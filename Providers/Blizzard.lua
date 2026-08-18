@@ -1,0 +1,889 @@
+-- Providers/Blizzard.lua
+-- Completion Navigator :: thin, defensive wrappers over Blizzard APIs.
+--
+-- Every call into the client goes through here. Blizzard renames and
+-- removes APIs between patches; keeping the surface area in one file means
+-- a patch break is a one-file fix rather than a hunt.
+
+local ADDON_NAME, CN = ...
+
+local Blizzard = {}
+
+CN.Blizzard = Blizzard
+
+------------------------------------------------------------
+-- QUESTS
+------------------------------------------------------------
+
+function Blizzard.IsQuestCompletedByCharacter(questID)
+    if not questID then
+        return false
+    end
+
+    if C_QuestLog and C_QuestLog.IsQuestFlaggedCompleted then
+        return C_QuestLog.IsQuestFlaggedCompleted(questID) and true or false
+    end
+
+    return false
+end
+
+function Blizzard.HasAccountQuestAPI()
+    return (C_QuestLog and C_QuestLog.IsQuestFlaggedCompletedOnAccount) and true or false
+end
+
+function Blizzard.IsQuestCompletedOnAccount(questID)
+    if not questID then
+        return false
+    end
+
+    if C_QuestLog and C_QuestLog.IsQuestFlaggedCompletedOnAccount then
+        return C_QuestLog.IsQuestFlaggedCompletedOnAccount(questID) and true or false
+    end
+
+    return false
+end
+
+-- Returns a title if the client already has it cached. Otherwise requests
+-- an asynchronous load and returns nil; QUEST_DATA_LOAD_RESULT follows.
+function Blizzard.GetQuestTitle(questID, requestIfMissing)
+    if not questID then
+        return nil
+    end
+
+    if C_QuestLog and C_QuestLog.GetTitleForQuestID then
+        local title = C_QuestLog.GetTitleForQuestID(questID)
+
+        if title and title ~= "" then
+            return title
+        end
+    end
+
+    if requestIfMissing and C_QuestLog and C_QuestLog.RequestLoadQuestByID then
+        CN.pendingQuestLoads = CN.pendingQuestLoads or {}
+        CN.pendingQuestLoads[questID] = true
+
+        C_QuestLog.RequestLoadQuestByID(questID)
+    end
+
+    return nil
+end
+
+function Blizzard.GetQuestLogEntries()
+    local entries = {}
+
+    if not C_QuestLog or not C_QuestLog.GetNumQuestLogEntries then
+        return entries
+    end
+
+    local count = C_QuestLog.GetNumQuestLogEntries()
+
+    for index = 1, count do
+        local info = C_QuestLog.GetInfo(index)
+
+        if info and not info.isHeader and info.questID and info.questID > 0 then
+            table.insert(entries, info)
+        end
+    end
+
+    return entries
+end
+
+-- Scans the map's quest POIs for one quest. This is the source that
+-- actually covers ordinary quests; GetNextWaypoint only answers for quests
+-- Blizzard has given an explicit waypoint.
+function Blizzard.GetQuestPOIOnMap(questID, uiMapID)
+    if not questID or not uiMapID or not C_QuestLog or not C_QuestLog.GetQuestsOnMap then
+        return nil, nil
+    end
+
+    local ok, quests = pcall(C_QuestLog.GetQuestsOnMap, uiMapID)
+
+    if not ok or type(quests) ~= "table" then
+        return nil, nil
+    end
+
+    for _, info in ipairs(quests) do
+        if info.questID == questID and info.x and info.y then
+            return info.x, info.y
+        end
+    end
+
+    return nil, nil
+end
+
+-- Returns mapID, x, y for the next thing the player must physically do for
+-- this quest, trying every source the client exposes before giving up.
+function Blizzard.GetQuestWaypoint(questID, preferredMapID)
+    if not questID then
+        return nil, nil, nil
+    end
+
+    -- 1. An explicit waypoint, if the quest has one.
+    if C_QuestLog and C_QuestLog.GetNextWaypoint then
+        local mapID, x, y = C_QuestLog.GetNextWaypoint(questID)
+
+        if mapID and x and y then
+            return mapID, x, y
+        end
+    end
+
+    local playerMap = C_Map and C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player")
+
+    local candidateMaps = {}
+
+    if preferredMapID then
+        table.insert(candidateMaps, preferredMapID)
+    end
+
+    if playerMap and playerMap ~= preferredMapID then
+        table.insert(candidateMaps, playerMap)
+    end
+
+    local zoneMap = Blizzard.GetQuestZone(questID)
+
+    if zoneMap and zoneMap ~= playerMap and zoneMap ~= preferredMapID then
+        table.insert(candidateMaps, zoneMap)
+    end
+
+    for _, mapID in ipairs(candidateMaps) do
+        -- 2. The quest's next waypoint expressed on this specific map.
+        if C_QuestLog and C_QuestLog.GetNextWaypointForMap then
+            local x, y = C_QuestLog.GetNextWaypointForMap(questID, mapID)
+
+            if x and y then
+                return mapID, x, y
+            end
+        end
+
+        -- 3. The quest's POI blip on this map.
+        local x, y = Blizzard.GetQuestPOIOnMap(questID, mapID)
+
+        if x and y then
+            return mapID, x, y
+        end
+
+        -- 4. World-quest style task location.
+        if C_TaskQuest and C_TaskQuest.GetQuestLocation then
+            local taskX, taskY = C_TaskQuest.GetQuestLocation(questID, mapID)
+
+            if taskX and taskY then
+                return mapID, taskX, taskY
+            end
+        end
+    end
+
+    return zoneMap or playerMap, nil, nil
+end
+
+-- Blizzard's own quest tracking arrow. The correct answer when we have no
+-- coordinates but the game does: it knows where its own quests are.
+function Blizzard.SuperTrackQuest(questID)
+    if not questID or not C_SuperTrack then
+        return false
+    end
+
+    if C_SuperTrack.SetSuperTrackedQuestID then
+        C_SuperTrack.SetSuperTrackedQuestID(questID)
+        return true
+    end
+
+    return false
+end
+
+function Blizzard.IsQuestInLog(questID)
+    if not questID or not C_QuestLog or not C_QuestLog.GetLogIndexForQuestID then
+        return false
+    end
+
+    return C_QuestLog.GetLogIndexForQuestID(questID) ~= nil
+end
+
+function Blizzard.IsQuestReadyForTurnIn(questID)
+    if C_QuestLog and C_QuestLog.ReadyForTurnIn then
+        return C_QuestLog.ReadyForTurnIn(questID) and true or false
+    end
+
+    return false
+end
+
+function Blizzard.IsQuestComplete(questID)
+    if C_QuestLog and C_QuestLog.IsComplete then
+        return C_QuestLog.IsComplete(questID) and true or false
+    end
+
+    return false
+end
+
+-- Returns completed, total for a quest's objectives.
+function Blizzard.GetQuestObjectiveProgress(questID)
+    if not C_QuestLog or not C_QuestLog.GetQuestObjectives then
+        return 0, 0
+    end
+
+    local objectives = C_QuestLog.GetQuestObjectives(questID)
+
+    if not objectives then
+        return 0, 0
+    end
+
+    local done, total = 0, 0
+
+    for _, objective in ipairs(objectives) do
+        total = total + 1
+
+        if objective.finished then
+            done = done + 1
+        end
+    end
+
+    return done, total
+end
+
+function Blizzard.GetQuestZone(questID)
+    if C_TaskQuest and C_TaskQuest.GetQuestZoneID then
+        local mapID = C_TaskQuest.GetQuestZoneID(questID)
+
+        if mapID then
+            return mapID
+        end
+    end
+
+    if C_QuestLog and C_QuestLog.GetQuestAdditionalHighlights then
+        local mapID = C_QuestLog.GetQuestAdditionalHighlights(questID)
+
+        if mapID then
+            return mapID
+        end
+    end
+
+    return nil
+end
+
+------------------------------------------------------------
+-- REPUTATION
+------------------------------------------------------------
+
+-- Retail moved everything to C_Reputation / C_MajorFactions in 11.0.
+-- GetFactionInfoByID is gone; never reintroduce it.
+
+function Blizzard.GetNumFactions()
+    if C_Reputation and C_Reputation.GetNumFactions then
+        return C_Reputation.GetNumFactions()
+    end
+
+    return 0
+end
+
+function Blizzard.GetFactionByIndex(index)
+    if C_Reputation and C_Reputation.GetFactionDataByIndex then
+        return C_Reputation.GetFactionDataByIndex(index)
+    end
+
+    return nil
+end
+
+function Blizzard.GetFactionByID(factionID)
+    if C_Reputation and C_Reputation.GetFactionDataByID then
+        return C_Reputation.GetFactionDataByID(factionID)
+    end
+
+    return nil
+end
+
+-- True when the standing is shared across the Warband rather than earned
+-- per character. This is the single most important flag for deciding
+-- which character should do reputation work.
+function Blizzard.IsAccountWideReputation(factionID)
+    if C_Reputation and C_Reputation.IsAccountWideReputation then
+        return C_Reputation.IsAccountWideReputation(factionID) and true or false
+    end
+
+    return false
+end
+
+function Blizzard.IsMajorFaction(factionID)
+    if C_Reputation and C_Reputation.IsMajorFaction then
+        return C_Reputation.IsMajorFaction(factionID) and true or false
+    end
+
+    return false
+end
+
+function Blizzard.GetMajorFactionData(factionID)
+    if C_MajorFactions and C_MajorFactions.GetMajorFactionData then
+        return C_MajorFactions.GetMajorFactionData(factionID)
+    end
+
+    return nil
+end
+
+function Blizzard.HasMaximumRenown(factionID)
+    if C_MajorFactions and C_MajorFactions.HasMaximumRenown then
+        return C_MajorFactions.HasMaximumRenown(factionID) and true or false
+    end
+
+    return false
+end
+
+function Blizzard.IsFactionParagon(factionID)
+    if C_Reputation and C_Reputation.IsFactionParagon then
+        return C_Reputation.IsFactionParagon(factionID) and true or false
+    end
+
+    return false
+end
+
+-- Returns currentValue, threshold, rewardQuestID, hasRewardPending.
+function Blizzard.GetParagonInfo(factionID)
+    if C_Reputation and C_Reputation.GetFactionParagonInfo then
+        return C_Reputation.GetFactionParagonInfo(factionID)
+    end
+
+    return nil
+end
+
+-- Friendship-style reputations (Brann, tenders, and similar) do not use
+-- the standard 1-8 reaction scale.
+function Blizzard.GetFriendshipReputation(factionID)
+    if C_GossipInfo and C_GossipInfo.GetFriendshipReputation then
+        local info = C_GossipInfo.GetFriendshipReputation(factionID)
+
+        if info and info.friendshipFactionID and info.friendshipFactionID > 0 then
+            return info
+        end
+    end
+
+    return nil
+end
+
+function Blizzard.GetStandingLabel(reaction)
+    if not reaction then
+        return "Unknown"
+    end
+
+    return _G["FACTION_STANDING_LABEL" .. reaction] or ("Standing " .. reaction)
+end
+
+-- The faction list only reports rows whose headers are expanded, so a
+-- complete scan has to expand everything and then put it back.
+function Blizzard.WithAllFactionsExpanded(scan)
+    local collapsed = {}
+
+    if C_Reputation and C_Reputation.GetNumFactions then
+        for index = C_Reputation.GetNumFactions(), 1, -1 do
+            local data = Blizzard.GetFactionByIndex(index)
+
+            if data and data.isCollapsed then
+                collapsed[data.factionID or index] = true
+            end
+        end
+    end
+
+    if C_Reputation and C_Reputation.ExpandAllFactionHeaders then
+        C_Reputation.ExpandAllFactionHeaders()
+    end
+
+    local ok, err = pcall(scan)
+
+    if C_Reputation and C_Reputation.CollapseFactionHeader then
+        for index = Blizzard.GetNumFactions(), 1, -1 do
+            local data = Blizzard.GetFactionByIndex(index)
+
+            if data and data.factionID and collapsed[data.factionID] then
+                C_Reputation.CollapseFactionHeader(index)
+            end
+        end
+    end
+
+    if not ok then
+        error(err, 0)
+    end
+end
+
+------------------------------------------------------------
+-- CHARACTER
+------------------------------------------------------------
+
+function Blizzard.GetProfessions()
+    local result = {}
+
+    if not GetProfessions then
+        return result
+    end
+
+    -- GetProfessions returns nil for any slot the character lacks, and
+    -- ipairs stops at the first nil. A character without Archaeology would
+    -- silently lose Fishing and Cooking. Index the slots explicitly.
+    local slots = { GetProfessions() }
+
+    for slot = 1, 5 do
+        local index = slots[slot]
+
+        if index then
+            local name, _, rank, maxRank, _, _, skillLineID = GetProfessionInfo(index)
+
+            if name then
+                table.insert(result, {
+                    name        = name,
+                    rank        = rank,
+                    maxRank     = maxRank,
+                    skillLineID = skillLineID,
+                })
+            end
+        end
+    end
+
+    return result
+end
+
+------------------------------------------------------------
+-- MAP
+------------------------------------------------------------
+
+function Blizzard.GetMapName(mapID)
+    if not mapID or not C_Map or not C_Map.GetMapInfo then
+        return nil
+    end
+
+    local info = C_Map.GetMapInfo(mapID)
+
+    return info and info.name or nil
+end
+
+------------------------------------------------------------
+-- BATTLE PETS
+------------------------------------------------------------
+
+-- The pet journal reports only what the player's current filters allow, so
+-- any complete scan must widen the filters and then put them back.
+function Blizzard.WithAllPetsShown(scan)
+    if not C_PetJournal then
+        return
+    end
+
+    local search = C_PetJournal.GetSearchFilter and C_PetJournal.GetSearchFilter() or ""
+
+    if C_PetJournal.SetSearchFilter then
+        C_PetJournal.SetSearchFilter("")
+    end
+
+    if C_PetJournal.SetAllPetSourcesChecked then
+        C_PetJournal.SetAllPetSourcesChecked(true)
+    end
+
+    if C_PetJournal.SetAllPetTypesChecked then
+        C_PetJournal.SetAllPetTypesChecked(true)
+    end
+
+    if C_PetJournal.SetFilterChecked and LE_PET_JOURNAL_FILTER_COLLECTED then
+        C_PetJournal.SetFilterChecked(LE_PET_JOURNAL_FILTER_COLLECTED, true)
+        C_PetJournal.SetFilterChecked(LE_PET_JOURNAL_FILTER_NOT_COLLECTED, true)
+    end
+
+    local ok, err = pcall(scan)
+
+    if C_PetJournal.SetSearchFilter and search ~= "" then
+        C_PetJournal.SetSearchFilter(search)
+    end
+
+    if not ok then
+        error(err, 0)
+    end
+end
+
+function Blizzard.GetNumPets()
+    if C_PetJournal and C_PetJournal.GetNumPets then
+        return C_PetJournal.GetNumPets()
+    end
+
+    return 0, 0
+end
+
+function Blizzard.GetPetByIndex(index)
+    if not C_PetJournal or not C_PetJournal.GetPetInfoByIndex then
+        return nil
+    end
+
+    local petID, speciesID, owned, customName, level, favorite, isRevoked,
+          speciesName, icon, petType, companionID, tooltip, description,
+          isWild, canBattle, isTradeable, isUnique, obtainable =
+          C_PetJournal.GetPetInfoByIndex(index)
+
+    if not speciesID then
+        return nil
+    end
+
+    return {
+        petID       = petID,
+        speciesID   = speciesID,
+        owned       = owned and true or false,
+        level       = level,
+        favorite    = favorite and true or false,
+        name        = speciesName,
+        icon        = icon,
+        petType     = petType,
+        isWild      = isWild and true or false,
+        canBattle   = canBattle and true or false,
+        obtainable  = obtainable ~= false,
+        description = description,
+    }
+end
+
+function Blizzard.GetPetCollectedCount(speciesID)
+    if C_PetJournal and C_PetJournal.GetNumCollectedInfo then
+        return C_PetJournal.GetNumCollectedInfo(speciesID)
+    end
+
+    return 0, 0
+end
+
+------------------------------------------------------------
+-- MOUNTS
+------------------------------------------------------------
+
+function Blizzard.GetMountIDs()
+    if C_MountJournal and C_MountJournal.GetMountIDs then
+        return C_MountJournal.GetMountIDs()
+    end
+
+    return {}
+end
+
+function Blizzard.GetMountByID(mountID)
+    if not C_MountJournal or not C_MountJournal.GetMountInfoByID then
+        return nil
+    end
+
+    local name, spellID, icon, isActive, isUsable, sourceType, isFavorite,
+          isFactionSpecific, faction, shouldHideOnChar, isCollected =
+          C_MountJournal.GetMountInfoByID(mountID)
+
+    if not name then
+        return nil
+    end
+
+    local source, description
+
+    if C_MountJournal.GetMountInfoExtraByID then
+        local _, extraDescription, extraSource = C_MountJournal.GetMountInfoExtraByID(mountID)
+
+        description = extraDescription
+        source      = extraSource
+    end
+
+    return {
+        mountID           = mountID,
+        name              = name,
+        spellID           = spellID,
+        icon              = icon,
+        sourceType        = sourceType,
+        isFactionSpecific = isFactionSpecific and true or false,
+        faction           = faction,
+        hiddenOnCharacter = shouldHideOnChar and true or false,
+        isCollected       = isCollected and true or false,
+        source            = source,
+        description       = description,
+    }
+end
+
+------------------------------------------------------------
+-- TOYS
+------------------------------------------------------------
+
+-- Same filter problem as the pet journal.
+function Blizzard.WithAllToysShown(scan)
+    if not C_ToyBox then
+        return
+    end
+
+    if C_ToyBox.SetFilterString then
+        C_ToyBox.SetFilterString("")
+    end
+
+    if C_ToyBox.SetCollectedShown then
+        C_ToyBox.SetCollectedShown(true)
+    end
+
+    if C_ToyBox.SetUncollectedShown then
+        C_ToyBox.SetUncollectedShown(true)
+    end
+
+    if C_ToyBox.SetAllSourceTypeFilters then
+        C_ToyBox.SetAllSourceTypeFilters(true)
+    end
+
+    local ok, err = pcall(scan)
+
+    if not ok then
+        error(err, 0)
+    end
+end
+
+function Blizzard.GetNumToys()
+    if C_ToyBox and C_ToyBox.GetNumFilteredToys then
+        return C_ToyBox.GetNumFilteredToys()
+    end
+
+    if C_ToyBox and C_ToyBox.GetNumToys then
+        return C_ToyBox.GetNumToys()
+    end
+
+    return 0
+end
+
+function Blizzard.GetToyByIndex(index)
+    if not C_ToyBox or not C_ToyBox.GetToyFromIndex then
+        return nil
+    end
+
+    local itemID = C_ToyBox.GetToyFromIndex(index)
+
+    if not itemID or itemID == 0 then
+        return nil
+    end
+
+    local _, name, icon = C_ToyBox.GetToyInfo(itemID)
+
+    return {
+        itemID    = itemID,
+        name      = name,
+        icon      = icon,
+        collected = PlayerHasToy and PlayerHasToy(itemID) and true or false,
+    }
+end
+
+------------------------------------------------------------
+-- APPEARANCES (TRANSMOG)
+------------------------------------------------------------
+
+-- Appearance counts are reported per category. Individual appearance
+-- enumeration is enormous; the per-category totals are what a completion
+-- dashboard actually needs.
+function Blizzard.GetAppearanceCategories()
+    local categories = {}
+
+    if not C_TransmogCollection then
+        return categories
+    end
+
+    local names = C_TransmogCollection.GetCategoryInfo
+        and Enum and Enum.TransmogCollectionType
+
+    if not names then
+        return categories
+    end
+
+    for _, categoryID in pairs(Enum.TransmogCollectionType) do
+        if type(categoryID) == "number" then
+            local name = C_TransmogCollection.GetCategoryInfo(categoryID)
+
+            if name then
+                local collected = C_TransmogCollection.GetCategoryCollectedCount
+                    and C_TransmogCollection.GetCategoryCollectedCount(categoryID) or 0
+
+                local total = C_TransmogCollection.GetCategoryTotal
+                    and C_TransmogCollection.GetCategoryTotal(categoryID) or 0
+
+                if total and total > 0 then
+                    table.insert(categories, {
+                        categoryID = categoryID,
+                        name       = name,
+                        collected  = collected,
+                        total      = total,
+                    })
+                end
+            end
+        end
+    end
+
+    table.sort(categories, function(a, b) return a.name < b.name end)
+
+    return categories
+end
+
+------------------------------------------------------------
+-- TITLES
+------------------------------------------------------------
+
+function Blizzard.GetTitles()
+    local titles = {}
+
+    if not GetNumTitles then
+        return titles
+    end
+
+    for index = 1, GetNumTitles() do
+        local name = GetTitleName and GetTitleName(index)
+
+        if name and name ~= "" then
+            table.insert(titles, {
+                titleID = index,
+                name    = (name:gsub("^%s+", ""):gsub("%s+$", "")),
+                known   = IsTitleKnown and IsTitleKnown(index) and true or false,
+            })
+        end
+    end
+
+    return titles
+end
+
+------------------------------------------------------------
+-- ACHIEVEMENTS
+------------------------------------------------------------
+
+function Blizzard.GetAchievementCategories()
+    if GetCategoryList then
+        return GetCategoryList()
+    end
+
+    return {}
+end
+
+function Blizzard.GetCategoryCounts(categoryID)
+    if not GetCategoryNumAchievements then
+        return 0, 0
+    end
+
+    local total, completed = GetCategoryNumAchievements(categoryID, true)
+
+    return total or 0, completed or 0
+end
+
+function Blizzard.GetAchievementInCategory(categoryID, index)
+    if not GetAchievementInfo then
+        return nil
+    end
+
+    local id, name, points, completed, _, _, _, description, flags, icon =
+        GetAchievementInfo(categoryID, index)
+
+    if not id then
+        return nil
+    end
+
+    return {
+        achievementID = id,
+        name          = name,
+        points        = points or 0,
+        completed     = completed and true or false,
+        description   = description,
+        icon          = icon,
+        flags         = flags,
+    }
+end
+
+-- Returns completedCriteria, totalCriteria for one achievement.
+function Blizzard.GetAchievementProgress(achievementID)
+    if not GetAchievementNumCriteria or not GetAchievementCriteriaInfo then
+        return 0, 0
+    end
+
+    local total = GetAchievementNumCriteria(achievementID) or 0
+    local done  = 0
+
+    for index = 1, total do
+        local _, _, criteriaCompleted = GetAchievementCriteriaInfo(achievementID, index)
+
+        if criteriaCompleted then
+            done = done + 1
+        end
+    end
+
+    return done, total
+end
+
+function Blizzard.GetAchievementTotals()
+    if GetNumCompletedAchievements then
+        local total, completed = GetNumCompletedAchievements(true)
+        return total or 0, completed or 0
+    end
+
+    return 0, 0
+end
+
+------------------------------------------------------------
+-- PROFESSIONS AND RECIPES
+------------------------------------------------------------
+
+function Blizzard.GetProfessionSkillLines()
+    local lines = {}
+
+    if not GetProfessions then
+        return lines
+    end
+
+    -- Same nil-hole problem as above: index the five slots explicitly
+    -- rather than iterating, or missing professions truncate the list.
+    local slots = { GetProfessions() }
+
+    for slot = 1, 5 do
+        local index = slots[slot]
+
+        if index then
+            local name, _, rank, maxRank, _, _, skillLineID, _, _, _ = GetProfessionInfo(index)
+
+            if name and skillLineID then
+                table.insert(lines, {
+                    name        = name,
+                    rank        = rank,
+                    maxRank     = maxRank,
+                    skillLineID = skillLineID,
+                })
+            end
+        end
+    end
+
+    return lines
+end
+
+-- Recipe enumeration only works while a trade skill window is open. This
+-- is a hard client restriction, not a choice; callers must handle false.
+function Blizzard.IsTradeSkillReady()
+    if C_TradeSkillUI and C_TradeSkillUI.IsTradeSkillReady then
+        return C_TradeSkillUI.IsTradeSkillReady() and true or false
+    end
+
+    return false
+end
+
+function Blizzard.GetOpenTradeSkillLine()
+    if C_TradeSkillUI and C_TradeSkillUI.GetBaseProfessionInfo then
+        local info = C_TradeSkillUI.GetBaseProfessionInfo()
+
+        if info and info.professionID then
+            return info.professionID, info.professionName
+        end
+    end
+
+    if C_TradeSkillUI and C_TradeSkillUI.GetTradeSkillLine then
+        return C_TradeSkillUI.GetTradeSkillLine()
+    end
+
+    return nil, nil
+end
+
+function Blizzard.GetAllRecipeIDs()
+    if C_TradeSkillUI and C_TradeSkillUI.GetAllRecipeIDs then
+        local ok, ids = pcall(C_TradeSkillUI.GetAllRecipeIDs)
+
+        if ok and type(ids) == "table" then
+            return ids
+        end
+    end
+
+    return {}
+end
+
+function Blizzard.GetRecipeInfo(recipeID)
+    if not C_TradeSkillUI or not C_TradeSkillUI.GetRecipeInfo then
+        return nil
+    end
+
+    local ok, info = pcall(C_TradeSkillUI.GetRecipeInfo, recipeID)
+
+    if not ok or type(info) ~= "table" then
+        return nil
+    end
+
+    return info
+end

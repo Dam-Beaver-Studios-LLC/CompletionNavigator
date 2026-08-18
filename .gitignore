@@ -1,0 +1,5 @@
+_backups/
+*.zip
+*.bak
+Thumbs.db
+desktop.ini

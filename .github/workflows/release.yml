@@ -1,0 +1,57 @@
+name: Package and release
+
+# Fires when you push a version tag, e.g.  git tag v0.8.0 && git push --tags
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Fails the build before publishing if any Lua file is malformed.
+      - name: Install Lua
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
+
+      - name: Syntax check every Lua file
+        run: |
+          status=0
+          while IFS= read -r file; do
+            if ! luac5.4 -p "$file"; then
+              echo "SYNTAX ERROR: $file"
+              status=1
+            fi
+          done < <(find . -name '*.lua' -not -path './.git/*')
+          exit $status
+
+      - name: Verify the .toc lists every Lua file
+        run: |
+          status=0
+          toc=CompletionNavigator.toc
+          while IFS= read -r file; do
+            rel="${file#./}"
+            win="${rel//\//\\}"
+            if ! grep -qxF "$win" "$toc" && ! grep -qxF "$rel" "$toc"; then
+              echo "NOT IN TOC: $rel"
+              status=1
+            fi
+          done < <(find . -name '*.lua' -not -path './.git/*')
+          exit $status
+
+      # BigWigs' packager is the standard tool; it reads .pkgmeta, builds the
+      # zip, and uploads to CurseForge, WoWInterface and Wago as configured.
+      - name: Package and upload
+        uses: BigWigsMods/packager@master
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,9 @@
+package-as: CompletionNavigator
+
+enable-nolib-creation: no
+
+ignore:
+  - .github
+  - cn.ps1
+  - _backups
+  - README.md

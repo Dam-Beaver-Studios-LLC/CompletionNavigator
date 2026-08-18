@@ -1,0 +1,11 @@
+<Bindings>
+    <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
+        CompletionNavigator_ToggleUI()
+    </Binding>
+    <Binding name="COMPLETIONNAVIGATOR_NEXT" category="ADDONS">
+        CompletionNavigator_NextObjective()
+    </Binding>
+    <Binding name="COMPLETIONNAVIGATOR_GO" category="ADDONS">
+        CompletionNavigator_Navigate()
+    </Binding>
+</Bindings>
