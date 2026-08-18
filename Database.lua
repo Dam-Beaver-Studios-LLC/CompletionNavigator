@@ -16,7 +16,9 @@ local DebugPrint = CN.DebugPrint
 ------------------------------------------------------------
 
 CN.defaults = {
-    version = 1,
+    -- Kept in step with CN.dbVersion so a fresh install never looks like
+    -- an old database that needs migrating.
+    version = CN.dbVersion,
 
     settings = {
         enabled      = true,
@@ -50,7 +52,40 @@ CN.defaults = {
 -- Each entry migrates FROM the given version TO version + 1.
 -- Never destroy user completion history here.
 CN.migrations = {
-    -- [1] = function(db) ... end,
+    -- 1 -> 2. The collection modules introduced account tables that older
+    -- databases do not have, and the minimap settings moved under a nested
+    -- table. CopyDefaults fills both in, so this migration exists to prove
+    -- the ladder runs and to normalize anything defaults cannot fix.
+    [1] = function(db)
+        db.account = db.account or {}
+
+        -- Tables added after the schema was first written. Creating them
+        -- here means no module has to guard against their absence.
+        for _, key in ipairs({
+            "pets", "mounts", "toys", "appearances", "titleNames",
+            "achievements", "achievementTotals", "recipeNames",
+            "reputations", "factionNames", "questHarvest", "questLocations",
+            "collectionScans",
+        }) do
+            db.account[key] = db.account[key] or {}
+        end
+
+        db.settings = db.settings or {}
+
+        -- Very early builds stored the minimap flag flat. Move it, and do
+        -- not lose the player's choice in the process.
+        if type(db.settings.minimap) ~= "table" then
+            local wasHidden = db.settings.minimap == true or db.settings.hideMinimap == true
+
+            db.settings.minimap = {
+                hide  = wasHidden and true or false,
+                angle = db.settings.minimapAngle or 225,
+            }
+        end
+
+        db.settings.hideMinimap  = nil
+        db.settings.minimapAngle = nil
+    end,
 }
 
 local function Migrate(db)
@@ -80,11 +115,31 @@ end
 ------------------------------------------------------------
 
 function CN.InitializeDatabase()
-    CompletionNavigatorDB = CN.CopyDefaults(CN.defaults, CompletionNavigatorDB or {})
+    local raw = CompletionNavigatorDB
+
+    -- A brand new install has nothing to migrate; stamping it at the current
+    -- version stops migration 1 running against an empty table.
+    local isFresh = type(raw) ~= "table" or next(raw) == nil
+
+    raw = type(raw) == "table" and raw or {}
+
+    if isFresh then
+        raw.version = CN.dbVersion
+    else
+        -- Migrations MUST run on the raw saved data, before defaults are
+        -- merged in.
+        --
+        -- CopyDefaults replaces any stored value whose type no longer matches
+        -- the default -- a legacy boolean where the default is now a table
+        -- gets discarded outright. Running defaults first would therefore
+        -- destroy exactly the values a migration exists to read, and it would
+        -- do so silently.
+        Migrate(raw)
+    end
+
+    CompletionNavigatorDB = CN.CopyDefaults(CN.defaults, raw)
 
     CN.db = CompletionNavigatorDB
-
-    Migrate(CN.db)
 
     DebugPrint("Database initialized (schema version " .. tostring(CN.db.version) .. ").")
 end

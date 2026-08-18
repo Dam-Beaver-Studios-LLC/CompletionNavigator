@@ -277,12 +277,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "pet",
-    args    = "<speciesID|name>",
+    args    = "<speciesID or name>",
     order   = 52,
     help    = "Show one pet's collection state.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn pet <speciesID|name>")
+            Print("Usage: /cn pet <speciesID or name>")
             return
         end
 

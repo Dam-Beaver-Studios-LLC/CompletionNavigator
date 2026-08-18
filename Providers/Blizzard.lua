@@ -887,3 +887,173 @@ function Blizzard.GetRecipeInfo(recipeID)
 
     return info
 end
+
+------------------------------------------------------------
+-- TIME-SENSITIVE CONTENT
+------------------------------------------------------------
+
+function Blizzard.GetSecondsUntilDailyReset()
+    if GetQuestResetTime then
+        local ok, seconds = pcall(GetQuestResetTime)
+
+        if ok and type(seconds) == "number" and seconds > 0 then
+            return seconds
+        end
+    end
+
+    return nil
+end
+
+function Blizzard.GetSecondsUntilWeeklyReset()
+    if C_DateAndTime and C_DateAndTime.GetSecondsUntilWeeklyReset then
+        local ok, seconds = pcall(C_DateAndTime.GetSecondsUntilWeeklyReset)
+
+        if ok and type(seconds) == "number" and seconds > 0 then
+            return seconds
+        end
+    end
+
+    return nil
+end
+
+function Blizzard.IsWorldQuest(questID)
+    if C_QuestLog and C_QuestLog.IsWorldQuest then
+        local ok, result = pcall(C_QuestLog.IsWorldQuest, questID)
+
+        return ok and result and true or false
+    end
+
+    return false
+end
+
+-- Seconds remaining on a world quest, or nil when it is not time-limited.
+function Blizzard.GetQuestTimeLeft(questID)
+    if not C_TaskQuest then
+        return nil
+    end
+
+    if C_TaskQuest.GetQuestTimeLeftSeconds then
+        local ok, seconds = pcall(C_TaskQuest.GetQuestTimeLeftSeconds, questID)
+
+        if ok and type(seconds) == "number" and seconds > 0 then
+            return seconds
+        end
+    end
+
+    if C_TaskQuest.GetQuestTimeLeftMinutes then
+        local ok, minutes = pcall(C_TaskQuest.GetQuestTimeLeftMinutes, questID)
+
+        if ok and type(minutes) == "number" and minutes > 0 then
+            return minutes * 60
+        end
+    end
+
+    return nil
+end
+
+-- World quests currently up on a map. The field naming has changed between
+-- versions (questId vs questID), so both are accepted.
+function Blizzard.GetWorldQuestsOnMap(uiMapID)
+    local results = {}
+
+    if not uiMapID or not C_TaskQuest or not C_TaskQuest.GetQuestsForPlayerByMapID then
+        return results
+    end
+
+    local ok, tasks = pcall(C_TaskQuest.GetQuestsForPlayerByMapID, uiMapID)
+
+    if not ok or type(tasks) ~= "table" then
+        return results
+    end
+
+    for _, task in ipairs(tasks) do
+        local questID = task.questID or task.questId
+
+        if questID then
+            table.insert(results, {
+                questID = questID,
+                mapID   = task.mapID or uiMapID,
+                x       = task.x,
+                y       = task.y,
+                inArea  = task.inProgress,
+            })
+        end
+    end
+
+    return results
+end
+
+function Blizzard.GetWorldQuestInfo(questID)
+    local info = {}
+
+    if C_TaskQuest and C_TaskQuest.GetQuestInfoByQuestID then
+        local ok, title, factionID = pcall(C_TaskQuest.GetQuestInfoByQuestID, questID)
+
+        if ok then
+            info.title     = title
+            info.factionID = factionID
+        end
+    end
+
+    if C_QuestLog and C_QuestLog.GetQuestTagInfo then
+        local ok, tag = pcall(C_QuestLog.GetQuestTagInfo, questID)
+
+        if ok and type(tag) == "table" then
+            info.tagName        = tag.tagName
+            info.worldQuestType = tag.worldQuestType
+            info.quality        = tag.quality
+            info.isElite        = tag.isElite
+        end
+    end
+
+    return info
+end
+
+-- Calendar events happening today. Requires the calendar to have been
+-- opened at least once; the call is cheap and safe to repeat.
+function Blizzard.GetTodaysEvents()
+    local events = {}
+
+    if not C_Calendar or not C_DateAndTime then
+        return events
+    end
+
+    pcall(function()
+        if C_Calendar.OpenCalendar then
+            C_Calendar.OpenCalendar()
+        end
+    end)
+
+    local ok, today = pcall(C_DateAndTime.GetCurrentCalendarTime)
+
+    if not ok or type(today) ~= "table" or not today.monthDay then
+        return events
+    end
+
+    local gotCount, count = pcall(C_Calendar.GetNumDayEvents, 0, today.monthDay)
+
+    if not gotCount or type(count) ~= "number" then
+        return events
+    end
+
+    for index = 1, count do
+        local gotEvent, event = pcall(C_Calendar.GetDayEvent, 0, today.monthDay, index)
+
+        if gotEvent and type(event) == "table" and event.title then
+            -- sequenceType is "ONGOING" or "START" while an event is live.
+            local ongoing = event.sequenceType == "ONGOING"
+                or event.sequenceType == "START"
+                or event.sequenceType == ""
+
+            table.insert(events, {
+                title        = event.title,
+                eventType    = event.eventType,
+                calendarType = event.calendarType,
+                sequenceType = event.sequenceType,
+                ongoing      = ongoing,
+            })
+        end
+    end
+
+    return events
+end

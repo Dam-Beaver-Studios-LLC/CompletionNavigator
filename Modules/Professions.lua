@@ -379,12 +379,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "recipe",
-    args    = "<recipeID|name>",
+    args    = "<recipeID or name>",
     order   = 73,
     help    = "Show which characters know a recipe.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn recipe <recipeID|name>")
+            Print("Usage: /cn recipe <recipeID or name>")
             return
         end
 

@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.9.0"
-CN.dbVersion   = 1
+CN.version     = "0.10.0"
+CN.dbVersion   = 2
 
 ------------------------------------------------------------
 -- REGISTRIES

@@ -222,12 +222,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "mount",
-    args    = "<mountID|name>",
+    args    = "<mountID or name>",
     order   = 55,
     help    = "Show one mount's collection state.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn mount <mountID|name>")
+            Print("Usage: /cn mount <mountID or name>")
             return
         end
 

@@ -176,12 +176,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "toy",
-    args    = "<itemID|name>",
+    args    = "<itemID or name>",
     order   = 58,
     help    = "Show one toy's collection state.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn toy <itemID|name>")
+            Print("Usage: /cn toy <itemID or name>")
             return
         end
 

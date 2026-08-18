@@ -500,12 +500,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "rep",
-    args    = "<factionID|name>",
+    args    = "<factionID or name>",
     order   = 42,
     help    = "Show one faction's standing and scope.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn rep <factionID|name>")
+            Print("Usage: /cn rep <factionID or name>")
             return
         end
 

@@ -1,0 +1,350 @@
+-- Modules/Warband.lua
+-- Completion Navigator :: which character should do this.
+--
+-- The per-character data already exists: reputations, titles, professions
+-- and recipes are stored on the character that owns them. What was missing
+-- is anything that reads across all of them and answers the question the
+-- whole design was built around.
+--
+-- This module also feeds `characterSuitability`, the second scoring term
+-- that was weighted in the formula but never set by anything. An objective
+-- your current character is poorly suited to should rank below one they can
+-- act on now, and the reason should say why.
+
+local ADDON_NAME, CN = ...
+
+local Warband = CN:RegisterModule("Warband")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+------------------------------------------------------------
+-- ROSTER
+------------------------------------------------------------
+
+function Warband.Roster()
+    local rows = {}
+
+    for key, character in CN.Characters() do
+        table.insert(rows, {
+            key      = key,
+            name     = character.name,
+            realm    = character.realm,
+            class    = character.class,
+            race     = character.race,
+            level    = character.level,
+            faction  = character.faction,
+            spec     = character.specName,
+            lastSeen = character.lastSeen,
+            isCurrent = (key == CN.characterKey),
+
+            professions  = CN.CountKeys(character.professions),
+            recipes      = CN.CountKeys(character.recipes),
+            titles       = CN.CountKeys(character.titles),
+            reputations  = CN.CountKeys(character.reputations),
+        })
+    end
+
+    table.sort(rows, function(a, b)
+        if (a.level or 0) ~= (b.level or 0) then
+            return (a.level or 0) > (b.level or 0)
+        end
+
+        return (a.key or "") < (b.key or "")
+    end)
+
+    return rows
+end
+
+------------------------------------------------------------
+-- WHO SHOULD DO THIS
+------------------------------------------------------------
+
+-- Answers for any objective type that has per-character state. Returns
+-- bestKey, detail, scope -- where scope explains why the answer is what it
+-- is, including "account-wide" meaning the question does not apply.
+function Warband.WhoShould(objectiveType, id)
+    local types = CN.objectiveTypes
+
+    if objectiveType == types.REPUTATION then
+        local module = CN:GetModule("Reputations")
+
+        if not module then
+            return nil, nil, "no reputation data"
+        end
+
+        local bestKey, bestRecord, accountWide = module.BestCharacterFor(id)
+
+        if accountWide then
+            return nil, nil, "account-wide"
+        end
+
+        if bestKey then
+            return bestKey, tostring(bestRecord and bestRecord.standing), "highest standing"
+        end
+
+        return nil, nil, "no character has this faction recorded"
+    end
+
+    if objectiveType == types.RECIPE then
+        local module = CN:GetModule("Professions")
+
+        if not module then
+            return nil, nil, "no profession data"
+        end
+
+        local holders = module.WhoKnows(id)
+
+        if #holders > 0 then
+            return holders[1], table.concat(holders, ", "), "already knows it"
+        end
+
+        return nil, nil, "no character knows this recipe"
+    end
+
+    if objectiveType == types.TITLE then
+        local module = CN:GetModule("Titles")
+
+        if not module then
+            return nil, nil, "no title data"
+        end
+
+        local holders = module.WhoHas(id)
+
+        if #holders > 0 then
+            return holders[1], table.concat(holders, ", "), "already earned it"
+        end
+
+        return nil, nil, "no character has this title"
+    end
+
+    if objectiveType == types.PROFESSION then
+        local module = CN:GetModule("Professions")
+
+        if not module then
+            return nil, nil, "no profession data"
+        end
+
+        local bestKey, bestRecord = module.BestCharacterFor(id)
+
+        if bestKey then
+            return bestKey,
+                   tostring(bestRecord and bestRecord.rank) .. " skill",
+                   "highest skill"
+        end
+
+        return nil, nil, "no character has this profession"
+    end
+
+    if objectiveType == types.PET or objectiveType == types.MOUNT
+        or objectiveType == types.TOY or objectiveType == types.ACHIEVEMENT
+        or objectiveType == types.APPEARANCE then
+        return nil, nil, "account-wide"
+    end
+
+    return nil, nil, "not tracked per character"
+end
+
+------------------------------------------------------------
+-- SUITABILITY
+------------------------------------------------------------
+
+-- Positive when the logged-in character is the right one, negative when
+-- somebody else is. Fed into the scoring formula so recommendations stop
+-- pointing at work this character cannot usefully do.
+function Warband.Suitability(objectiveType, id)
+    local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
+
+    if scope == "account-wide" or not bestKey then
+        return 0, nil
+    end
+
+    if bestKey == CN.characterKey then
+        return 1, "you are the best character for this"
+    end
+
+    return -2, bestKey .. " is better suited (" .. tostring(detail) .. ")"
+end
+
+-- Applied to every candidate before scoring, so no module has to remember
+-- to do it.
+function Warband.Decorate(objective)
+    if type(objective) ~= "table" or not objective.type or not objective.id then
+        return objective
+    end
+
+    if objective.accountWide then
+        return objective
+    end
+
+    local suitability, reason = Warband.Suitability(objective.type, objective.id)
+
+    if suitability ~= 0 then
+        objective.characterSuitability = suitability
+
+        if reason then
+            objective.reasons = objective.reasons or {}
+            table.insert(objective.reasons, reason)
+        end
+    end
+
+    return objective
+end
+
+CN.RegisterCandidateDecorator("Warband", Warband.Decorate)
+
+------------------------------------------------------------
+-- COVERAGE
+------------------------------------------------------------
+
+-- What the Warband collectively has, versus what any one character has.
+-- This is the number that matters for account completion; a single
+-- character's totals understate it.
+function Warband.Coverage()
+    local professions, recipes, titles = {}, {}, {}
+
+    local characters = 0
+
+    for _, character in CN.Characters() do
+        characters = characters + 1
+
+        for skillLineID in pairs(character.professions or {}) do
+            professions[skillLineID] = true
+        end
+
+        for recipeID in pairs(character.recipes or {}) do
+            recipes[recipeID] = true
+        end
+
+        for titleID in pairs(character.titles or {}) do
+            titles[titleID] = true
+        end
+    end
+
+    return {
+        characters  = characters,
+        professions = CN.CountKeys(professions),
+        recipes     = CN.CountKeys(recipes),
+        titles      = CN.CountKeys(titles),
+    }
+end
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "warband",
+    aliases = { "roster" },
+    order   = 17,
+    help    = "Show every known character and what they cover.",
+    handler = function()
+        local rows = Warband.Roster()
+
+        if #rows == 0 then
+            Print("No characters recorded yet.")
+            return
+        end
+
+        Print("Warband (" .. #rows .. " character"
+            .. (#rows == 1 and "" or "s") .. "):")
+
+        for _, row in ipairs(rows) do
+            local marker = row.isCurrent and "|cff00ff00>|r " or "  "
+
+            Print(marker .. row.key
+                .. " |cff999999" .. tostring(row.level) .. " "
+                .. tostring(row.class or "?")
+                .. (row.faction and (" " .. row.faction) or "") .. "|r")
+
+            Print("      professions " .. row.professions
+                .. ", recipes " .. row.recipes
+                .. ", titles " .. row.titles
+                .. ", reputations " .. row.reputations)
+        end
+
+        local coverage = Warband.Coverage()
+
+        Print("Combined coverage: " .. coverage.professions .. " professions, "
+            .. coverage.recipes .. " recipes, " .. coverage.titles .. " titles.")
+
+        if #rows == 1 then
+            Print("|cffffff00Only one character has been seen. Log in on your alts "
+                .. "with the addon loaded to make these comparisons useful.|r")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "who",
+    args    = "<type> <id>",
+    order   = 18,
+    help    = "Which character should do something. Types: rep, recipe, title, profession.",
+    handler = function(args)
+        local kind, value = args:match("^(%S+)%s+(.+)$")
+
+        if not kind or not value then
+            Print("Usage: /cn who <rep, recipe, title or profession> <id or name>")
+            return
+        end
+
+        kind = string.lower(kind)
+
+        local types = CN.objectiveTypes
+
+        local map = {
+            rep        = types.REPUTATION,
+            reputation = types.REPUTATION,
+            recipe     = types.RECIPE,
+            title      = types.TITLE,
+            profession = types.PROFESSION,
+            prof       = types.PROFESSION,
+        }
+
+        local objectiveType = map[kind]
+
+        if not objectiveType then
+            Print("Unknown type: " .. kind)
+            Print("Use one of: rep, recipe, title, profession")
+            return
+        end
+
+        -- Resolve names to IDs through the owning module where possible.
+        local id = CN.ToID(value)
+
+        if not id then
+            if objectiveType == types.REPUTATION then
+                local module = CN:GetModule("Reputations")
+                id = module and module.Resolve(value)
+            elseif objectiveType == types.TITLE then
+                local module = CN:GetModule("Titles")
+                id = module and module.Resolve(value)
+            end
+        end
+
+        if not id then
+            Print("Could not resolve: " .. value)
+            return
+        end
+
+        local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
+
+        if scope == "account-wide" then
+            Print("That is account-wide; any character counts.")
+            return
+        end
+
+        if not bestKey then
+            Print(tostring(scope) .. ".")
+            return
+        end
+
+        if bestKey == CN.characterKey then
+            Print("This character is the best one for it (" .. tostring(detail) .. ").")
+        else
+            Print("Best character: " .. bestKey .. " |cff999999(" .. tostring(detail) .. ")|r")
+        end
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.

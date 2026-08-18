@@ -7,6 +7,46 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.10.0]
+
+### Added
+
+- **Opportunity scanner.** World quests, daily and weekly resets, and active
+  world events. Urgency is scaled steeply: something with an hour left
+  dominates, something with three days left barely registers.
+  `/cn now` lists everything expiring, soonest first. `/cn events` lists
+  active world events.
+- **Warband intelligence.** `/cn warband` shows every known character with
+  what each covers, plus the combined coverage across all of them.
+  `/cn who <rep, recipe, title or profession> <id or name>` answers which
+  character should do a given thing.
+- **Candidate decorators.** Cross-cutting concerns now apply to objectives
+  from modules that know nothing about them. Warband suitability is the
+  first user.
+
+### Fixed
+
+- `limitedTimeBonus` carries the heaviest weight in the scoring formula
+  (3.0) and nothing ever set it. The engine was built to prioritise
+  expiring content and had no idea what expires.
+- `characterSuitability` was likewise weighted and never set.
+- **Migrations ran after defaults were merged**, which meant `CopyDefaults`
+  had already discarded any stored value whose type no longer matched the
+  default. A migration existing to read a legacy value would silently find
+  nothing. Migrations now run on the raw saved data first. This affected no
+  shipped migration yet; it would have broken every future one.
+- Literal `|` characters in command help and usage text were eaten by the
+  chat frame as escape sequences: `<factionID|name>` rendered as
+  `<factionIDame>`. Every affected string now reads `<factionID or name>`.
+
+### Notes
+
+- Database schema is now version 2. The 1 to 2 migration creates the account
+  tables the collection modules added and moves the flat minimap setting into
+  its nested form, preserving the player's choice. It is idempotent and is
+  covered by a test that starts from a real version 1 database.
+
+
 ## [0.9.0]
 
 ### Added

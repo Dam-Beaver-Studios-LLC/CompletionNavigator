@@ -219,12 +219,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "title",
-    args    = "<titleID|name>",
+    args    = "<titleID or name>",
     order   = 63,
     help    = "Show which characters have a title.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn title <titleID|name>")
+            Print("Usage: /cn title <titleID or name>")
             return
         end
 

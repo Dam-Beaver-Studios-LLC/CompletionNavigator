@@ -100,8 +100,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.9.0"
-CN.dbVersion   = 1
+CN.version     = "0.10.0"
+CN.dbVersion   = 2
 
 ------------------------------------------------------------
 -- REGISTRIES
@@ -337,7 +337,9 @@ local DebugPrint = CN.DebugPrint
 ------------------------------------------------------------
 
 CN.defaults = {
-    version = 1,
+    -- Kept in step with CN.dbVersion so a fresh install never looks like
+    -- an old database that needs migrating.
+    version = CN.dbVersion,
 
     settings = {
         enabled      = true,
@@ -371,7 +373,40 @@ CN.defaults = {
 -- Each entry migrates FROM the given version TO version + 1.
 -- Never destroy user completion history here.
 CN.migrations = {
-    -- [1] = function(db) ... end,
+    -- 1 -> 2. The collection modules introduced account tables that older
+    -- databases do not have, and the minimap settings moved under a nested
+    -- table. CopyDefaults fills both in, so this migration exists to prove
+    -- the ladder runs and to normalize anything defaults cannot fix.
+    [1] = function(db)
+        db.account = db.account or {}
+
+        -- Tables added after the schema was first written. Creating them
+        -- here means no module has to guard against their absence.
+        for _, key in ipairs({
+            "pets", "mounts", "toys", "appearances", "titleNames",
+            "achievements", "achievementTotals", "recipeNames",
+            "reputations", "factionNames", "questHarvest", "questLocations",
+            "collectionScans",
+        }) do
+            db.account[key] = db.account[key] or {}
+        end
+
+        db.settings = db.settings or {}
+
+        -- Very early builds stored the minimap flag flat. Move it, and do
+        -- not lose the player's choice in the process.
+        if type(db.settings.minimap) ~= "table" then
+            local wasHidden = db.settings.minimap == true or db.settings.hideMinimap == true
+
+            db.settings.minimap = {
+                hide  = wasHidden and true or false,
+                angle = db.settings.minimapAngle or 225,
+            }
+        end
+
+        db.settings.hideMinimap  = nil
+        db.settings.minimapAngle = nil
+    end,
 }
 
 local function Migrate(db)
@@ -401,11 +436,31 @@ end
 ------------------------------------------------------------
 
 function CN.InitializeDatabase()
-    CompletionNavigatorDB = CN.CopyDefaults(CN.defaults, CompletionNavigatorDB or {})
+    local raw = CompletionNavigatorDB
+
+    -- A brand new install has nothing to migrate; stamping it at the current
+    -- version stops migration 1 running against an empty table.
+    local isFresh = type(raw) ~= "table" or next(raw) == nil
+
+    raw = type(raw) == "table" and raw or {}
+
+    if isFresh then
+        raw.version = CN.dbVersion
+    else
+        -- Migrations MUST run on the raw saved data, before defaults are
+        -- merged in.
+        --
+        -- CopyDefaults replaces any stored value whose type no longer matches
+        -- the default -- a legacy boolean where the default is now a table
+        -- gets discarded outright. Running defaults first would therefore
+        -- destroy exactly the values a migration exists to read, and it would
+        -- do so silently.
+        Migrate(raw)
+    end
+
+    CompletionNavigatorDB = CN.CopyDefaults(CN.defaults, raw)
 
     CN.db = CompletionNavigatorDB
-
-    Migrate(CN.db)
 
     DebugPrint("Database initialized (schema version " .. tostring(CN.db.version) .. ").")
 end
@@ -1390,6 +1445,17 @@ function CN.RegisterCandidateProvider(name, provider)
     CN.candidateProviders[name] = provider
 end
 
+-- Decorators get a pass over every candidate after collection and before
+-- scoring. This is how cross-cutting concerns -- Warband suitability, for
+-- one -- apply to objectives from modules that know nothing about them.
+CN.candidateDecorators = CN.candidateDecorators or {}
+
+function CN.RegisterCandidateDecorator(name, decorator)
+    if type(decorator) == "function" then
+        CN.candidateDecorators[name] = decorator
+    end
+end
+
 function CN.CollectCandidates()
     local candidates = {}
 
@@ -1402,6 +1468,16 @@ function CN.CollectCandidates()
             end
         elseif not ok then
             CN.DebugPrint("Candidate provider " .. name .. " failed: " .. tostring(result))
+        end
+    end
+
+    for name, decorator in pairs(CN.candidateDecorators) do
+        for _, objective in ipairs(candidates) do
+            local ok, err = pcall(decorator, objective)
+
+            if not ok then
+                CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
+            end
         end
     end
 
@@ -4199,6 +4275,176 @@ function Blizzard.GetRecipeInfo(recipeID)
 
     return info
 end
+
+------------------------------------------------------------
+-- TIME-SENSITIVE CONTENT
+------------------------------------------------------------
+
+function Blizzard.GetSecondsUntilDailyReset()
+    if GetQuestResetTime then
+        local ok, seconds = pcall(GetQuestResetTime)
+
+        if ok and type(seconds) == "number" and seconds > 0 then
+            return seconds
+        end
+    end
+
+    return nil
+end
+
+function Blizzard.GetSecondsUntilWeeklyReset()
+    if C_DateAndTime and C_DateAndTime.GetSecondsUntilWeeklyReset then
+        local ok, seconds = pcall(C_DateAndTime.GetSecondsUntilWeeklyReset)
+
+        if ok and type(seconds) == "number" and seconds > 0 then
+            return seconds
+        end
+    end
+
+    return nil
+end
+
+function Blizzard.IsWorldQuest(questID)
+    if C_QuestLog and C_QuestLog.IsWorldQuest then
+        local ok, result = pcall(C_QuestLog.IsWorldQuest, questID)
+
+        return ok and result and true or false
+    end
+
+    return false
+end
+
+-- Seconds remaining on a world quest, or nil when it is not time-limited.
+function Blizzard.GetQuestTimeLeft(questID)
+    if not C_TaskQuest then
+        return nil
+    end
+
+    if C_TaskQuest.GetQuestTimeLeftSeconds then
+        local ok, seconds = pcall(C_TaskQuest.GetQuestTimeLeftSeconds, questID)
+
+        if ok and type(seconds) == "number" and seconds > 0 then
+            return seconds
+        end
+    end
+
+    if C_TaskQuest.GetQuestTimeLeftMinutes then
+        local ok, minutes = pcall(C_TaskQuest.GetQuestTimeLeftMinutes, questID)
+
+        if ok and type(minutes) == "number" and minutes > 0 then
+            return minutes * 60
+        end
+    end
+
+    return nil
+end
+
+-- World quests currently up on a map. The field naming has changed between
+-- versions (questId vs questID), so both are accepted.
+function Blizzard.GetWorldQuestsOnMap(uiMapID)
+    local results = {}
+
+    if not uiMapID or not C_TaskQuest or not C_TaskQuest.GetQuestsForPlayerByMapID then
+        return results
+    end
+
+    local ok, tasks = pcall(C_TaskQuest.GetQuestsForPlayerByMapID, uiMapID)
+
+    if not ok or type(tasks) ~= "table" then
+        return results
+    end
+
+    for _, task in ipairs(tasks) do
+        local questID = task.questID or task.questId
+
+        if questID then
+            table.insert(results, {
+                questID = questID,
+                mapID   = task.mapID or uiMapID,
+                x       = task.x,
+                y       = task.y,
+                inArea  = task.inProgress,
+            })
+        end
+    end
+
+    return results
+end
+
+function Blizzard.GetWorldQuestInfo(questID)
+    local info = {}
+
+    if C_TaskQuest and C_TaskQuest.GetQuestInfoByQuestID then
+        local ok, title, factionID = pcall(C_TaskQuest.GetQuestInfoByQuestID, questID)
+
+        if ok then
+            info.title     = title
+            info.factionID = factionID
+        end
+    end
+
+    if C_QuestLog and C_QuestLog.GetQuestTagInfo then
+        local ok, tag = pcall(C_QuestLog.GetQuestTagInfo, questID)
+
+        if ok and type(tag) == "table" then
+            info.tagName        = tag.tagName
+            info.worldQuestType = tag.worldQuestType
+            info.quality        = tag.quality
+            info.isElite        = tag.isElite
+        end
+    end
+
+    return info
+end
+
+-- Calendar events happening today. Requires the calendar to have been
+-- opened at least once; the call is cheap and safe to repeat.
+function Blizzard.GetTodaysEvents()
+    local events = {}
+
+    if not C_Calendar or not C_DateAndTime then
+        return events
+    end
+
+    pcall(function()
+        if C_Calendar.OpenCalendar then
+            C_Calendar.OpenCalendar()
+        end
+    end)
+
+    local ok, today = pcall(C_DateAndTime.GetCurrentCalendarTime)
+
+    if not ok or type(today) ~= "table" or not today.monthDay then
+        return events
+    end
+
+    local gotCount, count = pcall(C_Calendar.GetNumDayEvents, 0, today.monthDay)
+
+    if not gotCount or type(count) ~= "number" then
+        return events
+    end
+
+    for index = 1, count do
+        local gotEvent, event = pcall(C_Calendar.GetDayEvent, 0, today.monthDay, index)
+
+        if gotEvent and type(event) == "table" and event.title then
+            -- sequenceType is "ONGOING" or "START" while an event is live.
+            local ongoing = event.sequenceType == "ONGOING"
+                or event.sequenceType == "START"
+                or event.sequenceType == ""
+
+            table.insert(events, {
+                title        = event.title,
+                eventType    = event.eventType,
+                calendarType = event.calendarType,
+                sequenceType = event.sequenceType,
+                ongoing      = ongoing,
+            })
+        end
+    end
+
+    return events
+end
 '@
 
 $Embedded['Providers\StaticData.lua'] = @'
@@ -6031,12 +6277,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "rep",
-    args    = "<factionID|name>",
+    args    = "<factionID or name>",
     order   = 42,
     help    = "Show one faction's standing and scope.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn rep <factionID|name>")
+            Print("Usage: /cn rep <factionID or name>")
             return
         end
 
@@ -6761,12 +7007,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "pet",
-    args    = "<speciesID|name>",
+    args    = "<speciesID or name>",
     order   = 52,
     help    = "Show one pet's collection state.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn pet <speciesID|name>")
+            Print("Usage: /cn pet <speciesID or name>")
             return
         end
 
@@ -7017,12 +7263,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "mount",
-    args    = "<mountID|name>",
+    args    = "<mountID or name>",
     order   = 55,
     help    = "Show one mount's collection state.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn mount <mountID|name>")
+            Print("Usage: /cn mount <mountID or name>")
             return
         end
 
@@ -7229,12 +7475,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "toy",
-    args    = "<itemID|name>",
+    args    = "<itemID or name>",
     order   = 58,
     help    = "Show one toy's collection state.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn toy <itemID|name>")
+            Print("Usage: /cn toy <itemID or name>")
             return
         end
 
@@ -7624,12 +7870,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "title",
-    args    = "<titleID|name>",
+    args    = "<titleID or name>",
     order   = 63,
     help    = "Show which characters have a title.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn title <titleID|name>")
+            Print("Usage: /cn title <titleID or name>")
             return
         end
 
@@ -8035,12 +8281,12 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "recipe",
-    args    = "<recipeID|name>",
+    args    = "<recipeID or name>",
     order   = 73,
     help    = "Show which characters know a recipe.",
     handler = function(args)
         if args == "" then
-            Print("Usage: /cn recipe <recipeID|name>")
+            Print("Usage: /cn recipe <recipeID or name>")
             return
         end
 
@@ -8548,6 +8794,656 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Opportunities.lua'] = @'
+-- Modules/Opportunities.lua
+-- Completion Navigator :: things that expire.
+--
+-- The scoring formula gives limitedTimeBonus the heaviest weight of any
+-- term (3.0), and until this module existed nothing ever set it. The engine
+-- was built to prioritise content that disappears and had no idea what
+-- disappears.
+--
+-- That is the whole point of the module: a world quest with two hours left
+-- and a permanent quest in the same zone are not equally urgent, and the
+-- recommendation should say so.
+
+local ADDON_NAME, CN = ...
+
+local Opportunities = CN:RegisterModule("Opportunities")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+local HOUR = 3600
+local DAY  = 86400
+
+------------------------------------------------------------
+-- URGENCY
+------------------------------------------------------------
+
+-- Converts "seconds remaining" into the bonus the scorer multiplies by 3.0.
+-- Deliberately steep: something with an hour left should dominate, something
+-- with three days left should barely register.
+function Opportunities.Urgency(secondsLeft)
+    if not secondsLeft or secondsLeft <= 0 then
+        return 0
+    end
+
+    if secondsLeft <= HOUR then
+        return 3
+    elseif secondsLeft <= 6 * HOUR then
+        return 2
+    elseif secondsLeft <= DAY then
+        return 1.25
+    elseif secondsLeft <= 3 * DAY then
+        return 0.5
+    end
+
+    return 0.25
+end
+
+function Opportunities.FormatTimeLeft(seconds)
+    if not seconds or seconds <= 0 then
+        return "expired"
+    end
+
+    if seconds < HOUR then
+        return math.floor(seconds / 60) .. "m left"
+    end
+
+    if seconds < DAY then
+        return math.floor(seconds / HOUR) .. "h left"
+    end
+
+    return math.floor(seconds / DAY) .. "d left"
+end
+
+------------------------------------------------------------
+-- WORLD QUESTS
+------------------------------------------------------------
+
+-- World quests are the largest source of expiring content and the addon
+-- could not see a single one before this.
+function Opportunities.GetWorldQuests(mapID)
+    mapID = mapID or select(1, CN.GetPlayerPosition())
+
+    if not mapID then
+        return {}
+    end
+
+    local results = {}
+
+    for _, task in ipairs(Blizzard.GetWorldQuestsOnMap(mapID)) do
+        local questID = task.questID
+
+        if not Blizzard.IsQuestCompletedByCharacter(questID)
+            and not CN.IsIgnored(CN.objectiveTypes.QUEST, questID)
+            and not CN.IsDeferred(CN.objectiveTypes.QUEST, questID) then
+
+            local secondsLeft = Blizzard.GetQuestTimeLeft(questID)
+            local info        = Blizzard.GetWorldQuestInfo(questID)
+
+            table.insert(results, {
+                questID     = questID,
+                mapID       = task.mapID,
+                x           = task.x,
+                y           = task.y,
+                name        = info.title or CN.GetQuestName(questID) or ("World quest " .. questID),
+                tagName     = info.tagName,
+                isElite     = info.isElite,
+                secondsLeft = secondsLeft,
+            })
+        end
+    end
+
+    table.sort(results, function(a, b)
+        return (a.secondsLeft or math.huge) < (b.secondsLeft or math.huge)
+    end)
+
+    return results
+end
+
+------------------------------------------------------------
+-- RESETS
+------------------------------------------------------------
+
+function Opportunities.GetResets()
+    return {
+        daily  = Blizzard.GetSecondsUntilDailyReset(),
+        weekly = Blizzard.GetSecondsUntilWeeklyReset(),
+    }
+end
+
+------------------------------------------------------------
+-- WORLD EVENTS
+------------------------------------------------------------
+
+-- Calendar reads are relatively expensive and the answer changes daily, not
+-- minute to minute.
+local eventCache, eventCachedAt = nil, 0
+
+function Opportunities.GetActiveEvents(force)
+    if not force and eventCache and (time() - eventCachedAt) < 1800 then
+        return eventCache
+    end
+
+    local active = {}
+
+    for _, event in ipairs(Blizzard.GetTodaysEvents()) do
+        if event.ongoing then
+            table.insert(active, event)
+        end
+    end
+
+    eventCache    = active
+    eventCachedAt = time()
+
+    return active
+end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+CN.RegisterCandidateProvider("Opportunities", function()
+    local candidates = {}
+
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+    for _, worldQuest in ipairs(Opportunities.GetWorldQuests(playerMap)) do
+        local reasons = {}
+
+        local urgency = Opportunities.Urgency(worldQuest.secondsLeft)
+
+        if worldQuest.secondsLeft then
+            table.insert(reasons, "world quest, "
+                .. Opportunities.FormatTimeLeft(worldQuest.secondsLeft))
+        else
+            table.insert(reasons, "world quest")
+        end
+
+        if worldQuest.tagName then
+            table.insert(reasons, worldQuest.tagName)
+        end
+
+        local travel = 0
+
+        if worldQuest.x and worldQuest.y and playerX and playerY
+            and worldQuest.mapID == playerMap then
+
+            local dx = worldQuest.x - playerX
+            local dy = worldQuest.y - playerY
+
+            travel = math.sqrt((dx * dx) + (dy * dy)) * 10
+
+            table.insert(reasons, "in your current zone")
+        elseif worldQuest.mapID ~= playerMap then
+            travel = 25
+        end
+
+        table.insert(candidates, CN.NewObjective({
+            id               = worldQuest.questID,
+            type             = CN.objectiveTypes.QUEST,
+            name             = worldQuest.name,
+            mapID            = worldQuest.mapID,
+            x                = worldQuest.x,
+            y                = worldQuest.y,
+            state            = CN.objectiveStates.AVAILABLE,
+            completionValue  = 1,
+            limitedTimeBonus = urgency,
+            travelCost       = travel,
+            expiresIn        = worldQuest.secondsLeft,
+            reasons          = reasons,
+        }))
+    end
+
+    return candidates
+end)
+
+------------------------------------------------------------
+-- EVENTS
+------------------------------------------------------------
+
+CN:RegisterEvent("QUEST_LOG_UPDATE", function()
+    -- World quest availability changes constantly; nothing to persist, the
+    -- candidate provider reads live each time it is asked.
+end)
+
+CN:OnLogin(function()
+    -- Warm the calendar so the first /cn events call has data.
+    Opportunities.GetActiveEvents(true)
+end)
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "now",
+    aliases = { "opportunities" },
+    order   = 15,
+    help    = "Show everything expiring soon.",
+    handler = function()
+        local resets = Opportunities.GetResets()
+
+        if resets.daily then
+            Print("Daily reset: " .. Opportunities.FormatTimeLeft(resets.daily))
+        end
+
+        if resets.weekly then
+            Print("Weekly reset: " .. Opportunities.FormatTimeLeft(resets.weekly))
+        end
+
+        local events = Opportunities.GetActiveEvents()
+
+        if #events > 0 then
+            Print("Active events:")
+
+            for _, event in ipairs(events) do
+                Print("  " .. event.title)
+            end
+        end
+
+        local worldQuests = Opportunities.GetWorldQuests()
+
+        if #worldQuests == 0 then
+            Print("No world quests available on your current map.")
+            return
+        end
+
+        Print("World quests here (" .. #worldQuests .. "), soonest to expire:")
+
+        for index = 1, math.min(#worldQuests, 10) do
+            local worldQuest = worldQuests[index]
+
+            Print("  " .. index .. ". " .. worldQuest.name
+                .. " |cff999999(" .. Opportunities.FormatTimeLeft(worldQuest.secondsLeft)
+                .. (worldQuest.tagName and (", " .. worldQuest.tagName) or "") .. ")|r")
+        end
+
+        if #worldQuests > 10 then
+            Print("  |cff999999... and " .. (#worldQuests - 10) .. " more.|r")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "events",
+    order   = 16,
+    help    = "List world events active today.",
+    handler = function()
+        local events = Opportunities.GetActiveEvents(true)
+
+        if #events == 0 then
+            Print("No world events detected as active today.")
+            Print("|cff999999The calendar may not have loaded yet; open it once and retry.|r")
+            return
+        end
+
+        for _, event in ipairs(events) do
+            Print("  " .. event.title
+                .. " |cff999999(" .. tostring(event.sequenceType) .. ")|r")
+        end
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
+$Embedded['Modules\Warband.lua'] = @'
+-- Modules/Warband.lua
+-- Completion Navigator :: which character should do this.
+--
+-- The per-character data already exists: reputations, titles, professions
+-- and recipes are stored on the character that owns them. What was missing
+-- is anything that reads across all of them and answers the question the
+-- whole design was built around.
+--
+-- This module also feeds `characterSuitability`, the second scoring term
+-- that was weighted in the formula but never set by anything. An objective
+-- your current character is poorly suited to should rank below one they can
+-- act on now, and the reason should say why.
+
+local ADDON_NAME, CN = ...
+
+local Warband = CN:RegisterModule("Warband")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+------------------------------------------------------------
+-- ROSTER
+------------------------------------------------------------
+
+function Warband.Roster()
+    local rows = {}
+
+    for key, character in CN.Characters() do
+        table.insert(rows, {
+            key      = key,
+            name     = character.name,
+            realm    = character.realm,
+            class    = character.class,
+            race     = character.race,
+            level    = character.level,
+            faction  = character.faction,
+            spec     = character.specName,
+            lastSeen = character.lastSeen,
+            isCurrent = (key == CN.characterKey),
+
+            professions  = CN.CountKeys(character.professions),
+            recipes      = CN.CountKeys(character.recipes),
+            titles       = CN.CountKeys(character.titles),
+            reputations  = CN.CountKeys(character.reputations),
+        })
+    end
+
+    table.sort(rows, function(a, b)
+        if (a.level or 0) ~= (b.level or 0) then
+            return (a.level or 0) > (b.level or 0)
+        end
+
+        return (a.key or "") < (b.key or "")
+    end)
+
+    return rows
+end
+
+------------------------------------------------------------
+-- WHO SHOULD DO THIS
+------------------------------------------------------------
+
+-- Answers for any objective type that has per-character state. Returns
+-- bestKey, detail, scope -- where scope explains why the answer is what it
+-- is, including "account-wide" meaning the question does not apply.
+function Warband.WhoShould(objectiveType, id)
+    local types = CN.objectiveTypes
+
+    if objectiveType == types.REPUTATION then
+        local module = CN:GetModule("Reputations")
+
+        if not module then
+            return nil, nil, "no reputation data"
+        end
+
+        local bestKey, bestRecord, accountWide = module.BestCharacterFor(id)
+
+        if accountWide then
+            return nil, nil, "account-wide"
+        end
+
+        if bestKey then
+            return bestKey, tostring(bestRecord and bestRecord.standing), "highest standing"
+        end
+
+        return nil, nil, "no character has this faction recorded"
+    end
+
+    if objectiveType == types.RECIPE then
+        local module = CN:GetModule("Professions")
+
+        if not module then
+            return nil, nil, "no profession data"
+        end
+
+        local holders = module.WhoKnows(id)
+
+        if #holders > 0 then
+            return holders[1], table.concat(holders, ", "), "already knows it"
+        end
+
+        return nil, nil, "no character knows this recipe"
+    end
+
+    if objectiveType == types.TITLE then
+        local module = CN:GetModule("Titles")
+
+        if not module then
+            return nil, nil, "no title data"
+        end
+
+        local holders = module.WhoHas(id)
+
+        if #holders > 0 then
+            return holders[1], table.concat(holders, ", "), "already earned it"
+        end
+
+        return nil, nil, "no character has this title"
+    end
+
+    if objectiveType == types.PROFESSION then
+        local module = CN:GetModule("Professions")
+
+        if not module then
+            return nil, nil, "no profession data"
+        end
+
+        local bestKey, bestRecord = module.BestCharacterFor(id)
+
+        if bestKey then
+            return bestKey,
+                   tostring(bestRecord and bestRecord.rank) .. " skill",
+                   "highest skill"
+        end
+
+        return nil, nil, "no character has this profession"
+    end
+
+    if objectiveType == types.PET or objectiveType == types.MOUNT
+        or objectiveType == types.TOY or objectiveType == types.ACHIEVEMENT
+        or objectiveType == types.APPEARANCE then
+        return nil, nil, "account-wide"
+    end
+
+    return nil, nil, "not tracked per character"
+end
+
+------------------------------------------------------------
+-- SUITABILITY
+------------------------------------------------------------
+
+-- Positive when the logged-in character is the right one, negative when
+-- somebody else is. Fed into the scoring formula so recommendations stop
+-- pointing at work this character cannot usefully do.
+function Warband.Suitability(objectiveType, id)
+    local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
+
+    if scope == "account-wide" or not bestKey then
+        return 0, nil
+    end
+
+    if bestKey == CN.characterKey then
+        return 1, "you are the best character for this"
+    end
+
+    return -2, bestKey .. " is better suited (" .. tostring(detail) .. ")"
+end
+
+-- Applied to every candidate before scoring, so no module has to remember
+-- to do it.
+function Warband.Decorate(objective)
+    if type(objective) ~= "table" or not objective.type or not objective.id then
+        return objective
+    end
+
+    if objective.accountWide then
+        return objective
+    end
+
+    local suitability, reason = Warband.Suitability(objective.type, objective.id)
+
+    if suitability ~= 0 then
+        objective.characterSuitability = suitability
+
+        if reason then
+            objective.reasons = objective.reasons or {}
+            table.insert(objective.reasons, reason)
+        end
+    end
+
+    return objective
+end
+
+CN.RegisterCandidateDecorator("Warband", Warband.Decorate)
+
+------------------------------------------------------------
+-- COVERAGE
+------------------------------------------------------------
+
+-- What the Warband collectively has, versus what any one character has.
+-- This is the number that matters for account completion; a single
+-- character's totals understate it.
+function Warband.Coverage()
+    local professions, recipes, titles = {}, {}, {}
+
+    local characters = 0
+
+    for _, character in CN.Characters() do
+        characters = characters + 1
+
+        for skillLineID in pairs(character.professions or {}) do
+            professions[skillLineID] = true
+        end
+
+        for recipeID in pairs(character.recipes or {}) do
+            recipes[recipeID] = true
+        end
+
+        for titleID in pairs(character.titles or {}) do
+            titles[titleID] = true
+        end
+    end
+
+    return {
+        characters  = characters,
+        professions = CN.CountKeys(professions),
+        recipes     = CN.CountKeys(recipes),
+        titles      = CN.CountKeys(titles),
+    }
+end
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "warband",
+    aliases = { "roster" },
+    order   = 17,
+    help    = "Show every known character and what they cover.",
+    handler = function()
+        local rows = Warband.Roster()
+
+        if #rows == 0 then
+            Print("No characters recorded yet.")
+            return
+        end
+
+        Print("Warband (" .. #rows .. " character"
+            .. (#rows == 1 and "" or "s") .. "):")
+
+        for _, row in ipairs(rows) do
+            local marker = row.isCurrent and "|cff00ff00>|r " or "  "
+
+            Print(marker .. row.key
+                .. " |cff999999" .. tostring(row.level) .. " "
+                .. tostring(row.class or "?")
+                .. (row.faction and (" " .. row.faction) or "") .. "|r")
+
+            Print("      professions " .. row.professions
+                .. ", recipes " .. row.recipes
+                .. ", titles " .. row.titles
+                .. ", reputations " .. row.reputations)
+        end
+
+        local coverage = Warband.Coverage()
+
+        Print("Combined coverage: " .. coverage.professions .. " professions, "
+            .. coverage.recipes .. " recipes, " .. coverage.titles .. " titles.")
+
+        if #rows == 1 then
+            Print("|cffffff00Only one character has been seen. Log in on your alts "
+                .. "with the addon loaded to make these comparisons useful.|r")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "who",
+    args    = "<type> <id>",
+    order   = 18,
+    help    = "Which character should do something. Types: rep, recipe, title, profession.",
+    handler = function(args)
+        local kind, value = args:match("^(%S+)%s+(.+)$")
+
+        if not kind or not value then
+            Print("Usage: /cn who <rep, recipe, title or profession> <id or name>")
+            return
+        end
+
+        kind = string.lower(kind)
+
+        local types = CN.objectiveTypes
+
+        local map = {
+            rep        = types.REPUTATION,
+            reputation = types.REPUTATION,
+            recipe     = types.RECIPE,
+            title      = types.TITLE,
+            profession = types.PROFESSION,
+            prof       = types.PROFESSION,
+        }
+
+        local objectiveType = map[kind]
+
+        if not objectiveType then
+            Print("Unknown type: " .. kind)
+            Print("Use one of: rep, recipe, title, profession")
+            return
+        end
+
+        -- Resolve names to IDs through the owning module where possible.
+        local id = CN.ToID(value)
+
+        if not id then
+            if objectiveType == types.REPUTATION then
+                local module = CN:GetModule("Reputations")
+                id = module and module.Resolve(value)
+            elseif objectiveType == types.TITLE then
+                local module = CN:GetModule("Titles")
+                id = module and module.Resolve(value)
+            end
+        end
+
+        if not id then
+            Print("Could not resolve: " .. value)
+            return
+        end
+
+        local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
+
+        if scope == "account-wide" then
+            Print("That is account-wide; any character counts.")
+            return
+        end
+
+        if not bestKey then
+            Print(tostring(scope) .. ".")
+            return
+        end
+
+        if bestKey == CN.characterKey then
+            Print("This character is the best one for it (" .. tostring(detail) .. ").")
+        else
+            Print("Best character: " .. bestKey .. " |cff999999(" .. tostring(detail) .. ")|r")
+        end
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -8567,7 +9463,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.9.0
+## Version: 0.10.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -8600,12 +9496,14 @@ Modules\Achievements.lua
 Modules\Appearances.lua
 Modules\Harvest.lua
 Modules\Mounts.lua
+Modules\Opportunities.lua
 Modules\Pets.lua
 Modules\Professions.lua
 Modules\Quests.lua
 Modules\Reputations.lua
 Modules\Titles.lua
 Modules\Toys.lua
+Modules\Warband.lua
 # CN:FILES:END
 '@
 
@@ -8739,6 +9637,46 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.10.0]
+
+### Added
+
+- **Opportunity scanner.** World quests, daily and weekly resets, and active
+  world events. Urgency is scaled steeply: something with an hour left
+  dominates, something with three days left barely registers.
+  `/cn now` lists everything expiring, soonest first. `/cn events` lists
+  active world events.
+- **Warband intelligence.** `/cn warband` shows every known character with
+  what each covers, plus the combined coverage across all of them.
+  `/cn who <rep, recipe, title or profession> <id or name>` answers which
+  character should do a given thing.
+- **Candidate decorators.** Cross-cutting concerns now apply to objectives
+  from modules that know nothing about them. Warband suitability is the
+  first user.
+
+### Fixed
+
+- `limitedTimeBonus` carries the heaviest weight in the scoring formula
+  (3.0) and nothing ever set it. The engine was built to prioritise
+  expiring content and had no idea what expires.
+- `characterSuitability` was likewise weighted and never set.
+- **Migrations ran after defaults were merged**, which meant `CopyDefaults`
+  had already discarded any stored value whose type no longer matched the
+  default. A migration existing to read a legacy value would silently find
+  nothing. Migrations now run on the raw saved data first. This affected no
+  shipped migration yet; it would have broken every future one.
+- Literal `|` characters in command help and usage text were eaten by the
+  chat frame as escape sequences: `<factionID|name>` rendered as
+  `<factionIDame>`. Every affected string now reads `<factionID or name>`.
+
+### Notes
+
+- Database schema is now version 2. The 1 to 2 migration creates the account
+  tables the collection modules added and moves the flat minimap setting into
+  its nested form, preserving the player's choice. It is idempotent and is
+  covered by a test that starts from a real version 1 database.
+
 
 ## [0.9.0]
 

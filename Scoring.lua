@@ -127,6 +127,17 @@ function CN.RegisterCandidateProvider(name, provider)
     CN.candidateProviders[name] = provider
 end
 
+-- Decorators get a pass over every candidate after collection and before
+-- scoring. This is how cross-cutting concerns -- Warband suitability, for
+-- one -- apply to objectives from modules that know nothing about them.
+CN.candidateDecorators = CN.candidateDecorators or {}
+
+function CN.RegisterCandidateDecorator(name, decorator)
+    if type(decorator) == "function" then
+        CN.candidateDecorators[name] = decorator
+    end
+end
+
 function CN.CollectCandidates()
     local candidates = {}
 
@@ -139,6 +150,16 @@ function CN.CollectCandidates()
             end
         elseif not ok then
             CN.DebugPrint("Candidate provider " .. name .. " failed: " .. tostring(result))
+        end
+    end
+
+    for name, decorator in pairs(CN.candidateDecorators) do
+        for _, objective in ipairs(candidates) do
+            local ok, err = pcall(decorator, objective)
+
+            if not ok then
+                CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
+            end
         end
     end
 
