@@ -7913,6 +7913,25 @@ jobs:
           done < <(find . -name '*.lua' -not -path './.git/*')
           exit $status
 
+      # The packager SKIPS the CurseForge upload silently when CF_API_KEY is
+      # missing -- the build still goes green and no file appears. Fail here
+      # instead, so a missing or misnamed secret is obvious.
+      - name: Verify the CurseForge token is available
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+        run: |
+          if [ -z "$CF_API_KEY" ]; then
+            echo "::error::CF_API_KEY is empty or not visible to this workflow."
+            echo ""
+            echo "Check all three:"
+            echo "  1. The secret is named exactly CF_API_KEY (case sensitive)."
+            echo "  2. It is a REPOSITORY secret, or an organization secret with"
+            echo "     this repository granted access."
+            echo "  3. It is under Secrets, not Variables."
+            exit 1
+          fi
+          echo "CF_API_KEY is present (${#CF_API_KEY} characters)."
+
       # BigWigs' packager is the standard tool; it reads .pkgmeta, builds the
       # zip, and uploads to CurseForge, WoWInterface and Wago as configured.
       - name: Package and upload
@@ -7920,6 +7939,27 @@ jobs:
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
           GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+'@
+
+$Embedded['.gitattributes'] = @'
+# Shell and YAML must be LF in the repository. A CRLF workflow file reaches
+# the Linux runner with trailing carriage returns and every `run:` step dies
+# with "$'\r': command not found".
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+.pkgmeta text eol=lf
+
+# Lua and docs are edited on Windows; leave them to git's normalization.
+*.lua   text
+*.toc   text
+*.xml   text
+*.md    text
+*.ps1   text
+
+*.png   binary
+*.jpg   binary
+*.zip   binary
 '@
 
 

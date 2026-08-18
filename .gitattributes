@@ -1,0 +1,18 @@
+# Shell and YAML must be LF in the repository. A CRLF workflow file reaches
+# the Linux runner with trailing carriage returns and every `run:` step dies
+# with "$'\r': command not found".
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+.pkgmeta text eol=lf
+
+# Lua and docs are edited on Windows; leave them to git's normalization.
+*.lua   text
+*.toc   text
+*.xml   text
+*.md    text
+*.ps1   text
+
+*.png   binary
+*.jpg   binary
+*.zip   binary
