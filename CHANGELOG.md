@@ -7,6 +7,49 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.19.0]
+
+Completion Navigator no longer needs any other addon to navigate.
+
+### Added
+
+- **Native navigation.** An on-screen arrow that points at your destination,
+  turns as you turn, and reports real distance in yards.
+  TomTom was never a dependency on paper -- every access was probed and
+  wrapped -- but in practice it was: without it you got a static map pin and no
+  arrow, which is not navigation. That gap is closed.
+- **The arrow is the addon's own.** Custom artwork, tinted with the blue of
+  the waypoint marker in the Completion Navigator logo (`#5DD2FB`), sampled
+  from the logo rather than guessed. It turns gold when you drift off course
+  and red when you are walking away, so the colour carries information rather
+  than only branding. Drag it anywhere; the position is saved.
+- **Real distance, in yards.** Map coordinates are normalized per map, so the
+  same 0.1 difference is a different real distance in every zone. The arrow
+  converts through the client's world positions and reports yards -- and
+  reports *"distance unknown"* rather than a made-up figure when the client
+  cannot convert.
+- **Arrival detection.** Getting within twelve yards fires arrival, which is
+  what auto-advance was designed around; before this it could only re-point on
+  a timer or an event.
+- **`/cn nav`** chooses the provider: `auto` (native), `tomtom`, or
+  `blizzard`. TomTom users who prefer its arrow keep it with one command.
+  `/cn arrow` toggles the arrow, `/cn here` reports where you are and what is
+  being tracked.
+
+### Changed
+
+- Native navigation is now the preferred waypoint provider, ahead of TomTom.
+  It is the only provider that cannot be missing.
+- Routing no longer suggests installing TomTom when nothing is available,
+  because that is no longer the reason.
+
+### Notes
+
+- The bearing maths is the kind that is invisible when wrong -- a reversed sign
+  points you confidently at the wrong place and raises no error. Seven cardinal
+  cases are asserted in the harness, along with the yard conversion, the
+  arrival threshold, and the refusal to compute a bearing to another map.
+
 ## [0.18.0]
 
 ### Added

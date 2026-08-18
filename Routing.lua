@@ -1,8 +1,9 @@
 -- Routing.lua
 -- Completion Navigator :: waypoint creation and zone clustering.
 --
--- Navigation is delegated to a provider (TomTom first, Blizzard map pins
--- as fallback) rather than reimplemented. This file only decides WHERE to
+-- Navigation is delegated to a provider. Native navigation is preferred and
+-- needs nothing installed; TomTom and Blizzard map pins remain available and
+-- a player can insist on either with /cn nav. This file only decides WHERE to
 -- point.
 
 local ADDON_NAME, CN = ...
@@ -30,6 +31,17 @@ function CN.RegisterWaypointProvider(name, provider, priority)
 end
 
 function CN.GetWaypointProvider()
+    -- An explicit choice beats the priority order. Someone who runs TomTom and
+    -- prefers its arrow said so on purpose, and "whichever addon happens to be
+    -- loaded" is not a preference.
+    if CN.GetPreferredWaypointProvider then
+        local preferred, preferredName = CN.GetPreferredWaypointProvider()
+
+        if preferred then
+            return preferred, preferredName
+        end
+    end
+
     for _, entry in ipairs(CN.waypointOrder) do
         local provider = CN.waypointProviders[entry.name]
 
@@ -54,7 +66,10 @@ function CN.SetWaypoint(mapID, x, y, title)
     local provider, name = CN.GetWaypointProvider()
 
     if not provider then
-        CN.Print("No waypoint provider is available. Install TomTom for navigation.")
+        -- Native navigation needs only the map API, so reaching this means
+        -- something is badly wrong rather than merely uninstalled.
+        CN.Print("No waypoint provider is available.")
+        CN.Print("|cff999999Try |cffffff00/cn nav auto|r to reset the choice.|r")
         return false
     end
 

@@ -33,6 +33,11 @@ CN.defaults = {
         -- additive and read-only, unlike the waypoint.
         tooltips     = true,
 
+        -- The on-screen navigation arrow. On by default, but it only appears
+        -- once something is actually being tracked, so it is never in the way
+        -- of a player who has not asked for navigation.
+        arrow        = true,
+
         -- Minimap button placement is an angle in degrees around the
         -- minimap edge, so it survives UI scale and minimap size changes.
         minimap = {

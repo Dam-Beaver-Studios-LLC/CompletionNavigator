@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.18.0'
+$script:ToolkitVersion = '0.19.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.18.0"
+CN.version     = "0.19.0"
 CN.dbVersion   = 2
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -365,6 +365,11 @@ CN.defaults = {
         -- Addon lines on item and unit tooltips. On by default: these are
         -- additive and read-only, unlike the waypoint.
         tooltips     = true,
+
+        -- The on-screen navigation arrow. On by default, but it only appears
+        -- once something is actually being tracked, so it is never in the way
+        -- of a player who has not asked for navigation.
+        arrow        = true,
 
         -- Minimap button placement is an angle in degrees around the
         -- minimap edge, so it survives UI scale and minimap size changes.
@@ -2236,8 +2241,9 @@ $Embedded['Routing.lua'] = @'
 -- Routing.lua
 -- Completion Navigator :: waypoint creation and zone clustering.
 --
--- Navigation is delegated to a provider (TomTom first, Blizzard map pins
--- as fallback) rather than reimplemented. This file only decides WHERE to
+-- Navigation is delegated to a provider. Native navigation is preferred and
+-- needs nothing installed; TomTom and Blizzard map pins remain available and
+-- a player can insist on either with /cn nav. This file only decides WHERE to
 -- point.
 
 local ADDON_NAME, CN = ...
@@ -2265,6 +2271,17 @@ function CN.RegisterWaypointProvider(name, provider, priority)
 end
 
 function CN.GetWaypointProvider()
+    -- An explicit choice beats the priority order. Someone who runs TomTom and
+    -- prefers its arrow said so on purpose, and "whichever addon happens to be
+    -- loaded" is not a preference.
+    if CN.GetPreferredWaypointProvider then
+        local preferred, preferredName = CN.GetPreferredWaypointProvider()
+
+        if preferred then
+            return preferred, preferredName
+        end
+    end
+
     for _, entry in ipairs(CN.waypointOrder) do
         local provider = CN.waypointProviders[entry.name]
 
@@ -2289,7 +2306,10 @@ function CN.SetWaypoint(mapID, x, y, title)
     local provider, name = CN.GetWaypointProvider()
 
     if not provider then
-        CN.Print("No waypoint provider is available. Install TomTom for navigation.")
+        -- Native navigation needs only the map API, so reaching this means
+        -- something is badly wrong rather than merely uninstalled.
+        CN.Print("No waypoint provider is available.")
+        CN.Print("|cff999999Try |cffffff00/cn nav auto|r to reset the choice.|r")
         return false
     end
 
@@ -4478,6 +4498,27 @@ UI.RegisterTab{
             function(value) CN.Settings().tooltips = value end)
         panel.tooltips:SetPoint("TOPLEFT", panel.minimap, "BOTTOMLEFT", 0, -6)
 
+        panel.arrow = AddCheckbox(panel, "Show the navigation arrow",
+            function()
+                local nav = CN:GetModule("Navigation")
+                return nav and nav.IsArrowEnabled()
+            end,
+            function(value)
+                CN.Settings().arrow = value
+
+                local nav = CN:GetModule("Navigation")
+
+                if nav then
+                    if value then
+                        nav.BuildArrow()
+                        nav.Refresh()
+                    else
+                        nav.Clear()
+                    end
+                end
+            end)
+        panel.arrow:SetPoint("TOPLEFT", panel.tooltips, "BOTTOMLEFT", 0, -6)
+
         panel.setup = AddButton(panel, "Scan everything now", 180, function()
             local setup = CN:GetModule("Setup")
 
@@ -4485,7 +4526,7 @@ UI.RegisterTab{
                 setup.Run()
             end
         end)
-        panel.setup:SetPoint("TOPLEFT", panel.tooltips, "BOTTOMLEFT", 0, -12)
+        panel.setup:SetPoint("TOPLEFT", panel.arrow, "BOTTOMLEFT", 0, -12)
 
         panel.reset = AddButton(panel, "Reset window position", 180, function()
             CN.Settings().window = nil
@@ -4511,6 +4552,7 @@ UI.RegisterTab{
         panel.auto.Refresh()
         panel.minimap.Refresh()
         panel.tooltips.Refresh()
+        panel.arrow.Refresh()
 
         panel.about:SetText("Completion Navigator v" .. CN.version)
     end,
@@ -15615,6 +15657,659 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Navigation.lua'] = @'
+-- Modules/Navigation.lua
+-- Completion Navigator :: native waypoints and the on-screen arrow.
+--
+-- Until now the addon decided WHERE to go and handed the job of pointing at it
+-- to TomTom. That made TomTom effectively required: without it you got a
+-- static map pin and no arrow, which is not navigation.
+--
+-- This file removes that dependency. It is not an attempt to reimplement
+-- TomTom -- it is the minimum that makes the addon complete on its own:
+--
+--   * a waypoint store of our own
+--   * an arrow that points at the current target and colours by whether you
+--     are facing it
+--   * real distance in yards, not map percentage
+--   * arrival detection, which is what makes auto-advance work properly
+--
+-- TomTom stays supported. Someone who already runs it and likes its arrow can
+-- keep using it -- /cn nav tomtom -- and everything else still works.
+--
+------------------------------------------------------------------------------
+-- THE MATH, once, because getting a bearing wrong is invisible until you are
+-- standing in the wrong place.
+--
+--   Map coordinates run x east, y SOUTH. North is therefore -y.
+--   GetPlayerFacing() is radians, 0 = north, increasing COUNTER-clockwise.
+--   Texture:SetRotation() rotates counter-clockwise.
+--
+--   bearing clockwise from north = atan2(dx, -dy)
+--   relative bearing             = bearing + facing
+--   rotation to apply            = -(relative bearing)
+--
+-- Checked against four cases in the harness rather than trusted.
+------------------------------------------------------------------------------
+
+local ADDON_NAME, CN = ...
+
+local Navigation = CN:RegisterModule("Navigation")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+------------------------------------------------------------
+-- STATE
+------------------------------------------------------------
+
+-- The single active target. One arrow, one destination: a list of waypoints is
+-- TomTom's job, and duplicating it would be duplicating the wrong half.
+local target = nil
+
+local arrow, ticker
+
+Navigation.arrivalYards = 12
+
+function Navigation.GetTarget()
+    return target
+end
+
+------------------------------------------------------------
+-- GEOMETRY
+------------------------------------------------------------
+
+-- Radians clockwise from straight ahead. nil when the bearing cannot be
+-- computed, which is different from zero and must not be shown as zero.
+function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing)
+    if not (playerX and playerY and targetX and targetY and facing) then
+        return nil
+    end
+
+    local dx = targetX - playerX
+    local dy = targetY - playerY
+
+    if dx == 0 and dy == 0 then
+        return 0
+    end
+
+    -- -dy because map y grows southward.
+    local bearing = math.atan(dx, -dy)
+
+    local relative = bearing + facing
+
+    -- Normalize to (-pi, pi] so "how far off am I" is a small number.
+    while relative > math.pi do
+        relative = relative - (2 * math.pi)
+    end
+
+    while relative <= -math.pi do
+        relative = relative + (2 * math.pi)
+    end
+
+    return relative
+end
+
+-- Distance in yards, using the client's world positions. Map coordinates are
+-- normalized per map, so a 0.1 difference is a different real distance in
+-- every zone; converting is the only way to get a number worth printing.
+--
+-- Returns nil when the client cannot convert, rather than a made-up figure.
+function Navigation.DistanceYards(mapID, playerX, playerY, targetX, targetY)
+    if not (mapID and playerX and playerY and targetX and targetY) then
+        return nil
+    end
+
+    if not C_Map or not C_Map.GetWorldPosFromMapPos or not UiMapPoint then
+        return nil
+    end
+
+    local ok, fromContinent, fromPos = pcall(C_Map.GetWorldPosFromMapPos, mapID,
+        UiMapPoint.CreateFromCoordinates(mapID, playerX, playerY))
+
+    if not ok or not fromPos then
+        return nil
+    end
+
+    local toOk, toContinent, toPos = pcall(C_Map.GetWorldPosFromMapPos, mapID,
+        UiMapPoint.CreateFromCoordinates(mapID, targetX, targetY))
+
+    if not toOk or not toPos then
+        return nil
+    end
+
+    -- Different continents means the straight-line number would be nonsense.
+    if fromContinent and toContinent and fromContinent ~= toContinent then
+        return nil
+    end
+
+    local dx = (toPos.x or 0) - (fromPos.x or 0)
+    local dy = (toPos.y or 0) - (fromPos.y or 0)
+
+    return math.sqrt((dx * dx) + (dy * dy))
+end
+
+function Navigation.FormatDistance(yards)
+    if not yards then
+        return "distance unknown"
+    end
+
+    if yards >= 1000 then
+        return string.format("%.1f km", yards * 0.0009144)
+    end
+
+    return string.format("%d yd", math.floor(yards + 0.5))
+end
+
+------------------------------------------------------------
+-- THE ARROW
+------------------------------------------------------------
+
+local function Settings()
+    return CN.Settings() or {}
+end
+
+function Navigation.IsArrowEnabled()
+    local settings = Settings()
+
+    return settings.arrow ~= false
+end
+
+local function BuildArrow()
+    if arrow or not CreateFrame then
+        return arrow
+    end
+
+    arrow = CreateFrame("Frame", "CompletionNavigatorArrow", UIParent)
+
+    arrow:SetSize(56, 56)
+    arrow:SetFrameStrata("MEDIUM")
+    arrow:SetMovable(true)
+    arrow:EnableMouse(true)
+    arrow:RegisterForDrag("LeftButton")
+    arrow:SetClampedToScreen(true)
+
+    local settings = Settings()
+
+    settings.arrowPosition = settings.arrowPosition or {}
+
+    arrow:SetPoint(
+        settings.arrowPosition.point or "CENTER",
+        UIParent,
+        settings.arrowPosition.point or "CENTER",
+        settings.arrowPosition.x or 0,
+        settings.arrowPosition.y or 160)
+
+    arrow.texture = arrow:CreateTexture(nil, "ARTWORK")
+    arrow.texture:SetAllPoints()
+    arrow.texture:SetTexture(CN.MEDIA_PATH .. "Arrow")
+
+    -- SetTexture fails silently on a missing file, so verify rather than
+    -- shipping an invisible arrow.
+    if not arrow.texture:GetTexture() then
+        arrow.texture:SetTexture("Interface\\Minimap\\MinimapArrow")
+    end
+
+    arrow.label = arrow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    arrow.label:SetPoint("TOP", arrow, "BOTTOM", 0, -2)
+    arrow.label:SetJustifyH("CENTER")
+
+    arrow.distance = arrow:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
+    arrow.distance:SetPoint("TOP", arrow.label, "BOTTOM", 0, -2)
+    arrow.distance:SetJustifyH("CENTER")
+
+    arrow:SetScript("OnDragStart", function(self)
+        self:StartMoving()
+    end)
+
+    arrow:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+
+        local point, _, _, x, y = self:GetPoint()
+
+        local saved = Settings()
+
+        saved.arrowPosition = { point = point, x = x, y = y }
+    end)
+
+    arrow:Hide()
+
+    return arrow
+end
+
+Navigation.BuildArrow = BuildArrow
+
+-- The arrow's palette.
+--
+-- ON_COURSE is the blue of the waypoint marker in the addon's own logo,
+-- sampled from it rather than guessed: #5DD2FB. Because you are pointed at
+-- your target most of the time, this is the colour the arrow actually wears,
+-- which is what makes it read as part of the addon rather than as generic
+-- navigation furniture.
+--
+-- The texture is greyscale for exactly this reason: tinting is a multiply, so
+-- a pre-coloured blue arrow could never turn amber, and the bearing feedback
+-- would be lost to make one screenshot prettier.
+Navigation.colors = {
+    ON_COURSE = { 0.365, 0.824, 0.984 },   -- #5DD2FB, the logo's marker blue
+    DRIFTING  = { 1.000, 0.780, 0.310 },   -- the logo's gold, for "turn a bit"
+    AWAY      = { 0.960, 0.420, 0.380 },   -- you are walking the wrong way
+    UNKNOWN   = { 0.600, 0.640, 0.680 },   -- no bearing available
+}
+
+-- Blue when you are walking toward it, gold when you are drifting, red when
+-- you are walking away. The single most useful thing an arrow does, and it
+-- costs one comparison.
+function Navigation.BearingColor(relative)
+    local palette = Navigation.colors
+
+    if not relative then
+        return palette.UNKNOWN[1], palette.UNKNOWN[2], palette.UNKNOWN[3]
+    end
+
+    local off = math.abs(relative)
+
+    if off < 0.35 then
+        return palette.ON_COURSE[1], palette.ON_COURSE[2], palette.ON_COURSE[3]
+    end
+
+    if off < 1.2 then
+        return palette.DRIFTING[1], palette.DRIFTING[2], palette.DRIFTING[3]
+    end
+
+    return palette.AWAY[1], palette.AWAY[2], palette.AWAY[3]
+end
+
+-- Recomputes the arrow. Split out so the harness can drive it without a frame.
+function Navigation.Compute()
+    if not target then
+        return nil
+    end
+
+    local mapID, playerX, playerY = CN.GetPlayerPosition()
+
+    if not mapID or not playerX or not playerY then
+        return { state = "NO_POSITION" }
+    end
+
+    if mapID ~= target.mapID then
+        return {
+            state = "WRONG_MAP",
+            zone  = target.zone or Blizzard.GetMapName(target.mapID),
+        }
+    end
+
+    local facing = GetPlayerFacing and GetPlayerFacing() or nil
+
+    local relative = Navigation.RelativeBearing(playerX, playerY,
+        target.x, target.y, facing)
+
+    local yards = Navigation.DistanceYards(mapID, playerX, playerY,
+        target.x, target.y)
+
+    return {
+        state    = (yards and yards <= Navigation.arrivalYards) and "ARRIVED" or "TRACKING",
+        relative = relative,
+        yards    = yards,
+        facing   = facing,
+    }
+end
+
+local function Refresh()
+    if not arrow then
+        return
+    end
+
+    if not target or not Navigation.IsArrowEnabled() then
+        arrow:Hide()
+        return
+    end
+
+    local state = Navigation.Compute()
+
+    if not state then
+        arrow:Hide()
+        return
+    end
+
+    arrow:Show()
+
+    arrow.label:SetText(target.title or "Destination")
+
+    if state.state == "WRONG_MAP" then
+        arrow.texture:SetRotation(0)
+        arrow.texture:SetVertexColor(Navigation.BearingColor(nil))
+        arrow.distance:SetText("|cff999999" .. (state.zone or "another zone") .. "|r")
+        return
+    end
+
+    if state.state == "NO_POSITION" then
+        arrow.texture:SetVertexColor(Navigation.BearingColor(nil))
+        arrow.distance:SetText("|cff999999no position|r")
+        return
+    end
+
+    if state.relative then
+        -- SetRotation turns counter-clockwise; the relative bearing is
+        -- clockwise, hence the negation.
+        arrow.texture:SetRotation(-state.relative)
+    end
+
+    arrow.texture:SetVertexColor(Navigation.BearingColor(state.relative))
+
+    arrow.distance:SetText(Navigation.FormatDistance(state.yards))
+
+    if state.state == "ARRIVED" then
+        Navigation.Arrive()
+    end
+end
+
+Navigation.Refresh = Refresh
+
+function Navigation.Arrive()
+    if not target or target.arrived then
+        return
+    end
+
+    target.arrived = true
+
+    Print("Arrived: " .. tostring(target.title or "destination"))
+
+    -- Arrival is exactly the moment auto-advance was designed for; before
+    -- this, it could only re-point on a timer or an event.
+    if CN.IsAutoWaypointEnabled and CN.IsAutoWaypointEnabled() then
+        CN.AutoAdvance("arrival", true)
+    else
+        Navigation.Clear()
+    end
+end
+
+------------------------------------------------------------
+-- TICKER
+------------------------------------------------------------
+
+-- Ten times a second. A rotating arrow needs to feel continuous; recomputing
+-- world positions every frame does not.
+Navigation.tickSeconds = 0.1
+
+function Navigation.StartTicker()
+    if ticker or not C_Timer or not C_Timer.NewTicker then
+        return
+    end
+
+    ticker = C_Timer.NewTicker(Navigation.tickSeconds, function()
+        local ok, err = pcall(Refresh)
+
+        if not ok then
+            DebugPrint("Arrow refresh failed: " .. tostring(err))
+        end
+    end)
+end
+
+function Navigation.StopTicker()
+    if ticker then
+        ticker:Cancel()
+        ticker = nil
+    end
+end
+
+------------------------------------------------------------
+-- WAYPOINT PROVIDER
+------------------------------------------------------------
+
+local provider = {}
+
+function provider.IsAvailable()
+    -- Native navigation needs nothing but the map API, which is why it is the
+    -- default: it is the only provider that cannot be missing.
+    return C_Map ~= nil and C_Map.GetBestMapForUnit ~= nil
+end
+
+function provider.SetWaypoint(mapID, x, y, title)
+    target = {
+        mapID = mapID,
+        x     = x,
+        y     = y,
+        title = title,
+        zone  = Blizzard.GetMapName(mapID),
+        setAt = time(),
+    }
+
+    BuildArrow()
+    Navigation.StartTicker()
+    Refresh()
+
+    -- Also drop a map pin, so the destination is visible on the world map and
+    -- not only in front of the player.
+    if C_Map.SetUserWaypoint and UiMapPoint and UiMapPoint.CreateFromCoordinates then
+        local ok = pcall(function()
+            C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(mapID, x, y))
+        end)
+
+        if ok and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then
+            pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+        end
+    end
+
+    return true
+end
+
+function provider.ClearAll()
+    Navigation.Clear()
+end
+
+function Navigation.Clear()
+    target = nil
+
+    if arrow then
+        arrow:Hide()
+    end
+
+    Navigation.StopTicker()
+
+    if C_Map and C_Map.ClearUserWaypoint then
+        pcall(C_Map.ClearUserWaypoint)
+    end
+end
+
+-- Priority 5: ahead of TomTom's 10. The addon is self-contained now, and a
+-- player who prefers TomTom's arrow can say so with /cn nav tomtom.
+CN.RegisterWaypointProvider("Native", provider, 5)
+
+Navigation.provider = provider
+
+------------------------------------------------------------
+-- PROVIDER PREFERENCE
+------------------------------------------------------------
+
+-- Overrides the priority order. Stored rather than inferred, because
+-- "whichever addon happens to be loaded" is not a preference.
+function Navigation.SetPreference(name)
+    local settings = Settings()
+
+    if name == "auto" or name == nil then
+        settings.navigation = nil
+        return true, "automatic"
+    end
+
+    local key = string.lower(name)
+
+    local known = {
+        native  = "Native",
+        tomtom  = "TomTom",
+        blizzard = "Blizzard",
+    }
+
+    if not known[key] then
+        return false, nil
+    end
+
+    settings.navigation = known[key]
+
+    return true, known[key]
+end
+
+function Navigation.Preference()
+    return Settings().navigation
+end
+
+-- Consulted by Routing before the priority order.
+function CN.GetPreferredWaypointProvider()
+    local preferred = Navigation.Preference()
+
+    if not preferred then
+        return nil
+    end
+
+    local candidate = CN.waypointProviders[preferred]
+
+    if candidate and candidate.IsAvailable and candidate.IsAvailable() then
+        return candidate, preferred
+    end
+
+    return nil
+end
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "arrow",
+    args    = "[on or off]",
+    order   = 40,
+    help    = "Toggle the on-screen navigation arrow.",
+    handler = function(args)
+        local settings = Settings()
+
+        args = string.lower(CN.Trim(args or ""))
+
+        if args == "on" then
+            settings.arrow = true
+        elseif args == "off" then
+            settings.arrow = false
+        elseif args ~= "" then
+            Print("Usage: /cn arrow [on or off]")
+            return
+        else
+            settings.arrow = (settings.arrow == false)
+        end
+
+        Print("Navigation arrow: " .. CN.YesNo(Navigation.IsArrowEnabled()))
+
+        if Navigation.IsArrowEnabled() then
+            BuildArrow()
+            Refresh()
+        elseif arrow then
+            arrow:Hide()
+        end
+
+        if not target then
+            Print("|cff999999Nothing is being tracked. |cffffff00/cn go|r "
+                .. "points it at something.|r")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "nav",
+    args    = "[auto, native, tomtom or blizzard]",
+    order   = 41,
+    help    = "Choose which navigation provider to use.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        if args ~= "" then
+            local ok, resolved = Navigation.SetPreference(args)
+
+            if not ok then
+                Print("Not a navigation provider: " .. args)
+                Print("|cff999999Choose auto, native, tomtom or blizzard.|r")
+                return
+            end
+
+            Print("Navigation provider: |cffffff00" .. tostring(resolved) .. "|r")
+        end
+
+        local preference = Navigation.Preference()
+
+        Print("Preference: " .. (preference or "automatic"))
+
+        local active, name = CN.GetWaypointProvider()
+
+        Print("Currently using: " .. (active and name or "none available"))
+
+        Print("Available:")
+
+        for _, entry in ipairs(CN.waypointOrder) do
+            local candidate = CN.waypointProviders[entry.name]
+
+            local available = candidate and candidate.IsAvailable
+                and candidate.IsAvailable()
+
+            Print("  " .. entry.name .. " " .. CN.YesNo(available)
+                .. " |cff999999priority " .. entry.priority .. "|r")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "where am i",
+    aliases = { "here" },
+    order   = 42,
+    help    = "Report your position and what is being tracked.",
+    handler = function()
+        local mapID, x, y = CN.GetPlayerPosition()
+
+        if not mapID then
+            Print("Your position is not available right now.")
+            return
+        end
+
+        Print("You are in " .. tostring(Blizzard.GetMapName(mapID))
+            .. (x and y and string.format(" at %.1f, %.1f", x * 100, y * 100) or ""))
+
+        if not target then
+            Print("Nothing is being tracked.")
+            return
+        end
+
+        local state = Navigation.Compute()
+
+        Print("Tracking: |cffffff00" .. tostring(target.title) .. "|r in "
+            .. tostring(target.zone))
+
+        if state and state.state == "WRONG_MAP" then
+            Print("  |cff999999It is in another zone.|r")
+        elseif state then
+            Print("  " .. Navigation.FormatDistance(state.yards)
+                .. (state.relative and string.format(" |cff999999%d degrees off|r",
+                    math.floor(math.abs(math.deg(state.relative)) + 0.5)) or ""))
+        end
+    end,
+}
+
+------------------------------------------------------------
+-- LIFECYCLE
+------------------------------------------------------------
+
+CN:OnLogin(function()
+    if Navigation.IsArrowEnabled() then
+        BuildArrow()
+    end
+end)
+
+-- Zone changes can move you onto the target's map, or off it.
+CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
+    if target then
+        Refresh()
+    end
+end)
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -15634,7 +16329,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.18.0
+## Version: 0.19.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -15673,6 +16368,7 @@ Modules\Filters.lua
 Modules\Goals.lua
 Modules\Harvest.lua
 Modules\Mounts.lua
+Modules\Navigation.lua
 Modules\Opportunities.lua
 Modules\Pets.lua
 Modules\Professions.lua
@@ -15771,7 +16467,7 @@ These are honest constraints, not oversights:
 
 ## Optional integrations
 
-**TomTom** for waypoints. Without it, navigation falls back to Blizzard map pins and the quest tracking arrow.
+**TomTom** is optional as of 0.19.0. Navigation is native — the addon draws its own arrow, computes its own bearings, and converts to real yards through the client's world positions. `/cn nav` switches between native, TomTom and Blizzard map pins.
 
 **AllTheThings** and **BtWQuests** are read at runtime for quest names, coordinates, source quests and prerequisite chains. Their internals are not published contracts, so every access is probed and wrapped: an update to either can make a provider go quiet, but cannot break Completion Navigator. `/cn providers` reports exactly what resolved.
 
@@ -15845,6 +16541,49 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.19.0]
+
+Completion Navigator no longer needs any other addon to navigate.
+
+### Added
+
+- **Native navigation.** An on-screen arrow that points at your destination,
+  turns as you turn, and reports real distance in yards.
+  TomTom was never a dependency on paper -- every access was probed and
+  wrapped -- but in practice it was: without it you got a static map pin and no
+  arrow, which is not navigation. That gap is closed.
+- **The arrow is the addon's own.** Custom artwork, tinted with the blue of
+  the waypoint marker in the Completion Navigator logo (`#5DD2FB`), sampled
+  from the logo rather than guessed. It turns gold when you drift off course
+  and red when you are walking away, so the colour carries information rather
+  than only branding. Drag it anywhere; the position is saved.
+- **Real distance, in yards.** Map coordinates are normalized per map, so the
+  same 0.1 difference is a different real distance in every zone. The arrow
+  converts through the client's world positions and reports yards -- and
+  reports *"distance unknown"* rather than a made-up figure when the client
+  cannot convert.
+- **Arrival detection.** Getting within twelve yards fires arrival, which is
+  what auto-advance was designed around; before this it could only re-point on
+  a timer or an event.
+- **`/cn nav`** chooses the provider: `auto` (native), `tomtom`, or
+  `blizzard`. TomTom users who prefer its arrow keep it with one command.
+  `/cn arrow` toggles the arrow, `/cn here` reports where you are and what is
+  being tracked.
+
+### Changed
+
+- Native navigation is now the preferred waypoint provider, ahead of TomTom.
+  It is the only provider that cannot be missing.
+- Routing no longer suggests installing TomTom when nothing is available,
+  because that is no longer the reason.
+
+### Notes
+
+- The bearing maths is the kind that is invisible when wrong -- a reversed sign
+  points you confidently at the wrong place and raises no error. Seven cardinal
+  cases are asserted in the harness, along with the yard conversion, the
+  arrival threshold, and the refusal to compute a bearing to another map.
 
 ## [0.18.0]
 
@@ -16359,7 +17098,7 @@ below. Numbers are from that benchmark.
 $Embedded['ROADMAP.md'] = @'
 # Completion Navigator — Roadmap
 
-Current version: **0.18.0** · 40 Lua files · ~15,600 lines · 77 slash commands · 11 candidate providers · 10 UI tabs
+Current version: **0.19.0** · 41 Lua files · ~16,400 lines · 81 slash commands · 11 candidate providers · 10 UI tabs
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
@@ -16507,9 +17246,9 @@ Vignette detection already works. A rare appearing that you have not cleared is 
 
 **Effort:** small. **Risk:** low.
 
-### 3.5 Minimap/world map pins
+### 3.5 Minimap/world map pins — **partly done in 0.19.0**
 
-**Status:** navigation is waypoint-only.
+**Status:** native navigation ships an on-screen arrow and sets a Blizzard map pin. Drawing the addon's *own* pins on the world map — a whole zone sweep at once — is still outstanding.
 
 HandyNotes integration exists as a provider but the addon draws no pins of its own. Drawing zone-sweep stops on the world map would make `/cn zone` far more legible.
 
@@ -16981,7 +17720,11 @@ function GetSpecializationInfo() return 70, "Retribution" end
 function GetProfessions() return 1, 2, nil, 4, 5 end
 function GetProfessionInfo(i) return "Profession" .. i, nil, 75, 100, nil, nil, 170 + i end
 
-UiMapPoint = { CreateFromCoordinates = function() return U end }
+UiMapPoint = {
+    CreateFromCoordinates = function(mapID, x, y)
+        return { uiMapID = mapID, x = x, y = y }
+    end,
+}
 
 C_Map = {
     GetBestMapForUnit    = function() return 94 end,
@@ -16989,6 +17732,11 @@ C_Map = {
     GetMapInfo           = function(id) return { name = "Map" .. tostring(id) } end,
     SetUserWaypoint      = function() end,
     ClearUserWaypoint    = function() end,
+    -- A flat 1000x1000 yard square, so expected distances are checkable.
+    GetWorldPosFromMapPos = function(mapID, point)
+        local x, y = point.x or 0, point.y or 0
+        return 1, { x = x * 1000, y = y * 1000 }
+    end,
 }
 
 local superTracked = nil
@@ -17089,6 +17837,16 @@ function CN_TEST_TooltipHooks() return tooltipHooks end
 UISpecialFrames = {}
 
 function GetCursorPosition() return 400, 300 end
+
+-- Player facing: radians, 0 = north, increasing counter-clockwise.
+local playerFacing = 0
+
+function GetPlayerFacing() return playerFacing end
+function CN_TEST_SetFacing(radians) playerFacing = radians end
+
+-- World positions, so distance comes out in yards. The stub map is a flat
+-- 1000x1000 yard square, which makes the expected distances checkable by hand.
+C_Map = C_Map or {}
 
 -- C_Timer backs the auto-waypoint backstop ticker.
 local tickers = {}
@@ -17839,6 +18597,8 @@ local invocations = {
     "ui", "uistatus", "minimap", "minimap", "ui", "ui",
     "perf", "tooltips", "tooltips off", "tooltips on", "tooltips bogus",
     "vault", "greatvault",
+    "arrow", "arrow off", "arrow on", "arrow bogus",
+    "nav", "nav native", "nav tomtom", "nav auto", "nav nonsense", "here",
     "goals", "goal", "goal nonsense 1", "goal mount notanid",
     "goal mount 2", "goals", "goal mount 2", "gogoal 1", "gogoal 99",
     "goal quest 9002", "goal pet 101", "goals",
@@ -18530,6 +19290,145 @@ assert(worstDecorations == 1,
 
 CN.candidateDecorators["HarnessProbe"] = nil
 CN.CollectCandidates(true)
+
+print("\nNavigation:")
+
+local nav = CN:GetModule("Navigation")
+
+assert(nav, "the Navigation module must load")
+
+-- Bearing. This is the part that is completely invisible when wrong: a
+-- reversed sign puts the player confidently in the wrong place, and no error
+-- is ever raised. Four cardinal cases, checked by hand.
+--
+-- Map coordinates: x east, y SOUTH. Player at the centre.
+local function bearingDegrees(tx, ty, facing)
+    local relative = nav.RelativeBearing(0.5, 0.5, tx, ty, facing)
+    return relative and math.floor(math.deg(relative) + 0.5) or nil
+end
+
+local bearingCases = {
+    -- target,        facing,        expected relative (deg, + is clockwise)
+    { 0.5, 0.4,       0,             0,    "north of me, facing north"        },
+    { 0.6, 0.5,       0,             90,   "east of me, facing north"         },
+    { 0.5, 0.6,       0,             180,  "south of me, facing north"        },
+    { 0.4, 0.5,       0,             -90,  "west of me, facing north"         },
+    -- Facing east is 3*pi/2 because facing increases counter-clockwise.
+    { 0.6, 0.5,       3 * math.pi / 2, 0,  "east of me, facing east"          },
+    { 0.5, 0.4,       3 * math.pi / 2, -90, "north of me, facing east"        },
+    { 0.5, 0.4,       math.pi / 2,     90,  "north of me, facing west"        },
+}
+
+for _, case in ipairs(bearingCases) do
+    local got = bearingDegrees(case[1], case[2], case[3])
+
+    print(string.format("  %-28s expected %4d, got %4d", case[5], case[4], got))
+
+    -- 180 and -180 are the same bearing.
+    local matches = (got == case[4])
+        or (math.abs(case[4]) == 180 and math.abs(got) == 180)
+
+    assert(matches, "bearing wrong for " .. case[5]
+        .. ": expected " .. case[4] .. ", got " .. tostring(got))
+end
+
+assert(nav.RelativeBearing(0.5, 0.5, nil, nil, 0) == nil,
+    "an uncomputable bearing must be nil, not zero")
+
+-- Distance must be yards, not map percentage. The stub map is 1000 yards
+-- square, so 0.5 -> 0.6 on x is exactly 100 yards.
+local yards = nav.DistanceYards(94, 0.5, 0.5, 0.6, 0.5)
+
+print("  distance 0.5 -> 0.6 on a 1000yd map = " .. tostring(yards) .. " yd")
+
+assert(yards and math.abs(yards - 100) < 0.01,
+    "distance must convert to yards, got " .. tostring(yards))
+
+assert(nav.FormatDistance(nil) == "distance unknown",
+    "an unknown distance must say so rather than print a number")
+assert(nav.FormatDistance(42):find("42"), "yards should be shown plainly")
+
+-- Colour must track the bearing, and the on-course colour is the logo blue.
+local r, g, b = nav.BearingColor(0)
+assert(math.abs(r - 0.365) < 0.001 and math.abs(g - 0.824) < 0.001
+    and math.abs(b - 0.984) < 0.001,
+    "on-course must use the logo's marker blue")
+
+local ar, ag, ab = nav.BearingColor(math.pi)
+assert(ar > ag and ar > ab, "facing away must be warm, not blue")
+
+assert(select(1, nav.BearingColor(nil)) == nav.colors.UNKNOWN[1],
+    "no bearing must use the unknown colour")
+
+print("  on-course colour is the logo blue")
+
+-- The native provider must be preferred over TomTom, and must be available
+-- with no third-party addon present at all.
+local activeProvider, activeName = CN.GetWaypointProvider()
+
+print("  active waypoint provider = " .. tostring(activeName))
+
+assert(activeName == "Native",
+    "native navigation must be the default provider, got " .. tostring(activeName))
+
+-- Setting a waypoint must track it, and compute a real state.
+--
+-- Anchored to the player's ACTUAL stubbed position rather than assuming the
+-- centre of the map -- the first version of this test assumed 0.5, 0.5 and
+-- "failed" against correct code.
+local playerMapID, playerAtX, playerAtY = CN.GetPlayerPosition()
+
+print("  player is at " .. string.format("%.2f, %.2f on map %d",
+    playerAtX, playerAtY, playerMapID))
+
+CN.SetWaypoint(playerMapID, playerAtX + 0.18, playerAtY, "Test Destination")
+
+local tracked = nav.GetTarget()
+
+assert(tracked and tracked.title == "Test Destination",
+    "setting a waypoint must record the target")
+
+CN_TEST_SetFacing(3 * math.pi / 2)
+
+local computed = nav.Compute()
+
+print("  tracking state = " .. tostring(computed.state)
+    .. ", " .. tostring(math.floor((computed.yards or 0) + 0.5)) .. " yd"
+    .. ", " .. tostring(math.floor(math.deg(computed.relative or 0) + 0.5)) .. " deg off")
+
+assert(computed.state == "TRACKING", "a distant target must report TRACKING")
+assert(math.abs(computed.relative) < 0.001,
+    "facing the target must report zero relative bearing, got "
+    .. string.format("%.4f", computed.relative))
+
+assert(math.abs(computed.yards - 180) < 0.01,
+    "0.18 of a 1000yd map is 180 yards, got " .. tostring(computed.yards))
+
+-- Arrival must fire inside the threshold, not outside it.
+CN.SetWaypoint(playerMapID, playerAtX + 0.005, playerAtY, "Very Close")
+
+local arrived = nav.Compute()
+
+print("  5yd away -> " .. tostring(arrived.state))
+
+assert(arrived.state == "ARRIVED", "inside the arrival radius must report ARRIVED")
+
+-- A target on another map must say so rather than point confidently at a
+-- bearing computed from unrelated coordinates.
+CN.SetWaypoint(playerMapID + 1000, 0.5, 0.5, "Another Zone")
+
+local elsewhere = nav.Compute()
+
+print("  target on another map -> " .. tostring(elsewhere.state))
+
+assert(elsewhere.state == "WRONG_MAP",
+    "a target on another map must not produce a bearing")
+
+nav.Clear()
+
+assert(nav.GetTarget() == nil, "clearing must drop the target")
+
+CN_TEST_SetFacing(0)
 
 print("\nGreat Vault:")
 
@@ -19765,6 +20664,192 @@ $EmbeddedBinary['Media\Logo.tga'] = @(
     'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=='
+) -join ''
+
+$EmbeddedBinary['Media\Arrow.tga'] = @(
+    'AAACAAAAAAAAAAAAQABAACAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8f',
+    'H1AfHx/vHx8f7x8fH2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8fH2AfHx/vHx8f7x8fH1AAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfHx/PHx8f/x8fH/8fHx//',
+    'Hx8fnwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8fH58fHx//Hx8f/x8fH/8fHx/PAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHx8f/x8fH/8uLi7/ICAg/x8fH/8fHx+/Hx8fEAAA',
+    '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',
+    'AAAAAAAAHx8fUB8fH/8hISH/PDw8/1ZWVv9aWlr/U1NT/0tLS/9CQkL/OTk5/zAwMP8oKCj/ISEh/x8fH/8fHx//Hx8f/x8fH/8mJib/SkpK/2hoaP+BgYH/',
+    'l5eX/6qqqv+9vb3/zs7O/9/f3//u7u7//v7+/////////////v7+/+7u7v/f39//zs7O/729vf+qqqr/l5eX/4GBgf9oaGj/SkpK/yYmJv8fHx//Hx8f/x8f',
+    'H/8fHx//ISEh/ygoKP8wMDD/OTk5/0JCQv9LS0v/U1NT/1paWv9WVlb/PDw8/yEhIf8fHx//Hx8fUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfHx+v',
+    'Hx8f/ycnJ/9HR0f/YWFh/21tbf9paWn/YmJi/1tbW/9UVFT/TExM/0RERP86Ojr/MTEx/ykpKf8iIiL/Kioq/09PT/9sbGz/hISE/5qamv+tra3/wMDA/9HR',
+    '0f/i4uL/8vLy///////////////////////y8vL/4uLi/9HR0f/AwMD/ra2t/5qamv+EhIT/bGxs/09PT/8qKir/IiIi/ykpKf8xMTH/Ojo6/0RERP9MTEz/',
+    'VFRU/1tbW/9iYmL/aWlp/21tbf9hYWH/R0dH/ycnJ/8fHx//Hx8frwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHx8fEB8fH+8fHx//MTEx/1FR',
+    'Uf9qamr/e3t7/3x8fP92dnb/cHBw/2pqav9jY2P/XV1d/1ZWVv9OTk7/RkZG/0BAQP9WVlb/cHBw/4iIiP+dnZ3/sbGx/8PDw//V1dX/5eXl//X19f//////',
+    '////////////////9fX1/+Xl5f/V1dX/w8PD/7Gxsf+dnZ3/iIiI/3BwcP9WVlb/QEBA/0ZGRv9OTk7/VlZW/11dXf9jY2P/ampq/3BwcP92dnb/fHx8/3t7',
+    'e/9qamr/UVFR/zExMf8fHx//Hx8f7x8fHxAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfHx9QHx8f/yEhIf89PT3/Wlpa/3Jycv+FhYX/',
+    'jIyM/4iIiP+Dg4P/fX19/3d3d/9xcXH/a2tr/2VlZf9gYGD/aWlp/3t7e/+Pj4//o6Oj/7W1tf/Hx8f/2dnZ/+np6f/5+fn///////////////////////n5',
+    '+f/p6en/2dnZ/8fHx/+1tbX/o6Oj/4+Pj/97e3v/aWlp/2BgYP9lZWX/a2tr/3Fxcf93d3f/fX19/4ODg/+IiIj/jIyM/4WFhf9ycnL/Wlpa/z09Pf8hISH/',
+    'Hx8f/x8fH1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8fH68fHx//KCgo/0hISP9jY2P/eXl5/42Njf+ampr/mZmZ/5SU',
+    'lP+Pj4//ioqK/4SEhP9/f3//e3t7/4CAgP+MjIz/nJyc/6ysrP+9vb3/zs7O/9/f3//v7+///v7+///////////////////////+/v7/7+/v/9/f3//Ozs7/',
+    'vb29/6ysrP+cnJz/jIyM/4CAgP97e3v/f39//4SEhP+Kior/j4+P/5SUlP+ZmZn/mpqa/42Njf95eXn/Y2Nj/0hISP8oKCj/Hx8f/x8fH68AAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfHx8QHx8f7x8fH/8yMjL/U1NT/2xsbP+BgYH/lJSU/6Wlpf+pqan/paWl/6CgoP+bm5v/',
+    'lpaW/5OTk/+Wlpb/n5+f/6urq/+5ubn/yMjI/9jY2P/n5+f/9/f3//////////////////////////////////f39//n5+f/2NjY/8jIyP+5ubn/q6ur/5+f',
+    'n/+Wlpb/k5OT/5aWlv+bm5v/oKCg/6Wlpf+pqan/paWl/5SUlP+BgYH/bGxs/1NTU/8yMjL/Hx8f/x8fH+8fHx8QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8fH1AfHx//ISEh/z4+Pv9cXFz/dHR0/4mJif+cnJz/ra2t/7e3t/+1tbX/sLCw/6ysrP+qqqr/rKys/7Oz',
+    's/+8vLz/yMjI/9bW1v/k5OT/8vLy////////////////////////////////////////////8vLy/+Tk5P/W1tb/yMjI/7y8vP+zs7P/rKys/6qqqv+srKz/',
+    'sLCw/7W1tf+3t7f/ra2t/5ycnP+JiYn/dHR0/1xcXP8+Pj7/ISEh/x8fH/8fHx9QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAHx8fvx8fH/8pKSn/SkpK/2VlZf98fHz/kJCQ/6Ojo/+1tbX/w8PD/8XFxf/BwcH/v7+//8HBwf/Hx8f/z8/P/9nZ2f/k5OT/',
+    '8fHx//7+/v////////////////////////////////////////////7+/v/x8fH/5OTk/9nZ2f/Pz8//x8fH/8HBwf+/v7//wcHB/8XFxf/Dw8P/tbW1/6Oj',
+    'o/+QkJD/fHx8/2VlZf9KSkr/KSkp/x8fH/8fHx+/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAB8fHyAfHx/vHx8f/zMzM/9UVFT/bm5u/4SEhP+YmJj/q6ur/7y8vP/Nzc3/1dXV/9XV1f/W1tb/29vb/+Hh4f/q6ur/9fX1////////////////////',
+    '//////////////////////////////////////////////X19f/q6ur/4eHh/9vb2//W1tb/1dXV/9XV1f/Nzc3/vLy8/6urq/+YmJj/hISE/25ubv9UVFT/',
+    'MzMz/x8fH/8fHx/vHx8fIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHx8fcB8f',
+    'H/8iIiL/QEBA/15eXv93d3f/jIyM/6CgoP+ysrL/xMTE/9XV1f/j4+P/6+vr/+/v7//19fX//Pz8////////////////////////////////////////////',
+    '/////////////////////////////////Pz8//X19f/v7+//6+vr/+Pj4//V1dX/xMTE/7Kysv+goKD/jIyM/3d3d/9eXl7/QEBA/yIiIv8fHx//Hx8fcAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfHx+/Hx8f/yoqKv9LS0v/',
+    'Z2dn/39/f/+UlJT/qKio/7q6uv/MzMz/3d3d/+3t7f/7+/v/////////////////////////////////////////////////////////////////////////',
+    '////////////////////////+/v7/+3t7f/d3d3/zMzM/7q6uv+oqKj/lJSU/39/f/9nZ2f/S0tL/yoqKv8fHx//Hx8fvwAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHx8fIB8fH+8fHx//NTU1/1ZWVv9xcXH/iIiI/5yc',
+    'nP+wsLD/wsLC/9TU1P/l5eX/9fX1////////////////////////////////////////////////////////////////////////////////////////////',
+    '//////X19f/l5eX/1NTU/8LCwv+wsLD/nJyc/4iIiP9xcXH/VlZW/zU1Nf8fHx//Hx8f7x8fHyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfHx9wHx8f/yIiIv9BQUH/YGBg/3p6ev+QkJD/paWl/7i4uP/Kysr/',
+    '3Nzc/+3t7f/9/f3///////////////////////////////////////////////////////////////////////////////////////39/f/t7e3/3Nzc/8rK',
+    'yv+4uLj/paWl/5CQkP96enr/YGBg/0FBQf8iIiL/Hx8f/x8fH3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8fH78fHx//Kysr/01NTf9qamr/goKC/5iYmP+tra3/wMDA/9LS0v/k5OT/9fX1////',
+    '///////////////////////////////////////////////////////////////////////////////////19fX/5OTk/9LS0v/AwMD/ra2t/5iYmP+CgoL/',
+    'ampq/01NTf8rKyv/Hx8f/x8fH78AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfHx8gHx8f7x8fH/82Njb/WFhY/3Nzc/+Li4v/oaGh/7W1tf/IyMj/2tra/+zs7P/9/f3/////////////////',
+    '///////////////////////////////////////////////////////////9/f3/7Ozs/9ra2v/IyMj/tbW1/6Ghof+Li4v/c3Nz/1hYWP82Njb/Hx8f/x8f',
+    'H+8fHx8gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAB8fH4AfHx//IyMj/0NDQ/9iYmL/fHx8/5OTk/+pqan/vb29/9DQ0P/i4uL/9PT0////////////////////////////////////',
+    '////////////////////////////////////////9PT0/+Li4v/Q0ND/vb29/6mpqf+Tk5P/fHx8/2JiYv9DQ0P/IyMj/x8fH/8fHx+AAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAHx8fzx8fH/8sLCz/T09P/2xsbP+FhYX/nJyc/7Gxsf/FxcX/2NjY/+rq6v/8/Pz/////////////////////////////////////////////////',
+    '/////////////////Pz8/+rq6v/Y2Nj/xcXF/7Gxsf+cnJz/hYWF/2xsbP9PT0//LCws/x8fH/8fHx/PAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8fHzAfHx//',
+    'Hx8f/zc3N/9aWlr/dXV1/46Ojv+kpKT/ubm5/8zMzP/f39//8vLy//////////////////////////////////////////////////////////////////Ly',
+    '8v/f39//zMzM/7m5uf+kpKT/jo6O/3V1df9aWlr/Nzc3/x8fH/8fHx//Hx8fMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHx8fgB8fH/8kJCT/RERE/2Rk',
+    'ZP9+fn7/lpaW/6ysrP/AwMD/1NTU/+fn5//5+fn///////////////////////////////////////////////////////n5+f/n5+f/1NTU/8DAwP+srKz/',
+    'lpaW/35+fv9kZGT/RERE/yQkJP8fHx//Hx8fgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfHx/PHx8f/y0tLf9QUFD/bm5u/4eHh/+enp7/',
+    's7Oz/8jIyP/b29v/7u7u///////////////////////////////////////////////////////u7u7/29vb/8jIyP+zs7P/np6e/4eHh/9ubm7/UFBQ/y0t',
+    'Lf8fHx//Hx8fzwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHx8fMB8fH/8fHx//OTk5/1tbW/93d3f/j4+P/6ampv+7u7v/z8/P/+Li',
+    '4v/09PT////////////////////////////////////////////09PT/4uLi/8/Pz/+7u7v/pqam/4+Pj/93d3f/W1tb/zk5Of8fHx//Hx8f/x8fHzAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    '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',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAfHx9QHx8f/yAgIP88PDz/W1tb/3R0dP+Kior/nZ2d/52dnf+Kior/dHR0/1tbW/88PDz/ICAg/x8fH/8fHx9QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8fH68fHx//',
+    'Jycn/0hISP9kZGT/e3t7/5CQkP+QkJD/e3t7/2RkZP9ISEj/Jycn/x8fH/8fHx+vAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfHx8QHx8f7x8fH/8xMTH/UlJS/2tr',
+    'a/+BgYH/gYGB/2tra/9SUlL/MTEx/x8fH/8fHx/vHx8fEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8fH1AfHx//ISEh/z09Pf9bW1v/c3Nz/3Nzc/9bW1v/',
+    'PT09/yEhIf8fHx//Hx8fUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHx8frx8fH/8nJyf/SEhI/2NjY/9jY2P/SEhI/ycnJ/8fHx//Hx8frwAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8fHxAfHx/vHx8f/zIyMv9SUlL/UlJS/zIyMv8fHx//Hx8f7x8fHxAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHx8fUB8fH/8hISH/Pj4+/z4+Pv8hISH/Hx8f/x8fH1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAfHx+vHx8f/ygoKP8oKCj/Hx8f/x8fH68AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'Hx8fIB8fH+8fHx//Hx8f/x8fH+8fHx8gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfHx9gHx8f7x8f',
+    'H+8fHx9gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=='
 ) -join ''
 
 $EmbeddedBinary['Media\README.txt'] = @(

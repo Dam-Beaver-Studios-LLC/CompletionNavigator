@@ -1,6 +1,6 @@
 # Completion Navigator â€” Roadmap
 
-Current version: **0.18.0** Â· 40 Lua files Â· ~15,600 lines Â· 77 slash commands Â· 11 candidate providers Â· 10 UI tabs
+Current version: **0.19.0** Â· 41 Lua files Â· ~16,400 lines Â· 81 slash commands Â· 11 candidate providers Â· 10 UI tabs
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
@@ -148,9 +148,9 @@ Vignette detection already works. A rare appearing that you have not cleared is 
 
 **Effort:** small. **Risk:** low.
 
-### 3.5 Minimap/world map pins
+### 3.5 Minimap/world map pins â€” **partly done in 0.19.0**
 
-**Status:** navigation is waypoint-only.
+**Status:** native navigation ships an on-screen arrow and sets a Blizzard map pin. Drawing the addon's *own* pins on the world map â€” a whole zone sweep at once â€” is still outstanding.
 
 HandyNotes integration exists as a provider but the addon draws no pins of its own. Drawing zone-sweep stops on the world map would make `/cn zone` far more legible.
 

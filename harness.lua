@@ -99,7 +99,11 @@ function GetSpecializationInfo() return 70, "Retribution" end
 function GetProfessions() return 1, 2, nil, 4, 5 end
 function GetProfessionInfo(i) return "Profession" .. i, nil, 75, 100, nil, nil, 170 + i end
 
-UiMapPoint = { CreateFromCoordinates = function() return U end }
+UiMapPoint = {
+    CreateFromCoordinates = function(mapID, x, y)
+        return { uiMapID = mapID, x = x, y = y }
+    end,
+}
 
 C_Map = {
     GetBestMapForUnit    = function() return 94 end,
@@ -107,6 +111,11 @@ C_Map = {
     GetMapInfo           = function(id) return { name = "Map" .. tostring(id) } end,
     SetUserWaypoint      = function() end,
     ClearUserWaypoint    = function() end,
+    -- A flat 1000x1000 yard square, so expected distances are checkable.
+    GetWorldPosFromMapPos = function(mapID, point)
+        local x, y = point.x or 0, point.y or 0
+        return 1, { x = x * 1000, y = y * 1000 }
+    end,
 }
 
 local superTracked = nil
@@ -207,6 +216,16 @@ function CN_TEST_TooltipHooks() return tooltipHooks end
 UISpecialFrames = {}
 
 function GetCursorPosition() return 400, 300 end
+
+-- Player facing: radians, 0 = north, increasing counter-clockwise.
+local playerFacing = 0
+
+function GetPlayerFacing() return playerFacing end
+function CN_TEST_SetFacing(radians) playerFacing = radians end
+
+-- World positions, so distance comes out in yards. The stub map is a flat
+-- 1000x1000 yard square, which makes the expected distances checkable by hand.
+C_Map = C_Map or {}
 
 -- C_Timer backs the auto-waypoint backstop ticker.
 local tickers = {}
@@ -957,6 +976,8 @@ local invocations = {
     "ui", "uistatus", "minimap", "minimap", "ui", "ui",
     "perf", "tooltips", "tooltips off", "tooltips on", "tooltips bogus",
     "vault", "greatvault",
+    "arrow", "arrow off", "arrow on", "arrow bogus",
+    "nav", "nav native", "nav tomtom", "nav auto", "nav nonsense", "here",
     "goals", "goal", "goal nonsense 1", "goal mount notanid",
     "goal mount 2", "goals", "goal mount 2", "gogoal 1", "gogoal 99",
     "goal quest 9002", "goal pet 101", "goals",
@@ -1648,6 +1669,145 @@ assert(worstDecorations == 1,
 
 CN.candidateDecorators["HarnessProbe"] = nil
 CN.CollectCandidates(true)
+
+print("\nNavigation:")
+
+local nav = CN:GetModule("Navigation")
+
+assert(nav, "the Navigation module must load")
+
+-- Bearing. This is the part that is completely invisible when wrong: a
+-- reversed sign puts the player confidently in the wrong place, and no error
+-- is ever raised. Four cardinal cases, checked by hand.
+--
+-- Map coordinates: x east, y SOUTH. Player at the centre.
+local function bearingDegrees(tx, ty, facing)
+    local relative = nav.RelativeBearing(0.5, 0.5, tx, ty, facing)
+    return relative and math.floor(math.deg(relative) + 0.5) or nil
+end
+
+local bearingCases = {
+    -- target,        facing,        expected relative (deg, + is clockwise)
+    { 0.5, 0.4,       0,             0,    "north of me, facing north"        },
+    { 0.6, 0.5,       0,             90,   "east of me, facing north"         },
+    { 0.5, 0.6,       0,             180,  "south of me, facing north"        },
+    { 0.4, 0.5,       0,             -90,  "west of me, facing north"         },
+    -- Facing east is 3*pi/2 because facing increases counter-clockwise.
+    { 0.6, 0.5,       3 * math.pi / 2, 0,  "east of me, facing east"          },
+    { 0.5, 0.4,       3 * math.pi / 2, -90, "north of me, facing east"        },
+    { 0.5, 0.4,       math.pi / 2,     90,  "north of me, facing west"        },
+}
+
+for _, case in ipairs(bearingCases) do
+    local got = bearingDegrees(case[1], case[2], case[3])
+
+    print(string.format("  %-28s expected %4d, got %4d", case[5], case[4], got))
+
+    -- 180 and -180 are the same bearing.
+    local matches = (got == case[4])
+        or (math.abs(case[4]) == 180 and math.abs(got) == 180)
+
+    assert(matches, "bearing wrong for " .. case[5]
+        .. ": expected " .. case[4] .. ", got " .. tostring(got))
+end
+
+assert(nav.RelativeBearing(0.5, 0.5, nil, nil, 0) == nil,
+    "an uncomputable bearing must be nil, not zero")
+
+-- Distance must be yards, not map percentage. The stub map is 1000 yards
+-- square, so 0.5 -> 0.6 on x is exactly 100 yards.
+local yards = nav.DistanceYards(94, 0.5, 0.5, 0.6, 0.5)
+
+print("  distance 0.5 -> 0.6 on a 1000yd map = " .. tostring(yards) .. " yd")
+
+assert(yards and math.abs(yards - 100) < 0.01,
+    "distance must convert to yards, got " .. tostring(yards))
+
+assert(nav.FormatDistance(nil) == "distance unknown",
+    "an unknown distance must say so rather than print a number")
+assert(nav.FormatDistance(42):find("42"), "yards should be shown plainly")
+
+-- Colour must track the bearing, and the on-course colour is the logo blue.
+local r, g, b = nav.BearingColor(0)
+assert(math.abs(r - 0.365) < 0.001 and math.abs(g - 0.824) < 0.001
+    and math.abs(b - 0.984) < 0.001,
+    "on-course must use the logo's marker blue")
+
+local ar, ag, ab = nav.BearingColor(math.pi)
+assert(ar > ag and ar > ab, "facing away must be warm, not blue")
+
+assert(select(1, nav.BearingColor(nil)) == nav.colors.UNKNOWN[1],
+    "no bearing must use the unknown colour")
+
+print("  on-course colour is the logo blue")
+
+-- The native provider must be preferred over TomTom, and must be available
+-- with no third-party addon present at all.
+local activeProvider, activeName = CN.GetWaypointProvider()
+
+print("  active waypoint provider = " .. tostring(activeName))
+
+assert(activeName == "Native",
+    "native navigation must be the default provider, got " .. tostring(activeName))
+
+-- Setting a waypoint must track it, and compute a real state.
+--
+-- Anchored to the player's ACTUAL stubbed position rather than assuming the
+-- centre of the map -- the first version of this test assumed 0.5, 0.5 and
+-- "failed" against correct code.
+local playerMapID, playerAtX, playerAtY = CN.GetPlayerPosition()
+
+print("  player is at " .. string.format("%.2f, %.2f on map %d",
+    playerAtX, playerAtY, playerMapID))
+
+CN.SetWaypoint(playerMapID, playerAtX + 0.18, playerAtY, "Test Destination")
+
+local tracked = nav.GetTarget()
+
+assert(tracked and tracked.title == "Test Destination",
+    "setting a waypoint must record the target")
+
+CN_TEST_SetFacing(3 * math.pi / 2)
+
+local computed = nav.Compute()
+
+print("  tracking state = " .. tostring(computed.state)
+    .. ", " .. tostring(math.floor((computed.yards or 0) + 0.5)) .. " yd"
+    .. ", " .. tostring(math.floor(math.deg(computed.relative or 0) + 0.5)) .. " deg off")
+
+assert(computed.state == "TRACKING", "a distant target must report TRACKING")
+assert(math.abs(computed.relative) < 0.001,
+    "facing the target must report zero relative bearing, got "
+    .. string.format("%.4f", computed.relative))
+
+assert(math.abs(computed.yards - 180) < 0.01,
+    "0.18 of a 1000yd map is 180 yards, got " .. tostring(computed.yards))
+
+-- Arrival must fire inside the threshold, not outside it.
+CN.SetWaypoint(playerMapID, playerAtX + 0.005, playerAtY, "Very Close")
+
+local arrived = nav.Compute()
+
+print("  5yd away -> " .. tostring(arrived.state))
+
+assert(arrived.state == "ARRIVED", "inside the arrival radius must report ARRIVED")
+
+-- A target on another map must say so rather than point confidently at a
+-- bearing computed from unrelated coordinates.
+CN.SetWaypoint(playerMapID + 1000, 0.5, 0.5, "Another Zone")
+
+local elsewhere = nav.Compute()
+
+print("  target on another map -> " .. tostring(elsewhere.state))
+
+assert(elsewhere.state == "WRONG_MAP",
+    "a target on another map must not produce a bearing")
+
+nav.Clear()
+
+assert(nav.GetTarget() == nil, "clearing must drop the target")
+
+CN_TEST_SetFacing(0)
 
 print("\nGreat Vault:")
 

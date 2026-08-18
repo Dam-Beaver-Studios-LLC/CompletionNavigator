@@ -54,7 +54,7 @@ These are honest constraints, not oversights:
 
 ## Optional integrations
 
-**TomTom** for waypoints. Without it, navigation falls back to Blizzard map pins and the quest tracking arrow.
+**TomTom** is optional as of 0.19.0. Navigation is native â€” the addon draws its own arrow, computes its own bearings, and converts to real yards through the client's world positions. `/cn nav` switches between native, TomTom and Blizzard map pins.
 
 **AllTheThings** and **BtWQuests** are read at runtime for quest names, coordinates, source quests and prerequisite chains. Their internals are not published contracts, so every access is probed and wrapped: an update to either can make a provider go quiet, but cannot break Completion Navigator. `/cn providers` reports exactly what resolved.
 

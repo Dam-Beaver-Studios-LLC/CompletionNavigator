@@ -18,7 +18,7 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 
 **Finds rares and treasures that are actually up.** Driven by the client's live vignette data, not a static spawn list. A database tells you where a rare *can* spawn; a vignette tells you one is there now — which is the half that decides what you do next, and the half that doesn't go stale every patch.
 
-**Navigates.** TomTom waypoint if you use TomTom, Blizzard map pin if you don't, and the game's own quest tracking arrow when no coordinates exist. Quest locations are resolved from four separate client sources, not one.
+**Navigates, on its own.** An arrow that points at your destination, turns as you turn, colours by whether you are actually walking toward it, and reports real distance in yards rather than map percentage. No other addon required. TomTom is still supported for anyone who prefers its arrow — `/cn nav tomtom` — and quest locations are resolved from four separate client sources, not one.
 
 **Sweeps a zone.** `/cn zone` gathers everything obtainable on your current map, ordered nearest-first from where you're standing. Click any stop to route to it.
 
@@ -75,7 +75,7 @@ A minimap button and a ten-tab window. Everything the slash commands do is reach
 - **Collections** — account completion per category.
 - **Remaining** — what is left everywhere, and why.
 - **Scans** — counts and one-click scans for each subsystem.
-- **Settings** — priority mode, auto-advance, tooltips, debug output, minimap button, and a one-click full scan.
+- **Settings** — priority mode, auto-advance, tooltips, the navigation arrow, debug output, minimap button, and a one-click full scan.
 
 Keybindings live under **Key Bindings → AddOns**.
 
@@ -93,6 +93,9 @@ Keybindings live under **Key Bindings → AddOns**.
 /cn setup                Scan every subsystem once; run this first
 /cn next                 Recommend the next objective
 /cn vault                Great Vault progress and what unlocks the next reward
+/cn arrow                Toggle the on-screen navigation arrow
+/cn nav                  Choose the navigation provider
+/cn here                 Where you are, and what is being tracked
 /cn goal <type> <id>     Pin something to work toward
 /cn goals                Your goals, and what is known about reaching them
 /cn now                  Everything expiring soon
@@ -135,7 +138,7 @@ Stated plainly, because finding these out yourself feels like a bug:
 
 ## Optional integrations
 
-**TomTom** for waypoints. Without it, navigation falls back to Blizzard map pins and the quest tracking arrow.
+**TomTom** is no longer needed. Navigation is native: the addon draws its own arrow and computes its own distances. TomTom remains supported for anyone who prefers it — `/cn nav tomtom` — and Blizzard map pins remain available as a third option.
 
 **AllTheThings** and **BtWQuests** are read at runtime when installed, for quest names, coordinates, source quests and prerequisite chains. Their internals are not published contracts, so every access is probed and wrapped: an update to either can make a provider go quiet, but cannot break this addon. `/cn providers` shows exactly what resolved.
 
@@ -145,7 +148,7 @@ None are required. Completion Navigator is a decision layer, not a replacement f
 
 ## Status
 
-Version 0.18.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
+Version 0.19.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
 
 Bug reports and feature requests: [GitHub issues](https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/issues), or email developer@dambeaverstudios.com.
 

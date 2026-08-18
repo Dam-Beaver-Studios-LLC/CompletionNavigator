@@ -1663,6 +1663,27 @@ UI.RegisterTab{
             function(value) CN.Settings().tooltips = value end)
         panel.tooltips:SetPoint("TOPLEFT", panel.minimap, "BOTTOMLEFT", 0, -6)
 
+        panel.arrow = AddCheckbox(panel, "Show the navigation arrow",
+            function()
+                local nav = CN:GetModule("Navigation")
+                return nav and nav.IsArrowEnabled()
+            end,
+            function(value)
+                CN.Settings().arrow = value
+
+                local nav = CN:GetModule("Navigation")
+
+                if nav then
+                    if value then
+                        nav.BuildArrow()
+                        nav.Refresh()
+                    else
+                        nav.Clear()
+                    end
+                end
+            end)
+        panel.arrow:SetPoint("TOPLEFT", panel.tooltips, "BOTTOMLEFT", 0, -6)
+
         panel.setup = AddButton(panel, "Scan everything now", 180, function()
             local setup = CN:GetModule("Setup")
 
@@ -1670,7 +1691,7 @@ UI.RegisterTab{
                 setup.Run()
             end
         end)
-        panel.setup:SetPoint("TOPLEFT", panel.tooltips, "BOTTOMLEFT", 0, -12)
+        panel.setup:SetPoint("TOPLEFT", panel.arrow, "BOTTOMLEFT", 0, -12)
 
         panel.reset = AddButton(panel, "Reset window position", 180, function()
             CN.Settings().window = nil
@@ -1696,6 +1717,7 @@ UI.RegisterTab{
         panel.auto.Refresh()
         panel.minimap.Refresh()
         panel.tooltips.Refresh()
+        panel.arrow.Refresh()
 
         panel.about:SetText("Completion Navigator v" .. CN.version)
     end,
