@@ -57,6 +57,89 @@ function CN.GetDependency(key)
 end
 
 ------------------------------------------------------------
+-- EXTERNAL DATA PROVIDERS
+------------------------------------------------------------
+
+-- Other addons hold data this one deliberately does not duplicate. A
+-- provider is asked for a quest record and may answer with any subset of
+-- { name, mapID, x, y, requires, requiresLevel }.
+--
+-- Lower priority number wins when two providers answer the same field.
+-- Curated static data always outranks all of them, because it is the only
+-- source this addon controls.
+CN.questDataProviders = CN.questDataProviders or {}
+CN.questDataOrder     = CN.questDataOrder or {}
+
+function CN.RegisterQuestDataProvider(name, provider)
+    if type(provider) ~= "table" or type(provider.GetQuestData) ~= "function" then
+        return
+    end
+
+    CN.questDataProviders[name] = provider
+
+    table.insert(CN.questDataOrder, { name = name, priority = provider.priority or 100 })
+
+    table.sort(CN.questDataOrder, function(a, b)
+        return a.priority < b.priority
+    end)
+end
+
+function CN.GetAvailableQuestDataProviders()
+    local available = {}
+
+    for _, entry in ipairs(CN.questDataOrder) do
+        local provider = CN.questDataProviders[entry.name]
+
+        local ok, isAvailable = pcall(provider.IsAvailable)
+
+        if ok and isAvailable then
+            table.insert(available, entry.name)
+        end
+    end
+
+    return available
+end
+
+-- Merges every available provider's answer for one quest, first answer per
+-- field winning. Returns nil when nothing knows anything.
+function CN.QueryQuestDataProviders(questID)
+    local merged, contributors = nil, {}
+
+    for _, entry in ipairs(CN.questDataOrder) do
+        local provider = CN.questDataProviders[entry.name]
+
+        local ok, isAvailable = pcall(provider.IsAvailable)
+
+        if ok and isAvailable then
+            local gotData, data = pcall(provider.GetQuestData, questID)
+
+            if gotData and type(data) == "table" then
+                merged = merged or {}
+
+                local used = false
+
+                for field, value in pairs(data) do
+                    if field ~= "source" and merged[field] == nil then
+                        merged[field] = value
+                        used = true
+                    end
+                end
+
+                if used then
+                    table.insert(contributors, entry.name)
+                end
+            end
+        end
+    end
+
+    if merged then
+        merged.providers = contributors
+    end
+
+    return merged
+end
+
+------------------------------------------------------------
 -- FORENSICS
 ------------------------------------------------------------
 

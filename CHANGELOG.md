@@ -7,6 +7,40 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.9.0]
+
+### Added
+
+- **Harvesting.** Every quest you pick up or turn in now has its name, zone,
+  map, coordinates and observed level recorded permanently and account-wide.
+  Playing the game fills the static database. `/cn harvest` shows what has
+  been collected; `/cn harvestnow` sweeps the current log.
+- **Export.** `/cn export` emits harvested quests as ready-to-paste
+  `Data\Quests.lua` rows, so what one player harvests can be committed and
+  shipped to everyone. `/cn export all` includes quests with no coordinates.
+- **AllTheThings provider.** Reads quest names, coordinates, source quests
+  and level requirements from ATT when the player has it installed.
+- **BtWQuests provider.** Reads quest names and prerequisite chains,
+  including nested prerequisite conditions.
+- **Provider registry.** External data sources are merged by priority behind
+  one interface. Curated static data always outranks them, because it is the
+  only source this addon ships.
+- `/cn providers` reports which external addons were detected and which entry
+  points resolved. `/cn lookup <questID>` asks all of them about one quest.
+- `/cn why` now reports which data source produced its answer, or says
+  plainly that no prerequisite data exists for that quest.
+
+### Notes
+
+- Third-party addon internals are not published contracts. Every provider
+  access is probed and wrapped, so an ATT or BtWQuests update can make a
+  provider go quiet but cannot break Completion Navigator. `/cn providers` is
+  how you tell which happened.
+- Prerequisites inferred from the order you completed quests are recorded
+  separately, never fed to the eligibility checker, and appear in exports as
+  commented suggestions for a human to confirm. Correlation is not a
+  prerequisite.
+
 ## [0.8.0]
 
 ### Added

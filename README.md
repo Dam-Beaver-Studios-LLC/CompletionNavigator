@@ -16,7 +16,9 @@ Type `/cn next` or click the minimap button. The addon scores every objective it
 - **Navigates.** Sets a TomTom waypoint if you have TomTom, a Blizzard map pin if you don't, and falls back to the game's own quest tracking arrow when no coordinates exist.
 - **Routes a zone.** `/cn zone` clusters everything obtainable on your current map and orders it nearest-first.
 - **Knows your Warband.** Reputations, titles, professions and recipes are recorded per character where the game scopes them that way, so the addon can tell you when a different character is the right one for a job.
-- **Explains blockers.** `/cn why <questID>` reports the first unmet prerequisite rather than just saying "not available".
+- **Explains blockers.** `/cn why <questID>` reports the first unmet prerequisite rather than just saying "not available", and names which data source produced the answer.
+- **Learns from your play.** Every quest you accept or turn in has its name, zone, coordinates and level recorded permanently and account-wide. `/cn export` emits them as ready-to-paste `Data\Quests.lua` rows, so playing the game grows the shipped database.
+- **Reads other addons rather than duplicating them.** AllTheThings and BtWQuests are consumed at runtime for quest names, coordinates and prerequisite chains when installed. Neither is required.
 
 ## Tracked
 
@@ -31,6 +33,7 @@ Type `/cn next` or click the minimap button. The addon scores every objective it
 | Appearances | Transmog progress per category |
 | Titles | Per character, so you can see which alt has one |
 | Professions & recipes | Skill levels and which characters know which recipe |
+| Harvested data | Names, zones, coordinates and levels captured from your own play |
 
 ## Commands
 
@@ -49,7 +52,11 @@ These are honest constraints, not oversights:
 
 ## Optional integrations
 
-TomTom (waypoints), and the addon is built to consume data from AllTheThings, BtWQuests and HandyNotes where practical. None are required.
+**TomTom** for waypoints. Without it, navigation falls back to Blizzard map pins and the quest tracking arrow.
+
+**AllTheThings** and **BtWQuests** are read at runtime for quest names, coordinates, source quests and prerequisite chains. Their internals are not published contracts, so every access is probed and wrapped: an update to either can make a provider go quiet, but cannot break Completion Navigator. `/cn providers` reports exactly what resolved.
+
+None are required.
 
 ## Development
 
@@ -63,7 +70,7 @@ The addon is managed by `cn.ps1`, a PowerShell toolkit that carries the whole so
 .\cn.ps1 sync                    # rewrite the .toc load order from disk
 .\cn.ps1 check                   # validate .toc, BOMs, duplicates, Lua syntax
 .\cn.ps1 package                 # build a distributable zip
-.\cn.ps1 release 0.8.0           # bump, commit, tag and push
+.\cn.ps1 release 0.9.0           # bump, commit, tag and push
 ```
 
 Architecture is registry-based: `CN:RegisterCommand{}`, `CN:RegisterEvent()`, `CN:RegisterModule()`, `CN.RegisterCandidateProvider()`, `CN.RegisterEligibilityChecker()`, `CN.UI.RegisterTab{}`. Adding a subsystem never means editing a dispatcher. All client API calls live in `Providers/Blizzard.lua`, so a patch break is a one-file fix.

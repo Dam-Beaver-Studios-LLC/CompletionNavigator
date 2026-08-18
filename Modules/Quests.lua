@@ -197,6 +197,31 @@ end
 -- ELIGIBILITY
 ------------------------------------------------------------
 
+-- Curated static data first, then whatever external addons know, then
+-- anything harvested from this account's own play. Static wins because it is
+-- the only source this addon controls and ships.
+function Quests.GetRecord(questID)
+    local static = CN.Static.GetQuest(questID)
+
+    if static and (static.requires or static.obsolete or static.requiresLevel) then
+        return static, "static"
+    end
+
+    local external = CN.QueryQuestDataProviders(questID)
+
+    if external and (external.requires or external.requiresLevel) then
+        return external, table.concat(external.providers or { "external" }, "+")
+    end
+
+    local harvested = CN.Account("questHarvest")[questID]
+
+    if harvested and harvested.requires then
+        return harvested, "harvested"
+    end
+
+    return static, static and "static" or nil
+end
+
 CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
     local states = CN.objectiveStates
 
@@ -204,7 +229,7 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
         return states.COMPLETED, "Already completed by this character", nil
     end
 
-    local static = CN.Static.GetQuest(questID)
+    local static = Quests.GetRecord(questID)
 
     if static then
         if static.obsolete then
@@ -723,6 +748,15 @@ CN:RegisterCommand{
 
         if reason then
             Print("Reason: " .. reason .. (detail and (" (" .. detail .. ")") or ""))
+        end
+
+        local record, source = Quests.GetRecord(questID)
+
+        if record and source then
+            Print("Data source: |cff999999" .. source .. "|r")
+        else
+            Print("|cff999999No prerequisite data for this quest. "
+                .. "Install AllTheThings or BtWQuests, or add a row with /cn setloc.|r")
         end
     end,
 }

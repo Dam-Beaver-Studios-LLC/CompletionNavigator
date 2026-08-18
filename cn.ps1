@@ -100,7 +100,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.8.0"
+CN.version     = "0.9.0"
 CN.dbVersion   = 1
 
 ------------------------------------------------------------
@@ -694,6 +694,89 @@ end
 
 function CN.GetDependency(key)
     return CN.dependencies[key]
+end
+
+------------------------------------------------------------
+-- EXTERNAL DATA PROVIDERS
+------------------------------------------------------------
+
+-- Other addons hold data this one deliberately does not duplicate. A
+-- provider is asked for a quest record and may answer with any subset of
+-- { name, mapID, x, y, requires, requiresLevel }.
+--
+-- Lower priority number wins when two providers answer the same field.
+-- Curated static data always outranks all of them, because it is the only
+-- source this addon controls.
+CN.questDataProviders = CN.questDataProviders or {}
+CN.questDataOrder     = CN.questDataOrder or {}
+
+function CN.RegisterQuestDataProvider(name, provider)
+    if type(provider) ~= "table" or type(provider.GetQuestData) ~= "function" then
+        return
+    end
+
+    CN.questDataProviders[name] = provider
+
+    table.insert(CN.questDataOrder, { name = name, priority = provider.priority or 100 })
+
+    table.sort(CN.questDataOrder, function(a, b)
+        return a.priority < b.priority
+    end)
+end
+
+function CN.GetAvailableQuestDataProviders()
+    local available = {}
+
+    for _, entry in ipairs(CN.questDataOrder) do
+        local provider = CN.questDataProviders[entry.name]
+
+        local ok, isAvailable = pcall(provider.IsAvailable)
+
+        if ok and isAvailable then
+            table.insert(available, entry.name)
+        end
+    end
+
+    return available
+end
+
+-- Merges every available provider's answer for one quest, first answer per
+-- field winning. Returns nil when nothing knows anything.
+function CN.QueryQuestDataProviders(questID)
+    local merged, contributors = nil, {}
+
+    for _, entry in ipairs(CN.questDataOrder) do
+        local provider = CN.questDataProviders[entry.name]
+
+        local ok, isAvailable = pcall(provider.IsAvailable)
+
+        if ok and isAvailable then
+            local gotData, data = pcall(provider.GetQuestData, questID)
+
+            if gotData and type(data) == "table" then
+                merged = merged or {}
+
+                local used = false
+
+                for field, value in pairs(data) do
+                    if field ~= "source" and merged[field] == nil then
+                        merged[field] = value
+                        used = true
+                    end
+                end
+
+                if used then
+                    table.insert(contributors, entry.name)
+                end
+            end
+        end
+    end
+
+    if merged then
+        merged.providers = contributors
+    end
+
+    return merged
 end
 
 ------------------------------------------------------------
@@ -4292,6 +4375,392 @@ end
 CN.RegisterWaypointProvider("Blizzard", blizzardProvider, 20)
 '@
 
+$Embedded['Providers\ATT.lua'] = @'
+-- Providers/ATT.lua
+-- Completion Navigator :: AllTheThings interoperability.
+--
+-- ATT is the largest completion data corpus in the ecosystem. Duplicating it
+-- would be pointless and rude; reading it when the player already has it
+-- installed is the right relationship. Completion Navigator stays the
+-- decision layer.
+--
+-- IMPORTANT: third-party addon APIs are not stable and are not documented as
+-- public contracts. Every entry point below is probed at runtime and wrapped
+-- in pcall. If ATT changes shape, this provider reports itself unavailable
+-- and the addon carries on with its own data. It must never take the addon
+-- down with it.
+--
+-- Run /cn providers in game to see exactly which entry points resolved.
+
+local ADDON_NAME, CN = ...
+
+local ATT = {}
+
+CN.ATT = ATT
+
+-- Candidate globals, newest naming first.
+local GLOBALS = { "AllTheThings", "ATTC", "ATT" }
+
+local resolved   = nil
+local probeNotes = {}
+
+local function Root()
+    if resolved then
+        return resolved
+    end
+
+    for _, name in ipairs(GLOBALS) do
+        local candidate = _G[name]
+
+        if type(candidate) == "table" then
+            resolved = candidate
+
+            table.insert(probeNotes, "global: " .. name)
+
+            return resolved
+        end
+    end
+
+    return nil
+end
+
+function ATT.IsAvailable()
+    return Root() ~= nil
+end
+
+------------------------------------------------------------
+-- SEARCH
+------------------------------------------------------------
+
+-- ATT's field search is the one entry point that has survived several
+-- rewrites. It returns an array of "groups" describing everything ATT knows
+-- about that ID.
+local function Search(field, id)
+    local root = Root()
+
+    if not root or not id then
+        return nil
+    end
+
+    local search = root.SearchForField or root.SearchForFieldContainer
+
+    if type(search) ~= "function" then
+        return nil
+    end
+
+    local ok, results = pcall(search, field, id)
+
+    if not ok or type(results) ~= "table" then
+        return nil
+    end
+
+    return results
+end
+
+ATT.Search = Search
+
+------------------------------------------------------------
+-- QUEST DATA
+------------------------------------------------------------
+
+-- Walks the groups ATT returns for a quest and pulls out whatever is useful.
+-- Every field is optional; ATT groups are heterogeneous.
+function ATT.GetQuestData(questID)
+    local groups = Search("questID", questID)
+
+    if not groups or #groups == 0 then
+        return nil
+    end
+
+    local data = { source = "ATT" }
+
+    for _, group in ipairs(groups) do
+        if type(group) == "table" then
+            if not data.name and type(group.name) == "string" and group.name ~= "" then
+                data.name = group.name
+            end
+
+            if not data.mapID then
+                data.mapID = group.mapID or group.coord and group.coord[3] or nil
+            end
+
+            -- ATT stores coordinates as {x, y, mapID} in `coord`, or a list
+            -- of those in `coords`. Values are 0-100.
+            local coord = group.coord
+
+            if not coord and type(group.coords) == "table" then
+                coord = group.coords[1]
+            end
+
+            if not data.x and type(coord) == "table" and coord[1] and coord[2] then
+                data.x     = coord[1] / 100
+                data.y     = coord[2] / 100
+                data.mapID = coord[3] or data.mapID
+            end
+
+            if not data.requires and type(group.sourceQuests) == "table"
+                and #group.sourceQuests > 0 then
+
+                data.requires = {}
+
+                for _, prerequisiteID in ipairs(group.sourceQuests) do
+                    if type(prerequisiteID) == "number" then
+                        table.insert(data.requires, prerequisiteID)
+                    end
+                end
+
+                if #data.requires == 0 then
+                    data.requires = nil
+                end
+            end
+
+            if data.lvl == nil and type(group.lvl) == "number" then
+                data.requiresLevel = group.lvl
+            end
+        end
+    end
+
+    if not (data.name or data.requires or data.x) then
+        return nil
+    end
+
+    return data
+end
+
+------------------------------------------------------------
+-- DIAGNOSTICS
+------------------------------------------------------------
+
+function ATT.Describe()
+    local root = Root()
+
+    if not root then
+        return "not installed"
+    end
+
+    local entries = {}
+
+    for _, note in ipairs(probeNotes) do
+        table.insert(entries, note)
+    end
+
+    table.insert(entries, "SearchForField: "
+        .. (type(root.SearchForField) == "function" and "yes" or "no"))
+
+    return table.concat(entries, ", ")
+end
+
+------------------------------------------------------------
+-- REGISTRATION
+------------------------------------------------------------
+
+CN.RegisterQuestDataProvider("ATT", {
+    IsAvailable  = ATT.IsAvailable,
+    GetQuestData = ATT.GetQuestData,
+    Describe     = ATT.Describe,
+    priority     = 20,
+})
+'@
+
+$Embedded['Providers\BtWQuests.lua'] = @'
+-- Providers/BtWQuests.lua
+-- Completion Navigator :: BtWQuests interoperability.
+--
+-- BtWQuests knows quest chains. Completion Navigator knows what you have
+-- done and where you are. The useful combination is: given the chain, which
+-- link is the next one you can actually act on.
+--
+-- Same caution as the ATT provider: this reads another addon's internals,
+-- which are not a published contract. Every access is probed and wrapped, so
+-- a BtWQuests update can make this provider go quiet but cannot break
+-- Completion Navigator.
+--
+-- /cn providers reports exactly what resolved.
+
+local ADDON_NAME, CN = ...
+
+local BtW = {}
+
+CN.BtWQuests = BtW
+
+local probeNotes = {}
+
+local function Database()
+    -- The database has lived in a couple of places across versions.
+    local candidates = {
+        _G.BtWQuestsDatabase,
+        _G.BtWQuests and _G.BtWQuests.Database,
+        _G.BtWQuests and _G.BtWQuests.database,
+    }
+
+    for index, candidate in ipairs(candidates) do
+        if type(candidate) == "table" then
+            if #probeNotes == 0 then
+                table.insert(probeNotes, "database slot " .. index)
+            end
+
+            return candidate
+        end
+    end
+
+    return nil
+end
+
+function BtW.IsAvailable()
+    return _G.BtWQuests ~= nil and Database() ~= nil
+end
+
+------------------------------------------------------------
+-- QUEST LOOKUP
+------------------------------------------------------------
+
+local function GetQuestItem(questID)
+    local database = Database()
+
+    if not database or not questID then
+        return nil
+    end
+
+    local getter = database.GetQuestByID or database.GetQuest
+
+    if type(getter) ~= "function" then
+        return nil
+    end
+
+    local ok, item = pcall(getter, database, questID)
+
+    if not ok or type(item) ~= "table" then
+        return nil
+    end
+
+    return item
+end
+
+BtW.GetQuestItem = GetQuestItem
+
+-- Normalizes whatever shape prerequisites come back in into a flat array of
+-- quest IDs. BtWQuests expresses them as condition tables, which may nest.
+local function CollectQuestIDs(node, out, depth)
+    if type(node) ~= "table" or depth > 4 then
+        return
+    end
+
+    if type(node.questID) == "number" then
+        out[node.questID] = true
+    end
+
+    if type(node.id) == "number" and node.type == "quest" then
+        out[node.id] = true
+    end
+
+    for _, child in pairs(node) do
+        if type(child) == "table" then
+            CollectQuestIDs(child, out, depth + 1)
+        end
+    end
+end
+
+function BtW.GetQuestData(questID)
+    local item = GetQuestItem(questID)
+
+    if not item then
+        return nil
+    end
+
+    local data = { source = "BtWQuests" }
+
+    -- Name.
+    local nameGetter = item.GetName
+
+    if type(nameGetter) == "function" then
+        local ok, name = pcall(nameGetter, item)
+
+        if ok and type(name) == "string" and name ~= "" then
+            data.name = name
+        end
+    elseif type(item.name) == "string" then
+        data.name = item.name
+    end
+
+    -- Prerequisites.
+    local prerequisites = item.prerequisites or item.restrictions
+
+    local getter = item.GetPrerequisites
+
+    if type(getter) == "function" then
+        local ok, result = pcall(getter, item)
+
+        if ok and type(result) == "table" then
+            prerequisites = result
+        end
+    end
+
+    if type(prerequisites) == "table" then
+        local ids = {}
+
+        CollectQuestIDs(prerequisites, ids, 0)
+
+        ids[questID] = nil   -- never list a quest as its own prerequisite
+
+        local list = {}
+
+        for id in pairs(ids) do
+            table.insert(list, id)
+        end
+
+        table.sort(list)
+
+        if #list > 0 then
+            data.requires = list
+        end
+    end
+
+    if not (data.name or data.requires) then
+        return nil
+    end
+
+    return data
+end
+
+------------------------------------------------------------
+-- DIAGNOSTICS
+------------------------------------------------------------
+
+function BtW.Describe()
+    if not _G.BtWQuests then
+        return "not installed"
+    end
+
+    local database = Database()
+
+    if not database then
+        return "loaded, but no database found"
+    end
+
+    local entries = {}
+
+    for _, note in ipairs(probeNotes) do
+        table.insert(entries, note)
+    end
+
+    table.insert(entries, "GetQuestByID: "
+        .. (type(database.GetQuestByID) == "function" and "yes" or "no"))
+
+    return table.concat(entries, ", ")
+end
+
+------------------------------------------------------------
+-- REGISTRATION
+------------------------------------------------------------
+
+CN.RegisterQuestDataProvider("BtWQuests", {
+    IsAvailable  = BtW.IsAvailable,
+    GetQuestData = BtW.GetQuestData,
+    Describe     = BtW.Describe,
+    priority     = 30,
+})
+'@
+
 $Embedded['Modules\Quests.lua'] = @'
 -- Modules/Quests.lua
 -- Completion Navigator :: quest subsystem.
@@ -4492,6 +4961,31 @@ end
 -- ELIGIBILITY
 ------------------------------------------------------------
 
+-- Curated static data first, then whatever external addons know, then
+-- anything harvested from this account's own play. Static wins because it is
+-- the only source this addon controls and ships.
+function Quests.GetRecord(questID)
+    local static = CN.Static.GetQuest(questID)
+
+    if static and (static.requires or static.obsolete or static.requiresLevel) then
+        return static, "static"
+    end
+
+    local external = CN.QueryQuestDataProviders(questID)
+
+    if external and (external.requires or external.requiresLevel) then
+        return external, table.concat(external.providers or { "external" }, "+")
+    end
+
+    local harvested = CN.Account("questHarvest")[questID]
+
+    if harvested and harvested.requires then
+        return harvested, "harvested"
+    end
+
+    return static, static and "static" or nil
+end
+
 CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
     local states = CN.objectiveStates
 
@@ -4499,7 +4993,7 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
         return states.COMPLETED, "Already completed by this character", nil
     end
 
-    local static = CN.Static.GetQuest(questID)
+    local static = Quests.GetRecord(questID)
 
     if static then
         if static.obsolete then
@@ -5018,6 +5512,15 @@ CN:RegisterCommand{
 
         if reason then
             Print("Reason: " .. reason .. (detail and (" (" .. detail .. ")") or ""))
+        end
+
+        local record, source = Quests.GetRecord(questID)
+
+        if record and source then
+            Print("Data source: |cff999999" .. source .. "|r")
+        else
+            Print("|cff999999No prerequisite data for this quest. "
+                .. "Install AllTheThings or BtWQuests, or add a row with /cn setloc.|r")
         end
     end,
 }
@@ -7573,6 +8076,478 @@ CN:RegisterCommand{
 }
 '@
 
+$Embedded['Modules\Harvest.lua'] = @'
+-- Modules/Harvest.lua
+-- Completion Navigator :: build the static database from your own play.
+--
+-- The curated database is the addon's bottleneck: prerequisite forensics,
+-- zone percentages and unlock scoring all need quest records that nobody has
+-- typed in yet. External providers help only if the player has those addons
+-- installed.
+--
+-- This module needs nothing. Every quest you pick up gets its name, zone,
+-- coordinates and level recorded permanently, account-wide. Playing the game
+-- fills the database.
+--
+-- /cn export then emits it as a Data\Quests.lua block, so what you harvest
+-- can be committed and shipped to everyone.
+
+local ADDON_NAME, CN = ...
+
+local Harvest = CN:RegisterModule("Harvest")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+local function Store()
+    return CN.Account("questHarvest")
+end
+
+Harvest.Store = Store
+
+------------------------------------------------------------
+-- CAPTURE
+------------------------------------------------------------
+
+-- Records everything currently knowable about a quest. Safe to call
+-- repeatedly: fields are only filled in, never blanked, because the client
+-- answers for a quest in the log and goes quiet once it is turned in.
+function Harvest.Capture(questID, reason)
+    questID = CN.ToID(questID)
+
+    if not questID then
+        return false
+    end
+
+    local store  = Store()
+    local record = store[questID] or { questID = questID, firstSeen = time() }
+
+    local changed = false
+
+    local function set(field, value)
+        if value ~= nil and record[field] == nil then
+            record[field] = value
+            changed = true
+        end
+    end
+
+    local quests = CN:GetModule("Quests")
+
+    if quests then
+        set("name", quests.GetName(questID, false))
+    end
+
+    local mapID, x, y = Blizzard.GetQuestWaypoint(questID)
+
+    set("mapID", mapID)
+
+    if x and y then
+        set("x", math.floor(x * 10000 + 0.5) / 10000)
+        set("y", math.floor(y * 10000 + 0.5) / 10000)
+    end
+
+    if mapID then
+        set("zone", Blizzard.GetMapName(mapID))
+    end
+
+    -- The level the character was when the quest became available is a
+    -- usable lower bound on the quest's own level requirement.
+    if record.observedLevel == nil then
+        record.observedLevel = UnitLevel("player")
+        changed = true
+    end
+
+    if CN.character and record.faction == nil then
+        record.faction = CN.character.faction
+        changed = true
+    end
+
+    -- Anything an installed provider knows, captured once so it survives
+    -- that addon being uninstalled later.
+    if not record.requires then
+        local external = CN.QueryQuestDataProviders(questID)
+
+        if external then
+            set("name", external.name)
+            set("mapID", external.mapID)
+            set("x", external.x)
+            set("y", external.y)
+            set("requiresLevel", external.requiresLevel)
+
+            if external.requires then
+                record.requires  = external.requires
+                record.requiredBy = external.providers
+                changed = true
+            end
+        end
+    end
+
+    record.lastSeen = time()
+    record.reason   = record.reason or reason
+
+    store[questID] = record
+
+    if changed then
+        DebugPrint("Harvested quest " .. questID
+            .. (record.name and (" (" .. record.name .. ")") or ""))
+    end
+
+    return changed
+end
+
+------------------------------------------------------------
+-- INFERRED PREREQUISITES
+------------------------------------------------------------
+
+-- When a quest is accepted, every quest completed immediately beforehand in
+-- the same zone is a *candidate* prerequisite. This is a correlation, not a
+-- fact, so it is stored separately from real prerequisite data and is never
+-- fed to the eligibility checker. It exists to make curation quicker: the
+-- export marks these as comments for a human to confirm.
+local recentTurnIns = {}
+
+function Harvest.NoteTurnIn(questID)
+    table.insert(recentTurnIns, 1, { questID = questID, at = time() })
+
+    for index = #recentTurnIns, 6, -1 do
+        table.remove(recentTurnIns, index)
+    end
+end
+
+function Harvest.NoteAccepted(questID)
+    local record = Store()[questID]
+
+    if not record then
+        return
+    end
+
+    local candidates = {}
+
+    for _, entry in ipairs(recentTurnIns) do
+        -- Only within a short window; anything older is coincidence.
+        if time() - entry.at <= 300 and entry.questID ~= questID then
+            table.insert(candidates, entry.questID)
+        end
+    end
+
+    if #candidates > 0 then
+        record.maybeRequires = candidates
+    end
+end
+
+------------------------------------------------------------
+-- SUMMARY
+------------------------------------------------------------
+
+function Harvest.Summary()
+    local counts = {
+        total       = 0,
+        named       = 0,
+        located     = 0,
+        withRequires = 0,
+        withGuesses = 0,
+    }
+
+    for _, record in pairs(Store()) do
+        counts.total = counts.total + 1
+
+        if record.name then counts.named = counts.named + 1 end
+        if record.x and record.y then counts.located = counts.located + 1 end
+        if record.requires then counts.withRequires = counts.withRequires + 1 end
+        if record.maybeRequires then counts.withGuesses = counts.withGuesses + 1 end
+    end
+
+    return counts
+end
+
+------------------------------------------------------------
+-- EXPORT
+------------------------------------------------------------
+
+-- Emits harvested rows in the exact shape Data\Quests.lua expects, so the
+-- output can be pasted straight in and committed.
+function Harvest.BuildExport(onlyLocated)
+    local rows = {}
+
+    for questID, record in pairs(Store()) do
+        if not onlyLocated or (record.x and record.y) then
+            table.insert(rows, record)
+        end
+    end
+
+    table.sort(rows, function(a, b) return a.questID < b.questID end)
+
+    local lines = {}
+
+    for _, record in ipairs(rows) do
+        table.insert(lines, "    [" .. record.questID .. "] = {")
+
+        if record.name then
+            table.insert(lines, '        name      = "'
+                .. record.name:gsub('"', '\\"') .. '",')
+        end
+
+        if record.zone then
+            table.insert(lines, '        -- ' .. record.zone)
+        end
+
+        if record.mapID then
+            table.insert(lines, "        mapID     = " .. record.mapID .. ",")
+        end
+
+        if record.x and record.y then
+            table.insert(lines, "        x         = " .. record.x .. ",")
+            table.insert(lines, "        y         = " .. record.y .. ",")
+        end
+
+        if record.requiresLevel then
+            table.insert(lines, "        requiresLevel = " .. record.requiresLevel .. ",")
+        end
+
+        if record.requires and #record.requires > 0 then
+            table.insert(lines, "        requires  = { "
+                .. table.concat(record.requires, ", ") .. " },")
+        end
+
+        if record.maybeRequires and #record.maybeRequires > 0 then
+            table.insert(lines, "        -- unconfirmed, observed order only: requires = { "
+                .. table.concat(record.maybeRequires, ", ") .. " },")
+        end
+
+        table.insert(lines, "    },")
+    end
+
+    return table.concat(lines, "\n"), #rows
+end
+
+------------------------------------------------------------
+-- EXPORT WINDOW
+------------------------------------------------------------
+
+local exportFrame
+
+local function ShowExport(text, count)
+    if not exportFrame then
+        exportFrame = CN.UI.SafeCreateFrame("Frame", "CompletionNavigatorExportFrame",
+            UIParent, "BasicFrameTemplateWithInset")
+
+        exportFrame:SetSize(600, 420)
+        exportFrame:SetPoint("CENTER")
+        exportFrame:SetMovable(true)
+        exportFrame:EnableMouse(true)
+        exportFrame:RegisterForDrag("LeftButton")
+        exportFrame:SetScript("OnDragStart", exportFrame.StartMoving)
+        exportFrame:SetScript("OnDragStop", exportFrame.StopMovingOrSizing)
+        exportFrame:SetFrameStrata("DIALOG")
+
+        if exportFrame.TitleText then
+            exportFrame.TitleText:SetText("Completion Navigator - Export")
+        end
+
+        local scroll = CN.UI.SafeCreateFrame("ScrollFrame", nil, exportFrame,
+            "UIPanelScrollFrameTemplate")
+
+        scroll:SetPoint("TOPLEFT", 12, -32)
+        scroll:SetPoint("BOTTOMRIGHT", -32, 40)
+
+        local edit = CreateFrame("EditBox", nil, scroll)
+
+        edit:SetMultiLine(true)
+        edit:SetFontObject("GameFontHighlightSmall")
+        edit:SetWidth(540)
+        edit:SetAutoFocus(false)
+        edit:SetScript("OnEscapePressed", function() exportFrame:Hide() end)
+
+        scroll:SetScrollChild(edit)
+
+        exportFrame.edit = edit
+
+        local hint = exportFrame:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        hint:SetPoint("BOTTOMLEFT", 14, 14)
+        hint:SetText("Ctrl+A then Ctrl+C, and paste into Data\\Quests.lua")
+
+        table.insert(UISpecialFrames, "CompletionNavigatorExportFrame")
+    end
+
+    exportFrame.edit:SetText(text)
+    exportFrame.edit:HighlightText()
+    exportFrame.edit:SetFocus()
+    exportFrame:Show()
+
+    Print("Exported " .. count .. " harvested quests.")
+end
+
+------------------------------------------------------------
+-- EVENTS
+------------------------------------------------------------
+
+CN:RegisterEvent("QUEST_ACCEPTED", function(event, questID)
+    Harvest.Capture(questID, "accepted")
+    Harvest.NoteAccepted(questID)
+end)
+
+CN:RegisterEvent("QUEST_TURNED_IN", function(event, questID)
+    -- Capture before noting: the client still answers for it right now, and
+    -- stops shortly afterwards.
+    Harvest.Capture(questID, "turnedin")
+    Harvest.NoteTurnIn(questID)
+end)
+
+-- Quests already in the log when the addon loads would otherwise be missed.
+CN:OnLogin(function()
+    for _, info in ipairs(Blizzard.GetQuestLogEntries()) do
+        Harvest.Capture(info.questID, "login")
+    end
+end)
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "harvest",
+    order   = 80,
+    help    = "Show what has been harvested from play.",
+    handler = function()
+        local counts = Harvest.Summary()
+
+        if counts.total == 0 then
+            Print("Nothing harvested yet. Pick up and turn in quests with the addon loaded.")
+            return
+        end
+
+        Print("Harvested quests: " .. counts.total)
+        Print("  with names: " .. counts.named)
+        Print("  with coordinates: " .. counts.located)
+        Print("  with confirmed prerequisites: " .. counts.withRequires)
+        Print("  with unconfirmed prerequisite guesses: " .. counts.withGuesses)
+        Print("Use |cffffff00/cn export|r to emit them as Data\\Quests.lua rows.")
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "harvestnow",
+    order   = 81,
+    help    = "Harvest every quest currently in the log.",
+    handler = function()
+        local captured = 0
+
+        for _, info in ipairs(Blizzard.GetQuestLogEntries()) do
+            if Harvest.Capture(info.questID, "manual") then
+                captured = captured + 1
+            end
+        end
+
+        Print("Harvested " .. captured .. " quests from the current log.")
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "export",
+    args    = "[all]",
+    order   = 82,
+    help    = "Emit harvested quests as Data\\Quests.lua rows.",
+    handler = function(args)
+        local onlyLocated = string.lower(args or "") ~= "all"
+
+        local text, count = Harvest.BuildExport(onlyLocated)
+
+        if count == 0 then
+            Print("Nothing to export yet."
+                .. (onlyLocated and " Try |cffffff00/cn export all|r to include "
+                    .. "quests with no coordinates." or ""))
+            return
+        end
+
+        ShowExport(text, count)
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "providers",
+    order   = 83,
+    help    = "Show which external data addons were detected.",
+    handler = function()
+        Print("Quest data providers:")
+
+        for _, entry in ipairs(CN.questDataOrder) do
+            local provider = CN.questDataProviders[entry.name]
+
+            local ok, isAvailable = pcall(provider.IsAvailable)
+
+            local status = (ok and isAvailable)
+                and "|cff00ff00available|r"
+                or "|cff999999unavailable|r"
+
+            local detail = ""
+
+            if provider.Describe then
+                local described, text = pcall(provider.Describe)
+
+                if described and text then
+                    detail = " |cff999999(" .. text .. ")|r"
+                end
+            end
+
+            Print("  " .. entry.name .. ": " .. status .. detail)
+        end
+
+        Print("Waypoint providers:")
+
+        for _, entry in ipairs(CN.waypointOrder) do
+            local provider = CN.waypointProviders[entry.name]
+
+            local ok, isAvailable = pcall(provider.IsAvailable)
+
+            Print("  " .. entry.name .. ": "
+                .. ((ok and isAvailable) and "|cff00ff00available|r" or "|cff999999unavailable|r"))
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "lookup",
+    args    = "<questID>",
+    order   = 84,
+    help    = "Ask every external provider about a quest.",
+    handler = function(args)
+        local questID = CN.ToID(args)
+
+        if not questID then
+            Print("Usage: /cn lookup <questID>")
+            return
+        end
+
+        local data = CN.QueryQuestDataProviders(questID)
+
+        if not data then
+            Print("No external provider knows quest " .. questID .. ".")
+            Print("Run |cffffff00/cn providers|r to see what is installed.")
+            return
+        end
+
+        Print("Quest " .. questID .. " |cff999999via "
+            .. table.concat(data.providers or {}, ", ") .. "|r")
+
+        if data.name then Print("  name: " .. data.name) end
+
+        if data.mapID then
+            Print("  map: " .. data.mapID
+                .. (data.x and string.format(" at %.1f, %.1f", data.x * 100, data.y * 100) or ""))
+        end
+
+        if data.requiresLevel then Print("  level: " .. data.requiresLevel) end
+
+        if data.requires then
+            Print("  requires: " .. table.concat(data.requires, ", "))
+        end
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -7592,7 +8567,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.8.0
+## Version: 0.9.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -7617,10 +8592,13 @@ Routing.lua
 UI.lua
 Providers\Blizzard.lua
 Providers\StaticData.lua
+Providers\ATT.lua
+Providers\BtWQuests.lua
 Providers\TomTom.lua
 Data\Quests.lua
 Modules\Achievements.lua
 Modules\Appearances.lua
+Modules\Harvest.lua
 Modules\Mounts.lua
 Modules\Pets.lua
 Modules\Professions.lua
@@ -7675,7 +8653,9 @@ Type `/cn next` or click the minimap button. The addon scores every objective it
 - **Navigates.** Sets a TomTom waypoint if you have TomTom, a Blizzard map pin if you don't, and falls back to the game's own quest tracking arrow when no coordinates exist.
 - **Routes a zone.** `/cn zone` clusters everything obtainable on your current map and orders it nearest-first.
 - **Knows your Warband.** Reputations, titles, professions and recipes are recorded per character where the game scopes them that way, so the addon can tell you when a different character is the right one for a job.
-- **Explains blockers.** `/cn why <questID>` reports the first unmet prerequisite rather than just saying "not available".
+- **Explains blockers.** `/cn why <questID>` reports the first unmet prerequisite rather than just saying "not available", and names which data source produced the answer.
+- **Learns from your play.** Every quest you accept or turn in has its name, zone, coordinates and level recorded permanently and account-wide. `/cn export` emits them as ready-to-paste `Data\Quests.lua` rows, so playing the game grows the shipped database.
+- **Reads other addons rather than duplicating them.** AllTheThings and BtWQuests are consumed at runtime for quest names, coordinates and prerequisite chains when installed. Neither is required.
 
 ## Tracked
 
@@ -7690,6 +8670,7 @@ Type `/cn next` or click the minimap button. The addon scores every objective it
 | Appearances | Transmog progress per category |
 | Titles | Per character, so you can see which alt has one |
 | Professions & recipes | Skill levels and which characters know which recipe |
+| Harvested data | Names, zones, coordinates and levels captured from your own play |
 
 ## Commands
 
@@ -7708,7 +8689,11 @@ These are honest constraints, not oversights:
 
 ## Optional integrations
 
-TomTom (waypoints), and the addon is built to consume data from AllTheThings, BtWQuests and HandyNotes where practical. None are required.
+**TomTom** for waypoints. Without it, navigation falls back to Blizzard map pins and the quest tracking arrow.
+
+**AllTheThings** and **BtWQuests** are read at runtime for quest names, coordinates, source quests and prerequisite chains. Their internals are not published contracts, so every access is probed and wrapped: an update to either can make a provider go quiet, but cannot break Completion Navigator. `/cn providers` reports exactly what resolved.
+
+None are required.
 
 ## Development
 
@@ -7722,7 +8707,7 @@ The addon is managed by `cn.ps1`, a PowerShell toolkit that carries the whole so
 .\cn.ps1 sync                    # rewrite the .toc load order from disk
 .\cn.ps1 check                   # validate .toc, BOMs, duplicates, Lua syntax
 .\cn.ps1 package                 # build a distributable zip
-.\cn.ps1 release 0.8.0           # bump, commit, tag and push
+.\cn.ps1 release 0.9.0           # bump, commit, tag and push
 ```
 
 Architecture is registry-based: `CN:RegisterCommand{}`, `CN:RegisterEvent()`, `CN:RegisterModule()`, `CN.RegisterCandidateProvider()`, `CN.RegisterEligibilityChecker()`, `CN.UI.RegisterTab{}`. Adding a subsystem never means editing a dispatcher. All client API calls live in `Providers/Blizzard.lua`, so a patch break is a one-file fix.
@@ -7754,6 +8739,40 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.9.0]
+
+### Added
+
+- **Harvesting.** Every quest you pick up or turn in now has its name, zone,
+  map, coordinates and observed level recorded permanently and account-wide.
+  Playing the game fills the static database. `/cn harvest` shows what has
+  been collected; `/cn harvestnow` sweeps the current log.
+- **Export.** `/cn export` emits harvested quests as ready-to-paste
+  `Data\Quests.lua` rows, so what one player harvests can be committed and
+  shipped to everyone. `/cn export all` includes quests with no coordinates.
+- **AllTheThings provider.** Reads quest names, coordinates, source quests
+  and level requirements from ATT when the player has it installed.
+- **BtWQuests provider.** Reads quest names and prerequisite chains,
+  including nested prerequisite conditions.
+- **Provider registry.** External data sources are merged by priority behind
+  one interface. Curated static data always outranks them, because it is the
+  only source this addon ships.
+- `/cn providers` reports which external addons were detected and which entry
+  points resolved. `/cn lookup <questID>` asks all of them about one quest.
+- `/cn why` now reports which data source produced its answer, or says
+  plainly that no prerequisite data exists for that quest.
+
+### Notes
+
+- Third-party addon internals are not published contracts. Every provider
+  access is probed and wrapped, so an ATT or BtWQuests update can make a
+  provider go quiet but cannot break Completion Navigator. `/cn providers` is
+  how you tell which happened.
+- Prerequisites inferred from the order you completed quests are recorded
+  separately, never fed to the eligibility checker, and appear in exports as
+  commented suggestions for a human to confirm. Correlation is not a
+  prerequisite.
 
 ## [0.8.0]
 
