@@ -221,7 +221,7 @@ local function Entry(name)
     local entry = providerCache[name]
 
     if not entry then
-        entry = { candidates = nil, builtAt = 0, dirty = true }
+        entry = { candidates = nil, builtAt = 0, dirty = true, urgent = true }
         providerCache[name] = entry
     end
 
@@ -230,12 +230,25 @@ end
 
 -- reason == nil invalidates everything. A named event invalidates only the
 -- providers that subscribed to it, plus any that declared no subscription.
+--
+-- An invalidation with no reason is an explicit one -- a scan finished, a
+-- character logged in, a goal was pinned -- and it bypasses cooldowns. A
+-- cooldown exists to stop a chatty *event* from causing work; it must never
+-- delay something the player just did on purpose. Pinning a goal and not
+-- seeing it appear for two seconds reads as the feature being broken.
 function CN.InvalidateCandidates(reason)
     local hit = 0
 
     for name, provider in pairs(CN.candidateProviders) do
         if not reason or not provider.events or provider.events[reason] then
-            Entry(name).dirty = true
+            local entry = Entry(name)
+
+            entry.dirty = true
+
+            if not reason then
+                entry.urgent = true
+            end
+
             hit = hit + 1
         end
     end
@@ -254,9 +267,15 @@ function CN.InvalidateCandidates(reason)
     end
 end
 
-function CN.InvalidateProvider(name)
+function CN.InvalidateProvider(name, urgent)
     if CN.candidateProviders[name] then
-        Entry(name).dirty = true
+        local entry = Entry(name)
+
+        entry.dirty = true
+
+        if urgent then
+            entry.urgent = true
+        end
     end
 end
 
@@ -320,6 +339,26 @@ local function RunProvider(name, provider)
     return {}
 end
 
+-- Decoration happens once per objective, when its provider builds it.
+--
+-- It used to run over the whole aggregate on every rebuild. That was fine
+-- when every collection rebuilt everything, but per-provider caching means
+-- the aggregate is mostly the SAME objective tables as last time -- so a
+-- decorator that appends a reason (Warband's does) appended it again, and
+-- again, and the recommendation grew a stack of identical lines.
+local function Decorate(candidates)
+    for name, decorator in pairs(CN.candidateDecorators) do
+        for index = 1, #candidates do
+            local ok, err = pcall(decorator, candidates[index])
+
+            if not ok then
+                CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
+                break
+            end
+        end
+    end
+end
+
 local function RefreshProviders(force)
     local now     = time()
     local rebuilt = 0
@@ -327,7 +366,8 @@ local function RefreshProviders(force)
     for name, provider in pairs(CN.candidateProviders) do
         local entry = Entry(name)
 
-        local cooled = provider.cooldown == nil
+        local cooled = entry.urgent
+            or provider.cooldown == nil
             or (now - entry.builtAt) >= provider.cooldown
 
         local stale = force
@@ -338,8 +378,14 @@ local function RefreshProviders(force)
 
         if stale then
             entry.candidates = RunProvider(name, provider)
-            entry.builtAt    = now
-            entry.dirty      = false
+
+            -- Decorate here, not over the aggregate: these objectives are
+            -- new, and every other provider's are not.
+            Decorate(entry.candidates)
+
+            entry.builtAt = now
+            entry.dirty   = false
+            entry.urgent  = false
 
             rebuilt = rebuilt + 1
         end
@@ -348,18 +394,6 @@ local function RefreshProviders(force)
     return rebuilt
 end
 
-local function Decorate(candidates)
-    for name, decorator in pairs(CN.candidateDecorators) do
-        for _, objective in ipairs(candidates) do
-            local ok, err = pcall(decorator, objective)
-
-            if not ok then
-                CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
-                break
-            end
-        end
-    end
-end
 
 function CN.CollectCandidates(force)
     local rebuilt = RefreshProviders(force)
@@ -380,8 +414,6 @@ function CN.CollectCandidates(force)
             end
         end
     end
-
-    Decorate(candidates)
 
     aggregate.candidates = candidates
     aggregate.builtAt    = time()

@@ -60,6 +60,12 @@ These are honest constraints, not oversights:
 
 None are required.
 
+## Goals
+
+`/cn goal <type> <id>` pins a target. It becomes a candidate in its own right, anything leading to it is weighted up and says why, and `/cn goals` reports the known route: source, location, best-placed character, next step. Where nothing is known it says so and names what would make it knowable.
+
+Three relationships count as "leads to a goal", deliberately narrow ones the addon can actually establish: it *is* the goal, it unlocks the goal per the dependency graph, or it is in the same zone as a located goal. The third is weighted weakly â€” being in the right place is worth something, but it is not progress.
+
 ## Performance
 
 The recommendation path is measured, not assumed. `bench.lua` runs the addon
@@ -86,6 +92,8 @@ The addon is managed by `cn.ps1`, a PowerShell toolkit that carries the whole so
 .\cn.ps1 cmd pets -Module Pets   # register a slash command stub
 .\cn.ps1 event NEW_PET_ADDED -Module Pets
 .\cn.ps1 sync                    # rewrite the .toc load order from disk
+.\cn.ps1 harvest                 # fold harvested quests from SavedVariables into Data
+.\cn.ps1 doctor                  # report the whole release chain state
 .\cn.ps1 check                   # validate .toc, BOMs, duplicates, Lua syntax
 .\cn.ps1 package                 # build a distributable zip
 .\cn.ps1 release 0.9.0           # bump, commit, tag and push

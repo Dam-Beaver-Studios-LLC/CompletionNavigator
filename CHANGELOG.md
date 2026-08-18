@@ -7,6 +7,52 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.17.0]
+
+### Added
+
+- **Goals.** `/cn goal <type> <id>` pins something you have decided you want.
+  A goal becomes a candidate in its own right -- an uncollected mount is not
+  normally a next action, which is exactly why saying you want it has to mean
+  something -- and anything that leads to it ranks higher and says so.
+  `/cn goals` prints what is actually known about reaching each one: the
+  source, where it is, which of your characters is best placed, and the next
+  concrete step. Where nothing is known it says so, and names what would make
+  it knowable, rather than inventing a route.
+  `/cn ungoal`, `/cn gogoal <n>` to navigate, and a **Goals** tab.
+  Types: quest, achievement, mount, pet, toy, recipe, title, rep, rare,
+  currency. Goals are account-wide, because deciding you want a mount is not
+  a fact about the character you happened to be playing at the time.
+- **`.\cn.ps1 harvest`** reads SavedVariables directly and folds harvested
+  quests into `Data\Quests.lua`.
+  The addon has recorded the name, zone, coordinates and level of every quest
+  you accept since the first build, and the only way to get it out was a copy
+  box -- so in practice it stayed in SavedVariables and the curated database
+  stayed nearly empty. That is what limits prerequisite forensics, and it was
+  a tooling gap, not a data gap. Curated rows are never overwritten:
+  hand-checked data outranks observed data, the same source-ranking rule the
+  addon applies internally. Quests with no coordinates are skipped unless
+  you pass `-Force`.
+
+### Fixed
+
+- **Decorators ran once per rebuild instead of once per objective.** 0.16.0's
+  per-provider caching means the aggregate list is mostly the *same* objective
+  tables as last time, so Warband's "another character is better suited" was
+  appended again on every rebuild and stacked up under the recommendation.
+  Decoration now happens when a provider builds its objectives. Regression
+  test asserts no objective is ever decorated twice.
+- **An explicit action no longer waits on a cooldown.** Cooldowns exist to
+  stop a chatty *event* from causing work; they were also delaying things the
+  player just did on purpose, so a newly pinned goal could take two seconds to
+  appear. Invalidation with no event reason -- a scan finishing, a login, a
+  goal changing -- now bypasses cooldowns.
+
+### Notes
+
+- `Data\Quests.lua` still ships nearly empty. `harvest` is the mechanism that
+  changes that; it needs people to play with the addon loaded first.
+
 ## [0.16.1]
 
 A Windows-only defect in 0.16.0's release path. No addon changes.

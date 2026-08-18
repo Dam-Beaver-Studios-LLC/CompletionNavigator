@@ -1093,6 +1093,161 @@ UI.RegisterTab{
 }
 
 ------------------------------------------------------------
+-- TAB: GOALS
+------------------------------------------------------------
+
+UI.RegisterTab{
+    name  = "Goals",
+    order = 15,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 64)
+
+        panel.navigate = AddButton(panel, "Navigate", 110, function()
+            local goals = CN:GetModule("Goals")
+
+            if not goals or not panel.selected then
+                return
+            end
+
+            local plan = goals.Plan(panel.selected)
+
+            if plan.mapID and plan.x and plan.y then
+                CN.NavigateToObjective({
+                    id    = panel.selected.id,
+                    type  = panel.selected.type,
+                    name  = plan.name,
+                    mapID = plan.mapID,
+                    x     = plan.x,
+                    y     = plan.y,
+                })
+            else
+                CN.Print("No location is known for " .. tostring(plan.name) .. ".")
+            end
+        end)
+        panel.navigate:SetPoint("BOTTOMLEFT", 8, 34)
+
+        panel.remove = AddButton(panel, "Remove goal", 110, function()
+            local goals = CN:GetModule("Goals")
+
+            if not goals or not panel.selected then
+                return
+            end
+
+            goals.Remove(panel.selected.type, panel.selected.id)
+
+            panel.selected = nil
+
+            UI.Refresh()
+        end)
+        panel.remove:SetPoint("LEFT", panel.navigate, "RIGHT", 6, 0)
+
+        panel.note = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        panel.note:SetPoint("BOTTOMLEFT", 12, 12)
+        panel.note:SetPoint("RIGHT", -12, 0)
+        panel.note:SetJustifyH("LEFT")
+    end,
+
+    refresh = function(panel)
+        local goals = CN:GetModule("Goals")
+
+        if not goals then
+            panel.header:SetText("Goals module not loaded.")
+            panel.list:SetEntries({})
+            return
+        end
+
+        local list = goals.List()
+
+        panel.header:SetText(#list .. " goal" .. (#list == 1 and "" or "s")
+            .. " |cff999999of " .. goals.limit .. "|r")
+
+        if #list == 0 then
+            panel.list:SetEntries({})
+            panel.note:SetText("|cffffff00Nothing pinned. Use |r/cn goal <type> <id>|cffffff00 "
+                .. "to pin something to work toward. A goal becomes actionable even "
+                .. "when nothing else would surface it, and anything leading to it "
+                .. "ranks higher.|r")
+            return
+        end
+
+        -- Keep the selection valid across refreshes; a removed goal must not
+        -- leave the buttons pointed at nothing.
+        if panel.selected then
+            local stillThere = false
+
+            for _, goal in ipairs(list) do
+                if goal.type == panel.selected.type and goal.id == panel.selected.id then
+                    stillThere = true
+                    break
+                end
+            end
+
+            if not stillThere then
+                panel.selected = nil
+            end
+        end
+
+        panel.selected = panel.selected or list[1]
+
+        local entries = {}
+
+        for _, goal in ipairs(list) do
+            local plan = goals.Plan(goal)
+
+            local isSelected = panel.selected
+                and panel.selected.type == goal.type
+                and panel.selected.id == goal.id
+
+            table.insert(entries, {
+                text = (isSelected and "|cff00ff00>|r " or "  ")
+                    .. (plan.done and "|cff999999" or "|cffffff00")
+                    .. tostring(goal.name) .. "|r"
+                    .. " |cff999999(" .. tostring(goal.type) .. ")|r"
+                    .. (plan.done and " |cff00ff00done|r" or ""),
+
+                tooltip = tostring(goal.name) .. "\n"
+                    .. (plan.source and (plan.source .. "\n") or "")
+                    .. table.concat(plan.steps, "\n"),
+
+                onClick = function()
+                    panel.selected = goal
+                    UI.Refresh()
+                end,
+            })
+
+            if plan.source then
+                table.insert(entries, { text = "      |cff999999" .. plan.source .. "|r" })
+            end
+
+            for _, step in ipairs(plan.steps) do
+                table.insert(entries, { text = "      |cff999999" .. step .. "|r" })
+            end
+        end
+
+        panel.list:SetEntries(entries)
+
+        local plan = goals.Plan(panel.selected)
+
+        if plan.mapID and plan.x and plan.y then
+            panel.note:SetText("|cff999999Selected: " .. tostring(plan.name)
+                .. " -- " .. (plan.zone or ("map " .. plan.mapID)) .. "|r")
+        else
+            panel.note:SetText("|cff999999Selected: " .. tostring(plan.name)
+                .. " -- no location known|r")
+        end
+    end,
+}
+
+------------------------------------------------------------
 -- TAB: REMAINING
 ------------------------------------------------------------
 

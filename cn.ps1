@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.16.1'
+$script:ToolkitVersion = '0.17.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.16.1"
+CN.version     = "0.17.0"
 CN.dbVersion   = 2
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -1770,7 +1770,7 @@ local function Entry(name)
     local entry = providerCache[name]
 
     if not entry then
-        entry = { candidates = nil, builtAt = 0, dirty = true }
+        entry = { candidates = nil, builtAt = 0, dirty = true, urgent = true }
         providerCache[name] = entry
     end
 
@@ -1779,12 +1779,25 @@ end
 
 -- reason == nil invalidates everything. A named event invalidates only the
 -- providers that subscribed to it, plus any that declared no subscription.
+--
+-- An invalidation with no reason is an explicit one -- a scan finished, a
+-- character logged in, a goal was pinned -- and it bypasses cooldowns. A
+-- cooldown exists to stop a chatty *event* from causing work; it must never
+-- delay something the player just did on purpose. Pinning a goal and not
+-- seeing it appear for two seconds reads as the feature being broken.
 function CN.InvalidateCandidates(reason)
     local hit = 0
 
     for name, provider in pairs(CN.candidateProviders) do
         if not reason or not provider.events or provider.events[reason] then
-            Entry(name).dirty = true
+            local entry = Entry(name)
+
+            entry.dirty = true
+
+            if not reason then
+                entry.urgent = true
+            end
+
             hit = hit + 1
         end
     end
@@ -1803,9 +1816,15 @@ function CN.InvalidateCandidates(reason)
     end
 end
 
-function CN.InvalidateProvider(name)
+function CN.InvalidateProvider(name, urgent)
     if CN.candidateProviders[name] then
-        Entry(name).dirty = true
+        local entry = Entry(name)
+
+        entry.dirty = true
+
+        if urgent then
+            entry.urgent = true
+        end
     end
 end
 
@@ -1869,6 +1888,26 @@ local function RunProvider(name, provider)
     return {}
 end
 
+-- Decoration happens once per objective, when its provider builds it.
+--
+-- It used to run over the whole aggregate on every rebuild. That was fine
+-- when every collection rebuilt everything, but per-provider caching means
+-- the aggregate is mostly the SAME objective tables as last time -- so a
+-- decorator that appends a reason (Warband's does) appended it again, and
+-- again, and the recommendation grew a stack of identical lines.
+local function Decorate(candidates)
+    for name, decorator in pairs(CN.candidateDecorators) do
+        for index = 1, #candidates do
+            local ok, err = pcall(decorator, candidates[index])
+
+            if not ok then
+                CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
+                break
+            end
+        end
+    end
+end
+
 local function RefreshProviders(force)
     local now     = time()
     local rebuilt = 0
@@ -1876,7 +1915,8 @@ local function RefreshProviders(force)
     for name, provider in pairs(CN.candidateProviders) do
         local entry = Entry(name)
 
-        local cooled = provider.cooldown == nil
+        local cooled = entry.urgent
+            or provider.cooldown == nil
             or (now - entry.builtAt) >= provider.cooldown
 
         local stale = force
@@ -1887,8 +1927,14 @@ local function RefreshProviders(force)
 
         if stale then
             entry.candidates = RunProvider(name, provider)
-            entry.builtAt    = now
-            entry.dirty      = false
+
+            -- Decorate here, not over the aggregate: these objectives are
+            -- new, and every other provider's are not.
+            Decorate(entry.candidates)
+
+            entry.builtAt = now
+            entry.dirty   = false
+            entry.urgent  = false
 
             rebuilt = rebuilt + 1
         end
@@ -1897,18 +1943,6 @@ local function RefreshProviders(force)
     return rebuilt
 end
 
-local function Decorate(candidates)
-    for name, decorator in pairs(CN.candidateDecorators) do
-        for _, objective in ipairs(candidates) do
-            local ok, err = pcall(decorator, objective)
-
-            if not ok then
-                CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
-                break
-            end
-        end
-    end
-end
 
 function CN.CollectCandidates(force)
     local rebuilt = RefreshProviders(force)
@@ -1929,8 +1963,6 @@ function CN.CollectCandidates(force)
             end
         end
     end
-
-    Decorate(candidates)
 
     aggregate.candidates = candidates
     aggregate.builtAt    = time()
@@ -3871,6 +3903,161 @@ UI.RegisterTab{
                 .. "comparisons useful.|r")
         else
             panel.note:SetText("")
+        end
+    end,
+}
+
+------------------------------------------------------------
+-- TAB: GOALS
+------------------------------------------------------------
+
+UI.RegisterTab{
+    name  = "Goals",
+    order = 15,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 64)
+
+        panel.navigate = AddButton(panel, "Navigate", 110, function()
+            local goals = CN:GetModule("Goals")
+
+            if not goals or not panel.selected then
+                return
+            end
+
+            local plan = goals.Plan(panel.selected)
+
+            if plan.mapID and plan.x and plan.y then
+                CN.NavigateToObjective({
+                    id    = panel.selected.id,
+                    type  = panel.selected.type,
+                    name  = plan.name,
+                    mapID = plan.mapID,
+                    x     = plan.x,
+                    y     = plan.y,
+                })
+            else
+                CN.Print("No location is known for " .. tostring(plan.name) .. ".")
+            end
+        end)
+        panel.navigate:SetPoint("BOTTOMLEFT", 8, 34)
+
+        panel.remove = AddButton(panel, "Remove goal", 110, function()
+            local goals = CN:GetModule("Goals")
+
+            if not goals or not panel.selected then
+                return
+            end
+
+            goals.Remove(panel.selected.type, panel.selected.id)
+
+            panel.selected = nil
+
+            UI.Refresh()
+        end)
+        panel.remove:SetPoint("LEFT", panel.navigate, "RIGHT", 6, 0)
+
+        panel.note = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        panel.note:SetPoint("BOTTOMLEFT", 12, 12)
+        panel.note:SetPoint("RIGHT", -12, 0)
+        panel.note:SetJustifyH("LEFT")
+    end,
+
+    refresh = function(panel)
+        local goals = CN:GetModule("Goals")
+
+        if not goals then
+            panel.header:SetText("Goals module not loaded.")
+            panel.list:SetEntries({})
+            return
+        end
+
+        local list = goals.List()
+
+        panel.header:SetText(#list .. " goal" .. (#list == 1 and "" or "s")
+            .. " |cff999999of " .. goals.limit .. "|r")
+
+        if #list == 0 then
+            panel.list:SetEntries({})
+            panel.note:SetText("|cffffff00Nothing pinned. Use |r/cn goal <type> <id>|cffffff00 "
+                .. "to pin something to work toward. A goal becomes actionable even "
+                .. "when nothing else would surface it, and anything leading to it "
+                .. "ranks higher.|r")
+            return
+        end
+
+        -- Keep the selection valid across refreshes; a removed goal must not
+        -- leave the buttons pointed at nothing.
+        if panel.selected then
+            local stillThere = false
+
+            for _, goal in ipairs(list) do
+                if goal.type == panel.selected.type and goal.id == panel.selected.id then
+                    stillThere = true
+                    break
+                end
+            end
+
+            if not stillThere then
+                panel.selected = nil
+            end
+        end
+
+        panel.selected = panel.selected or list[1]
+
+        local entries = {}
+
+        for _, goal in ipairs(list) do
+            local plan = goals.Plan(goal)
+
+            local isSelected = panel.selected
+                and panel.selected.type == goal.type
+                and panel.selected.id == goal.id
+
+            table.insert(entries, {
+                text = (isSelected and "|cff00ff00>|r " or "  ")
+                    .. (plan.done and "|cff999999" or "|cffffff00")
+                    .. tostring(goal.name) .. "|r"
+                    .. " |cff999999(" .. tostring(goal.type) .. ")|r"
+                    .. (plan.done and " |cff00ff00done|r" or ""),
+
+                tooltip = tostring(goal.name) .. "\n"
+                    .. (plan.source and (plan.source .. "\n") or "")
+                    .. table.concat(plan.steps, "\n"),
+
+                onClick = function()
+                    panel.selected = goal
+                    UI.Refresh()
+                end,
+            })
+
+            if plan.source then
+                table.insert(entries, { text = "      |cff999999" .. plan.source .. "|r" })
+            end
+
+            for _, step in ipairs(plan.steps) do
+                table.insert(entries, { text = "      |cff999999" .. step .. "|r" })
+            end
+        end
+
+        panel.list:SetEntries(entries)
+
+        local plan = goals.Plan(panel.selected)
+
+        if plan.mapID and plan.x and plan.y then
+            panel.note:SetText("|cff999999Selected: " .. tostring(plan.name)
+                .. " -- " .. (plan.zone or ("map " .. plan.mapID)) .. "|r")
+        else
+            panel.note:SetText("|cff999999Selected: " .. tostring(plan.name)
+                .. " -- no location known|r")
         end
     end,
 }
@@ -14186,6 +14373,679 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Goals.lua'] = @'
+-- Modules/Goals.lua
+-- Completion Navigator :: what you are actually working toward.
+--
+-- Everything else in this addon answers "what should I do next?" from the
+-- whole field of what is available. That is the right default, and it is the
+-- wrong answer when you have decided you want one specific thing.
+--
+-- A goal is a target you pin. Once pinned:
+--
+--   * it becomes a candidate in its own right, even when nothing else would
+--     have surfaced it -- an uncollected mount is not normally actionable,
+--     but if you have decided you want it, it is;
+--   * anything that plausibly leads to it is weighted up, and says so;
+--   * /cn goal prints what is actually known about getting it -- the source,
+--     where it is, which of your characters is best placed, and what the
+--     next concrete step is.
+--
+-- Goals are account-wide. Deciding you want a mount is not a fact about the
+-- character you happened to be playing when you decided it.
+
+local ADDON_NAME, CN = ...
+
+local Goals = CN:RegisterModule("Goals")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+local function Store()
+    return CN.Account("goals")
+end
+
+Goals.Store = Store
+
+-- How many goals are worth having at once. Beyond a handful, "goal" stops
+-- meaning anything and the weighting stops discriminating.
+Goals.limit = 10
+
+------------------------------------------------------------
+-- TYPES
+------------------------------------------------------------
+
+-- Which objective types can be pinned, and what the user types for each.
+Goals.types = {
+    quest       = CN.objectiveTypes.QUEST,
+    achievement = CN.objectiveTypes.ACHIEVEMENT,
+    mount       = CN.objectiveTypes.MOUNT,
+    pet         = CN.objectiveTypes.PET,
+    toy         = CN.objectiveTypes.TOY,
+    recipe      = CN.objectiveTypes.RECIPE,
+    title       = CN.objectiveTypes.TITLE,
+    rep         = CN.objectiveTypes.REPUTATION,
+    reputation  = CN.objectiveTypes.REPUTATION,
+    rare        = CN.objectiveTypes.RARE,
+    currency    = CN.objectiveTypes.CURRENCY,
+}
+
+local function ResolveType(text)
+    if not text then
+        return nil
+    end
+
+    return Goals.types[string.lower(text)]
+end
+
+Goals.ResolveType = ResolveType
+
+local function Key(objectiveType, id)
+    return CN.ObjectiveKey(objectiveType, id)
+end
+
+------------------------------------------------------------
+-- MANAGING GOALS
+------------------------------------------------------------
+
+function Goals.IsGoal(objectiveType, id)
+    if not objectiveType or not id then
+        return false
+    end
+
+    local store = Store()
+
+    if not store or next(store) == nil then
+        return false
+    end
+
+    return store[Key(objectiveType, id)] ~= nil
+end
+
+function Goals.Add(objectiveType, id)
+    if not objectiveType or not id then
+        return false, "A goal needs a type and an ID."
+    end
+
+    local store = Store()
+
+    local key = Key(objectiveType, id)
+
+    if store[key] then
+        return false, "That is already a goal."
+    end
+
+    if CN.CountKeys(store) >= Goals.limit then
+        return false, "You already have " .. Goals.limit
+            .. " goals. Clear one first."
+    end
+
+    local filters = CN:GetModule("Filters")
+
+    local name = filters and filters.DescribeObjective(objectiveType, id)
+        or (objectiveType .. " " .. tostring(id))
+
+    store[key] = {
+        type  = objectiveType,
+        id    = id,
+        name  = name,
+        since = time(),
+    }
+
+    -- A goal changes the weight of everything, and objectives are decorated
+    -- when their provider builds them. Force a full rebuild so the new
+    -- weighting takes effect immediately rather than whenever something
+    -- happens to go stale.
+    CN.InvalidateCandidates()
+
+    return true, name
+end
+
+function Goals.Remove(objectiveType, id)
+    local store = Store()
+
+    local key = Key(objectiveType, id)
+
+    if not store[key] then
+        return false
+    end
+
+    local name = store[key].name
+
+    store[key] = nil
+
+    CN.InvalidateCandidates()
+
+    return true, name
+end
+
+function Goals.Clear()
+    local store = Store()
+
+    local count = CN.CountKeys(store)
+
+    for key in pairs(store) do
+        store[key] = nil
+    end
+
+    CN.InvalidateCandidates()
+
+    return count
+end
+
+-- Ordered oldest first, so the list is stable and numbering means something
+-- between calls.
+function Goals.List()
+    local list = {}
+
+    for key, goal in pairs(Store()) do
+        table.insert(list, {
+            key   = key,
+            type  = goal.type,
+            id    = goal.id,
+            name  = goal.name,
+            since = goal.since or 0,
+        })
+    end
+
+    table.sort(list, function(a, b)
+        if a.since ~= b.since then
+            return a.since < b.since
+        end
+
+        return tostring(a.key) < tostring(b.key)
+    end)
+
+    return list
+end
+
+------------------------------------------------------------
+-- WHAT IS KNOWN ABOUT GETTING IT
+------------------------------------------------------------
+
+-- Everything the addon can say about how to obtain one goal. Deliberately
+-- honest: where nothing is known, it says so and names what would make it
+-- knowable, rather than inventing a route.
+--
+-- Returns a table:
+--   name, source, mapID, x, y, zone, steps (array of strings),
+--   done (boolean), character (string or nil)
+function Goals.Plan(goal)
+    local plan = {
+        name  = goal.name,
+        steps = {},
+    }
+
+    local types = CN.objectiveTypes
+
+    local function step(text)
+        table.insert(plan.steps, text)
+    end
+
+    ------------------------------------------------------------
+    -- Is it already done?
+    ------------------------------------------------------------
+
+    local state, reason = CN.Explain(goal.type, goal.id)
+
+    if state == CN.objectiveStates.COMPLETED then
+        plan.done = true
+
+        step(reason or "Already complete.")
+
+        return plan
+    end
+
+    ------------------------------------------------------------
+    -- Where is it?
+    ------------------------------------------------------------
+
+    if goal.type == types.QUEST then
+        local quests = CN:GetModule("Quests")
+
+        if quests then
+            local mapID, x, y, source = quests.GetLocation(goal.id)
+
+            plan.mapID, plan.x, plan.y = mapID, x, y
+            plan.source = source
+
+            if mapID then
+                plan.zone = Blizzard.GetMapName(mapID)
+            end
+        end
+
+        if state == CN.objectiveStates.LOCKED and reason then
+            step(reason)
+        end
+    end
+
+    if goal.type == types.MOUNT then
+        local record = CN.Account("mounts")[goal.id]
+
+        if record then
+            plan.source = record.source
+
+            if record.isFactionSpecific then
+                step("Faction-locked. Only obtainable on one faction.")
+            end
+        end
+    end
+
+    if goal.type == types.PET then
+        local record = CN.Account("pets")[goal.id]
+
+        if record and record.isWild then
+            step("Wild pet: find and capture it in the world.")
+        end
+    end
+
+    if goal.type == types.RECIPE then
+        local vendors = CN:GetModule("Vendors")
+
+        if vendors then
+            local seller = vendors.FirstLocatedSeller(goal.id)
+
+            if seller then
+                plan.source = "Sold by " .. tostring(seller.name)
+                plan.mapID, plan.x, plan.y = seller.mapID, seller.x, seller.y
+                plan.zone = seller.zone
+
+                step("Buy it from " .. tostring(seller.name)
+                    .. (seller.zone and (" in " .. seller.zone) or "") .. ".")
+            else
+                step("No recorded vendor sells this. Open merchants to record them.")
+            end
+        end
+    end
+
+    if goal.type == types.RARE or goal.type == types.TREASURE then
+        local record = CN.Account("rares")[goal.id]
+
+        if record then
+            plan.mapID, plan.x, plan.y = record.mapID, record.x, record.y
+            plan.zone = record.zone
+
+            step("Seen " .. (record.sightings or 1) .. " time"
+                .. ((record.sightings or 1) == 1 and "" or "s") .. " here.")
+        end
+    end
+
+    if goal.type == types.ACHIEVEMENT then
+        local record = CN.Account("achievements")[goal.id]
+
+        if record and record.criteria then
+            local remaining = (record.criteria or 0) - (record.done or 0)
+
+            step(remaining .. " of " .. record.criteria .. " criteria left.")
+
+            for _, criterion in ipairs(Blizzard.GetIncompleteCriteria(goal.id, 5) or {}) do
+                step("Missing: " .. criterion)
+            end
+        end
+    end
+
+    if goal.type == types.REPUTATION then
+        local record = CN.Account("reputations")[goal.id]
+
+        if record then
+            if record.accountWide then
+                step("Account-wide: any character's progress counts.")
+            else
+                step("Character-specific: progress does not carry across your Warband.")
+            end
+        end
+    end
+
+    ------------------------------------------------------------
+    -- Who should do it?
+    ------------------------------------------------------------
+
+    local warband = CN:GetModule("Warband")
+
+    if warband then
+        local ok, best, detail, why = pcall(warband.WhoShould, goal.type, goal.id)
+
+        if ok and best then
+            plan.character = best
+
+            step("Best character: " .. tostring(best)
+                .. (why and (" (" .. why .. ")") or ""))
+        end
+    end
+
+    ------------------------------------------------------------
+    -- Fall back to honesty.
+    ------------------------------------------------------------
+
+    if plan.mapID and plan.x and plan.y then
+        step("Location known: " .. (plan.zone or ("map " .. plan.mapID))
+            .. string.format(" (%.1f, %.1f)", plan.x * 100, plan.y * 100))
+    elseif #plan.steps == 0 then
+        step("Nothing is known about how to obtain this yet.")
+        step("The addon learns sources from play: open vendors, scan "
+            .. "collections, and travel.")
+    end
+
+    return plan
+end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- A goal is actionable by definition. Most goals would never surface on their
+-- own -- an uncollected mount is not a next action for most people -- which is
+-- exactly the point of having said you want it.
+CN.RegisterCandidateProvider("Goals", function()
+    local candidates = {}
+
+    for _, goal in ipairs(Goals.List()) do
+        if not CN.IsIgnored(goal.type, goal.id)
+            and not CN.IsDeferred(goal.type, goal.id) then
+
+            local plan = Goals.Plan(goal)
+
+            if not plan.done then
+                local reasons = { "you set this as a goal" }
+
+                if plan.source then
+                    table.insert(reasons, plan.source)
+                end
+
+                local travel
+
+                if plan.mapID then
+                    local playerMap = select(1, CN.GetPlayerPosition())
+
+                    travel = (plan.mapID == playerMap) and 2 or 25
+                end
+
+                table.insert(candidates, CN.NewObjective({
+                    id              = goal.id,
+                    type            = goal.type,
+                    name            = goal.name,
+                    mapID           = plan.mapID,
+                    x               = plan.x,
+                    y               = plan.y,
+                    zone            = plan.zone,
+                    accountWide     = true,
+                    completionValue = 6,
+                    travelCost      = travel,
+                    isGoal          = true,
+                    reasons         = reasons,
+                }))
+            end
+        end
+    end
+
+    return candidates
+end, { events = { "ZONE_CHANGED_NEW_AREA" }, cooldown = 2 })
+
+------------------------------------------------------------
+-- WEIGHTING
+------------------------------------------------------------
+
+-- Anything that leads to a goal is worth more than it would be otherwise.
+-- "Leads to" is deliberately narrow -- three relationships the addon can
+-- actually establish, rather than a guess dressed up as a plan.
+function Goals.Decorate(objective)
+    if type(objective) ~= "table" or not objective.type or not objective.id then
+        return objective
+    end
+
+    local store = Store()
+
+    if not store or next(store) == nil then
+        return objective
+    end
+
+    -- 1. It IS a goal.
+    if Goals.IsGoal(objective.type, objective.id) then
+        objective.userPreference = (objective.userPreference or 0) + 8
+
+        if not objective.isGoal then
+            objective.isGoal  = true
+            objective.reasons = objective.reasons or {}
+            table.insert(objective.reasons, "this is one of your goals")
+        end
+
+        return objective
+    end
+
+    -- 2. It unlocks a goal, per the dependency graph.
+    if objective.type == CN.objectiveTypes.QUEST then
+        local dependency = CN.GetDependency(CN.ObjectiveKey(objective.type, objective.id))
+
+        if dependency and dependency.unlocks then
+            for _, unlocked in ipairs(dependency.unlocks) do
+                -- Dependency edges are stored as keys, but static data writes
+                -- plain quest IDs. Accept both.
+                local unlockedID = tonumber(unlocked)
+                    or tonumber(tostring(unlocked):match(":(%d+)$"))
+
+                if unlockedID and Goals.IsGoal(CN.objectiveTypes.QUEST, unlockedID) then
+                    objective.userPreference = (objective.userPreference or 0) + 5
+                    objective.reasons = objective.reasons or {}
+                    table.insert(objective.reasons, "unlocks a goal")
+
+                    return objective
+                end
+            end
+        end
+    end
+
+    -- 3. It is in the same zone as a located goal. Weak, and weighted weakly:
+    --    being in the right place is worth something, but it is not progress.
+    if objective.mapID then
+        for _, goal in ipairs(Goals.List()) do
+            local plan = Goals.Plan(goal)
+
+            if plan.mapID == objective.mapID and not plan.done then
+                objective.userPreference = (objective.userPreference or 0) + 2
+                objective.reasons = objective.reasons or {}
+                table.insert(objective.reasons, "in the same zone as a goal")
+
+                return objective
+            end
+        end
+    end
+
+    return objective
+end
+
+CN.RegisterCandidateDecorator("Goals", Goals.Decorate)
+
+------------------------------------------------------------
+-- OUTPUT
+------------------------------------------------------------
+
+local function PrintPlan(index, goal)
+    local plan = Goals.Plan(goal)
+
+    Print(index .. ". |cffffff00" .. tostring(plan.name) .. "|r"
+        .. " |cff999999(" .. tostring(goal.type) .. " " .. tostring(goal.id) .. ")|r"
+        .. (plan.done and " |cff00ff00done|r" or ""))
+
+    if plan.source then
+        Print("   Source: " .. tostring(plan.source))
+    end
+
+    for _, step in ipairs(plan.steps) do
+        Print("   - " .. step)
+    end
+
+    if plan.character then
+        Print("   Best character: |cffffff00" .. tostring(plan.character) .. "|r")
+    end
+
+    if plan.mapID and plan.x and plan.y then
+        Print("   |cffffff00/cn gogoal " .. index .. "|r to set a waypoint.")
+    end
+end
+
+Goals.PrintPlan = PrintPlan
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "goal",
+    args    = "<type> <id>",
+    order   = 12,
+    help    = "Pin something as a goal. Types: quest, achievement, mount, pet, toy, recipe, title, rep, rare, currency.",
+    handler = function(args)
+        local typeText, idText = string.match(CN.Trim(args or ""), "^(%S+)%s+(%S+)$")
+
+        if not typeText then
+            Print("Usage: /cn goal <type> <id>")
+            Print("|cff999999Types: quest, achievement, mount, pet, toy, recipe, "
+                .. "title, rep, rare, currency|r")
+            Print("|cffffff00/cn goals|r lists what you have pinned.")
+            return
+        end
+
+        local objectiveType = ResolveType(typeText)
+
+        if not objectiveType then
+            Print("Not a goal type: " .. typeText)
+            Print("|cff999999Types: quest, achievement, mount, pet, toy, recipe, "
+                .. "title, rep, rare, currency|r")
+            return
+        end
+
+        local id = CN.ToID(idText)
+
+        if not id then
+            Print("Not an ID: " .. idText)
+            return
+        end
+
+        local added, message = Goals.Add(objectiveType, id)
+
+        if not added then
+            Print(message)
+            return
+        end
+
+        Print("Goal set: |cffffff00" .. tostring(message) .. "|r")
+
+        local list = Goals.List()
+
+        for index, goal in ipairs(list) do
+            if goal.type == objectiveType and goal.id == id then
+                PrintPlan(index, goal)
+                break
+            end
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "goals",
+    order   = 13,
+    help    = "List your goals and what is known about reaching them.",
+    handler = function()
+        local list = Goals.List()
+
+        if #list == 0 then
+            Print("No goals set.")
+            Print("|cffffff00/cn goal mount 1234|r pins something to work toward.")
+            Print("|cff999999A goal becomes actionable even when nothing else "
+                .. "would have surfaced it, and anything leading to it ranks higher.|r")
+            return
+        end
+
+        Print("Goals (" .. #list .. " of " .. Goals.limit .. "):")
+
+        for index, goal in ipairs(list) do
+            PrintPlan(index, goal)
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "ungoal",
+    args    = "<number or all>",
+    order   = 14,
+    help    = "Remove a goal.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        if string.lower(args) == "all" then
+            local count = Goals.Clear()
+
+            Print("Cleared " .. count .. " goal" .. (count == 1 and "" or "s") .. ".")
+            return
+        end
+
+        local index = CN.ToID(args)
+
+        local list = Goals.List()
+
+        if not index or not list[index] then
+            Print("Usage: /cn ungoal <number or all>")
+
+            if #list > 0 then
+                Print("|cff999999Numbers come from |cffffff00/cn goals|r.|r")
+            end
+
+            return
+        end
+
+        local goal = list[index]
+
+        local removed, name = Goals.Remove(goal.type, goal.id)
+
+        if removed then
+            Print("Goal removed: " .. tostring(name))
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "gogoal",
+    args    = "<number>",
+    order   = 15,
+    help    = "Navigate to a goal.",
+    handler = function(args)
+        local index = CN.ToID(CN.Trim(args or ""))
+
+        local list = Goals.List()
+
+        if not index or not list[index] then
+            Print("Usage: /cn gogoal <number>")
+            return
+        end
+
+        local goal = list[index]
+        local plan = Goals.Plan(goal)
+
+        if not (plan.mapID and plan.x and plan.y) then
+            Print("No location is known for " .. tostring(plan.name) .. ".")
+
+            for _, step in ipairs(plan.steps) do
+                Print("  - " .. step)
+            end
+
+            return
+        end
+
+        CN.NavigateToObjective({
+            id    = goal.id,
+            type  = goal.type,
+            name  = plan.name,
+            mapID = plan.mapID,
+            x     = plan.x,
+            y     = plan.y,
+        })
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -14205,7 +15065,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.16.1
+## Version: 0.17.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -14241,6 +15101,7 @@ Modules\Breakdown.lua
 Modules\Currencies.lua
 Modules\Exploration.lua
 Modules\Filters.lua
+Modules\Goals.lua
 Modules\Harvest.lua
 Modules\Mounts.lua
 Modules\Opportunities.lua
@@ -14346,6 +15207,12 @@ These are honest constraints, not oversights:
 
 None are required.
 
+## Goals
+
+`/cn goal <type> <id>` pins a target. It becomes a candidate in its own right, anything leading to it is weighted up and says why, and `/cn goals` reports the known route: source, location, best-placed character, next step. Where nothing is known it says so and names what would make it knowable.
+
+Three relationships count as "leads to a goal", deliberately narrow ones the addon can actually establish: it *is* the goal, it unlocks the goal per the dependency graph, or it is in the same zone as a located goal. The third is weighted weakly — being in the right place is worth something, but it is not progress.
+
 ## Performance
 
 The recommendation path is measured, not assumed. `bench.lua` runs the addon
@@ -14372,6 +15239,8 @@ The addon is managed by `cn.ps1`, a PowerShell toolkit that carries the whole so
 .\cn.ps1 cmd pets -Module Pets   # register a slash command stub
 .\cn.ps1 event NEW_PET_ADDED -Module Pets
 .\cn.ps1 sync                    # rewrite the .toc load order from disk
+.\cn.ps1 harvest                 # fold harvested quests from SavedVariables into Data
+.\cn.ps1 doctor                  # report the whole release chain state
 .\cn.ps1 check                   # validate .toc, BOMs, duplicates, Lua syntax
 .\cn.ps1 package                 # build a distributable zip
 .\cn.ps1 release 0.9.0           # bump, commit, tag and push
@@ -14406,6 +15275,52 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.17.0]
+
+### Added
+
+- **Goals.** `/cn goal <type> <id>` pins something you have decided you want.
+  A goal becomes a candidate in its own right -- an uncollected mount is not
+  normally a next action, which is exactly why saying you want it has to mean
+  something -- and anything that leads to it ranks higher and says so.
+  `/cn goals` prints what is actually known about reaching each one: the
+  source, where it is, which of your characters is best placed, and the next
+  concrete step. Where nothing is known it says so, and names what would make
+  it knowable, rather than inventing a route.
+  `/cn ungoal`, `/cn gogoal <n>` to navigate, and a **Goals** tab.
+  Types: quest, achievement, mount, pet, toy, recipe, title, rep, rare,
+  currency. Goals are account-wide, because deciding you want a mount is not
+  a fact about the character you happened to be playing at the time.
+- **`.\cn.ps1 harvest`** reads SavedVariables directly and folds harvested
+  quests into `Data\Quests.lua`.
+  The addon has recorded the name, zone, coordinates and level of every quest
+  you accept since the first build, and the only way to get it out was a copy
+  box -- so in practice it stayed in SavedVariables and the curated database
+  stayed nearly empty. That is what limits prerequisite forensics, and it was
+  a tooling gap, not a data gap. Curated rows are never overwritten:
+  hand-checked data outranks observed data, the same source-ranking rule the
+  addon applies internally. Quests with no coordinates are skipped unless
+  you pass `-Force`.
+
+### Fixed
+
+- **Decorators ran once per rebuild instead of once per objective.** 0.16.0's
+  per-provider caching means the aggregate list is mostly the *same* objective
+  tables as last time, so Warband's "another character is better suited" was
+  appended again on every rebuild and stacked up under the recommendation.
+  Decoration now happens when a provider builds its objectives. Regression
+  test asserts no objective is ever decorated twice.
+- **An explicit action no longer waits on a cooldown.** Cooldowns exist to
+  stop a chatty *event* from causing work; they were also delaying things the
+  player just did on purpose, so a newly pinned goal could take two seconds to
+  appear. Invalidation with no event reason -- a scan finishing, a login, a
+  goal changing -- now bypasses cooldowns.
+
+### Notes
+
+- `Data\Quests.lua` still ships nearly empty. `harvest` is the mechanism that
+  changes that; it needs people to play with the addon loaded first.
 
 ## [0.16.1]
 
@@ -16320,6 +17235,285 @@ function Invoke-CNData {
     Write-Host "Added quest $id to $relative" -ForegroundColor Green
 }
 
+# ---------------------------------------------------------------------------
+# HARVEST
+# ---------------------------------------------------------------------------
+#
+# Closing the loop the design always described but never finished.
+#
+# The addon records the name, zone, coordinates and level of every quest you
+# accept or turn in, permanently and account-wide. Until now the only way to
+# get that out was /cn export, which prints it into a copy box -- so in
+# practice it stayed in SavedVariables and the curated database stayed empty.
+# That is what limits prerequisite forensics, and it is a tooling problem, not
+# a data problem.
+#
+# This reads SavedVariables directly and folds anything new into
+# Data\Quests.lua. Existing rows are never overwritten without -Force: curated
+# data outranks observed data, which is the same source-ranking rule the addon
+# itself applies.
+
+# Extracts one balanced { ... } block starting at the first brace at or after
+# $StartIndex. Lua tables nest, so a regex cannot do this correctly.
+function Get-CNLuaBlock {
+    param([string] $Text, [int] $StartIndex)
+
+    $open = $Text.IndexOf('{', $StartIndex)
+
+    if ($open -lt 0) { return $null }
+
+    $depth    = 0
+    $inString = $false
+    $escaped  = $false
+
+    for ($i = $open; $i -lt $Text.Length; $i++) {
+        $char = $Text[$i]
+
+        if ($escaped) { $escaped = $false; continue }
+
+        if ($char -eq '\') { $escaped = $true; continue }
+
+        if ($char -eq '"') { $inString = -not $inString; continue }
+
+        if ($inString) { continue }
+
+        if ($char -eq '{') { $depth++ }
+        elseif ($char -eq '}') {
+            $depth--
+
+            if ($depth -eq 0) {
+                return [PSCustomObject]@{
+                    Body  = $Text.Substring($open + 1, $i - $open - 1)
+                    End   = $i
+                    Start = $open
+                }
+            }
+        }
+    }
+
+    return $null
+}
+
+# Pulls [id] = { ... } records out of one SavedVariables table body.
+function Get-CNSavedRecords {
+    param([string] $Body)
+
+    $records = @{}
+
+    $index = 0
+
+    while ($true) {
+        $match = [regex]::Match($Body.Substring($index), '\[(\d+)\]\s*=\s*\{')
+
+        if (-not $match.Success) { break }
+
+        $id = [int] $match.Groups[1].Value
+
+        $block = Get-CNLuaBlock -Text $Body -StartIndex ($index + $match.Index)
+
+        if (-not $block) { break }
+
+        $fields = @{}
+
+        foreach ($field in [regex]::Matches($block.Body,
+            '\["(\w+)"\]\s*=\s*("(?:[^"\\]|\\.)*"|[-\d.eE+]+|true|false)')) {
+
+            $key   = $field.Groups[1].Value
+            $value = $field.Groups[2].Value
+
+            if ($value.StartsWith('"')) {
+                $value = $value.Substring(1, $value.Length - 2) -replace '\\"', '"'
+            }
+
+            $fields[$key] = $value
+        }
+
+        if ($fields.Count -gt 0) { $records[$id] = $fields }
+
+        $index = $block.End + 1
+
+        if ($index -ge $Body.Length) { break }
+    }
+
+    return $records
+}
+
+# Where WoW keeps SavedVariables. Deriving it from the addon folder only works
+# when the toolkit is running from inside AddOns -- and the recommended layout
+# is a writable folder elsewhere with a junction back, precisely because
+# Program Files is ACL-protected. So try the derivation, then the usual install
+# locations.
+function Get-CNSavedVariablesRoots {
+    $roots = New-Object System.Collections.Generic.List[string]
+
+    $candidate = $script:Root
+
+    for ($i = 0; $i -lt 3; $i++) {
+        $candidate = Split-Path -Parent $candidate
+
+        if (-not $candidate) { break }
+    }
+
+    if ($candidate) {
+        $roots.Add((Join-Path $candidate 'WTF\Account')) | Out-Null
+    }
+
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, 'C:\', 'D:\')) {
+        if (-not $base) { continue }
+
+        foreach ($flavour in @('_retail_', '_ptr_', '_classic_')) {
+            $roots.Add((Join-Path $base "World of Warcraft\$flavour\WTF\Account")) | Out-Null
+        }
+    }
+
+    return @($roots | Select-Object -Unique | Where-Object { Test-Path -LiteralPath $_ })
+}
+
+function Invoke-CNHarvest {
+    Assert-CNWritable
+
+    $saved = $null
+
+    if ($Target) {
+        if (-not (Test-Path -LiteralPath $Target)) {
+            Write-Host "Not found: $Target" -ForegroundColor Yellow
+            return
+        }
+
+        $saved = Get-Item -LiteralPath $Target
+    }
+    else {
+        $roots = @(Get-CNSavedVariablesRoots)
+
+        foreach ($root in $roots) {
+            $found = Get-ChildItem -LiteralPath $root -Recurse -Filter 'CompletionNavigator.lua' -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending |
+                Select-Object -First 1
+
+            if ($found) { $saved = $found; break }
+        }
+
+        if (-not $saved) {
+            Write-Host 'No SavedVariables found.' -ForegroundColor Yellow
+            Write-Host ''
+
+            if ($roots.Count -gt 0) {
+                Write-Host '  Looked in:' -ForegroundColor DarkGray
+                foreach ($root in $roots) { Write-Host "    $root" -ForegroundColor DarkGray }
+            }
+            else {
+                Write-Host '  No WoW WTF\Account folder could be located.' -ForegroundColor DarkGray
+            }
+
+            Write-Host ''
+            Write-Host '  Log in with the addon loaded and /reload once, then try again.' -ForegroundColor DarkGray
+            Write-Host '  Or point at the file:  .\cn.ps1 harvest <path>' -ForegroundColor DarkGray
+            return
+        }
+    }
+
+    Write-Host "Reading $($saved.FullName)" -ForegroundColor DarkGray
+    Write-Host ("  {0:N0} bytes, written {1}" -f $saved.Length,
+        $saved.LastWriteTime.ToString('yyyy-MM-dd HH:mm')) -ForegroundColor DarkGray
+    Write-Host ''
+
+    $text = [System.IO.File]::ReadAllText($saved.FullName)
+
+    $marker = [regex]::Match($text, '\["questHarvest"\]\s*=\s*\{')
+
+    if (-not $marker.Success) {
+        Write-Host 'No harvested quests in SavedVariables yet.' -ForegroundColor Yellow
+        Write-Host '  The addon records quests as you accept and turn them in.' -ForegroundColor DarkGray
+        return
+    }
+
+    $block = Get-CNLuaBlock -Text $text -StartIndex $marker.Index
+
+    if (-not $block) {
+        Write-Host 'questHarvest table is malformed; nothing was changed.' -ForegroundColor Red
+        return
+    }
+
+    $harvested = Get-CNSavedRecords -Body $block.Body
+
+    if ($harvested.Count -eq 0) {
+        Write-Host 'No harvested quests found.' -ForegroundColor Yellow
+        return
+    }
+
+    $relative = 'Data\Quests.lua'
+    $existing = Read-CNFile $relative
+
+    if ($null -eq $existing) { throw "$relative not found. Run: .\cn.ps1 init" }
+
+    $added      = 0
+    $skipped    = 0
+    $unlocated  = 0
+    $lines      = New-Object System.Collections.Generic.List[string]
+
+    foreach ($id in ($harvested.Keys | Sort-Object)) {
+        $record = $harvested[$id]
+
+        if ($existing -match ('\[\s*' + $id + '\s*\]\s*=')) {
+            $skipped++
+            continue
+        }
+
+        # A quest with no coordinates adds a name and nothing else. Useful,
+        # but not what the static database exists for.
+        if (-not ($record.ContainsKey('x') -and $record.ContainsKey('y'))) {
+            $unlocated++
+
+            if (-not $Force) { continue }
+        }
+
+        $lines.Add("    [$id] = {") | Out-Null
+
+        if ($record.name) {
+            $lines.Add('        name      = "' + ($record.name -replace '"', '\"') + '",') | Out-Null
+        }
+
+        if ($record.zone) { $lines.Add('        -- ' + $record.zone) | Out-Null }
+
+        if ($record.mapID) { $lines.Add("        mapID     = $($record.mapID),") | Out-Null }
+
+        if ($record.x -and $record.y) {
+            $lines.Add("        x         = $($record.x),") | Out-Null
+            $lines.Add("        y         = $($record.y),") | Out-Null
+        }
+
+        if ($record.requiresLevel) {
+            $lines.Add("        requiresLevel = $($record.requiresLevel),") | Out-Null
+        }
+
+        $lines.Add('    },') | Out-Null
+
+        $added++
+    }
+
+    Write-Host "Harvested in SavedVariables: $($harvested.Count)" -ForegroundColor White
+    Write-Host "  already in $relative       $skipped" -ForegroundColor DarkGray
+    Write-Host "  without coordinates        $unlocated$(if (-not $Force -and $unlocated -gt 0) { '  (skipped; -Force includes them)' })" -ForegroundColor DarkGray
+    Write-Host "  new rows to add            $added" -ForegroundColor $(if ($added -gt 0) { 'Green' } else { 'DarkGray' })
+    Write-Host ''
+
+    if ($added -eq 0) {
+        Write-Host 'Nothing to add.' -ForegroundColor Yellow
+        return
+    }
+
+    Invoke-CNBackup -Quiet
+
+    Add-CNBlock -Relative $relative -Block ($lines -join "`n") -Marker $script:DataMark
+
+    Write-Host "Added $added quest$(if ($added -eq 1) { '' } else { 's' }) to $relative" -ForegroundColor Green
+    Write-Host ''
+    Write-Host '  Curated rows are never overwritten: if an ID is already present' -ForegroundColor DarkGray
+    Write-Host '  it is left alone, because hand-checked data outranks observed data.' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  Next:  .\cn.ps1 check' -ForegroundColor DarkGray
+}
+
 function Invoke-CNVersion {
     Assert-CNWritable
 
@@ -17377,6 +18571,7 @@ function Show-CNHelp {
     Write-Host '  savedvars [-Force]              Locate SavedVariables (-Force opens it).'
     Write-Host '  release <x.y.z>                Bump, commit, tag and push a release.'
     Write-Host '  doctor                         Report the whole release chain state.'
+    Write-Host '  harvest [path]                 Fold harvested quests from SavedVariables into Data.'
     Write-Host '  relocate <path>                Copy the source out of Program Files.'
     Write-Host '  icon [path.png]                Convert a PNG into Media\Logo.tga for in-game use.'
     Write-Host '  gitinit                         Initialize git with a sane .gitignore.'
@@ -17412,6 +18607,7 @@ switch ($Command.ToLower()) {
     'package'   { Invoke-CNPackage }
     'savedvars' { Invoke-CNSavedVars }
     'sv'        { Invoke-CNSavedVars }
+    'harvest'   { Invoke-CNHarvest }
     'release'   { Invoke-CNRelease }
     'doctor'    { Invoke-CNDoctor }
     'status'    { Invoke-CNDoctor }

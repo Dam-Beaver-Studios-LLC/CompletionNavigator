@@ -30,6 +30,8 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 
 **Answers in the tooltip.** Hover an item anywhere — a vendor list, a loot window, the auction house — and it tells you whether you have collected that toy, mount, pet or appearance, whether this character knows that recipe and which of your characters does, and which recorded vendor sells it. Items the addon knows nothing about get nothing added, so it stays out of the way.
 
+**Works toward what you actually want.** `/cn goal mount 1234` pins a target. It becomes actionable even when nothing else would have surfaced it — an uncollected mount is not normally a next action, which is exactly why saying you want it has to mean something — and anything that leads to it ranks higher and says so. `/cn goals` reports what is known about reaching each one: the source, where it is, which of your characters is best placed, and the next concrete step. Where nothing is known, it says so rather than inventing a route.
+
 **Lets you undo hiding things.** Ignore or defer anything you are not interested in, then `/cn hidden` to see the list and `/cn unhide` to bring it back. Deferrals expire on their own.
 
 **Learns from your play.** Every quest you accept or turn in has its name, zone, coordinates and level recorded permanently. Every vendor you open records what it sells and where they stand. Every rare you see joins a spawn database. `/cn export` emits the quest data as ready-to-paste rows, so playing the game grows the database that ships to everyone.
@@ -59,9 +61,10 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 
 ## Interface
 
-A minimap button and an eight-tab window. Everything the slash commands do is reachable by clicking.
+A minimap button and a nine-tab window. Everything the slash commands do is reachable by clicking.
 
 - **Next** — the recommendation, its reasoning, and Navigate / Defer / Ignore. Below it, the ranked alternatives; click any to inspect it.
+- **Goals** — what you are working toward, and the known route to each.
 - **Now** — world quests, live rares, capped currencies and unfilled weekly earning, in one clickable list.
 - **Zone** — a live nearest-first sweep of your current map.
 - **Warband** — your roster and what each character covers.
@@ -85,6 +88,8 @@ Keybindings live under **Key Bindings → AddOns**.
 ```
 /cn setup                Scan every subsystem once; run this first
 /cn next                 Recommend the next objective
+/cn goal <type> <id>     Pin something to work toward
+/cn goals                Your goals, and what is known about reaching them
 /cn now                  Everything expiring soon
 /cn rares                Rares and treasures up right now
 /cn zone [stop]          Route this zone, or navigate to a stop
@@ -135,7 +140,7 @@ None are required. Completion Navigator is a decision layer, not a replacement f
 
 ## Status
 
-Version 0.16.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
+Version 0.17.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
 
 Bug reports and feature requests: [GitHub issues](https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/issues), or email developer@dambeaverstudios.com.
 
