@@ -1324,17 +1324,19 @@ function Blizzard.GetMerchantItems()
     return items
 end
 
--- The NPC currently being interacted with. The GUID carries the creature ID,
--- which is the only stable identifier for a vendor.
-function Blizzard.GetInteractingNPC()
-    if not UnitExists or not UnitExists("npc") then
+-- The creature ID behind any unit token. The GUID carries it, and it is the
+-- only stable identifier for an NPC.
+function Blizzard.GetUnitNPCID(unit)
+    if not unit or not UnitExists or not UnitExists(unit) then
         return nil, nil
     end
 
-    local guid = UnitGUID and UnitGUID("npc")
+    local name = UnitName and UnitName(unit) or nil
+
+    local guid = UnitGUID and UnitGUID(unit)
 
     if not guid then
-        return nil, UnitName and UnitName("npc") or nil
+        return nil, name
     end
 
     -- GUID form: Creature-0-serverID-instanceID-zoneUID-npcID-spawnUID
@@ -1344,5 +1346,88 @@ function Blizzard.GetInteractingNPC()
     -- its `base` argument and throws.
     local npcID = tonumber((select(6, strsplit("-", guid))))
 
-    return npcID, UnitName and UnitName("npc") or nil
+    return npcID, name
+end
+
+-- The NPC currently being interacted with.
+function Blizzard.GetInteractingNPC()
+    return Blizzard.GetUnitNPCID("npc")
+end
+
+------------------------------------------------------------
+-- ITEM IDENTITY
+------------------------------------------------------------
+
+-- Items that teach a collectible do not announce themselves as such; each
+-- collection API has its own item lookup. All three are optional and all
+-- three have changed shape before, so each is probed rather than assumed.
+
+function Blizzard.GetMountFromItem(itemID)
+    if not itemID or not C_MountJournal or not C_MountJournal.GetMountFromItem then
+        return nil
+    end
+
+    return C_MountJournal.GetMountFromItem(itemID)
+end
+
+function Blizzard.GetPetSpeciesFromItem(itemID)
+    if not itemID or not C_PetJournal or not C_PetJournal.GetPetInfoByItemID then
+        return nil, nil
+    end
+
+    local name, icon, petType, companionID, tooltipSource, description,
+          isWild, canBattle, isTradeable, isUnique, obtainable, creatureDisplayID,
+          speciesID = C_PetJournal.GetPetInfoByItemID(itemID)
+
+    -- The species ID has moved position in this return list before. Falling
+    -- back to the companion ID keeps the lookup working either way.
+    return speciesID or companionID, name
+end
+
+-- Returns true/false only for items that actually have an appearance, and nil
+-- for everything else.
+--
+-- The gate matters. PlayerHasTransmogByItemInfo answers false for a stack of
+-- ore just as readily as for an unlearned tabard, so using it alone would
+-- stamp "appearance not yet known" on every trade good in the game.
+function Blizzard.HasTransmogByItem(itemID)
+    if not itemID or not C_TransmogCollection then
+        return nil
+    end
+
+    if not C_TransmogCollection.GetItemInfo then
+        return nil
+    end
+
+    local ok, appearanceID = pcall(C_TransmogCollection.GetItemInfo, itemID)
+
+    if not ok or not appearanceID then
+        return nil
+    end
+
+    if C_TransmogCollection.PlayerHasTransmogByItemInfo then
+        local hasOk, has = pcall(C_TransmogCollection.PlayerHasTransmogByItemInfo, itemID)
+
+        if hasOk then
+            return has and true or false
+        end
+    end
+
+    return nil
+end
+
+function Blizzard.GetItemName(itemID)
+    if not itemID then
+        return nil
+    end
+
+    if C_Item and C_Item.GetItemNameByID then
+        return C_Item.GetItemNameByID(itemID)
+    end
+
+    if GetItemInfo then
+        return (GetItemInfo(itemID))
+    end
+
+    return nil
 end

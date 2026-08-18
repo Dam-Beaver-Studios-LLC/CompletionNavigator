@@ -100,7 +100,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.14.0"
+CN.version     = "0.15.0"
 CN.dbVersion   = 2
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -353,6 +353,10 @@ CN.defaults = {
         -- Off by default: taking over the waypoint uninvited is hostile,
         -- and TomTom arrows are shared with every other addon.
         autoWaypoint = false,
+
+        -- Addon lines on item and unit tooltips. On by default: these are
+        -- additive and read-only, unlike the waypoint.
+        tooltips     = true,
 
         -- Minimap button placement is an angle in degrees around the
         -- minimap edge, so it survives UI scale and minimap size changes.
@@ -1464,11 +1468,82 @@ function CN.RegisterCandidateDecorator(name, decorator)
     end
 end
 
-function CN.CollectCandidates()
+------------------------------------------------------------
+-- CACHING
+------------------------------------------------------------
+
+-- Fourteen providers now run on every /cn next, every window refresh and
+-- every auto-advance tick, and several of them walk thousands of records.
+-- Recomputing all of that several times a second was never the design; the
+-- architecture notes called for cached state and dirty flags from the start.
+--
+-- The cache is invalidated by the events that can actually change an answer,
+-- with a short TTL as a backstop for anything that changes without an event
+-- (a world quest timer ticking down, for one).
+local cache = {
+    candidates = nil,
+    builtAt    = 0,
+    dirty      = true,
+}
+
+CN.candidateCacheSeconds = 5
+
+-- Per-provider timings, so a slow provider can be identified rather than
+-- guessed at.
+CN.providerTimings = CN.providerTimings or {}
+
+function CN.InvalidateCandidates(reason)
+    cache.dirty = true
+
+    if reason then
+        CN.DebugPrint("Candidate cache invalidated: " .. tostring(reason))
+    end
+end
+
+-- Anything that can change what is actionable.
+for _, event in ipairs({
+    "QUEST_ACCEPTED",
+    "QUEST_TURNED_IN",
+    "QUEST_REMOVED",
+    "QUEST_LOG_UPDATE",
+    "ACHIEVEMENT_EARNED",
+    "CRITERIA_UPDATE",
+    "UPDATE_FACTION",
+    "NEW_PET_ADDED",
+    "NEW_MOUNT_ADDED",
+    "NEW_TOY_ADDED",
+    "CURRENCY_DISPLAY_UPDATE",
+    "VIGNETTE_MINIMAP_UPDATED",
+    "VIGNETTES_UPDATED",
+    "ZONE_CHANGED_NEW_AREA",
+    "MERCHANT_SHOW",
+    "TRADE_SKILL_LIST_UPDATE",
+}) do
+    CN:RegisterEvent(event, function()
+        CN.InvalidateCandidates(event)
+    end)
+end
+
+local function BuildCandidates()
     local candidates = {}
 
     for name, provider in pairs(CN.candidateProviders) do
+        local startedAt = debugprofilestop and debugprofilestop() or nil
+
         local ok, result = pcall(provider)
+
+        if startedAt and debugprofilestop then
+            local elapsed = debugprofilestop() - startedAt
+
+            local timing = CN.providerTimings[name] or { calls = 0, total = 0, worst = 0 }
+
+            timing.calls = timing.calls + 1
+            timing.total = timing.total + elapsed
+            timing.worst = math.max(timing.worst, elapsed)
+            timing.last  = elapsed
+
+            CN.providerTimings[name] = timing
+        end
 
         if ok and type(result) == "table" then
             for _, objective in ipairs(result) do
@@ -1490,6 +1565,33 @@ function CN.CollectCandidates()
     end
 
     return candidates
+end
+
+function CN.CollectCandidates(force)
+    local now = time()
+
+    local fresh = cache.candidates
+        and not cache.dirty
+        and (now - cache.builtAt) < CN.candidateCacheSeconds
+
+    if fresh and not force then
+        return cache.candidates
+    end
+
+    cache.candidates = BuildCandidates()
+    cache.builtAt    = now
+    cache.dirty      = false
+
+    return cache.candidates
+end
+
+function CN.GetCandidateCacheState()
+    return {
+        cached  = cache.candidates ~= nil,
+        count   = cache.candidates and #cache.candidates or 0,
+        dirty   = cache.dirty,
+        age     = cache.candidates and (time() - cache.builtAt) or nil,
+    }
 end
 
 ------------------------------------------------------------
@@ -1568,6 +1670,48 @@ CN:RegisterCommand{
 
         if objective.mapID and objective.x and objective.y then
             CN.Print("|cffffff00/cn go|r to set a waypoint.")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "perf",
+    order   = 90,
+    help    = "Show candidate provider timings and cache state.",
+    handler = function()
+        local state = CN.GetCandidateCacheState()
+
+        CN.Print("Candidate cache: "
+            .. (state.cached and (state.count .. " objectives") or "empty")
+            .. (state.dirty and " |cffffff00(stale)|r" or "")
+            .. (state.age and (" |cff999999" .. state.age .. "s old|r") or ""))
+
+        local rows = {}
+
+        for name, timing in pairs(CN.providerTimings) do
+            table.insert(rows, {
+                name    = name,
+                average = timing.calls > 0 and (timing.total / timing.calls) or 0,
+                worst   = timing.worst,
+                calls   = timing.calls,
+            })
+        end
+
+        if #rows == 0 then
+            CN.Print("No timings recorded yet. Run |cffffff00/cn next|r first.")
+            CN.Print("|cff999999Timings need debugprofilestop, which exists in game "
+                .. "but not in offline tests.|r")
+            return
+        end
+
+        table.sort(rows, function(a, b) return a.average > b.average end)
+
+        CN.Print("Providers, slowest first:")
+
+        for _, row in ipairs(rows) do
+            CN.Print(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)",
+                row.name, row.average, row.worst, row.calls,
+                row.calls == 1 and "call" or "calls"))
         end
     end,
 }
@@ -3586,6 +3730,20 @@ UI.RegisterTab{
             end)
         panel.minimap:SetPoint("TOPLEFT", panel.auto, "BOTTOMLEFT", 0, -6)
 
+        panel.tooltips = AddCheckbox(panel, "Add lines to item and unit tooltips",
+            function() return CN.Settings().tooltips ~= false end,
+            function(value) CN.Settings().tooltips = value end)
+        panel.tooltips:SetPoint("TOPLEFT", panel.minimap, "BOTTOMLEFT", 0, -6)
+
+        panel.setup = AddButton(panel, "Scan everything now", 180, function()
+            local setup = CN:GetModule("Setup")
+
+            if setup then
+                setup.Run()
+            end
+        end)
+        panel.setup:SetPoint("TOPLEFT", panel.tooltips, "BOTTOMLEFT", 0, -12)
+
         panel.reset = AddButton(panel, "Reset window position", 180, function()
             CN.Settings().window = nil
 
@@ -3609,6 +3767,7 @@ UI.RegisterTab{
         panel.debug.Refresh()
         panel.auto.Refresh()
         panel.minimap.Refresh()
+        panel.tooltips.Refresh()
 
         panel.about:SetText("Completion Navigator v" .. CN.version)
     end,
@@ -3710,6 +3869,33 @@ local function BuildMinimapButton()
     minimapButton:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:AddLine("Completion Navigator")
+
+        -- The recommendation is the whole point of the addon, so put it where
+        -- it costs nothing to read. This is cheap now: candidates are cached,
+        -- so hovering the button does not rebuild fourteen providers.
+        local ok, results = pcall(CN.Recommend, 1)
+
+        if ok and results and results[1] then
+            local objective = results[1]
+
+            GameTooltip:AddLine("Next: " .. tostring(objective.name or objective.id),
+                0.2, 1.0, 0.6)
+
+            local reasons = CN.ExplainRecommendation(objective)
+
+            for index, reason in ipairs(reasons) do
+                if index > 2 then
+                    break
+                end
+
+                GameTooltip:AddLine(reason, 0.6, 0.6, 0.6)
+            end
+        else
+            GameTooltip:AddLine("Nothing actionable is known yet.", 0.6, 0.6, 0.6)
+            GameTooltip:AddLine("Run /cn setup once.", 0.6, 0.6, 0.6)
+        end
+
+        GameTooltip:AddLine(" ")
         GameTooltip:AddLine("|cffffffffLeft-click|r open the window", 1, 1, 1)
         GameTooltip:AddLine("|cffffffffRight-click|r navigate to the next objective", 1, 1, 1)
         GameTooltip:AddLine("|cffffffffDrag|r reposition this button", 1, 1, 1)
@@ -5236,17 +5422,19 @@ function Blizzard.GetMerchantItems()
     return items
 end
 
--- The NPC currently being interacted with. The GUID carries the creature ID,
--- which is the only stable identifier for a vendor.
-function Blizzard.GetInteractingNPC()
-    if not UnitExists or not UnitExists("npc") then
+-- The creature ID behind any unit token. The GUID carries it, and it is the
+-- only stable identifier for an NPC.
+function Blizzard.GetUnitNPCID(unit)
+    if not unit or not UnitExists or not UnitExists(unit) then
         return nil, nil
     end
 
-    local guid = UnitGUID and UnitGUID("npc")
+    local name = UnitName and UnitName(unit) or nil
+
+    local guid = UnitGUID and UnitGUID(unit)
 
     if not guid then
-        return nil, UnitName and UnitName("npc") or nil
+        return nil, name
     end
 
     -- GUID form: Creature-0-serverID-instanceID-zoneUID-npcID-spawnUID
@@ -5256,7 +5444,90 @@ function Blizzard.GetInteractingNPC()
     -- its `base` argument and throws.
     local npcID = tonumber((select(6, strsplit("-", guid))))
 
-    return npcID, UnitName and UnitName("npc") or nil
+    return npcID, name
+end
+
+-- The NPC currently being interacted with.
+function Blizzard.GetInteractingNPC()
+    return Blizzard.GetUnitNPCID("npc")
+end
+
+------------------------------------------------------------
+-- ITEM IDENTITY
+------------------------------------------------------------
+
+-- Items that teach a collectible do not announce themselves as such; each
+-- collection API has its own item lookup. All three are optional and all
+-- three have changed shape before, so each is probed rather than assumed.
+
+function Blizzard.GetMountFromItem(itemID)
+    if not itemID or not C_MountJournal or not C_MountJournal.GetMountFromItem then
+        return nil
+    end
+
+    return C_MountJournal.GetMountFromItem(itemID)
+end
+
+function Blizzard.GetPetSpeciesFromItem(itemID)
+    if not itemID or not C_PetJournal or not C_PetJournal.GetPetInfoByItemID then
+        return nil, nil
+    end
+
+    local name, icon, petType, companionID, tooltipSource, description,
+          isWild, canBattle, isTradeable, isUnique, obtainable, creatureDisplayID,
+          speciesID = C_PetJournal.GetPetInfoByItemID(itemID)
+
+    -- The species ID has moved position in this return list before. Falling
+    -- back to the companion ID keeps the lookup working either way.
+    return speciesID or companionID, name
+end
+
+-- Returns true/false only for items that actually have an appearance, and nil
+-- for everything else.
+--
+-- The gate matters. PlayerHasTransmogByItemInfo answers false for a stack of
+-- ore just as readily as for an unlearned tabard, so using it alone would
+-- stamp "appearance not yet known" on every trade good in the game.
+function Blizzard.HasTransmogByItem(itemID)
+    if not itemID or not C_TransmogCollection then
+        return nil
+    end
+
+    if not C_TransmogCollection.GetItemInfo then
+        return nil
+    end
+
+    local ok, appearanceID = pcall(C_TransmogCollection.GetItemInfo, itemID)
+
+    if not ok or not appearanceID then
+        return nil
+    end
+
+    if C_TransmogCollection.PlayerHasTransmogByItemInfo then
+        local hasOk, has = pcall(C_TransmogCollection.PlayerHasTransmogByItemInfo, itemID)
+
+        if hasOk then
+            return has and true or false
+        end
+    end
+
+    return nil
+end
+
+function Blizzard.GetItemName(itemID)
+    if not itemID then
+        return nil
+    end
+
+    if C_Item and C_Item.GetItemNameByID then
+        return C_Item.GetItemNameByID(itemID)
+    end
+
+    if GetItemInfo then
+        return (GetItemInfo(itemID))
+    end
+
+    return nil
 end
 '@
 
@@ -12651,6 +12922,729 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Tooltips.lua'] = @'
+-- Modules/Tooltips.lua
+-- Completion Navigator :: what the addon knows, shown where you are looking.
+--
+-- Everything in this addon already knows whether you own a toy, which of your
+-- characters knows a recipe, and which vendor sells an item. Until now you had
+-- to go and ask. A tooltip is where that question actually gets asked -- while
+-- hovering the thing in a vendor list, a loot window or the auction house.
+--
+-- The line-building functions are deliberately separate from the hooks: the
+-- lines are pure data, so they can be tested offline, and the hooks are a thin
+-- adapter over whichever tooltip API the client is running.
+
+local ADDON_NAME, CN = ...
+
+local Tooltips = CN:RegisterModule("Tooltips")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+local GREEN  = { 0.4, 1.0, 0.4 }
+local RED    = { 1.0, 0.4, 0.4 }
+local YELLOW = { 1.0, 0.85, 0.3 }
+local GREY   = { 0.6, 0.6, 0.6 }
+
+local HEADER = "Completion Navigator"
+
+local function Enabled()
+    local settings = CN.Settings()
+
+    return settings and settings.tooltips ~= false
+end
+
+Tooltips.Enabled = Enabled
+
+------------------------------------------------------------
+-- LINE BUILDERS
+------------------------------------------------------------
+
+local function Add(lines, text, color)
+    table.insert(lines, { text = text, color = color or GREY })
+end
+
+local function CollectedLine(lines, label, collected)
+    if collected then
+        Add(lines, label .. ": collected", GREEN)
+    else
+        Add(lines, label .. ": not collected", RED)
+    end
+end
+
+-- Toys are keyed by item ID in both the toy box and our own store, so this is
+-- the one collection lookup that needs no translation.
+local function ToyLines(lines, itemID)
+    local record = CN.Account("toys")[itemID]
+
+    if record then
+        CollectedLine(lines, "Toy", record.collected)
+        return true
+    end
+
+    -- No scan yet, but the client can still answer for this one item.
+    if PlayerHasToy and C_ToyBox and C_ToyBox.GetToyInfo then
+        local _, name = C_ToyBox.GetToyInfo(itemID)
+
+        if name then
+            CollectedLine(lines, "Toy", PlayerHasToy(itemID))
+            return true
+        end
+    end
+
+    return false
+end
+
+local function MountLines(lines, itemID)
+    local mountID = Blizzard.GetMountFromItem(itemID)
+
+    if not mountID then
+        return false
+    end
+
+    local record = CN.Account("mounts")[mountID]
+
+    if record then
+        CollectedLine(lines, "Mount", record.collected)
+
+        if record.isFactionSpecific and record.faction then
+            Add(lines, "Faction-locked", YELLOW)
+        end
+
+        return true
+    end
+
+    local mount = Blizzard.GetMountByID(mountID)
+
+    if mount then
+        CollectedLine(lines, "Mount", mount.isCollected)
+        return true
+    end
+
+    return false
+end
+
+local function PetLines(lines, itemID)
+    local speciesID = Blizzard.GetPetSpeciesFromItem(itemID)
+
+    if not speciesID then
+        return false
+    end
+
+    local record = CN.Account("pets")[speciesID]
+
+    local count, limit
+
+    if record then
+        count, limit = record.count, record.limit
+    else
+        count, limit = Blizzard.GetPetCollectedCount(speciesID)
+    end
+
+    count = count or 0
+    limit = limit or 3
+
+    if count > 0 then
+        Add(lines, "Battle pet: collected " .. count .. " of " .. limit, GREEN)
+    else
+        Add(lines, "Battle pet: not collected", RED)
+    end
+
+    return true
+end
+
+local function AppearanceLines(lines, itemID)
+    local has = Blizzard.HasTransmogByItem(itemID)
+
+    if has == nil then
+        return false
+    end
+
+    if has then
+        Add(lines, "Appearance: already known", GREEN)
+    else
+        Add(lines, "Appearance: not yet known", RED)
+    end
+
+    return true
+end
+
+-- Recipes are the messy case. The trade skill API keys recipes by recipe ID
+-- while a vendor sells an item ID, and the two are not the same number. The
+-- ID lookup is tried first because it is exact; the name match is the fallback
+-- that actually fires most of the time, and it is reported as a match on name
+-- rather than dressed up as certainty.
+local function RecipeLines(lines, itemID, itemName)
+    local professions = CN:GetModule("Professions")
+
+    if not professions then
+        return false
+    end
+
+    local names = professions.RecipeNames() or {}
+    local mine  = professions.CharacterRecipes() or {}
+
+    local recipeID, matchedOnName
+
+    if names[itemID] then
+        recipeID = itemID
+    elseif itemName and itemName ~= "" then
+        -- "Recipe: Flask of Testing" teaches "Flask of Testing".
+        local needle = string.lower(itemName)
+
+        for id, name in pairs(names) do
+            if name and name ~= "" then
+                local candidate = string.lower(name)
+
+                if candidate == needle or string.find(needle, candidate, 1, true) then
+                    recipeID      = id
+                    matchedOnName = true
+                    break
+                end
+            end
+        end
+    end
+
+    if not recipeID then
+        return false
+    end
+
+    if mine[recipeID] then
+        Add(lines, "Recipe: known by this character", GREEN)
+    else
+        Add(lines, "Recipe: not known by this character", RED)
+
+        local holders = professions.WhoKnows(recipeID) or {}
+
+        if #holders > 0 then
+            Add(lines, "Known by: " .. table.concat(holders, ", "), YELLOW)
+        end
+    end
+
+    if matchedOnName then
+        Add(lines, "matched by name", GREY)
+    end
+
+    return true
+end
+
+local function VendorLines(lines, itemID)
+    local vendors = CN:GetModule("Vendors")
+
+    if not vendors then
+        return false
+    end
+
+    local sellers = vendors.WhoSells(itemID)
+
+    if #sellers == 0 then
+        return false
+    end
+
+    for index, seller in ipairs(sellers) do
+        if index > 3 then
+            Add(lines, "and " .. (#sellers - 3) .. " more recorded seller"
+                .. ((#sellers - 3) == 1 and "" or "s"), GREY)
+            break
+        end
+
+        local text = "Sold by " .. tostring(seller.name or seller.npcID)
+
+        if seller.zone then
+            text = text .. " in " .. seller.zone
+        end
+
+        if seller.x and seller.y then
+            text = text .. string.format(" (%.1f, %.1f)", seller.x * 100, seller.y * 100)
+        end
+
+        Add(lines, text, YELLOW)
+    end
+
+    return true
+end
+
+-- The whole item block, as data. Returns an array of { text, color }.
+function Tooltips.ItemLines(itemID, itemName)
+    local lines = {}
+
+    if not itemID or not CN.db then
+        return lines
+    end
+
+    itemName = itemName or Blizzard.GetItemName(itemID)
+
+    local collectible = false
+
+    collectible = ToyLines(lines, itemID)         or collectible
+    collectible = MountLines(lines, itemID)       or collectible
+    collectible = PetLines(lines, itemID)         or collectible
+    collectible = RecipeLines(lines, itemID, itemName) or collectible
+
+    -- Appearance state is noise on something that is not gear, so it is only
+    -- consulted when nothing else claimed the item.
+    if not collectible then
+        AppearanceLines(lines, itemID)
+    end
+
+    VendorLines(lines, itemID)
+
+    return lines
+end
+
+-- Unit tooltips answer a narrower question: have I shopped here, and is this
+-- creature one the addon is tracking as a rare.
+function Tooltips.UnitLines(npcID)
+    local lines = {}
+
+    if not npcID or not CN.db then
+        return lines
+    end
+
+    local vendors = CN:GetModule("Vendors")
+
+    if vendors then
+        local record = vendors.Store()[npcID]
+
+        if record then
+            Add(lines, "Recorded vendor: " .. (record.itemCount or 0) .. " items", YELLOW)
+
+            if not record.mapID then
+                Add(lines, "no coordinates recorded yet", GREY)
+            end
+        end
+    end
+
+    -- The rare database is keyed by vignette ID, not creature ID, so there is
+    -- deliberately nothing to say here about rares. Adding a guess would be
+    -- worse than the silence.
+
+    return lines
+end
+
+------------------------------------------------------------
+-- RENDERING
+------------------------------------------------------------
+
+function Tooltips.Render(tooltip, lines)
+    if not tooltip or not tooltip.AddLine or #lines == 0 then
+        return 0
+    end
+
+    tooltip:AddLine(" ")
+    tooltip:AddLine(HEADER, 0.2, 1.0, 0.6)
+
+    for _, line in ipairs(lines) do
+        tooltip:AddLine(line.text, line.color[1], line.color[2], line.color[3])
+    end
+
+    if tooltip.Show then
+        tooltip:Show()
+    end
+
+    return #lines
+end
+
+------------------------------------------------------------
+-- HOOKS
+------------------------------------------------------------
+
+-- Which tooltip API resolved, reported by /cn tooltips so a silent hook is
+-- diagnosable rather than mysterious.
+Tooltips.backend = "none"
+
+local function OnItemTooltip(tooltip, itemID, itemName)
+    if not Enabled() then
+        return
+    end
+
+    local ok, err = pcall(function()
+        Tooltips.Render(tooltip, Tooltips.ItemLines(itemID, itemName))
+    end)
+
+    if not ok then
+        DebugPrint("Item tooltip failed: " .. tostring(err))
+    end
+end
+
+local function OnUnitTooltip(tooltip, unit)
+    if not Enabled() then
+        return
+    end
+
+    local ok, err = pcall(function()
+        local npcID = Blizzard.GetUnitNPCID(unit or "mouseover")
+
+        Tooltips.Render(tooltip, Tooltips.UnitLines(npcID))
+    end)
+
+    if not ok then
+        DebugPrint("Unit tooltip failed: " .. tostring(err))
+    end
+end
+
+Tooltips.OnItemTooltip = OnItemTooltip
+Tooltips.OnUnitTooltip = OnUnitTooltip
+
+function Tooltips.Install()
+    if Tooltips.installed then
+        return Tooltips.backend
+    end
+
+    -- Modern retail: every tooltip is data-driven and post-processed. Post
+    -- calls run after the tooltip is rebuilt, so lines are added once per
+    -- render rather than accumulating.
+    if TooltipDataProcessor
+        and TooltipDataProcessor.AddTooltipPostCall
+        and Enum and Enum.TooltipDataType then
+
+        TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item,
+            function(tooltip, data)
+                local itemID, itemName
+
+                if data then
+                    itemID = data.id
+                end
+
+                if TooltipUtil and TooltipUtil.GetDisplayedItem then
+                    local name, _, id = TooltipUtil.GetDisplayedItem(tooltip)
+
+                    itemName = name
+                    itemID   = itemID or id
+                end
+
+                OnItemTooltip(tooltip, itemID, itemName)
+            end)
+
+        TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Unit,
+            function(tooltip, data)
+                local unit
+
+                if TooltipUtil and TooltipUtil.GetDisplayedUnit then
+                    unit = select(2, TooltipUtil.GetDisplayedUnit(tooltip))
+                end
+
+                OnUnitTooltip(tooltip, unit)
+            end)
+
+        Tooltips.installed = true
+        Tooltips.backend   = "TooltipDataProcessor"
+
+        return Tooltips.backend
+    end
+
+    -- Older clients. Kept because the addon is expected to load on more than
+    -- one flavour, and a missing hook here is silent otherwise.
+    if GameTooltip and GameTooltip.HookScript then
+        GameTooltip:HookScript("OnTooltipSetItem", function(self)
+            local name, link = self:GetItem()
+
+            local itemID = link and tonumber(link:match("item:(%d+)"))
+
+            OnItemTooltip(self, itemID, name)
+        end)
+
+        GameTooltip:HookScript("OnTooltipSetUnit", function(self)
+            local _, unit = self:GetUnit()
+
+            OnUnitTooltip(self, unit)
+        end)
+
+        Tooltips.installed = true
+        Tooltips.backend   = "OnTooltipSet"
+
+        return Tooltips.backend
+    end
+
+    Tooltips.backend = "none"
+
+    return Tooltips.backend
+end
+
+CN:OnLogin(function()
+    Tooltips.Install()
+
+    DebugPrint("Tooltip backend: " .. tostring(Tooltips.backend))
+end)
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "tooltips",
+    args    = "[on or off]",
+    order   = 82,
+    help    = "Toggle addon lines on item and unit tooltips.",
+    handler = function(args)
+        local settings = CN.Settings()
+
+        args = string.lower(CN.Trim(args))
+
+        if args == "on" then
+            settings.tooltips = true
+        elseif args == "off" then
+            settings.tooltips = false
+        elseif args ~= "" then
+            Print("Usage: /cn tooltips [on or off]")
+            return
+        else
+            settings.tooltips = not (settings.tooltips ~= false)
+        end
+
+        Print("Tooltip lines: " .. CN.YesNo(settings.tooltips ~= false))
+        Print("|cff999999Backend: " .. tostring(Tooltips.backend) .. "|r")
+
+        if Tooltips.backend == "none" then
+            Print("|cff999999No tooltip API resolved, so nothing will be added.|r")
+        end
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
+$Embedded['Modules\Setup.lua'] = @'
+-- Modules/Setup.lua
+-- Completion Navigator :: the first five minutes.
+--
+-- Every recommendation this addon makes is only as good as what it has
+-- scanned, and until now a new install had to discover eleven separate scan
+-- commands to get there. Worse, it looked broken in the meantime: an empty
+-- database and a confident "nothing actionable is known yet" read as a bug
+-- rather than as a first run.
+--
+-- /cn setup runs every scan in order, one per frame, and then reports what
+-- the client genuinely could not answer -- recipes and vendors, which are
+-- readable only while their windows are open, and so can never be batched.
+
+local ADDON_NAME, CN = ...
+
+local Setup = CN:RegisterModule("Setup")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+------------------------------------------------------------
+-- STEPS
+------------------------------------------------------------
+
+-- Ordered so the cheap scans report first and the journal scans -- which
+-- open and filter collection UIs -- come last.
+Setup.steps = {
+    { key = "reputations", label = "Reputations", module = "Reputations", fn = "Scan" },
+    { key = "currencies",  label = "Currencies",  module = "Currencies",  fn = "Scan" },
+    { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan" },
+    { key = "professions", label = "Professions", module = "Professions", fn = "Scan" },
+    { key = "exploration", label = "Exploration", module = "Exploration", fn = "Scan" },
+    { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown" },
+    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan" },
+    { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan" },
+    { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan" },
+    { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan" },
+    { key = "appearances", label = "Appearances", module = "Appearances", fn = "Scan" },
+}
+
+function Setup.RunStep(step)
+    local module = CN:GetModule(step.module)
+
+    if not module or type(module[step.fn]) ~= "function" then
+        return false, "module not loaded"
+    end
+
+    local ok, first = pcall(module[step.fn])
+
+    if not ok then
+        return false, tostring(first)
+    end
+
+    return true, first
+end
+
+------------------------------------------------------------
+-- RUN
+------------------------------------------------------------
+
+Setup.running = false
+
+-- Spreading the steps across frames matters: several of these walk the entire
+-- pet journal or achievement tree, and doing all eleven inside one frame is a
+-- visible stutter on a login that is already busy.
+function Setup.Run(onComplete)
+    if Setup.running then
+        Print("Setup is already running.")
+        return false
+    end
+
+    Setup.running = true
+
+    local results = {}
+    local index   = 0
+
+    local function step()
+        index = index + 1
+
+        local entry = Setup.steps[index]
+
+        if not entry then
+            Setup.running = false
+
+            CN.Account("setup").completedAt = time()
+
+            Setup.Report(results)
+
+            if onComplete then
+                pcall(onComplete, results)
+            end
+
+            return
+        end
+
+        local ok, value = Setup.RunStep(entry)
+
+        table.insert(results, {
+            label = entry.label,
+            ok    = ok,
+            value = ok and value or nil,
+            error = (not ok) and value or nil,
+        })
+
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0, step)
+        else
+            step()
+        end
+    end
+
+    Print("Running setup: " .. #Setup.steps .. " scans.")
+
+    step()
+
+    return true
+end
+
+function Setup.Report(results)
+    local scanned, failed = 0, 0
+
+    for _, result in ipairs(results) do
+        if result.ok then
+            scanned = scanned + 1
+
+            Print("  " .. result.label .. ": "
+                .. (type(result.value) == "number" and result.value or "done"))
+        else
+            failed = failed + 1
+
+            Print("  " .. result.label .. ": |cffff4444" .. tostring(result.error) .. "|r")
+        end
+    end
+
+    Print("Setup complete: " .. scanned .. " scanned"
+        .. (failed > 0 and (", " .. failed .. " unavailable") or "") .. ".")
+
+    for _, line in ipairs(Setup.Outstanding()) do
+        Print("|cffffff00" .. line .. "|r")
+    end
+
+    Print("Now try |cffffff00/cn next|r.")
+end
+
+------------------------------------------------------------
+-- WHAT SETUP CANNOT DO
+------------------------------------------------------------
+
+-- Two subsystems are readable only while their window is open. Saying so is
+-- the difference between "this addon does not track recipes" and "open your
+-- profession window once".
+function Setup.Outstanding()
+    local lines = {}
+
+    local professions = CN:GetModule("Professions")
+
+    if professions and professions.AwaitingRecipeCapture then
+        local awaiting = professions.AwaitingRecipeCapture()
+
+        if awaiting and #awaiting > 0 then
+            local names = {}
+
+            for _, entry in ipairs(awaiting) do
+                table.insert(names, tostring(entry))
+            end
+
+            table.insert(lines, "Open each profession window once to record recipes: "
+                .. table.concat(names, ", "))
+        end
+    end
+
+    local vendors = CN:GetModule("Vendors")
+
+    if vendors then
+        local counts = vendors.Summary()
+
+        if counts.vendors == 0 then
+            table.insert(lines,
+                "No vendors recorded yet; they are captured as you open merchant windows.")
+        end
+    end
+
+    return lines
+end
+
+function Setup.HasRun()
+    local record = CN.Account("setup")
+
+    return (record and record.completedAt) and true or false
+end
+
+------------------------------------------------------------
+-- FIRST-RUN PROMPT
+------------------------------------------------------------
+
+-- Prompt, never act. Running eleven scans uninvited on someone's login is the
+-- same discourtesy as seizing their waypoint.
+CN:OnLogin(function()
+    if Setup.HasRun() then
+        return
+    end
+
+    local account = CN.Account("setup")
+
+    if account.prompted then
+        return
+    end
+
+    account.prompted = time()
+
+    if C_Timer and C_Timer.After then
+        C_Timer.After(8, function()
+            if not Setup.HasRun() then
+                Print("First run: type |cffffff00/cn setup|r to scan everything once.")
+            end
+        end)
+    else
+        Print("First run: type |cffffff00/cn setup|r to scan everything once.")
+    end
+end)
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "setup",
+    aliases = { "scanall" },
+    order   = 5,
+    help    = "Scan every subsystem once. Run this first.",
+    handler = function()
+        Setup.Run()
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -12670,7 +13664,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.14.0
+## Version: 0.15.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -12693,11 +13687,11 @@ Commands.lua
 Scoring.lua
 Routing.lua
 UI.lua
+Providers\ATT.lua
 Providers\Blizzard.lua
+Providers\BtWQuests.lua
 Providers\HandyNotes.lua
 Providers\StaticData.lua
-Providers\ATT.lua
-Providers\BtWQuests.lua
 Providers\TomTom.lua
 Data\Quests.lua
 Modules\Achievements.lua
@@ -12714,7 +13708,9 @@ Modules\Professions.lua
 Modules\Quests.lua
 Modules\Rares.lua
 Modules\Reputations.lua
+Modules\Setup.lua
 Modules\Titles.lua
+Modules\Tooltips.lua
 Modules\Toys.lua
 Modules\Vendors.lua
 Modules\Warband.lua
@@ -12759,7 +13755,7 @@ Most completion addons answer *what am I missing?* Completion Navigator is built
 
 ## What it does
 
-Type `/cn next` or click the minimap button. The addon scores every objective it knows to be currently actionable and tells you which one is worth doing, and why.
+Run `/cn setup` once, then type `/cn next` or click the minimap button. The addon scores every objective it knows to be currently actionable and tells you which one is worth doing, and why.
 
 - **Explains itself.** Every recommendation comes with its reasons: *ready to turn in*, *in your current zone*, *a Paragon reward is waiting*, *unlocks four further quests*.
 - **Navigates.** Sets a TomTom waypoint if you have TomTom, a Blizzard map pin if you don't, and falls back to the game's own quest tracking arrow when no coordinates exist.
@@ -12788,7 +13784,7 @@ Type `/cn next` or click the minimap button. The addon scores every objective it
 
 `/cn` for status, `/cn help` for the full list, `/cn ui` for the window.
 
-The window has five tabs — Next, Zone, Collections, Scans, Settings — and everything the slash commands do is reachable by clicking. Keybindings live under Key Bindings → AddOns.
+The window has eight tabs — Next, Now, Zone, Warband, Collections, Remaining, Scans, Settings — and everything the slash commands do is reachable by clicking. Keybindings live under Key Bindings → AddOns.
 
 ## Known limitations
 
@@ -12798,6 +13794,8 @@ These are honest constraints, not oversights:
 - **No completion percentages for zones.** A percentage needs a trustworthy denominator, and the curated static database does not yet have zone coverage. The addon reports counts of what remains instead of inventing a number you would act on.
 - **Appearances are tracked per category, not per item.** Enumerating every appearance source is tens of thousands of entries; the actionable question is which slot is furthest from done.
 - **Achievements only become recommendations when nearly complete.** A zero-progress achievement is a project, not a next action.
+- **Tooltip appearance lines only appear where an item has an appearance.** `PlayerHasTransmogByItemInfo` answers `false` for a stack of ore just as readily as for an unlearned tabard, so the lookup is gated on the item genuinely having an appearance source rather than stamping "not yet known" on every trade good in the game.
+- **Recipe tooltips fall back to matching on name.** The trade skill API keys recipes by recipe ID while a vendor sells an item ID, and the two are not the same number. The ID lookup is tried first; when the name match is what fired, the tooltip says so rather than dressing it up as certainty.
 
 ## Optional integrations
 
@@ -12851,6 +13849,40 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.15.0]
+
+### Added
+
+- **Tooltips.** Item tooltips now say what the addon already knew: whether a
+  toy, mount, battle pet or appearance is collected, whether this character
+  knows a recipe and which of your characters does, and which recorded
+  vendor sells the item and where they stand. Unit tooltips identify a
+  merchant you have already shopped at.
+  Nothing is added to items the addon knows nothing about — an appearance
+  line only appears where the item genuinely has an appearance source, so
+  the addon stays off every stack of ore in the game. `/cn tooltips` toggles
+  the whole thing, and reports which tooltip API resolved.
+- **`/cn setup`.** Runs all eleven subsystem scans in order, one per frame,
+  then names the two things it cannot do for you: recipes and vendor
+  inventories are readable only while their windows are open.
+  A new install previously had to discover eleven separate scan commands,
+  and looked broken until it did. The first login now prints a single
+  pointer to this command and then stays quiet.
+- The minimap button tooltip shows the current recommendation and its top
+  reasons, so the most common question the addon answers no longer requires
+  opening anything.
+- Settings tab gains a tooltip toggle and a **Scan everything now** button.
+
+### Changed
+
+- **Candidates are cached.** Fourteen providers were being rebuilt on every
+  `/cn next`, every window refresh and every auto-advance tick, several of
+  them walking thousands of records. Results are now held for five seconds
+  and invalidated by the sixteen events that can actually change an answer.
+  This is what makes a recommendation cheap enough to put in a tooltip.
+- `/cn perf` reports cache state and per-provider timings, slowest first, so
+  a slow provider can be identified rather than guessed at.
 
 ## [0.14.0]
 

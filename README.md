@@ -10,7 +10,7 @@ Most completion addons answer *what am I missing?* Completion Navigator is built
 
 ## What it does
 
-Type `/cn next` or click the minimap button. The addon scores every objective it knows to be currently actionable and tells you which one is worth doing, and why.
+Run `/cn setup` once, then type `/cn next` or click the minimap button. The addon scores every objective it knows to be currently actionable and tells you which one is worth doing, and why.
 
 - **Explains itself.** Every recommendation comes with its reasons: *ready to turn in*, *in your current zone*, *a Paragon reward is waiting*, *unlocks four further quests*.
 - **Navigates.** Sets a TomTom waypoint if you have TomTom, a Blizzard map pin if you don't, and falls back to the game's own quest tracking arrow when no coordinates exist.
@@ -39,7 +39,7 @@ Type `/cn next` or click the minimap button. The addon scores every objective it
 
 `/cn` for status, `/cn help` for the full list, `/cn ui` for the window.
 
-The window has five tabs â€” Next, Zone, Collections, Scans, Settings â€” and everything the slash commands do is reachable by clicking. Keybindings live under Key Bindings â†’ AddOns.
+The window has eight tabs â€” Next, Now, Zone, Warband, Collections, Remaining, Scans, Settings â€” and everything the slash commands do is reachable by clicking. Keybindings live under Key Bindings â†’ AddOns.
 
 ## Known limitations
 
@@ -49,6 +49,8 @@ These are honest constraints, not oversights:
 - **No completion percentages for zones.** A percentage needs a trustworthy denominator, and the curated static database does not yet have zone coverage. The addon reports counts of what remains instead of inventing a number you would act on.
 - **Appearances are tracked per category, not per item.** Enumerating every appearance source is tens of thousands of entries; the actionable question is which slot is furthest from done.
 - **Achievements only become recommendations when nearly complete.** A zero-progress achievement is a project, not a next action.
+- **Tooltip appearance lines only appear where an item has an appearance.** `PlayerHasTransmogByItemInfo` answers `false` for a stack of ore just as readily as for an unlearned tabard, so the lookup is gated on the item genuinely having an appearance source rather than stamping "not yet known" on every trade good in the game.
+- **Recipe tooltips fall back to matching on name.** The trade skill API keys recipes by recipe ID while a vendor sells an item ID, and the two are not the same number. The ID lookup is tried first; when the name match is what fired, the tooltip says so rather than dressing it up as certainty.
 
 ## Optional integrations
 

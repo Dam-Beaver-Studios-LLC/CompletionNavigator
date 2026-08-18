@@ -1407,6 +1407,20 @@ UI.RegisterTab{
             end)
         panel.minimap:SetPoint("TOPLEFT", panel.auto, "BOTTOMLEFT", 0, -6)
 
+        panel.tooltips = AddCheckbox(panel, "Add lines to item and unit tooltips",
+            function() return CN.Settings().tooltips ~= false end,
+            function(value) CN.Settings().tooltips = value end)
+        panel.tooltips:SetPoint("TOPLEFT", panel.minimap, "BOTTOMLEFT", 0, -6)
+
+        panel.setup = AddButton(panel, "Scan everything now", 180, function()
+            local setup = CN:GetModule("Setup")
+
+            if setup then
+                setup.Run()
+            end
+        end)
+        panel.setup:SetPoint("TOPLEFT", panel.tooltips, "BOTTOMLEFT", 0, -12)
+
         panel.reset = AddButton(panel, "Reset window position", 180, function()
             CN.Settings().window = nil
 
@@ -1430,6 +1444,7 @@ UI.RegisterTab{
         panel.debug.Refresh()
         panel.auto.Refresh()
         panel.minimap.Refresh()
+        panel.tooltips.Refresh()
 
         panel.about:SetText("Completion Navigator v" .. CN.version)
     end,
@@ -1531,6 +1546,33 @@ local function BuildMinimapButton()
     minimapButton:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:AddLine("Completion Navigator")
+
+        -- The recommendation is the whole point of the addon, so put it where
+        -- it costs nothing to read. This is cheap now: candidates are cached,
+        -- so hovering the button does not rebuild fourteen providers.
+        local ok, results = pcall(CN.Recommend, 1)
+
+        if ok and results and results[1] then
+            local objective = results[1]
+
+            GameTooltip:AddLine("Next: " .. tostring(objective.name or objective.id),
+                0.2, 1.0, 0.6)
+
+            local reasons = CN.ExplainRecommendation(objective)
+
+            for index, reason in ipairs(reasons) do
+                if index > 2 then
+                    break
+                end
+
+                GameTooltip:AddLine(reason, 0.6, 0.6, 0.6)
+            end
+        else
+            GameTooltip:AddLine("Nothing actionable is known yet.", 0.6, 0.6, 0.6)
+            GameTooltip:AddLine("Run /cn setup once.", 0.6, 0.6, 0.6)
+        end
+
+        GameTooltip:AddLine(" ")
         GameTooltip:AddLine("|cffffffffLeft-click|r open the window", 1, 1, 1)
         GameTooltip:AddLine("|cffffffffRight-click|r navigate to the next objective", 1, 1, 1)
         GameTooltip:AddLine("|cffffffffDrag|r reposition this button", 1, 1, 1)

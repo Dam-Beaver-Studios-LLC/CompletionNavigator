@@ -29,6 +29,10 @@ CN.defaults = {
         -- and TomTom arrows are shared with every other addon.
         autoWaypoint = false,
 
+        -- Addon lines on item and unit tooltips. On by default: these are
+        -- additive and read-only, unlike the waypoint.
+        tooltips     = true,
+
         -- Minimap button placement is an angle in degrees around the
         -- minimap edge, so it survives UI scale and minimap size changes.
         minimap = {

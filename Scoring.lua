@@ -138,11 +138,82 @@ function CN.RegisterCandidateDecorator(name, decorator)
     end
 end
 
-function CN.CollectCandidates()
+------------------------------------------------------------
+-- CACHING
+------------------------------------------------------------
+
+-- Fourteen providers now run on every /cn next, every window refresh and
+-- every auto-advance tick, and several of them walk thousands of records.
+-- Recomputing all of that several times a second was never the design; the
+-- architecture notes called for cached state and dirty flags from the start.
+--
+-- The cache is invalidated by the events that can actually change an answer,
+-- with a short TTL as a backstop for anything that changes without an event
+-- (a world quest timer ticking down, for one).
+local cache = {
+    candidates = nil,
+    builtAt    = 0,
+    dirty      = true,
+}
+
+CN.candidateCacheSeconds = 5
+
+-- Per-provider timings, so a slow provider can be identified rather than
+-- guessed at.
+CN.providerTimings = CN.providerTimings or {}
+
+function CN.InvalidateCandidates(reason)
+    cache.dirty = true
+
+    if reason then
+        CN.DebugPrint("Candidate cache invalidated: " .. tostring(reason))
+    end
+end
+
+-- Anything that can change what is actionable.
+for _, event in ipairs({
+    "QUEST_ACCEPTED",
+    "QUEST_TURNED_IN",
+    "QUEST_REMOVED",
+    "QUEST_LOG_UPDATE",
+    "ACHIEVEMENT_EARNED",
+    "CRITERIA_UPDATE",
+    "UPDATE_FACTION",
+    "NEW_PET_ADDED",
+    "NEW_MOUNT_ADDED",
+    "NEW_TOY_ADDED",
+    "CURRENCY_DISPLAY_UPDATE",
+    "VIGNETTE_MINIMAP_UPDATED",
+    "VIGNETTES_UPDATED",
+    "ZONE_CHANGED_NEW_AREA",
+    "MERCHANT_SHOW",
+    "TRADE_SKILL_LIST_UPDATE",
+}) do
+    CN:RegisterEvent(event, function()
+        CN.InvalidateCandidates(event)
+    end)
+end
+
+local function BuildCandidates()
     local candidates = {}
 
     for name, provider in pairs(CN.candidateProviders) do
+        local startedAt = debugprofilestop and debugprofilestop() or nil
+
         local ok, result = pcall(provider)
+
+        if startedAt and debugprofilestop then
+            local elapsed = debugprofilestop() - startedAt
+
+            local timing = CN.providerTimings[name] or { calls = 0, total = 0, worst = 0 }
+
+            timing.calls = timing.calls + 1
+            timing.total = timing.total + elapsed
+            timing.worst = math.max(timing.worst, elapsed)
+            timing.last  = elapsed
+
+            CN.providerTimings[name] = timing
+        end
 
         if ok and type(result) == "table" then
             for _, objective in ipairs(result) do
@@ -164,6 +235,33 @@ function CN.CollectCandidates()
     end
 
     return candidates
+end
+
+function CN.CollectCandidates(force)
+    local now = time()
+
+    local fresh = cache.candidates
+        and not cache.dirty
+        and (now - cache.builtAt) < CN.candidateCacheSeconds
+
+    if fresh and not force then
+        return cache.candidates
+    end
+
+    cache.candidates = BuildCandidates()
+    cache.builtAt    = now
+    cache.dirty      = false
+
+    return cache.candidates
+end
+
+function CN.GetCandidateCacheState()
+    return {
+        cached  = cache.candidates ~= nil,
+        count   = cache.candidates and #cache.candidates or 0,
+        dirty   = cache.dirty,
+        age     = cache.candidates and (time() - cache.builtAt) or nil,
+    }
 end
 
 ------------------------------------------------------------
@@ -242,6 +340,48 @@ CN:RegisterCommand{
 
         if objective.mapID and objective.x and objective.y then
             CN.Print("|cffffff00/cn go|r to set a waypoint.")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "perf",
+    order   = 90,
+    help    = "Show candidate provider timings and cache state.",
+    handler = function()
+        local state = CN.GetCandidateCacheState()
+
+        CN.Print("Candidate cache: "
+            .. (state.cached and (state.count .. " objectives") or "empty")
+            .. (state.dirty and " |cffffff00(stale)|r" or "")
+            .. (state.age and (" |cff999999" .. state.age .. "s old|r") or ""))
+
+        local rows = {}
+
+        for name, timing in pairs(CN.providerTimings) do
+            table.insert(rows, {
+                name    = name,
+                average = timing.calls > 0 and (timing.total / timing.calls) or 0,
+                worst   = timing.worst,
+                calls   = timing.calls,
+            })
+        end
+
+        if #rows == 0 then
+            CN.Print("No timings recorded yet. Run |cffffff00/cn next|r first.")
+            CN.Print("|cff999999Timings need debugprofilestop, which exists in game "
+                .. "but not in offline tests.|r")
+            return
+        end
+
+        table.sort(rows, function(a, b) return a.average > b.average end)
+
+        CN.Print("Providers, slowest first:")
+
+        for _, row in ipairs(rows) do
+            CN.Print(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)",
+                row.name, row.average, row.worst, row.calls,
+                row.calls == 1 and "call" or "calls"))
         end
     end,
 }

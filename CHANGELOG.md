@@ -7,6 +7,40 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.15.0]
+
+### Added
+
+- **Tooltips.** Item tooltips now say what the addon already knew: whether a
+  toy, mount, battle pet or appearance is collected, whether this character
+  knows a recipe and which of your characters does, and which recorded
+  vendor sells the item and where they stand. Unit tooltips identify a
+  merchant you have already shopped at.
+  Nothing is added to items the addon knows nothing about â€” an appearance
+  line only appears where the item genuinely has an appearance source, so
+  the addon stays off every stack of ore in the game. `/cn tooltips` toggles
+  the whole thing, and reports which tooltip API resolved.
+- **`/cn setup`.** Runs all eleven subsystem scans in order, one per frame,
+  then names the two things it cannot do for you: recipes and vendor
+  inventories are readable only while their windows are open.
+  A new install previously had to discover eleven separate scan commands,
+  and looked broken until it did. The first login now prints a single
+  pointer to this command and then stays quiet.
+- The minimap button tooltip shows the current recommendation and its top
+  reasons, so the most common question the addon answers no longer requires
+  opening anything.
+- Settings tab gains a tooltip toggle and a **Scan everything now** button.
+
+### Changed
+
+- **Candidates are cached.** Fourteen providers were being rebuilt on every
+  `/cn next`, every window refresh and every auto-advance tick, several of
+  them walking thousands of records. Results are now held for five seconds
+  and invalidated by the sixteen events that can actually change an answer.
+  This is what makes a recommendation cheap enough to put in a tooltip.
+- `/cn perf` reports cache state and per-provider timings, slowest first, so
+  a slow provider can be identified rather than guessed at.
+
 ## [0.14.0]
 
 ### Added
