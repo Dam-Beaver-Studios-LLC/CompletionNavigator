@@ -100,8 +100,12 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.10.0"
+CN.version     = "0.11.0"
 CN.dbVersion   = 2
+
+-- Where the addon's own textures live. Referenced by the .toc IconTexture
+-- line and the minimap button.
+CN.MEDIA_PATH  = "Interface\\AddOns\\CompletionNavigator\\Media\\"
 
 ------------------------------------------------------------
 -- REGISTRIES
@@ -3139,9 +3143,21 @@ local function BuildMinimapButton()
 
     local icon = minimapButton:CreateTexture(nil, "ARTWORK")
     icon:SetSize(20, 20)
-    icon:SetTexture("Interface\\Icons\\INV_Misc_Map_01")
     icon:SetPoint("CENTER", -1, 1)
-    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+    -- Prefer the addon's own artwork. SetTexture fails silently on a missing
+    -- file and leaves the texture blank, so verify it took and fall back to
+    -- a stock icon rather than shipping an invisible button.
+    icon:SetTexture(CN.MEDIA_PATH .. "Logo")
+
+    if not icon:GetTexture() then
+        icon:SetTexture("Interface\\Icons\\INV_Misc_Map_01")
+        icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    else
+        -- The supplied art is a circular badge already; trimming the corners
+        -- keeps it round inside the minimap ring.
+        icon:SetTexCoord(0.06, 0.94, 0.06, 0.94)
+    end
 
     minimapButton:SetScript("OnClick", function(self, button)
         if button == "RightButton" then
@@ -4444,6 +4460,89 @@ function Blizzard.GetTodaysEvents()
     end
 
     return events
+end
+
+------------------------------------------------------------
+-- VIGNETTES (RARES AND TREASURES)
+------------------------------------------------------------
+
+-- Vignettes are the skull and chest icons the client puts on the minimap.
+-- They are the only live signal that a rare is actually up right now, which
+-- is what makes them worth more than any static rare database.
+function Blizzard.GetVignettes(uiMapID)
+    local results = {}
+
+    if not C_VignetteInfo or not C_VignetteInfo.GetVignettes then
+        return results
+    end
+
+    local ok, guids = pcall(C_VignetteInfo.GetVignettes)
+
+    if not ok or type(guids) ~= "table" then
+        return results
+    end
+
+    for _, guid in ipairs(guids) do
+        local gotInfo, info = pcall(C_VignetteInfo.GetVignetteInfo, guid)
+
+        if gotInfo and type(info) == "table" and info.name then
+            local entry = {
+                guid        = guid,
+                vignetteID  = info.vignetteID,
+                name        = info.name,
+                atlas       = info.atlasName,
+                objectGUID  = info.objectGUID,
+                isDead      = info.isDead and true or false,
+                onMinimap   = info.onMinimap,
+                inFogOfWar  = info.inFogOfWar,
+            }
+
+            if uiMapID and C_VignetteInfo.GetVignettePosition then
+                local gotPosition, position =
+                    pcall(C_VignetteInfo.GetVignettePosition, guid, uiMapID)
+
+                if gotPosition and position and position.GetXY then
+                    local x, y = position:GetXY()
+
+                    entry.mapID = uiMapID
+                    entry.x     = x
+                    entry.y     = y
+                end
+            end
+
+            table.insert(results, entry)
+        end
+    end
+
+    return results
+end
+
+-- Treasure chests and rare creatures use different atlas art. The atlas
+-- name is the only reliable discriminator the client exposes.
+function Blizzard.ClassifyVignette(atlasName)
+    if type(atlasName) ~= "string" then
+        return "UNKNOWN"
+    end
+
+    local lower = string.lower(atlasName)
+
+    if string.find(lower, "chest", 1, true)
+        or string.find(lower, "treasure", 1, true)
+        or string.find(lower, "lootcontainer", 1, true) then
+        return "TREASURE"
+    end
+
+    if string.find(lower, "vignetteskull", 1, true)
+        or string.find(lower, "vignetteboss", 1, true)
+        or string.find(lower, "elite", 1, true) then
+        return "RARE"
+    end
+
+    if string.find(lower, "vignette", 1, true) then
+        return "RARE"
+    end
+
+    return "UNKNOWN"
 end
 '@
 
@@ -9444,6 +9543,431 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Rares.lua'] = @'
+-- Modules/Rares.lua
+-- Completion Navigator :: rares and treasures.
+--
+-- Most rare-tracking addons ship a static database of where rares spawn.
+-- That answers "where is it", which is only half the question, and it goes
+-- stale every patch.
+--
+-- This module leads with the client's vignette data instead, because a
+-- vignette is the one live signal that a rare is *up right now*. Something
+-- that exists this minute and may be dead in five is exactly the kind of
+-- objective the opportunity scoring was built for.
+--
+-- Everything seen is also recorded permanently, so the addon accumulates its
+-- own spawn database from play -- same approach as quest harvesting, and it
+-- never goes stale because it comes from the live game.
+
+local ADDON_NAME, CN = ...
+
+local Rares = CN:RegisterModule("Rares")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+------------------------------------------------------------
+-- STORAGE
+------------------------------------------------------------
+
+-- Everything ever seen, keyed by vignetteID. Account-wide: where a rare
+-- spawns is a fact about the world.
+local function Store()
+    return CN.Account("rares")
+end
+
+-- Which vignettes this character has already dealt with. Rares are usually
+-- once-per-character, so this is character state, not account state.
+local function CharacterKills(character)
+    character = character or CN.character
+
+    if not character then
+        return nil
+    end
+
+    character.raresKilled = character.raresKilled or {}
+
+    return character.raresKilled
+end
+
+Rares.Store          = Store
+Rares.CharacterKills = CharacterKills
+
+------------------------------------------------------------
+-- LIVE STATE
+------------------------------------------------------------
+
+-- Vignettes currently visible, classified and located.
+function Rares.GetActive(mapID)
+    mapID = mapID or select(1, CN.GetPlayerPosition())
+
+    local active = {}
+
+    for _, vignette in ipairs(Blizzard.GetVignettes(mapID)) do
+        local kind = Blizzard.ClassifyVignette(vignette.atlas)
+
+        if not vignette.isDead then
+            table.insert(active, {
+                guid       = vignette.guid,
+                vignetteID = vignette.vignetteID,
+                name       = vignette.name,
+                kind       = kind,
+                mapID      = vignette.mapID,
+                x          = vignette.x,
+                y          = vignette.y,
+                inFogOfWar = vignette.inFogOfWar,
+            })
+        end
+    end
+
+    table.sort(active, function(a, b)
+        if a.kind ~= b.kind then
+            return a.kind < b.kind
+        end
+
+        return (a.name or "") < (b.name or "")
+    end)
+
+    return active
+end
+
+------------------------------------------------------------
+-- RECORDING
+------------------------------------------------------------
+
+function Rares.Record(vignette)
+    if not vignette or not vignette.vignetteID then
+        return false
+    end
+
+    local store    = Store()
+    local existing = store[vignette.vignetteID]
+
+    local record = existing or {
+        vignetteID = vignette.vignetteID,
+        firstSeen  = time(),
+        sightings  = 0,
+    }
+
+    record.name      = vignette.name or record.name
+    record.kind      = vignette.kind or record.kind
+    record.lastSeen  = time()
+    record.sightings = (record.sightings or 0) + 1
+
+    -- Keep the first coordinates seen; rares roam, and the spawn point is
+    -- more useful than wherever it happened to be standing.
+    if vignette.mapID and vignette.x and vignette.y then
+        if not record.mapID then
+            record.mapID = vignette.mapID
+            record.x     = math.floor(vignette.x * 10000 + 0.5) / 10000
+            record.y     = math.floor(vignette.y * 10000 + 0.5) / 10000
+            record.zone  = Blizzard.GetMapName(vignette.mapID)
+        end
+    end
+
+    store[vignette.vignetteID] = record
+
+    return existing == nil
+end
+
+function Rares.Sweep()
+    local mapID = select(1, CN.GetPlayerPosition())
+
+    local seen, new = 0, 0
+
+    for _, vignette in ipairs(Rares.GetActive(mapID)) do
+        if Rares.Record(vignette) then
+            new = new + 1
+        end
+
+        seen = seen + 1
+    end
+
+    return seen, new
+end
+
+------------------------------------------------------------
+-- KILL TRACKING
+------------------------------------------------------------
+
+-- A vignette that was present and is now gone, while the player was nearby,
+-- is very likely dealt with. This is inference, so it is recorded as
+-- "cleared by this character" rather than presented as fact.
+local lastSeenGuids = {}
+
+function Rares.NoteDisappearances(currentGuids)
+    local kills = CharacterKills()
+
+    if not kills then
+        return
+    end
+
+    for guid, entry in pairs(lastSeenGuids) do
+        if not currentGuids[guid] and entry.vignetteID then
+            kills[entry.vignetteID] = time()
+
+            DebugPrint("Vignette gone, marking cleared: " .. tostring(entry.name))
+        end
+    end
+end
+
+function Rares.IsClearedByCharacter(vignetteID)
+    local kills = CharacterKills()
+
+    return kills and kills[vignetteID] ~= nil
+end
+
+------------------------------------------------------------
+-- SUMMARY
+------------------------------------------------------------
+
+function Rares.Summary()
+    local counts = {
+        known     = 0,
+        rares     = 0,
+        treasures = 0,
+        located   = 0,
+        cleared   = 0,
+    }
+
+    local kills = CharacterKills() or {}
+
+    for vignetteID, record in pairs(Store()) do
+        counts.known = counts.known + 1
+
+        if record.kind == "TREASURE" then
+            counts.treasures = counts.treasures + 1
+        else
+            counts.rares = counts.rares + 1
+        end
+
+        if record.x and record.y then
+            counts.located = counts.located + 1
+        end
+
+        if kills[vignetteID] then
+            counts.cleared = counts.cleared + 1
+        end
+    end
+
+    return counts
+end
+
+------------------------------------------------------------
+-- ELIGIBILITY
+------------------------------------------------------------
+
+CN.RegisterEligibilityChecker(CN.objectiveTypes.RARE, function(vignetteID)
+    local states = CN.objectiveStates
+    local record = Store()[vignetteID]
+
+    if not record then
+        return states.UNKNOWN, "Never seen this rare", nil
+    end
+
+    if Rares.IsClearedByCharacter(vignetteID) then
+        return states.COMPLETED, "Cleared by this character", record.name
+    end
+
+    return states.AVAILABLE, nil, nil
+end)
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- Only what is actually up right now becomes a candidate. A rare that is
+-- not spawned is not a next action, and the whole point of using vignettes
+-- is knowing the difference.
+CN.RegisterCandidateProvider("Rares", function()
+    local candidates = {}
+
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+    for _, vignette in ipairs(Rares.GetActive(playerMap)) do
+        local objectiveType = vignette.kind == "TREASURE"
+            and CN.objectiveTypes.TREASURE
+            or CN.objectiveTypes.RARE
+
+        local id = vignette.vignetteID
+
+        if id
+            and not Rares.IsClearedByCharacter(id)
+            and not CN.IsIgnored(objectiveType, id)
+            and not CN.IsDeferred(objectiveType, id) then
+
+            local reasons = {}
+            local travel  = 0
+
+            table.insert(reasons, vignette.kind == "TREASURE"
+                and "treasure is up right now"
+                or "rare is up right now")
+
+            if vignette.x and vignette.y and playerX and playerY then
+                local dx = vignette.x - playerX
+                local dy = vignette.y - playerY
+
+                travel = math.sqrt((dx * dx) + (dy * dy)) * 10
+
+                table.insert(reasons, "in your current zone")
+            end
+
+            table.insert(candidates, CN.NewObjective({
+                id               = id,
+                type             = objectiveType,
+                name             = vignette.name,
+                mapID            = vignette.mapID,
+                x                = vignette.x,
+                y                = vignette.y,
+                accountWide      = false,
+                state            = CN.objectiveStates.AVAILABLE,
+                completionValue  = 2,
+
+                -- Up now, gone when someone else kills it. That is exactly
+                -- what the limited-time term is for.
+                limitedTimeBonus = 1.5,
+
+                travelCost       = travel,
+                reasons          = reasons,
+            }))
+        end
+    end
+
+    return candidates
+end)
+
+------------------------------------------------------------
+-- EVENTS
+------------------------------------------------------------
+
+local function OnVignetteUpdate()
+    local mapID = select(1, CN.GetPlayerPosition())
+
+    local currentGuids = {}
+
+    for _, vignette in ipairs(Rares.GetActive(mapID)) do
+        currentGuids[vignette.guid] = true
+
+        Rares.Record(vignette)
+    end
+
+    Rares.NoteDisappearances(currentGuids)
+
+    -- Rebuild the seen set for the next comparison.
+    local nextSeen = {}
+
+    for _, vignette in ipairs(Rares.GetActive(mapID)) do
+        nextSeen[vignette.guid] = {
+            vignetteID = vignette.vignetteID,
+            name       = vignette.name,
+        }
+    end
+
+    lastSeenGuids = nextSeen
+end
+
+CN:RegisterEvent("VIGNETTE_MINIMAP_UPDATED", OnVignetteUpdate)
+CN:RegisterEvent("VIGNETTES_UPDATED", OnVignetteUpdate)
+
+CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
+    -- Vignettes from the previous zone are meaningless now.
+    lastSeenGuids = {}
+end)
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "rares",
+    order   = 74,
+    help    = "Show rares and treasures up right now.",
+    handler = function()
+        local active = Rares.GetActive()
+
+        if #active == 0 then
+            Print("Nothing is up nearby.")
+            Print("|cff999999Vignettes only appear for content in range; "
+                .. "move around the zone.|r")
+            return
+        end
+
+        Print("Up right now (" .. #active .. "):")
+
+        for index, vignette in ipairs(active) do
+            local cleared = vignette.vignetteID
+                and Rares.IsClearedByCharacter(vignette.vignetteID)
+
+            Print("  " .. index .. ". " .. tostring(vignette.name)
+                .. " |cff999999[" .. tostring(vignette.kind) .. "]|r"
+                .. (cleared and " |cff999999(already cleared)|r" or "")
+                .. (vignette.x and string.format(" |cff999999%.1f, %.1f|r",
+                    vignette.x * 100, vignette.y * 100) or ""))
+        end
+
+        Print("|cffffff00/cn rare <number>|r to set a waypoint.")
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "rare",
+    args    = "<number>",
+    order   = 75,
+    help    = "Navigate to something that is up right now.",
+    handler = function(args)
+        local index = CN.ToID(args)
+
+        if not index then
+            Print("Usage: /cn rare <number from /cn rares>")
+            return
+        end
+
+        local active = Rares.GetActive()
+        local vignette = active[index]
+
+        if not vignette then
+            Print("There is no number " .. index .. " in the current list.")
+            return
+        end
+
+        CN.NavigateToObjective({
+            id    = vignette.vignetteID,
+            type  = vignette.kind == "TREASURE"
+                and CN.objectiveTypes.TREASURE
+                or CN.objectiveTypes.RARE,
+            name  = vignette.name,
+            mapID = vignette.mapID,
+            x     = vignette.x,
+            y     = vignette.y,
+        })
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "raredb",
+    order   = 76,
+    help    = "Summarize every rare and treasure recorded from play.",
+    handler = function()
+        local counts = Rares.Summary()
+
+        if counts.known == 0 then
+            Print("Nothing recorded yet. Rares and treasures are captured "
+                .. "automatically as you encounter them.")
+            return
+        end
+
+        Print("Recorded: " .. counts.known
+            .. " (" .. counts.rares .. " rares, " .. counts.treasures .. " treasures)")
+        Print("With coordinates: " .. counts.located)
+        Print("Cleared by this character: " .. counts.cleared)
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -9463,7 +9987,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.10.0
+## Version: 0.11.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -9471,7 +9995,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## X-Copyright: Copyright (c) 2026 Dam Beaver Studios, LLC
 ## X-Publisher: Dam Beaver Studios, LLC
 ## X-Email: developer@dambeaverstudios.com
-## IconTexture: Interface\Icons\INV_Misc_Map_01
+## IconTexture: Interface\AddOns\CompletionNavigator\Media\Logo
 ## X-Curse-Project-ID: 1657613
 # ## X-Wago-ID:   (set this if the addon is also published to Wago)
 
@@ -9500,6 +10024,7 @@ Modules\Opportunities.lua
 Modules\Pets.lua
 Modules\Professions.lua
 Modules\Quests.lua
+Modules\Rares.lua
 Modules\Reputations.lua
 Modules\Titles.lua
 Modules\Toys.lua
@@ -9637,6 +10162,36 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.11.0]
+
+### Added
+
+- **Rares and treasures**, driven by the client's vignette data rather than a
+  static spawn database. A vignette is the only live signal that a rare is
+  actually up right now, which is the half of the question static data
+  cannot answer and which goes stale every patch.
+  `/cn rares` lists what is up, `/cn rare <n>` routes to it, `/cn raredb`
+  summarizes everything recorded.
+- Rares and treasures feed the recommendation engine as time-sensitive
+  objectives, because something that is up now and dead when someone else
+  finds it is exactly what the limited-time term is for.
+- Everything seen is recorded permanently and account-wide, so the addon
+  accumulates its own spawn database from play. It cannot go stale, because
+  it comes from the live game.
+- Vignettes that disappear while the player is nearby are inferred as
+  cleared by that character. Recorded as inference, not asserted as fact.
+- **Addon artwork.** The .toc IconTexture and the minimap button now use the
+  project logo. `.\cn.ps1 icon <file.png>` regenerates `Media\Logo.tga`.
+
+### Fixed
+
+- `check` now verifies that the file `IconTexture` points at actually
+  exists. WoW fails silently on a missing texture, so a typo produced a
+  blank icon and no error anywhere.
+- The minimap button verifies its texture loaded and falls back to a stock
+  icon rather than rendering an invisible button.
+
 
 ## [0.10.0]
 
@@ -10677,6 +11232,33 @@ function Invoke-CNCheck {
         }
     }
 
+    # The .toc can point IconTexture at addon art. WoW fails silently on a
+    # missing texture, so a typo here produces a blank icon and no error.
+    if ($toc -match '(?m)^##\s*IconTexture:\s*(.+)$') {
+        $iconPath = $Matches[1].Trim()
+
+        if ($iconPath -match 'AddOns\\CompletionNavigator\\(.+)$') {
+            $relativeIcon = $Matches[1] -replace '/', '\'
+
+            $found = $false
+
+            foreach ($extension in @('.tga', '.blp', '')) {
+                if (Test-Path -LiteralPath (Join-Path $script:Root ($relativeIcon + $extension))) {
+                    $found = $true
+                    break
+                }
+            }
+
+            if (-not $found) {
+                Write-Host "  FAIL  IconTexture points at a missing file: $relativeIcon(.tga)" -ForegroundColor Red
+                $problems++
+            }
+            else {
+                Write-Host "  ok    IconTexture resolves to $relativeIcon.tga" -ForegroundColor DarkGray
+            }
+        }
+    }
+
     # Byte-order marks break some Lua parsers and look like garbage in game.
     foreach ($file in $onDisk) {
         $bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:Root $file))
@@ -11086,6 +11668,113 @@ function Invoke-CNRelocate {
     Write-Host '  .\cn.ps1 backup' -ForegroundColor DarkGray
 }
 
+
+function Invoke-CNIcon {
+    Assert-CNWritable
+
+    $source = if ($Target) { $Target } else { $Value }
+
+    if (-not $source) {
+        # Default to the logo dropped into the CurseForge assets folder.
+        $source = Join-Path $script:Root '_curseforge\logo.png'
+    }
+
+    if (-not (Test-Path -LiteralPath $source)) {
+        Write-Host "Source image not found: $source" -ForegroundColor Yellow
+        Write-Host 'Usage: .\cn.ps1 icon <path-to-png>' -ForegroundColor Yellow
+        Write-Host 'Or drop logo.png into _curseforge\ and run: .\cn.ps1 icon' -ForegroundColor DarkGray
+        return
+    }
+
+    # System.Drawing exists on Windows PowerShell but is unavailable on other
+    # hosts, and it fails at first use rather than at load, so probing the
+    # type is not enough -- actually try to use it.
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        $null = New-Object System.Drawing.Bitmap(1, 1)
+    }
+    catch {
+        Write-Host 'System.Drawing is not usable on this PowerShell host, so the' -ForegroundColor Red
+        Write-Host 'TGA cannot be generated here.' -ForegroundColor Red
+        Write-Host ''
+        Write-Host 'Media\Logo.tga is committed to the repository, so unless you are' -ForegroundColor Yellow
+        Write-Host 'replacing the artwork you do not need this command at all.' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host 'To replace it by hand: export a 128x128 uncompressed 32-bit TGA' -ForegroundColor DarkGray
+        Write-Host 'and save it as Media\Logo.tga' -ForegroundColor DarkGray
+        return
+    }
+
+    $mediaDirectory = Join-Path $script:Root 'Media'
+
+    if (-not (Test-Path -LiteralPath $mediaDirectory)) {
+        New-Item -ItemType Directory -Path $mediaDirectory -Force | Out-Null
+    }
+
+    $size = 128
+
+    try {
+        $original = [System.Drawing.Bitmap]::FromFile((Resolve-Path -LiteralPath $source))
+    }
+    catch {
+        Write-Host "Could not read the image: $_" -ForegroundColor Red
+        return
+    }
+
+    try {
+        # WoW requires power-of-two dimensions. 128x128 is the standard for an
+        # addon icon and stays crisp on the minimap button.
+        $resized = New-Object System.Drawing.Bitmap($size, $size)
+
+        $graphics = [System.Drawing.Graphics]::FromImage($resized)
+        $graphics.InterpolationMode  = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.SmoothingMode      = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $graphics.PixelOffsetMode    = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.DrawImage($original, 0, 0, $size, $size)
+        $graphics.Dispose()
+
+        # Uncompressed 32-bit BGRA TGA, bottom-up. The client will not read a
+        # PNG, and it fails silently rather than erroring.
+        $pixels = New-Object 'System.Collections.Generic.List[byte]'
+
+        for ($y = $size - 1; $y -ge 0; $y--) {
+            for ($x = 0; $x -lt $size; $x++) {
+                $pixel = $resized.GetPixel($x, $y)
+
+                $pixels.Add($pixel.B)
+                $pixels.Add($pixel.G)
+                $pixels.Add($pixel.R)
+                $pixels.Add($pixel.A)
+            }
+        }
+
+        $header = [byte[]]@(
+            0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ($size -band 0xFF), (($size -shr 8) -band 0xFF),
+            ($size -band 0xFF), (($size -shr 8) -band 0xFF),
+            32, 8
+        )
+
+        $output = Join-Path $mediaDirectory 'Logo.tga'
+
+        $stream = [System.IO.File]::Create($output)
+        $stream.Write($header, 0, $header.Length)
+        $stream.Write($pixels.ToArray(), 0, $pixels.Count)
+        $stream.Close()
+
+        $resized.Dispose()
+
+        Write-Host "Wrote Media\Logo.tga  ($size x $size, 32-bit uncompressed)" -ForegroundColor Green
+        Write-Host '  used by the .toc IconTexture line and the minimap button'
+        Write-Host '  /reload in game to see it'
+    }
+    finally {
+        $original.Dispose()
+    }
+
+    Invoke-CNSync
+}
+
 function Invoke-CNOpen {
     Start-Process explorer.exe $script:Root
 }
@@ -11117,6 +11806,7 @@ function Show-CNHelp {
     Write-Host '  savedvars [-Force]              Locate SavedVariables (-Force opens it).'
     Write-Host '  release <x.y.z>                Bump, commit, tag and push a release.'
     Write-Host '  relocate <path>                Copy the source out of Program Files.'
+    Write-Host '  icon [path.png]                Convert a PNG into Media\Logo.tga for in-game use.'
     Write-Host '  gitinit                         Initialize git with a sane .gitignore.'
     Write-Host '  open                            Open the folder in Explorer.'
     Write-Host ''
@@ -11152,6 +11842,7 @@ switch ($Command.ToLower()) {
     'sv'        { Invoke-CNSavedVars }
     'release'   { Invoke-CNRelease }
     'relocate'  { Invoke-CNRelocate }
+    'icon'      { Invoke-CNIcon }
     'gitinit'   { Invoke-CNGitInit }
     'git-init'  { Invoke-CNGitInit }
     'open'      { Invoke-CNOpen }

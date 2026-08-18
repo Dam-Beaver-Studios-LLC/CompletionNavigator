@@ -18,8 +18,12 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.10.0"
+CN.version     = "0.11.0"
 CN.dbVersion   = 2
+
+-- Where the addon's own textures live. Referenced by the .toc IconTexture
+-- line and the minimap button.
+CN.MEDIA_PATH  = "Interface\\AddOns\\CompletionNavigator\\Media\\"
 
 ------------------------------------------------------------
 -- REGISTRIES

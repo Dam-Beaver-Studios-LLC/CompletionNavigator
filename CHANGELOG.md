@@ -7,6 +7,36 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.11.0]
+
+### Added
+
+- **Rares and treasures**, driven by the client's vignette data rather than a
+  static spawn database. A vignette is the only live signal that a rare is
+  actually up right now, which is the half of the question static data
+  cannot answer and which goes stale every patch.
+  `/cn rares` lists what is up, `/cn rare <n>` routes to it, `/cn raredb`
+  summarizes everything recorded.
+- Rares and treasures feed the recommendation engine as time-sensitive
+  objectives, because something that is up now and dead when someone else
+  finds it is exactly what the limited-time term is for.
+- Everything seen is recorded permanently and account-wide, so the addon
+  accumulates its own spawn database from play. It cannot go stale, because
+  it comes from the live game.
+- Vignettes that disappear while the player is nearby are inferred as
+  cleared by that character. Recorded as inference, not asserted as fact.
+- **Addon artwork.** The .toc IconTexture and the minimap button now use the
+  project logo. `.\cn.ps1 icon <file.png>` regenerates `Media\Logo.tga`.
+
+### Fixed
+
+- `check` now verifies that the file `IconTexture` points at actually
+  exists. WoW fails silently on a missing texture, so a typo produced a
+  blank icon and no error anywhere.
+- The minimap button verifies its texture loaded and falls back to a stock
+  icon rather than rendering an invisible button.
+
+
 ## [0.10.0]
 
 ### Added

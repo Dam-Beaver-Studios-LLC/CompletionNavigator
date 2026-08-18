@@ -1124,9 +1124,21 @@ local function BuildMinimapButton()
 
     local icon = minimapButton:CreateTexture(nil, "ARTWORK")
     icon:SetSize(20, 20)
-    icon:SetTexture("Interface\\Icons\\INV_Misc_Map_01")
     icon:SetPoint("CENTER", -1, 1)
-    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+    -- Prefer the addon's own artwork. SetTexture fails silently on a missing
+    -- file and leaves the texture blank, so verify it took and fall back to
+    -- a stock icon rather than shipping an invisible button.
+    icon:SetTexture(CN.MEDIA_PATH .. "Logo")
+
+    if not icon:GetTexture() then
+        icon:SetTexture("Interface\\Icons\\INV_Misc_Map_01")
+        icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    else
+        -- The supplied art is a circular badge already; trimming the corners
+        -- keeps it round inside the minimap ring.
+        icon:SetTexCoord(0.06, 0.94, 0.06, 0.94)
+    end
 
     minimapButton:SetScript("OnClick", function(self, button)
         if button == "RightButton" then

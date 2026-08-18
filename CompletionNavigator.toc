@@ -2,7 +2,7 @@
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.10.0
+## Version: 0.11.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -10,7 +10,7 @@
 ## X-Copyright: Copyright (c) 2026 Dam Beaver Studios, LLC
 ## X-Publisher: Dam Beaver Studios, LLC
 ## X-Email: developer@dambeaverstudios.com
-## IconTexture: Interface\Icons\INV_Misc_Map_01
+## IconTexture: Interface\AddOns\CompletionNavigator\Media\Logo
 ## X-Curse-Project-ID: 1657613
 # ## X-Wago-ID:   (set this if the addon is also published to Wago)
 
@@ -39,6 +39,7 @@ Modules\Opportunities.lua
 Modules\Pets.lua
 Modules\Professions.lua
 Modules\Quests.lua
+Modules\Rares.lua
 Modules\Reputations.lua
 Modules\Titles.lua
 Modules\Toys.lua

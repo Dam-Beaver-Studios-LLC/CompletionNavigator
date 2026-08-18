@@ -1057,3 +1057,86 @@ function Blizzard.GetTodaysEvents()
 
     return events
 end
+
+------------------------------------------------------------
+-- VIGNETTES (RARES AND TREASURES)
+------------------------------------------------------------
+
+-- Vignettes are the skull and chest icons the client puts on the minimap.
+-- They are the only live signal that a rare is actually up right now, which
+-- is what makes them worth more than any static rare database.
+function Blizzard.GetVignettes(uiMapID)
+    local results = {}
+
+    if not C_VignetteInfo or not C_VignetteInfo.GetVignettes then
+        return results
+    end
+
+    local ok, guids = pcall(C_VignetteInfo.GetVignettes)
+
+    if not ok or type(guids) ~= "table" then
+        return results
+    end
+
+    for _, guid in ipairs(guids) do
+        local gotInfo, info = pcall(C_VignetteInfo.GetVignetteInfo, guid)
+
+        if gotInfo and type(info) == "table" and info.name then
+            local entry = {
+                guid        = guid,
+                vignetteID  = info.vignetteID,
+                name        = info.name,
+                atlas       = info.atlasName,
+                objectGUID  = info.objectGUID,
+                isDead      = info.isDead and true or false,
+                onMinimap   = info.onMinimap,
+                inFogOfWar  = info.inFogOfWar,
+            }
+
+            if uiMapID and C_VignetteInfo.GetVignettePosition then
+                local gotPosition, position =
+                    pcall(C_VignetteInfo.GetVignettePosition, guid, uiMapID)
+
+                if gotPosition and position and position.GetXY then
+                    local x, y = position:GetXY()
+
+                    entry.mapID = uiMapID
+                    entry.x     = x
+                    entry.y     = y
+                end
+            end
+
+            table.insert(results, entry)
+        end
+    end
+
+    return results
+end
+
+-- Treasure chests and rare creatures use different atlas art. The atlas
+-- name is the only reliable discriminator the client exposes.
+function Blizzard.ClassifyVignette(atlasName)
+    if type(atlasName) ~= "string" then
+        return "UNKNOWN"
+    end
+
+    local lower = string.lower(atlasName)
+
+    if string.find(lower, "chest", 1, true)
+        or string.find(lower, "treasure", 1, true)
+        or string.find(lower, "lootcontainer", 1, true) then
+        return "TREASURE"
+    end
+
+    if string.find(lower, "vignetteskull", 1, true)
+        or string.find(lower, "vignetteboss", 1, true)
+        or string.find(lower, "elite", 1, true) then
+        return "RARE"
+    end
+
+    if string.find(lower, "vignette", 1, true) then
+        return "RARE"
+    end
+
+    return "UNKNOWN"
+end
