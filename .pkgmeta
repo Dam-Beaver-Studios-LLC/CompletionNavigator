@@ -2,8 +2,12 @@ package-as: CompletionNavigator
 
 enable-nolib-creation: no
 
+# Everything the game does not load. The build toolkit, CI config, backups
+# and the CurseForge project-page copy all belong in the repository but not
+# in a user's AddOns folder.
 ignore:
   - .github
-  - cn.ps1
+  - _curseforge
   - _backups
+  - cn.ps1
   - README.md

@@ -44,6 +44,7 @@ param(
     [double] $X,
     [double] $Y,
     [string] $Requires,
+    [string] $Email,
     [switch] $Force
 )
 
@@ -7600,8 +7601,8 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## X-Publisher: Dam Beaver Studios, LLC
 ## X-Email: developer@dambeaverstudios.com
 ## IconTexture: Interface\Icons\INV_Misc_Map_01
-## X-Curse-Project-ID:
-## X-Wago-ID:
+## X-Curse-Project-ID: 1657613
+# ## X-Wago-ID:   (set this if the addon is also published to Wago)
 
 # CN:FILES:BEGIN -- managed by cn.ps1 sync; do not edit by hand.
 Core.lua
@@ -7850,10 +7851,14 @@ package-as: CompletionNavigator
 
 enable-nolib-creation: no
 
+# Everything the game does not load. The build toolkit, CI config, backups
+# and the CurseForge project-page copy all belong in the repository but not
+# in a user's AddOns folder.
 ignore:
   - .github
-  - cn.ps1
+  - _curseforge
   - _backups
+  - cn.ps1
   - README.md
 '@
 
@@ -8806,24 +8811,23 @@ desktop.ini
 
     try {
         git init -b main | Out-Null
+
+        # Set the repository identity BEFORE the first commit. Inheriting a
+        # machine-wide identity here silently stamps the wrong address onto
+        # the initial commit, and correcting it afterwards means rewriting
+        # history.
+        $commitName  = if ($Name)  { $Name }  else { 'Travis A. Bryan I' }
+        $commitEmail = if ($Email) { $Email } else { 'developer@dambeaverstudios.com' }
+
+        git config user.name  $commitName  | Out-Null
+        git config user.email $commitEmail | Out-Null
+
         git add -A | Out-Null
-
-        # Use whatever identity git is already configured with rather than
-        # baking one in. Commit authorship is a person, not a project.
-        $identity = (git config user.email) 2>$null
-
-        if (-not $identity) {
-            Write-Host 'Repository created, but nothing was committed:' -ForegroundColor Yellow
-            Write-Host 'git has no author identity configured. Set one, then commit:' -ForegroundColor Yellow
-            Write-Host '  git config --global user.name "Your Name"' -ForegroundColor DarkGray
-            Write-Host '  git config --global user.email "you@example.com"' -ForegroundColor DarkGray
-            Write-Host '  git commit -m "Completion Navigator: initial commit"' -ForegroundColor DarkGray
-            return
-        }
-
         git commit -m 'Completion Navigator: initial commit' | Out-Null
 
-        Write-Host "Git repository initialized and committed as $identity." -ForegroundColor Green
+        Write-Host "Git repository initialized." -ForegroundColor Green
+        Write-Host "  identity: $commitName <$commitEmail>" -ForegroundColor DarkGray
+        Write-Host '  (override with -Name and -Email)' -ForegroundColor DarkGray
     }
     finally {
         Pop-Location
@@ -8856,7 +8860,7 @@ function Invoke-CNPackage {
     # Ship only what the game loads. The toolkit, backups, git metadata and
     # scratch folders are yours, not the recipient's.
     $excludedNames      = @('_backups', '.git', '.gitignore', '_to_delete',
-                            '.github', '.pkgmeta')
+                            '.github', '.pkgmeta', '_curseforge')
     $excludedExtensions = @('.ps1', '.psm1', '.zip', '.bak')
 
     $shipped = 0
