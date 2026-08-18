@@ -147,6 +147,26 @@ function Titles.Resolve(text)
 end
 
 ------------------------------------------------------------
+-- WHY THERE IS NO CANDIDATE PROVIDER HERE
+------------------------------------------------------------
+
+-- Every other collection module contributes recommendations. Titles
+-- deliberately does not, and this comment exists so that absence reads as a
+-- decision rather than an oversight.
+--
+-- A recommendation has to name an action. The client exposes a title's name
+-- and whether this character has it, and nothing else -- no source, no
+-- coordinates, no criteria. "You do not have Loremaster" is a fact, not a next
+-- action, and emitting it would push a row with no location and no route into
+-- a list whose entire purpose is to be actionable.
+--
+-- Titles are still fully tracked and reported: /cn titles, /cn who title, the
+-- Collections tab and /cn breakdown all read this store directly. And a title
+-- someone actually wants can be pinned with /cn goal title <id>, which is the
+-- correct place for "I have decided I want this even though the addon cannot
+-- tell me how to get it".
+
+------------------------------------------------------------
 -- ELIGIBILITY
 ------------------------------------------------------------
 

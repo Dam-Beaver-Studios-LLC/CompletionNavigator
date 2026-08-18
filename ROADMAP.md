@@ -1,6 +1,6 @@
 # Completion Navigator â€” Roadmap
 
-Current version: **0.19.0** Â· 41 Lua files Â· ~16,400 lines Â· 81 slash commands Â· 11 candidate providers Â· 10 UI tabs
+Current version: **0.20.0** Â· 41 Lua files Â· ~17,400 lines Â· 82 slash commands Â· 15 candidate providers Â· 10 UI tabs
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
@@ -23,7 +23,13 @@ This is the single largest recurring "what should I do next" signal in modern re
 **Effort:** moderate.
 **Recommendation: build first.** Highest value-to-effort ratio on the entire list.
 
-### 1.2 Five subsystems are tracked but never recommended
+### 1.2 Subsystems tracked but never recommended â€” **DONE in 0.20.0**
+
+**Resolved:** Mounts, Toys, Professions and Appearances now register providers. Titles deliberately does not â€” the client exposes no source for a title, so there is no action to name; the harness asserts that absence so adding one later is a conscious choice.
+
+Historical detail below.
+
+#### Original finding
 
 **Status:** confirmed by audit. These modules scan, store and report â€” but register **no candidate provider**, so they never surface in `/cn next`:
 
@@ -81,9 +87,9 @@ The addon is entirely solo-content-aware. A meaningful share of what a player "s
 
 **Recommendation: option 1, then option 2.** Curation is not a strategy.
 
-### 2.2 Route quality
+### 2.2 Route quality â€” **DONE in 0.20.0**
 
-**Status:** `CN.OrderByProximity` is greedy nearest-neighbour.
+**Status:** a 2-opt improvement pass now runs over the greedy result, removing 21.6% of the distance on the harness's crossed test case. Historically: `CN.OrderByProximity` was greedy nearest-neighbour only.
 
 Greedy nearest-neighbour is typically 15â€“25% worse than optimal and produces a characteristic failure: it strands one far objective and doubles back for it at the end. On a 12-stop zone sweep that is a visible, annoying detour.
 

@@ -96,6 +96,79 @@ function Appearances.Remaining()
 end
 
 ------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- How many slots are worth surfacing. Beyond a few, "your least complete
+-- slot" stops being a next action and becomes a table.
+Appearances.candidateSlots = 3
+
+-- Appearances are tracked per category, not per item -- enumerating every
+-- appearance source is tens of thousands of entries. So the objective here is
+-- the honest one the data supports: which slot is furthest from done.
+--
+-- It is deliberately low-valued. "Your chest slot is least complete" is a
+-- direction to point yourself in, not a task, and it should never outrank
+-- something with coordinates or a deadline.
+CN.RegisterCandidateProvider("Appearances", function()
+    local rows = {}
+
+    for categoryID, record in pairs(Store()) do
+        local total     = record.total or 0
+        local collected = record.collected or 0
+
+        if total > 0
+            and collected < total
+            and not CN.IsIgnored(CN.objectiveTypes.APPEARANCE, categoryID)
+            and not CN.IsDeferred(CN.objectiveTypes.APPEARANCE, categoryID) then
+
+            table.insert(rows, {
+                categoryID = categoryID,
+                name       = record.name,
+                collected  = collected,
+                total      = total,
+                remaining  = total - collected,
+                fraction   = collected / total,
+            })
+        end
+    end
+
+    -- Least complete first; ties by ID so the list does not reshuffle.
+    table.sort(rows, function(a, b)
+        if a.fraction ~= b.fraction then
+            return a.fraction < b.fraction
+        end
+
+        return a.categoryID < b.categoryID
+    end)
+
+    local candidates = {}
+
+    for index = 1, math.min(Appearances.candidateSlots, #rows) do
+        local row = rows[index]
+
+        table.insert(candidates, CN.NewObjective({
+            id              = row.categoryID,
+            type            = CN.objectiveTypes.APPEARANCE,
+            name            = tostring(row.name) .. " appearances",
+            accountWide     = true,
+            completionValue = 1,
+            reasons         = {
+                row.collected .. " of " .. row.total .. " collected",
+                row.remaining .. " remaining in this slot",
+            },
+        }))
+    end
+
+    CN.providerTruncation["Appearances"] = {
+        considered = #rows,
+        dropped    = math.max(0, #rows - #candidates),
+    }
+
+    return candidates
+end, { events = { "TRANSMOG_COLLECTION_UPDATED" }, cooldown = 10 })
+
+------------------------------------------------------------
 -- COMMANDS
 ------------------------------------------------------------
 

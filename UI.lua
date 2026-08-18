@@ -641,6 +641,15 @@ UI.RegisterTab{
         end)
         panel.ignore:SetPoint("LEFT", panel.skip, "RIGHT", 6, 0)
 
+        -- Type filter. A dropdown would need a menu library; a button that
+        -- opens a scrollable checklist in the same list widget the rest of the
+        -- window uses costs nothing extra and behaves identically everywhere.
+        panel.filter = AddButton(panel, "Filter types", 110, function()
+            panel.filtering = not panel.filtering
+            UI.Refresh()
+        end)
+        panel.filter:SetPoint("LEFT", panel.ignore, "RIGHT", 6, 0)
+
         panel.list = CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", panel.why, "BOTTOMLEFT", -4, -14)
@@ -648,12 +657,76 @@ UI.RegisterTab{
     end,
 
     refresh = function(panel)
+        local filters = CN:GetModule("Filters")
+
+        -- Filter mode takes over the list. The recommendation itself stays
+        -- visible above it, so you can see what changed as you toggle.
+        if panel.filtering and filters then
+            local hidden = filters.HiddenTypeCount()
+
+            panel.filter:SetText("Done")
+
+            panel.title:SetText("Show which types?")
+            panel.type:SetText(hidden == 0 and "showing everything"
+                or (hidden .. " type" .. (hidden == 1 and "" or "s") .. " hidden"))
+            panel.why:SetText("Hidden types still appear in Remaining and "
+                .. "Collections.\nThis only filters recommendations.")
+
+            local entries = {}
+
+            table.insert(entries, {
+                text = "|cffffff00Show everything|r",
+                onClick = function()
+                    filters.EnableAllTypes()
+                    UI.Refresh()
+                end,
+            })
+
+            for _, objectiveType in ipairs(filters.TypeOrder()) do
+                local enabled = filters.IsTypeEnabled(objectiveType)
+
+                table.insert(entries, {
+                    text = (enabled and "|cff00ff00[x]|r " or "|cff666666[ ]|r ")
+                        .. (enabled and "" or "|cff808080")
+                        .. filters.TypeLabel(objectiveType)
+                        .. (enabled and "" or "|r"),
+
+                    tooltip = filters.TypeLabel(objectiveType)
+                        .. (enabled and "\nShown in recommendations."
+                            or "\nHidden from recommendations."),
+
+                    onClick = function()
+                        filters.ToggleType(objectiveType)
+                        UI.Refresh()
+                    end,
+                })
+            end
+
+            panel.list:SetEntries(entries)
+
+            return
+        end
+
+        panel.filter:SetText("Filter types")
+
         local results = CN.Recommend(12)
 
         if #results == 0 then
+            local hidden = filters and filters.HiddenTypeCount() or 0
+
             panel.title:SetText("Nothing actionable yet")
             panel.type:SetText("")
-            panel.why:SetText("Run a scan from the Scans tab, or pick up a quest.")
+
+            -- An empty list because you filtered everything out looks exactly
+            -- like an empty list because nothing was found. Say which.
+            if hidden > 0 then
+                panel.why:SetText(hidden .. " type"
+                    .. (hidden == 1 and " is" or "s are") .. " hidden by your filter.\n"
+                    .. "Click Filter types to change it.")
+            else
+                panel.why:SetText("Run a scan from the Scans tab, or pick up a quest.")
+            end
+
             panel.list:SetEntries({})
 
             CN.currentRecommendation = nil

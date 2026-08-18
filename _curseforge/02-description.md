@@ -20,7 +20,7 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 
 **Navigates, on its own.** An arrow that points at your destination, turns as you turn, colours by whether you are actually walking toward it, and reports real distance in yards rather than map percentage. No other addon required. TomTom is still supported for anyone who prefers its arrow — `/cn nav tomtom` — and quest locations are resolved from four separate client sources, not one.
 
-**Sweeps a zone.** `/cn zone` gathers everything obtainable on your current map, ordered nearest-first from where you're standing. Click any stop to route to it.
+**Sweeps a zone.** `/cn zone` gathers everything obtainable on your current map and orders it into a real route — nearest-first, then improved to remove the doubling-back that a naive nearest-first ordering always leaves behind. Click any stop to route to it.
 
 **Understands your Warband.** Reputations, titles, professions, recipes and currencies are stored per character where the game scopes them that way. `/cn warband` shows your roster and combined coverage; `/cn who rep <faction>` tells you which character should do a job. Objectives another character is better suited to rank lower, and say so.
 
@@ -33,6 +33,8 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 **Answers in the tooltip.** Hover an item anywhere — a vendor list, a loot window, the auction house — and it tells you whether you have collected that toy, mount, pet or appearance, whether this character knows that recipe and which of your characters does, and which recorded vendor sells it. Items the addon knows nothing about get nothing added, so it stays out of the way.
 
 **Works toward what you actually want.** `/cn goal mount 1234` pins a target. It becomes actionable even when nothing else would have surfaced it — an uncollected mount is not normally a next action, which is exactly why saying you want it has to mean something — and anything that leads to it ranks higher and says so. `/cn goals` reports what is known about reaching each one: the source, where it is, which of your characters is best placed, and the next concrete step. Where nothing is known, it says so rather than inventing a route.
+
+**Shows you only what you care about.** `/cn show only quests` while levelling, `/cn show pets` to drop a category you have finished with, or the *Filter types* button on the Next tab. Filtering changes what gets recommended, never what gets tracked — everything still appears in Remaining and Collections.
 
 **Lets you undo hiding things.** Ignore or defer anything you are not interested in, then `/cn hidden` to see the list and `/cn unhide` to bring it back. Deferrals expire on their own.
 
@@ -96,6 +98,7 @@ Keybindings live under **Key Bindings → AddOns**.
 /cn arrow                Toggle the on-screen navigation arrow
 /cn nav                  Choose the navigation provider
 /cn here                 Where you are, and what is being tracked
+/cn show [type]          Choose which kinds of objective get recommended
 /cn goal <type> <id>     Pin something to work toward
 /cn goals                Your goals, and what is known about reaching them
 /cn now                  Everything expiring soon
@@ -148,7 +151,7 @@ None are required. Completion Navigator is a decision layer, not a replacement f
 
 ## Status
 
-Version 0.19.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
+Version 0.20.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
 
 Bug reports and feature requests: [GitHub issues](https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/issues), or email developer@dambeaverstudios.com.
 

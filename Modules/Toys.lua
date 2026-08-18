@@ -114,6 +114,79 @@ function Toys.Resolve(text)
 end
 
 ------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- Toys are the one collection whose IDs line up with the vendor database:
+-- both are keyed by item ID, so "which recorded vendor sells this toy" is an
+-- exact join rather than a guess. That turns an uncollected toy into an
+-- objective with real coordinates.
+--
+-- Toys with no recorded seller are deliberately NOT emitted. The toy box has
+-- no source field, so without a vendor there is nothing to say beyond "you do
+-- not have this", which the Collections tab already covers.
+CN.RegisterCandidateProvider("Toys", function()
+    local vendors = CN:GetModule("Vendors")
+
+    if not vendors then
+        return {}
+    end
+
+    local playerMap = select(1, CN.GetPlayerPosition())
+
+    local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
+        function(itemID, record)
+            if record.collected then
+                return nil
+            end
+
+            if CN.IsIgnored(CN.objectiveTypes.TOY, itemID)
+                or CN.IsDeferred(CN.objectiveTypes.TOY, itemID) then
+                return nil
+            end
+
+            local seller = vendors.FirstLocatedSeller(itemID)
+
+            if not seller then
+                return nil
+            end
+
+            return (seller.mapID == playerMap) and 3 or 2
+        end,
+        function(itemID, record, value)
+            local seller = vendors.FirstLocatedSeller(itemID)
+
+            if not seller then
+                return nil
+            end
+
+            local reasons = { "sold by " .. tostring(seller.name) }
+
+            if seller.zone then
+                table.insert(reasons, "in " .. seller.zone)
+            end
+
+            return CN.NewObjective({
+                id              = itemID,
+                type            = CN.objectiveTypes.TOY,
+                name            = record.name,
+                mapID           = seller.mapID,
+                x               = seller.x,
+                y               = seller.y,
+                zone            = seller.zone,
+                accountWide     = true,
+                completionValue = value,
+                travelCost      = (seller.mapID == playerMap) and 2 or 25,
+                reasons         = reasons,
+            })
+        end)
+
+    CN.providerTruncation["Toys"] = { considered = considered, dropped = dropped }
+
+    return candidates
+end, { events = { "NEW_TOY_ADDED", "MERCHANT_SHOW" }, cooldown = 5 })
+
+------------------------------------------------------------
 -- ELIGIBILITY
 ------------------------------------------------------------
 

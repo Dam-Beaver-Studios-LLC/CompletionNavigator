@@ -71,6 +71,76 @@ function Mounts.Scan()
 end
 
 ------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- Only mounts with a KNOWN SOURCE become recommendations.
+--
+-- Retail has roughly 900 mounts and most players are missing hundreds. An
+-- objective that says "collect this mount" and nothing else is not a next
+-- action, it is a list -- and /cn breakdown and the Collections tab already
+-- read the store directly for that. What makes a mount actionable is the
+-- journal's source text: "Vendor: X", "Quest: Y", "Drop: Z".
+CN.RegisterCandidateProvider("Mounts", function()
+    local playerFaction = UnitFactionGroup and UnitFactionGroup("player") or nil
+
+    local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
+        function(mountID, record)
+            if record.collected then
+                return nil
+            end
+
+            -- A mount locked to the other faction cannot be earned on this
+            -- account's characters of this faction; saying "go get it" is
+            -- worse than silence.
+            if record.isFactionSpecific and record.faction and playerFaction then
+                local wanted = (record.faction == 0) and "Horde" or "Alliance"
+
+                if wanted ~= playerFaction then
+                    return nil
+                end
+            end
+
+            if not record.source or record.source == "" then
+                return nil
+            end
+
+            if CN.IsIgnored(CN.objectiveTypes.MOUNT, mountID)
+                or CN.IsDeferred(CN.objectiveTypes.MOUNT, mountID) then
+                return nil
+            end
+
+            -- Something you can walk up to and buy or complete beats something
+            -- with a drop chance, which beats everything else.
+            local source = string.lower(record.source)
+
+            if source:find("vendor", 1, true) or source:find("quest", 1, true) then
+                return 3
+            end
+
+            if source:find("drop", 1, true) then
+                return 2
+            end
+
+            return 1
+        end,
+        function(mountID, record, value)
+            return CN.NewObjective({
+                id              = mountID,
+                type            = CN.objectiveTypes.MOUNT,
+                name            = record.name,
+                accountWide     = true,
+                completionValue = value,
+                reasons         = { record.source },
+            })
+        end)
+
+    CN.providerTruncation["Mounts"] = { considered = considered, dropped = dropped }
+
+    return candidates
+end, { events = { "NEW_MOUNT_ADDED" } })
+
+------------------------------------------------------------
 -- ELIGIBILITY
 ------------------------------------------------------------
 

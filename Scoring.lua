@@ -205,6 +205,7 @@ local ranked = {
     list       = nil,
     generation = -1,
     mode       = nil,
+    filter     = -1,
 }
 
 CN.candidateCacheSeconds = 5
@@ -298,6 +299,7 @@ for _, event in ipairs({
     "ZONE_CHANGED_NEW_AREA",
     "MERCHANT_SHOW",
     "TRADE_SKILL_LIST_UPDATE",
+    "TRANSMOG_COLLECTION_UPDATED",
 }) do
     CN:RegisterEvent(event, function()
         CN.InvalidateCandidates(event)
@@ -478,9 +480,12 @@ local function Ranked()
 
     local candidates = CN.CollectCandidates()
 
+    local filterGeneration = CN.typeFilterGeneration or 0
+
     if ranked.list
         and ranked.generation == aggregate.generation
-        and ranked.mode == mode then
+        and ranked.mode == mode
+        and ranked.filter == filterGeneration then
 
         return ranked.list
     end
@@ -488,6 +493,10 @@ local function Ranked()
     -- Sorting a copy, not the aggregate. Callers that walk the candidate
     -- list -- zone routing, for one -- must not have it reordered under
     -- them as a side effect of somebody asking for a recommendation.
+    -- The type filter is a display preference, applied here rather than in the
+    -- providers. Filtering earlier would mean rebuilding providers whenever it
+    -- changed, and would leak a presentation choice into data collection --
+    -- /cn breakdown and the Collections tab must still see everything.
     local list = {}
 
     for index = 1, #candidates do
@@ -495,7 +504,10 @@ local function Ranked()
 
         CN.ScoreObjective(objective)
 
-        list[index] = objective
+        if not CN.IsObjectiveTypeEnabled
+            or CN.IsObjectiveTypeEnabled(objective.type) then
+            list[#list + 1] = objective
+        end
     end
 
     table.sort(list, function(a, b)
@@ -514,6 +526,7 @@ local function Ranked()
     ranked.list       = list
     ranked.generation = aggregate.generation
     ranked.mode       = mode
+    ranked.filter     = filterGeneration
 
     return list
 end

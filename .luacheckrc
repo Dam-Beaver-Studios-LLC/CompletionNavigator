@@ -38,7 +38,7 @@ read_globals = {
 
     -- Globals the client defines that are not functions.
     "Enum", "GameTooltip", "Minimap", "UIParent", "UISpecialFrames",
-    "UiMapPoint", "DEFAULT_CHAT_FRAME", "TooltipDataProcessor",
+    "UiMapPoint", "CreateVector2D", "DEFAULT_CHAT_FRAME", "TooltipDataProcessor",
     "TooltipUtil", "LE_PET_JOURNAL_FILTER_COLLECTED",
     "LE_PET_JOURNAL_FILTER_NOT_COLLECTED", "NORMAL_FONT_COLOR",
 

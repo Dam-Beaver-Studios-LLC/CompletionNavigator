@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.19.0'
+$script:ToolkitVersion = '0.20.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.19.0"
+CN.version     = "0.20.0"
 CN.dbVersion   = 2
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -1759,6 +1759,7 @@ local ranked = {
     list       = nil,
     generation = -1,
     mode       = nil,
+    filter     = -1,
 }
 
 CN.candidateCacheSeconds = 5
@@ -1852,6 +1853,7 @@ for _, event in ipairs({
     "ZONE_CHANGED_NEW_AREA",
     "MERCHANT_SHOW",
     "TRADE_SKILL_LIST_UPDATE",
+    "TRANSMOG_COLLECTION_UPDATED",
 }) do
     CN:RegisterEvent(event, function()
         CN.InvalidateCandidates(event)
@@ -2032,9 +2034,12 @@ local function Ranked()
 
     local candidates = CN.CollectCandidates()
 
+    local filterGeneration = CN.typeFilterGeneration or 0
+
     if ranked.list
         and ranked.generation == aggregate.generation
-        and ranked.mode == mode then
+        and ranked.mode == mode
+        and ranked.filter == filterGeneration then
 
         return ranked.list
     end
@@ -2042,6 +2047,10 @@ local function Ranked()
     -- Sorting a copy, not the aggregate. Callers that walk the candidate
     -- list -- zone routing, for one -- must not have it reordered under
     -- them as a side effect of somebody asking for a recommendation.
+    -- The type filter is a display preference, applied here rather than in the
+    -- providers. Filtering earlier would mean rebuilding providers whenever it
+    -- changed, and would leak a presentation choice into data collection --
+    -- /cn breakdown and the Collections tab must still see everything.
     local list = {}
 
     for index = 1, #candidates do
@@ -2049,7 +2058,10 @@ local function Ranked()
 
         CN.ScoreObjective(objective)
 
-        list[index] = objective
+        if not CN.IsObjectiveTypeEnabled
+            or CN.IsObjectiveTypeEnabled(objective.type) then
+            list[#list + 1] = objective
+        end
     end
 
     table.sort(list, function(a, b)
@@ -2068,6 +2080,7 @@ local function Ranked()
     ranked.list       = list
     ranked.generation = aggregate.generation
     ranked.mode       = mode
+    ranked.filter     = filterGeneration
 
     return list
 end
@@ -2419,6 +2432,88 @@ end
 
 -- Nearest-neighbour ordering from a starting point. Good enough for a
 -- zone sweep; a proper route solver can replace this later.
+-- Squared distance is enough for comparisons and avoids a sqrt per pair.
+local function Distance2(ax, ay, bx, by)
+    local dx = (ax or 0.5) - (bx or 0.5)
+    local dy = (ay or 0.5) - (by or 0.5)
+
+    return (dx * dx) + (dy * dy)
+end
+
+-- Total length of a route starting from the player.
+local function RouteLength(route, startX, startY)
+    local total = 0
+
+    local x, y = startX or 0.5, startY or 0.5
+
+    for index = 1, #route do
+        total = total + math.sqrt(Distance2(x, y, route[index].x, route[index].y))
+
+        x, y = route[index].x or 0.5, route[index].y or 0.5
+    end
+
+    return total
+end
+
+CN.RouteLength = RouteLength
+
+-- 2-opt improvement.
+--
+-- Nearest-neighbour has a characteristic failure: it takes the locally cheap
+-- step every time and strands one far objective, then doubles back for it at
+-- the end. On a twelve-stop zone sweep that is a visible, irritating detour.
+--
+-- 2-opt repeatedly reverses any segment that shortens the route. It converges
+-- in milliseconds at this size and removes exactly that kind of crossing.
+-- Bounded by passes so a pathological set cannot spin.
+CN.routeOptimizePasses = 12
+
+function CN.ImproveRoute(route, startX, startY)
+    local count = #route
+
+    if count < 4 then
+        return route, 0
+    end
+
+    local before = RouteLength(route, startX, startY)
+
+    for _ = 1, CN.routeOptimizePasses do
+        local improved = false
+
+        for i = 1, count - 1 do
+            for k = i + 1, count do
+                -- Reverse the segment i..k and keep it only if shorter.
+                local candidate = {}
+
+                for index = 1, i - 1 do
+                    candidate[#candidate + 1] = route[index]
+                end
+
+                for index = k, i, -1 do
+                    candidate[#candidate + 1] = route[index]
+                end
+
+                for index = k + 1, count do
+                    candidate[#candidate + 1] = route[index]
+                end
+
+                if RouteLength(candidate, startX, startY) < RouteLength(route, startX, startY) - 1e-9 then
+                    route = candidate
+                    improved = true
+                end
+            end
+        end
+
+        if not improved then
+            break
+        end
+    end
+
+    local after = RouteLength(route, startX, startY)
+
+    return route, before > 0 and ((before - after) / before) or 0
+end
+
 function CN.OrderByProximity(objectives, startX, startY)
     local remaining = {}
 
@@ -2479,6 +2574,16 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     end
 
     local route = CN.OrderByProximity(located, startX, startY)
+
+    -- Greedy first, then improve. Nearest-neighbour gives a good starting
+    -- order cheaply; 2-opt removes the crossings it leaves behind.
+    local improved, saved = CN.ImproveRoute(route, startX, startY)
+
+    route = improved
+
+    if saved and saved > 0.001 then
+        CN.DebugPrint(string.format("Route shortened by %.1f%% by 2-opt.", saved * 100))
+    end
 
     CN.currentRoute = route
 
@@ -3476,6 +3581,15 @@ UI.RegisterTab{
         end)
         panel.ignore:SetPoint("LEFT", panel.skip, "RIGHT", 6, 0)
 
+        -- Type filter. A dropdown would need a menu library; a button that
+        -- opens a scrollable checklist in the same list widget the rest of the
+        -- window uses costs nothing extra and behaves identically everywhere.
+        panel.filter = AddButton(panel, "Filter types", 110, function()
+            panel.filtering = not panel.filtering
+            UI.Refresh()
+        end)
+        panel.filter:SetPoint("LEFT", panel.ignore, "RIGHT", 6, 0)
+
         panel.list = CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", panel.why, "BOTTOMLEFT", -4, -14)
@@ -3483,12 +3597,76 @@ UI.RegisterTab{
     end,
 
     refresh = function(panel)
+        local filters = CN:GetModule("Filters")
+
+        -- Filter mode takes over the list. The recommendation itself stays
+        -- visible above it, so you can see what changed as you toggle.
+        if panel.filtering and filters then
+            local hidden = filters.HiddenTypeCount()
+
+            panel.filter:SetText("Done")
+
+            panel.title:SetText("Show which types?")
+            panel.type:SetText(hidden == 0 and "showing everything"
+                or (hidden .. " type" .. (hidden == 1 and "" or "s") .. " hidden"))
+            panel.why:SetText("Hidden types still appear in Remaining and "
+                .. "Collections.\nThis only filters recommendations.")
+
+            local entries = {}
+
+            table.insert(entries, {
+                text = "|cffffff00Show everything|r",
+                onClick = function()
+                    filters.EnableAllTypes()
+                    UI.Refresh()
+                end,
+            })
+
+            for _, objectiveType in ipairs(filters.TypeOrder()) do
+                local enabled = filters.IsTypeEnabled(objectiveType)
+
+                table.insert(entries, {
+                    text = (enabled and "|cff00ff00[x]|r " or "|cff666666[ ]|r ")
+                        .. (enabled and "" or "|cff808080")
+                        .. filters.TypeLabel(objectiveType)
+                        .. (enabled and "" or "|r"),
+
+                    tooltip = filters.TypeLabel(objectiveType)
+                        .. (enabled and "\nShown in recommendations."
+                            or "\nHidden from recommendations."),
+
+                    onClick = function()
+                        filters.ToggleType(objectiveType)
+                        UI.Refresh()
+                    end,
+                })
+            end
+
+            panel.list:SetEntries(entries)
+
+            return
+        end
+
+        panel.filter:SetText("Filter types")
+
         local results = CN.Recommend(12)
 
         if #results == 0 then
+            local hidden = filters and filters.HiddenTypeCount() or 0
+
             panel.title:SetText("Nothing actionable yet")
             panel.type:SetText("")
-            panel.why:SetText("Run a scan from the Scans tab, or pick up a quest.")
+
+            -- An empty list because you filtered everything out looks exactly
+            -- like an empty list because nothing was found. Say which.
+            if hidden > 0 then
+                panel.why:SetText(hidden .. " type"
+                    .. (hidden == 1 and " is" or "s are") .. " hidden by your filter.\n"
+                    .. "Click Filter types to change it.")
+            else
+                panel.why:SetText("Run a scan from the Scans tab, or pick up a quest.")
+            end
+
             panel.list:SetEntries({})
 
             CN.currentRecommendation = nil
@@ -9336,6 +9514,76 @@ function Mounts.Scan()
 end
 
 ------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- Only mounts with a KNOWN SOURCE become recommendations.
+--
+-- Retail has roughly 900 mounts and most players are missing hundreds. An
+-- objective that says "collect this mount" and nothing else is not a next
+-- action, it is a list -- and /cn breakdown and the Collections tab already
+-- read the store directly for that. What makes a mount actionable is the
+-- journal's source text: "Vendor: X", "Quest: Y", "Drop: Z".
+CN.RegisterCandidateProvider("Mounts", function()
+    local playerFaction = UnitFactionGroup and UnitFactionGroup("player") or nil
+
+    local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
+        function(mountID, record)
+            if record.collected then
+                return nil
+            end
+
+            -- A mount locked to the other faction cannot be earned on this
+            -- account's characters of this faction; saying "go get it" is
+            -- worse than silence.
+            if record.isFactionSpecific and record.faction and playerFaction then
+                local wanted = (record.faction == 0) and "Horde" or "Alliance"
+
+                if wanted ~= playerFaction then
+                    return nil
+                end
+            end
+
+            if not record.source or record.source == "" then
+                return nil
+            end
+
+            if CN.IsIgnored(CN.objectiveTypes.MOUNT, mountID)
+                or CN.IsDeferred(CN.objectiveTypes.MOUNT, mountID) then
+                return nil
+            end
+
+            -- Something you can walk up to and buy or complete beats something
+            -- with a drop chance, which beats everything else.
+            local source = string.lower(record.source)
+
+            if source:find("vendor", 1, true) or source:find("quest", 1, true) then
+                return 3
+            end
+
+            if source:find("drop", 1, true) then
+                return 2
+            end
+
+            return 1
+        end,
+        function(mountID, record, value)
+            return CN.NewObjective({
+                id              = mountID,
+                type            = CN.objectiveTypes.MOUNT,
+                name            = record.name,
+                accountWide     = true,
+                completionValue = value,
+                reasons         = { record.source },
+            })
+        end)
+
+    CN.providerTruncation["Mounts"] = { considered = considered, dropped = dropped }
+
+    return candidates
+end, { events = { "NEW_MOUNT_ADDED" } })
+
+------------------------------------------------------------
 -- ELIGIBILITY
 ------------------------------------------------------------
 
@@ -9637,6 +9885,79 @@ function Toys.Resolve(text)
 end
 
 ------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- Toys are the one collection whose IDs line up with the vendor database:
+-- both are keyed by item ID, so "which recorded vendor sells this toy" is an
+-- exact join rather than a guess. That turns an uncollected toy into an
+-- objective with real coordinates.
+--
+-- Toys with no recorded seller are deliberately NOT emitted. The toy box has
+-- no source field, so without a vendor there is nothing to say beyond "you do
+-- not have this", which the Collections tab already covers.
+CN.RegisterCandidateProvider("Toys", function()
+    local vendors = CN:GetModule("Vendors")
+
+    if not vendors then
+        return {}
+    end
+
+    local playerMap = select(1, CN.GetPlayerPosition())
+
+    local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
+        function(itemID, record)
+            if record.collected then
+                return nil
+            end
+
+            if CN.IsIgnored(CN.objectiveTypes.TOY, itemID)
+                or CN.IsDeferred(CN.objectiveTypes.TOY, itemID) then
+                return nil
+            end
+
+            local seller = vendors.FirstLocatedSeller(itemID)
+
+            if not seller then
+                return nil
+            end
+
+            return (seller.mapID == playerMap) and 3 or 2
+        end,
+        function(itemID, record, value)
+            local seller = vendors.FirstLocatedSeller(itemID)
+
+            if not seller then
+                return nil
+            end
+
+            local reasons = { "sold by " .. tostring(seller.name) }
+
+            if seller.zone then
+                table.insert(reasons, "in " .. seller.zone)
+            end
+
+            return CN.NewObjective({
+                id              = itemID,
+                type            = CN.objectiveTypes.TOY,
+                name            = record.name,
+                mapID           = seller.mapID,
+                x               = seller.x,
+                y               = seller.y,
+                zone            = seller.zone,
+                accountWide     = true,
+                completionValue = value,
+                travelCost      = (seller.mapID == playerMap) and 2 or 25,
+                reasons         = reasons,
+            })
+        end)
+
+    CN.providerTruncation["Toys"] = { considered = considered, dropped = dropped }
+
+    return candidates
+end, { events = { "NEW_TOY_ADDED", "MERCHANT_SHOW" }, cooldown = 5 })
+
+------------------------------------------------------------
 -- ELIGIBILITY
 ------------------------------------------------------------
 
@@ -9820,6 +10141,79 @@ function Appearances.Remaining()
 
     return rows
 end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- How many slots are worth surfacing. Beyond a few, "your least complete
+-- slot" stops being a next action and becomes a table.
+Appearances.candidateSlots = 3
+
+-- Appearances are tracked per category, not per item -- enumerating every
+-- appearance source is tens of thousands of entries. So the objective here is
+-- the honest one the data supports: which slot is furthest from done.
+--
+-- It is deliberately low-valued. "Your chest slot is least complete" is a
+-- direction to point yourself in, not a task, and it should never outrank
+-- something with coordinates or a deadline.
+CN.RegisterCandidateProvider("Appearances", function()
+    local rows = {}
+
+    for categoryID, record in pairs(Store()) do
+        local total     = record.total or 0
+        local collected = record.collected or 0
+
+        if total > 0
+            and collected < total
+            and not CN.IsIgnored(CN.objectiveTypes.APPEARANCE, categoryID)
+            and not CN.IsDeferred(CN.objectiveTypes.APPEARANCE, categoryID) then
+
+            table.insert(rows, {
+                categoryID = categoryID,
+                name       = record.name,
+                collected  = collected,
+                total      = total,
+                remaining  = total - collected,
+                fraction   = collected / total,
+            })
+        end
+    end
+
+    -- Least complete first; ties by ID so the list does not reshuffle.
+    table.sort(rows, function(a, b)
+        if a.fraction ~= b.fraction then
+            return a.fraction < b.fraction
+        end
+
+        return a.categoryID < b.categoryID
+    end)
+
+    local candidates = {}
+
+    for index = 1, math.min(Appearances.candidateSlots, #rows) do
+        local row = rows[index]
+
+        table.insert(candidates, CN.NewObjective({
+            id              = row.categoryID,
+            type            = CN.objectiveTypes.APPEARANCE,
+            name            = tostring(row.name) .. " appearances",
+            accountWide     = true,
+            completionValue = 1,
+            reasons         = {
+                row.collected .. " of " .. row.total .. " collected",
+                row.remaining .. " remaining in this slot",
+            },
+        }))
+    end
+
+    CN.providerTruncation["Appearances"] = {
+        considered = #rows,
+        dropped    = math.max(0, #rows - #candidates),
+    }
+
+    return candidates
+end, { events = { "TRANSMOG_COLLECTION_UPDATED" }, cooldown = 10 })
 
 ------------------------------------------------------------
 -- COMMANDS
@@ -10020,6 +10414,26 @@ function Titles.Resolve(text)
 
     return matches[1].id
 end
+
+------------------------------------------------------------
+-- WHY THERE IS NO CANDIDATE PROVIDER HERE
+------------------------------------------------------------
+
+-- Every other collection module contributes recommendations. Titles
+-- deliberately does not, and this comment exists so that absence reads as a
+-- decision rather than an oversight.
+--
+-- A recommendation has to name an action. The client exposes a title's name
+-- and whether this character has it, and nothing else -- no source, no
+-- coordinates, no criteria. "You do not have Loremaster" is a fact, not a next
+-- action, and emitting it would push a row with no location and no route into
+-- a list whose entire purpose is to be actionable.
+--
+-- Titles are still fully tracked and reported: /cn titles, /cn who title, the
+-- Collections tab and /cn breakdown all read this store directly. And a title
+-- someone actually wants can be pinned with /cn goal title <id>, which is the
+-- correct place for "I have decided I want this even though the addon cannot
+-- tell me how to get it".
 
 ------------------------------------------------------------
 -- ELIGIBILITY
@@ -10350,6 +10764,73 @@ end
 ------------------------------------------------------------
 -- ELIGIBILITY
 ------------------------------------------------------------
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- A profession below its cap is one of the few completion objectives that is
+-- unambiguously actionable: you know the skill, you know the number, and the
+-- work is entirely in your hands.
+--
+-- Character-scoped on purpose. Professions do not carry across a Warband, and
+-- pretending otherwise would put an alt's blacksmithing in front of you.
+CN.RegisterCandidateProvider("Professions", function()
+    local store = CharacterStore()
+
+    if not store then
+        return {}
+    end
+
+    local candidates = {}
+
+    for skillLineID, record in pairs(store) do
+        local rank    = record.rank or 0
+        local maxRank = record.maxRank or 0
+
+        local remaining = maxRank - rank
+
+        if maxRank > 0
+            and remaining > 0
+            and not CN.IsIgnored(CN.objectiveTypes.PROFESSION, skillLineID)
+            and not CN.IsDeferred(CN.objectiveTypes.PROFESSION, skillLineID) then
+
+            local fraction = rank / maxRank
+
+            -- Nearly finished is worth more than barely started: the last few
+            -- points are the ones a nudge actually completes.
+            local value = (fraction >= 0.9) and 3 or (fraction >= 0.5) and 2 or 1
+
+            local reasons = {
+                rank .. " of " .. maxRank .. ", " .. remaining .. " to go",
+            }
+
+            if not record.recipesSeen then
+                table.insert(reasons,
+                    "open its window once so recipes can be recorded")
+            end
+
+            table.insert(candidates, CN.NewObjective({
+                id              = skillLineID,
+                type            = CN.objectiveTypes.PROFESSION,
+                name            = record.name,
+                accountWide     = false,
+                characterSpecific = true,
+                completionValue = value,
+                reasons         = reasons,
+            }))
+        end
+    end
+
+    local kept, dropped = CN.CapCandidates(candidates)
+
+    CN.providerTruncation["Professions"] = {
+        considered = #kept + dropped,
+        dropped    = dropped,
+    }
+
+    return kept
+end, { events = { "TRADE_SKILL_LIST_UPDATE" }, cooldown = 5 })
 
 CN.RegisterEligibilityChecker(CN.objectiveTypes.RECIPE, function(recipeID)
     local states = CN.objectiveStates
@@ -13185,6 +13666,194 @@ function Filters.SecondsFor(key)
 end
 
 ------------------------------------------------------------
+-- TYPE FILTERING
+------------------------------------------------------------
+
+-- Which KINDS of objective the recommendation list may contain.
+--
+-- Distinct from ignore and defer, which hide one specific objective. This is a
+-- standing preference about what you want to be told about at all: someone
+-- levelling wants quests, someone finishing a collection does not.
+--
+-- Only DISABLED types are stored. That way a type added in a later release is
+-- enabled by default rather than silently invisible to everyone who upgraded,
+-- which is the failure mode of storing an allow-list.
+local function HiddenTypes()
+    local settings = CN.Settings()
+
+    if not settings then
+        return {}
+    end
+
+    settings.hiddenTypes = settings.hiddenTypes or {}
+
+    return settings.hiddenTypes
+end
+
+Filters.HiddenTypes = HiddenTypes
+
+-- Bumped whenever the filter changes, so the ranked list knows to rebuild
+-- without invalidating the providers, which have not changed at all.
+CN.typeFilterGeneration = 0
+
+local function Bump()
+    CN.typeFilterGeneration = (CN.typeFilterGeneration or 0) + 1
+end
+
+function Filters.IsTypeEnabled(objectiveType)
+    if not objectiveType then
+        return true
+    end
+
+    local hidden = HiddenTypes()
+
+    if next(hidden) == nil then
+        return true
+    end
+
+    return not hidden[objectiveType]
+end
+
+function Filters.SetTypeEnabled(objectiveType, enabled)
+    if not objectiveType then
+        return false
+    end
+
+    local hidden = HiddenTypes()
+
+    if enabled then
+        hidden[objectiveType] = nil
+    else
+        hidden[objectiveType] = true
+    end
+
+    Bump()
+
+    return true
+end
+
+function Filters.ToggleType(objectiveType)
+    local enabled = Filters.IsTypeEnabled(objectiveType)
+
+    Filters.SetTypeEnabled(objectiveType, not enabled)
+
+    return not enabled
+end
+
+function Filters.EnableAllTypes()
+    local hidden = HiddenTypes()
+
+    local count = CN.CountKeys(hidden)
+
+    for key in pairs(hidden) do
+        hidden[key] = nil
+    end
+
+    Bump()
+
+    return count
+end
+
+-- Everything except this one.
+function Filters.OnlyType(objectiveType)
+    local hidden = HiddenTypes()
+
+    for key in pairs(hidden) do
+        hidden[key] = nil
+    end
+
+    for _, known in ipairs(Filters.TypeOrder()) do
+        if known ~= objectiveType then
+            hidden[known] = true
+        end
+    end
+
+    Bump()
+
+    return true
+end
+
+-- The types worth offering, in a stable order. Deliberately not every entry in
+-- CN.objectiveTypes: VENDOR and COLLECTIBLE are internal plumbing rather than
+-- things anyone would choose to be shown.
+function Filters.TypeOrder()
+    local types = CN.objectiveTypes
+
+    return {
+        types.QUEST,
+        types.ACHIEVEMENT,
+        types.REPUTATION,
+        types.PET,
+        types.MOUNT,
+        types.TOY,
+        types.APPEARANCE,
+        types.RECIPE,
+        types.PROFESSION,
+        types.RARE,
+        types.TREASURE,
+        types.EXPLORATION,
+        types.TITLE,
+        types.CURRENCY,
+    }
+end
+
+-- Friendly names, because "APPEARANCE" is how the code thinks and not how a
+-- person reads a checkbox.
+Filters.typeLabels = {
+    QUEST       = "Quests",
+    ACHIEVEMENT = "Achievements",
+    REPUTATION  = "Reputations",
+    PET         = "Battle pets",
+    MOUNT       = "Mounts",
+    TOY         = "Toys",
+    APPEARANCE  = "Appearances",
+    RECIPE      = "Recipes",
+    PROFESSION  = "Professions",
+    RARE        = "Rares",
+    TREASURE    = "Treasures",
+    EXPLORATION = "Exploration",
+    TITLE       = "Titles",
+    CURRENCY    = "Currencies",
+}
+
+function Filters.TypeLabel(objectiveType)
+    return Filters.typeLabels[objectiveType] or tostring(objectiveType)
+end
+
+-- Accepts what a person would actually type.
+function Filters.ResolveType(text)
+    if not text or text == "" then
+        return nil
+    end
+
+    local needle = string.lower(CN.Trim(text))
+
+    for _, objectiveType in ipairs(Filters.TypeOrder()) do
+        if string.lower(objectiveType) == needle
+            or string.lower(Filters.TypeLabel(objectiveType)) == needle then
+            return objectiveType
+        end
+
+        -- "quest" should match QUEST, "pet" should match PET.
+        if string.lower(Filters.TypeLabel(objectiveType)):find(needle, 1, true) then
+            return objectiveType
+        end
+    end
+
+    return nil
+end
+
+function Filters.HiddenTypeCount()
+    return CN.CountKeys(HiddenTypes())
+end
+
+-- Exposed on CN so the scoring layer can consult it without knowing that a
+-- Filters module exists.
+function CN.IsObjectiveTypeEnabled(objectiveType)
+    return Filters.IsTypeEnabled(objectiveType)
+end
+
+------------------------------------------------------------
 -- READING THE LISTS
 ------------------------------------------------------------
 
@@ -13477,6 +14146,72 @@ CN:RegisterCommand{
         if restored == 0 then
             Print("Nothing hidden matches: " .. args)
             Print("Run |cffffff00/cn hidden|r to see the list.")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "show",
+    aliases = { "types" },
+    args    = "[type, only <type>, or all]",
+    order   = 17,
+    help    = "Choose which kinds of objective appear in recommendations.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        local lowered = string.lower(args)
+
+        if lowered == "all" then
+            local restored = Filters.EnableAllTypes()
+
+            Print("Showing every type again"
+                .. (restored > 0 and (" (" .. restored .. " restored)") or "") .. ".")
+
+        elseif lowered:match("^only%s+") then
+            local wanted = Filters.ResolveType(lowered:gsub("^only%s+", ""))
+
+            if not wanted then
+                Print("Not a type: " .. args)
+                Print("|cffffff00/cn show|r lists them.")
+                return
+            end
+
+            Filters.OnlyType(wanted)
+
+            Print("Showing only " .. Filters.TypeLabel(wanted) .. ".")
+
+        elseif args ~= "" then
+            local wanted = Filters.ResolveType(args)
+
+            if not wanted then
+                Print("Not a type: " .. args)
+                Print("|cffffff00/cn show|r lists them.")
+                return
+            end
+
+            local nowEnabled = Filters.ToggleType(wanted)
+
+            Print(Filters.TypeLabel(wanted) .. ": " .. CN.YesNo(nowEnabled))
+        end
+
+        local hiddenCount = Filters.HiddenTypeCount()
+
+        Print("Recommendation types"
+            .. (hiddenCount > 0 and (" |cffffff00" .. hiddenCount .. " hidden|r") or ""))
+
+        for _, objectiveType in ipairs(Filters.TypeOrder()) do
+            local enabled = Filters.IsTypeEnabled(objectiveType)
+
+            Print("  " .. CN.YesNo(enabled) .. " " .. Filters.TypeLabel(objectiveType)
+                .. " |cff999999" .. string.lower(objectiveType) .. "|r")
+        end
+
+        Print("|cff999999/cn show pets|r toggles one, |cff999999/cn show only quests|r "
+            .. "narrows to one, |cff999999/cn show all|r restores everything.")
+
+        if hiddenCount > 0 then
+            Print("|cff999999Hidden types still appear in /cn breakdown and the "
+                .. "Collections tab; this only filters recommendations.|r")
         end
     end,
 }
@@ -15761,21 +16496,59 @@ function Navigation.DistanceYards(mapID, playerX, playerY, targetX, targetY)
         return nil
     end
 
-    if not C_Map or not C_Map.GetWorldPosFromMapPos or not UiMapPoint then
+    if not C_Map or not C_Map.GetWorldPosFromMapPos then
         return nil
     end
 
-    local ok, fromContinent, fromPos = pcall(C_Map.GetWorldPosFromMapPos, mapID,
-        UiMapPoint.CreateFromCoordinates(mapID, playerX, playerY))
-
-    if not ok or not fromPos then
+    -- GetWorldPosFromMapPos takes a Vector2D, NOT a UiMapPoint.
+    --
+    -- These are two different types and 0.19.0 passed the wrong one, so the
+    -- call returned nothing and the arrow reported "distance unknown" for
+    -- every target. UiMapPoint carries a nested `position`; Vector2D carries
+    -- x and y directly. SetUserWaypoint wants the former, this wants the
+    -- latter, and they are easy to confuse because both describe a point.
+    if not CreateVector2D then
         return nil
     end
 
-    local toOk, toContinent, toPos = pcall(C_Map.GetWorldPosFromMapPos, mapID,
-        UiMapPoint.CreateFromCoordinates(mapID, targetX, targetY))
+    local function worldPosition(x, y)
+        local ok, continentID, position =
+            pcall(C_Map.GetWorldPosFromMapPos, mapID, CreateVector2D(x, y))
 
-    if not toOk or not toPos then
+        if not ok or not position then
+            return nil, nil
+        end
+
+        -- Vector2D exposes GetXY(); some builds also expose x and y directly.
+        local wx, wy
+
+        if position.GetXY then
+            local gotXY, gx, gy = pcall(position.GetXY, position)
+
+            if gotXY then
+                wx, wy = gx, gy
+            end
+        end
+
+        wx = wx or position.x
+        wy = wy or position.y
+
+        if not wx or not wy then
+            return nil, nil
+        end
+
+        return continentID, { x = wx, y = wy }
+    end
+
+    local fromContinent, fromPos = worldPosition(playerX, playerY)
+
+    if not fromPos then
+        return nil
+    end
+
+    local toContinent, toPos = worldPosition(targetX, targetY)
+
+    if not toPos then
         return nil
     end
 
@@ -15784,8 +16557,8 @@ function Navigation.DistanceYards(mapID, playerX, playerY, targetX, targetY)
         return nil
     end
 
-    local dx = (toPos.x or 0) - (fromPos.x or 0)
-    local dy = (toPos.y or 0) - (fromPos.y or 0)
+    local dx = toPos.x - fromPos.x
+    local dy = toPos.y - fromPos.y
 
     return math.sqrt((dx * dx) + (dy * dy))
 end
@@ -16329,7 +17102,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.19.0
+## Version: 0.20.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -16541,6 +17314,69 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.20.0]
+
+### Fixed
+
+- **The arrow reported "distance unknown" for every target.** 0.19.0 passed a
+  `UiMapPoint` to `C_Map.GetWorldPosFromMapPos`, which wants a `Vector2D`.
+  They are different types -- `UiMapPoint` carries a nested `position`,
+  `Vector2D` carries `x` and `y` directly -- and they are easy to confuse
+  because both describe a point. `SetUserWaypoint` wants the first, this wants
+  the second.
+  The harness stub modelled both as the same flat shape, which is exactly why
+  the test passed while the addon failed. The stub now models each correctly
+  and asserts the right type is passed; reintroducing the bug fails the suite.
+
+### Added
+
+- **Filter what you get recommended.** `/cn show` chooses which kinds of
+  objective appear: `/cn show pets` toggles one, `/cn show only quests`
+  narrows to a single kind, `/cn show all` restores everything. The **Next**
+  tab has a *Filter types* button with the same checklist.
+  Only hidden types are stored, so a kind added in a later release is visible
+  by default rather than silently missing for everyone who upgraded. Filtering
+  is applied to the ranked list, never to collection -- `/cn breakdown` and the
+  Collections tab still see everything -- and when a filter empties the list
+  the Next tab says so instead of looking broken.
+
+- **Mounts, toys, professions and appearances are now recommendations.** Four
+  subsystems that the addon has scanned, stored and reported since early
+  builds registered no candidate provider at all, so they could never appear
+  in `/cn next`. Pets had one; mounts did not. That was an omission, not a
+  design decision, and it meant the Collections priority mode weighted types
+  that could never surface.
+  - **Mounts** are recommended only where the journal supplies a source --
+    *"Vendor: X"*, *"Quest: Y"*, *"Drop: Z"*. A mount locked to the other
+    faction is never suggested.
+  - **Toys** join the vendor database exactly, because both are keyed by item
+    ID, so an uncollected toy a recorded vendor sells becomes an objective
+    with real coordinates.
+  - **Professions** below their cap, weighted so the last few points rank
+    above a profession barely started.
+  - **Appearances** surface the least-complete slots only, capped at three.
+- **2-opt route improvement.** `/cn zone` built its route with greedy
+  nearest-neighbour, which has a characteristic failure: it takes the locally
+  cheap step every time, strands one far objective, and doubles back for it at
+  the end. A 2-opt pass now uncrosses the route. On the harness's crossed test
+  case it removes **21.6%** of the distance.
+
+### Notes
+
+- **Titles deliberately do NOT get a provider, and the harness asserts it.**
+  A recommendation has to name an action, and the client exposes a title's
+  name and whether you have it -- no source, no coordinates, no criteria.
+  *"You do not have Loremaster"* is a fact, not a next action. Titles remain
+  fully tracked in `/cn titles`, `/cn who title`, the Collections tab and
+  `/cn breakdown`, and one you actually want can be pinned with
+  `/cn goal title <id>`. Shipping a fifth provider to close a checklist item
+  would have put rows with no route into a list whose entire purpose is to be
+  actionable.
+- The Goals test previously proved its point using an uncollected mount, on
+  the premise that one is never a candidate. Mounts gained a provider and that
+  premise quietly became false -- the test caught it, and now uses a title,
+  which has no provider by design.
 
 ## [0.19.0]
 
@@ -17098,7 +17934,7 @@ below. Numbers are from that benchmark.
 $Embedded['ROADMAP.md'] = @'
 # Completion Navigator — Roadmap
 
-Current version: **0.19.0** · 41 Lua files · ~16,400 lines · 81 slash commands · 11 candidate providers · 10 UI tabs
+Current version: **0.20.0** · 41 Lua files · ~17,400 lines · 82 slash commands · 15 candidate providers · 10 UI tabs
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
@@ -17121,7 +17957,13 @@ This is the single largest recurring "what should I do next" signal in modern re
 **Effort:** moderate.
 **Recommendation: build first.** Highest value-to-effort ratio on the entire list.
 
-### 1.2 Five subsystems are tracked but never recommended
+### 1.2 Subsystems tracked but never recommended — **DONE in 0.20.0**
+
+**Resolved:** Mounts, Toys, Professions and Appearances now register providers. Titles deliberately does not — the client exposes no source for a title, so there is no action to name; the harness asserts that absence so adding one later is a conscious choice.
+
+Historical detail below.
+
+#### Original finding
 
 **Status:** confirmed by audit. These modules scan, store and report — but register **no candidate provider**, so they never surface in `/cn next`:
 
@@ -17179,9 +18021,9 @@ The addon is entirely solo-content-aware. A meaningful share of what a player "s
 
 **Recommendation: option 1, then option 2.** Curation is not a strategy.
 
-### 2.2 Route quality
+### 2.2 Route quality — **DONE in 0.20.0**
 
-**Status:** `CN.OrderByProximity` is greedy nearest-neighbour.
+**Status:** a 2-opt improvement pass now runs over the greedy result, removing 21.6% of the distance on the harness's crossed test case. Historically: `CN.OrderByProximity` was greedy nearest-neighbour only.
 
 Greedy nearest-neighbour is typically 15–25% worse than optimal and produces a characteristic failure: it strands one far objective and doubles back for it at the end. On a 12-stop zone sweep that is a visible, annoying detour.
 
@@ -17540,7 +18382,7 @@ read_globals = {
 
     -- Globals the client defines that are not functions.
     "Enum", "GameTooltip", "Minimap", "UIParent", "UISpecialFrames",
-    "UiMapPoint", "DEFAULT_CHAT_FRAME", "TooltipDataProcessor",
+    "UiMapPoint", "CreateVector2D", "DEFAULT_CHAT_FRAME", "TooltipDataProcessor",
     "TooltipUtil", "LE_PET_JOURNAL_FILTER_COLLECTED",
     "LE_PET_JOURNAL_FILTER_NOT_COLLECTED", "NORMAL_FONT_COLOR",
 
@@ -17720,11 +18562,30 @@ function GetSpecializationInfo() return 70, "Retribution" end
 function GetProfessions() return 1, 2, nil, 4, 5 end
 function GetProfessionInfo(i) return "Profession" .. i, nil, 75, 100, nil, nil, 170 + i end
 
+-- UiMapPoint and Vector2D are DIFFERENT types, and modelling them as the same
+-- shape is what let a real bug ship: 0.19.0 passed a UiMapPoint to
+-- GetWorldPosFromMapPos, which wants a Vector2D, and the arrow reported
+-- "distance unknown" for every target. The stub accepted it because the stub
+-- was wrong too.
+--
+-- UiMapPoint carries a NESTED position. Vector2D carries x and y directly and
+-- exposes GetXY(). Anything that reads the wrong one now fails here first.
 UiMapPoint = {
     CreateFromCoordinates = function(mapID, x, y)
-        return { uiMapID = mapID, x = x, y = y }
+        return {
+            uiMapID  = mapID,
+            position = { x = x, y = y },
+        }
     end,
 }
+
+function CreateVector2D(x, y)
+    local vector = { x = x, y = y }
+
+    function vector:GetXY() return self.x, self.y end
+
+    return vector
+end
 
 C_Map = {
     GetBestMapForUnit    = function() return 94 end,
@@ -17734,8 +18595,12 @@ C_Map = {
     ClearUserWaypoint    = function() end,
     -- A flat 1000x1000 yard square, so expected distances are checkable.
     GetWorldPosFromMapPos = function(mapID, point)
-        local x, y = point.x or 0, point.y or 0
-        return 1, { x = x * 1000, y = y * 1000 }
+        -- The real client wants a Vector2D. Handing it a UiMapPoint is the
+        -- 0.19.0 bug; fail loudly rather than quietly returning a number.
+        assert(point and point.x and point.y and not point.uiMapID,
+            "GetWorldPosFromMapPos needs a Vector2D, not a UiMapPoint")
+
+        return 1, CreateVector2D(point.x * 1000, point.y * 1000)
     end,
 }
 
@@ -18186,6 +19051,10 @@ local merchantItems = {
     { name = "Flask of Testing", price = 5000, itemID = 700 },
     { name = "Potion of Maybe",  price = 2500, itemID = 701 },
     { name = "Spare Boots",      price = 100,  itemID = 999 },
+    -- Item 501 is the uncollected toy. Toys and vendor stock are both keyed
+    -- by item ID, so this join is exact -- and without a toy on the merchant
+    -- the toy provider's assertion would pass vacuously.
+    { name = "Missing Toy",      price = 750,  itemID = 501 },
 }
 
 function GetMerchantNumItems() return #merchantItems end
@@ -18597,6 +19466,8 @@ local invocations = {
     "ui", "uistatus", "minimap", "minimap", "ui", "ui",
     "perf", "tooltips", "tooltips off", "tooltips on", "tooltips bogus",
     "vault", "greatvault",
+    "show", "show pets", "show pets", "show only quests", "show all",
+    "show nonsense", "types",
     "arrow", "arrow off", "arrow on", "arrow bogus",
     "nav", "nav native", "nav tomtom", "nav auto", "nav nonsense", "here",
     "goals", "goal", "goal nonsense 1", "goal mount notanid",
@@ -18818,6 +19689,48 @@ assert(type(CompletionNavigator_NextObjective) == "function", "keybinding entry 
 assert(type(CompletionNavigator_Navigate) == "function", "keybinding entry point missing")
 assert(db.settings.minimap and db.settings.minimap.angle, "minimap settings must persist")
 
+print("\nRoute optimization:")
+
+-- A deliberately bad order: nearest-neighbour's classic failure is to strand
+-- a far stop and double back. Four points on a square, visited diagonally,
+-- cross in the middle; 2-opt must uncross them.
+local crossed = {
+    { name = "A", x = 0.10, y = 0.10 },
+    { name = "B", x = 0.90, y = 0.90 },
+    { name = "C", x = 0.90, y = 0.10 },
+    { name = "D", x = 0.10, y = 0.90 },
+}
+
+local crossedLength = CN.RouteLength(crossed, 0.10, 0.10)
+
+local uncrossed, saved = CN.ImproveRoute(crossed, 0.10, 0.10)
+
+local uncrossedLength = CN.RouteLength(uncrossed, 0.10, 0.10)
+
+local order = {}
+for _, stop in ipairs(uncrossed) do order[#order + 1] = stop.name end
+
+print(string.format("  crossed  = %.3f", crossedLength))
+print(string.format("  improved = %.3f  (%s)  saved %.1f%%",
+    uncrossedLength, table.concat(order, " -> "), (saved or 0) * 100))
+
+assert(uncrossedLength < crossedLength,
+    "2-opt must shorten a crossed route")
+assert(#uncrossed == #crossed, "2-opt must not lose or duplicate stops")
+
+local seenStops = {}
+for _, stop in ipairs(uncrossed) do
+    assert(not seenStops[stop.name], "2-opt duplicated stop " .. stop.name)
+    seenStops[stop.name] = true
+end
+
+-- It must never make a route worse, and must be a no-op on tiny routes.
+local tiny = { { name = "A", x = 0.2, y = 0.2 }, { name = "B", x = 0.8, y = 0.8 } }
+local tinyResult = CN.ImproveRoute(tiny, 0.5, 0.5)
+assert(#tinyResult == 2, "a two-stop route must survive untouched")
+
+print("  no stops lost, short routes untouched")
+
 print("\nNavigation:")
 
 local overrides = db.account.questLocations or {}
@@ -18949,7 +19862,7 @@ assert(count(vendors) == 1, "the open merchant should be recorded")
 
 local vendor = vendors[55501]
 assert(vendor, "the vendor must be keyed by its creature ID from the GUID")
-assert(vendor.itemCount == 3, "every merchant item should be recorded, got "
+assert(vendor.itemCount == 4, "every merchant item should be recorded, got "
     .. tostring(vendor.itemCount))
 assert(vendor.items[700] and vendor.items[700].name == "Flask of Testing",
     "item IDs must be parsed out of the merchant item link")
@@ -19087,7 +20000,7 @@ assert(#silent == 0, "an unknown item must add no lines, got " .. tooltipText(si
 -- The unit tooltip knows the merchant we already recorded.
 local unitLines = tooltipText(CN_TEST_FireUnitTooltip("mouseover"))
 print("  unit     -> " .. unitLines)
-assert(unitLines:find("Recorded vendor: 3 items", 1, true),
+assert(unitLines:find("Recorded vendor: 4 items", 1, true),
     "a recorded vendor must be identified on its unit tooltip, got " .. unitLines)
 
 -- Turning tooltips off must actually stop them.
@@ -19175,7 +20088,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 11, "every candidate provider must register, got "
+assert(firstState.providers == 15, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -19184,13 +20097,16 @@ assert(firstState.fresh == firstState.providers,
 -- to must not dirty anything.
 local generationBeforeMountEvent = CN.GetCandidateCacheState().generation
 
-CN.InvalidateCandidates("NEW_MOUNT_ADDED")
+-- A synthetic event name rather than a real one: picking a real event that
+-- "nothing subscribes to today" breaks the moment a provider subscribes to
+-- it, which is exactly what happened when Mounts gained a provider.
+CN.InvalidateCandidates("CN_TEST_EVENT_NOBODY_WANTS")
 CN.CollectCandidates()
 
 assert(CN.GetCandidateCacheState().generation == generationBeforeMountEvent,
     "an event no provider subscribes to must not rebuild the aggregate")
 
-print("  NEW_MOUNT_ADDED rebuilt nothing")
+print("  an unsubscribed event rebuilt nothing")
 
 -- A subscribed event must dirty exactly its own provider.
 CN.InvalidateCandidates("NEW_PET_ADDED")
@@ -19516,6 +20432,140 @@ CN_TEST_SetVaultClaimable(false)
 CN.InvalidateCandidates()
 CN.CollectCandidates(true)
 
+print("\nCollection providers:")
+
+CN.CollectCandidates(true)
+
+local byType = {}
+
+for _, objective in ipairs(CN.CollectCandidates()) do
+    byType[objective.type] = (byType[objective.type] or 0) + 1
+end
+
+for _, kind in ipairs({ "MOUNT", "TOY", "PROFESSION", "APPEARANCE", "TITLE" }) do
+    print("  " .. kind .. " candidates = " .. (byType[kind] or 0))
+end
+
+-- Mounts: only those with a known source, and never one locked to the other
+-- faction. The stub player is Alliance; mount 2 is Horde-locked.
+assert((byType.MOUNT or 0) > 0, "mounts with a known source must be recommended")
+
+for _, objective in ipairs(CN.CollectCandidates()) do
+    if objective.type == "MOUNT" then
+        assert(objective.id ~= 2,
+            "a mount locked to the other faction must never be recommended")
+        assert(objective.reasons and objective.reasons[1] and objective.reasons[1] ~= "",
+            "a mount recommendation must carry its source")
+    end
+end
+
+-- Toys: only where a recorded vendor sells them, and those carry coordinates.
+for _, objective in ipairs(CN.CollectCandidates()) do
+    if objective.type == "TOY" then
+        assert(objective.mapID and objective.x and objective.y,
+            "a toy recommendation must have real coordinates")
+    end
+end
+
+-- Professions below their cap.
+assert((byType.PROFESSION or 0) > 0, "an unmaxed profession must be recommended")
+
+assert((byType.TOY or 0) > 0,
+    "a toy sold by a recorded vendor must be recommended")
+
+-- Appearances are capped to a few slots, not one per category.
+local appearances = CN:GetModule("Appearances")
+
+assert((byType.APPEARANCE or 0) <= appearances.candidateSlots,
+    "appearance candidates must be capped to the least-complete slots, got "
+    .. tostring(byType.APPEARANCE))
+
+-- Titles deliberately have no provider: the client exposes no source, so
+-- there is no action to name. This asserts the decision, so that adding a
+-- provider later is a conscious change rather than an accident.
+assert((byType.TITLE or 0) == 0,
+    "titles must not be recommended: there is no source data to act on")
+
+print("  titles correctly absent (no source data exists)")
+
+print("\nType filtering:")
+
+local typeFilters = CN:GetModule("Filters")
+
+assert(typeFilters, "the Filters module must load")
+
+typeFilters.EnableAllTypes()
+CN.CollectCandidates(true)
+
+local unfiltered = CN.Recommend(200)
+
+local typesPresent = {}
+for _, objective in ipairs(unfiltered) do typesPresent[objective.type] = true end
+
+print("  unfiltered recommendations = " .. #unfiltered
+    .. " across " .. count(typesPresent) .. " types")
+
+assert(count(typesPresent) > 1, "the test needs more than one type present")
+
+-- Hiding a type must remove exactly that type and nothing else.
+typeFilters.SetTypeEnabled("PET", false)
+
+local withoutPets = CN.Recommend(200)
+
+for _, objective in ipairs(withoutPets) do
+    assert(objective.type ~= "PET", "a hidden type must not be recommended")
+end
+
+print("  hiding PET removed " .. (#unfiltered - #withoutPets) .. " entries")
+
+assert(#withoutPets < #unfiltered, "hiding a present type must remove something")
+
+-- The ranked cache must notice. Without a filter generation it would serve
+-- the previous list and the toggle would appear to do nothing.
+typeFilters.SetTypeEnabled("PET", true)
+
+local restored = CN.Recommend(200)
+
+assert(#restored == #unfiltered,
+    "restoring a type must restore its entries: expected " .. #unfiltered
+    .. ", got " .. #restored)
+
+print("  restoring PET brought them back (ranked cache respects the filter)")
+
+-- "only" narrows to one.
+typeFilters.OnlyType("QUEST")
+
+local onlyQuests = CN.Recommend(200)
+
+for _, objective in ipairs(onlyQuests) do
+    assert(objective.type == "QUEST",
+        "only-quests must exclude " .. tostring(objective.type))
+end
+
+print("  only-quests left " .. #onlyQuests .. " entries, all quests")
+
+assert(#onlyQuests > 0, "narrowing to quests must not empty the list")
+
+-- Filtering must NOT touch the underlying candidate set: breakdowns and the
+-- Collections tab read it directly and must still see everything.
+local allCandidates = CN.CollectCandidates()
+
+local candidateTypes = {}
+for _, objective in ipairs(allCandidates) do candidateTypes[objective.type] = true end
+
+assert(count(candidateTypes) > 1,
+    "the type filter must not remove candidates, only filter the ranked list")
+
+print("  candidate set untouched (" .. count(candidateTypes) .. " types still collected)")
+
+-- Text input a person would actually type.
+assert(typeFilters.ResolveType("pets") == "PET", "'pets' must resolve to PET")
+assert(typeFilters.ResolveType("quest") == "QUEST", "'quest' must resolve to QUEST")
+assert(typeFilters.ResolveType("nonsense") == nil, "unknown text must not resolve")
+
+typeFilters.EnableAllTypes()
+CN.Recommend(1)
+
 print("\nGoals:")
 
 local goals = CN:GetModule("Goals")
@@ -19524,28 +20574,33 @@ assert(goals, "the Goals module must load")
 
 goals.Clear()
 
--- An uncollected mount is not normally a candidate at all. Pinning it must
--- make it one -- that is the entire point.
+-- A title is never a candidate: Titles deliberately registers no provider,
+-- because the client exposes no source for one. That makes it the right
+-- subject for this test -- pinning something the engine would otherwise never
+-- surface is the entire point of a goal.
+--
+-- (This used to use a mount. Mounts gained a provider, the premise quietly
+-- became false, and the test caught it.)
 local beforeGoal = 0
 
 for _, objective in ipairs(CN.CollectCandidates(true)) do
-    if objective.type == "MOUNT" and objective.id == 3 then beforeGoal = beforeGoal + 1 end
+    if objective.type == "TITLE" and objective.id == 2 then beforeGoal = beforeGoal + 1 end
 end
 
-assert(beforeGoal == 0, "an unpinned mount must not be a candidate")
+assert(beforeGoal == 0, "an unpinned title must not be a candidate")
 
-goals.Add("MOUNT", 3)
+goals.Add("TITLE", 2)
 
 local afterGoal, goalObjective = 0, nil
 
 for _, objective in ipairs(CN.CollectCandidates()) do
-    if objective.type == "MOUNT" and objective.id == 3 then
+    if objective.type == "TITLE" and objective.id == 2 then
         afterGoal = afterGoal + 1
         goalObjective = objective
     end
 end
 
-print("  pinned mount appears as a candidate = " .. tostring(afterGoal == 1))
+print("  pinned title appears as a candidate = " .. tostring(afterGoal == 1))
 
 assert(afterGoal == 1, "a pinned goal must become exactly one candidate, got " .. afterGoal)
 assert(goalObjective.isGoal, "a goal candidate must be flagged as one")
@@ -19572,7 +20627,7 @@ end
 local goalRank
 
 for index, objective in ipairs(ranked) do
-    if objective.type == "MOUNT" and objective.id == 3 then goalRank = index end
+    if objective.type == "TITLE" and objective.id == 2 then goalRank = index end
 end
 
 assert(goalRank and goalRank <= 3,
@@ -19589,19 +20644,19 @@ local top = CN.Recommend(1)[1]
 print("  top with nothing expiring = " .. tostring(top.name) .. " ("
     .. string.format("%.1f", top.priorityWeight or 0) .. ")")
 
-assert(top.type == "MOUNT" and top.id == 3,
+assert(top.type == "TITLE" and top.id == 2,
     "with nothing expiring, a pinned goal must rank first, got " .. tostring(top.name))
 
 CN.candidateProviders["Vault"] = vaultProvider
 CN.InvalidateCandidates()
 
 -- Removing it must put things back.
-goals.Remove("MOUNT", 3)
+goals.Remove("TITLE", 2)
 
 local afterRemoval = 0
 
 for _, objective in ipairs(CN.CollectCandidates()) do
-    if objective.type == "MOUNT" and objective.id == 3 then afterRemoval = afterRemoval + 1 end
+    if objective.type == "TITLE" and objective.id == 2 then afterRemoval = afterRemoval + 1 end
 end
 
 assert(afterRemoval == 0, "removing a goal must remove its candidate")

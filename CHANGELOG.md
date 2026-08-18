@@ -7,6 +7,69 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.20.0]
+
+### Fixed
+
+- **The arrow reported "distance unknown" for every target.** 0.19.0 passed a
+  `UiMapPoint` to `C_Map.GetWorldPosFromMapPos`, which wants a `Vector2D`.
+  They are different types -- `UiMapPoint` carries a nested `position`,
+  `Vector2D` carries `x` and `y` directly -- and they are easy to confuse
+  because both describe a point. `SetUserWaypoint` wants the first, this wants
+  the second.
+  The harness stub modelled both as the same flat shape, which is exactly why
+  the test passed while the addon failed. The stub now models each correctly
+  and asserts the right type is passed; reintroducing the bug fails the suite.
+
+### Added
+
+- **Filter what you get recommended.** `/cn show` chooses which kinds of
+  objective appear: `/cn show pets` toggles one, `/cn show only quests`
+  narrows to a single kind, `/cn show all` restores everything. The **Next**
+  tab has a *Filter types* button with the same checklist.
+  Only hidden types are stored, so a kind added in a later release is visible
+  by default rather than silently missing for everyone who upgraded. Filtering
+  is applied to the ranked list, never to collection -- `/cn breakdown` and the
+  Collections tab still see everything -- and when a filter empties the list
+  the Next tab says so instead of looking broken.
+
+- **Mounts, toys, professions and appearances are now recommendations.** Four
+  subsystems that the addon has scanned, stored and reported since early
+  builds registered no candidate provider at all, so they could never appear
+  in `/cn next`. Pets had one; mounts did not. That was an omission, not a
+  design decision, and it meant the Collections priority mode weighted types
+  that could never surface.
+  - **Mounts** are recommended only where the journal supplies a source --
+    *"Vendor: X"*, *"Quest: Y"*, *"Drop: Z"*. A mount locked to the other
+    faction is never suggested.
+  - **Toys** join the vendor database exactly, because both are keyed by item
+    ID, so an uncollected toy a recorded vendor sells becomes an objective
+    with real coordinates.
+  - **Professions** below their cap, weighted so the last few points rank
+    above a profession barely started.
+  - **Appearances** surface the least-complete slots only, capped at three.
+- **2-opt route improvement.** `/cn zone` built its route with greedy
+  nearest-neighbour, which has a characteristic failure: it takes the locally
+  cheap step every time, strands one far objective, and doubles back for it at
+  the end. A 2-opt pass now uncrosses the route. On the harness's crossed test
+  case it removes **21.6%** of the distance.
+
+### Notes
+
+- **Titles deliberately do NOT get a provider, and the harness asserts it.**
+  A recommendation has to name an action, and the client exposes a title's
+  name and whether you have it -- no source, no coordinates, no criteria.
+  *"You do not have Loremaster"* is a fact, not a next action. Titles remain
+  fully tracked in `/cn titles`, `/cn who title`, the Collections tab and
+  `/cn breakdown`, and one you actually want can be pinned with
+  `/cn goal title <id>`. Shipping a fifth provider to close a checklist item
+  would have put rows with no route into a list whose entire purpose is to be
+  actionable.
+- The Goals test previously proved its point using an uncollected mount, on
+  the premise that one is never a candidate. Mounts gained a provider and that
+  premise quietly became false -- the test caught it, and now uses a title,
+  which has no provider by design.
+
 ## [0.19.0]
 
 Completion Navigator no longer needs any other addon to navigate.

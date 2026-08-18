@@ -99,11 +99,30 @@ function GetSpecializationInfo() return 70, "Retribution" end
 function GetProfessions() return 1, 2, nil, 4, 5 end
 function GetProfessionInfo(i) return "Profession" .. i, nil, 75, 100, nil, nil, 170 + i end
 
+-- UiMapPoint and Vector2D are DIFFERENT types, and modelling them as the same
+-- shape is what let a real bug ship: 0.19.0 passed a UiMapPoint to
+-- GetWorldPosFromMapPos, which wants a Vector2D, and the arrow reported
+-- "distance unknown" for every target. The stub accepted it because the stub
+-- was wrong too.
+--
+-- UiMapPoint carries a NESTED position. Vector2D carries x and y directly and
+-- exposes GetXY(). Anything that reads the wrong one now fails here first.
 UiMapPoint = {
     CreateFromCoordinates = function(mapID, x, y)
-        return { uiMapID = mapID, x = x, y = y }
+        return {
+            uiMapID  = mapID,
+            position = { x = x, y = y },
+        }
     end,
 }
+
+function CreateVector2D(x, y)
+    local vector = { x = x, y = y }
+
+    function vector:GetXY() return self.x, self.y end
+
+    return vector
+end
 
 C_Map = {
     GetBestMapForUnit    = function() return 94 end,
@@ -113,8 +132,12 @@ C_Map = {
     ClearUserWaypoint    = function() end,
     -- A flat 1000x1000 yard square, so expected distances are checkable.
     GetWorldPosFromMapPos = function(mapID, point)
-        local x, y = point.x or 0, point.y or 0
-        return 1, { x = x * 1000, y = y * 1000 }
+        -- The real client wants a Vector2D. Handing it a UiMapPoint is the
+        -- 0.19.0 bug; fail loudly rather than quietly returning a number.
+        assert(point and point.x and point.y and not point.uiMapID,
+            "GetWorldPosFromMapPos needs a Vector2D, not a UiMapPoint")
+
+        return 1, CreateVector2D(point.x * 1000, point.y * 1000)
     end,
 }
 
@@ -565,6 +588,10 @@ local merchantItems = {
     { name = "Flask of Testing", price = 5000, itemID = 700 },
     { name = "Potion of Maybe",  price = 2500, itemID = 701 },
     { name = "Spare Boots",      price = 100,  itemID = 999 },
+    -- Item 501 is the uncollected toy. Toys and vendor stock are both keyed
+    -- by item ID, so this join is exact -- and without a toy on the merchant
+    -- the toy provider's assertion would pass vacuously.
+    { name = "Missing Toy",      price = 750,  itemID = 501 },
 }
 
 function GetMerchantNumItems() return #merchantItems end
@@ -976,6 +1003,8 @@ local invocations = {
     "ui", "uistatus", "minimap", "minimap", "ui", "ui",
     "perf", "tooltips", "tooltips off", "tooltips on", "tooltips bogus",
     "vault", "greatvault",
+    "show", "show pets", "show pets", "show only quests", "show all",
+    "show nonsense", "types",
     "arrow", "arrow off", "arrow on", "arrow bogus",
     "nav", "nav native", "nav tomtom", "nav auto", "nav nonsense", "here",
     "goals", "goal", "goal nonsense 1", "goal mount notanid",
@@ -1197,6 +1226,48 @@ assert(type(CompletionNavigator_NextObjective) == "function", "keybinding entry 
 assert(type(CompletionNavigator_Navigate) == "function", "keybinding entry point missing")
 assert(db.settings.minimap and db.settings.minimap.angle, "minimap settings must persist")
 
+print("\nRoute optimization:")
+
+-- A deliberately bad order: nearest-neighbour's classic failure is to strand
+-- a far stop and double back. Four points on a square, visited diagonally,
+-- cross in the middle; 2-opt must uncross them.
+local crossed = {
+    { name = "A", x = 0.10, y = 0.10 },
+    { name = "B", x = 0.90, y = 0.90 },
+    { name = "C", x = 0.90, y = 0.10 },
+    { name = "D", x = 0.10, y = 0.90 },
+}
+
+local crossedLength = CN.RouteLength(crossed, 0.10, 0.10)
+
+local uncrossed, saved = CN.ImproveRoute(crossed, 0.10, 0.10)
+
+local uncrossedLength = CN.RouteLength(uncrossed, 0.10, 0.10)
+
+local order = {}
+for _, stop in ipairs(uncrossed) do order[#order + 1] = stop.name end
+
+print(string.format("  crossed  = %.3f", crossedLength))
+print(string.format("  improved = %.3f  (%s)  saved %.1f%%",
+    uncrossedLength, table.concat(order, " -> "), (saved or 0) * 100))
+
+assert(uncrossedLength < crossedLength,
+    "2-opt must shorten a crossed route")
+assert(#uncrossed == #crossed, "2-opt must not lose or duplicate stops")
+
+local seenStops = {}
+for _, stop in ipairs(uncrossed) do
+    assert(not seenStops[stop.name], "2-opt duplicated stop " .. stop.name)
+    seenStops[stop.name] = true
+end
+
+-- It must never make a route worse, and must be a no-op on tiny routes.
+local tiny = { { name = "A", x = 0.2, y = 0.2 }, { name = "B", x = 0.8, y = 0.8 } }
+local tinyResult = CN.ImproveRoute(tiny, 0.5, 0.5)
+assert(#tinyResult == 2, "a two-stop route must survive untouched")
+
+print("  no stops lost, short routes untouched")
+
 print("\nNavigation:")
 
 local overrides = db.account.questLocations or {}
@@ -1328,7 +1399,7 @@ assert(count(vendors) == 1, "the open merchant should be recorded")
 
 local vendor = vendors[55501]
 assert(vendor, "the vendor must be keyed by its creature ID from the GUID")
-assert(vendor.itemCount == 3, "every merchant item should be recorded, got "
+assert(vendor.itemCount == 4, "every merchant item should be recorded, got "
     .. tostring(vendor.itemCount))
 assert(vendor.items[700] and vendor.items[700].name == "Flask of Testing",
     "item IDs must be parsed out of the merchant item link")
@@ -1466,7 +1537,7 @@ assert(#silent == 0, "an unknown item must add no lines, got " .. tooltipText(si
 -- The unit tooltip knows the merchant we already recorded.
 local unitLines = tooltipText(CN_TEST_FireUnitTooltip("mouseover"))
 print("  unit     -> " .. unitLines)
-assert(unitLines:find("Recorded vendor: 3 items", 1, true),
+assert(unitLines:find("Recorded vendor: 4 items", 1, true),
     "a recorded vendor must be identified on its unit tooltip, got " .. unitLines)
 
 -- Turning tooltips off must actually stop them.
@@ -1554,7 +1625,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 11, "every candidate provider must register, got "
+assert(firstState.providers == 15, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -1563,13 +1634,16 @@ assert(firstState.fresh == firstState.providers,
 -- to must not dirty anything.
 local generationBeforeMountEvent = CN.GetCandidateCacheState().generation
 
-CN.InvalidateCandidates("NEW_MOUNT_ADDED")
+-- A synthetic event name rather than a real one: picking a real event that
+-- "nothing subscribes to today" breaks the moment a provider subscribes to
+-- it, which is exactly what happened when Mounts gained a provider.
+CN.InvalidateCandidates("CN_TEST_EVENT_NOBODY_WANTS")
 CN.CollectCandidates()
 
 assert(CN.GetCandidateCacheState().generation == generationBeforeMountEvent,
     "an event no provider subscribes to must not rebuild the aggregate")
 
-print("  NEW_MOUNT_ADDED rebuilt nothing")
+print("  an unsubscribed event rebuilt nothing")
 
 -- A subscribed event must dirty exactly its own provider.
 CN.InvalidateCandidates("NEW_PET_ADDED")
@@ -1895,6 +1969,140 @@ CN_TEST_SetVaultClaimable(false)
 CN.InvalidateCandidates()
 CN.CollectCandidates(true)
 
+print("\nCollection providers:")
+
+CN.CollectCandidates(true)
+
+local byType = {}
+
+for _, objective in ipairs(CN.CollectCandidates()) do
+    byType[objective.type] = (byType[objective.type] or 0) + 1
+end
+
+for _, kind in ipairs({ "MOUNT", "TOY", "PROFESSION", "APPEARANCE", "TITLE" }) do
+    print("  " .. kind .. " candidates = " .. (byType[kind] or 0))
+end
+
+-- Mounts: only those with a known source, and never one locked to the other
+-- faction. The stub player is Alliance; mount 2 is Horde-locked.
+assert((byType.MOUNT or 0) > 0, "mounts with a known source must be recommended")
+
+for _, objective in ipairs(CN.CollectCandidates()) do
+    if objective.type == "MOUNT" then
+        assert(objective.id ~= 2,
+            "a mount locked to the other faction must never be recommended")
+        assert(objective.reasons and objective.reasons[1] and objective.reasons[1] ~= "",
+            "a mount recommendation must carry its source")
+    end
+end
+
+-- Toys: only where a recorded vendor sells them, and those carry coordinates.
+for _, objective in ipairs(CN.CollectCandidates()) do
+    if objective.type == "TOY" then
+        assert(objective.mapID and objective.x and objective.y,
+            "a toy recommendation must have real coordinates")
+    end
+end
+
+-- Professions below their cap.
+assert((byType.PROFESSION or 0) > 0, "an unmaxed profession must be recommended")
+
+assert((byType.TOY or 0) > 0,
+    "a toy sold by a recorded vendor must be recommended")
+
+-- Appearances are capped to a few slots, not one per category.
+local appearances = CN:GetModule("Appearances")
+
+assert((byType.APPEARANCE or 0) <= appearances.candidateSlots,
+    "appearance candidates must be capped to the least-complete slots, got "
+    .. tostring(byType.APPEARANCE))
+
+-- Titles deliberately have no provider: the client exposes no source, so
+-- there is no action to name. This asserts the decision, so that adding a
+-- provider later is a conscious change rather than an accident.
+assert((byType.TITLE or 0) == 0,
+    "titles must not be recommended: there is no source data to act on")
+
+print("  titles correctly absent (no source data exists)")
+
+print("\nType filtering:")
+
+local typeFilters = CN:GetModule("Filters")
+
+assert(typeFilters, "the Filters module must load")
+
+typeFilters.EnableAllTypes()
+CN.CollectCandidates(true)
+
+local unfiltered = CN.Recommend(200)
+
+local typesPresent = {}
+for _, objective in ipairs(unfiltered) do typesPresent[objective.type] = true end
+
+print("  unfiltered recommendations = " .. #unfiltered
+    .. " across " .. count(typesPresent) .. " types")
+
+assert(count(typesPresent) > 1, "the test needs more than one type present")
+
+-- Hiding a type must remove exactly that type and nothing else.
+typeFilters.SetTypeEnabled("PET", false)
+
+local withoutPets = CN.Recommend(200)
+
+for _, objective in ipairs(withoutPets) do
+    assert(objective.type ~= "PET", "a hidden type must not be recommended")
+end
+
+print("  hiding PET removed " .. (#unfiltered - #withoutPets) .. " entries")
+
+assert(#withoutPets < #unfiltered, "hiding a present type must remove something")
+
+-- The ranked cache must notice. Without a filter generation it would serve
+-- the previous list and the toggle would appear to do nothing.
+typeFilters.SetTypeEnabled("PET", true)
+
+local restored = CN.Recommend(200)
+
+assert(#restored == #unfiltered,
+    "restoring a type must restore its entries: expected " .. #unfiltered
+    .. ", got " .. #restored)
+
+print("  restoring PET brought them back (ranked cache respects the filter)")
+
+-- "only" narrows to one.
+typeFilters.OnlyType("QUEST")
+
+local onlyQuests = CN.Recommend(200)
+
+for _, objective in ipairs(onlyQuests) do
+    assert(objective.type == "QUEST",
+        "only-quests must exclude " .. tostring(objective.type))
+end
+
+print("  only-quests left " .. #onlyQuests .. " entries, all quests")
+
+assert(#onlyQuests > 0, "narrowing to quests must not empty the list")
+
+-- Filtering must NOT touch the underlying candidate set: breakdowns and the
+-- Collections tab read it directly and must still see everything.
+local allCandidates = CN.CollectCandidates()
+
+local candidateTypes = {}
+for _, objective in ipairs(allCandidates) do candidateTypes[objective.type] = true end
+
+assert(count(candidateTypes) > 1,
+    "the type filter must not remove candidates, only filter the ranked list")
+
+print("  candidate set untouched (" .. count(candidateTypes) .. " types still collected)")
+
+-- Text input a person would actually type.
+assert(typeFilters.ResolveType("pets") == "PET", "'pets' must resolve to PET")
+assert(typeFilters.ResolveType("quest") == "QUEST", "'quest' must resolve to QUEST")
+assert(typeFilters.ResolveType("nonsense") == nil, "unknown text must not resolve")
+
+typeFilters.EnableAllTypes()
+CN.Recommend(1)
+
 print("\nGoals:")
 
 local goals = CN:GetModule("Goals")
@@ -1903,28 +2111,33 @@ assert(goals, "the Goals module must load")
 
 goals.Clear()
 
--- An uncollected mount is not normally a candidate at all. Pinning it must
--- make it one -- that is the entire point.
+-- A title is never a candidate: Titles deliberately registers no provider,
+-- because the client exposes no source for one. That makes it the right
+-- subject for this test -- pinning something the engine would otherwise never
+-- surface is the entire point of a goal.
+--
+-- (This used to use a mount. Mounts gained a provider, the premise quietly
+-- became false, and the test caught it.)
 local beforeGoal = 0
 
 for _, objective in ipairs(CN.CollectCandidates(true)) do
-    if objective.type == "MOUNT" and objective.id == 3 then beforeGoal = beforeGoal + 1 end
+    if objective.type == "TITLE" and objective.id == 2 then beforeGoal = beforeGoal + 1 end
 end
 
-assert(beforeGoal == 0, "an unpinned mount must not be a candidate")
+assert(beforeGoal == 0, "an unpinned title must not be a candidate")
 
-goals.Add("MOUNT", 3)
+goals.Add("TITLE", 2)
 
 local afterGoal, goalObjective = 0, nil
 
 for _, objective in ipairs(CN.CollectCandidates()) do
-    if objective.type == "MOUNT" and objective.id == 3 then
+    if objective.type == "TITLE" and objective.id == 2 then
         afterGoal = afterGoal + 1
         goalObjective = objective
     end
 end
 
-print("  pinned mount appears as a candidate = " .. tostring(afterGoal == 1))
+print("  pinned title appears as a candidate = " .. tostring(afterGoal == 1))
 
 assert(afterGoal == 1, "a pinned goal must become exactly one candidate, got " .. afterGoal)
 assert(goalObjective.isGoal, "a goal candidate must be flagged as one")
@@ -1951,7 +2164,7 @@ end
 local goalRank
 
 for index, objective in ipairs(ranked) do
-    if objective.type == "MOUNT" and objective.id == 3 then goalRank = index end
+    if objective.type == "TITLE" and objective.id == 2 then goalRank = index end
 end
 
 assert(goalRank and goalRank <= 3,
@@ -1968,19 +2181,19 @@ local top = CN.Recommend(1)[1]
 print("  top with nothing expiring = " .. tostring(top.name) .. " ("
     .. string.format("%.1f", top.priorityWeight or 0) .. ")")
 
-assert(top.type == "MOUNT" and top.id == 3,
+assert(top.type == "TITLE" and top.id == 2,
     "with nothing expiring, a pinned goal must rank first, got " .. tostring(top.name))
 
 CN.candidateProviders["Vault"] = vaultProvider
 CN.InvalidateCandidates()
 
 -- Removing it must put things back.
-goals.Remove("MOUNT", 3)
+goals.Remove("TITLE", 2)
 
 local afterRemoval = 0
 
 for _, objective in ipairs(CN.CollectCandidates()) do
-    if objective.type == "MOUNT" and objective.id == 3 then afterRemoval = afterRemoval + 1 end
+    if objective.type == "TITLE" and objective.id == 2 then afterRemoval = afterRemoval + 1 end
 end
 
 assert(afterRemoval == 0, "removing a goal must remove its candidate")

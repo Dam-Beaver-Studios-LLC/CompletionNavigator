@@ -179,6 +179,88 @@ end
 
 -- Nearest-neighbour ordering from a starting point. Good enough for a
 -- zone sweep; a proper route solver can replace this later.
+-- Squared distance is enough for comparisons and avoids a sqrt per pair.
+local function Distance2(ax, ay, bx, by)
+    local dx = (ax or 0.5) - (bx or 0.5)
+    local dy = (ay or 0.5) - (by or 0.5)
+
+    return (dx * dx) + (dy * dy)
+end
+
+-- Total length of a route starting from the player.
+local function RouteLength(route, startX, startY)
+    local total = 0
+
+    local x, y = startX or 0.5, startY or 0.5
+
+    for index = 1, #route do
+        total = total + math.sqrt(Distance2(x, y, route[index].x, route[index].y))
+
+        x, y = route[index].x or 0.5, route[index].y or 0.5
+    end
+
+    return total
+end
+
+CN.RouteLength = RouteLength
+
+-- 2-opt improvement.
+--
+-- Nearest-neighbour has a characteristic failure: it takes the locally cheap
+-- step every time and strands one far objective, then doubles back for it at
+-- the end. On a twelve-stop zone sweep that is a visible, irritating detour.
+--
+-- 2-opt repeatedly reverses any segment that shortens the route. It converges
+-- in milliseconds at this size and removes exactly that kind of crossing.
+-- Bounded by passes so a pathological set cannot spin.
+CN.routeOptimizePasses = 12
+
+function CN.ImproveRoute(route, startX, startY)
+    local count = #route
+
+    if count < 4 then
+        return route, 0
+    end
+
+    local before = RouteLength(route, startX, startY)
+
+    for _ = 1, CN.routeOptimizePasses do
+        local improved = false
+
+        for i = 1, count - 1 do
+            for k = i + 1, count do
+                -- Reverse the segment i..k and keep it only if shorter.
+                local candidate = {}
+
+                for index = 1, i - 1 do
+                    candidate[#candidate + 1] = route[index]
+                end
+
+                for index = k, i, -1 do
+                    candidate[#candidate + 1] = route[index]
+                end
+
+                for index = k + 1, count do
+                    candidate[#candidate + 1] = route[index]
+                end
+
+                if RouteLength(candidate, startX, startY) < RouteLength(route, startX, startY) - 1e-9 then
+                    route = candidate
+                    improved = true
+                end
+            end
+        end
+
+        if not improved then
+            break
+        end
+    end
+
+    local after = RouteLength(route, startX, startY)
+
+    return route, before > 0 and ((before - after) / before) or 0
+end
+
 function CN.OrderByProximity(objectives, startX, startY)
     local remaining = {}
 
@@ -239,6 +321,16 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     end
 
     local route = CN.OrderByProximity(located, startX, startY)
+
+    -- Greedy first, then improve. Nearest-neighbour gives a good starting
+    -- order cheaply; 2-opt removes the crossings it leaves behind.
+    local improved, saved = CN.ImproveRoute(route, startX, startY)
+
+    route = improved
+
+    if saved and saved > 0.001 then
+        CN.DebugPrint(string.format("Route shortened by %.1f%% by 2-opt.", saved * 100))
+    end
 
     CN.currentRoute = route
 

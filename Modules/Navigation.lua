@@ -101,21 +101,59 @@ function Navigation.DistanceYards(mapID, playerX, playerY, targetX, targetY)
         return nil
     end
 
-    if not C_Map or not C_Map.GetWorldPosFromMapPos or not UiMapPoint then
+    if not C_Map or not C_Map.GetWorldPosFromMapPos then
         return nil
     end
 
-    local ok, fromContinent, fromPos = pcall(C_Map.GetWorldPosFromMapPos, mapID,
-        UiMapPoint.CreateFromCoordinates(mapID, playerX, playerY))
-
-    if not ok or not fromPos then
+    -- GetWorldPosFromMapPos takes a Vector2D, NOT a UiMapPoint.
+    --
+    -- These are two different types and 0.19.0 passed the wrong one, so the
+    -- call returned nothing and the arrow reported "distance unknown" for
+    -- every target. UiMapPoint carries a nested `position`; Vector2D carries
+    -- x and y directly. SetUserWaypoint wants the former, this wants the
+    -- latter, and they are easy to confuse because both describe a point.
+    if not CreateVector2D then
         return nil
     end
 
-    local toOk, toContinent, toPos = pcall(C_Map.GetWorldPosFromMapPos, mapID,
-        UiMapPoint.CreateFromCoordinates(mapID, targetX, targetY))
+    local function worldPosition(x, y)
+        local ok, continentID, position =
+            pcall(C_Map.GetWorldPosFromMapPos, mapID, CreateVector2D(x, y))
 
-    if not toOk or not toPos then
+        if not ok or not position then
+            return nil, nil
+        end
+
+        -- Vector2D exposes GetXY(); some builds also expose x and y directly.
+        local wx, wy
+
+        if position.GetXY then
+            local gotXY, gx, gy = pcall(position.GetXY, position)
+
+            if gotXY then
+                wx, wy = gx, gy
+            end
+        end
+
+        wx = wx or position.x
+        wy = wy or position.y
+
+        if not wx or not wy then
+            return nil, nil
+        end
+
+        return continentID, { x = wx, y = wy }
+    end
+
+    local fromContinent, fromPos = worldPosition(playerX, playerY)
+
+    if not fromPos then
+        return nil
+    end
+
+    local toContinent, toPos = worldPosition(targetX, targetY)
+
+    if not toPos then
         return nil
     end
 
@@ -124,8 +162,8 @@ function Navigation.DistanceYards(mapID, playerX, playerY, targetX, targetY)
         return nil
     end
 
-    local dx = (toPos.x or 0) - (fromPos.x or 0)
-    local dy = (toPos.y or 0) - (fromPos.y or 0)
+    local dx = toPos.x - fromPos.x
+    local dy = toPos.y - fromPos.y
 
     return math.sqrt((dx * dx) + (dy * dy))
 end

@@ -58,6 +58,194 @@ function Filters.SecondsFor(key)
 end
 
 ------------------------------------------------------------
+-- TYPE FILTERING
+------------------------------------------------------------
+
+-- Which KINDS of objective the recommendation list may contain.
+--
+-- Distinct from ignore and defer, which hide one specific objective. This is a
+-- standing preference about what you want to be told about at all: someone
+-- levelling wants quests, someone finishing a collection does not.
+--
+-- Only DISABLED types are stored. That way a type added in a later release is
+-- enabled by default rather than silently invisible to everyone who upgraded,
+-- which is the failure mode of storing an allow-list.
+local function HiddenTypes()
+    local settings = CN.Settings()
+
+    if not settings then
+        return {}
+    end
+
+    settings.hiddenTypes = settings.hiddenTypes or {}
+
+    return settings.hiddenTypes
+end
+
+Filters.HiddenTypes = HiddenTypes
+
+-- Bumped whenever the filter changes, so the ranked list knows to rebuild
+-- without invalidating the providers, which have not changed at all.
+CN.typeFilterGeneration = 0
+
+local function Bump()
+    CN.typeFilterGeneration = (CN.typeFilterGeneration or 0) + 1
+end
+
+function Filters.IsTypeEnabled(objectiveType)
+    if not objectiveType then
+        return true
+    end
+
+    local hidden = HiddenTypes()
+
+    if next(hidden) == nil then
+        return true
+    end
+
+    return not hidden[objectiveType]
+end
+
+function Filters.SetTypeEnabled(objectiveType, enabled)
+    if not objectiveType then
+        return false
+    end
+
+    local hidden = HiddenTypes()
+
+    if enabled then
+        hidden[objectiveType] = nil
+    else
+        hidden[objectiveType] = true
+    end
+
+    Bump()
+
+    return true
+end
+
+function Filters.ToggleType(objectiveType)
+    local enabled = Filters.IsTypeEnabled(objectiveType)
+
+    Filters.SetTypeEnabled(objectiveType, not enabled)
+
+    return not enabled
+end
+
+function Filters.EnableAllTypes()
+    local hidden = HiddenTypes()
+
+    local count = CN.CountKeys(hidden)
+
+    for key in pairs(hidden) do
+        hidden[key] = nil
+    end
+
+    Bump()
+
+    return count
+end
+
+-- Everything except this one.
+function Filters.OnlyType(objectiveType)
+    local hidden = HiddenTypes()
+
+    for key in pairs(hidden) do
+        hidden[key] = nil
+    end
+
+    for _, known in ipairs(Filters.TypeOrder()) do
+        if known ~= objectiveType then
+            hidden[known] = true
+        end
+    end
+
+    Bump()
+
+    return true
+end
+
+-- The types worth offering, in a stable order. Deliberately not every entry in
+-- CN.objectiveTypes: VENDOR and COLLECTIBLE are internal plumbing rather than
+-- things anyone would choose to be shown.
+function Filters.TypeOrder()
+    local types = CN.objectiveTypes
+
+    return {
+        types.QUEST,
+        types.ACHIEVEMENT,
+        types.REPUTATION,
+        types.PET,
+        types.MOUNT,
+        types.TOY,
+        types.APPEARANCE,
+        types.RECIPE,
+        types.PROFESSION,
+        types.RARE,
+        types.TREASURE,
+        types.EXPLORATION,
+        types.TITLE,
+        types.CURRENCY,
+    }
+end
+
+-- Friendly names, because "APPEARANCE" is how the code thinks and not how a
+-- person reads a checkbox.
+Filters.typeLabels = {
+    QUEST       = "Quests",
+    ACHIEVEMENT = "Achievements",
+    REPUTATION  = "Reputations",
+    PET         = "Battle pets",
+    MOUNT       = "Mounts",
+    TOY         = "Toys",
+    APPEARANCE  = "Appearances",
+    RECIPE      = "Recipes",
+    PROFESSION  = "Professions",
+    RARE        = "Rares",
+    TREASURE    = "Treasures",
+    EXPLORATION = "Exploration",
+    TITLE       = "Titles",
+    CURRENCY    = "Currencies",
+}
+
+function Filters.TypeLabel(objectiveType)
+    return Filters.typeLabels[objectiveType] or tostring(objectiveType)
+end
+
+-- Accepts what a person would actually type.
+function Filters.ResolveType(text)
+    if not text or text == "" then
+        return nil
+    end
+
+    local needle = string.lower(CN.Trim(text))
+
+    for _, objectiveType in ipairs(Filters.TypeOrder()) do
+        if string.lower(objectiveType) == needle
+            or string.lower(Filters.TypeLabel(objectiveType)) == needle then
+            return objectiveType
+        end
+
+        -- "quest" should match QUEST, "pet" should match PET.
+        if string.lower(Filters.TypeLabel(objectiveType)):find(needle, 1, true) then
+            return objectiveType
+        end
+    end
+
+    return nil
+end
+
+function Filters.HiddenTypeCount()
+    return CN.CountKeys(HiddenTypes())
+end
+
+-- Exposed on CN so the scoring layer can consult it without knowing that a
+-- Filters module exists.
+function CN.IsObjectiveTypeEnabled(objectiveType)
+    return Filters.IsTypeEnabled(objectiveType)
+end
+
+------------------------------------------------------------
 -- READING THE LISTS
 ------------------------------------------------------------
 
@@ -350,6 +538,72 @@ CN:RegisterCommand{
         if restored == 0 then
             Print("Nothing hidden matches: " .. args)
             Print("Run |cffffff00/cn hidden|r to see the list.")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "show",
+    aliases = { "types" },
+    args    = "[type, only <type>, or all]",
+    order   = 17,
+    help    = "Choose which kinds of objective appear in recommendations.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        local lowered = string.lower(args)
+
+        if lowered == "all" then
+            local restored = Filters.EnableAllTypes()
+
+            Print("Showing every type again"
+                .. (restored > 0 and (" (" .. restored .. " restored)") or "") .. ".")
+
+        elseif lowered:match("^only%s+") then
+            local wanted = Filters.ResolveType(lowered:gsub("^only%s+", ""))
+
+            if not wanted then
+                Print("Not a type: " .. args)
+                Print("|cffffff00/cn show|r lists them.")
+                return
+            end
+
+            Filters.OnlyType(wanted)
+
+            Print("Showing only " .. Filters.TypeLabel(wanted) .. ".")
+
+        elseif args ~= "" then
+            local wanted = Filters.ResolveType(args)
+
+            if not wanted then
+                Print("Not a type: " .. args)
+                Print("|cffffff00/cn show|r lists them.")
+                return
+            end
+
+            local nowEnabled = Filters.ToggleType(wanted)
+
+            Print(Filters.TypeLabel(wanted) .. ": " .. CN.YesNo(nowEnabled))
+        end
+
+        local hiddenCount = Filters.HiddenTypeCount()
+
+        Print("Recommendation types"
+            .. (hiddenCount > 0 and (" |cffffff00" .. hiddenCount .. " hidden|r") or ""))
+
+        for _, objectiveType in ipairs(Filters.TypeOrder()) do
+            local enabled = Filters.IsTypeEnabled(objectiveType)
+
+            Print("  " .. CN.YesNo(enabled) .. " " .. Filters.TypeLabel(objectiveType)
+                .. " |cff999999" .. string.lower(objectiveType) .. "|r")
+        end
+
+        Print("|cff999999/cn show pets|r toggles one, |cff999999/cn show only quests|r "
+            .. "narrows to one, |cff999999/cn show all|r restores everything.")
+
+        if hiddenCount > 0 then
+            Print("|cff999999Hidden types still appear in /cn breakdown and the "
+                .. "Collections tab; this only filters recommendations.|r")
         end
     end,
 }

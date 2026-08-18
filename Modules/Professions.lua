@@ -225,6 +225,73 @@ end
 -- ELIGIBILITY
 ------------------------------------------------------------
 
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- A profession below its cap is one of the few completion objectives that is
+-- unambiguously actionable: you know the skill, you know the number, and the
+-- work is entirely in your hands.
+--
+-- Character-scoped on purpose. Professions do not carry across a Warband, and
+-- pretending otherwise would put an alt's blacksmithing in front of you.
+CN.RegisterCandidateProvider("Professions", function()
+    local store = CharacterStore()
+
+    if not store then
+        return {}
+    end
+
+    local candidates = {}
+
+    for skillLineID, record in pairs(store) do
+        local rank    = record.rank or 0
+        local maxRank = record.maxRank or 0
+
+        local remaining = maxRank - rank
+
+        if maxRank > 0
+            and remaining > 0
+            and not CN.IsIgnored(CN.objectiveTypes.PROFESSION, skillLineID)
+            and not CN.IsDeferred(CN.objectiveTypes.PROFESSION, skillLineID) then
+
+            local fraction = rank / maxRank
+
+            -- Nearly finished is worth more than barely started: the last few
+            -- points are the ones a nudge actually completes.
+            local value = (fraction >= 0.9) and 3 or (fraction >= 0.5) and 2 or 1
+
+            local reasons = {
+                rank .. " of " .. maxRank .. ", " .. remaining .. " to go",
+            }
+
+            if not record.recipesSeen then
+                table.insert(reasons,
+                    "open its window once so recipes can be recorded")
+            end
+
+            table.insert(candidates, CN.NewObjective({
+                id              = skillLineID,
+                type            = CN.objectiveTypes.PROFESSION,
+                name            = record.name,
+                accountWide     = false,
+                characterSpecific = true,
+                completionValue = value,
+                reasons         = reasons,
+            }))
+        end
+    end
+
+    local kept, dropped = CN.CapCandidates(candidates)
+
+    CN.providerTruncation["Professions"] = {
+        considered = #kept + dropped,
+        dropped    = dropped,
+    }
+
+    return kept
+end, { events = { "TRADE_SKILL_LIST_UPDATE" }, cooldown = 5 })
+
 CN.RegisterEligibilityChecker(CN.objectiveTypes.RECIPE, function(recipeID)
     local states = CN.objectiveStates
     local mine   = CharacterRecipes()
