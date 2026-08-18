@@ -1750,40 +1750,113 @@ local nav = CN:GetModule("Navigation")
 
 assert(nav, "the Navigation module must load")
 
--- Bearing. This is the part that is completely invisible when wrong: a
--- reversed sign puts the player confidently in the wrong place, and no error
--- is ever raised. Four cardinal cases, checked by hand.
+-- Bearing.
 --
--- Map coordinates: x east, y SOUTH. Player at the centre.
-local function bearingDegrees(tx, ty, facing)
-    local relative = nav.RelativeBearing(0.5, 0.5, tx, ty, facing)
+-- The previous version of this test computed each expected answer from the
+-- same assumption the code used, so it agreed with a bug that pointed people
+-- away from their target. These cases are written from PHYSICAL facts that
+-- hold regardless of which way GetPlayerFacing counts:
+--
+--   * facing straight at the target must give a relative bearing of zero
+--   * facing directly away must give +/- 180
+--   * a target to one side must give +/- 90, and the two sides must differ
+--
+-- The sign convention is then pinned separately, and the harness checks BOTH
+-- conventions behave consistently rather than asserting which one is live.
+local function bearingDegrees(tx, ty, facing, sign)
+    local relative = nav.RelativeBearing(0.5, 0.5, tx, ty, facing, sign)
     return relative and math.floor(math.deg(relative) + 0.5) or nil
 end
 
-local bearingCases = {
-    -- target,        facing,        expected relative (deg, + is clockwise)
-    { 0.5, 0.4,       0,             0,    "north of me, facing north"        },
-    { 0.6, 0.5,       0,             90,   "east of me, facing north"         },
-    { 0.5, 0.6,       0,             180,  "south of me, facing north"        },
-    { 0.4, 0.5,       0,             -90,  "west of me, facing north"         },
-    -- Facing east is 3*pi/2 because facing increases counter-clockwise.
-    { 0.6, 0.5,       3 * math.pi / 2, 0,  "east of me, facing east"          },
-    { 0.5, 0.4,       3 * math.pi / 2, -90, "north of me, facing east"        },
-    { 0.5, 0.4,       math.pi / 2,     90,  "north of me, facing west"        },
-}
+for _, sign in ipairs({ 1, -1 }) do
+    -- Under either convention, facing north is 0.
+    local aheadNorth = bearingDegrees(0.5, 0.4, 0, sign)
 
-for _, case in ipairs(bearingCases) do
-    local got = bearingDegrees(case[1], case[2], case[3])
+    assert(aheadNorth == 0,
+        "facing north at a northern target must be 0 under sign " .. sign
+        .. ", got " .. tostring(aheadNorth))
 
-    print(string.format("  %-28s expected %4d, got %4d", case[5], case[4], got))
+    -- And facing north at a southern target must be a half turn.
+    local behind = bearingDegrees(0.5, 0.6, 0, sign)
 
-    -- 180 and -180 are the same bearing.
-    local matches = (got == case[4])
-        or (math.abs(case[4]) == 180 and math.abs(got) == 180)
+    assert(math.abs(behind) == 180,
+        "facing north at a southern target must be a half turn under sign "
+        .. sign .. ", got " .. tostring(behind))
 
-    assert(matches, "bearing wrong for " .. case[5]
-        .. ": expected " .. case[4] .. ", got " .. tostring(got))
+    -- East and west must be 90 apart in opposite directions.
+    local east = bearingDegrees(0.6, 0.5, 0, sign)
+    local west = bearingDegrees(0.4, 0.5, 0, sign)
+
+    assert(math.abs(east) == 90 and math.abs(west) == 90,
+        "a target due east or west must be a quarter turn away")
+    assert(east == -west, "east and west must differ in sign")
+
+    -- Turning the player by the bearing must line them up: this is the
+    -- property that actually matters and it is convention-independent.
+    local turned = bearingDegrees(0.6, 0.5, sign * math.rad(east), sign)
+
+    assert(math.abs(turned) < 1,
+        "turning by the reported bearing must line the player up under sign "
+        .. sign .. ", got " .. tostring(turned))
 end
+
+print("  bearing is self-consistent under both facing conventions")
+
+-- The two conventions must actually differ, or the sign would be doing
+-- nothing and the self-correction could never help.
+local underPlus  = bearingDegrees(0.6, 0.5, math.rad(45), 1)
+local underMinus = bearingDegrees(0.6, 0.5, math.rad(45), -1)
+
+assert(underPlus ~= underMinus,
+    "the facing sign must change the answer, or correcting it is pointless")
+
+print("  the facing sign changes the result (+" .. underPlus
+    .. " vs " .. underMinus .. ")")
+
+-- Self-correction: following the arrow while the distance GROWS is proof the
+-- arrow is backwards. That is ground truth from the game, which is the only
+-- place it can come from.
+local signBefore = nav.FacingSign()
+
+nav.ResetCalibration()
+
+local flipped = false
+
+for step = 1, nav.calibrationSamples + 1 do
+    -- Lined up with the arrow, and getting further away every tick.
+    if nav.NoteObservation(0.05, 100 + (step * 10)) then
+        flipped = true
+    end
+end
+
+assert(flipped, "walking along the arrow while the distance grows must flip the sign")
+assert(nav.FacingSign() == -signBefore, "the sign must actually change")
+
+print("  distance growing while aligned flipped the sign "
+    .. signBefore .. " -> " .. nav.FacingSign())
+
+-- And it must NOT flip when the distance is shrinking, or when the player is
+-- not following the arrow at all.
+nav.SetFacingSign(signBefore)
+nav.ResetCalibration()
+
+for step = 1, nav.calibrationSamples + 2 do
+    nav.NoteObservation(0.05, 500 - (step * 10))
+end
+
+assert(nav.FacingSign() == signBefore, "closing distance must never flip the sign")
+
+nav.ResetCalibration()
+
+for step = 1, nav.calibrationSamples + 2 do
+    -- Facing sideways: the distance says nothing about the arrow.
+    nav.NoteObservation(1.4, 100 + (step * 10))
+end
+
+assert(nav.FacingSign() == signBefore,
+    "distance growing while NOT following the arrow must not flip the sign")
+
+print("  no flip when closing, or when not following the arrow")
 
 assert(nav.RelativeBearing(0.5, 0.5, nil, nil, 0) == nil,
     "an uncomputable bearing must be nil, not zero")
@@ -1841,7 +1914,10 @@ local tracked = nav.GetTarget()
 assert(tracked and tracked.title == "Test Destination",
     "setting a waypoint must record the target")
 
-CN_TEST_SetFacing(3 * math.pi / 2)
+-- Face the target, derived from the live convention rather than hardcoded.
+-- The target is due east, so its bearing clockwise from north is pi/2, and
+-- lining up means facing * sign == pi/2.
+CN_TEST_SetFacing((math.pi / 2) * nav.FacingSign())
 
 local computed = nav.Compute()
 

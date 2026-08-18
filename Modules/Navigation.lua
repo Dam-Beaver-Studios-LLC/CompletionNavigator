@@ -18,18 +18,28 @@
 -- keep using it -- /cn nav tomtom -- and everything else still works.
 --
 ------------------------------------------------------------------------------
--- THE MATH, once, because getting a bearing wrong is invisible until you are
--- standing in the wrong place.
+-- THE MATH, and an admission about it.
 --
 --   Map coordinates run x east, y SOUTH. North is therefore -y.
---   GetPlayerFacing() is radians, 0 = north, increasing COUNTER-clockwise.
---   Texture:SetRotation() rotates counter-clockwise.
---
 --   bearing clockwise from north = atan2(dx, -dy)
---   relative bearing             = bearing + facing
+--   relative bearing             = bearing - (facing * facingSign)
 --   rotation to apply            = -(relative bearing)
 --
--- Checked against four cases in the harness rather than trusted.
+-- The one thing that cannot be derived from first principles is which way
+-- GetPlayerFacing() counts. 0 is north on every build; whether the value grows
+-- as you turn left or as you turn right is a client convention.
+--
+-- 0.19.0 assumed counter-clockwise and shipped a bearing that pointed people
+-- away from their target. The harness "verified" it against seven cases -- and
+-- every one of those cases computed its expected answer from the same
+-- assumption, so the tests agreed with the bug. A test that encodes the
+-- premise it is meant to check proves nothing.
+--
+-- So the sign is not asserted here. It defaults to the convention every
+-- established navigation addon uses, and then CORRECTS ITSELF from evidence:
+-- if you are lined up with the arrow, moving, and the distance is growing,
+-- the sign is wrong, and the addon flips it and says so. The game is the only
+-- thing that can settle this, so the game settles it.
 ------------------------------------------------------------------------------
 
 local ADDON_NAME, CN = ...
@@ -62,7 +72,27 @@ end
 
 -- Radians clockwise from straight ahead. nil when the bearing cannot be
 -- computed, which is different from zero and must not be shown as zero.
-function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing)
+-- +1 means GetPlayerFacing() grows clockwise; -1 means counter-clockwise.
+-- Persisted once determined, so the correction happens at most once ever.
+function Navigation.FacingSign()
+    local settings = CN.Settings()
+
+    if settings and settings.facingSign then
+        return settings.facingSign
+    end
+
+    return 1
+end
+
+function Navigation.SetFacingSign(sign)
+    local settings = CN.Settings()
+
+    if settings then
+        settings.facingSign = (sign < 0) and -1 or 1
+    end
+end
+
+function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing, sign)
     if not (playerX and playerY and targetX and targetY and facing) then
         return nil
     end
@@ -77,7 +107,7 @@ function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing)
     -- -dy because map y grows southward.
     local bearing = math.atan(dx, -dy)
 
-    local relative = bearing + facing
+    local relative = bearing - (facing * (sign or Navigation.FacingSign()))
 
     -- Normalize to (-pi, pi] so "how far off am I" is a small number.
     while relative > math.pi do
@@ -334,6 +364,83 @@ function Navigation.Compute()
     }
 end
 
+------------------------------------------------------------
+-- SELF-CORRECTION
+------------------------------------------------------------
+
+-- Evidence that the facing convention is backwards.
+--
+-- If you are lined up with the arrow and moving, the distance must shrink. If
+-- it grows instead, the arrow is pointing at the reciprocal. That is not a
+-- guess -- it is the definition of the arrow being wrong, observed directly.
+--
+-- Several consecutive samples are required so that walking backwards, a
+-- flight path, or a teleport cannot trigger it.
+local calibration = {
+    lastDistance = nil,
+    growing      = 0,
+    corrected    = false,
+}
+
+Navigation.calibrationSamples = 4
+
+function Navigation.ResetCalibration()
+    calibration.lastDistance = nil
+    calibration.growing      = 0
+end
+
+function Navigation.NoteObservation(relative, yards)
+    -- Only meaningful while genuinely lined up: if you are not following the
+    -- arrow, the distance says nothing about whether the arrow is right.
+    if not relative or not yards or math.abs(relative) > 0.3 then
+        Navigation.ResetCalibration()
+        return false
+    end
+
+    local previous = calibration.lastDistance
+
+    calibration.lastDistance = yards
+
+    if not previous then
+        return false
+    end
+
+    local delta = yards - previous
+
+    -- Ignore standing still and ignore jumps far too large to be walking,
+    -- which are loading screens rather than movement.
+    if math.abs(delta) < 0.5 or math.abs(delta) > 200 then
+        return false
+    end
+
+    if delta > 0 then
+        calibration.growing = calibration.growing + 1
+    else
+        calibration.growing = 0
+    end
+
+    if calibration.growing < Navigation.calibrationSamples then
+        return false
+    end
+
+    calibration.growing = 0
+
+    if calibration.corrected then
+        -- Already flipped once this session and still wrong: flipping back and
+        -- forth forever would be worse than leaving it alone.
+        return false
+    end
+
+    calibration.corrected = true
+
+    Navigation.SetFacingSign(-Navigation.FacingSign())
+
+    Print("The arrow was pointing the wrong way. Corrected, and remembered.")
+    DebugPrint("Facing sign is now " .. Navigation.FacingSign() .. ".")
+
+    return true
+end
+
 local function Refresh()
     if not arrow then
         return
@@ -377,6 +484,9 @@ local function Refresh()
     arrow.texture:SetVertexColor(Navigation.BearingColor(state.relative))
 
     arrow.distance:SetText(Navigation.FormatDistance(state.yards))
+
+    -- Watch whether following the arrow actually works.
+    Navigation.NoteObservation(state.relative, state.yards)
 
     if state.state == "ARRIVED" then
         Navigation.Arrive()
@@ -453,6 +563,8 @@ function provider.SetWaypoint(mapID, x, y, title)
         zone  = Blizzard.GetMapName(mapID),
         setAt = time(),
     }
+
+    Navigation.ResetCalibration()
 
     BuildArrow()
     Navigation.StartTicker()
@@ -587,6 +699,25 @@ CN:RegisterCommand{
             Print("|cff999999Nothing is being tracked. |cffffff00/cn go|r "
                 .. "points it at something.|r")
         end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "calibrate",
+    aliases = { "flip" },
+    order   = 43,
+    help    = "Flip the navigation arrow if it points the wrong way.",
+    handler = function()
+        Navigation.SetFacingSign(-Navigation.FacingSign())
+        Navigation.ResetCalibration()
+
+        Print("Arrow direction flipped and remembered.")
+        Print("|cff999999Whether GetPlayerFacing counts clockwise or "
+            .. "counter-clockwise is a client convention, so the addon "
+            .. "normally works this out on its own by watching whether "
+            .. "following the arrow shortens the distance.|r")
+
+        Navigation.Refresh()
     end,
 }
 

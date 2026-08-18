@@ -7,6 +7,39 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.20.1]
+
+The arrow pointed the wrong way. This fixes it, and fixes the reason the tests
+did not catch it.
+
+### Fixed
+
+- **The navigation arrow pointed at the reciprocal of the target.** Following
+  it increased the distance while it still showed blue for "on course", because
+  the colour and the direction were computed from the same wrong number and so
+  agreed with each other.
+  The cause: 0 is north on every client, but whether `GetPlayerFacing()` grows
+  as you turn left or as you turn right is a convention, and 0.19.0 assumed the
+  wrong one.
+
+### Changed
+
+- **The arrow now works the convention out for itself.** If you are lined up
+  with it, moving, and the distance is *growing*, the arrow is demonstrably
+  backwards -- so it flips, says so once, and remembers. Several consecutive
+  samples are required, so walking backwards, a flight path or a loading screen
+  cannot trigger it. `/cn calibrate` forces the flip by hand.
+- **The bearing tests were the real defect.** Seven cases "verified" 0.19.0,
+  and every one of them computed its expected answer from the same assumption
+  the code used -- so the tests agreed with the bug. A test that encodes the
+  premise it is meant to check proves nothing.
+  They are rewritten around properties that hold under *either* convention:
+  facing the target is zero, facing away is a half turn, east and west are a
+  quarter turn in opposite directions, and turning by the reported bearing must
+  line you up. The suite now also asserts that the two conventions genuinely
+  differ, and that the self-correction fires when the distance grows and stays
+  put when it shrinks.
+
 ## [0.20.0]
 
 ### Fixed

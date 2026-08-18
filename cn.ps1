@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.20.0'
+$script:ToolkitVersion = '0.20.1'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.20.0"
+CN.version     = "0.20.1"
 CN.dbVersion   = 2
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -16413,18 +16413,28 @@ $Embedded['Modules\Navigation.lua'] = @'
 -- keep using it -- /cn nav tomtom -- and everything else still works.
 --
 ------------------------------------------------------------------------------
--- THE MATH, once, because getting a bearing wrong is invisible until you are
--- standing in the wrong place.
+-- THE MATH, and an admission about it.
 --
 --   Map coordinates run x east, y SOUTH. North is therefore -y.
---   GetPlayerFacing() is radians, 0 = north, increasing COUNTER-clockwise.
---   Texture:SetRotation() rotates counter-clockwise.
---
 --   bearing clockwise from north = atan2(dx, -dy)
---   relative bearing             = bearing + facing
+--   relative bearing             = bearing - (facing * facingSign)
 --   rotation to apply            = -(relative bearing)
 --
--- Checked against four cases in the harness rather than trusted.
+-- The one thing that cannot be derived from first principles is which way
+-- GetPlayerFacing() counts. 0 is north on every build; whether the value grows
+-- as you turn left or as you turn right is a client convention.
+--
+-- 0.19.0 assumed counter-clockwise and shipped a bearing that pointed people
+-- away from their target. The harness "verified" it against seven cases -- and
+-- every one of those cases computed its expected answer from the same
+-- assumption, so the tests agreed with the bug. A test that encodes the
+-- premise it is meant to check proves nothing.
+--
+-- So the sign is not asserted here. It defaults to the convention every
+-- established navigation addon uses, and then CORRECTS ITSELF from evidence:
+-- if you are lined up with the arrow, moving, and the distance is growing,
+-- the sign is wrong, and the addon flips it and says so. The game is the only
+-- thing that can settle this, so the game settles it.
 ------------------------------------------------------------------------------
 
 local ADDON_NAME, CN = ...
@@ -16457,7 +16467,27 @@ end
 
 -- Radians clockwise from straight ahead. nil when the bearing cannot be
 -- computed, which is different from zero and must not be shown as zero.
-function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing)
+-- +1 means GetPlayerFacing() grows clockwise; -1 means counter-clockwise.
+-- Persisted once determined, so the correction happens at most once ever.
+function Navigation.FacingSign()
+    local settings = CN.Settings()
+
+    if settings and settings.facingSign then
+        return settings.facingSign
+    end
+
+    return 1
+end
+
+function Navigation.SetFacingSign(sign)
+    local settings = CN.Settings()
+
+    if settings then
+        settings.facingSign = (sign < 0) and -1 or 1
+    end
+end
+
+function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing, sign)
     if not (playerX and playerY and targetX and targetY and facing) then
         return nil
     end
@@ -16472,7 +16502,7 @@ function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing)
     -- -dy because map y grows southward.
     local bearing = math.atan(dx, -dy)
 
-    local relative = bearing + facing
+    local relative = bearing - (facing * (sign or Navigation.FacingSign()))
 
     -- Normalize to (-pi, pi] so "how far off am I" is a small number.
     while relative > math.pi do
@@ -16729,6 +16759,83 @@ function Navigation.Compute()
     }
 end
 
+------------------------------------------------------------
+-- SELF-CORRECTION
+------------------------------------------------------------
+
+-- Evidence that the facing convention is backwards.
+--
+-- If you are lined up with the arrow and moving, the distance must shrink. If
+-- it grows instead, the arrow is pointing at the reciprocal. That is not a
+-- guess -- it is the definition of the arrow being wrong, observed directly.
+--
+-- Several consecutive samples are required so that walking backwards, a
+-- flight path, or a teleport cannot trigger it.
+local calibration = {
+    lastDistance = nil,
+    growing      = 0,
+    corrected    = false,
+}
+
+Navigation.calibrationSamples = 4
+
+function Navigation.ResetCalibration()
+    calibration.lastDistance = nil
+    calibration.growing      = 0
+end
+
+function Navigation.NoteObservation(relative, yards)
+    -- Only meaningful while genuinely lined up: if you are not following the
+    -- arrow, the distance says nothing about whether the arrow is right.
+    if not relative or not yards or math.abs(relative) > 0.3 then
+        Navigation.ResetCalibration()
+        return false
+    end
+
+    local previous = calibration.lastDistance
+
+    calibration.lastDistance = yards
+
+    if not previous then
+        return false
+    end
+
+    local delta = yards - previous
+
+    -- Ignore standing still and ignore jumps far too large to be walking,
+    -- which are loading screens rather than movement.
+    if math.abs(delta) < 0.5 or math.abs(delta) > 200 then
+        return false
+    end
+
+    if delta > 0 then
+        calibration.growing = calibration.growing + 1
+    else
+        calibration.growing = 0
+    end
+
+    if calibration.growing < Navigation.calibrationSamples then
+        return false
+    end
+
+    calibration.growing = 0
+
+    if calibration.corrected then
+        -- Already flipped once this session and still wrong: flipping back and
+        -- forth forever would be worse than leaving it alone.
+        return false
+    end
+
+    calibration.corrected = true
+
+    Navigation.SetFacingSign(-Navigation.FacingSign())
+
+    Print("The arrow was pointing the wrong way. Corrected, and remembered.")
+    DebugPrint("Facing sign is now " .. Navigation.FacingSign() .. ".")
+
+    return true
+end
+
 local function Refresh()
     if not arrow then
         return
@@ -16772,6 +16879,9 @@ local function Refresh()
     arrow.texture:SetVertexColor(Navigation.BearingColor(state.relative))
 
     arrow.distance:SetText(Navigation.FormatDistance(state.yards))
+
+    -- Watch whether following the arrow actually works.
+    Navigation.NoteObservation(state.relative, state.yards)
 
     if state.state == "ARRIVED" then
         Navigation.Arrive()
@@ -16848,6 +16958,8 @@ function provider.SetWaypoint(mapID, x, y, title)
         zone  = Blizzard.GetMapName(mapID),
         setAt = time(),
     }
+
+    Navigation.ResetCalibration()
 
     BuildArrow()
     Navigation.StartTicker()
@@ -16986,6 +17098,25 @@ CN:RegisterCommand{
 }
 
 CN:RegisterCommand{
+    name    = "calibrate",
+    aliases = { "flip" },
+    order   = 43,
+    help    = "Flip the navigation arrow if it points the wrong way.",
+    handler = function()
+        Navigation.SetFacingSign(-Navigation.FacingSign())
+        Navigation.ResetCalibration()
+
+        Print("Arrow direction flipped and remembered.")
+        Print("|cff999999Whether GetPlayerFacing counts clockwise or "
+            .. "counter-clockwise is a client convention, so the addon "
+            .. "normally works this out on its own by watching whether "
+            .. "following the arrow shortens the distance.|r")
+
+        Navigation.Refresh()
+    end,
+}
+
+CN:RegisterCommand{
     name    = "nav",
     args    = "[auto, native, tomtom or blizzard]",
     order   = 41,
@@ -17102,7 +17233,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.20.0
+## Version: 0.20.1
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -17314,6 +17445,39 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.20.1]
+
+The arrow pointed the wrong way. This fixes it, and fixes the reason the tests
+did not catch it.
+
+### Fixed
+
+- **The navigation arrow pointed at the reciprocal of the target.** Following
+  it increased the distance while it still showed blue for "on course", because
+  the colour and the direction were computed from the same wrong number and so
+  agreed with each other.
+  The cause: 0 is north on every client, but whether `GetPlayerFacing()` grows
+  as you turn left or as you turn right is a convention, and 0.19.0 assumed the
+  wrong one.
+
+### Changed
+
+- **The arrow now works the convention out for itself.** If you are lined up
+  with it, moving, and the distance is *growing*, the arrow is demonstrably
+  backwards -- so it flips, says so once, and remembers. Several consecutive
+  samples are required, so walking backwards, a flight path or a loading screen
+  cannot trigger it. `/cn calibrate` forces the flip by hand.
+- **The bearing tests were the real defect.** Seven cases "verified" 0.19.0,
+  and every one of them computed its expected answer from the same assumption
+  the code used -- so the tests agreed with the bug. A test that encodes the
+  premise it is meant to check proves nothing.
+  They are rewritten around properties that hold under *either* convention:
+  facing the target is zero, facing away is a half turn, east and west are a
+  quarter turn in opposite directions, and turning by the reported bearing must
+  line you up. The suite now also asserts that the two conventions genuinely
+  differ, and that the self-correction fires when the distance grows and stays
+  put when it shrinks.
 
 ## [0.20.0]
 
@@ -20213,40 +20377,113 @@ local nav = CN:GetModule("Navigation")
 
 assert(nav, "the Navigation module must load")
 
--- Bearing. This is the part that is completely invisible when wrong: a
--- reversed sign puts the player confidently in the wrong place, and no error
--- is ever raised. Four cardinal cases, checked by hand.
+-- Bearing.
 --
--- Map coordinates: x east, y SOUTH. Player at the centre.
-local function bearingDegrees(tx, ty, facing)
-    local relative = nav.RelativeBearing(0.5, 0.5, tx, ty, facing)
+-- The previous version of this test computed each expected answer from the
+-- same assumption the code used, so it agreed with a bug that pointed people
+-- away from their target. These cases are written from PHYSICAL facts that
+-- hold regardless of which way GetPlayerFacing counts:
+--
+--   * facing straight at the target must give a relative bearing of zero
+--   * facing directly away must give +/- 180
+--   * a target to one side must give +/- 90, and the two sides must differ
+--
+-- The sign convention is then pinned separately, and the harness checks BOTH
+-- conventions behave consistently rather than asserting which one is live.
+local function bearingDegrees(tx, ty, facing, sign)
+    local relative = nav.RelativeBearing(0.5, 0.5, tx, ty, facing, sign)
     return relative and math.floor(math.deg(relative) + 0.5) or nil
 end
 
-local bearingCases = {
-    -- target,        facing,        expected relative (deg, + is clockwise)
-    { 0.5, 0.4,       0,             0,    "north of me, facing north"        },
-    { 0.6, 0.5,       0,             90,   "east of me, facing north"         },
-    { 0.5, 0.6,       0,             180,  "south of me, facing north"        },
-    { 0.4, 0.5,       0,             -90,  "west of me, facing north"         },
-    -- Facing east is 3*pi/2 because facing increases counter-clockwise.
-    { 0.6, 0.5,       3 * math.pi / 2, 0,  "east of me, facing east"          },
-    { 0.5, 0.4,       3 * math.pi / 2, -90, "north of me, facing east"        },
-    { 0.5, 0.4,       math.pi / 2,     90,  "north of me, facing west"        },
-}
+for _, sign in ipairs({ 1, -1 }) do
+    -- Under either convention, facing north is 0.
+    local aheadNorth = bearingDegrees(0.5, 0.4, 0, sign)
 
-for _, case in ipairs(bearingCases) do
-    local got = bearingDegrees(case[1], case[2], case[3])
+    assert(aheadNorth == 0,
+        "facing north at a northern target must be 0 under sign " .. sign
+        .. ", got " .. tostring(aheadNorth))
 
-    print(string.format("  %-28s expected %4d, got %4d", case[5], case[4], got))
+    -- And facing north at a southern target must be a half turn.
+    local behind = bearingDegrees(0.5, 0.6, 0, sign)
 
-    -- 180 and -180 are the same bearing.
-    local matches = (got == case[4])
-        or (math.abs(case[4]) == 180 and math.abs(got) == 180)
+    assert(math.abs(behind) == 180,
+        "facing north at a southern target must be a half turn under sign "
+        .. sign .. ", got " .. tostring(behind))
 
-    assert(matches, "bearing wrong for " .. case[5]
-        .. ": expected " .. case[4] .. ", got " .. tostring(got))
+    -- East and west must be 90 apart in opposite directions.
+    local east = bearingDegrees(0.6, 0.5, 0, sign)
+    local west = bearingDegrees(0.4, 0.5, 0, sign)
+
+    assert(math.abs(east) == 90 and math.abs(west) == 90,
+        "a target due east or west must be a quarter turn away")
+    assert(east == -west, "east and west must differ in sign")
+
+    -- Turning the player by the bearing must line them up: this is the
+    -- property that actually matters and it is convention-independent.
+    local turned = bearingDegrees(0.6, 0.5, sign * math.rad(east), sign)
+
+    assert(math.abs(turned) < 1,
+        "turning by the reported bearing must line the player up under sign "
+        .. sign .. ", got " .. tostring(turned))
 end
+
+print("  bearing is self-consistent under both facing conventions")
+
+-- The two conventions must actually differ, or the sign would be doing
+-- nothing and the self-correction could never help.
+local underPlus  = bearingDegrees(0.6, 0.5, math.rad(45), 1)
+local underMinus = bearingDegrees(0.6, 0.5, math.rad(45), -1)
+
+assert(underPlus ~= underMinus,
+    "the facing sign must change the answer, or correcting it is pointless")
+
+print("  the facing sign changes the result (+" .. underPlus
+    .. " vs " .. underMinus .. ")")
+
+-- Self-correction: following the arrow while the distance GROWS is proof the
+-- arrow is backwards. That is ground truth from the game, which is the only
+-- place it can come from.
+local signBefore = nav.FacingSign()
+
+nav.ResetCalibration()
+
+local flipped = false
+
+for step = 1, nav.calibrationSamples + 1 do
+    -- Lined up with the arrow, and getting further away every tick.
+    if nav.NoteObservation(0.05, 100 + (step * 10)) then
+        flipped = true
+    end
+end
+
+assert(flipped, "walking along the arrow while the distance grows must flip the sign")
+assert(nav.FacingSign() == -signBefore, "the sign must actually change")
+
+print("  distance growing while aligned flipped the sign "
+    .. signBefore .. " -> " .. nav.FacingSign())
+
+-- And it must NOT flip when the distance is shrinking, or when the player is
+-- not following the arrow at all.
+nav.SetFacingSign(signBefore)
+nav.ResetCalibration()
+
+for step = 1, nav.calibrationSamples + 2 do
+    nav.NoteObservation(0.05, 500 - (step * 10))
+end
+
+assert(nav.FacingSign() == signBefore, "closing distance must never flip the sign")
+
+nav.ResetCalibration()
+
+for step = 1, nav.calibrationSamples + 2 do
+    -- Facing sideways: the distance says nothing about the arrow.
+    nav.NoteObservation(1.4, 100 + (step * 10))
+end
+
+assert(nav.FacingSign() == signBefore,
+    "distance growing while NOT following the arrow must not flip the sign")
+
+print("  no flip when closing, or when not following the arrow")
 
 assert(nav.RelativeBearing(0.5, 0.5, nil, nil, 0) == nil,
     "an uncomputable bearing must be nil, not zero")
@@ -20304,7 +20541,10 @@ local tracked = nav.GetTarget()
 assert(tracked and tracked.title == "Test Destination",
     "setting a waypoint must record the target")
 
-CN_TEST_SetFacing(3 * math.pi / 2)
+-- Face the target, derived from the live convention rather than hardcoded.
+-- The target is due east, so its bearing clockwise from north is pi/2, and
+-- lining up means facing * sign == pi/2.
+CN_TEST_SetFacing((math.pi / 2) * nav.FacingSign())
 
 local computed = nav.Compute()
 
