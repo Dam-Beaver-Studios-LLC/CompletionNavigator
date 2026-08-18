@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.16.0'
+$script:ToolkitVersion = '0.16.1'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.16.0"
+CN.version     = "0.16.1"
 CN.dbVersion   = 2
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -14205,7 +14205,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.16.0
+## Version: 0.16.1
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -14406,6 +14406,32 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.16.1]
+
+A Windows-only defect in 0.16.0's release path. No addon changes.
+
+### Fixed
+
+- **`release` died mid-push on Windows PowerShell 5.1.** There, stderr from a
+  native command under `2>&1` arrives as ErrorRecord objects, and with
+  `$ErrorActionPreference = 'Stop'` -- set at the top of `cn.ps1` -- the first
+  one becomes a terminating error. git writes its ordinary progress to stderr,
+  so `git push 2>&1` killed the script on a push that had *succeeded*, leaving
+  the tag unpushed and the release invisible to CurseForge.
+  Every native invocation now goes through one helper that neutralizes the
+  preference for the duration, renders stderr as its message rather than its
+  type name, and returns the real exit code.
+  This was not caught because the end-to-end test runs PowerShell 7 on Linux,
+  which does not behave this way.
+- **`check` had the same defect.** `luac.exe` writes syntax errors to stderr,
+  so the first malformed file would have terminated the whole check rather
+  than being reported alongside the others.
+- **`doctor` sorted remote tags as strings**, which put `v0.9.0` above
+  `v0.15.0` and made "newest remote tags" actively misleading. Sorted by
+  version number now.
+- A failed push prints the two commands that finish the release by hand,
+  rather than leaving you to work them out.
 
 ## [0.16.0]
 
@@ -16526,10 +16552,14 @@ function Invoke-CNCheck {
 
     if ($luac) {
         foreach ($file in $onDisk) {
-            $output = & $luac.Source -p (Join-Path $script:Root $file) 2>&1
+            # Same trap as git: luac writes syntax errors to stderr, so under
+            # $ErrorActionPreference = 'Stop' the first bad file would have
+            # terminated the whole check instead of being reported.
+            $result = Invoke-CNNative -Executable $luac.Source `
+                -Arguments @('-p', (Join-Path $script:Root $file)) -Quiet
 
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "  FAIL  $file :: $output" -ForegroundColor Red
+            if (-not $result.Ok) {
+                Write-Host "  FAIL  $file :: $($result.Output -join ' ')" -ForegroundColor Red
                 $problems++
             }
         }
@@ -16663,7 +16693,7 @@ desktop.ini
     Push-Location $script:Root
 
     try {
-        git init -b main | Out-Null
+        Invoke-CNGit @('init', '-b', 'main') -Quiet | Out-Null
 
         # Set the repository identity BEFORE the first commit. Inheriting a
         # machine-wide identity here silently stamps the wrong address onto
@@ -16672,11 +16702,11 @@ desktop.ini
         $commitName  = if ($Name)  { $Name }  else { 'Travis A. Bryan I' }
         $commitEmail = if ($Email) { $Email } else { 'developer@dambeaverstudios.com' }
 
-        git config user.name  $commitName  | Out-Null
-        git config user.email $commitEmail | Out-Null
+        Invoke-CNGit @('config', 'user.name', $commitName) -Quiet | Out-Null
+        Invoke-CNGit @('config', 'user.email', $commitEmail) -Quiet | Out-Null
 
-        git add -A | Out-Null
-        git commit -m 'Completion Navigator: initial commit' | Out-Null
+        Invoke-CNGit @('add', '-A') -Quiet | Out-Null
+        Invoke-CNGit @('commit', '-m', 'Completion Navigator: initial commit') -Quiet | Out-Null
 
         Write-Host "Git repository initialized." -ForegroundColor Green
         Write-Host "  identity: $commitName <$commitEmail>" -ForegroundColor DarkGray
@@ -16777,29 +16807,101 @@ function Invoke-CNPackage {
 }
 
 
-# git writes progress and diagnostics to stderr. With 2>&1 those arrive as
-# ErrorRecord objects, and interpolating one into a string yields
-# "System.Management.Automation.RemoteException" rather than the message --
-# which is exactly the kind of output that makes a failed release unreadable.
-function Write-CNGitOutput {
-    param([Parameter(ValueFromPipeline = $true)] $Line)
+# Native commands and $ErrorActionPreference = 'Stop' do not mix.
+#
+# On Windows PowerShell 5.1, stderr from a native command under 2>&1 arrives
+# as ErrorRecord objects, and with the preference set to Stop the FIRST one
+# terminates the script. git writes its ordinary progress to stderr, so
+# `git push 2>&1` killed a release mid-way through a push that had actually
+# succeeded. PowerShell 7 on Linux does not behave this way, which is exactly
+# why it was not caught here.
+#
+# Every native invocation in this file goes through this function: the
+# preference is neutralized for the duration, stderr is rendered as its
+# message rather than its type name, and the real exit code comes back.
+function Invoke-CNNative {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Executable,
+        [string[]] $Arguments = @(),
+        [switch] $Quiet
+    )
 
-    process {
-        if ($null -eq $Line) { return }
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
 
-        $text = if ($Line -is [System.Management.Automation.ErrorRecord]) {
-            $Line.Exception.Message
-        }
-        else {
-            [string] $Line
-        }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $code  = 0
 
-        foreach ($part in ($text -split "`r?`n")) {
-            if ($part.Trim()) {
-                Write-Host "  $part" -ForegroundColor DarkGray
+    try {
+        $raw = & $Executable @Arguments 2>&1
+
+        $code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
+
+        foreach ($item in @($raw)) {
+            if ($null -eq $item) { continue }
+
+            $text = if ($item -is [System.Management.Automation.ErrorRecord]) {
+                $item.Exception.Message
+            }
+            else {
+                [string] $item
+            }
+
+            foreach ($part in ($text -split "`r?`n")) {
+                if ($part.Trim()) { $lines.Add($part) | Out-Null }
             }
         }
     }
+    catch {
+        $lines.Add($_.Exception.Message) | Out-Null
+        $code = 1
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
+
+    if (-not $Quiet) {
+        foreach ($line in $lines) {
+            Write-Host "  $line" -ForegroundColor DarkGray
+        }
+    }
+
+    return [PSCustomObject]@{
+        Output   = @($lines)
+        ExitCode = $code
+        Ok       = ($code -eq 0)
+    }
+}
+
+# The argument list is passed as ONE array, deliberately.
+#
+# With ValueFromRemainingArguments, PowerShell still binds by parameter-name
+# prefix first -- so `Invoke-CNGit add -A` bound "-A" to the -Arguments
+# parameter and failed with "Missing an argument for parameter 'Arguments'".
+# git's flags cover most of the alphabet, so there is no safe parameter name.
+# Wrapping them in an array removes the ambiguity entirely.
+function Invoke-CNGit {
+    param(
+        [Parameter(Mandatory = $true, Position = 0)] [string[]] $GitArguments,
+        [switch] $Quiet
+    )
+
+    return Invoke-CNNative -Executable 'git' -Arguments $GitArguments -Quiet:$Quiet
+}
+
+# Sorts version-like tags newest first. A plain string sort puts v0.9.0 above
+# v0.15.0, which makes "newest remote tags" actively misleading.
+function Sort-CNVersionTag {
+    param([string[]] $Tags)
+
+    return @($Tags | Sort-Object -Property @{ Expression = {
+        $text = $_ -replace '^v', ''
+        $parts = @(($text -split '\.') | ForEach-Object { [int]($_ -replace '\D', '0') })
+
+        while ($parts.Count -lt 3) { $parts += 0 }
+
+        ($parts[0] * 1000000) + ($parts[1] * 1000) + $parts[2]
+    } } -Descending)
 }
 
 function Invoke-CNRelease {
@@ -16860,7 +16962,7 @@ function Invoke-CNRelease {
     Push-Location $script:Root
 
     try {
-        $existing = @(git tag --list "v$new")
+        $existing = @((Invoke-CNGit @('tag', '--list', "v$new") -Quiet).Output)
 
         if ($existing.Count -gt 0 -and -not $Force) {
             Write-Host "ERROR  Tag v$new already exists." -ForegroundColor Red
@@ -16900,25 +17002,27 @@ function Invoke-CNRelease {
     Push-Location $script:Root
 
     try {
-        git add -A | Out-Null
+        Invoke-CNGit @('add', '-A') -Quiet | Out-Null
 
         # An empty commit is not an error here: init may have written exactly
         # what was already committed. The tag is what matters.
-        git commit -m "Release $new" 2>&1 | Write-CNGitOutput
+        Invoke-CNGit @('commit', '-m', "Release $new") | Out-Null
 
-        git tag "v$new" 2>&1 | Write-CNGitOutput
+        Invoke-CNGit @('tag', "v$new") | Out-Null
 
-        if (-not (git tag --list "v$new")) {
+        if (-not @((Invoke-CNGit @('tag', '--list', "v$new") -Quiet).Output)) {
             Write-Host "ERROR  Tag v$new was not created. Not pushing." -ForegroundColor Red
             return
         }
 
-        Write-Host "Tagged v$new at $(git rev-parse --short HEAD)." -ForegroundColor Green
+        $head = @((Invoke-CNGit @('rev-parse', '--short', 'HEAD') -Quiet).Output)[0]
+
+        Write-Host "Tagged v$new at $head." -ForegroundColor Green
 
         # The packager derives the release type from a tag pointing at HEAD.
         # No tag there means it publishes as an alpha, which then hides behind
         # "Show alpha files" on CurseForge.
-        $atHead = @(git tag --points-at HEAD)
+        $atHead = @((Invoke-CNGit @('tag', '--points-at', 'HEAD') -Quiet).Output)
 
         if ($atHead -notcontains "v$new") {
             Write-Host "ERROR  v$new does not point at HEAD; CurseForge would get an alpha." -ForegroundColor Red
@@ -16926,7 +17030,7 @@ function Invoke-CNRelease {
             return
         }
 
-        $remote = git remote 2>$null
+        $remote = @((Invoke-CNGit @('remote') -Quiet).Output)
 
         if (-not $remote) {
             Write-Host 'No git remote configured, so nothing was pushed.' -ForegroundColor Yellow
@@ -16935,17 +17039,15 @@ function Invoke-CNRelease {
             return
         }
 
-        git push 2>&1 | Write-CNGitOutput
-
-        if ($LASTEXITCODE -ne 0) {
+        if (-not (Invoke-CNGit @('push')).Ok) {
             Write-Host 'ERROR  git push failed. The tag exists locally but was not pushed.' -ForegroundColor Red
+            Write-Host '  Recover with:  git push ; git push --tags' -ForegroundColor Yellow
             return
         }
 
-        git push --tags 2>&1 | Write-CNGitOutput
-
-        if ($LASTEXITCODE -ne 0) {
+        if (-not (Invoke-CNGit @('push', '--tags')).Ok) {
             Write-Host 'ERROR  git push --tags failed. CurseForge will not see this release.' -ForegroundColor Red
+            Write-Host '  Recover with:  git push --tags' -ForegroundColor Yellow
             return
         }
 
@@ -17010,32 +17112,45 @@ function Invoke-CNDoctor {
 
     try {
         Write-Host 'Git' -ForegroundColor White
-        Write-Host "  HEAD                     $(git rev-parse --short HEAD) $(git log -1 --pretty=%s)"
+        $head    = @((Invoke-CNGit @('rev-parse', '--short', 'HEAD') -Quiet).Output)[0]
+        $subject = @((Invoke-CNGit @('log', '-1', '--pretty=%s') -Quiet).Output)[0]
 
-        $atHead = @(git tag --points-at HEAD)
+        Write-Host "  HEAD                     $head $subject"
+
+        $atHead = @((Invoke-CNGit @('tag', '--points-at', 'HEAD') -Quiet).Output)
 
         Write-Host ("  tags at HEAD             " +
             $(if ($atHead.Count) { $atHead -join ', ' } else { '(none)' })) `
             -ForegroundColor $(if ($atHead.Count) { 'Gray' } else { 'Yellow' })
 
-        $dirty = @(git status --porcelain)
+        $dirty = @((Invoke-CNGit @('status', '--porcelain') -Quiet).Output)
 
         Write-Host ("  uncommitted changes      " +
             $(if ($dirty.Count) { "$($dirty.Count) file(s)" } else { 'none' }))
 
-        $remote = git remote 2>$null
+        $remote = @((Invoke-CNGit @('remote') -Quiet).Output)
 
         if (-not $remote) {
             Write-Host '  remote                   (none)' -ForegroundColor Yellow
             return
         }
 
-        Write-Host "  remote                   $(git remote get-url origin)"
+        $remoteUrl = @((Invoke-CNGit @('remote', 'get-url', 'origin') -Quiet).Output)[0]
 
-        $remoteTags = @(git ls-remote --tags origin 2>$null |
-            ForEach-Object { ($_ -split 'refs/tags/')[-1] } |
-            Where-Object { $_ -and $_ -notmatch '\^\{\}$' } |
-            Sort-Object -Descending)
+        Write-Host "  remote                   $remoteUrl"
+
+        $lsRemote = Invoke-CNGit @('ls-remote', '--tags', 'origin') -Quiet
+
+        $remoteTags = @()
+
+        if ($lsRemote.Ok) {
+            $remoteTags = Sort-CNVersionTag @($lsRemote.Output |
+                ForEach-Object { ($_ -split 'refs/tags/')[-1] } |
+                Where-Object { $_ -and $_ -notmatch '\^\{\}$' })
+        }
+        else {
+            Write-Host '  (could not read remote tags)' -ForegroundColor Yellow
+        }
 
         Write-Host ("  newest remote tags       " +
             $(if ($remoteTags.Count) { ($remoteTags | Select-Object -First 3) -join ', ' } else { '(none)' }))

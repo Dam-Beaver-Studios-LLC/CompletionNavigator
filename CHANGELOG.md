@@ -7,6 +7,32 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.16.1]
+
+A Windows-only defect in 0.16.0's release path. No addon changes.
+
+### Fixed
+
+- **`release` died mid-push on Windows PowerShell 5.1.** There, stderr from a
+  native command under `2>&1` arrives as ErrorRecord objects, and with
+  `$ErrorActionPreference = 'Stop'` -- set at the top of `cn.ps1` -- the first
+  one becomes a terminating error. git writes its ordinary progress to stderr,
+  so `git push 2>&1` killed the script on a push that had *succeeded*, leaving
+  the tag unpushed and the release invisible to CurseForge.
+  Every native invocation now goes through one helper that neutralizes the
+  preference for the duration, renders stderr as its message rather than its
+  type name, and returns the real exit code.
+  This was not caught because the end-to-end test runs PowerShell 7 on Linux,
+  which does not behave this way.
+- **`check` had the same defect.** `luac.exe` writes syntax errors to stderr,
+  so the first malformed file would have terminated the whole check rather
+  than being reported alongside the others.
+- **`doctor` sorted remote tags as strings**, which put `v0.9.0` above
+  `v0.15.0` and made "newest remote tags" actively misleading. Sorted by
+  version number now.
+- A failed push prints the two commands that finish the release by hand,
+  rather than leaving you to work them out.
+
 ## [0.16.0]
 
 Measured, not guessed. A benchmark against a retail-scale database -- 1800
