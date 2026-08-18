@@ -7,6 +7,47 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.13.0]
+
+### Added
+
+- **Auto-advancing waypoints.** `/cn auto`, or the Settings checkbox. When
+  the thing you were pointed at is finished, the waypoint moves to whatever
+  is worth doing next. Off by default: taking over the waypoint uninvited
+  is hostile, and TomTom arrows are shared with every other addon.
+  It re-points when the objective *changes*, not on a timer, because a
+  waypoint that silently moves while you walk to it is worse than one that
+  never moves. A slow backstop ticker covers objectives that expire rather
+  than complete, such as a world quest running out while you stand still.
+- **Three new tabs: Now, Warband and Remaining.** Everything added since
+  0.9 was reachable only by typing, which broke this addon's own rule that
+  the keyboard is the power-user path and not the required one.
+  The Now tab merges world quests, live rares, capped currencies and
+  unfilled weekly earning into one clickable list.
+- **Exploration.** Per-zone subzone discovery, with the names of the places
+  you have not been. Zones closest to finishing are surfaced first.
+  `/cn exploration`, `/cn explorescan`.
+- **HandyNotes provider.** Reads registered HandyNotes plugins for treasure
+  and rare coordinates. It never answers quest lookups, so it cannot
+  contribute wrong prerequisite data.
+
+### Fixed
+
+- Tab buttons ran off the edge of the window once there were more than about
+  six. Tabs are a registry any module can add to, so they now wrap to a
+  second row and the panel below moves down to match, rather than the window
+  being widened to fit today's count.
+- "1 plugins" in provider diagnostics.
+
+### Notes
+
+- The exploration achievement category is the only countable exploration
+  data the client exposes. The map API reports which overlays you have
+  revealed but never how many exist, so a true "percent explored" cannot be
+  computed. Per-subzone criteria are more actionable anyway: they name the
+  place you have not been.
+
+
 ## [0.12.0]
 
 ### Added

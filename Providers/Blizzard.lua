@@ -1198,3 +1198,70 @@ function Blizzard.GetCurrency(currencyID)
 
     return info
 end
+
+------------------------------------------------------------
+-- EXPLORATION
+------------------------------------------------------------
+
+-- Blizzard exposes explored overlay textures but never a total, so a raw
+-- "percent explored" cannot be computed from the map API. The Exploration
+-- achievement category does carry per-subzone criteria, which is the only
+-- countable exploration data the client offers.
+CN_EXPLORATION_CATEGORY = 97
+
+function Blizzard.GetExplorationAchievements()
+    local results = {}
+
+    if not GetCategoryNumAchievements then
+        return results
+    end
+
+    local total = Blizzard.GetCategoryCounts(CN_EXPLORATION_CATEGORY)
+
+    for index = 1, total do
+        local achievement =
+            Blizzard.GetAchievementInCategory(CN_EXPLORATION_CATEGORY, index)
+
+        if achievement then
+            local done, criteria =
+                Blizzard.GetAchievementProgress(achievement.achievementID)
+
+            table.insert(results, {
+                achievementID = achievement.achievementID,
+                name          = achievement.name,
+                completed     = achievement.completed,
+                done          = done,
+                criteria      = criteria,
+            })
+        end
+    end
+
+    return results
+end
+
+-- The unfinished criteria of one achievement, by name. For exploration
+-- achievements these are the subzone names still undiscovered.
+function Blizzard.GetIncompleteCriteria(achievementID, limit)
+    local missing = {}
+
+    if not GetAchievementNumCriteria or not GetAchievementCriteriaInfo then
+        return missing
+    end
+
+    local total = GetAchievementNumCriteria(achievementID) or 0
+
+    for index = 1, total do
+        local ok, description, _, completed =
+            pcall(GetAchievementCriteriaInfo, achievementID, index)
+
+        if ok and not completed and description and description ~= "" then
+            table.insert(missing, description)
+
+            if limit and #missing >= limit then
+                break
+            end
+        end
+    end
+
+    return missing
+end

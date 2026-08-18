@@ -399,6 +399,7 @@ function UI.RebuildTabs()
     end
 
     local previous
+    local row, rowWidth = 0, 0
 
     for index, tab in ipairs(UI.tabs) do
         local button = window.tabButtons[index]
@@ -419,14 +420,27 @@ function UI.RebuildTabs()
             textWidth = 60
         end
 
-        button:SetWidth(math.max(70, textWidth + 20))
+        local buttonWidth = math.max(64, textWidth + 18)
+
+        button:SetWidth(buttonWidth)
         button:ClearAllPoints()
+
+        -- Wrap to a new row rather than running off the edge. Tabs are a
+        -- registry, so the count grows as modules are added and a fixed
+        -- single row would eventually overflow silently.
+        if previous and (rowWidth + buttonWidth + 4) > (WINDOW_WIDTH - 24) then
+            row      = row + 1
+            rowWidth = 0
+            previous = nil
+        end
 
         if previous then
             button:SetPoint("LEFT", previous, "RIGHT", 4, 0)
         else
-            button:SetPoint("TOPLEFT", 12, -30)
+            button:SetPoint("TOPLEFT", 12, -30 - (row * 26))
         end
+
+        rowWidth = rowWidth + buttonWidth + 4
 
         button:SetScript("OnClick", function()
             UI.SelectTab(index)
@@ -435,6 +449,13 @@ function UI.RebuildTabs()
         button:Show()
 
         previous = button
+    end
+
+    -- Push the body down so a second row of tabs does not overlap it.
+    if window.body then
+        window.body:ClearAllPoints()
+        window.body:SetPoint("TOPLEFT", 10, -58 - (row * 26))
+        window.body:SetPoint("BOTTOMRIGHT", -10, 34)
     end
 
     UI.SelectTab(UI.selectedTab or 1)
@@ -842,6 +863,318 @@ UI.RegisterTab{
 }
 
 ------------------------------------------------------------
+-- TAB: NOW
+------------------------------------------------------------
+
+-- Everything with a clock on it, in one place. Nothing added since 0.9 was
+-- reachable without typing, which broke the rule this file opens with.
+UI.RegisterTab{
+    name  = "Now",
+    order = 15,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+
+        panel.refresh = AddButton(panel, "Refresh", 110, function()
+            UI.Refresh()
+        end)
+        panel.refresh:SetPoint("BOTTOMLEFT", 8, 8)
+
+        panel.scanCurrency = AddButton(panel, "Rescan currencies", 150, function()
+            local module = CN:GetModule("Currencies")
+
+            if module then
+                module.Scan()
+            end
+
+            UI.Refresh()
+        end)
+        panel.scanCurrency:SetPoint("LEFT", panel.refresh, "RIGHT", 6, 0)
+    end,
+
+    refresh = function(panel)
+        local entries = {}
+
+        local opportunities = CN:GetModule("Opportunities")
+
+        if opportunities then
+            local resets = opportunities.GetResets()
+
+            local parts = {}
+
+            if resets.daily then
+                table.insert(parts, "daily in " .. opportunities.FormatTimeLeft(resets.daily))
+            end
+
+            if resets.weekly then
+                table.insert(parts, "weekly in " .. opportunities.FormatTimeLeft(resets.weekly))
+            end
+
+            if #parts > 0 then
+                panel.header:SetText("Resets: " .. table.concat(parts, ", "))
+            else
+                panel.header:SetText("Expiring soon")
+            end
+
+            for _, event in ipairs(opportunities.GetActiveEvents()) do
+                table.insert(entries, {
+                    text = "|cffffd100EVENT|r  " .. tostring(event.title),
+                })
+            end
+
+            local worldQuests = opportunities.GetWorldQuests()
+
+            for _, worldQuest in ipairs(worldQuests) do
+                table.insert(entries, {
+                    text = string.format("|cff33ff99WQ|r     %s  |cff999999%s%s|r",
+                        tostring(worldQuest.name),
+                        opportunities.FormatTimeLeft(worldQuest.secondsLeft),
+                        worldQuest.tagName and (", " .. worldQuest.tagName) or ""),
+
+                    tooltip = "Click to set a waypoint.",
+
+                    onClick = function()
+                        CN.NavigateToObjective({
+                            id    = worldQuest.questID,
+                            type  = CN.objectiveTypes.QUEST,
+                            name  = worldQuest.name,
+                            mapID = worldQuest.mapID,
+                            x     = worldQuest.x,
+                            y     = worldQuest.y,
+                        })
+                    end,
+                })
+            end
+        else
+            panel.header:SetText("Expiring soon")
+        end
+
+        local rares = CN:GetModule("Rares")
+
+        if rares then
+            for _, vignette in ipairs(rares.GetActive()) do
+                table.insert(entries, {
+                    text = string.format("|cffff8040%s|r  %s",
+                        vignette.kind == "TREASURE" and "CHEST " or "RARE  ",
+                        tostring(vignette.name)),
+
+                    tooltip = "Up right now. Click to set a waypoint.",
+
+                    onClick = function()
+                        CN.NavigateToObjective({
+                            id    = vignette.vignetteID,
+                            type  = vignette.kind == "TREASURE"
+                                and CN.objectiveTypes.TREASURE
+                                or CN.objectiveTypes.RARE,
+                            name  = vignette.name,
+                            mapID = vignette.mapID,
+                            x     = vignette.x,
+                            y     = vignette.y,
+                        })
+                    end,
+                })
+            end
+        end
+
+        local currencies = CN:GetModule("Currencies")
+
+        if currencies then
+            for _, currency in ipairs(currencies.Capped()) do
+                table.insert(entries, {
+                    text = "|cffff4444CAP|r    " .. tostring(currency.name)
+                        .. " |cff999999" .. currency.quantity
+                        .. " / " .. currency.maximum .. " -- spend it|r",
+                })
+            end
+
+            for _, currency in ipairs(currencies.WeeklyUnfilled()) do
+                table.insert(entries, {
+                    text = "|cff999999WEEK|r   " .. tostring(currency.name)
+                        .. " |cff999999" .. currency.remaining .. " left this week|r",
+                })
+            end
+        end
+
+        if #entries == 0 then
+            table.insert(entries, { text = "Nothing is expiring nearby." })
+            table.insert(entries, {
+                text = "|cff999999World quests and rares only appear for your current map.|r",
+            })
+        end
+
+        panel.list:SetEntries(entries)
+    end,
+}
+
+------------------------------------------------------------
+-- TAB: WARBAND
+------------------------------------------------------------
+
+UI.RegisterTab{
+    name  = "Warband",
+    order = 22,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+
+        panel.note = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        panel.note:SetPoint("BOTTOMLEFT", 12, 12)
+        panel.note:SetPoint("RIGHT", -12, 0)
+        panel.note:SetJustifyH("LEFT")
+    end,
+
+    refresh = function(panel)
+        local module = CN:GetModule("Warband")
+
+        if not module then
+            panel.header:SetText("Warband module not loaded.")
+            panel.list:SetEntries({})
+            return
+        end
+
+        local rows     = module.Roster()
+        local coverage = module.Coverage()
+
+        panel.header:SetText(string.format(
+            "%d character%s  |cff999999combined: %d professions, %d recipes, %d titles|r",
+            #rows, #rows == 1 and "" or "s",
+            coverage.professions, coverage.recipes, coverage.titles))
+
+        local entries = {}
+
+        for _, row in ipairs(rows) do
+            local marker = row.isCurrent and "|cff00ff00>|r " or "  "
+
+            table.insert(entries, {
+                text = marker .. row.key
+                    .. string.format("  |cff999999%s %s%s|r",
+                        tostring(row.level), tostring(row.class or "?"),
+                        row.faction and (" " .. row.faction) or ""),
+
+                tooltip = string.format(
+                    "professions %d\nrecipes %d\ntitles %d\nreputations %d",
+                    row.professions, row.recipes, row.titles, row.reputations),
+            })
+
+            table.insert(entries, {
+                text = "      |cff999999professions " .. row.professions
+                    .. ", recipes " .. row.recipes
+                    .. ", titles " .. row.titles
+                    .. ", reputations " .. row.reputations .. "|r",
+            })
+        end
+
+        panel.list:SetEntries(entries)
+
+        if #rows == 1 then
+            panel.note:SetText("|cffffff00Only one character has been seen. "
+                .. "Log in on your alts with the addon loaded to make these "
+                .. "comparisons useful.|r")
+        else
+            panel.note:SetText("")
+        end
+    end,
+}
+
+------------------------------------------------------------
+-- TAB: REMAINING
+------------------------------------------------------------
+
+UI.RegisterTab{
+    name  = "Remaining",
+    order = 27,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+
+        panel.refresh = AddButton(panel, "Refresh", 110, function()
+            UI.Refresh()
+        end)
+        panel.refresh:SetPoint("BOTTOMLEFT", 8, 8)
+    end,
+
+    refresh = function(panel)
+        local module = CN:GetModule("Breakdown")
+
+        if not module then
+            panel.header:SetText("Breakdown module not loaded.")
+            panel.list:SetEntries({})
+            return
+        end
+
+        panel.header:SetText("What is left, and why")
+
+        local entries = {}
+
+        for _, row in ipairs(module.Report()) do
+            local headline
+
+            if row.total and row.total > 0 then
+                headline = string.format("|cffffd100%-14s|r %6d / %-6d  |cff999999%.1f%%|r",
+                    row.name, row.collected or 0, row.total,
+                    (row.collected or 0) / row.total * 100)
+            else
+                headline = string.format("|cffffd100%-14s|r %6d collected",
+                    row.name, row.collected or 0)
+            end
+
+            table.insert(entries, {
+                text    = headline,
+                tooltip = row.unknownTotal
+                    and ("No percentage is shown because " .. row.unknownTotal .. ".")
+                    or nil,
+            })
+
+            if row.unknownTotal then
+                table.insert(entries, {
+                    text = "      |cff808080no percentage: " .. row.unknownTotal .. "|r",
+                })
+            end
+
+            for _, reason in ipairs(row.reasons or {}) do
+                table.insert(entries, { text = "      " .. reason })
+            end
+
+            if row.action then
+                table.insert(entries, {
+                    text = "      |cffffff00-> " .. row.action .. "|r",
+                })
+            end
+        end
+
+        if #entries == 0 then
+            table.insert(entries, { text = "Nothing to report yet. Run the scans first." })
+        end
+
+        panel.list:SetEntries(entries)
+    end,
+}
+
+------------------------------------------------------------
 -- TAB: COLLECTIONS
 ------------------------------------------------------------
 
@@ -1052,13 +1385,27 @@ UI.RegisterTab{
             function(value) CN.Settings().debug = value end)
         panel.debug:SetPoint("TOPLEFT", panel.modeButton, "BOTTOMLEFT", 0, -16)
 
+        panel.auto = AddCheckbox(panel, "Auto-advance waypoint as I finish things",
+            function() return CN.IsAutoWaypointEnabled() end,
+            function(value)
+                CN.Settings().autoWaypoint = value
+
+                if value then
+                    CN.StartAutoWaypointTicker()
+                    CN.AutoAdvance("settings", true)
+                else
+                    CN.StopAutoWaypointTicker()
+                end
+            end)
+        panel.auto:SetPoint("TOPLEFT", panel.debug, "BOTTOMLEFT", 0, -6)
+
         panel.minimap = AddCheckbox(panel, "Show minimap button",
             function() return not CN.Settings().minimap.hide end,
             function(value)
                 CN.Settings().minimap.hide = not value
                 UI.UpdateMinimapButton()
             end)
-        panel.minimap:SetPoint("TOPLEFT", panel.debug, "BOTTOMLEFT", 0, -6)
+        panel.minimap:SetPoint("TOPLEFT", panel.auto, "BOTTOMLEFT", 0, -6)
 
         panel.reset = AddButton(panel, "Reset window position", 180, function()
             CN.Settings().window = nil
@@ -1081,6 +1428,7 @@ UI.RegisterTab{
         panel.modeButton:SetText(tostring(settings.priorityMode))
 
         panel.debug.Refresh()
+        panel.auto.Refresh()
         panel.minimap.Refresh()
 
         panel.about:SetText("Completion Navigator v" .. CN.version)

@@ -25,6 +25,10 @@ CN.defaults = {
         debug        = false,
         priorityMode = "balanced",
 
+        -- Off by default: taking over the waypoint uninvited is hostile,
+        -- and TomTom arrows are shared with every other addon.
+        autoWaypoint = false,
+
         -- Minimap button placement is an angle in degrees around the
         -- minimap edge, so it survives UI scale and minimap size changes.
         minimap = {

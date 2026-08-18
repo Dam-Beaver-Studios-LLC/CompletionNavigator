@@ -100,7 +100,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.12.0"
+CN.version     = "0.13.0"
 CN.dbVersion   = 2
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -349,6 +349,10 @@ CN.defaults = {
         enabled      = true,
         debug        = false,
         priorityMode = "balanced",
+
+        -- Off by default: taking over the waypoint uninvited is hostile,
+        -- and TomTom arrows are shared with every other addon.
+        autoWaypoint = false,
 
         -- Minimap button placement is an angle in degrees around the
         -- minimap edge, so it survives UI scale and minimap size changes.
@@ -1853,6 +1857,138 @@ function CN.SummarizeZone(route, skipped)
 end
 
 ------------------------------------------------------------
+-- AUTO-ADVANCE
+------------------------------------------------------------
+
+-- Hands-free mode: when the thing you were pointed at is done, point at the
+-- next one automatically.
+--
+-- Off by default and deliberately so. Taking over the waypoint without being
+-- asked is hostile -- the player may be following a route of their own, and
+-- TomTom arrows are shared with every other addon.
+--
+-- The rule for re-pointing is "the objective changed", not "time passed". A
+-- waypoint that silently moves while you are walking to it is worse than one
+-- that never moves at all.
+
+local ticker
+local lastAnnounced
+
+function CN.IsAutoWaypointEnabled()
+    local settings = CN.Settings()
+
+    return settings and settings.autoWaypoint == true
+end
+
+-- Returns true when the objective we were pointing at is no longer the one
+-- worth doing.
+local function CurrentIsStale()
+    local current = CN.currentRecommendation
+
+    if not current then
+        return true
+    end
+
+    -- Completed, or otherwise no longer available.
+    if current.id and current.type then
+        local state = CN.Explain(current.type, current.id)
+
+        local states = CN.objectiveStates
+
+        if state == states.COMPLETED
+            or state == states.IGNORED
+            or state == states.DEFERRED
+            or state == states.UNOBTAINABLE then
+            return true
+        end
+    end
+
+    return false
+end
+
+function CN.AutoAdvance(reason, force)
+    if not CN.IsAutoWaypointEnabled() then
+        return false
+    end
+
+    if not force and not CurrentIsStale() then
+        return false
+    end
+
+    local results = CN.Recommend(1)
+
+    if #results == 0 then
+        return false
+    end
+
+    local objective = results[1]
+
+    -- Do not re-announce the same objective over and over.
+    local signature = tostring(objective.type) .. ":" .. tostring(objective.id)
+
+    if signature == lastAnnounced and not force then
+        return false
+    end
+
+    CN.currentRecommendation = objective
+
+    local navigated = CN.NavigateToObjective(objective)
+
+    if navigated then
+        lastAnnounced = signature
+
+        CN.DebugPrint("Auto-advanced (" .. tostring(reason) .. ").")
+    end
+
+    return navigated
+end
+
+-- Completion events are the honest trigger: something finished, so what is
+-- next may have changed.
+for _, event in ipairs({
+    "QUEST_TURNED_IN",
+    "QUEST_REMOVED",
+    "ACHIEVEMENT_EARNED",
+    "NEW_PET_ADDED",
+    "NEW_MOUNT_ADDED",
+    "NEW_TOY_ADDED",
+    "VIGNETTE_MINIMAP_UPDATED",
+    "ZONE_CHANGED_NEW_AREA",
+}) do
+    CN:RegisterEvent(event, function()
+        CN.AutoAdvance(event)
+    end)
+end
+
+-- A slow backstop for objectives that expire rather than complete: a world
+-- quest can run out while you are standing still, and no event fires for it.
+function CN.StartAutoWaypointTicker()
+    if ticker or not C_Timer or not C_Timer.NewTicker then
+        return
+    end
+
+    ticker = C_Timer.NewTicker(60, function()
+        if CN.IsAutoWaypointEnabled() then
+            CN.AutoAdvance("ticker")
+        end
+    end)
+end
+
+function CN.StopAutoWaypointTicker()
+    if ticker and ticker.Cancel then
+        ticker:Cancel()
+    end
+
+    ticker = nil
+end
+
+CN:OnLogin(function()
+    if CN.IsAutoWaypointEnabled() then
+        CN.StartAutoWaypointTicker()
+    end
+end)
+
+------------------------------------------------------------
 -- COMMANDS
 ------------------------------------------------------------
 
@@ -1976,6 +2112,30 @@ CN:RegisterCommand{
         end
 
         CN.NavigateToObjective(objective)
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "auto",
+    order   = 11,
+    help    = "Toggle automatically re-pointing the waypoint as you finish things.",
+    handler = function()
+        local settings = CN.Settings()
+
+        settings.autoWaypoint = not settings.autoWaypoint
+
+        if settings.autoWaypoint then
+            CN.StartAutoWaypointTicker()
+
+            CN.Print("Auto-waypoint |cff00ff00on|r. "
+                .. "The waypoint moves to the next objective as you finish things.")
+
+            CN.AutoAdvance("enabled", true)
+        else
+            CN.StopAutoWaypointTicker()
+
+            CN.Print("Auto-waypoint |cffff4444off|r. Waypoints stay where you put them.")
+        end
     end,
 }
 
@@ -2418,6 +2578,7 @@ function UI.RebuildTabs()
     end
 
     local previous
+    local row, rowWidth = 0, 0
 
     for index, tab in ipairs(UI.tabs) do
         local button = window.tabButtons[index]
@@ -2438,14 +2599,27 @@ function UI.RebuildTabs()
             textWidth = 60
         end
 
-        button:SetWidth(math.max(70, textWidth + 20))
+        local buttonWidth = math.max(64, textWidth + 18)
+
+        button:SetWidth(buttonWidth)
         button:ClearAllPoints()
+
+        -- Wrap to a new row rather than running off the edge. Tabs are a
+        -- registry, so the count grows as modules are added and a fixed
+        -- single row would eventually overflow silently.
+        if previous and (rowWidth + buttonWidth + 4) > (WINDOW_WIDTH - 24) then
+            row      = row + 1
+            rowWidth = 0
+            previous = nil
+        end
 
         if previous then
             button:SetPoint("LEFT", previous, "RIGHT", 4, 0)
         else
-            button:SetPoint("TOPLEFT", 12, -30)
+            button:SetPoint("TOPLEFT", 12, -30 - (row * 26))
         end
+
+        rowWidth = rowWidth + buttonWidth + 4
 
         button:SetScript("OnClick", function()
             UI.SelectTab(index)
@@ -2454,6 +2628,13 @@ function UI.RebuildTabs()
         button:Show()
 
         previous = button
+    end
+
+    -- Push the body down so a second row of tabs does not overlap it.
+    if window.body then
+        window.body:ClearAllPoints()
+        window.body:SetPoint("TOPLEFT", 10, -58 - (row * 26))
+        window.body:SetPoint("BOTTOMRIGHT", -10, 34)
     end
 
     UI.SelectTab(UI.selectedTab or 1)
@@ -2861,6 +3042,318 @@ UI.RegisterTab{
 }
 
 ------------------------------------------------------------
+-- TAB: NOW
+------------------------------------------------------------
+
+-- Everything with a clock on it, in one place. Nothing added since 0.9 was
+-- reachable without typing, which broke the rule this file opens with.
+UI.RegisterTab{
+    name  = "Now",
+    order = 15,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+
+        panel.refresh = AddButton(panel, "Refresh", 110, function()
+            UI.Refresh()
+        end)
+        panel.refresh:SetPoint("BOTTOMLEFT", 8, 8)
+
+        panel.scanCurrency = AddButton(panel, "Rescan currencies", 150, function()
+            local module = CN:GetModule("Currencies")
+
+            if module then
+                module.Scan()
+            end
+
+            UI.Refresh()
+        end)
+        panel.scanCurrency:SetPoint("LEFT", panel.refresh, "RIGHT", 6, 0)
+    end,
+
+    refresh = function(panel)
+        local entries = {}
+
+        local opportunities = CN:GetModule("Opportunities")
+
+        if opportunities then
+            local resets = opportunities.GetResets()
+
+            local parts = {}
+
+            if resets.daily then
+                table.insert(parts, "daily in " .. opportunities.FormatTimeLeft(resets.daily))
+            end
+
+            if resets.weekly then
+                table.insert(parts, "weekly in " .. opportunities.FormatTimeLeft(resets.weekly))
+            end
+
+            if #parts > 0 then
+                panel.header:SetText("Resets: " .. table.concat(parts, ", "))
+            else
+                panel.header:SetText("Expiring soon")
+            end
+
+            for _, event in ipairs(opportunities.GetActiveEvents()) do
+                table.insert(entries, {
+                    text = "|cffffd100EVENT|r  " .. tostring(event.title),
+                })
+            end
+
+            local worldQuests = opportunities.GetWorldQuests()
+
+            for _, worldQuest in ipairs(worldQuests) do
+                table.insert(entries, {
+                    text = string.format("|cff33ff99WQ|r     %s  |cff999999%s%s|r",
+                        tostring(worldQuest.name),
+                        opportunities.FormatTimeLeft(worldQuest.secondsLeft),
+                        worldQuest.tagName and (", " .. worldQuest.tagName) or ""),
+
+                    tooltip = "Click to set a waypoint.",
+
+                    onClick = function()
+                        CN.NavigateToObjective({
+                            id    = worldQuest.questID,
+                            type  = CN.objectiveTypes.QUEST,
+                            name  = worldQuest.name,
+                            mapID = worldQuest.mapID,
+                            x     = worldQuest.x,
+                            y     = worldQuest.y,
+                        })
+                    end,
+                })
+            end
+        else
+            panel.header:SetText("Expiring soon")
+        end
+
+        local rares = CN:GetModule("Rares")
+
+        if rares then
+            for _, vignette in ipairs(rares.GetActive()) do
+                table.insert(entries, {
+                    text = string.format("|cffff8040%s|r  %s",
+                        vignette.kind == "TREASURE" and "CHEST " or "RARE  ",
+                        tostring(vignette.name)),
+
+                    tooltip = "Up right now. Click to set a waypoint.",
+
+                    onClick = function()
+                        CN.NavigateToObjective({
+                            id    = vignette.vignetteID,
+                            type  = vignette.kind == "TREASURE"
+                                and CN.objectiveTypes.TREASURE
+                                or CN.objectiveTypes.RARE,
+                            name  = vignette.name,
+                            mapID = vignette.mapID,
+                            x     = vignette.x,
+                            y     = vignette.y,
+                        })
+                    end,
+                })
+            end
+        end
+
+        local currencies = CN:GetModule("Currencies")
+
+        if currencies then
+            for _, currency in ipairs(currencies.Capped()) do
+                table.insert(entries, {
+                    text = "|cffff4444CAP|r    " .. tostring(currency.name)
+                        .. " |cff999999" .. currency.quantity
+                        .. " / " .. currency.maximum .. " -- spend it|r",
+                })
+            end
+
+            for _, currency in ipairs(currencies.WeeklyUnfilled()) do
+                table.insert(entries, {
+                    text = "|cff999999WEEK|r   " .. tostring(currency.name)
+                        .. " |cff999999" .. currency.remaining .. " left this week|r",
+                })
+            end
+        end
+
+        if #entries == 0 then
+            table.insert(entries, { text = "Nothing is expiring nearby." })
+            table.insert(entries, {
+                text = "|cff999999World quests and rares only appear for your current map.|r",
+            })
+        end
+
+        panel.list:SetEntries(entries)
+    end,
+}
+
+------------------------------------------------------------
+-- TAB: WARBAND
+------------------------------------------------------------
+
+UI.RegisterTab{
+    name  = "Warband",
+    order = 22,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+
+        panel.note = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        panel.note:SetPoint("BOTTOMLEFT", 12, 12)
+        panel.note:SetPoint("RIGHT", -12, 0)
+        panel.note:SetJustifyH("LEFT")
+    end,
+
+    refresh = function(panel)
+        local module = CN:GetModule("Warband")
+
+        if not module then
+            panel.header:SetText("Warband module not loaded.")
+            panel.list:SetEntries({})
+            return
+        end
+
+        local rows     = module.Roster()
+        local coverage = module.Coverage()
+
+        panel.header:SetText(string.format(
+            "%d character%s  |cff999999combined: %d professions, %d recipes, %d titles|r",
+            #rows, #rows == 1 and "" or "s",
+            coverage.professions, coverage.recipes, coverage.titles))
+
+        local entries = {}
+
+        for _, row in ipairs(rows) do
+            local marker = row.isCurrent and "|cff00ff00>|r " or "  "
+
+            table.insert(entries, {
+                text = marker .. row.key
+                    .. string.format("  |cff999999%s %s%s|r",
+                        tostring(row.level), tostring(row.class or "?"),
+                        row.faction and (" " .. row.faction) or ""),
+
+                tooltip = string.format(
+                    "professions %d\nrecipes %d\ntitles %d\nreputations %d",
+                    row.professions, row.recipes, row.titles, row.reputations),
+            })
+
+            table.insert(entries, {
+                text = "      |cff999999professions " .. row.professions
+                    .. ", recipes " .. row.recipes
+                    .. ", titles " .. row.titles
+                    .. ", reputations " .. row.reputations .. "|r",
+            })
+        end
+
+        panel.list:SetEntries(entries)
+
+        if #rows == 1 then
+            panel.note:SetText("|cffffff00Only one character has been seen. "
+                .. "Log in on your alts with the addon loaded to make these "
+                .. "comparisons useful.|r")
+        else
+            panel.note:SetText("")
+        end
+    end,
+}
+
+------------------------------------------------------------
+-- TAB: REMAINING
+------------------------------------------------------------
+
+UI.RegisterTab{
+    name  = "Remaining",
+    order = 27,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+
+        panel.refresh = AddButton(panel, "Refresh", 110, function()
+            UI.Refresh()
+        end)
+        panel.refresh:SetPoint("BOTTOMLEFT", 8, 8)
+    end,
+
+    refresh = function(panel)
+        local module = CN:GetModule("Breakdown")
+
+        if not module then
+            panel.header:SetText("Breakdown module not loaded.")
+            panel.list:SetEntries({})
+            return
+        end
+
+        panel.header:SetText("What is left, and why")
+
+        local entries = {}
+
+        for _, row in ipairs(module.Report()) do
+            local headline
+
+            if row.total and row.total > 0 then
+                headline = string.format("|cffffd100%-14s|r %6d / %-6d  |cff999999%.1f%%|r",
+                    row.name, row.collected or 0, row.total,
+                    (row.collected or 0) / row.total * 100)
+            else
+                headline = string.format("|cffffd100%-14s|r %6d collected",
+                    row.name, row.collected or 0)
+            end
+
+            table.insert(entries, {
+                text    = headline,
+                tooltip = row.unknownTotal
+                    and ("No percentage is shown because " .. row.unknownTotal .. ".")
+                    or nil,
+            })
+
+            if row.unknownTotal then
+                table.insert(entries, {
+                    text = "      |cff808080no percentage: " .. row.unknownTotal .. "|r",
+                })
+            end
+
+            for _, reason in ipairs(row.reasons or {}) do
+                table.insert(entries, { text = "      " .. reason })
+            end
+
+            if row.action then
+                table.insert(entries, {
+                    text = "      |cffffff00-> " .. row.action .. "|r",
+                })
+            end
+        end
+
+        if #entries == 0 then
+            table.insert(entries, { text = "Nothing to report yet. Run the scans first." })
+        end
+
+        panel.list:SetEntries(entries)
+    end,
+}
+
+------------------------------------------------------------
 -- TAB: COLLECTIONS
 ------------------------------------------------------------
 
@@ -3071,13 +3564,27 @@ UI.RegisterTab{
             function(value) CN.Settings().debug = value end)
         panel.debug:SetPoint("TOPLEFT", panel.modeButton, "BOTTOMLEFT", 0, -16)
 
+        panel.auto = AddCheckbox(panel, "Auto-advance waypoint as I finish things",
+            function() return CN.IsAutoWaypointEnabled() end,
+            function(value)
+                CN.Settings().autoWaypoint = value
+
+                if value then
+                    CN.StartAutoWaypointTicker()
+                    CN.AutoAdvance("settings", true)
+                else
+                    CN.StopAutoWaypointTicker()
+                end
+            end)
+        panel.auto:SetPoint("TOPLEFT", panel.debug, "BOTTOMLEFT", 0, -6)
+
         panel.minimap = AddCheckbox(panel, "Show minimap button",
             function() return not CN.Settings().minimap.hide end,
             function(value)
                 CN.Settings().minimap.hide = not value
                 UI.UpdateMinimapButton()
             end)
-        panel.minimap:SetPoint("TOPLEFT", panel.debug, "BOTTOMLEFT", 0, -6)
+        panel.minimap:SetPoint("TOPLEFT", panel.auto, "BOTTOMLEFT", 0, -6)
 
         panel.reset = AddButton(panel, "Reset window position", 180, function()
             CN.Settings().window = nil
@@ -3100,6 +3607,7 @@ UI.RegisterTab{
         panel.modeButton:SetText(tostring(settings.priorityMode))
 
         panel.debug.Refresh()
+        panel.auto.Refresh()
         panel.minimap.Refresh()
 
         panel.about:SetText("Completion Navigator v" .. CN.version)
@@ -4602,6 +5110,73 @@ function Blizzard.GetCurrency(currencyID)
 
     return info
 end
+
+------------------------------------------------------------
+-- EXPLORATION
+------------------------------------------------------------
+
+-- Blizzard exposes explored overlay textures but never a total, so a raw
+-- "percent explored" cannot be computed from the map API. The Exploration
+-- achievement category does carry per-subzone criteria, which is the only
+-- countable exploration data the client offers.
+CN_EXPLORATION_CATEGORY = 97
+
+function Blizzard.GetExplorationAchievements()
+    local results = {}
+
+    if not GetCategoryNumAchievements then
+        return results
+    end
+
+    local total = Blizzard.GetCategoryCounts(CN_EXPLORATION_CATEGORY)
+
+    for index = 1, total do
+        local achievement =
+            Blizzard.GetAchievementInCategory(CN_EXPLORATION_CATEGORY, index)
+
+        if achievement then
+            local done, criteria =
+                Blizzard.GetAchievementProgress(achievement.achievementID)
+
+            table.insert(results, {
+                achievementID = achievement.achievementID,
+                name          = achievement.name,
+                completed     = achievement.completed,
+                done          = done,
+                criteria      = criteria,
+            })
+        end
+    end
+
+    return results
+end
+
+-- The unfinished criteria of one achievement, by name. For exploration
+-- achievements these are the subzone names still undiscovered.
+function Blizzard.GetIncompleteCriteria(achievementID, limit)
+    local missing = {}
+
+    if not GetAchievementNumCriteria or not GetAchievementCriteriaInfo then
+        return missing
+    end
+
+    local total = GetAchievementNumCriteria(achievementID) or 0
+
+    for index = 1, total do
+        local ok, description, _, completed =
+            pcall(GetAchievementCriteriaInfo, achievementID, index)
+
+        if ok and not completed and description and description ~= "" then
+            table.insert(missing, description)
+
+            if limit and #missing >= limit then
+                break
+            end
+        end
+    end
+
+    return missing
+end
 '@
 
 $Embedded['Providers\StaticData.lua'] = @'
@@ -5161,6 +5736,208 @@ CN.RegisterQuestDataProvider("BtWQuests", {
     GetQuestData = BtW.GetQuestData,
     Describe     = BtW.Describe,
     priority     = 30,
+})
+'@
+
+$Embedded['Providers\HandyNotes.lua'] = @'
+-- Providers/HandyNotes.lua
+-- Completion Navigator :: HandyNotes interoperability.
+--
+-- HandyNotes and its plugins hold coordinates for treasures, rares, vendors
+-- and collectibles that no Blizzard API reports. Where vignettes only tell
+-- you about something in range, HandyNotes knows where things are before you
+-- get near them.
+--
+-- Same caution as the other external providers: this reads another addon's
+-- internals, which are not a published contract. Every access is probed and
+-- wrapped, so a HandyNotes update can make this go quiet but cannot break
+-- Completion Navigator. /cn providers reports what resolved.
+
+local ADDON_NAME, CN = ...
+
+local HandyNotes = {}
+
+CN.HandyNotes = HandyNotes
+
+local probeNotes = {}
+
+local function Root()
+    local candidate = _G.HandyNotes
+
+    if type(candidate) == "table" then
+        return candidate
+    end
+
+    return nil
+end
+
+function HandyNotes.IsAvailable()
+    return Root() ~= nil
+end
+
+------------------------------------------------------------
+-- PLUGINS
+------------------------------------------------------------
+
+-- HandyNotes itself holds almost no data. The plugins do, and they register
+-- with the parent under names like "HandyNotes_Treasures".
+function HandyNotes.GetPlugins()
+    local root = Root()
+
+    if not root then
+        return {}
+    end
+
+    local names = {}
+
+    -- Ace-style addon with a plugin registry.
+    local iterate = root.IteratePlugins
+
+    if type(iterate) == "function" then
+        local ok, iterator = pcall(iterate, root)
+
+        if ok and type(iterator) == "function" then
+            local safe = 0
+
+            for name in iterator do
+                table.insert(names, name)
+
+                safe = safe + 1
+
+                if safe > 200 then
+                    break
+                end
+            end
+        end
+    end
+
+    if #names == 0 and type(root.plugins) == "table" then
+        for name in pairs(root.plugins) do
+            table.insert(names, name)
+        end
+    end
+
+    table.sort(names)
+
+    return names
+end
+
+------------------------------------------------------------
+-- NODE LOOKUP
+------------------------------------------------------------
+
+-- Asks every registered plugin what it knows about a map. Plugin node
+-- iterators are HandyNotes' documented extension point, so this is the most
+-- stable surface available -- but it is still another addon's internals.
+function HandyNotes.GetNodesOnMap(uiMapID)
+    local root = Root()
+
+    if not root or not uiMapID then
+        return {}
+    end
+
+    local nodes = {}
+
+    local iterate = root.IteratePlugins
+
+    if type(iterate) ~= "function" then
+        return nodes
+    end
+
+    local ok, iterator = pcall(iterate, root)
+
+    if not ok or type(iterator) ~= "function" then
+        return nodes
+    end
+
+    local pluginCount = 0
+
+    for name, handler in iterator do
+        pluginCount = pluginCount + 1
+
+        if pluginCount > 50 then
+            break
+        end
+
+        if type(handler) == "table" and type(handler.GetNodes2) == "function" then
+            local gotNodes, nodeIterator = pcall(handler.GetNodes2, handler, uiMapID, false)
+
+            if gotNodes and type(nodeIterator) == "function" then
+                local safe = 0
+
+                -- HandyNotes coords pack x and y into one integer.
+                local success = pcall(function()
+                    for coord, node in nodeIterator do
+                        safe = safe + 1
+
+                        if safe > 500 then
+                            break
+                        end
+
+                        if type(coord) == "number" then
+                            local x = math.floor(coord / 10000) / 10000
+                            local y = (coord % 10000) / 10000
+
+                            table.insert(nodes, {
+                                plugin = name,
+                                x      = x,
+                                y      = y,
+                                mapID  = uiMapID,
+                                label  = type(node) == "table" and node.label or nil,
+                            })
+                        end
+                    end
+                end)
+
+                if not success then
+                    CN.DebugPrint("HandyNotes plugin " .. tostring(name)
+                        .. " node iteration failed.")
+                end
+            end
+        end
+    end
+
+    return nodes
+end
+
+------------------------------------------------------------
+-- DIAGNOSTICS
+------------------------------------------------------------
+
+function HandyNotes.Describe()
+    local root = Root()
+
+    if not root then
+        return "not installed"
+    end
+
+    local plugins = HandyNotes.GetPlugins()
+
+    if #plugins == 0 then
+        return "loaded, no plugins registered"
+    end
+
+    local noun = (#plugins == 1) and " plugin" or " plugins"
+
+    if #plugins <= 3 then
+        return #plugins .. noun .. ": " .. table.concat(plugins, ", ")
+    end
+
+    return #plugins .. noun
+end
+
+------------------------------------------------------------
+-- REGISTRATION
+------------------------------------------------------------
+
+-- Registered as a quest data provider so it appears in /cn providers, even
+-- though it answers about locations rather than quests. It never claims to
+-- know a quest, so it can never contribute wrong prerequisite data.
+CN.RegisterQuestDataProvider("HandyNotes", {
+    IsAvailable  = HandyNotes.IsAvailable,
+    GetQuestData = function() return nil end,
+    Describe     = HandyNotes.Describe,
+    priority     = 90,
 })
 '@
 
@@ -10790,6 +11567,273 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Exploration.lua'] = @'
+-- Modules/Exploration.lua
+-- Completion Navigator :: map exploration.
+--
+-- The map API exposes which overlay textures you have revealed but never how
+-- many exist, so a genuine "percent explored" cannot be computed from it.
+-- The Exploration achievement category does carry one criterion per subzone,
+-- which is the only countable exploration data the client offers -- and each
+-- unfinished criterion is the literal name of a place you have not been.
+--
+-- That turns out to be the more useful shape anyway: "Eversong Woods, 3 of
+-- 12 subzones, missing Sunsail Anchorage" is actionable. "78% explored" is
+-- not.
+
+local ADDON_NAME, CN = ...
+
+local Exploration = CN:RegisterModule("Exploration")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+local function Store()
+    return CN.Account("exploration")
+end
+
+Exploration.Store = Store
+
+------------------------------------------------------------
+-- SCAN
+------------------------------------------------------------
+
+function Exploration.Scan()
+    local store = Store()
+
+    local seen, complete = 0, 0
+
+    for _, achievement in ipairs(Blizzard.GetExplorationAchievements()) do
+        store[achievement.achievementID] = {
+            achievementID = achievement.achievementID,
+            name          = achievement.name,
+            completed     = achievement.completed,
+            done          = achievement.done,
+            criteria      = achievement.criteria,
+            lastSeen      = time(),
+        }
+
+        seen = seen + 1
+
+        if achievement.completed then
+            complete = complete + 1
+        end
+    end
+
+    CN.Account("collectionScans").exploration = time()
+
+    return seen, complete
+end
+
+------------------------------------------------------------
+-- QUERIES
+------------------------------------------------------------
+
+function Exploration.Summary()
+    local counts = {
+        zones     = 0,
+        complete  = 0,
+        criteria  = 0,
+        done      = 0,
+    }
+
+    for _, record in pairs(Store()) do
+        counts.zones    = counts.zones + 1
+        counts.criteria = counts.criteria + (record.criteria or 0)
+        counts.done     = counts.done + (record.done or 0)
+
+        if record.completed then
+            counts.complete = counts.complete + 1
+        end
+    end
+
+    return counts
+end
+
+-- Zones with the fewest subzones left, so the cheapest wins come first.
+function Exploration.Closest(limit)
+    local rows = {}
+
+    for _, record in pairs(Store()) do
+        if not record.completed and (record.criteria or 0) > 0 then
+            table.insert(rows, {
+                achievementID = record.achievementID,
+                name          = record.name,
+                done          = record.done,
+                criteria      = record.criteria,
+                remaining     = record.criteria - record.done,
+            })
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        if a.remaining == b.remaining then
+            return (a.name or "") < (b.name or "")
+        end
+
+        return a.remaining < b.remaining
+    end)
+
+    local results = {}
+
+    for index = 1, math.min(limit or 10, #rows) do
+        table.insert(results, rows[index])
+    end
+
+    return results
+end
+
+-- The exploration achievement matching the zone the player is standing in,
+-- matched on name because no API maps a UiMapID to its achievement.
+function Exploration.ForCurrentZone()
+    local zone = GetZoneText and GetZoneText()
+
+    if not zone or zone == "" then
+        return nil
+    end
+
+    local needle = string.lower(zone)
+
+    for _, record in pairs(Store()) do
+        if record.name and string.find(string.lower(record.name), needle, 1, true) then
+            return record
+        end
+    end
+
+    return nil
+end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- Only the zone the player is already in. Exploration elsewhere is a
+-- project, and the criteria carry no coordinates to route to.
+CN.RegisterCandidateProvider("Exploration", function()
+    local candidates = {}
+
+    local record = Exploration.ForCurrentZone()
+
+    if record and not record.completed and (record.criteria or 0) > 0 then
+        local remaining = record.criteria - record.done
+
+        if remaining > 0
+            and not CN.IsIgnored(CN.objectiveTypes.EXPLORATION, record.achievementID)
+            and not CN.IsDeferred(CN.objectiveTypes.EXPLORATION, record.achievementID) then
+
+            local reasons = {
+                remaining .. " subzone" .. (remaining == 1 and "" or "s")
+                    .. " left in this zone",
+            }
+
+            local missing = Blizzard.GetIncompleteCriteria(record.achievementID, 3)
+
+            if #missing > 0 then
+                table.insert(reasons, "missing: " .. table.concat(missing, ", "))
+            end
+
+            table.insert(candidates, CN.NewObjective({
+                id              = record.achievementID,
+                type            = CN.objectiveTypes.EXPLORATION,
+                name            = record.name,
+                accountWide     = true,
+                completionValue = math.max(1, 4 - remaining),
+                travelCost      = 0,
+                reasons         = reasons,
+            }))
+        end
+    end
+
+    return candidates
+end)
+
+------------------------------------------------------------
+-- EVENTS
+------------------------------------------------------------
+
+CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
+    -- Discovering a subzone fires criteria updates; the Achievements module
+    -- already throttles those, so only refresh the exploration view.
+    local record = Exploration.ForCurrentZone()
+
+    if record then
+        local done, criteria = Blizzard.GetAchievementProgress(record.achievementID)
+
+        record.done     = done
+        record.criteria = criteria
+    end
+end)
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "explorescan",
+    order   = 67,
+    help    = "Scan exploration achievements.",
+    handler = function()
+        local seen, complete = Exploration.Scan()
+
+        Print("Scanned " .. seen .. " exploration achievements.")
+        Print("Complete: " .. complete)
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "exploration",
+    aliases = { "explore" },
+    args    = "[count]",
+    order   = 68,
+    help    = "Show zones with the least exploration left.",
+    handler = function(args)
+        local counts = Exploration.Summary()
+
+        if counts.zones == 0 then
+            Print("No exploration data yet. Run /cn explorescan.")
+            return
+        end
+
+        Print("Exploration: " .. counts.complete .. " / " .. counts.zones .. " zones")
+
+        if counts.criteria > 0 then
+            Print(string.format("Subzones discovered: %d / %d (%.1f%%)",
+                counts.done, counts.criteria, counts.done / counts.criteria * 100))
+        end
+
+        local here = Exploration.ForCurrentZone()
+
+        if here then
+            if here.completed then
+                Print("This zone: |cff00ff00fully explored|r")
+            else
+                Print("This zone: " .. here.done .. " / " .. here.criteria)
+
+                local missing = Blizzard.GetIncompleteCriteria(here.achievementID, 6)
+
+                for _, name in ipairs(missing) do
+                    Print("  missing: " .. name)
+                end
+            end
+        end
+
+        local closest = Exploration.Closest(CN.ToID(args) or 5)
+
+        if #closest > 0 then
+            Print("Closest to finishing:")
+
+            for _, row in ipairs(closest) do
+                Print("  " .. row.name .. " |cff999999("
+                    .. row.done .. "/" .. row.criteria .. ")|r")
+            end
+        end
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -10809,7 +11853,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.12.0
+## Version: 0.13.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -10833,6 +11877,7 @@ Scoring.lua
 Routing.lua
 UI.lua
 Providers\Blizzard.lua
+Providers\HandyNotes.lua
 Providers\StaticData.lua
 Providers\ATT.lua
 Providers\BtWQuests.lua
@@ -10842,6 +11887,7 @@ Modules\Achievements.lua
 Modules\Appearances.lua
 Modules\Breakdown.lua
 Modules\Currencies.lua
+Modules\Exploration.lua
 Modules\Harvest.lua
 Modules\Mounts.lua
 Modules\Opportunities.lua
@@ -10986,6 +12032,47 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.13.0]
+
+### Added
+
+- **Auto-advancing waypoints.** `/cn auto`, or the Settings checkbox. When
+  the thing you were pointed at is finished, the waypoint moves to whatever
+  is worth doing next. Off by default: taking over the waypoint uninvited
+  is hostile, and TomTom arrows are shared with every other addon.
+  It re-points when the objective *changes*, not on a timer, because a
+  waypoint that silently moves while you walk to it is worse than one that
+  never moves. A slow backstop ticker covers objectives that expire rather
+  than complete, such as a world quest running out while you stand still.
+- **Three new tabs: Now, Warband and Remaining.** Everything added since
+  0.9 was reachable only by typing, which broke this addon's own rule that
+  the keyboard is the power-user path and not the required one.
+  The Now tab merges world quests, live rares, capped currencies and
+  unfilled weekly earning into one clickable list.
+- **Exploration.** Per-zone subzone discovery, with the names of the places
+  you have not been. Zones closest to finishing are surfaced first.
+  `/cn exploration`, `/cn explorescan`.
+- **HandyNotes provider.** Reads registered HandyNotes plugins for treasure
+  and rare coordinates. It never answers quest lookups, so it cannot
+  contribute wrong prerequisite data.
+
+### Fixed
+
+- Tab buttons ran off the edge of the window once there were more than about
+  six. Tabs are a registry any module can add to, so they now wrap to a
+  second row and the panel below moves down to match, rather than the window
+  being widened to fit today's count.
+- "1 plugins" in provider diagnostics.
+
+### Notes
+
+- The exploration achievement category is the only countable exploration
+  data the client exposes. The map API reports which overlays you have
+  revealed but never how many exist, so a true "percent explored" cannot be
+  computed. Per-subzone criteria are more actionable anyway: they name the
+  place you have not been.
+
 
 ## [0.12.0]
 

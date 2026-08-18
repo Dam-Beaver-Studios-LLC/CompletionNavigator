@@ -258,6 +258,138 @@ function CN.SummarizeZone(route, skipped)
 end
 
 ------------------------------------------------------------
+-- AUTO-ADVANCE
+------------------------------------------------------------
+
+-- Hands-free mode: when the thing you were pointed at is done, point at the
+-- next one automatically.
+--
+-- Off by default and deliberately so. Taking over the waypoint without being
+-- asked is hostile -- the player may be following a route of their own, and
+-- TomTom arrows are shared with every other addon.
+--
+-- The rule for re-pointing is "the objective changed", not "time passed". A
+-- waypoint that silently moves while you are walking to it is worse than one
+-- that never moves at all.
+
+local ticker
+local lastAnnounced
+
+function CN.IsAutoWaypointEnabled()
+    local settings = CN.Settings()
+
+    return settings and settings.autoWaypoint == true
+end
+
+-- Returns true when the objective we were pointing at is no longer the one
+-- worth doing.
+local function CurrentIsStale()
+    local current = CN.currentRecommendation
+
+    if not current then
+        return true
+    end
+
+    -- Completed, or otherwise no longer available.
+    if current.id and current.type then
+        local state = CN.Explain(current.type, current.id)
+
+        local states = CN.objectiveStates
+
+        if state == states.COMPLETED
+            or state == states.IGNORED
+            or state == states.DEFERRED
+            or state == states.UNOBTAINABLE then
+            return true
+        end
+    end
+
+    return false
+end
+
+function CN.AutoAdvance(reason, force)
+    if not CN.IsAutoWaypointEnabled() then
+        return false
+    end
+
+    if not force and not CurrentIsStale() then
+        return false
+    end
+
+    local results = CN.Recommend(1)
+
+    if #results == 0 then
+        return false
+    end
+
+    local objective = results[1]
+
+    -- Do not re-announce the same objective over and over.
+    local signature = tostring(objective.type) .. ":" .. tostring(objective.id)
+
+    if signature == lastAnnounced and not force then
+        return false
+    end
+
+    CN.currentRecommendation = objective
+
+    local navigated = CN.NavigateToObjective(objective)
+
+    if navigated then
+        lastAnnounced = signature
+
+        CN.DebugPrint("Auto-advanced (" .. tostring(reason) .. ").")
+    end
+
+    return navigated
+end
+
+-- Completion events are the honest trigger: something finished, so what is
+-- next may have changed.
+for _, event in ipairs({
+    "QUEST_TURNED_IN",
+    "QUEST_REMOVED",
+    "ACHIEVEMENT_EARNED",
+    "NEW_PET_ADDED",
+    "NEW_MOUNT_ADDED",
+    "NEW_TOY_ADDED",
+    "VIGNETTE_MINIMAP_UPDATED",
+    "ZONE_CHANGED_NEW_AREA",
+}) do
+    CN:RegisterEvent(event, function()
+        CN.AutoAdvance(event)
+    end)
+end
+
+-- A slow backstop for objectives that expire rather than complete: a world
+-- quest can run out while you are standing still, and no event fires for it.
+function CN.StartAutoWaypointTicker()
+    if ticker or not C_Timer or not C_Timer.NewTicker then
+        return
+    end
+
+    ticker = C_Timer.NewTicker(60, function()
+        if CN.IsAutoWaypointEnabled() then
+            CN.AutoAdvance("ticker")
+        end
+    end)
+end
+
+function CN.StopAutoWaypointTicker()
+    if ticker and ticker.Cancel then
+        ticker:Cancel()
+    end
+
+    ticker = nil
+end
+
+CN:OnLogin(function()
+    if CN.IsAutoWaypointEnabled() then
+        CN.StartAutoWaypointTicker()
+    end
+end)
+
+------------------------------------------------------------
 -- COMMANDS
 ------------------------------------------------------------
 
@@ -381,6 +513,30 @@ CN:RegisterCommand{
         end
 
         CN.NavigateToObjective(objective)
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "auto",
+    order   = 11,
+    help    = "Toggle automatically re-pointing the waypoint as you finish things.",
+    handler = function()
+        local settings = CN.Settings()
+
+        settings.autoWaypoint = not settings.autoWaypoint
+
+        if settings.autoWaypoint then
+            CN.StartAutoWaypointTicker()
+
+            CN.Print("Auto-waypoint |cff00ff00on|r. "
+                .. "The waypoint moves to the next objective as you finish things.")
+
+            CN.AutoAdvance("enabled", true)
+        else
+            CN.StopAutoWaypointTicker()
+
+            CN.Print("Auto-waypoint |cffff4444off|r. Waypoints stay where you put them.")
+        end
     end,
 }
 
