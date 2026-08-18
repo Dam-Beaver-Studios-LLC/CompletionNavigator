@@ -916,6 +916,122 @@ function Blizzard.GetSecondsUntilWeeklyReset()
     return nil
 end
 
+------------------------------------------------------------
+-- GREAT VAULT
+------------------------------------------------------------
+
+-- The weekly reward chest. Three rows -- raid, dungeons, world -- each with
+-- three thresholds, and you pick ONE item from everything unlocked.
+--
+-- This is the only system in the game that hands the addon all three things
+-- it normally has to guess at: a hard deadline, a known denominator, and a
+-- known reward. Everywhere else the addon reports counts because a percentage
+-- would need a denominator the client will not supply; here the thresholds
+-- are fixed and the client reports progress against them, so "3 of 4" is a
+-- fact rather than an estimate.
+--
+-- The enum has been renamed across expansions, so the row type is resolved by
+-- probing rather than assumed.
+local function ThresholdEnum()
+    if not Enum then
+        return {}
+    end
+
+    return Enum.WeeklyRewardChestThresholdType
+        or Enum.WeeklyRewardChestThreshold
+        or {}
+end
+
+function Blizzard.HasWeeklyRewards()
+    return C_WeeklyRewards ~= nil and C_WeeklyRewards.GetActivities ~= nil
+end
+
+-- Maps the client's row enum onto stable names of our own, so nothing
+-- downstream depends on Blizzard's numbering.
+function Blizzard.WeeklyRewardRowName(activityType)
+    local enum = ThresholdEnum()
+
+    if enum.Raid and activityType == enum.Raid then
+        return "RAID"
+    end
+
+    -- Mythic+ is called "Activities" in the enum, which is uselessly generic.
+    if enum.Activities and activityType == enum.Activities then
+        return "DUNGEON"
+    end
+
+    if enum.World and activityType == enum.World then
+        return "WORLD"
+    end
+
+    -- Older builds exposed a PvP row; treat it as world content rather than
+    -- dropping it, so nothing silently disappears.
+    if enum.RankedPvP and activityType == enum.RankedPvP then
+        return "PVP"
+    end
+
+    return "UNKNOWN"
+end
+
+-- Returns an array of rows:
+--   { row, index, threshold, progress, level, unlocked, rewardID }
+function Blizzard.GetWeeklyRewardActivities()
+    if not Blizzard.HasWeeklyRewards() then
+        return {}
+    end
+
+    local ok, activities = pcall(C_WeeklyRewards.GetActivities)
+
+    if not ok or type(activities) ~= "table" then
+        return {}
+    end
+
+    local rows = {}
+
+    for _, activity in ipairs(activities) do
+        if type(activity) == "table" then
+            local threshold = activity.threshold or 0
+            local progress  = activity.progress or 0
+
+            table.insert(rows, {
+                row       = Blizzard.WeeklyRewardRowName(activity.type),
+                index     = activity.index,
+                threshold = threshold,
+                progress  = progress,
+                level     = activity.level,
+                unlocked  = threshold > 0 and progress >= threshold,
+                rewardID  = activity.id,
+            })
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        if a.row ~= b.row then
+            return a.row < b.row
+        end
+
+        return (a.threshold or 0) < (b.threshold or 0)
+    end)
+
+    return rows
+end
+
+function Blizzard.HasAvailableWeeklyRewards()
+    if not C_WeeklyRewards then
+        return false
+    end
+
+    if C_WeeklyRewards.HasAvailableRewards then
+        local ok, available = pcall(C_WeeklyRewards.HasAvailableRewards)
+
+        if ok then
+            return available and true or false
+        end
+    end
+
+    return false
+end
+
 function Blizzard.IsWorldQuest(questID)
     if C_QuestLog and C_QuestLog.IsWorldQuest then
         local ok, result = pcall(C_QuestLog.IsWorldQuest, questID)

@@ -11,3 +11,10 @@ ignore:
   - _backups
   - cn.ps1
   - README.md
+  - ROADMAP.md
+  - .luacheckrc
+  # Test tooling. harness.lua stubs the entire client API, so shipping it into
+  # a player's AddOns folder would be actively dangerous, not merely wasteful.
+  - harness.lua
+  - bench.lua
+  - pstest.sh

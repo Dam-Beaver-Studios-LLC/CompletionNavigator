@@ -466,7 +466,8 @@ CN:RegisterCommand{
             Print("Usage: /cn tooltips [on or off]")
             return
         else
-            settings.tooltips = not (settings.tooltips ~= false)
+            -- Default is on, so nil counts as enabled.
+            settings.tooltips = (settings.tooltips == false)
         end
 
         Print("Tooltip lines: " .. CN.YesNo(settings.tooltips ~= false))

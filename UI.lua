@@ -186,8 +186,8 @@ local function CreateList(parent)
             end)
 
             if entry.tooltip then
-                row:SetScript("OnEnter", function(self)
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                row:SetScript("OnEnter", function(hovered)
+                    GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
                     GameTooltip:SetText(entry.tooltip, nil, nil, nil, nil, true)
                     GameTooltip:Show()
                 end)
@@ -242,7 +242,7 @@ local function AddButton(parent, text, width, onClick)
 end
 
 local function AddCheckbox(parent, text, getter, setter)
-    local check, templated = SafeCreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+    local check = SafeCreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
 
     check:SetSize(24, 24)
 
@@ -1088,6 +1088,102 @@ UI.RegisterTab{
                 .. "comparisons useful.|r")
         else
             panel.note:SetText("")
+        end
+    end,
+}
+
+------------------------------------------------------------
+-- TAB: VAULT
+------------------------------------------------------------
+
+UI.RegisterTab{
+    name  = "Vault",
+    order = 14,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+
+        panel.note = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        panel.note:SetPoint("BOTTOMLEFT", 12, 12)
+        panel.note:SetPoint("RIGHT", -12, 0)
+        panel.note:SetJustifyH("LEFT")
+    end,
+
+    refresh = function(panel)
+        local vault = CN:GetModule("Vault")
+
+        if not vault or not vault.IsAvailable() then
+            panel.header:SetText("The Great Vault is not available on this client.")
+            panel.list:SetEntries({})
+            panel.note:SetText("")
+            return
+        end
+
+        local rows = vault.Rows()
+
+        if #rows == 0 then
+            panel.header:SetText("No Great Vault progress yet")
+            panel.list:SetEntries({})
+            panel.note:SetText("|cff999999The client reports vault progress once you "
+                .. "have completed at least one qualifying activity this week.|r")
+            return
+        end
+
+        local summary = vault.Summary()
+
+        panel.header:SetText(summary.unlocked .. " reward"
+            .. (summary.unlocked == 1 and "" or "s") .. " unlocked"
+            .. (summary.resetsIn and ("  |cff999999resets in "
+                .. vault.FormatReset(summary.resetsIn) .. "|r") or ""))
+
+        local entries = {}
+
+        if summary.claimable then
+            table.insert(entries, {
+                text = "|cff00ff00A reward is waiting to be collected.|r",
+            })
+        end
+
+        for _, row in ipairs(rows) do
+            table.insert(entries, {
+                text = "  " .. vault.DescribeRow(row),
+
+                tooltip = row.label .. "\n"
+                    .. (row.capped
+                        and "Every threshold met."
+                        or ((vault.rowActions[row.row] or "") .. "\n"
+                            .. row.remaining .. " more for the next reward.")),
+            })
+
+            for _, tier in ipairs(row.tiers) do
+                table.insert(entries, {
+                    text = "        |cff999999" .. tier.threshold .. ": "
+                        .. (tier.unlocked
+                            and ("|cff00ff00unlocked" .. (tier.level and tier.level > 0
+                                and (" (item level " .. tier.level .. ")") or "") .. "|r")
+                            or "locked")
+                        .. "|r",
+                })
+            end
+        end
+
+        panel.list:SetEntries(entries)
+
+        if summary.closest then
+            panel.note:SetText("|cffffff00Closest: " .. summary.closest.label
+                .. " -- " .. summary.closest.remaining .. " more, "
+                .. (vault.rowActions[summary.closest.row] or "keep going") .. ".|r")
+        else
+            panel.note:SetText("|cff999999Every row is capped. You choose one item "
+                .. "from everything unlocked.|r")
         end
     end,
 }

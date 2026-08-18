@@ -12,6 +12,8 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 
 **Recommends, and shows its work.** Every recommendation comes with reasons: *world quest, 45m left*, *rare is up right now*, *ready to turn in*, *a Paragon reward is waiting to be collected*, *4 of 5 criteria already done*, *your alt is better suited*. You can see why it chose what it chose, and disagree with it.
 
+**Tells you what the Great Vault still needs.** Three rows, three thresholds each, and one item to choose at the end of the week. A row one activity short of a threshold with the reset approaching is the most actionable thing this addon can surface: *one more Heroic before Tuesday unlocks a second reward*. Capped rows are never suggested, because there is nothing left to earn from them.
+
 **Knows what expires.** World quests with real time remaining, daily and weekly resets, active world events, and rares that are up *this minute*. Urgency is weighted heavily and scaled steeply: something with an hour left dominates the list, something with three days left barely registers.
 
 **Finds rares and treasures that are actually up.** Driven by the client's live vignette data, not a static spawn list. A database tells you where a rare *can* spawn; a vignette tells you one is there now — which is the half that decides what you do next, and the half that doesn't go stale every patch.
@@ -56,14 +58,16 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 | **Currencies** | Caps, and unfilled weekly earning that resets whether you use it or not |
 | **Exploration** | Per-zone subzone discovery, naming the places you have not been |
 | **Vendors** | What each merchant sells and where they stand, recorded as you shop |
+| **Great Vault** | Every row's progress, thresholds, and what the next reward costs |
 
 ---
 
 ## Interface
 
-A minimap button and a nine-tab window. Everything the slash commands do is reachable by clicking.
+A minimap button and a ten-tab window. Everything the slash commands do is reachable by clicking.
 
 - **Next** — the recommendation, its reasoning, and Navigate / Defer / Ignore. Below it, the ranked alternatives; click any to inspect it.
+- **Vault** — Great Vault rows, thresholds, and what unlocks the next reward.
 - **Goals** — what you are working toward, and the known route to each.
 - **Now** — world quests, live rares, capped currencies and unfilled weekly earning, in one clickable list.
 - **Zone** — a live nearest-first sweep of your current map.
@@ -88,6 +92,7 @@ Keybindings live under **Key Bindings → AddOns**.
 ```
 /cn setup                Scan every subsystem once; run this first
 /cn next                 Recommend the next objective
+/cn vault                Great Vault progress and what unlocks the next reward
 /cn goal <type> <id>     Pin something to work toward
 /cn goals                Your goals, and what is known about reaching them
 /cn now                  Everything expiring soon
@@ -140,7 +145,7 @@ None are required. Completion Navigator is a decision layer, not a replacement f
 
 ## Status
 
-Version 0.17.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
+Version 0.18.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
 
 Bug reports and feature requests: [GitHub issues](https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/issues), or email developer@dambeaverstudios.com.
 

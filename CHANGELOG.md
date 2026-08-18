@@ -7,6 +7,46 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.18.0]
+
+### Added
+
+- **The Great Vault.** `/cn vault`, a **Vault** tab, and vault progress as real
+  recommendations.
+  This is the only system in the game that supplies all three things the addon
+  normally has to guess at -- a hard deadline, a known denominator, and a known
+  reward -- so it is the one place a percentage is a fact rather than an
+  estimate. A row one activity short of a threshold, with the reset approaching,
+  is the most actionable thing this addon can offer: *"one more Heroic before
+  Tuesday unlocks a second reward."*
+  Capped rows are never recommended, because they cannot be advanced. An
+  unclaimed reward from last week outranks everything -- it is free, it takes
+  thirty seconds, and it is destroyed when the vault next fills.
+- **luacheck static analysis**, configured for the WoW client surface so a
+  warning is worth reading. The baseline is zero, enforced by the test suite
+  and by CI.
+- **CI now runs the tests.** `release.yml` previously syntax-checked Lua and
+  verified the `.toc` but never ran the harness -- the full suite ran only on
+  the author's machine, which meant a release could ship with it failing and
+  nothing would say so. The harness and the benchmark now ship with the source
+  and run on every tagged build.
+
+### Changed
+
+- Precedence between goals and expiring content is now explicit and tested. A
+  pinned goal outranks everything merely *available*; it does not outrank
+  something with a deadline. A vault slot expires on Tuesday and an uncollected
+  mount will still be there next week, and special-casing goals out of urgency
+  weighting would have been wrong. The harness asserts both halves.
+
+### Fixed
+
+- `harness.lua` had two shadowed locals that made two halves of the file look
+  independent when they were not. Found by luacheck on its first run.
+- Test tooling is excluded from the `.toc`, the addon zip and the packaging
+  step. `harness.lua` stubs the entire client API, so a copy of it in a
+  player's AddOns folder would replace live client functions with fakes.
+
 ## [0.17.0]
 
 ### Added

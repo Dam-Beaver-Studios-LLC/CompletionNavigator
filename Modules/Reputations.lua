@@ -229,7 +229,7 @@ function Reputations.BestCharacterFor(factionID)
         local record = character.reputations and character.reputations[factionID]
 
         if record then
-            local better = false
+            local better
 
             if not bestRecord then
                 better = true

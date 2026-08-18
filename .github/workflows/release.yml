@@ -55,7 +55,7 @@ jobs:
 
       # Fails the build before publishing if any Lua file is malformed.
       - name: Install Lua
-        run: sudo apt-get update && sudo apt-get install -y lua5.4
+        run: sudo apt-get update && sudo apt-get install -y lua5.4 lua-check
 
       - name: Syntax check every Lua file
         run: |
@@ -79,8 +79,31 @@ jobs:
               echo "NOT IN TOC: $rel"
               status=1
             fi
-          done < <(find . -name '*.lua' -not -path './.git/*')
+          done < <(find . -name '*.lua' -not -path './.git/*' \
+                     -not -name 'harness.lua' -not -name 'bench.lua')
           exit $status
+
+      # Static analysis. Catches globals-by-typo, shadowing and dead locals --
+      # the class of bug a stubbed test harness hides, because the harness
+      # defines the very globals a typo would otherwise expose.
+      - name: Lint
+        run: luacheck . --no-color
+
+      # The offline harness loads every file in .toc order against a stubbed
+      # client, fires the lifecycle events, runs every slash command, exercises
+      # every UI tab and asserts the SavedVariables shapes.
+      #
+      # This used to run only on the author's machine, which meant a release
+      # could ship with it failing and nothing would say so.
+      - name: Run the offline harness
+        run: |
+          if [ -f harness.lua ]; then
+            lua5.4 harness.lua .
+          else
+            echo "::error::harness.lua is missing from the repository."
+            echo "The test suite cannot run, so this release is not verified."
+            exit 1
+          fi
 
       # The packager SKIPS the CurseForge upload silently when CF_API_KEY is
       # missing -- the build still goes green and no file appears. Fail here

@@ -328,7 +328,7 @@ function Goals.Plan(goal)
     local warband = CN:GetModule("Warband")
 
     if warband then
-        local ok, best, detail, why = pcall(warband.WhoShould, goal.type, goal.id)
+        local ok, best, _, why = pcall(warband.WhoShould, goal.type, goal.id)
 
         if ok and best then
             plan.character = best

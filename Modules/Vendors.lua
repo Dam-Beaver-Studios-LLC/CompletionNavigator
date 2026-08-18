@@ -30,7 +30,7 @@ end
 
 -- Reverse index: itemID -> { npcID, npcID, ... }. Rebuilt from the vendor
 -- store rather than persisted, so it can never drift out of sync with it.
-local itemIndex, itemIndexBuiltAt = nil, 0
+local itemIndex = nil
 
 Vendors.Store = Store
 
@@ -107,8 +107,7 @@ local function BuildItemIndex()
         end
     end
 
-    itemIndex        = index
-    itemIndexBuiltAt = time()
+    itemIndex = index
 
     return index
 end

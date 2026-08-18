@@ -17,8 +17,6 @@ local HandyNotes = {}
 
 CN.HandyNotes = HandyNotes
 
-local probeNotes = {}
-
 local function Root()
     local candidate = _G.HandyNotes
 
