@@ -7,6 +7,42 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.14.0]
+
+### Added
+
+- **Managing what you hid.** `/cn hidden` lists everything ignored or
+  deferred, with real names rather than internal keys. `/cn unhide <id>`
+  restores one, `/cn unhide all` restores everything.
+  Ignore and defer have existed since the first build with no way to see
+  either list or undo anything in them. Ignoring something by accident
+  meant it was gone permanently, which is a bug wearing a feature's
+  clothes.
+- Expired deferrals are pruned at login instead of accumulating in
+  SavedVariables forever.
+- **Vendors.** Every merchant you open is recorded permanently: what they
+  sell, and where they stand. `/cn sells <item>` finds who sells something,
+  `/cn tovendor <item>` routes you there, `/cn vendors` summarizes.
+- Recipes you do not know that a recorded vendor sells now become
+  recommendations with real coordinates. This is the missing link in the
+  design's flagship example: everything else it needed already existed, but
+  nothing knew where anything was sold.
+
+### Fixed
+
+- **NPC IDs were never parsed.** `tonumber(select(6, strsplit("-", guid)))`
+  passes every remaining GUID field to `tonumber`, so the spawn UID arrived
+  as the `base` argument and the call threw. Every vendor capture would have
+  failed in game. Wrapping the `select` in parentheses truncates it to one
+  value.
+
+### Notes
+
+- Vendor inventories, like trade skill recipes, are only readable while the
+  window is open. So the vendor database grows as you play rather than
+  shipping stale, and only vendors you have actually opened are known.
+
+
 ## [0.13.0]
 
 ### Added

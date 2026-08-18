@@ -24,7 +24,13 @@ Click the minimap button or type `/cn next`. The addon scores every objective it
 
 **Explains why you aren't at 100%.** `/cn breakdown` reports what's left in every category *and why* — how many pets can never be collected again, how many mounts are locked to the other faction, how many titles a different character already holds — with a concrete next step on each line.
 
-**Learns from your play.** Every quest you accept or turn in has its name, zone, coordinates and level recorded permanently. `/cn export` emits them as ready-to-paste data rows. Playing the game grows the database.
+**Moves the waypoint on as you finish.** Turn on auto-advance and the waypoint follows you through the list: finish one thing, it points at the next. It re-points when the objective *changes*, not on a timer, so it never moves out from under you while you are walking to it. Off by default, because seizing the waypoint uninvited is rude.
+
+**Tells you who sells it.** `/cn sells <item>` finds the vendor from your own recorded travels; `/cn tovendor` routes you there. Recipes you do not know that a recorded vendor stocks become recommendations with real coordinates.
+
+**Lets you undo hiding things.** Ignore or defer anything you are not interested in, then `/cn hidden` to see the list and `/cn unhide` to bring it back. Deferrals expire on their own.
+
+**Learns from your play.** Every quest you accept or turn in has its name, zone, coordinates and level recorded permanently. Every vendor you open records what it sells and where they stand. Every rare you see joins a spawn database. `/cn export` emits the quest data as ready-to-paste rows, so playing the game grows the database that ships to everyone.
 
 ---
 
@@ -44,18 +50,23 @@ Click the minimap button or type `/cn next`. The addon scores every objective it
 | **Titles** | Per character, so you can see which alt already earned one |
 | **Professions & recipes** | Skill levels, and which of your characters knows which recipe |
 | **Currencies** | Caps, and unfilled weekly earning that resets whether you use it or not |
+| **Exploration** | Per-zone subzone discovery, naming the places you have not been |
+| **Vendors** | What each merchant sells and where they stand, recorded as you shop |
 
 ---
 
 ## Interface
 
-A minimap button and a five-tab window. Everything the slash commands do is reachable by clicking.
+A minimap button and an eight-tab window. Everything the slash commands do is reachable by clicking.
 
 - **Next** — the recommendation, its reasoning, and Navigate / Defer / Ignore. Below it, the ranked alternatives; click any to inspect it.
+- **Now** — world quests, live rares, capped currencies and unfilled weekly earning, in one clickable list.
 - **Zone** — a live nearest-first sweep of your current map.
+- **Warband** — your roster and what each character covers.
 - **Collections** — account completion per category.
+- **Remaining** — what is left everywhere, and why.
 - **Scans** — counts and one-click scans for each subsystem.
-- **Settings** — priority mode, debug output, minimap button, window position.
+- **Settings** — priority mode, auto-advance, debug output, minimap button.
 
 Keybindings live under **Key Bindings → AddOns**.
 
@@ -67,7 +78,7 @@ Keybindings live under **Key Bindings → AddOns**.
 
 ## Commands
 
-`/cn` for status, `/cn help` for all 60-plus.
+`/cn` for status, `/cn help` for all seventy.
 
 ```
 /cn next                 Recommend the next objective
@@ -82,6 +93,10 @@ Keybindings live under **Key Bindings → AddOns**.
 /cn paragon              Paragon rewards ready to collect
 /cn closest              Achievements nearest to completion
 /cn export               Emit harvested quest data
+/cn auto                 Move the waypoint on as you finish things
+/cn sells <item>         Which recorded vendor sells something
+/cn hidden               Everything you ignored or deferred
+/cn exploration          Zones with the least left to discover
 ```
 
 ---
@@ -96,6 +111,8 @@ Stated plainly, because finding these out yourself feels like a bug:
 - **Achievements only become recommendations when nearly complete.** A zero-progress achievement is a project, not a next action.
 - **Warband comparisons need more than one character logged in.** The addon can only reason about characters it has seen.
 - **Harvested prerequisites are suggestions, not facts.** Quests completed shortly before another became available are recorded as *possible* prerequisites, kept separate from real data, and never used to decide whether something is locked.
+- **Only vendors you have opened are known.** Merchant inventories, like recipe lists, are readable only while the window is open. The addon builds its vendor database from your own shopping rather than shipping a list that goes stale.
+- **Exploration is measured in subzones, not percent.** The map API reports which overlays you have revealed but never how many exist, so a true "percent explored" cannot be computed. Per-subzone criteria name the place you have not been, which is more useful anyway.
 
 ---
 
@@ -111,7 +128,7 @@ None are required. Completion Navigator is a decision layer, not a replacement f
 
 ## Status
 
-Version 0.12.0. All subsystems above are implemented and tested. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
+Version 0.14.0. All subsystems above are implemented and tested. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
 
 Bug reports and feature requests: [GitHub issues](https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/issues), or email developer@dambeaverstudios.com.
 

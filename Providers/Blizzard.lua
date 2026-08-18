@@ -1265,3 +1265,84 @@ function Blizzard.GetIncompleteCriteria(achievementID, limit)
 
     return missing
 end
+
+------------------------------------------------------------
+-- MERCHANTS
+------------------------------------------------------------
+
+-- Vendor inventories are only readable while the merchant window is open,
+-- exactly like trade skill recipes. Everything here is opportunistic.
+function Blizzard.GetMerchantItems()
+    local items = {}
+
+    if not GetMerchantNumItems then
+        return items
+    end
+
+    local ok, count = pcall(GetMerchantNumItems)
+
+    if not ok or type(count) ~= "number" then
+        return items
+    end
+
+    for index = 1, count do
+        local gotInfo, name, texture, price, quantity, numAvailable,
+              isPurchasable, isUsable, extendedCost =
+              pcall(GetMerchantItemInfo, index)
+
+        if gotInfo and name then
+            local itemID
+
+            if C_MerchantFrame and C_MerchantFrame.GetItemInfo then
+                local gotItem, info = pcall(C_MerchantFrame.GetItemInfo, index)
+
+                if gotItem and type(info) == "table" then
+                    itemID = info.itemID
+                end
+            end
+
+            if not itemID and GetMerchantItemLink then
+                local gotLink, link = pcall(GetMerchantItemLink, index)
+
+                if gotLink and type(link) == "string" then
+                    itemID = tonumber(link:match("item:(%d+)"))
+                end
+            end
+
+            table.insert(items, {
+                index         = index,
+                itemID        = itemID,
+                name          = name,
+                price         = price,
+                available     = numAvailable,
+                isPurchasable = isPurchasable and true or false,
+                extendedCost  = extendedCost and true or false,
+            })
+        end
+    end
+
+    return items
+end
+
+-- The NPC currently being interacted with. The GUID carries the creature ID,
+-- which is the only stable identifier for a vendor.
+function Blizzard.GetInteractingNPC()
+    if not UnitExists or not UnitExists("npc") then
+        return nil, nil
+    end
+
+    local guid = UnitGUID and UnitGUID("npc")
+
+    if not guid then
+        return nil, UnitName and UnitName("npc") or nil
+    end
+
+    -- GUID form: Creature-0-serverID-instanceID-zoneUID-npcID-spawnUID
+    --
+    -- The extra parentheses matter: select(6, ...) returns every value from
+    -- position 6 onward, so without them tonumber receives the spawn UID as
+    -- its `base` argument and throws.
+    local npcID = tonumber((select(6, strsplit("-", guid))))
+
+    return npcID, UnitName and UnitName("npc") or nil
+end

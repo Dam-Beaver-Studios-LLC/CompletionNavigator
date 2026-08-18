@@ -100,7 +100,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.13.0"
+CN.version     = "0.14.0"
 CN.dbVersion   = 2
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -5176,6 +5176,87 @@ function Blizzard.GetIncompleteCriteria(achievementID, limit)
     end
 
     return missing
+end
+
+------------------------------------------------------------
+-- MERCHANTS
+------------------------------------------------------------
+
+-- Vendor inventories are only readable while the merchant window is open,
+-- exactly like trade skill recipes. Everything here is opportunistic.
+function Blizzard.GetMerchantItems()
+    local items = {}
+
+    if not GetMerchantNumItems then
+        return items
+    end
+
+    local ok, count = pcall(GetMerchantNumItems)
+
+    if not ok or type(count) ~= "number" then
+        return items
+    end
+
+    for index = 1, count do
+        local gotInfo, name, texture, price, quantity, numAvailable,
+              isPurchasable, isUsable, extendedCost =
+              pcall(GetMerchantItemInfo, index)
+
+        if gotInfo and name then
+            local itemID
+
+            if C_MerchantFrame and C_MerchantFrame.GetItemInfo then
+                local gotItem, info = pcall(C_MerchantFrame.GetItemInfo, index)
+
+                if gotItem and type(info) == "table" then
+                    itemID = info.itemID
+                end
+            end
+
+            if not itemID and GetMerchantItemLink then
+                local gotLink, link = pcall(GetMerchantItemLink, index)
+
+                if gotLink and type(link) == "string" then
+                    itemID = tonumber(link:match("item:(%d+)"))
+                end
+            end
+
+            table.insert(items, {
+                index         = index,
+                itemID        = itemID,
+                name          = name,
+                price         = price,
+                available     = numAvailable,
+                isPurchasable = isPurchasable and true or false,
+                extendedCost  = extendedCost and true or false,
+            })
+        end
+    end
+
+    return items
+end
+
+-- The NPC currently being interacted with. The GUID carries the creature ID,
+-- which is the only stable identifier for a vendor.
+function Blizzard.GetInteractingNPC()
+    if not UnitExists or not UnitExists("npc") then
+        return nil, nil
+    end
+
+    local guid = UnitGUID and UnitGUID("npc")
+
+    if not guid then
+        return nil, UnitName and UnitName("npc") or nil
+    end
+
+    -- GUID form: Creature-0-serverID-instanceID-zoneUID-npcID-spawnUID
+    --
+    -- The extra parentheses matter: select(6, ...) returns every value from
+    -- position 6 onward, so without them tonumber receives the spawn UID as
+    -- its `base` argument and throws.
+    local npcID = tonumber((select(6, strsplit("-", guid))))
+
+    return npcID, UnitName and UnitName("npc") or nil
 end
 '@
 
@@ -11834,6 +11915,742 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Filters.lua'] = @'
+-- Modules/Filters.lua
+-- Completion Navigator :: managing what you told the addon to hide.
+--
+-- Ignore and defer have existed since the first build, and until now there
+-- was no way to see either list or undo anything in them. Ignoring something
+-- by accident meant it was gone permanently with no recourse, which is a
+-- bug wearing a feature's clothes.
+--
+-- Defer also only offered one hour. The spec asked for a real set of
+-- durations, and "until the weekly reset" is the one that actually matches
+-- how the game works.
+
+local ADDON_NAME, CN = ...
+
+local Filters = CN:RegisterModule("Filters")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+local HOUR = 3600
+local DAY  = 86400
+
+------------------------------------------------------------
+-- DURATIONS
+------------------------------------------------------------
+
+-- Ordered, because they are offered as a list in the UI.
+Filters.durations = {
+    { key = "hour",    label = "1 hour",        seconds = HOUR },
+    { key = "day",     label = "Today",         seconds = DAY },
+    { key = "tomorrow",label = "Tomorrow",      seconds = 2 * DAY },
+    { key = "week",    label = "This week",     seconds = 7 * DAY },
+    { key = "reset",   label = "Until reset",   seconds = nil },  -- computed
+    { key = "forever", label = "Until I undo it", seconds = math.huge },
+}
+
+function Filters.SecondsFor(key)
+    for _, duration in ipairs(Filters.durations) do
+        if duration.key == key then
+            if duration.key == "reset" then
+                local opportunities = CN:GetModule("Opportunities")
+
+                if opportunities then
+                    local resets = opportunities.GetResets()
+
+                    -- Weekly if it is sooner than a week away, else daily.
+                    return resets.weekly or resets.daily or DAY
+                end
+
+                return DAY
+            end
+
+            return duration.seconds
+        end
+    end
+
+    return nil
+end
+
+------------------------------------------------------------
+-- READING THE LISTS
+------------------------------------------------------------
+
+-- Objective keys are "TYPE:id". Splitting them back out is what lets the
+-- lists show a name rather than an opaque string.
+local function SplitKey(key)
+    local objectiveType, id = string.match(tostring(key), "^(.-):(.+)$")
+
+    return objectiveType, tonumber(id) or id
+end
+
+Filters.SplitKey = SplitKey
+
+-- Best-effort name for anything the addon might have hidden.
+function Filters.DescribeObjective(objectiveType, id)
+    local types = CN.objectiveTypes
+
+    local numericID = tonumber(id)
+
+    if objectiveType == types.QUEST and numericID then
+        return CN.GetQuestName(numericID) or ("Quest " .. numericID)
+    end
+
+    if objectiveType == types.REPUTATION and numericID then
+        return CN.Account("factionNames")[numericID] or ("Faction " .. numericID)
+    end
+
+    if objectiveType == types.PET and numericID then
+        local record = CN.Account("pets")[numericID]
+        return record and record.name or ("Pet " .. numericID)
+    end
+
+    if objectiveType == types.MOUNT and numericID then
+        local record = CN.Account("mounts")[numericID]
+        return record and record.name or ("Mount " .. numericID)
+    end
+
+    if objectiveType == types.TOY and numericID then
+        local record = CN.Account("toys")[numericID]
+        return record and record.name or ("Toy " .. numericID)
+    end
+
+    if (objectiveType == types.RARE or objectiveType == types.TREASURE) and numericID then
+        local record = CN.Account("rares")[numericID]
+        return record and record.name or (objectiveType .. " " .. numericID)
+    end
+
+    if objectiveType == types.ACHIEVEMENT and numericID then
+        local record = CN.Account("achievements")[numericID]
+        return record and record.name or ("Achievement " .. numericID)
+    end
+
+    if objectiveType == types.CURRENCY and numericID then
+        return CN.Account("currencyNames")[numericID] or ("Currency " .. numericID)
+    end
+
+    if objectiveType == types.RECIPE and numericID then
+        return CN.Account("recipeNames")[numericID] or ("Recipe " .. numericID)
+    end
+
+    if objectiveType == types.TITLE and numericID then
+        return CN.Account("titleNames")[numericID] or ("Title " .. numericID)
+    end
+
+    return tostring(objectiveType) .. " " .. tostring(id)
+end
+
+function Filters.ListIgnored()
+    local rows = {}
+
+    for key, entry in pairs(CN.Account("ignoredObjectives")) do
+        local objectiveType, id = SplitKey(key)
+
+        table.insert(rows, {
+            key   = key,
+            type  = objectiveType,
+            id    = id,
+            name  = Filters.DescribeObjective(objectiveType, id),
+            since = entry and entry.since,
+        })
+    end
+
+    table.sort(rows, function(a, b) return (a.name or "") < (b.name or "") end)
+
+    return rows
+end
+
+function Filters.ListDeferred()
+    local rows = {}
+
+    local now = time()
+
+    for key, entry in pairs(CN.Account("deferredObjectives")) do
+        local objectiveType, id = SplitKey(key)
+
+        local remaining
+
+        if entry and entry.until_ then
+            remaining = entry.until_ - now
+        end
+
+        table.insert(rows, {
+            key       = key,
+            type      = objectiveType,
+            id        = id,
+            name      = Filters.DescribeObjective(objectiveType, id),
+            remaining = remaining,
+            expired   = remaining ~= nil and remaining <= 0,
+        })
+    end
+
+    table.sort(rows, function(a, b)
+        return (a.remaining or math.huge) < (b.remaining or math.huge)
+    end)
+
+    return rows
+end
+
+------------------------------------------------------------
+-- UNDO
+------------------------------------------------------------
+
+function Filters.Restore(key)
+    local ignored  = CN.Account("ignoredObjectives")
+    local deferred = CN.Account("deferredObjectives")
+
+    local removed = false
+
+    if ignored[key] then
+        ignored[key] = nil
+        removed = true
+    end
+
+    if deferred[key] then
+        deferred[key] = nil
+        removed = true
+    end
+
+    return removed
+end
+
+function Filters.RestoreAll()
+    local ignored  = CN.Account("ignoredObjectives")
+    local deferred = CN.Account("deferredObjectives")
+
+    local count = CN.CountKeys(ignored) + CN.CountKeys(deferred)
+
+    for key in pairs(ignored) do
+        ignored[key] = nil
+    end
+
+    for key in pairs(deferred) do
+        deferred[key] = nil
+    end
+
+    return count
+end
+
+-- Deferrals that have run out are dead weight in SavedVariables.
+function Filters.PruneExpired()
+    local deferred = CN.Account("deferredObjectives")
+
+    local now, pruned = time(), 0
+
+    for key, entry in pairs(deferred) do
+        if entry and entry.until_ and entry.until_ <= now then
+            deferred[key] = nil
+            pruned = pruned + 1
+        end
+    end
+
+    return pruned
+end
+
+CN:OnLogin(function()
+    local pruned = Filters.PruneExpired()
+
+    if pruned > 0 then
+        DebugPrint("Pruned " .. pruned .. " expired deferrals.")
+    end
+end)
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+local function FormatRemaining(seconds)
+    if not seconds then
+        return "indefinitely"
+    end
+
+    if seconds <= 0 then
+        return "expired"
+    end
+
+    if seconds < HOUR then
+        return math.floor(seconds / 60) .. "m"
+    end
+
+    if seconds < DAY then
+        return math.floor(seconds / HOUR) .. "h"
+    end
+
+    return math.floor(seconds / DAY) .. "d"
+end
+
+Filters.FormatRemaining = FormatRemaining
+
+CN:RegisterCommand{
+    name    = "hidden",
+    aliases = { "ignored" },
+    order   = 20,
+    help    = "Show everything you have ignored or deferred.",
+    handler = function()
+        local ignored  = Filters.ListIgnored()
+        local deferred = Filters.ListDeferred()
+
+        if #ignored == 0 and #deferred == 0 then
+            Print("Nothing is hidden.")
+            return
+        end
+
+        if #ignored > 0 then
+            Print("Ignored (" .. #ignored .. "):")
+
+            for _, row in ipairs(ignored) do
+                Print("  " .. row.name .. " |cff999999[" .. tostring(row.type)
+                    .. " " .. tostring(row.id) .. "]|r")
+            end
+        end
+
+        if #deferred > 0 then
+            Print("Deferred (" .. #deferred .. "):")
+
+            for _, row in ipairs(deferred) do
+                Print("  " .. row.name .. " |cff999999["
+                    .. FormatRemaining(row.remaining) .. " left]|r")
+            end
+        end
+
+        Print("|cffffff00/cn unhide <id>|r to restore one, "
+            .. "|cffffff00/cn unhide all|r for everything.")
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "unhide",
+    aliases = { "restore" },
+    args    = "<id or all>",
+    order   = 21,
+    help    = "Undo an ignore or a deferral.",
+    handler = function(args)
+        if args == "" then
+            Print("Usage: /cn unhide <id or all>")
+            return
+        end
+
+        if string.lower(args) == "all" then
+            local count = Filters.RestoreAll()
+
+            Print("Restored " .. count .. " hidden objective"
+                .. (count == 1 and "" or "s") .. ".")
+            return
+        end
+
+        local wanted = tostring(CN.ToID(args) or args)
+
+        local restored = 0
+
+        -- Match on the id alone, since the player sees ids and not the
+        -- internal TYPE:id key.
+        for _, row in ipairs(Filters.ListIgnored()) do
+            if tostring(row.id) == wanted then
+                if Filters.Restore(row.key) then
+                    Print("Restored: " .. row.name)
+                    restored = restored + 1
+                end
+            end
+        end
+
+        for _, row in ipairs(Filters.ListDeferred()) do
+            if tostring(row.id) == wanted then
+                if Filters.Restore(row.key) then
+                    Print("Restored: " .. row.name)
+                    restored = restored + 1
+                end
+            end
+        end
+
+        if restored == 0 then
+            Print("Nothing hidden matches: " .. args)
+            Print("Run |cffffff00/cn hidden|r to see the list.")
+        end
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
+$Embedded['Modules\Vendors.lua'] = @'
+-- Modules/Vendors.lua
+-- Completion Navigator :: who sells what, and where they stand.
+--
+-- This is the module the flagship example in the design needs:
+--
+--   Recipe X is sold by Vendor A. Vendor A is in <zone> at <coords>.
+--   The recipe requires Revered with Faction B. This character is Honored.
+--   Another character is already Revered and has the profession.
+--   -> Switch to that character and buy it.
+--
+-- Every other piece of that already exists. The missing link was that
+-- nothing knew where anything is sold.
+--
+-- Vendor inventories are only readable while the merchant window is open --
+-- the same client restriction as trade skill recipes. So this records every
+-- vendor you talk to, permanently and account-wide, and the database grows
+-- as you play rather than shipping stale.
+
+local ADDON_NAME, CN = ...
+
+local Vendors = CN:RegisterModule("Vendors")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+local function Store()
+    return CN.Account("vendors")
+end
+
+-- Reverse index: itemID -> { npcID, npcID, ... }. Rebuilt from the vendor
+-- store rather than persisted, so it can never drift out of sync with it.
+local itemIndex, itemIndexBuiltAt = nil, 0
+
+Vendors.Store = Store
+
+------------------------------------------------------------
+-- RECORDING
+------------------------------------------------------------
+
+function Vendors.CaptureOpenMerchant()
+    local npcID, npcName = Blizzard.GetInteractingNPC()
+
+    if not npcID then
+        return false, 0
+    end
+
+    local items = Blizzard.GetMerchantItems()
+
+    if #items == 0 then
+        return false, 0
+    end
+
+    local store  = Store()
+    local record = store[npcID] or { npcID = npcID, firstSeen = time() }
+
+    record.name     = npcName or record.name
+    record.lastSeen = time()
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    -- Keep the first location seen; vendors do not move, and later readings
+    -- are just wherever you happened to be standing when you opened the
+    -- window a second time.
+    if mapID and x and y and not record.mapID then
+        record.mapID = mapID
+        record.x     = math.floor(x * 10000 + 0.5) / 10000
+        record.y     = math.floor(y * 10000 + 0.5) / 10000
+        record.zone  = Blizzard.GetMapName(mapID)
+    end
+
+    record.items = {}
+
+    for _, item in ipairs(items) do
+        if item.itemID then
+            record.items[item.itemID] = {
+                name         = item.name,
+                price        = item.price,
+                extendedCost = item.extendedCost,
+            }
+        end
+    end
+
+    record.itemCount = CN.CountKeys(record.items)
+
+    store[npcID] = record
+
+    -- The reverse index is now stale.
+    itemIndex = nil
+
+    CN.Account("collectionScans").vendors = time()
+
+    return true, record.itemCount
+end
+
+------------------------------------------------------------
+-- LOOKUP
+------------------------------------------------------------
+
+local function BuildItemIndex()
+    local index = {}
+
+    for npcID, record in pairs(Store()) do
+        for itemID in pairs(record.items or {}) do
+            index[itemID] = index[itemID] or {}
+            table.insert(index[itemID], npcID)
+        end
+    end
+
+    itemIndex        = index
+    itemIndexBuiltAt = time()
+
+    return index
+end
+
+function Vendors.WhoSells(itemID)
+    if not itemID then
+        return {}
+    end
+
+    local index = itemIndex or BuildItemIndex()
+
+    local sellers = {}
+
+    for _, npcID in ipairs(index[itemID] or {}) do
+        local record = Store()[npcID]
+
+        if record then
+            table.insert(sellers, {
+                npcID = npcID,
+                name  = record.name,
+                zone  = record.zone,
+                mapID = record.mapID,
+                x     = record.x,
+                y     = record.y,
+                item  = record.items and record.items[itemID],
+            })
+        end
+    end
+
+    return sellers
+end
+
+-- Finds an item by name across every recorded vendor. This is what makes
+-- "who sells Flask of Testing" work without knowing an item ID.
+function Vendors.FindItem(text)
+    if not text or text == "" then
+        return nil, {}
+    end
+
+    local itemID = CN.ToID(text)
+
+    if itemID then
+        return itemID, Vendors.WhoSells(itemID)
+    end
+
+    local needle  = string.lower(text)
+    local matches = {}
+
+    for npcID, record in pairs(Store()) do
+        for id, item in pairs(record.items or {}) do
+            if item.name and string.find(string.lower(item.name), needle, 1, true) then
+                matches[id] = item.name
+            end
+        end
+    end
+
+    local bestID, bestName
+
+    for id, name in pairs(matches) do
+        if not bestName or #name < #bestName then
+            bestID, bestName = id, name
+        end
+    end
+
+    if not bestID then
+        return nil, {}
+    end
+
+    return bestID, Vendors.WhoSells(bestID)
+end
+
+function Vendors.Summary()
+    local counts = { vendors = 0, items = 0, located = 0 }
+
+    local uniqueItems = {}
+
+    for _, record in pairs(Store()) do
+        counts.vendors = counts.vendors + 1
+
+        if record.x and record.y then
+            counts.located = counts.located + 1
+        end
+
+        for itemID in pairs(record.items or {}) do
+            uniqueItems[itemID] = true
+        end
+    end
+
+    counts.items = CN.CountKeys(uniqueItems)
+
+    return counts
+end
+
+------------------------------------------------------------
+-- RECIPE LINKING
+------------------------------------------------------------
+
+-- The payoff: a recipe this character does not know, sold by a vendor whose
+-- location is recorded, becomes an objective with real coordinates.
+CN.RegisterCandidateProvider("Vendors", function()
+    local candidates = {}
+
+    local professions = CN:GetModule("Professions")
+
+    if not professions then
+        return candidates
+    end
+
+    local known = professions.CharacterRecipes() or {}
+    local names = professions.RecipeNames()
+
+    local playerMap = select(1, CN.GetPlayerPosition())
+
+    for itemID, recipeName in pairs(names) do
+        if not known[itemID]
+            and not CN.IsIgnored(CN.objectiveTypes.RECIPE, itemID)
+            and not CN.IsDeferred(CN.objectiveTypes.RECIPE, itemID) then
+
+            local sellers = Vendors.WhoSells(itemID)
+
+            for _, seller in ipairs(sellers) do
+                if seller.mapID and seller.x and seller.y then
+                    local reasons = {
+                        "sold by " .. tostring(seller.name),
+                    }
+
+                    if seller.zone then
+                        table.insert(reasons, "in " .. seller.zone)
+                    end
+
+                    table.insert(candidates, CN.NewObjective({
+                        id              = itemID,
+                        type            = CN.objectiveTypes.RECIPE,
+                        name            = recipeName,
+                        mapID           = seller.mapID,
+                        x               = seller.x,
+                        y               = seller.y,
+                        completionValue = 2,
+                        travelCost      = (seller.mapID == playerMap) and 2 or 25,
+                        reasons         = reasons,
+                    }))
+
+                    break
+                end
+            end
+        end
+    end
+
+    return candidates
+end)
+
+------------------------------------------------------------
+-- EVENTS
+------------------------------------------------------------
+
+CN:RegisterEvent("MERCHANT_SHOW", function()
+    local captured, count = Vendors.CaptureOpenMerchant()
+
+    if captured then
+        DebugPrint("Recorded vendor with " .. count .. " items.")
+    end
+end)
+
+CN:RegisterEvent("MERCHANT_UPDATE", function()
+    Vendors.CaptureOpenMerchant()
+end)
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "vendors",
+    order   = 79,
+    help    = "Summarize recorded vendors.",
+    handler = function()
+        local counts = Vendors.Summary()
+
+        if counts.vendors == 0 then
+            Print("No vendors recorded yet.")
+            Print("|cff999999Open a merchant window and the addon records "
+                .. "what they sell and where they stand.|r")
+            return
+        end
+
+        Print("Vendors recorded: " .. counts.vendors
+            .. " (" .. counts.located .. " with coordinates)")
+        Print("Distinct items seen: " .. counts.items)
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "sells",
+    aliases = { "whosells" },
+    args    = "<itemID or name>",
+    order   = 80,
+    help    = "Find which recorded vendor sells something.",
+    handler = function(args)
+        if args == "" then
+            Print("Usage: /cn sells <itemID or name>")
+            return
+        end
+
+        local itemID, sellers = Vendors.FindItem(args)
+
+        if not itemID or #sellers == 0 then
+            Print("Nothing recorded matches: " .. args)
+            Print("|cff999999Only vendors you have opened are known.|r")
+            return
+        end
+
+        Print("Item " .. itemID .. " is sold by:")
+
+        for index, seller in ipairs(sellers) do
+            Print("  " .. index .. ". " .. tostring(seller.name)
+                .. (seller.zone and (" |cff999999in " .. seller.zone .. "|r") or "")
+                .. (seller.x and string.format(" |cff999999%.1f, %.1f|r",
+                    seller.x * 100, seller.y * 100) or ""))
+        end
+
+        Print("|cffffff00/cn tovendor " .. itemID .. "|r to set a waypoint.")
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "tovendor",
+    args    = "<itemID or name>",
+    order   = 81,
+    help    = "Navigate to a vendor that sells something.",
+    handler = function(args)
+        if args == "" then
+            Print("Usage: /cn tovendor <itemID or name>")
+            return
+        end
+
+        local itemID, sellers = Vendors.FindItem(args)
+
+        if not itemID or #sellers == 0 then
+            Print("Nothing recorded matches: " .. args)
+            return
+        end
+
+        for _, seller in ipairs(sellers) do
+            if seller.mapID and seller.x and seller.y then
+                CN.NavigateToObjective({
+                    id    = seller.npcID,
+                    type  = CN.objectiveTypes.VENDOR,
+                    name  = seller.name,
+                    mapID = seller.mapID,
+                    x     = seller.x,
+                    y     = seller.y,
+                })
+
+                return
+            end
+        end
+
+        Print("No recorded seller has coordinates yet.")
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -11853,7 +12670,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.13.0
+## Version: 0.14.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -11888,6 +12705,7 @@ Modules\Appearances.lua
 Modules\Breakdown.lua
 Modules\Currencies.lua
 Modules\Exploration.lua
+Modules\Filters.lua
 Modules\Harvest.lua
 Modules\Mounts.lua
 Modules\Opportunities.lua
@@ -11898,6 +12716,7 @@ Modules\Rares.lua
 Modules\Reputations.lua
 Modules\Titles.lua
 Modules\Toys.lua
+Modules\Vendors.lua
 Modules\Warband.lua
 # CN:FILES:END
 '@
@@ -12032,6 +12851,42 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.14.0]
+
+### Added
+
+- **Managing what you hid.** `/cn hidden` lists everything ignored or
+  deferred, with real names rather than internal keys. `/cn unhide <id>`
+  restores one, `/cn unhide all` restores everything.
+  Ignore and defer have existed since the first build with no way to see
+  either list or undo anything in them. Ignoring something by accident
+  meant it was gone permanently, which is a bug wearing a feature's
+  clothes.
+- Expired deferrals are pruned at login instead of accumulating in
+  SavedVariables forever.
+- **Vendors.** Every merchant you open is recorded permanently: what they
+  sell, and where they stand. `/cn sells <item>` finds who sells something,
+  `/cn tovendor <item>` routes you there, `/cn vendors` summarizes.
+- Recipes you do not know that a recorded vendor sells now become
+  recommendations with real coordinates. This is the missing link in the
+  design's flagship example: everything else it needed already existed, but
+  nothing knew where anything was sold.
+
+### Fixed
+
+- **NPC IDs were never parsed.** `tonumber(select(6, strsplit("-", guid)))`
+  passes every remaining GUID field to `tonumber`, so the spawn UID arrived
+  as the `base` argument and the call threw. Every vendor capture would have
+  failed in game. Wrapping the `select` in parentheses truncates it to one
+  value.
+
+### Notes
+
+- Vendor inventories, like trade skill recipes, are only readable while the
+  window is open. So the vendor database grows as you play rather than
+  shipping stale, and only vendors you have actually opened are known.
+
 
 ## [0.13.0]
 

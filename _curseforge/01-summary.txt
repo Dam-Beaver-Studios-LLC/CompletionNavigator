@@ -1,1 +1,1 @@
-Tells you what to do next, and why. Scores every objective you can act on right now, from world quests and live rares to reputations, achievements and collections, then explains its reasoning and sets a waypoint.
+Tells you what to do next, and why. Scores every objective you can act on right now, from world quests and live rares to reputations and collections, explains its reasoning, and moves the waypoint on as you finish each one.
