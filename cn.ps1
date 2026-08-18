@@ -8902,6 +8902,40 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Without this the tag object may not be present in the checkout,
+          # and the packager decides the release type from
+          # `git tag --points-at HEAD`. No tag means it uploads as ALPHA.
+          fetch-tags: true
+
+      # Belt and braces: force-fetch tags even if the checkout missed them.
+      - name: Fetch tags
+        run: git fetch --force --tags --prune --prune-tags
+
+      # If no tag points at HEAD the packager silently publishes an alpha,
+      # which then hides behind "Show alpha files" on CurseForge. Fail
+      # instead, and print what git actually sees.
+      - name: Verify a tag points at HEAD
+        run: |
+          echo "GITHUB_REF      = $GITHUB_REF"
+          echo "GITHUB_REF_NAME = $GITHUB_REF_NAME"
+          echo "HEAD            = $(git rev-parse HEAD)"
+          echo "tags at HEAD    = $(git tag --points-at HEAD | tr '\n' ' ')"
+
+          if [ -z "$(git tag --points-at HEAD)" ]; then
+            echo "::error::No tag points at HEAD, so the packager would upload this as an ALPHA."
+            echo "The release type is derived entirely from the tag; there is no flag to override it."
+            exit 1
+          fi
+
+          # A tag containing alpha or beta is an intentional pre-release, but
+          # say so out loud rather than surprising anyone.
+          for t in $(git tag --points-at HEAD); do
+            case "${t,,}" in
+              *alpha*) echo "::warning::Tag $t contains 'alpha'; this will publish as an alpha file." ;;
+              *beta*)  echo "::warning::Tag $t contains 'beta'; this will publish as a beta file." ;;
+              *)       echo "Tag $t will publish as a RELEASE file." ;;
+            esac
+          done
 
       # Fails the build before publishing if any Lua file is malformed.
       - name: Install Lua
