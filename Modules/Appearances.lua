@@ -43,7 +43,7 @@ function Appearances.Scan()
         }
     end
 
-    CN.Account("collectionScans").appearances = time()
+    CN.MarkScanned("appearances")
 
     return #categories
 end

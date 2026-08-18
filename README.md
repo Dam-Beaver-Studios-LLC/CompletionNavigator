@@ -60,6 +60,22 @@ These are honest constraints, not oversights:
 
 None are required.
 
+## Performance
+
+The recommendation path is measured, not assumed. `bench.lua` runs the addon
+against a retail-scale database (1800 pets, 3000 achievements, 500 factions,
+2500 recipes) and times it; `/cn perf` reports the same figures live.
+
+Three caches, each invalidated by the narrowest thing that can change it:
+per provider, then the aggregate list, then the scored and sorted list. Each
+provider declares which events make it stale, so learning a mount does not
+rebuild the achievement candidates. Providers subscribed to chatty events
+(`CRITERIA_UPDATE`, `UPDATE_FACTION`) rebuild at most once every five seconds.
+
+Providers that enumerate an entire collection are capped at 60 candidates,
+chosen by counting rather than sorting, ties broken by ID. `/cn perf` reports
+what was dropped: a cap nobody can see reads as "that was everything".
+
 ## Development
 
 The addon is managed by `cn.ps1`, a PowerShell toolkit that carries the whole source tree inside it.

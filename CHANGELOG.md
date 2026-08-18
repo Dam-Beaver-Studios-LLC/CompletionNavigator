@@ -7,6 +7,76 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.16.0]
+
+Measured, not guessed. A benchmark against a retail-scale database -- 1800
+pets, 3000 achievements, 500 factions, 2500 recipes -- drove every change
+below. Numbers are from that benchmark.
+
+### Changed
+
+- **The ranked list is cached.** 0.15.0 cached the candidate list but still
+  re-scored and re-sorted every candidate on every call, so `/cn next` cost
+  **14.8ms** even with a warm cache. It is now **0.01ms**. A frame at 60fps is
+  16ms, which means the minimap tooltip added in 0.15.0 was dropping a frame
+  every time you hovered it. That was a regression I shipped, and this is the
+  fix.
+- **Invalidation is per provider.** Each provider declares which events can
+  make it stale, so learning a mount no longer rebuilds the achievement
+  candidates. `NEW_MOUNT_ADDED` went from **18.3ms to 0.02ms**;
+  `UPDATE_FACTION` from **6.6ms to 0.01ms**; `CRITERIA_UPDATE` from **8.5ms to
+  1.1ms**.
+- **Chatty events are throttled at the cache, not just at the scan.**
+  `CRITERIA_UPDATE` and `UPDATE_FACTION` fire many times a second during normal
+  play. Providers subscribed to them rebuild at most once every five seconds.
+- **Providers that enumerate a whole collection are capped.** Emitting 1200
+  uncollected pets so that one can rank first is waste, and every one of them
+  scores identically. The highest-valued 60 per provider are kept, chosen by
+  counting rather than sorting, with ties broken by ID so the list does not
+  reshuffle. Candidate count dropped from **3211 to 189**. `/cn perf` reports
+  exactly what was dropped -- a cap nobody can see reads as "that was
+  everything".
+- **Ignore and defer lookups short-circuit when nothing is hidden.** They were
+  building a `TYPE:id` string per call, several thousand times per rebuild,
+  to look up nothing. **12ms to 3.5ms** per 10,000 pairs.
+- A full rebuild is down from **45.2ms to 16.5ms**, and now only happens on a
+  scan or a login rather than on every event.
+- Ranking sorts a copy. Zone routing walks the candidate list, and having it
+  reordered underneath as a side effect of somebody asking for a
+  recommendation was a bug waiting to be found.
+
+### Fixed
+
+- **`release` no longer half-applies.** It bumped the version files and *then*
+  checked the changelog, so a stale `CHANGELOG.md` left the tree claiming a
+  version whose source had never been scaffolded -- and said so in a yellow
+  warning that scrolled past. Every refusal now happens before anything is
+  written, and says "nothing has been changed" out loud.
+- **A failing `check` aborts the release** instead of printing above it and
+  carrying on.
+- **`cn.ps1` stamps the version it carries.** A `cn.ps1` older than the tree
+  used to scaffold a previous release over the top and report success. `check`
+  now fails on it, and `release` refuses a version this file does not carry.
+- **An existing tag is detected** rather than letting `git tag` fail into the
+  middle of a release.
+- **Push failures are caught.** `git push` and `git push --tags` are checked,
+  so a tag that never reached the remote is reported rather than assumed.
+- git's stderr is rendered as its message rather than
+  `System.Management.Automation.RemoteException`.
+- **`init` scaffolds `Media\Logo.tga`.** A fresh scaffold previously failed its
+  own `check` on a missing IconTexture, which then blocked `release`.
+- Rescanning a store no longer invalidates every provider -- only the ones that
+  read it. Mounts, toys, appearances and titles feed no candidate provider at
+  all, so scanning them now invalidates nothing.
+
+### Added
+
+- **`.\cn.ps1 doctor`** reports the whole release chain in one place: toolkit
+  version, tree version, changelog section, HEAD, tags at HEAD, uncommitted
+  changes, remote, and whether the expected tag has actually been pushed. Written because diagnosing a release that silently did nothing
+  meant assembling five separate commands by hand.
+- `/cn perf` reports per-provider cache state and any caps hit.
+
 ## [0.15.0]
 
 ### Added
@@ -33,11 +103,10 @@ Authored by Travis A. Bryan I.
 
 ### Changed
 
-- **Candidates are cached.** Fourteen providers were being rebuilt on every
+- **Candidates are cached.** Nine providers were being rebuilt on every
   `/cn next`, every window refresh and every auto-advance tick, several of
   them walking thousands of records. Results are now held for five seconds
   and invalidated by the sixteen events that can actually change an answer.
-  This is what makes a recommendation cheap enough to put in a tooltip.
 - `/cn perf` reports cache state and per-provider timings, slowest first, so
   a slow provider can be identified rather than guessed at.
 

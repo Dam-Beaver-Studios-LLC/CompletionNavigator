@@ -88,7 +88,7 @@ function Vendors.CaptureOpenMerchant()
     -- The reverse index is now stale.
     itemIndex = nil
 
-    CN.Account("collectionScans").vendors = time()
+    CN.MarkScanned("vendors")
 
     return true, record.itemCount
 end
@@ -111,6 +111,36 @@ local function BuildItemIndex()
     itemIndexBuiltAt = time()
 
     return index
+end
+
+-- The candidate provider asks this question thousands of times per rebuild,
+-- once per known recipe, and almost always gets no answer. WhoSells allocates
+-- a result array every time it is called; this does not allocate at all until
+-- there is something to return.
+function Vendors.FirstLocatedSeller(itemID)
+    if not itemID then
+        return nil
+    end
+
+    local index = itemIndex or BuildItemIndex()
+
+    local npcIDs = index[itemID]
+
+    if not npcIDs then
+        return nil
+    end
+
+    local store = Store()
+
+    for _, npcID in ipairs(npcIDs) do
+        local record = store[npcID]
+
+        if record and record.mapID and record.x and record.y then
+            return record, npcID
+        end
+    end
+
+    return nil
 end
 
 function Vendors.WhoSells(itemID)
@@ -209,12 +239,10 @@ end
 -- The payoff: a recipe this character does not know, sold by a vendor whose
 -- location is recorded, becomes an objective with real coordinates.
 CN.RegisterCandidateProvider("Vendors", function()
-    local candidates = {}
-
     local professions = CN:GetModule("Professions")
 
     if not professions then
-        return candidates
+        return {}
     end
 
     local known = professions.CharacterRecipes() or {}
@@ -222,43 +250,57 @@ CN.RegisterCandidateProvider("Vendors", function()
 
     local playerMap = select(1, CN.GetPlayerPosition())
 
-    for itemID, recipeName in pairs(names) do
-        if not known[itemID]
-            and not CN.IsIgnored(CN.objectiveTypes.RECIPE, itemID)
-            and not CN.IsDeferred(CN.objectiveTypes.RECIPE, itemID) then
-
-            local sellers = Vendors.WhoSells(itemID)
-
-            for _, seller in ipairs(sellers) do
-                if seller.mapID and seller.x and seller.y then
-                    local reasons = {
-                        "sold by " .. tostring(seller.name),
-                    }
-
-                    if seller.zone then
-                        table.insert(reasons, "in " .. seller.zone)
-                    end
-
-                    table.insert(candidates, CN.NewObjective({
-                        id              = itemID,
-                        type            = CN.objectiveTypes.RECIPE,
-                        name            = recipeName,
-                        mapID           = seller.mapID,
-                        x               = seller.x,
-                        y               = seller.y,
-                        completionValue = 2,
-                        travelCost      = (seller.mapID == playerMap) and 2 or 25,
-                        reasons         = reasons,
-                    }))
-
-                    break
-                end
+    local candidates, considered, dropped = CN.CollectBounded(names, nil,
+        function(itemID)
+            if known[itemID] then
+                return nil
             end
-        end
-    end
+
+            if CN.IsIgnored(CN.objectiveTypes.RECIPE, itemID)
+                or CN.IsDeferred(CN.objectiveTypes.RECIPE, itemID) then
+                return nil
+            end
+
+            local seller = Vendors.FirstLocatedSeller(itemID)
+
+            if not seller then
+                return nil
+            end
+
+            -- A recipe you can walk to in this zone beats one across the
+            -- continent, and that is the only distinction worth ranking here.
+            return (seller.mapID == playerMap) and 3 or 2
+        end,
+        function(itemID, recipeName)
+            local seller = Vendors.FirstLocatedSeller(itemID)
+
+            if not seller then
+                return nil
+            end
+
+            local reasons = { "sold by " .. tostring(seller.name) }
+
+            if seller.zone then
+                table.insert(reasons, "in " .. seller.zone)
+            end
+
+            return CN.NewObjective({
+                id              = itemID,
+                type            = CN.objectiveTypes.RECIPE,
+                name            = recipeName,
+                mapID           = seller.mapID,
+                x               = seller.x,
+                y               = seller.y,
+                completionValue = 2,
+                travelCost      = (seller.mapID == playerMap) and 2 or 25,
+                reasons         = reasons,
+            })
+        end)
+
+    CN.providerTruncation["Vendors"] = { considered = considered, dropped = dropped }
 
     return candidates
-end)
+end, { events = { "MERCHANT_SHOW", "TRADE_SKILL_LIST_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 5 })
 
 ------------------------------------------------------------
 -- EVENTS

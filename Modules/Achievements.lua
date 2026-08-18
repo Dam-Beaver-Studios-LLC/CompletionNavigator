@@ -97,7 +97,7 @@ function Achievements.Scan()
         end
     end
 
-    CN.Account("collectionScans").achievements = time()
+    CN.MarkScanned("achievements")
 
     return scanned, completed, nearlyDone
 end
@@ -219,32 +219,48 @@ end)
 -- achievement is a project, not a next action, and flooding the
 -- recommendation list with thousands of them would bury everything else.
 CN.RegisterCandidateProvider("Achievements", function()
-    local candidates = {}
+    local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
+        function(achievementID, record)
+            local criteria = record.criteria or 0
 
-    for achievementID, record in pairs(Store()) do
-        local remaining = (record.criteria or 0) - (record.done or 0)
+            if criteria <= 0 then
+                return nil
+            end
 
-        if record.criteria and record.criteria > 0
-            and remaining > 0 and remaining <= 2
-            and not CN.IsIgnored(CN.objectiveTypes.ACHIEVEMENT, achievementID)
-            and not CN.IsDeferred(CN.objectiveTypes.ACHIEVEMENT, achievementID) then
+            local remaining = criteria - (record.done or 0)
 
-            table.insert(candidates, CN.NewObjective({
+            -- A zero-progress achievement is a project, not a next action.
+            if remaining <= 0 or remaining > 2 then
+                return nil
+            end
+
+            if CN.IsIgnored(CN.objectiveTypes.ACHIEVEMENT, achievementID)
+                or CN.IsDeferred(CN.objectiveTypes.ACHIEVEMENT, achievementID) then
+                return nil
+            end
+
+            return 3 - remaining
+        end,
+        function(achievementID, record, value)
+            local remaining = (record.criteria or 0) - (record.done or 0)
+
+            return CN.NewObjective({
                 id              = achievementID,
                 type            = CN.objectiveTypes.ACHIEVEMENT,
                 name            = record.name,
                 accountWide     = true,
-                completionValue = 3 - remaining,
+                completionValue = value,
                 reasons         = {
                     remaining .. " of " .. record.criteria .. " criteria left",
-                    record.points .. " achievement points",
+                    tostring(record.points or 0) .. " achievement points",
                 },
-            }))
-        end
-    end
+            })
+        end)
+
+    CN.providerTruncation["Achievements"] = { considered = considered, dropped = dropped }
 
     return candidates
-end)
+end, { events = { "ACHIEVEMENT_EARNED", "CRITERIA_UPDATE" }, cooldown = 5 })
 
 ------------------------------------------------------------
 -- EVENTS

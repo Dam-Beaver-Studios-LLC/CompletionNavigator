@@ -58,6 +58,14 @@ $script:EndMark    = '# CN:FILES:END'
 $script:AppendMark = '-- CN:APPEND'
 $script:DataMark   = '-- CN:DATA:QUESTS'
 
+# The version of the addon source embedded in THIS file. Written by the
+# generator from Core.lua, so it can never drift from what gets scaffolded.
+#
+# This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
+# previous release over a newer tree, reports success, and every downstream
+# step then fails for reasons that look unrelated.
+$script:ToolkitVersion = '0.16.0'
+
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
 $script:RootOrder = @(
@@ -100,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.15.0"
+CN.version     = "0.16.0"
 CN.dbVersion   = 2
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -498,6 +506,48 @@ function CN.Account(key)
     return CN.db.account
 end
 
+-- Which candidate providers read which store. Rescanning your mounts must not
+-- rebuild the achievement candidates; measured, that mistake cost 18ms of a
+-- 16ms frame every time a mount was learned.
+--
+-- A store with no entry here feeds no candidate provider at all -- mounts,
+-- toys, appearances and titles are reported by /cn breakdown and the
+-- Collections tab, which read their stores directly.
+CN.scanProviders = {
+    pets         = { "Pets" },
+    achievements = { "Achievements" },
+    reputations  = { "Reputations" },
+    currencies   = { "Currencies" },
+    exploration  = { "Exploration" },
+    vendors      = { "Vendors" },
+
+    -- Recipe names are the left-hand side of the vendor recipe join.
+    recipes      = { "Vendors" },
+}
+
+-- A scan rewrites a store wholesale, and no client event fires to say so.
+-- Recording the scan is the one thing every scan already does, which makes it
+-- the right place to tell the candidate caches they are stale.
+function CN.MarkScanned(key)
+    CN.Account("collectionScans")[key] = time()
+
+    -- Scoring.lua loads after this file, so these may not exist yet at load
+    -- time. They always do by the time a scan can run.
+    if not CN.InvalidateProvider then
+        return
+    end
+
+    local providers = CN.scanProviders[key]
+
+    if not providers then
+        return
+    end
+
+    for _, name in ipairs(providers) do
+        CN.InvalidateProvider(name)
+    end
+end
+
 function CN.Settings()
     if not CN.db then
         return nil
@@ -611,29 +661,23 @@ CN.priorityModes = {
 
 -- Objectives are transient by design: they are rebuilt from persisted
 -- state rather than stored, so the schema can evolve freely.
+-- The full shape an objective may carry. Only the fields with a real default
+-- are written; the rest are documentation, and assigning nil to them was
+-- twenty wasted stores per objective and a hash part sized for twenty keys
+-- when eight get used. At a few thousand objectives per rebuild that is
+-- measurable, and this runs on every rebuild.
+--
+--   id, name, expansion, zone, mapID, x, y, eligibility, prerequisites,
+--   unlocks, acquisitionMethod, source, availability, estimatedTime,
+--   travelCost, rewards
+--
 function CN.NewObjective(fields)
     local objective = {
-        id               = nil,
-        type             = CN.objectiveTypes.QUEST,
-        name             = nil,
-        expansion        = nil,
-        zone             = nil,
-        mapID            = nil,
-        x                = nil,
-        y                = nil,
-        state            = CN.objectiveStates.UNKNOWN,
-        accountWide      = false,
+        type              = CN.objectiveTypes.QUEST,
+        state             = CN.objectiveStates.UNKNOWN,
+        accountWide       = false,
         characterSpecific = true,
-        eligibility      = nil,
-        prerequisites    = nil,
-        unlocks          = nil,
-        acquisitionMethod = nil,
-        source           = nil,
-        availability     = nil,
-        estimatedTime    = nil,
-        travelCost       = nil,
-        priorityWeight   = 0,
-        rewards          = nil,
+        priorityWeight    = 0,
     }
 
     if type(fields) == "table" then
@@ -646,6 +690,164 @@ function CN.NewObjective(fields)
 end
 
 ------------------------------------------------------------
+-- BOUNDED COLLECTION
+------------------------------------------------------------
+
+-- How many candidates one provider may contribute.
+--
+-- A provider that walks an entire collection can emit thousands of
+-- objectives that all score identically -- 1200 uncollected pets, say, none
+-- of which has a known location. Allocating all of them so that one can rank
+-- first is waste, and it is waste paid on every rebuild.
+CN.providerCandidateCap = 60
+
+-- The post-hoc form, for providers whose candidates come from more than one
+-- store and so cannot be counted in a single pass. The objectives are already
+-- built by the time this runs, so it saves the ranking and sorting work
+-- rather than the allocation.
+--
+-- Returns list, dropped.
+function CN.CapCandidates(list, limit)
+    limit = limit or CN.providerCandidateCap
+
+    if #list <= limit then
+        return list, 0
+    end
+
+    table.sort(list, function(a, b)
+        local left  = a.completionValue or 0
+        local right = b.completionValue or 0
+
+        if left == right then
+            return tostring(a.id) < tostring(b.id)
+        end
+
+        return left > right
+    end)
+
+    local dropped = #list - limit
+
+    for index = #list, limit + 1, -1 do
+        list[index] = nil
+    end
+
+    return list, dropped
+end
+
+-- Selects the highest-valued entries of a store without allocating an
+-- objective for the ones that lose.
+--
+--   evaluate(id, record) -> value | nil     nil means "not a candidate"
+--   build(id, record, value) -> objective | nil
+--
+-- Values are bucketed by integer, and the cut is found by counting buckets
+-- rather than by sorting, so nothing proportional to the store is allocated.
+-- Ties at the cut are broken by ID so the list does not reshuffle between
+-- rebuilds.
+--
+-- Returns candidates, considered, dropped.
+function CN.CollectBounded(source, limit, evaluate, build)
+    limit = limit or CN.providerCandidateCap
+
+    -- One evaluate call per entry, not three. The values are kept in a
+    -- scratch table sized by how many entries qualify, which for every real
+    -- store is far smaller than the store itself -- and far smaller than the
+    -- objective tables this exists to avoid allocating.
+    local values, counts = {}, {}
+
+    local maxBucket, total = nil, 0
+
+    for id, record in pairs(source) do
+        local value = evaluate(id, record)
+
+        if value then
+            local bucket = math.floor(value)
+
+            values[id]     = value
+            counts[bucket] = (counts[bucket] or 0) + 1
+
+            total = total + 1
+
+            if not maxBucket or bucket > maxBucket then
+                maxBucket = bucket
+            end
+        end
+    end
+
+    if total == 0 then
+        return {}, 0, 0
+    end
+
+    -- Emit when bucket > threshold, or when bucket == threshold and the entry
+    -- is among the lowest `allowance` IDs in that bucket.
+    local threshold, allowance = -math.huge, 0
+
+    if total > limit then
+        local running = 0
+        local bucket  = maxBucket
+
+        while bucket ~= nil do
+            local n = counts[bucket] or 0
+
+            if running + n >= limit then
+                threshold = bucket
+                allowance = limit - running
+                break
+            end
+
+            running = running + n
+
+            -- Walk down to the next populated bucket.
+            local nextBucket
+
+            for candidate in pairs(counts) do
+                if candidate < bucket and (not nextBucket or candidate > nextBucket) then
+                    nextBucket = candidate
+                end
+            end
+
+            bucket = nextBucket
+        end
+    end
+
+    -- Which IDs in the cut bucket survive. Bounded by that bucket's size,
+    -- never by the size of the store.
+    local admitted
+
+    if allowance > 0 then
+        local atThreshold = {}
+
+        for id, value in pairs(values) do
+            if math.floor(value) == threshold then
+                atThreshold[#atThreshold + 1] = id
+            end
+        end
+
+        table.sort(atThreshold, function(a, b) return tostring(a) < tostring(b) end)
+
+        admitted = {}
+
+        for index = 1, math.min(allowance, #atThreshold) do
+            admitted[atThreshold[index]] = true
+        end
+    end
+
+    local candidates = {}
+
+    for id, value in pairs(values) do
+        if math.floor(value) > threshold or (admitted and admitted[id]) then
+            local objective = build(id, source[id], value)
+
+            if objective then
+                candidates[#candidates + 1] = objective
+            end
+        end
+    end
+
+    return candidates, total, total - #candidates
+end
+
+------------------------------------------------------------
 -- IGNORE / DEFER
 ------------------------------------------------------------
 
@@ -655,8 +857,19 @@ end
 
 CN.ObjectiveKey = ObjectiveKey
 
+-- These two are called twice for every candidate a provider considers, which
+-- at retail scale is several thousand calls per rebuild. Each call used to
+-- build a "TYPE:id" string, so the common case -- both lists empty, which is
+-- true for most players most of the time -- was allocating thousands of
+-- strings just to look up nothing. Measured at 12ms per 10,000 pairs.
+--
+-- next(t) == nil answers "is this table empty" without touching a key.
 function CN.IsIgnored(objectiveType, id)
     local ignored = CN.Account("ignoredObjectives")
+
+    if not ignored or next(ignored) == nil then
+        return false
+    end
 
     return ignored[ObjectiveKey(objectiveType, id)] ~= nil
 end
@@ -674,14 +887,20 @@ end
 
 function CN.IsDeferred(objectiveType, id)
     local deferred = CN.Account("deferredObjectives")
-    local entry    = deferred[ObjectiveKey(objectiveType, id)]
+
+    if not deferred or next(deferred) == nil then
+        return false
+    end
+
+    local key   = ObjectiveKey(objectiveType, id)
+    local entry = deferred[key]
 
     if not entry then
         return false
     end
 
     if entry.until_ and entry.until_ <= time() then
-        deferred[ObjectiveKey(objectiveType, id)] = nil
+        deferred[key] = nil
         return false
     end
 
@@ -1451,10 +1670,44 @@ end
 
 -- Modules contribute actionable objectives by registering a provider.
 -- Each provider returns an array of objective tables.
+--
+-- options = {
+--     events   = { "QUEST_ACCEPTED", ... },  -- what makes this provider stale
+--     volatile = true,                       -- also expires on the clock
+--     cooldown = 5,                          -- rebuild at most this often
+-- }
+--
+-- cooldown is for providers subscribed to chatty events. CRITERIA_UPDATE and
+-- UPDATE_FACTION fire many times a second during normal play, and rebuilding
+-- a 3000-record provider on each one costs more than the answer is worth. The
+-- provider stays marked stale and rebuilds on the first collection after the
+-- cooldown expires, so the cost is bounded rather than the work skipped.
+--
+-- A provider that declares no events is treated as stale on every event. That
+-- is the safe default and the old behaviour, but declaring events is what
+-- makes an invalidation cost one provider instead of all nine.
 CN.candidateProviders = CN.candidateProviders or {}
 
-function CN.RegisterCandidateProvider(name, provider)
-    CN.candidateProviders[name] = provider
+function CN.RegisterCandidateProvider(name, provider, options)
+    options = options or {}
+
+    local events
+
+    if options.events then
+        events = {}
+
+        for _, event in ipairs(options.events) do
+            events[event] = true
+        end
+    end
+
+    CN.candidateProviders[name] = {
+        name     = name,
+        fn       = provider,
+        events   = events,
+        volatile = options.volatile and true or false,
+        cooldown = options.cooldown,
+    }
 end
 
 -- Decorators get a pass over every candidate after collection and before
@@ -1472,18 +1725,35 @@ end
 -- CACHING
 ------------------------------------------------------------
 
--- Fourteen providers now run on every /cn next, every window refresh and
--- every auto-advance tick, and several of them walk thousands of records.
--- Recomputing all of that several times a second was never the design; the
--- architecture notes called for cached state and dirty flags from the start.
+-- Measured against a retail-scale database -- 1800 pets, 3000 achievements,
+-- 500 factions, 2500 recipes -- the naive path cost 45ms to rebuild and,
+-- worse, 15ms on every single call even with the candidate list cached,
+-- because the whole list was re-scored and re-sorted every time. At 60fps a
+-- frame is 16ms. Hovering the minimap button was dropping frames.
 --
--- The cache is invalidated by the events that can actually change an answer,
--- with a short TTL as a backstop for anything that changes without an event
--- (a world quest timer ticking down, for one).
-local cache = {
+-- Three caches, each invalidated by the narrowest thing that can change it:
+--
+--   1. Per provider. NEW_PET_ADDED rebuilds Pets, not Achievements.
+--   2. The aggregate list, rebuilt only when some provider actually was.
+--   3. The scored and sorted list, reused until the aggregate or the
+--      priority mode changes.
+--
+-- Volatile providers -- world quest timers, live rares, weekly currency
+-- earning -- change without any event firing, so those alone also expire on
+-- a short clock.
+
+local providerCache = {}   -- [name] = { candidates, builtAt, dirty }
+
+local aggregate = {
     candidates = nil,
     builtAt    = 0,
-    dirty      = true,
+    generation = 0,
+}
+
+local ranked = {
+    list       = nil,
+    generation = -1,
+    mode       = nil,
 }
 
 CN.candidateCacheSeconds = 5
@@ -1492,15 +1762,55 @@ CN.candidateCacheSeconds = 5
 -- guessed at.
 CN.providerTimings = CN.providerTimings or {}
 
-function CN.InvalidateCandidates(reason)
-    cache.dirty = true
+-- What each provider dropped to stay inside its budget. Reported by
+-- /cn perf, because a cap nobody can see reads as "that is everything".
+CN.providerTruncation = CN.providerTruncation or {}
 
-    if reason then
-        CN.DebugPrint("Candidate cache invalidated: " .. tostring(reason))
+local function Entry(name)
+    local entry = providerCache[name]
+
+    if not entry then
+        entry = { candidates = nil, builtAt = 0, dirty = true }
+        providerCache[name] = entry
+    end
+
+    return entry
+end
+
+-- reason == nil invalidates everything. A named event invalidates only the
+-- providers that subscribed to it, plus any that declared no subscription.
+function CN.InvalidateCandidates(reason)
+    local hit = 0
+
+    for name, provider in pairs(CN.candidateProviders) do
+        if not reason or not provider.events or provider.events[reason] then
+            Entry(name).dirty = true
+            hit = hit + 1
+        end
+    end
+
+    if hit > 0 then
+        -- Deliberately NOT clearing the aggregate here. Marking a provider
+        -- stale is not the same as it having changed: a cooldown may hold the
+        -- rebuild off, or the rebuild may produce an identical list. Only
+        -- RefreshProviders knows whether anything was actually rebuilt, and
+        -- discarding the aggregate here would bust the ranked cache on every
+        -- QUEST_LOG_UPDATE for nothing.
+        if reason then
+            CN.DebugPrint("Candidate cache: " .. reason .. " invalidated " .. hit
+                .. " provider" .. (hit == 1 and "" or "s"))
+        end
     end
 end
 
--- Anything that can change what is actionable.
+function CN.InvalidateProvider(name)
+    if CN.candidateProviders[name] then
+        Entry(name).dirty = true
+    end
+end
+
+-- Anything that can change what is actionable. Which providers each event
+-- reaches is declared by the providers themselves.
 for _, event in ipairs({
     "QUEST_ACCEPTED",
     "QUEST_TURNED_IN",
@@ -1524,73 +1834,151 @@ for _, event in ipairs({
     end)
 end
 
-local function BuildCandidates()
-    local candidates = {}
+-- A different character means different Warband suitability, different
+-- character-scoped reputations and a different recipe book.
+CN:OnLogin(function()
+    CN.InvalidateCandidates()
+end)
+
+local function RunProvider(name, provider)
+    local startedAt = debugprofilestop and debugprofilestop() or nil
+
+    local ok, result = pcall(provider.fn)
+
+    if startedAt and debugprofilestop then
+        local elapsed = debugprofilestop() - startedAt
+
+        local timing = CN.providerTimings[name] or { calls = 0, total = 0, worst = 0 }
+
+        timing.calls = timing.calls + 1
+        timing.total = timing.total + elapsed
+        timing.worst = math.max(timing.worst, elapsed)
+        timing.last  = elapsed
+
+        CN.providerTimings[name] = timing
+    end
+
+    if ok and type(result) == "table" then
+        return result
+    end
+
+    if not ok then
+        CN.DebugPrint("Candidate provider " .. name .. " failed: " .. tostring(result))
+    end
+
+    return {}
+end
+
+local function RefreshProviders(force)
+    local now     = time()
+    local rebuilt = 0
 
     for name, provider in pairs(CN.candidateProviders) do
-        local startedAt = debugprofilestop and debugprofilestop() or nil
+        local entry = Entry(name)
 
-        local ok, result = pcall(provider)
+        local cooled = provider.cooldown == nil
+            or (now - entry.builtAt) >= provider.cooldown
 
-        if startedAt and debugprofilestop then
-            local elapsed = debugprofilestop() - startedAt
+        local stale = force
+            or entry.candidates == nil
+            or (entry.dirty and cooled)
+            or (provider.volatile
+                and (now - entry.builtAt) >= CN.candidateCacheSeconds)
 
-            local timing = CN.providerTimings[name] or { calls = 0, total = 0, worst = 0 }
+        if stale then
+            entry.candidates = RunProvider(name, provider)
+            entry.builtAt    = now
+            entry.dirty      = false
 
-            timing.calls = timing.calls + 1
-            timing.total = timing.total + elapsed
-            timing.worst = math.max(timing.worst, elapsed)
-            timing.last  = elapsed
-
-            CN.providerTimings[name] = timing
-        end
-
-        if ok and type(result) == "table" then
-            for _, objective in ipairs(result) do
-                table.insert(candidates, objective)
-            end
-        elseif not ok then
-            CN.DebugPrint("Candidate provider " .. name .. " failed: " .. tostring(result))
+            rebuilt = rebuilt + 1
         end
     end
 
+    return rebuilt
+end
+
+local function Decorate(candidates)
     for name, decorator in pairs(CN.candidateDecorators) do
         for _, objective in ipairs(candidates) do
             local ok, err = pcall(decorator, objective)
 
             if not ok then
                 CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
+                break
+            end
+        end
+    end
+end
+
+function CN.CollectCandidates(force)
+    local rebuilt = RefreshProviders(force)
+
+    -- Nothing was rebuilt, so the aggregate cannot have changed.
+    if aggregate.candidates and rebuilt == 0 then
+        return aggregate.candidates
+    end
+
+    local candidates = {}
+
+    for name in pairs(CN.candidateProviders) do
+        local list = providerCache[name] and providerCache[name].candidates
+
+        if list then
+            for index = 1, #list do
+                candidates[#candidates + 1] = list[index]
             end
         end
     end
 
+    Decorate(candidates)
+
+    aggregate.candidates = candidates
+    aggregate.builtAt    = time()
+    aggregate.generation = aggregate.generation + 1
+
     return candidates
 end
 
-function CN.CollectCandidates(force)
-    local now = time()
+function CN.GetCandidateCacheState()
+    local providers, fresh, dirty = 0, 0, 0
 
-    local fresh = cache.candidates
-        and not cache.dirty
-        and (now - cache.builtAt) < CN.candidateCacheSeconds
+    for name in pairs(CN.candidateProviders) do
+        providers = providers + 1
 
-    if fresh and not force then
-        return cache.candidates
+        local entry = providerCache[name]
+
+        if entry and entry.candidates and not entry.dirty then
+            fresh = fresh + 1
+        else
+            dirty = dirty + 1
+        end
     end
 
-    cache.candidates = BuildCandidates()
-    cache.builtAt    = now
-    cache.dirty      = false
-
-    return cache.candidates
+    return {
+        cached     = aggregate.candidates ~= nil,
+        count      = aggregate.candidates and #aggregate.candidates or 0,
+        dirty      = aggregate.candidates == nil or dirty > 0,
+        age        = aggregate.candidates and (time() - aggregate.builtAt) or nil,
+        generation = aggregate.generation,
+        providers  = providers,
+        fresh      = fresh,
+        stale      = dirty,
+        ranked     = ranked.generation == aggregate.generation,
+    }
 end
 
-function CN.GetCandidateCacheState()
+function CN.GetProviderCacheState(name)
+    local entry = providerCache[name]
+
+    if not entry then
+        return nil
+    end
+
     return {
-        cached  = cache.candidates ~= nil,
-        count   = cache.candidates and #cache.candidates or 0,
-        dirty   = cache.dirty,
-        age     = cache.candidates and (time() - cache.builtAt) or nil,
+        cached = entry.candidates ~= nil,
+        count  = entry.candidates and #entry.candidates or 0,
+        dirty  = entry.dirty,
+        age    = entry.candidates and (time() - entry.builtAt) or nil,
     }
 end
 
@@ -1598,23 +1986,66 @@ end
 -- RECOMMENDATION
 ------------------------------------------------------------
 
-function CN.Recommend(limit)
-    limit = limit or 1
+-- Scoring and sorting a few thousand candidates is not free, and every
+-- caller wants the same ordering. Keep the ranked list until either the
+-- candidate set or the priority mode changes.
+local function Ranked()
+    local settings = CN.Settings()
+    local mode     = (settings and settings.priorityMode) or "balanced"
 
     local candidates = CN.CollectCandidates()
 
-    for _, objective in ipairs(candidates) do
-        CN.ScoreObjective(objective)
+    if ranked.list
+        and ranked.generation == aggregate.generation
+        and ranked.mode == mode then
+
+        return ranked.list
     end
 
-    table.sort(candidates, function(a, b)
-        return (a.priorityWeight or 0) > (b.priorityWeight or 0)
+    -- Sorting a copy, not the aggregate. Callers that walk the candidate
+    -- list -- zone routing, for one -- must not have it reordered under
+    -- them as a side effect of somebody asking for a recommendation.
+    local list = {}
+
+    for index = 1, #candidates do
+        local objective = candidates[index]
+
+        CN.ScoreObjective(objective)
+
+        list[index] = objective
+    end
+
+    table.sort(list, function(a, b)
+        local left  = a.priorityWeight or 0
+        local right = b.priorityWeight or 0
+
+        if left == right then
+            -- Ties must break deterministically or the list shuffles between
+            -- refreshes and reads as flicker.
+            return tostring(a.id) < tostring(b.id)
+        end
+
+        return left > right
     end)
+
+    ranked.list       = list
+    ranked.generation = aggregate.generation
+    ranked.mode       = mode
+
+    return list
+end
+
+CN.RankedCandidates = Ranked
+
+function CN.Recommend(limit)
+    limit = limit or 1
+
+    local list = Ranked()
 
     local results = {}
 
-    for index = 1, math.min(limit, #candidates) do
-        table.insert(results, candidates[index])
+    for index = 1, math.min(limit, #list) do
+        results[index] = list[index]
     end
 
     return results
@@ -1677,7 +2108,7 @@ CN:RegisterCommand{
 CN:RegisterCommand{
     name    = "perf",
     order   = 90,
-    help    = "Show candidate provider timings and cache state.",
+    help    = "Show candidate provider timings, cache state and any caps hit.",
     handler = function()
         local state = CN.GetCandidateCacheState()
 
@@ -1686,14 +2117,21 @@ CN:RegisterCommand{
             .. (state.dirty and " |cffffff00(stale)|r" or "")
             .. (state.age and (" |cff999999" .. state.age .. "s old|r") or ""))
 
+        CN.Print("Providers: " .. state.fresh .. " of " .. state.providers
+            .. " cached, ranked list "
+            .. (state.ranked and "|cff00ff00reused|r" or "|cffffff00rebuilding|r"))
+
         local rows = {}
 
         for name, timing in pairs(CN.providerTimings) do
+            local cache = CN.GetProviderCacheState(name)
+
             table.insert(rows, {
                 name    = name,
                 average = timing.calls > 0 and (timing.total / timing.calls) or 0,
                 worst   = timing.worst,
                 calls   = timing.calls,
+                cached  = cache and cache.cached and not cache.dirty,
             })
         end
 
@@ -1709,9 +2147,31 @@ CN:RegisterCommand{
         CN.Print("Providers, slowest first:")
 
         for _, row in ipairs(rows) do
-            CN.Print(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)",
+            CN.Print(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
                 row.name, row.average, row.worst, row.calls,
-                row.calls == 1 and "call" or "calls"))
+                row.calls == 1 and "call" or "calls",
+                row.cached and "" or " |cffffff00stale|r"))
+        end
+
+        -- A cap nobody can see reads as "that was everything".
+        local capped = false
+
+        for name, truncation in pairs(CN.providerTruncation) do
+            if (truncation.dropped or 0) > 0 then
+                if not capped then
+                    CN.Print("Capped at " .. CN.providerCandidateCap .. " per provider:")
+                    capped = true
+                end
+
+                CN.Print("  " .. name .. ": showing " .. CN.providerCandidateCap
+                    .. " of " .. truncation.considered
+                    .. " |cff999999(" .. truncation.dropped .. " lower-valued dropped)|r")
+            end
+        end
+
+        if capped then
+            CN.Print("|cff999999Dropped entries scored no higher than the ones kept. "
+                .. "Full counts are in /cn breakdown.|r")
         end
     end,
 }
@@ -6718,7 +7178,7 @@ CN.RegisterCandidateProvider("Quests", function()
     end
 
     return candidates
-end)
+end, { events = { "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 2 })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -7220,6 +7680,8 @@ function Reputations.Scan()
         CN.character.reputationsScanned = time()
     end
 
+    CN.MarkScanned("reputations")
+
     return total, accountWide, characterSpecific, pendingParagon
 end
 
@@ -7468,8 +7930,17 @@ CN.RegisterCandidateProvider("Reputations", function()
         end
     end
 
-    return candidates
-end)
+    -- Two stores, so this one cannot be counted in a single pass; cap after
+    -- the fact instead.
+    local kept, dropped = CN.CapCandidates(candidates)
+
+    CN.providerTruncation["Reputations"] = {
+        considered = #kept + dropped,
+        dropped    = dropped,
+    }
+
+    return kept
+end, { events = { "UPDATE_FACTION" }, cooldown = 5 })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -7754,7 +8225,7 @@ function Achievements.Scan()
         end
     end
 
-    CN.Account("collectionScans").achievements = time()
+    CN.MarkScanned("achievements")
 
     return scanned, completed, nearlyDone
 end
@@ -7876,32 +8347,48 @@ end)
 -- achievement is a project, not a next action, and flooding the
 -- recommendation list with thousands of them would bury everything else.
 CN.RegisterCandidateProvider("Achievements", function()
-    local candidates = {}
+    local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
+        function(achievementID, record)
+            local criteria = record.criteria or 0
 
-    for achievementID, record in pairs(Store()) do
-        local remaining = (record.criteria or 0) - (record.done or 0)
+            if criteria <= 0 then
+                return nil
+            end
 
-        if record.criteria and record.criteria > 0
-            and remaining > 0 and remaining <= 2
-            and not CN.IsIgnored(CN.objectiveTypes.ACHIEVEMENT, achievementID)
-            and not CN.IsDeferred(CN.objectiveTypes.ACHIEVEMENT, achievementID) then
+            local remaining = criteria - (record.done or 0)
 
-            table.insert(candidates, CN.NewObjective({
+            -- A zero-progress achievement is a project, not a next action.
+            if remaining <= 0 or remaining > 2 then
+                return nil
+            end
+
+            if CN.IsIgnored(CN.objectiveTypes.ACHIEVEMENT, achievementID)
+                or CN.IsDeferred(CN.objectiveTypes.ACHIEVEMENT, achievementID) then
+                return nil
+            end
+
+            return 3 - remaining
+        end,
+        function(achievementID, record, value)
+            local remaining = (record.criteria or 0) - (record.done or 0)
+
+            return CN.NewObjective({
                 id              = achievementID,
                 type            = CN.objectiveTypes.ACHIEVEMENT,
                 name            = record.name,
                 accountWide     = true,
-                completionValue = 3 - remaining,
+                completionValue = value,
                 reasons         = {
                     remaining .. " of " .. record.criteria .. " criteria left",
-                    record.points .. " achievement points",
+                    tostring(record.points or 0) .. " achievement points",
                 },
-            }))
-        end
-    end
+            })
+        end)
+
+    CN.providerTruncation["Achievements"] = { considered = considered, dropped = dropped }
 
     return candidates
-end)
+end, { events = { "ACHIEVEMENT_EARNED", "CRITERIA_UPDATE" }, cooldown = 5 })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -8088,7 +8575,7 @@ function Pets.Scan()
         end
     end)
 
-    CN.Account("collectionScans").pets = time()
+    CN.MarkScanned("pets")
 
     return seen, owned, missing
 end
@@ -8195,36 +8682,48 @@ end)
 -- Wild pets are the only ones this addon can currently point at, because a
 -- wild pet's location is a zone rather than a vendor or a boss drop. Vendor
 -- and drop sources need the static database.
+-- Retail has around 1800 species, of which most players are missing several
+-- hundred. Emitting one objective per missing pet meant allocating a thousand
+-- tables per rebuild so that at most a handful could ever rank -- and they all
+-- score identically anyway, since none of them carries a location. Take the
+-- best of them instead, and report what was dropped.
 CN.RegisterCandidateProvider("Pets", function()
-    local candidates = {}
+    local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
+        function(speciesID, record)
+            if record.collected or record.obtainable == false then
+                return nil
+            end
 
-    for speciesID, record in pairs(Store()) do
-        if not record.collected
-            and record.obtainable ~= false
-            and not CN.IsIgnored(CN.objectiveTypes.PET, speciesID)
-            and not CN.IsDeferred(CN.objectiveTypes.PET, speciesID) then
+            if CN.IsIgnored(CN.objectiveTypes.PET, speciesID)
+                or CN.IsDeferred(CN.objectiveTypes.PET, speciesID) then
+                return nil
+            end
 
+            -- A wild pet is something you can go and catch; anything else is
+            -- a wish. That is the whole ranking.
+            return record.isWild and 2 or 1
+        end,
+        function(speciesID, record, value)
             local reasons = {}
-            local value   = 1
 
             if record.isWild then
-                value = value + 1
                 table.insert(reasons, "wild pet, catchable in the world")
             end
 
-            table.insert(candidates, CN.NewObjective({
+            return CN.NewObjective({
                 id              = speciesID,
                 type            = CN.objectiveTypes.PET,
                 name            = record.name,
                 accountWide     = true,
                 completionValue = value,
                 reasons         = reasons,
-            }))
-        end
-    end
+            })
+        end)
+
+    CN.providerTruncation["Pets"] = { considered = considered, dropped = dropped }
 
     return candidates
-end)
+end, { events = { "NEW_PET_ADDED" } })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -8392,7 +8891,7 @@ function Mounts.Scan()
         end
     end
 
-    CN.Account("collectionScans").mounts = time()
+    CN.MarkScanned("mounts")
 
     return seen, collected, missing
 end
@@ -8644,7 +9143,7 @@ function Toys.Scan()
         end
     end)
 
-    CN.Account("collectionScans").toys = time()
+    CN.MarkScanned("toys")
 
     return seen, collected, missing
 end
@@ -8831,7 +9330,7 @@ function Appearances.Scan()
         }
     end
 
-    CN.Account("collectionScans").appearances = time()
+    CN.MarkScanned("appearances")
 
     return #categories
 end
@@ -9000,7 +9499,7 @@ function Titles.Scan()
         end
     end
 
-    CN.Account("collectionScans").titles = time()
+    CN.MarkScanned("titles")
 
     if CN.character then
         CN.character.titlesKnown = known
@@ -9340,7 +9839,7 @@ function Professions.CaptureOpenProfession()
     store[skillLineID].recipeKnown  = known
     store[skillLineID].recipesAt    = time()
 
-    CN.Account("collectionScans").recipes = time()
+    CN.MarkScanned("recipes")
 
     return true, seen, known
 end
@@ -10285,7 +10784,7 @@ CN.RegisterCandidateProvider("Opportunities", function()
     end
 
     return candidates
-end)
+end, { events = { "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" }, volatile = true })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -11023,7 +11522,7 @@ CN.RegisterCandidateProvider("Rares", function()
     end
 
     return candidates
-end)
+end, { events = { "VIGNETTE_MINIMAP_UPDATED", "VIGNETTES_UPDATED", "ZONE_CHANGED_NEW_AREA" }, volatile = true })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -11247,7 +11746,7 @@ function Currencies.Scan()
         end
     end
 
-    CN.Account("collectionScans").currencies = time()
+    CN.MarkScanned("currencies")
 
     return seen, atCap, weeklyRemaining
 end
@@ -11366,7 +11865,7 @@ CN.RegisterCandidateProvider("Currencies", function()
     end
 
     return candidates
-end)
+end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -11973,7 +12472,7 @@ function Exploration.Scan()
         end
     end
 
-    CN.Account("collectionScans").exploration = time()
+    CN.MarkScanned("exploration")
 
     return seen, complete
 end
@@ -12098,7 +12597,7 @@ CN.RegisterCandidateProvider("Exploration", function()
     end
 
     return candidates
-end)
+end, { events = { "CRITERIA_UPDATE", "ZONE_CHANGED_NEW_AREA" } })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -12637,7 +13136,7 @@ function Vendors.CaptureOpenMerchant()
     -- The reverse index is now stale.
     itemIndex = nil
 
-    CN.Account("collectionScans").vendors = time()
+    CN.MarkScanned("vendors")
 
     return true, record.itemCount
 end
@@ -12660,6 +13159,36 @@ local function BuildItemIndex()
     itemIndexBuiltAt = time()
 
     return index
+end
+
+-- The candidate provider asks this question thousands of times per rebuild,
+-- once per known recipe, and almost always gets no answer. WhoSells allocates
+-- a result array every time it is called; this does not allocate at all until
+-- there is something to return.
+function Vendors.FirstLocatedSeller(itemID)
+    if not itemID then
+        return nil
+    end
+
+    local index = itemIndex or BuildItemIndex()
+
+    local npcIDs = index[itemID]
+
+    if not npcIDs then
+        return nil
+    end
+
+    local store = Store()
+
+    for _, npcID in ipairs(npcIDs) do
+        local record = store[npcID]
+
+        if record and record.mapID and record.x and record.y then
+            return record, npcID
+        end
+    end
+
+    return nil
 end
 
 function Vendors.WhoSells(itemID)
@@ -12758,12 +13287,10 @@ end
 -- The payoff: a recipe this character does not know, sold by a vendor whose
 -- location is recorded, becomes an objective with real coordinates.
 CN.RegisterCandidateProvider("Vendors", function()
-    local candidates = {}
-
     local professions = CN:GetModule("Professions")
 
     if not professions then
-        return candidates
+        return {}
     end
 
     local known = professions.CharacterRecipes() or {}
@@ -12771,43 +13298,57 @@ CN.RegisterCandidateProvider("Vendors", function()
 
     local playerMap = select(1, CN.GetPlayerPosition())
 
-    for itemID, recipeName in pairs(names) do
-        if not known[itemID]
-            and not CN.IsIgnored(CN.objectiveTypes.RECIPE, itemID)
-            and not CN.IsDeferred(CN.objectiveTypes.RECIPE, itemID) then
-
-            local sellers = Vendors.WhoSells(itemID)
-
-            for _, seller in ipairs(sellers) do
-                if seller.mapID and seller.x and seller.y then
-                    local reasons = {
-                        "sold by " .. tostring(seller.name),
-                    }
-
-                    if seller.zone then
-                        table.insert(reasons, "in " .. seller.zone)
-                    end
-
-                    table.insert(candidates, CN.NewObjective({
-                        id              = itemID,
-                        type            = CN.objectiveTypes.RECIPE,
-                        name            = recipeName,
-                        mapID           = seller.mapID,
-                        x               = seller.x,
-                        y               = seller.y,
-                        completionValue = 2,
-                        travelCost      = (seller.mapID == playerMap) and 2 or 25,
-                        reasons         = reasons,
-                    }))
-
-                    break
-                end
+    local candidates, considered, dropped = CN.CollectBounded(names, nil,
+        function(itemID)
+            if known[itemID] then
+                return nil
             end
-        end
-    end
+
+            if CN.IsIgnored(CN.objectiveTypes.RECIPE, itemID)
+                or CN.IsDeferred(CN.objectiveTypes.RECIPE, itemID) then
+                return nil
+            end
+
+            local seller = Vendors.FirstLocatedSeller(itemID)
+
+            if not seller then
+                return nil
+            end
+
+            -- A recipe you can walk to in this zone beats one across the
+            -- continent, and that is the only distinction worth ranking here.
+            return (seller.mapID == playerMap) and 3 or 2
+        end,
+        function(itemID, recipeName)
+            local seller = Vendors.FirstLocatedSeller(itemID)
+
+            if not seller then
+                return nil
+            end
+
+            local reasons = { "sold by " .. tostring(seller.name) }
+
+            if seller.zone then
+                table.insert(reasons, "in " .. seller.zone)
+            end
+
+            return CN.NewObjective({
+                id              = itemID,
+                type            = CN.objectiveTypes.RECIPE,
+                name            = recipeName,
+                mapID           = seller.mapID,
+                x               = seller.x,
+                y               = seller.y,
+                completionValue = 2,
+                travelCost      = (seller.mapID == playerMap) and 2 or 25,
+                reasons         = reasons,
+            })
+        end)
+
+    CN.providerTruncation["Vendors"] = { considered = considered, dropped = dropped }
 
     return candidates
-end)
+end, { events = { "MERCHANT_SHOW", "TRADE_SKILL_LIST_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 5 })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -13664,7 +14205,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.15.0
+## Version: 0.16.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -13805,6 +14346,22 @@ These are honest constraints, not oversights:
 
 None are required.
 
+## Performance
+
+The recommendation path is measured, not assumed. `bench.lua` runs the addon
+against a retail-scale database (1800 pets, 3000 achievements, 500 factions,
+2500 recipes) and times it; `/cn perf` reports the same figures live.
+
+Three caches, each invalidated by the narrowest thing that can change it:
+per provider, then the aggregate list, then the scored and sorted list. Each
+provider declares which events make it stale, so learning a mount does not
+rebuild the achievement candidates. Providers subscribed to chatty events
+(`CRITERIA_UPDATE`, `UPDATE_FACTION`) rebuild at most once every five seconds.
+
+Providers that enumerate an entire collection are capped at 60 candidates,
+chosen by counting rather than sorting, ties broken by ID. `/cn perf` reports
+what was dropped: a cap nobody can see reads as "that was everything".
+
 ## Development
 
 The addon is managed by `cn.ps1`, a PowerShell toolkit that carries the whole source tree inside it.
@@ -13850,6 +14407,76 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.16.0]
+
+Measured, not guessed. A benchmark against a retail-scale database -- 1800
+pets, 3000 achievements, 500 factions, 2500 recipes -- drove every change
+below. Numbers are from that benchmark.
+
+### Changed
+
+- **The ranked list is cached.** 0.15.0 cached the candidate list but still
+  re-scored and re-sorted every candidate on every call, so `/cn next` cost
+  **14.8ms** even with a warm cache. It is now **0.01ms**. A frame at 60fps is
+  16ms, which means the minimap tooltip added in 0.15.0 was dropping a frame
+  every time you hovered it. That was a regression I shipped, and this is the
+  fix.
+- **Invalidation is per provider.** Each provider declares which events can
+  make it stale, so learning a mount no longer rebuilds the achievement
+  candidates. `NEW_MOUNT_ADDED` went from **18.3ms to 0.02ms**;
+  `UPDATE_FACTION` from **6.6ms to 0.01ms**; `CRITERIA_UPDATE` from **8.5ms to
+  1.1ms**.
+- **Chatty events are throttled at the cache, not just at the scan.**
+  `CRITERIA_UPDATE` and `UPDATE_FACTION` fire many times a second during normal
+  play. Providers subscribed to them rebuild at most once every five seconds.
+- **Providers that enumerate a whole collection are capped.** Emitting 1200
+  uncollected pets so that one can rank first is waste, and every one of them
+  scores identically. The highest-valued 60 per provider are kept, chosen by
+  counting rather than sorting, with ties broken by ID so the list does not
+  reshuffle. Candidate count dropped from **3211 to 189**. `/cn perf` reports
+  exactly what was dropped -- a cap nobody can see reads as "that was
+  everything".
+- **Ignore and defer lookups short-circuit when nothing is hidden.** They were
+  building a `TYPE:id` string per call, several thousand times per rebuild,
+  to look up nothing. **12ms to 3.5ms** per 10,000 pairs.
+- A full rebuild is down from **45.2ms to 16.5ms**, and now only happens on a
+  scan or a login rather than on every event.
+- Ranking sorts a copy. Zone routing walks the candidate list, and having it
+  reordered underneath as a side effect of somebody asking for a
+  recommendation was a bug waiting to be found.
+
+### Fixed
+
+- **`release` no longer half-applies.** It bumped the version files and *then*
+  checked the changelog, so a stale `CHANGELOG.md` left the tree claiming a
+  version whose source had never been scaffolded -- and said so in a yellow
+  warning that scrolled past. Every refusal now happens before anything is
+  written, and says "nothing has been changed" out loud.
+- **A failing `check` aborts the release** instead of printing above it and
+  carrying on.
+- **`cn.ps1` stamps the version it carries.** A `cn.ps1` older than the tree
+  used to scaffold a previous release over the top and report success. `check`
+  now fails on it, and `release` refuses a version this file does not carry.
+- **An existing tag is detected** rather than letting `git tag` fail into the
+  middle of a release.
+- **Push failures are caught.** `git push` and `git push --tags` are checked,
+  so a tag that never reached the remote is reported rather than assumed.
+- git's stderr is rendered as its message rather than
+  `System.Management.Automation.RemoteException`.
+- **`init` scaffolds `Media\Logo.tga`.** A fresh scaffold previously failed its
+  own `check` on a missing IconTexture, which then blocked `release`.
+- Rescanning a store no longer invalidates every provider -- only the ones that
+  read it. Mounts, toys, appearances and titles feed no candidate provider at
+  all, so scanning them now invalidates nothing.
+
+### Added
+
+- **`.\cn.ps1 doctor`** reports the whole release chain in one place: toolkit
+  version, tree version, changelog section, HEAD, tags at HEAD, uncommitted
+  changes, remote, and whether the expected tag has actually been pushed. Written because diagnosing a release that silently did nothing
+  meant assembling five separate commands by hand.
+- `/cn perf` reports per-provider cache state and any caps hit.
+
 ## [0.15.0]
 
 ### Added
@@ -13876,11 +14503,10 @@ Authored by Travis A. Bryan I.
 
 ### Changed
 
-- **Candidates are cached.** Fourteen providers were being rebuilt on every
+- **Candidates are cached.** Nine providers were being rebuilt on every
   `/cn next`, every window refresh and every auto-advance tick, several of
   them walking thousands of records. Results are now held for five seconds
   and invalidated by the sixteen events that can actually change an answer.
-  This is what makes a recommendation cheap enough to put in a tooltip.
 - `/cn perf` reports cache state and per-provider timings, slowest first, so
   a slow provider can be identified rather than guessed at.
 
@@ -14329,6 +14955,749 @@ $Embedded['.gitattributes'] = @'
 *.zip   binary
 '@
 
+$EmbeddedBinary = [ordered]@{}
+
+$EmbeddedBinary['Media\Logo.tga'] = @(
+    'AAACAAAAAAAAAAAAgACAACAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEgAAACcAAAA6AAAASgAAAFgAAABjAAAAawAAAHAAAABzAAAAcwAAAHAAAABrAAAAYwAAAFgAAABK',
+    'AAAAOgAAACcAAAASAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJQAAAEgAAABoAAAAhgAA',
+    'AKIAAgS6AAUJ0AAID+MACxb0AA4b/wARIP8BEyT/ARUm/wETJP8BEyT/ARQn/wEUJf8AESH/AA8c/wALFvQABw/jAAUJ0AABA7oAAACiAAAAhgAAAGgAAABI',
+    'AAAAJQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACIAAABQAAAAewAAAKQAAwbLAAkS7gEQIP8BFSn/ARgv/wEbNP8AGjT/ABgx/wAVL/8AFC3/ABMs/wAT',
+    'LP8AESn/AA8n/wAPJ/8AESr/ABMt/wAVL/8AGDL/ABk0/wAaNv8BHjn/AR02/wEZMP8BFiv/AREh/wAKE+4AAwbLAAAApAAAAHsAAABQAAAAIgAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKgAAAGAAAACU',
+    'AAIExQAIEPQBEB7/ARcs/wAbNv8AGzb/ABYw/wARKP8ADSH/AA8i/wASJf8CFyr/BR4w/wglOP8KLUH/DjRI/xA6UP8UOk//EjhN/w84Tf8LMkf/Cy1B/wgm',
+    'Of8FHjD/Ahcq/wASKP8AECj/ABEq/wAUL/8AGjn/AB8//wEgPv8BHDT/ARUm/wAKE/QAAgTFAAAAlAAAAGAAAAAqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    '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',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAnAAAAewABAc0ADBf/',
+    'ARcs/wAWLP8ADyH/ARMm/wQgOf8ILE3/BzJX/wUtUv8DKU3/AyhM/wQoSv8DIDv/BBYn/wMKEf8FBQT/BwMA/wkDAP8LBQD/DgkC/w0KBP8NCgb/EQ4I/xAO',
+    'Cf8PDQn/Dg0I/w4MCP8ODQj/DQwI/w4NCf8PDgn/Dg0I/w4NCf8ODgr/DQ0J/w4NCf8PDQj/CgcD/woEAP8JAQD/CAAA/wcEAP8HEA//CSQv/wtCXf8LVH//',
+    'C2Od/wlio/8MZKX/FW+n/xx6o/8aaIb/CzhQ/wAXLv8AFTH/ASND/wIkQf8BEyL/AAECzQAAAHsAAQEnAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEKAAAAYwAAALoACBH/ARUp/wEWK/8BDh3/AQ4e/wIaMv8EJ0b/BCRB/wAaMv8AGDD/',
+    'ARoy/wEYLf8CESD/AwcL/wUCAP8HAwD/CwcB/w0KBv8ODAj/DgwI/w4MB/8ODAj/DgwI/w4NCP8RDwn/CwkE/w4LBv8ODAb/EAwH/w4LBv8PDAf/DQsG/w0L',
+    'Bf8OCwb/Dw0J/xAOCv8PDQj/DQsG/wwKBv8NDAf/DQwI/w0MCP8NDAn/DAsH/wwHAv8KAwD/CAEA/wYIBP8HHiX/Cj9W/wpSfv8HVIz/CFOQ/w1dlv8YcJ7/',
+    'FWmN/wk8Vf8AFy3/ABMs/wEmR/8CI0D/AA0Z/wAAALoAAABjAAEBCgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAPQAAAJkABAn0ARMk/wEXLf8BDx//AQsZ/wESI/8CGCz/ARYp/wAPHv8AECH/ABEj/wANGf8ABQn/AgEA/wYBAP8JBQH/CwkF/w4LB/8OCwf/',
+    'DQoG/w0KBv8NCgb/DgsG/w8MB/8OCwf/DwwH/xIQC/8NCgX/DAoG/xANCP8RDgj/EA0H/w8MB/8PDQf/EA4I/xAOCP8QDAb/DgsG/w8MBv8PDgn/Dw0J/w4L',
+    'B/8OCwb/DwwH/w0KBv8MCgb/DQsH/w0MCP8NDQn/DAoG/woDAP8IAQD/BgwL/wUnNf8HRmb/BlCC/wRIg/8JUYj/D2eU/xJnh/8NPlX/ABMq/wAZNv8BKEn/',
+    'AR43/wAGC/QAAACZAAEBPQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEBCgAAAGsAAADLAA0a/wEZMP8AEiX/AAsZ/wAN',
+    'HP8ADRr/AAoV/wAGD/8ABQ7/AAcQ/wAGDP8AAgP/AQAA/wQCAP8HBQP/CQcF/wsJBf8KCAX/DAkF/wwJBf8NCgb/DgsG/w4LBv8PDAf/EA0H/xANB/8QDQj/',
+    'ERAL/xEPCv8TEgz/ExMO/xESDv8QEQ7/EBIP/xITD/8SExD/EA4I/wsRE/8IFiD/DA4N/w8MBv8QDwv/EBAM/w8PC/8PDAf/DgsH/wwKBv8NCwb/DgsG/w4M',
+    'B/8NDAj/DAwI/w0NCf8NCQX/CgIA/wYEAP8EHCP/BT1b/wVIdv8DQXb/BkN2/xNkjv8Yaob/CTRO/wATLP8AHz7/ASdI/wESIf8AAADLAAAAawABAQoAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAS8AAACUAAQJ9wEXLf8BGTH/AA8f/wAQIP8ADhz/AAcQ/wEFDP8AAwf/AAAC/wAAAP8AAAH/AAAA/wAA',
+    'AP8CAgH/AwMC/wYEA/8HBgP/CQcD/woHA/8KCAX/CwgF/w0KBv8OCwb/DwwG/xAMB/8PDQf/DwwH/xAOCP8SDwr/DgsH/xANCP8SDwr/DQwI/w0MCf8REAv/',
+    'EA4I/xEOB/8PCwT/BxQc/wQWI/8KFBn/EQwE/w8MBf8RDgj/ExQQ/xAQDP8QDgr/EA8L/xAOCf8QDgn/DgwI/w0MCP8MCgf/DAoG/wwKBv8NDQn/DAsH/wgC',
+    'AP8GAwD/AxQb/wM1UP8EQm3/Azdp/whCcf8TZIv/Eld2/wMhOv8AFTD/ASdJ/wEeOv8ABQn3AAAAlAABAS8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQ',
+    'AAAAtwENGf8BHTj/ABQq/wAPIf8CHDP/ABEh/wEHDv8FGzP/Ahox/wEPH/8DGzH/AQwX/wAAAP8AAAD/AAAA/wEBAf8BAgH/AwIB/wUEAv8HBQL/CAYD/wgG',
+    'A/8KCAT/DAkF/wwKBf8MCQX/DgwG/w8MB/8OCwb/DwwH/xMQCv8PDAf/DQsH/w8NCP8RDwn/EhEM/xEQDP8LDQv/DQ4N/woSF/8FFB//BA4W/wUTHv8MFx3/',
+    'DBUZ/woNDf8TDQT/EhAL/xAOCP8QDQb/EA4H/xISDv8QEg//DQ0J/w0LB/8MCwf/DgwI/w4MCP8MCgb/Dg4K/wwLCP8KBQD/BgIA/wIWHv8DOlv/BD5q/wIz',
+    'Yv8LS3j/FWuO/wo+Wv8AFC7/ACJD/wIpTP8BDhz/AAAAtwABAVAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAawAAANYAEyX/AR47/wASJf8EGi//ByhF/wIXKv8BBAr/',
+    'Axoy/wESJv8ACRT/AAMH/wMXKv8EJEX/Ahoy/wAID/8AAAD/AAAA/wAAAP8BAQH/AgIB/wUEAv8FBAH/BgUC/wcFAv8JBwP/CgkF/woIBf8LCAT/DAkF/w0K',
+    'Bv8ODgr/ERAL/xANB/8PDAf/Dg0H/w8NCP8SEAr/EQ0G/wkVHP8FGCf/BRQe/wQUIP8GGyv/BRUi/wQTHv8EEx7/BhYj/w0QD/8RDgj/Dg0J/wgWIP8LExf/',
+    'Eg0F/xQSDP8QDwv/DgwI/w8NCf8ODQn/Dw0J/w8NCf8REAv/DQsH/w0MB/8MCgb/CQMA/wUEAf8DIC7/BT1i/wI3Zf8DNGD/EFmB/xBbe/8CITz/ABw5/wMv',
+    'Vf8BGC3/AAAA1gAAAGsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAEBEgAAAIEAAwbuARox/wEdOf8ADyL/CCpF/wo0Vf8BFCb/AAUM/wMUJv8BFCj/Ag8d/wESIv8AAgT/AQwX/wMfPP8CGzf/',
+    'Ah04/wMgO/8CER//AAMG/wAAAP8AAAD/AAEB/wICAf8CAgH/BQQC/wYFA/8IBgP/CAYD/wgGA/8KCAT/DAsI/w0MCP8NDAf/DQsG/xEPCf8SEQv/EhAL/xIP',
+    'Cf8RDAX/Cxsk/wUVIf8FFSL/CCA0/wgiNv8IHzH/Bxsr/wUWI/8EEx7/BRgm/wcWIP8FFB3/AxMg/wYXJP8JExr/Dw4K/xISDv8QDwv/DgsH/w4MCP8PDQn/',
+    'Dg0J/xEQC/8ODQj/DQsH/w0KBv8MCwf/CggF/wcBAP8CCQv/AitD/wQ7Zf8CLFf/CUVw/xhoi/8JNFL/ABUy/wIsUv8DIj3/AAIE7gAAAIEAAQESAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAR8AAACRAAcP/wEg',
+    'Pf8AGTT/ABMn/ww3WP8LNlr/ARgv/wAOG/8BCA//Axsy/wEQH/8BFSj/AhIh/wEVKf8EGC3/Bi1T/wMdOP8CHTj/Ax87/wMhQP8DIUD/Axcr/wEHDv8AAAD/',
+    'AAAA/wAAAP8BAgH/AwMC/wQDAf8FBAH/BgUD/wkJBv8IBwP/BQgI/wUMD/8GDRL/DQoE/xEOCP8SDwj/EA4H/wsXHv8IHCv/Bxkm/wkjOf8IIDT/CSM6/wgh',
+    'Nv8KJz7/CSc+/wcfMf8FFCH/BBMf/wUaKf8HGyr/BBId/wYXJP8ODw3/EhMP/w8QDP8ODQn/DQwI/w0MB/8ODQj/ERAL/w8NCP8ODAj/DQsG/wwJBf8LCAX/',
+    'CgkG/wkFAv8EAAD/Axgk/wU8Yf8DMVv/Bzdi/xlljv8UTWv/ABUy/wIpTf8DJ0n/AAYK/wAAAJEAAQEfAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQEnAAAAnAALFf8CJEL/ABUu/wMaMf8RSGz/CTRZ/wEbNP8BFCb/AAMH/wMR',
+    'Hv8FITz/ARMj/wAKFf8GJD7/ARct/w0rSP8QPmz/CjFa/wkvVP8FJET/Ax48/wMdOf8DIUD/BCRD/wQdNv8CDxz/AAMF/wAAAP8AAAD/AAAA/wICAf8DAwP/',
+    'AwMC/wMDAv8BBwr/AgoR/wIME/8GDRH/CQ4Q/woSFv8JGib/Bhop/wYVIP8KJz3/DCpC/wspQP8KIzj/CilB/wonPv8JJTv/Cic+/wooQP8JIzj/CiQ3/wsj',
+    'N/8GFiP/BxUd/xANBv8QDwr/DxAN/xARDv8NDQn/DAoG/wwLBv8PDQn/DgsH/w0LB/8NCwf/DQwJ/w0MCP8MDAn/DAsI/wkIBv8GAQD/AwoO/wQwS/8GOmb/',
+    'Ay9b/xZgiP8VWXz/ABs5/wInSv8ELlT/AQkR/wAAAJwAAQInAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAEBKgAAAKIBDRn/ASVF/wASKf8GIjj/F1V6/wo0W/8DIT//ARYp/wAECP8AAAD/ByI8/wcmRf8EGy7/AAUN/wAAAP8CCA//HViF/xpZ',
+    'kf8WUoj/FEp5/xFCcf8OOWb/BypQ/wUjRP8EID3/Ax89/wQkRf8EIT7/Ahcq/wELFf8AAwX/AAAA/wAAAP8AAAD/AAMF/wADBv8ABAb/AQcL/wEJD/8DDRb/',
+    'BBMf/wUSHP8HFyL/CSI1/wokOf8KJTr/DS5J/wwuSf8JJDr/CSU9/wcbLP8GGin/CSU8/wolOv8KIjT/DCc8/wcZJv8FEx7/Cw8Q/w4LBf8KDAz/CgoI/wwL',
+    'B/8MDAj/CgkF/w0LB/8LCQX/DAoH/w4PC/8PDQj/DQsH/w0NCf8ODQr/DAwJ/wsLCv8JBgL/AwEA/wMgNf8GOmH/Ay1Y/xJSfP8ZYoT/AiA//wEjRv8EMFf/',
+    'AQoU/wAAAKIAAQIqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAScAAACiAA0b/wIlRf8AESf/',
+    'CSlA/xtgh/8JMVT/BCRD/wMcMv8AAwf/AAAA/wEDBf8NNVr/CSxP/wgjPv8IGyv/Eig3/zJ4pP8+l9H/NIW6/zKFu/8tfrX/JWuj/xZQhP8TToP/EEFw/w04',
+    'Yv8JL1X/BCA+/wMeO/8CHzv/AyE//wMgPf8CGS//AQ8c/wEHDf8AAQL/AAAA/wAAAP8AAAD/AAMF/wMKEP8FERv/Bxkm/wgcLP8KIjX/CSAy/wwpQP8MLUX/',
+    'Cy5I/wwrQv8KIzf/DS1G/wopP/8IIDP/CiI1/wokOP8KJDj/CB4v/wQQGf8EEh3/BAwS/wQRGv8ECw//BgUB/wgIBP8KCQb/CgkG/wsLB/8NDAn/DQsG/wkL',
+    'Cv8GDhP/CA0P/w0LBv8NCwf/DQ0J/wwNC/8KBwT/BAAA/wMWIv8GOWH/BDFd/w5Jcv8daIr/BCRE/wEjR/8EL1j/AQoT/wAAAKIAAQInAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    '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',
+    'P/8KM1r/Dz5h/x1ojP8CJUr/CThj/wQdNv8AAADLAAECPQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAQoAAACZAhcr/wMoSv8BFzD/E1V+/wk2X/8EKEr/Axos/wMAAP8KCAT/CwgE/wsJBP8NCgX/DgwH/wgH',
+    'A/8FAwD/AwcL/x9gj/8daKP/LYG8/zSFuP8FJED/BCNB/wUrT/8URGf/OZLG/zaOxP9Bn9X/QZzS/zqUyf8+ksX/Oo/D/ziOw/8+l8v/RJ/T/zuRxP8uean/',
+    'HFaC/w88Y/8HLE3/G12P/x5lnf8VToD/EUBp/wcJCf8KDgn/ChEN/wwVEv8KEQ3/CRAM/wQFAP8AFin/BT1n/wMrTP8ADRz/BgcB/wsQDP8JERH/DBsh/w0Z',
+    'GP8KEQ7/BxAT/wYPEv8BAQD/AxIf/w81Vf82ZYj/HjE+/xMDAP8bEg//Gg8K/wsMDv8LO2D/Cz5l/wMKEP8VDAj/GBIP/w8AAP8dND7/OnSY/wosT/8AFCb/',
+    'AQEA/wIHCv8EDRP/BREZ/wgZJv8JGyj/CR0t/wYXIv8LGCH/EhAK/xISDv8QDQj/DwwH/w4MCP8MCQX/BAYH/wowUf8HLVL/F1J0/xdWe/8CI0n/Cjxp/wEM',
+    'Ff8AAACZAAEBCgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAYwEJEfQFLlP/ABMt/w9Haf8SS3X/AiRI/wMjQP8BAgT/CgcD/wwKBf8LCQX/DAoF/w0KBf8MCwb/BgUC/wMDAv8AAAD/Gkdl/yNzr/8tf7b/NIvB/x5R',
+    'dP8ygbH/IV2E/wMhQP8xgrP/OpPK/0Wg0/9Gm8z/TajY/0Gd0f9EoNT/PpTH/zeIuv85ibz/OpDE/ziQx/8zib//LX60/yZtoP8ia6H/H2KW/xdXj/8OMUv/',
+    'BgEA/woMCf8NEAv/Cw4I/wkNCf8IDAj/AwUC/wEkQ/8FPmj/AipL/wAVLP8DAwD/CQ0K/wsRDP8LEQv/ChIO/wsSDv8JDgv/AwMA/wINFv8OM1P/MWOJ/x0v',
+    'O/8UBQD/GxMP/xoSD/8dDAL/FEdn/xl1vP8YcLH/DDpc/xYHAP8bEg7/GhIP/xECAP8ZLjj/NW2P/wkpSP8ADyD/AgIB/wUPFf8HFiH/CRwr/wshMv8KHCv/',
+    'CRom/xARD/8TEg3/EhIO/xANBv8QDQj/DgsG/w8NCf8KBQD/Aw8Y/ww3Wf8KMFH/H2WJ/wk5Yf8FLVb/CDJX/wAAAfQAAQJjAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAScAAAG6BCZF/wEgQP8DKkr/EFiE/wMkR/8EKUv/',
+    'AQsT/wYCAP8KCQX/DAkF/w4LB/8NCwf/CwkF/woJBv8GBQL/AQEA/wkZJ/8bUHb/Jm+n/zWLxP83jcX/PpnR/zqWzv8ygK//AiNC/yVgh/9JrOH/Po+//xZM',
+    'ef8oaZb/OYOw/0SXxf9Np9j/R6TY/zaMwP8yg7b/NYq//zGFvP8tfrb/LXmw/yh0q/8cXpL/DS9M/wQJDP8KCQX/CgoG/woMCP8KCgb/CQoH/wUEAf8BChD/',
+    'AClR/wVCbf8DLE7/AB07/wEGCP8GBQH/CAsI/wkNCf8KDgn/Cw4K/wgKBf8HEBX/DC5L/y1egP8cNUb/FAQA/x0UD/8ZEAv/IhcT/x8NBf8/Y3L/OaPg/yCJ',
+    'zP8XQF3/HwwD/x4UEP8WDgr/GBIP/xIDAP8ZMT3/MWeL/wckP/8BDxz/BgwP/wkaJf8IFiD/Ch4t/wkbKf8JHSz/DxMU/xUSCf8UGBf/EhQQ/xISD/8REAz/',
+    'DgwH/w4NCP8FAAD/ByI2/ww4Xf8NOVr/GmKH/wImS/8KOmf/BBku/wAAALoAAQInAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAewIRIP8DK1H/ABo0/w5Ufv8HNVz/BCtQ/wIXKf8DAAD/CggE/wwJBf8NCwf/DgwH/w4MB/8KCAX/',
+    'BwcF/wIBAP8FCxH/JWyi/yZ5t/8uf7f/MIa+/zSOyv8/mc//Oo/F/0Kc0f8TPFz/Cy5M/0mk1P9DmMn/Mnah/x9biP8UTn//E0h3/x9Zhv8uc6D/O4y7/z6W',
+    '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',
+    'cv8IHS7/CwMA/w8KA/8QCgL/EAoC/w8JA/8OCgT/CAIA/wIGCv8AGS//Ahgn/wIUIf8AEB//AA0a/wEPG/8BDBf/AQ0b/wEBAv8FAAD/CAQA/wwJBf8IAAH/',
+    'ECw+/ylmlP8NGiX/IxUO/y8hHP80JSH/OSom/z4zMP8zJCD/NnuX/0XL/P82vvb/J2OA/yENBv89LCf/NCQe/yocFv8kGBT/Hg8H/xIfK/8bU3//FSg9/yAR',
+    'Bv8XICT/Gicr/yAyOP8mP0z/IjtL/xQnNP8TKDb/Eyw9/xc2Sv8MIC3/Dhsj/yEUAv8lHRD/FBAI/xQPB/8UDwj/EA0H/wwHAv8ECQz/DTJP/wwuTP8XXoT/',
+    'Bzdj/wpAb/8FHjL/AAAAtQABAhcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVQEMFvQFMFf/AyJB/xFSev8FKEb/BCdF/wEM',
+    'FP8FAgD/DAoG/w4MB/8PDQn/Dg4J/woKBv8GAwD/AgwX/wIXL/8CFin/ARYs/wADCf8HJUD/Bi5W/wQiQP8DGTD/AQ8f/wAOHv8BFiv/BCJA/wkxWf8MOmj/',
+    'D0J0/xZTi/8bXZf/HWOf/yBlnv8iaqL/JnOs/yp4sv8sebH/Ln20/ypzp/8hX47/HlqK/xE6X/8DGzP/BiRB/wQFBv8JBAD/CgYB/wkFAP8GAgD/AwAA/wAD',
+    'Bf8ACRP/ABEg/wEZLv8AHTX/ASA6/wEkQv8BJkT/AiVA/wEiO/8BGzH/ABcp/wANF/8AAwb/AgAA/wEAAP8QLkL/LGua/wwYIv8iFQ7/MiQf/zIkIP86LSr/',
+    'RTw7/zUrKf9BlrX/U9b//0XI+f8we53/Hw4K/z4tJ/8wIh3/LB4Y/yUZFf8cDwj/ERwn/xxPd/8eKjr/NhYD/yQeGP8tFw//LR8b/yc0OP8iNT//Gi87/xYt',
+    'Ov8SJjL/FCs5/w8hLf8MHSf/FxML/ykfD/8bFQv/GhUM/xYSCf8TDwn/DwwH/wQBAP8KJDb/DC9N/xVIZv8QUHr/BTFf/wk3Xv8AAAH0AAEBVQAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACRBB86/wMmSf8INlf/Dkpv/wIfPv8EHzf/AgEB/woIBP8MCgb/DgwH/w4MB/8ODQn/DAoF/wgG',
+    'Av8CEyT/ABQr/wEQIP8BDRn/ARUs/wcgOP8GLlX/AyVL/wUrVP8FKk7/BCE//wIYLv8AECD/ABEi/wEWK/8DID//By9Y/ww7av8PQHH/E0yA/xdWjf8bXZX/',
+    'IGSc/x9km/8eYpj/IGSZ/yFkmv8dV4n/Dzhe/wYlN/8ACRH/AQAA/wMCAP8BAAD/AAED/wAKFf8AFSr/AB88/wAlSP8AKU//AChP/wAnUf8AJlH/AChU/wAq',
+    'Vv8ALFn/AC5d/wAwXf8ANmX/ATln/wIsUP8BGzP/AAYN/xAvQ/8vb57/DBkj/yEUD/8wIx7/MyYi/zouLP9NRUT/NTU4/1Kx0f9j3f7/TtD8/z2UuP8ZDw7/',
+    'QS8o/zcmIf8oGxb/IBYS/xsPCP8QHCj/IFF4/xImN/8hEQT/TR8K/6dbGf+lXiP/UC0h/zM8P/8hND7/GjNB/xQnMv8bNkf/EiUy/wodKP8TJCz/KRwK/x8Z',
+    'Df8YEgn/Ew8I/xENB/8PDAf/CQUA/wUQFv8ONVX/DTNP/xhghv8GMFr/CkBv/wIOGv8AAACRAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAKgADBssFLFD/AR49/w9Ncf8HMlT/AyRF/wAOGv8FAQD/DAoH/w0LB/8OCwf/DQsG/w4NCf8NDAj/CgoI/wQaL/8AESX/AQ8d/wkkOf8EJkf/EkFq/xJR',
+    'iv8PP2z/Cjln/wUuWv8FL1n/BSxR/wMfPf8CHz3/Ahgw/wEQIf8ADh//ARcu/wQiQP8HLE//CjZg/w09bf8RRXb/FEyA/xROgv8WToH/FUx8/xVKev8IKEn/',
+    'DTRE/xdJYP8AAAD/AQID/wAIEf8AEiT/ARoz/wAdOf8AHDv/AB8+/wMpSf8JNFL/Djxa/xVMcP8URGT/Gklo/yBSdf8SQ2b/DT1k/wYzW/8ALFn/ACtZ/wAy',
+    'X/8BHjr/DzNK/yVikP8DDhf/GRAK/y8jHv8yJiP/PTEv/0E5Of9GRUn/e9Dp/17f//9Q1///R67W/yAaH/86KSL/MyUg/ywdGf8hFxP/FAkD/wcQGv8bR2z/',
+    'DiU4/zEaBP9wKgn/8rtJ///xY//Gejb/ZDgk/y88Qf8gND//HjZE/xowPv8SJjL/Eic0/xseG/8xIAz/IBcK/xkRBv8XEQj/Eg0G/w8MBv8OCwX/BgQC/wss',
+    'RP8KK0n/FlZ2/wxDbP8IOWj/BihF/wAAAMsAAQIqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABgAhAe/wQsUf8EKkv/FFN5/wQjQv8DIz7/',
+    'AQQG/wgFAf8NCwf/DgsG/w0MCf8ODwz/DhEP/w0QDv8NDgr/Bx0w/wAKF/8DEyL/CCtJ/wAOIP8aTGr/IXOu/x1rp/8dY5v/Gl+Y/xdVi/8OQXH/CTRe/wc1',
+    'Y/8FMmD/BCpQ/wMfPv8BFCr/ABAi/wAPH/8AESL/Ahkx/wQhPf8HKk3/CTJZ/wozW/8LNl7/CjJZ/wUlRf8BEiH/K3CJ/wglPv8AAwv/AQkU/wAPHf8BEiT/',
+    'Ax44/wgzU/8RRWT/FEts/xdRdv8YV3//EEJl/xhWeP8XRWH/HlJ2/yl1pP8veqj/Mnei/zNxmf8kX4f/DTxj/wAXMP8RN1P/VZjB/yhEWf8AAAj/DQkG/zAm',
+    'IP8+MzH/Qzs7/0A5Of9yhY3/g9/0/3Tf+v9AdIv/NiUi/zkqJf8tIBz/JBgS/w8IBf8AAgf/FCY3/zhpjP8lO03/QyUK/1EtFf+oVB//981g///vav/Ffzb/',
+    'Wj4v/y9FT/8lP03/EiMs/xgnLv8uHw3/MR8K/ykbCv8eEwb/HxUJ/xoSCP8VEAf/Eg4H/xANCP8JAwD/Bhck/wouTP8QPl3/FVyG/wUxXP8LPWb/AAIE/wAA',
+    'AGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJQFIj3/AiRG/ws/ZP8OQ2j/ASA//wIaLv8DAQD/DAoG/w0LBv8ODQn/DxMT/xAQDf8QEAz/',
+    'ERAM/wsMCv8GGSr/AAgV/wAEC/8AAAD/KUlc/02x5f9CntP/QprN/z2Txv8pfrf/Kn65/yNyrf8fa6b/FlaM/xFKfv8LPW//CTVh/wcxXP8GLlb/BSdK/wMe',
+    'Ov8CFSz/ARAi/wAOH/8ADyD/ARMm/wEVKf8BFi3/Ah45/wAABf8UTWD/JmmO/wAULP8BBAj/AAkT/wEaMP8DJD7/BCQ8/wQjPP8FIj3/CSU9/wwfMf8AFSv/',
+    'ElJ6/wgzU/8AESL/EjJI/xhKaP8dY4z/J3en/zOFtf85g6//KmKF/yVJXv9WlrD/Xcfz/0eKqv8VKTz/AAAE/xoVEf84MC3/QDo7/0A4Ov9ZVVf/T05P/z0u',
+    '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',
+    'Dv8UO1b/DB4r/wUBAP8PEQr/ExYO/xEZFP8RGBH/ESAl/w4hLP8XMDz/HTZF/yE1P/8rPkX/STw2/8CMUf/wwWb/ZEMt/yg9Rv8iPEr/Fy47/xQtPf8TKjr/',
+    'Chwn/wwWG/8fGAz/GRUM/xANB/8MBwH/BAoO/wkpQ/8KLUX/Fll//wU0Y/8KPGn/AQQH/wAAAGgAAAAAAAAAAAAAAAAAAAAAAAAAhgQfN/8BJEj/DEFm/wo6',
+    'Xf8CJUj/ARYm/wMAAP8NCwf/EA4J/wwPDv8EEh//Bxwz/wkhOv8KJUH/DSxM/w0tTf8OMlP/DzNV/wwoRP8RN1j/GUlx/xhHbP8ZRmr/DzFK/wokNf8LHiD/',
+    'DB8e/w4iIf8OHxv/DhsU/w0XE/8EBgL/BhMd/w45XP8UFhT/Hg8A/xgPBP8VDgT/CAQC/wAVKf8AGzT/ABAj/wIZKf8HIDb/EDZU/ylghf8jP03/CAkI/wkb',
+    'Jv8GCwn/GW+c/weM1P8xptP/ETJQ/wAiR/8BIkX/AS9Z/wIpQv8BAAD/AgAA/wELEv8DCQ3/EAgA/xQMAf8VDAH/FAwB/xMMAv8XDgP/EQoC/wcCAP8CBgn/',
+    'ABIl/w4uR/8eXIL/DxQV/xQGAP8QDwr/FVqF/yh9s/8naJD/ADRk/wdGd/8CFyb/DAMA/xsQA/8jFQT/JRIA/xktOP8SOFT/BggH/woJAv8TGRH/ExwX/w4W',
+    'D/8PJTD/DB4n/xMpNv8dPlD/IDtJ/x0tM/8tPUH/U0Ex/2I4Iv8yMC3/KTxD/yQ7R/8dNkb/ESQw/w4gLP8HFyH/EBEQ/x4TBP8ZFAz/Eg4I/wsIA/8DBAT/',
+    'ByU9/wgnP/8XWXr/CDtq/wo+bf8CDhf/AAAAhgAAAAAAAAAAAAAAAAAAAAAAAACiBCNA/wEjRv8MR27/BS9S/wImSf8ADRn/BgIA/w4NCf8SDQb/DBMX/wQW',
+    'Jv8GGSv/CSE6/wkjPv8KJUH/DSxN/wsnQ/8MKUb/CyhD/xRBZv8ZRmv/FkNo/xZCZf8YRmr/DCc7/w0rQf8NIyn/CyAk/w0gIf8NGBL/CRIO/wMFAf8NL0r/',
+    'EzVO/x8PAP8jFQT/HBIE/xIIAP8CDhj/Azdl/wAmT/8MQWP/CzVR/wIWKf8GAAD/DQMA/xACAP8PBgD/Dhwl/wULD/8eVmv/Do/V/xim4v80gaD/ABw//wIr',
+    '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',
+    'A/8FBQP/BgUC/wYFA/8FBQL/BQQC/wUEAv8EAwH/AwIA/wIBAP8BAAD/AAAA/wAAAP8AAAP/AAMI/wAIEf8BDhz/ARYp/wIcM/8CGzL/ABEn/wAIG/8GFCf/',
+    'J0hf/0+Prv9Vst//O6bh/zOZ2f9CmczTQG6JhhMcIDgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFiQqOkJ+l4RUvejLRMv9/03W//9t4P//bsni/1ONpv8iQ2D/Axgz/wANKf8AFTL/',
+    'AB47/wIjQP8CHTf/ARox/wAVKP8AEB//AAsW/wAGDv8AAwf/AAAD/wAAAP8AAAD/AAAA/wAAAP8AAAD/AAAA/wAAAP8AAAD/AAAA/wAAAP8AAAD/AAAA/wAA',
+    'Av8AAgX/AAQJ/wAHD/8AChX/AA0c/wEUJ/8CGzD/Ahsy/wAZMP8AEyn/AAoe/wANIP8XLD//PGR8/1Sdv/9OtOX/N6Pg/zmg3v9LpNXLPHSShBYmLToAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    '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',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFy04JSZVaEgyeZdoOZjAhj6r26JAvO66RtD/0Era/+NG3f/0TeP//0/k',
+    '//9O5P//TuT//1Hm//9U5///UOT//07g//9I2P//QNL//zzL//Q7x//jPMH50D2987pDtueiSKbQhkCPsWg1bIVIJENRJQAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABopMRImRFInLl5yOjZ2jkpFjKVYSJq3Y02nw2tQq8hwUbDMc1GwznNPrs5wTKnKa0mf',
+    'wGNFkK5YOn2ZSjJofzopUWInIDtHEgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=='
+) -join ''
+
+$EmbeddedBinary['Media\README.txt'] = @(
+    'VGV4dHVyZXMgZm9yIENvbXBsZXRpb24gTmF2aWdhdG9yLgoKTG9nby50Z2EgIC0tIGFkZG9uIGljb24sIHVzZWQgYnkgdGhlIC50b2MgSWNvblRleHR1cmUg',
+    'bGluZSBhbmQgdGhlIG1pbmltYXAKICAgICAgICAgICAgIGJ1dHRvbi4gTXVzdCBiZSBhbiB1bmNvbXByZXNzZWQgMzItYml0IFRHQSB3aXRoIHBvd2VyLW9m',
+    'LXR3bwogICAgICAgICAgICAgZGltZW5zaW9ucyAoMTI4eDEyOCkuIFdvVyB3aWxsIG5vdCBsb2FkIGEgUE5HLCBhbmQgaXQgZmFpbHMKICAgICAgICAgICAg',
+    'IHNpbGVudGx5IHJhdGhlciB0aGFuIGVycm9yaW5nLCBzbyB0aGUgbWluaW1hcCBidXR0b24gdmVyaWZpZXMKICAgICAgICAgICAgIHRoZSB0ZXh0dXJlIGxv',
+    'YWRlZCBhbmQgZmFsbHMgYmFjayB0byBhIHN0b2NrIGljb24gaWYgaXQgZGlkIG5vdC4KClJlZ2VuZXJhdGUgZnJvbSBhIHNvdXJjZSBQTkcgd2l0aDogIC5c',
+    'Y24ucHMxIGljb24gPHBhdGgtdG8tcG5nPgo='
+) -join ''
+
 
 ############################################################
 # TEMPLATES
@@ -14689,6 +16058,23 @@ function Invoke-CNInit {
 
     foreach ($relative in $Embedded.Keys) {
         Write-CNFile $relative $Embedded[$relative]
+        Write-Host "  wrote  $relative" -ForegroundColor DarkGray
+    }
+
+    # Artwork and anything else that is not text. Carried as base64 so a fresh
+    # scaffold is complete and releasable -- without this, init produced a tree
+    # whose own check failed on a missing IconTexture.
+    foreach ($relative in $EmbeddedBinary.Keys) {
+        $path = Join-Path $script:Root $relative
+        $dir  = Split-Path -Parent $path
+
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+
+        [System.IO.File]::WriteAllBytes($path,
+            [System.Convert]::FromBase64String($EmbeddedBinary[$relative]))
+
         Write-Host "  wrote  $relative" -ForegroundColor DarkGray
     }
 
@@ -15117,8 +16503,20 @@ function Invoke-CNCheck {
         $coreVersion = if ($core -match 'CN\.version\s*=\s*"([^"]+)"') { $Matches[1] } else { $null }
 
         if ($tocVersion -and $coreVersion -and $tocVersion -ne $coreVersion) {
-            Write-Host "  WARN  version mismatch: .toc $tocVersion vs Core.lua $coreVersion" -ForegroundColor Yellow
+            Write-Host "  FAIL  version mismatch: .toc $tocVersion vs Core.lua $coreVersion" -ForegroundColor Red
             $problems++
+        }
+
+        # A cn.ps1 older than the tree it manages will scaffold a previous
+        # release over the top and report success. That failure is otherwise
+        # completely silent, so it is worth being loud about.
+        if ($coreVersion -and (Compare-CNVersion $script:ToolkitVersion $coreVersion) -lt 0) {
+            Write-Host "  FAIL  this cn.ps1 carries $script:ToolkitVersion but the tree is $coreVersion." -ForegroundColor Red
+            Write-Host '        Running init would downgrade your source. Get the current cn.ps1.' -ForegroundColor Red
+            $problems++
+        }
+        elseif ($coreVersion -eq $script:ToolkitVersion) {
+            Write-Host "  ok    toolkit and tree agree at $script:ToolkitVersion" -ForegroundColor DarkGray
         }
     }
 
@@ -15150,6 +16548,27 @@ function Invoke-CNCheck {
     else {
         Write-Host "$problems problem(s) found." -ForegroundColor Yellow
     }
+
+    return $problems
+}
+
+# Returns -1, 0 or 1. Non-numeric or missing parts sort low rather than
+# throwing, because a version string is not worth crashing a build over.
+function Compare-CNVersion {
+    param([string] $Left, [string] $Right)
+
+    $leftParts  = @(($Left  -split '\.') | ForEach-Object { [int]($_ -replace '\D', '0') })
+    $rightParts = @(($Right -split '\.') | ForEach-Object { [int]($_ -replace '\D', '0') })
+
+    for ($i = 0; $i -lt 3; $i++) {
+        $l = if ($i -lt $leftParts.Count)  { $leftParts[$i] }  else { 0 }
+        $r = if ($i -lt $rightParts.Count) { $rightParts[$i] } else { 0 }
+
+        if ($l -lt $r) { return -1 }
+        if ($l -gt $r) { return 1 }
+    }
+
+    return 0
 }
 
 function Invoke-CNList {
@@ -15358,6 +16777,31 @@ function Invoke-CNPackage {
 }
 
 
+# git writes progress and diagnostics to stderr. With 2>&1 those arrive as
+# ErrorRecord objects, and interpolating one into a string yields
+# "System.Management.Automation.RemoteException" rather than the message --
+# which is exactly the kind of output that makes a failed release unreadable.
+function Write-CNGitOutput {
+    param([Parameter(ValueFromPipeline = $true)] $Line)
+
+    process {
+        if ($null -eq $Line) { return }
+
+        $text = if ($Line -is [System.Management.Automation.ErrorRecord]) {
+            $Line.Exception.Message
+        }
+        else {
+            [string] $Line
+        }
+
+        foreach ($part in ($text -split "`r?`n")) {
+            if ($part.Trim()) {
+                Write-Host "  $part" -ForegroundColor DarkGray
+            }
+        }
+    }
+}
+
 function Invoke-CNRelease {
     Assert-CNWritable
 
@@ -15368,6 +16812,30 @@ function Invoke-CNRelease {
         return
     }
 
+    # ------------------------------------------------------------------
+    # Everything that can refuse the release happens BEFORE anything is
+    # written, cheapest and most fundamental first.
+    #
+    # An earlier version bumped the version files and then bailed on a missing
+    # changelog section, which left the tree claiming a version whose source
+    # was never scaffolded. Nothing downstream could then be trusted, and the
+    # only signal was a yellow warning that scrolled past.
+    # ------------------------------------------------------------------
+
+    # 1. Does this cn.ps1 even carry the source being released? Checked before
+    #    anything else, because every other diagnosis is misleading when the
+    #    answer here is no.
+    if ($script:ToolkitVersion -ne $new) {
+        Write-Host "ERROR  This cn.ps1 carries version $script:ToolkitVersion, not $new." -ForegroundColor Red
+        Write-Host ''
+        Write-Host '  The addon source is embedded in this file. Releasing a version it' -ForegroundColor DarkGray
+        Write-Host '  does not carry would tag whatever happens to be on disk.' -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host "  Either get the cn.ps1 for $new, or run:  .\cn.ps1 release $script:ToolkitVersion" -ForegroundColor Yellow
+        return
+    }
+
+    # 2. Is git usable and is this a repository?
     if (-not (Assert-CNGit)) { return }
 
     if (-not (Test-Path -LiteralPath (Join-Path $script:Root '.git'))) {
@@ -15375,46 +16843,213 @@ function Invoke-CNRelease {
         return
     }
 
-    # Never tag something that does not pass its own validator.
-    Write-Host 'Validating...' -ForegroundColor Cyan
-    Invoke-CNCheck
-    Write-Host ''
-
-    $Target = $new
-    Invoke-CNVersion
-
+    # 3. Is the changelog ready? Checked before any file is touched.
     $changelog = Read-CNFile 'CHANGELOG.md'
 
     if ($changelog -and $changelog -notmatch [regex]::Escape("## [$new]")) {
-        Write-Host "WARN  CHANGELOG.md has no '## [$new]' section." -ForegroundColor Yellow
+        Write-Host "ERROR  CHANGELOG.md has no '## [$new]' section." -ForegroundColor Red
+        Write-Host ''
+        Write-Host '  Nothing has been changed. If the changelog on disk is stale, run:' -ForegroundColor DarkGray
+        Write-Host '    .\cn.ps1 init -Force' -ForegroundColor Yellow
+        Write-Host '  Or re-run with -Force to tag without a changelog entry.' -ForegroundColor DarkGray
+        return
+    }
 
-        if (-not $Force) {
-            Write-Host 'Add one, or re-run with -Force to tag anyway.' -ForegroundColor Yellow
+    # 4. Does a tag already exist? git tag fails on a duplicate, and the
+    #    failure is easy to miss in the middle of a release.
+    Push-Location $script:Root
+
+    try {
+        $existing = @(git tag --list "v$new")
+
+        if ($existing.Count -gt 0 -and -not $Force) {
+            Write-Host "ERROR  Tag v$new already exists." -ForegroundColor Red
+            Write-Host ''
+            Write-Host '  Nothing has been changed. To replace it:' -ForegroundColor DarkGray
+            Write-Host "    git tag -d v$new" -ForegroundColor Yellow
+            Write-Host "    git push --delete origin v$new" -ForegroundColor Yellow
+            Write-Host '  Or release the next version instead.' -ForegroundColor DarkGray
             return
         }
     }
+    finally {
+        Pop-Location
+    }
+
+    # 5. Does it pass its own validator? A failing check must stop the
+    #    release, not merely print in front of it.
+    Write-Host 'Validating...' -ForegroundColor Cyan
+
+    $problems = Invoke-CNCheck
+
+    Write-Host ''
+
+    if ($problems -gt 0 -and -not $Force) {
+        Write-Host "ERROR  $problems problem(s) found; not releasing." -ForegroundColor Red
+        Write-Host '  Nothing has been changed. Fix them, or re-run with -Force.' -ForegroundColor DarkGray
+        return
+    }
+
+    # ------------------------------------------------------------------
+    # Past this line, the tree gets written to.
+    # ------------------------------------------------------------------
+
+    $Target = $new
+    Invoke-CNVersion
 
     Push-Location $script:Root
 
     try {
         git add -A | Out-Null
-        git commit -m "Release $new" | Out-Null
-        git tag "v$new"
 
-        Write-Host "Committed and tagged v$new." -ForegroundColor Green
+        # An empty commit is not an error here: init may have written exactly
+        # what was already committed. The tag is what matters.
+        git commit -m "Release $new" 2>&1 | Write-CNGitOutput
+
+        git tag "v$new" 2>&1 | Write-CNGitOutput
+
+        if (-not (git tag --list "v$new")) {
+            Write-Host "ERROR  Tag v$new was not created. Not pushing." -ForegroundColor Red
+            return
+        }
+
+        Write-Host "Tagged v$new at $(git rev-parse --short HEAD)." -ForegroundColor Green
+
+        # The packager derives the release type from a tag pointing at HEAD.
+        # No tag there means it publishes as an alpha, which then hides behind
+        # "Show alpha files" on CurseForge.
+        $atHead = @(git tag --points-at HEAD)
+
+        if ($atHead -notcontains "v$new") {
+            Write-Host "ERROR  v$new does not point at HEAD; CurseForge would get an alpha." -ForegroundColor Red
+            Write-Host "  tags at HEAD: $($atHead -join ', ')" -ForegroundColor DarkGray
+            return
+        }
 
         $remote = git remote 2>$null
 
-        if ($remote) {
-            git push
-            git push --tags
-
-            Write-Host 'Pushed. The GitHub Actions workflow packages and uploads to CurseForge.' -ForegroundColor Green
-        }
-        else {
+        if (-not $remote) {
             Write-Host 'No git remote configured, so nothing was pushed.' -ForegroundColor Yellow
             Write-Host '  git remote add origin <url>' -ForegroundColor DarkGray
             Write-Host '  git push -u origin main --tags' -ForegroundColor DarkGray
+            return
+        }
+
+        git push 2>&1 | Write-CNGitOutput
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host 'ERROR  git push failed. The tag exists locally but was not pushed.' -ForegroundColor Red
+            return
+        }
+
+        git push --tags 2>&1 | Write-CNGitOutput
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host 'ERROR  git push --tags failed. CurseForge will not see this release.' -ForegroundColor Red
+            return
+        }
+
+        Write-Host ''
+        Write-Host "Pushed v$new. GitHub Actions packages and uploads to CurseForge." -ForegroundColor Green
+        Write-Host '  Watch it:  https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/actions' -ForegroundColor DarkGray
+        Write-Host '  Confirm:   .\cn.ps1 doctor' -ForegroundColor DarkGray
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+# Prints the whole release chain in one place. Written because diagnosing a
+# release that silently did nothing meant assembling five separate commands
+# by hand.
+function Invoke-CNDoctor {
+    Write-Host 'Completion Navigator :: doctor' -ForegroundColor Cyan
+    Write-Host ''
+
+    $toc  = Read-CNFile 'CompletionNavigator.toc'
+    $core = Read-CNFile 'Core.lua'
+
+    $tocVersion  = if ($toc  -match '(?m)^##\s*Version:\s*(.+)$') { $Matches[1].Trim() } else { '(none)' }
+    $coreVersion = if ($core -match 'CN\.version\s*=\s*"([^"]+)"') { $Matches[1] } else { '(none)' }
+
+    $luaCount = @(Get-CNLuaFiles).Count
+
+    Write-Host 'Toolkit' -ForegroundColor White
+    Write-Host "  cn.ps1 carries version   $script:ToolkitVersion"
+    Write-Host "  cn.ps1 size              $((Get-Item $PSCommandPath).Length) bytes"
+    Write-Host ''
+
+    Write-Host 'Tree' -ForegroundColor White
+    Write-Host "  .toc version             $tocVersion"
+    Write-Host "  Core.lua version         $coreVersion"
+    Write-Host "  Lua files on disk        $luaCount"
+
+    $changelog = Read-CNFile 'CHANGELOG.md'
+
+    $hasSection = $changelog -and $changelog -match [regex]::Escape("## [$coreVersion]")
+
+    Write-Host ("  CHANGELOG [$coreVersion]" + (' ' * [Math]::Max(1, 15 - $coreVersion.Length)) +
+        $(if ($hasSection) { 'present' } else { 'MISSING' })) `
+        -ForegroundColor $(if ($hasSection) { 'Gray' } else { 'Red' })
+    Write-Host ''
+
+    if ((Compare-CNVersion $script:ToolkitVersion $coreVersion) -lt 0) {
+        Write-Host '  This cn.ps1 is OLDER than the tree. init would downgrade your source.' -ForegroundColor Red
+        Write-Host ''
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $script:Root '.git'))) {
+        Write-Host 'Git' -ForegroundColor White
+        Write-Host '  not a repository' -ForegroundColor Yellow
+        return
+    }
+
+    if (-not (Assert-CNGit)) { return }
+
+    Push-Location $script:Root
+
+    try {
+        Write-Host 'Git' -ForegroundColor White
+        Write-Host "  HEAD                     $(git rev-parse --short HEAD) $(git log -1 --pretty=%s)"
+
+        $atHead = @(git tag --points-at HEAD)
+
+        Write-Host ("  tags at HEAD             " +
+            $(if ($atHead.Count) { $atHead -join ', ' } else { '(none)' })) `
+            -ForegroundColor $(if ($atHead.Count) { 'Gray' } else { 'Yellow' })
+
+        $dirty = @(git status --porcelain)
+
+        Write-Host ("  uncommitted changes      " +
+            $(if ($dirty.Count) { "$($dirty.Count) file(s)" } else { 'none' }))
+
+        $remote = git remote 2>$null
+
+        if (-not $remote) {
+            Write-Host '  remote                   (none)' -ForegroundColor Yellow
+            return
+        }
+
+        Write-Host "  remote                   $(git remote get-url origin)"
+
+        $remoteTags = @(git ls-remote --tags origin 2>$null |
+            ForEach-Object { ($_ -split 'refs/tags/')[-1] } |
+            Where-Object { $_ -and $_ -notmatch '\^\{\}$' } |
+            Sort-Object -Descending)
+
+        Write-Host ("  newest remote tags       " +
+            $(if ($remoteTags.Count) { ($remoteTags | Select-Object -First 3) -join ', ' } else { '(none)' }))
+
+        Write-Host ''
+
+        $expected = "v$coreVersion"
+
+        if ($remoteTags -contains $expected) {
+            Write-Host "$expected is on the remote. If CurseForge has no file, check the Actions run." -ForegroundColor Green
+        }
+        else {
+            Write-Host "$expected has NOT been pushed. CurseForge cannot have it." -ForegroundColor Yellow
+            Write-Host "  Run:  .\cn.ps1 release $coreVersion" -ForegroundColor DarkGray
         }
     }
     finally {
@@ -15626,6 +17261,7 @@ function Show-CNHelp {
     Write-Host '  package                         Build a distributable zip.'
     Write-Host '  savedvars [-Force]              Locate SavedVariables (-Force opens it).'
     Write-Host '  release <x.y.z>                Bump, commit, tag and push a release.'
+    Write-Host '  doctor                         Report the whole release chain state.'
     Write-Host '  relocate <path>                Copy the source out of Program Files.'
     Write-Host '  icon [path.png]                Convert a PNG into Media\Logo.tga for in-game use.'
     Write-Host '  gitinit                         Initialize git with a sane .gitignore.'
@@ -15648,7 +17284,7 @@ function Show-CNHelp {
 switch ($Command.ToLower()) {
     'init'      { Invoke-CNInit }
     'sync'      { Invoke-CNSync }
-    'check'     { Invoke-CNCheck }
+    'check'     { Invoke-CNCheck | Out-Null }
     'list'      { Invoke-CNList }
     'new'       { Invoke-CNNew }
     'cmd'       { Invoke-CNCommand }
@@ -15662,6 +17298,8 @@ switch ($Command.ToLower()) {
     'savedvars' { Invoke-CNSavedVars }
     'sv'        { Invoke-CNSavedVars }
     'release'   { Invoke-CNRelease }
+    'doctor'    { Invoke-CNDoctor }
+    'status'    { Invoke-CNDoctor }
     'relocate'  { Invoke-CNRelocate }
     'icon'      { Invoke-CNIcon }
     'gitinit'   { Invoke-CNGitInit }

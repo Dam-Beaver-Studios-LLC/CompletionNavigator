@@ -59,7 +59,7 @@ function Toys.Scan()
         end
     end)
 
-    CN.Account("collectionScans").toys = time()
+    CN.MarkScanned("toys")
 
     return seen, collected, missing
 end

@@ -89,7 +89,7 @@ function Currencies.Scan()
         end
     end
 
-    CN.Account("collectionScans").currencies = time()
+    CN.MarkScanned("currencies")
 
     return seen, atCap, weeklyRemaining
 end
@@ -208,7 +208,7 @@ CN.RegisterCandidateProvider("Currencies", function()
     end
 
     return candidates
-end)
+end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true })
 
 ------------------------------------------------------------
 -- EVENTS

@@ -63,7 +63,7 @@ function Titles.Scan()
         end
     end
 
-    CN.Account("collectionScans").titles = time()
+    CN.MarkScanned("titles")
 
     if CN.character then
         CN.character.titlesKnown = known

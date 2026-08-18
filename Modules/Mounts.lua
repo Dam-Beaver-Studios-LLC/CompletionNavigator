@@ -65,7 +65,7 @@ function Mounts.Scan()
         end
     end
 
-    CN.Account("collectionScans").mounts = time()
+    CN.MarkScanned("mounts")
 
     return seen, collected, missing
 end

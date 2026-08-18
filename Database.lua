@@ -173,6 +173,48 @@ function CN.Account(key)
     return CN.db.account
 end
 
+-- Which candidate providers read which store. Rescanning your mounts must not
+-- rebuild the achievement candidates; measured, that mistake cost 18ms of a
+-- 16ms frame every time a mount was learned.
+--
+-- A store with no entry here feeds no candidate provider at all -- mounts,
+-- toys, appearances and titles are reported by /cn breakdown and the
+-- Collections tab, which read their stores directly.
+CN.scanProviders = {
+    pets         = { "Pets" },
+    achievements = { "Achievements" },
+    reputations  = { "Reputations" },
+    currencies   = { "Currencies" },
+    exploration  = { "Exploration" },
+    vendors      = { "Vendors" },
+
+    -- Recipe names are the left-hand side of the vendor recipe join.
+    recipes      = { "Vendors" },
+}
+
+-- A scan rewrites a store wholesale, and no client event fires to say so.
+-- Recording the scan is the one thing every scan already does, which makes it
+-- the right place to tell the candidate caches they are stale.
+function CN.MarkScanned(key)
+    CN.Account("collectionScans")[key] = time()
+
+    -- Scoring.lua loads after this file, so these may not exist yet at load
+    -- time. They always do by the time a scan can run.
+    if not CN.InvalidateProvider then
+        return
+    end
+
+    local providers = CN.scanProviders[key]
+
+    if not providers then
+        return
+    end
+
+    for _, name in ipairs(providers) do
+        CN.InvalidateProvider(name)
+    end
+end
+
 function CN.Settings()
     if not CN.db then
         return nil

@@ -290,7 +290,7 @@ CN.RegisterCandidateProvider("Rares", function()
     end
 
     return candidates
-end)
+end, { events = { "VIGNETTE_MINIMAP_UPDATED", "VIGNETTES_UPDATED", "ZONE_CHANGED_NEW_AREA" }, volatile = true })
 
 ------------------------------------------------------------
 -- EVENTS

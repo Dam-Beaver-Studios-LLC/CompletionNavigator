@@ -72,7 +72,7 @@ function Pets.Scan()
         end
     end)
 
-    CN.Account("collectionScans").pets = time()
+    CN.MarkScanned("pets")
 
     return seen, owned, missing
 end
@@ -179,36 +179,48 @@ end)
 -- Wild pets are the only ones this addon can currently point at, because a
 -- wild pet's location is a zone rather than a vendor or a boss drop. Vendor
 -- and drop sources need the static database.
+-- Retail has around 1800 species, of which most players are missing several
+-- hundred. Emitting one objective per missing pet meant allocating a thousand
+-- tables per rebuild so that at most a handful could ever rank -- and they all
+-- score identically anyway, since none of them carries a location. Take the
+-- best of them instead, and report what was dropped.
 CN.RegisterCandidateProvider("Pets", function()
-    local candidates = {}
+    local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
+        function(speciesID, record)
+            if record.collected or record.obtainable == false then
+                return nil
+            end
 
-    for speciesID, record in pairs(Store()) do
-        if not record.collected
-            and record.obtainable ~= false
-            and not CN.IsIgnored(CN.objectiveTypes.PET, speciesID)
-            and not CN.IsDeferred(CN.objectiveTypes.PET, speciesID) then
+            if CN.IsIgnored(CN.objectiveTypes.PET, speciesID)
+                or CN.IsDeferred(CN.objectiveTypes.PET, speciesID) then
+                return nil
+            end
 
+            -- A wild pet is something you can go and catch; anything else is
+            -- a wish. That is the whole ranking.
+            return record.isWild and 2 or 1
+        end,
+        function(speciesID, record, value)
             local reasons = {}
-            local value   = 1
 
             if record.isWild then
-                value = value + 1
                 table.insert(reasons, "wild pet, catchable in the world")
             end
 
-            table.insert(candidates, CN.NewObjective({
+            return CN.NewObjective({
                 id              = speciesID,
                 type            = CN.objectiveTypes.PET,
                 name            = record.name,
                 accountWide     = true,
                 completionValue = value,
                 reasons         = reasons,
-            }))
-        end
-    end
+            })
+        end)
+
+    CN.providerTruncation["Pets"] = { considered = considered, dropped = dropped }
 
     return candidates
-end)
+end, { events = { "NEW_PET_ADDED" } })
 
 ------------------------------------------------------------
 -- EVENTS

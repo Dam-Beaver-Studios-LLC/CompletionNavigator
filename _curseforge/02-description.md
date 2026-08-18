@@ -4,7 +4,7 @@ Most completion addons answer **"what am I missing?"** Completion Navigator is b
 
 > Given everything I have already completed, everything I can currently obtain, my current character, location, restrictions and prerequisites — **what should I do next?**
 
-Click the minimap button or type `/cn next`. The addon scores every objective it knows to be currently actionable, tells you which one to do, and explains its reasoning.
+Run `/cn setup` once, then click the minimap button or type `/cn next`. The addon scores every objective it knows to be currently actionable, tells you which one to do, and explains its reasoning.
 
 ---
 
@@ -27,6 +27,8 @@ Click the minimap button or type `/cn next`. The addon scores every objective it
 **Moves the waypoint on as you finish.** Turn on auto-advance and the waypoint follows you through the list: finish one thing, it points at the next. It re-points when the objective *changes*, not on a timer, so it never moves out from under you while you are walking to it. Off by default, because seizing the waypoint uninvited is rude.
 
 **Tells you who sells it.** `/cn sells <item>` finds the vendor from your own recorded travels; `/cn tovendor` routes you there. Recipes you do not know that a recorded vendor stocks become recommendations with real coordinates.
+
+**Answers in the tooltip.** Hover an item anywhere — a vendor list, a loot window, the auction house — and it tells you whether you have collected that toy, mount, pet or appearance, whether this character knows that recipe and which of your characters does, and which recorded vendor sells it. Items the addon knows nothing about get nothing added, so it stays out of the way.
 
 **Lets you undo hiding things.** Ignore or defer anything you are not interested in, then `/cn hidden` to see the list and `/cn unhide` to bring it back. Deferrals expire on their own.
 
@@ -66,7 +68,7 @@ A minimap button and an eight-tab window. Everything the slash commands do is re
 - **Collections** — account completion per category.
 - **Remaining** — what is left everywhere, and why.
 - **Scans** — counts and one-click scans for each subsystem.
-- **Settings** — priority mode, auto-advance, debug output, minimap button.
+- **Settings** — priority mode, auto-advance, tooltips, debug output, minimap button, and a one-click full scan.
 
 Keybindings live under **Key Bindings → AddOns**.
 
@@ -78,9 +80,10 @@ Keybindings live under **Key Bindings → AddOns**.
 
 ## Commands
 
-`/cn` for status, `/cn help` for all seventy.
+`/cn` for status, `/cn help` for all seventy-three.
 
 ```
+/cn setup                Scan every subsystem once; run this first
 /cn next                 Recommend the next objective
 /cn now                  Everything expiring soon
 /cn rares                Rares and treasures up right now
@@ -97,6 +100,8 @@ Keybindings live under **Key Bindings → AddOns**.
 /cn sells <item>         Which recorded vendor sells something
 /cn hidden               Everything you ignored or deferred
 /cn exploration          Zones with the least left to discover
+/cn tooltips             Toggle addon lines on item and unit tooltips
+/cn perf                 Provider timings, cache state, and any caps hit
 ```
 
 ---
@@ -112,6 +117,8 @@ Stated plainly, because finding these out yourself feels like a bug:
 - **Warband comparisons need more than one character logged in.** The addon can only reason about characters it has seen.
 - **Harvested prerequisites are suggestions, not facts.** Quests completed shortly before another became available are recorded as *possible* prerequisites, kept separate from real data, and never used to decide whether something is locked.
 - **Only vendors you have opened are known.** Merchant inventories, like recipe lists, are readable only while the window is open. The addon builds its vendor database from your own shopping rather than shipping a list that goes stale.
+- **Tooltip lines only appear where the addon actually knows something.** The appearance lookup is gated on the item having a real appearance source, because the client's "do you own this appearance" call answers *no* for a stack of ore just as readily as for an unlearned tabard. And because the trade skill API keys recipes by recipe ID while a vendor sells an item ID, a recipe tooltip that matched on name says so rather than dressing it up as certainty.
+- **Collection providers contribute at most 60 candidates each.** There is no useful ranking among a thousand uncollected pets with no known location; they all score identically. The highest-valued are kept and `/cn perf` says exactly how many were dropped. Full counts live in `/cn breakdown` and the Collections tab, which read their stores directly.
 - **Exploration is measured in subzones, not percent.** The map API reports which overlays you have revealed but never how many exist, so a true "percent explored" cannot be computed. Per-subzone criteria name the place you have not been, which is more useful anyway.
 
 ---
@@ -128,7 +135,7 @@ None are required. Completion Navigator is a decision layer, not a replacement f
 
 ## Status
 
-Version 0.14.0. All subsystems above are implemented and tested. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
+Version 0.16.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
 
 Bug reports and feature requests: [GitHub issues](https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/issues), or email developer@dambeaverstudios.com.
 

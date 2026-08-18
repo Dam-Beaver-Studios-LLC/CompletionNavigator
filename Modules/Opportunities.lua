@@ -202,7 +202,7 @@ CN.RegisterCandidateProvider("Opportunities", function()
     end
 
     return candidates
-end)
+end, { events = { "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" }, volatile = true })
 
 ------------------------------------------------------------
 -- EVENTS

@@ -121,10 +121,44 @@ end
 
 -- Modules contribute actionable objectives by registering a provider.
 -- Each provider returns an array of objective tables.
+--
+-- options = {
+--     events   = { "QUEST_ACCEPTED", ... },  -- what makes this provider stale
+--     volatile = true,                       -- also expires on the clock
+--     cooldown = 5,                          -- rebuild at most this often
+-- }
+--
+-- cooldown is for providers subscribed to chatty events. CRITERIA_UPDATE and
+-- UPDATE_FACTION fire many times a second during normal play, and rebuilding
+-- a 3000-record provider on each one costs more than the answer is worth. The
+-- provider stays marked stale and rebuilds on the first collection after the
+-- cooldown expires, so the cost is bounded rather than the work skipped.
+--
+-- A provider that declares no events is treated as stale on every event. That
+-- is the safe default and the old behaviour, but declaring events is what
+-- makes an invalidation cost one provider instead of all nine.
 CN.candidateProviders = CN.candidateProviders or {}
 
-function CN.RegisterCandidateProvider(name, provider)
-    CN.candidateProviders[name] = provider
+function CN.RegisterCandidateProvider(name, provider, options)
+    options = options or {}
+
+    local events
+
+    if options.events then
+        events = {}
+
+        for _, event in ipairs(options.events) do
+            events[event] = true
+        end
+    end
+
+    CN.candidateProviders[name] = {
+        name     = name,
+        fn       = provider,
+        events   = events,
+        volatile = options.volatile and true or false,
+        cooldown = options.cooldown,
+    }
 end
 
 -- Decorators get a pass over every candidate after collection and before
@@ -142,18 +176,35 @@ end
 -- CACHING
 ------------------------------------------------------------
 
--- Fourteen providers now run on every /cn next, every window refresh and
--- every auto-advance tick, and several of them walk thousands of records.
--- Recomputing all of that several times a second was never the design; the
--- architecture notes called for cached state and dirty flags from the start.
+-- Measured against a retail-scale database -- 1800 pets, 3000 achievements,
+-- 500 factions, 2500 recipes -- the naive path cost 45ms to rebuild and,
+-- worse, 15ms on every single call even with the candidate list cached,
+-- because the whole list was re-scored and re-sorted every time. At 60fps a
+-- frame is 16ms. Hovering the minimap button was dropping frames.
 --
--- The cache is invalidated by the events that can actually change an answer,
--- with a short TTL as a backstop for anything that changes without an event
--- (a world quest timer ticking down, for one).
-local cache = {
+-- Three caches, each invalidated by the narrowest thing that can change it:
+--
+--   1. Per provider. NEW_PET_ADDED rebuilds Pets, not Achievements.
+--   2. The aggregate list, rebuilt only when some provider actually was.
+--   3. The scored and sorted list, reused until the aggregate or the
+--      priority mode changes.
+--
+-- Volatile providers -- world quest timers, live rares, weekly currency
+-- earning -- change without any event firing, so those alone also expire on
+-- a short clock.
+
+local providerCache = {}   -- [name] = { candidates, builtAt, dirty }
+
+local aggregate = {
     candidates = nil,
     builtAt    = 0,
-    dirty      = true,
+    generation = 0,
+}
+
+local ranked = {
+    list       = nil,
+    generation = -1,
+    mode       = nil,
 }
 
 CN.candidateCacheSeconds = 5
@@ -162,15 +213,55 @@ CN.candidateCacheSeconds = 5
 -- guessed at.
 CN.providerTimings = CN.providerTimings or {}
 
-function CN.InvalidateCandidates(reason)
-    cache.dirty = true
+-- What each provider dropped to stay inside its budget. Reported by
+-- /cn perf, because a cap nobody can see reads as "that is everything".
+CN.providerTruncation = CN.providerTruncation or {}
 
-    if reason then
-        CN.DebugPrint("Candidate cache invalidated: " .. tostring(reason))
+local function Entry(name)
+    local entry = providerCache[name]
+
+    if not entry then
+        entry = { candidates = nil, builtAt = 0, dirty = true }
+        providerCache[name] = entry
+    end
+
+    return entry
+end
+
+-- reason == nil invalidates everything. A named event invalidates only the
+-- providers that subscribed to it, plus any that declared no subscription.
+function CN.InvalidateCandidates(reason)
+    local hit = 0
+
+    for name, provider in pairs(CN.candidateProviders) do
+        if not reason or not provider.events or provider.events[reason] then
+            Entry(name).dirty = true
+            hit = hit + 1
+        end
+    end
+
+    if hit > 0 then
+        -- Deliberately NOT clearing the aggregate here. Marking a provider
+        -- stale is not the same as it having changed: a cooldown may hold the
+        -- rebuild off, or the rebuild may produce an identical list. Only
+        -- RefreshProviders knows whether anything was actually rebuilt, and
+        -- discarding the aggregate here would bust the ranked cache on every
+        -- QUEST_LOG_UPDATE for nothing.
+        if reason then
+            CN.DebugPrint("Candidate cache: " .. reason .. " invalidated " .. hit
+                .. " provider" .. (hit == 1 and "" or "s"))
+        end
     end
 end
 
--- Anything that can change what is actionable.
+function CN.InvalidateProvider(name)
+    if CN.candidateProviders[name] then
+        Entry(name).dirty = true
+    end
+end
+
+-- Anything that can change what is actionable. Which providers each event
+-- reaches is declared by the providers themselves.
 for _, event in ipairs({
     "QUEST_ACCEPTED",
     "QUEST_TURNED_IN",
@@ -194,73 +285,151 @@ for _, event in ipairs({
     end)
 end
 
-local function BuildCandidates()
-    local candidates = {}
+-- A different character means different Warband suitability, different
+-- character-scoped reputations and a different recipe book.
+CN:OnLogin(function()
+    CN.InvalidateCandidates()
+end)
+
+local function RunProvider(name, provider)
+    local startedAt = debugprofilestop and debugprofilestop() or nil
+
+    local ok, result = pcall(provider.fn)
+
+    if startedAt and debugprofilestop then
+        local elapsed = debugprofilestop() - startedAt
+
+        local timing = CN.providerTimings[name] or { calls = 0, total = 0, worst = 0 }
+
+        timing.calls = timing.calls + 1
+        timing.total = timing.total + elapsed
+        timing.worst = math.max(timing.worst, elapsed)
+        timing.last  = elapsed
+
+        CN.providerTimings[name] = timing
+    end
+
+    if ok and type(result) == "table" then
+        return result
+    end
+
+    if not ok then
+        CN.DebugPrint("Candidate provider " .. name .. " failed: " .. tostring(result))
+    end
+
+    return {}
+end
+
+local function RefreshProviders(force)
+    local now     = time()
+    local rebuilt = 0
 
     for name, provider in pairs(CN.candidateProviders) do
-        local startedAt = debugprofilestop and debugprofilestop() or nil
+        local entry = Entry(name)
 
-        local ok, result = pcall(provider)
+        local cooled = provider.cooldown == nil
+            or (now - entry.builtAt) >= provider.cooldown
 
-        if startedAt and debugprofilestop then
-            local elapsed = debugprofilestop() - startedAt
+        local stale = force
+            or entry.candidates == nil
+            or (entry.dirty and cooled)
+            or (provider.volatile
+                and (now - entry.builtAt) >= CN.candidateCacheSeconds)
 
-            local timing = CN.providerTimings[name] or { calls = 0, total = 0, worst = 0 }
+        if stale then
+            entry.candidates = RunProvider(name, provider)
+            entry.builtAt    = now
+            entry.dirty      = false
 
-            timing.calls = timing.calls + 1
-            timing.total = timing.total + elapsed
-            timing.worst = math.max(timing.worst, elapsed)
-            timing.last  = elapsed
-
-            CN.providerTimings[name] = timing
-        end
-
-        if ok and type(result) == "table" then
-            for _, objective in ipairs(result) do
-                table.insert(candidates, objective)
-            end
-        elseif not ok then
-            CN.DebugPrint("Candidate provider " .. name .. " failed: " .. tostring(result))
+            rebuilt = rebuilt + 1
         end
     end
 
+    return rebuilt
+end
+
+local function Decorate(candidates)
     for name, decorator in pairs(CN.candidateDecorators) do
         for _, objective in ipairs(candidates) do
             local ok, err = pcall(decorator, objective)
 
             if not ok then
                 CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
+                break
+            end
+        end
+    end
+end
+
+function CN.CollectCandidates(force)
+    local rebuilt = RefreshProviders(force)
+
+    -- Nothing was rebuilt, so the aggregate cannot have changed.
+    if aggregate.candidates and rebuilt == 0 then
+        return aggregate.candidates
+    end
+
+    local candidates = {}
+
+    for name in pairs(CN.candidateProviders) do
+        local list = providerCache[name] and providerCache[name].candidates
+
+        if list then
+            for index = 1, #list do
+                candidates[#candidates + 1] = list[index]
             end
         end
     end
 
+    Decorate(candidates)
+
+    aggregate.candidates = candidates
+    aggregate.builtAt    = time()
+    aggregate.generation = aggregate.generation + 1
+
     return candidates
 end
 
-function CN.CollectCandidates(force)
-    local now = time()
+function CN.GetCandidateCacheState()
+    local providers, fresh, dirty = 0, 0, 0
 
-    local fresh = cache.candidates
-        and not cache.dirty
-        and (now - cache.builtAt) < CN.candidateCacheSeconds
+    for name in pairs(CN.candidateProviders) do
+        providers = providers + 1
 
-    if fresh and not force then
-        return cache.candidates
+        local entry = providerCache[name]
+
+        if entry and entry.candidates and not entry.dirty then
+            fresh = fresh + 1
+        else
+            dirty = dirty + 1
+        end
     end
 
-    cache.candidates = BuildCandidates()
-    cache.builtAt    = now
-    cache.dirty      = false
-
-    return cache.candidates
+    return {
+        cached     = aggregate.candidates ~= nil,
+        count      = aggregate.candidates and #aggregate.candidates or 0,
+        dirty      = aggregate.candidates == nil or dirty > 0,
+        age        = aggregate.candidates and (time() - aggregate.builtAt) or nil,
+        generation = aggregate.generation,
+        providers  = providers,
+        fresh      = fresh,
+        stale      = dirty,
+        ranked     = ranked.generation == aggregate.generation,
+    }
 end
 
-function CN.GetCandidateCacheState()
+function CN.GetProviderCacheState(name)
+    local entry = providerCache[name]
+
+    if not entry then
+        return nil
+    end
+
     return {
-        cached  = cache.candidates ~= nil,
-        count   = cache.candidates and #cache.candidates or 0,
-        dirty   = cache.dirty,
-        age     = cache.candidates and (time() - cache.builtAt) or nil,
+        cached = entry.candidates ~= nil,
+        count  = entry.candidates and #entry.candidates or 0,
+        dirty  = entry.dirty,
+        age    = entry.candidates and (time() - entry.builtAt) or nil,
     }
 end
 
@@ -268,23 +437,66 @@ end
 -- RECOMMENDATION
 ------------------------------------------------------------
 
-function CN.Recommend(limit)
-    limit = limit or 1
+-- Scoring and sorting a few thousand candidates is not free, and every
+-- caller wants the same ordering. Keep the ranked list until either the
+-- candidate set or the priority mode changes.
+local function Ranked()
+    local settings = CN.Settings()
+    local mode     = (settings and settings.priorityMode) or "balanced"
 
     local candidates = CN.CollectCandidates()
 
-    for _, objective in ipairs(candidates) do
-        CN.ScoreObjective(objective)
+    if ranked.list
+        and ranked.generation == aggregate.generation
+        and ranked.mode == mode then
+
+        return ranked.list
     end
 
-    table.sort(candidates, function(a, b)
-        return (a.priorityWeight or 0) > (b.priorityWeight or 0)
+    -- Sorting a copy, not the aggregate. Callers that walk the candidate
+    -- list -- zone routing, for one -- must not have it reordered under
+    -- them as a side effect of somebody asking for a recommendation.
+    local list = {}
+
+    for index = 1, #candidates do
+        local objective = candidates[index]
+
+        CN.ScoreObjective(objective)
+
+        list[index] = objective
+    end
+
+    table.sort(list, function(a, b)
+        local left  = a.priorityWeight or 0
+        local right = b.priorityWeight or 0
+
+        if left == right then
+            -- Ties must break deterministically or the list shuffles between
+            -- refreshes and reads as flicker.
+            return tostring(a.id) < tostring(b.id)
+        end
+
+        return left > right
     end)
+
+    ranked.list       = list
+    ranked.generation = aggregate.generation
+    ranked.mode       = mode
+
+    return list
+end
+
+CN.RankedCandidates = Ranked
+
+function CN.Recommend(limit)
+    limit = limit or 1
+
+    local list = Ranked()
 
     local results = {}
 
-    for index = 1, math.min(limit, #candidates) do
-        table.insert(results, candidates[index])
+    for index = 1, math.min(limit, #list) do
+        results[index] = list[index]
     end
 
     return results
@@ -347,7 +559,7 @@ CN:RegisterCommand{
 CN:RegisterCommand{
     name    = "perf",
     order   = 90,
-    help    = "Show candidate provider timings and cache state.",
+    help    = "Show candidate provider timings, cache state and any caps hit.",
     handler = function()
         local state = CN.GetCandidateCacheState()
 
@@ -356,14 +568,21 @@ CN:RegisterCommand{
             .. (state.dirty and " |cffffff00(stale)|r" or "")
             .. (state.age and (" |cff999999" .. state.age .. "s old|r") or ""))
 
+        CN.Print("Providers: " .. state.fresh .. " of " .. state.providers
+            .. " cached, ranked list "
+            .. (state.ranked and "|cff00ff00reused|r" or "|cffffff00rebuilding|r"))
+
         local rows = {}
 
         for name, timing in pairs(CN.providerTimings) do
+            local cache = CN.GetProviderCacheState(name)
+
             table.insert(rows, {
                 name    = name,
                 average = timing.calls > 0 and (timing.total / timing.calls) or 0,
                 worst   = timing.worst,
                 calls   = timing.calls,
+                cached  = cache and cache.cached and not cache.dirty,
             })
         end
 
@@ -379,9 +598,31 @@ CN:RegisterCommand{
         CN.Print("Providers, slowest first:")
 
         for _, row in ipairs(rows) do
-            CN.Print(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)",
+            CN.Print(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
                 row.name, row.average, row.worst, row.calls,
-                row.calls == 1 and "call" or "calls"))
+                row.calls == 1 and "call" or "calls",
+                row.cached and "" or " |cffffff00stale|r"))
+        end
+
+        -- A cap nobody can see reads as "that was everything".
+        local capped = false
+
+        for name, truncation in pairs(CN.providerTruncation) do
+            if (truncation.dropped or 0) > 0 then
+                if not capped then
+                    CN.Print("Capped at " .. CN.providerCandidateCap .. " per provider:")
+                    capped = true
+                end
+
+                CN.Print("  " .. name .. ": showing " .. CN.providerCandidateCap
+                    .. " of " .. truncation.considered
+                    .. " |cff999999(" .. truncation.dropped .. " lower-valued dropped)|r")
+            end
+        end
+
+        if capped then
+            CN.Print("|cff999999Dropped entries scored no higher than the ones kept. "
+                .. "Full counts are in /cn breakdown.|r")
         end
     end,
 }

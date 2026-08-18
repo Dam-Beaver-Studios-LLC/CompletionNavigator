@@ -152,7 +152,7 @@ function Professions.CaptureOpenProfession()
     store[skillLineID].recipeKnown  = known
     store[skillLineID].recipesAt    = time()
 
-    CN.Account("collectionScans").recipes = time()
+    CN.MarkScanned("recipes")
 
     return true, seen, known
 end

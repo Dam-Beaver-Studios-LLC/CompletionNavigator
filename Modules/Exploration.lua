@@ -51,7 +51,7 @@ function Exploration.Scan()
         end
     end
 
-    CN.Account("collectionScans").exploration = time()
+    CN.MarkScanned("exploration")
 
     return seen, complete
 end
@@ -176,7 +176,7 @@ CN.RegisterCandidateProvider("Exploration", function()
     end
 
     return candidates
-end)
+end, { events = { "CRITERIA_UPDATE", "ZONE_CHANGED_NEW_AREA" } })
 
 ------------------------------------------------------------
 -- EVENTS

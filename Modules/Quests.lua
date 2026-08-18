@@ -422,7 +422,7 @@ CN.RegisterCandidateProvider("Quests", function()
     end
 
     return candidates
-end)
+end, { events = { "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 2 })
 
 ------------------------------------------------------------
 -- EVENTS

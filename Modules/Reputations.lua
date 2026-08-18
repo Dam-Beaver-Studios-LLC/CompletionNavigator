@@ -157,6 +157,8 @@ function Reputations.Scan()
         CN.character.reputationsScanned = time()
     end
 
+    CN.MarkScanned("reputations")
+
     return total, accountWide, characterSpecific, pendingParagon
 end
 
@@ -405,8 +407,17 @@ CN.RegisterCandidateProvider("Reputations", function()
         end
     end
 
-    return candidates
-end)
+    -- Two stores, so this one cannot be counted in a single pass; cap after
+    -- the fact instead.
+    local kept, dropped = CN.CapCandidates(candidates)
+
+    CN.providerTruncation["Reputations"] = {
+        considered = #kept + dropped,
+        dropped    = dropped,
+    }
+
+    return kept
+end, { events = { "UPDATE_FACTION" }, cooldown = 5 })
 
 ------------------------------------------------------------
 -- EVENTS
