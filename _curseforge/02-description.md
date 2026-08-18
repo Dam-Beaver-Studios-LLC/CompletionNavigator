@@ -10,21 +10,21 @@ Click the minimap button or type `/cn next`. The addon scores every objective it
 
 ## What it does
 
-**Recommends, and shows its work.** Every recommendation comes with reasons: *ready to turn in*, *in your current zone*, *a Paragon reward is waiting to be collected*, *4 of 5 criteria already done*, *account-wide, so any character's progress counts*. You can see why it chose what it chose, and disagree with it.
+**Recommends, and shows its work.** Every recommendation comes with reasons: *world quest, 45m left*, *rare is up right now*, *ready to turn in*, *a Paragon reward is waiting to be collected*, *4 of 5 criteria already done*, *your alt is better suited*. You can see why it chose what it chose, and disagree with it.
 
-**Navigates.** Sets a TomTom waypoint if you use TomTom, a Blizzard map pin if you don't, and hands off to the game's own quest tracking arrow when no coordinates exist. Quest locations are resolved from four separate client sources, not one.
+**Knows what expires.** World quests with real time remaining, daily and weekly resets, active world events, and rares that are up *this minute*. Urgency is weighted heavily and scaled steeply: something with an hour left dominates the list, something with three days left barely registers.
 
-**Sweeps a zone.** `/cn zone` gathers everything obtainable on your current map and orders it nearest-first from where you are standing. Click any stop to route to it. It re-routes on every call, so the order stays accurate as you finish things.
+**Finds rares and treasures that are actually up.** Driven by the client's live vignette data, not a static spawn list. A database tells you where a rare *can* spawn; a vignette tells you one is there now — which is the half that decides what you do next, and the half that doesn't go stale every patch.
 
-**Understands your Warband.** Reputations, titles, professions and recipes are stored per character where the game scopes them that way. So the addon can tell you that a faction you are Honored with is one your alt is already Revered with, or which character already knows a recipe.
+**Navigates.** TomTom waypoint if you use TomTom, Blizzard map pin if you don't, and the game's own quest tracking arrow when no coordinates exist. Quest locations are resolved from four separate client sources, not one.
 
-**Explains blockers.** `/cn why <questID>` reports the first unmet prerequisite — the specific quest, level or faction standing in the way — rather than just saying "not available", and tells you which data source it came from.
+**Sweeps a zone.** `/cn zone` gathers everything obtainable on your current map, ordered nearest-first from where you're standing. Click any stop to route to it.
 
-**Learns from your play.** Every quest you accept or turn in has its name, zone, map coordinates and level recorded permanently, account-wide. No configuration, no third-party addon needed. `/cn export` then emits what you have collected as ready-to-paste data rows, so playing the game grows the database that ships to everyone.
+**Understands your Warband.** Reputations, titles, professions, recipes and currencies are stored per character where the game scopes them that way. `/cn warband` shows your roster and combined coverage; `/cn who rep <faction>` tells you which character should do a job. Objectives another character is better suited to rank lower, and say so.
 
-**Reads other addons instead of duplicating them.** AllTheThings and BtWQuests are consumed at runtime for quest names, coordinates, source quests and prerequisite chains. Completion Navigator stays the decision layer and does not attempt to replace their data.
+**Explains why you aren't at 100%.** `/cn breakdown` reports what's left in every category *and why* — how many pets can never be collected again, how many mounts are locked to the other faction, how many titles a different character already holds — with a concrete next step on each line.
 
-**Ignores and defers.** Not interested in something? Ignore it permanently, or defer it for an hour, and it stops competing for your attention.
+**Learns from your play.** Every quest you accept or turn in has its name, zone, coordinates and level recorded permanently. `/cn export` emits them as ready-to-paste data rows. Playing the game grows the database.
 
 ---
 
@@ -33,7 +33,9 @@ Click the minimap button or type `/cn next`. The addon scores every objective it
 | Subsystem | What is recorded |
 |---|---|
 | **Quests** | Event-driven discovery, character vs account/Warband completion, coordinates, prerequisites |
-| **Reputations** | Standing, Renown, Paragon, and crucially whether each is account-wide or character-specific |
+| **World quests** | Live availability with real expiry times |
+| **Rares & treasures** | Live vignette detection, plus a spawn database built from your own play |
+| **Reputations** | Standing, Renown, Paragon, and whether each is account-wide or character-specific |
 | **Achievements** | Focused on near-completion — what sits within two criteria of finishing |
 | **Battle pets** | Collected counts per species, wild and obtainable classification |
 | **Mounts** | Collection state and faction locks |
@@ -41,7 +43,7 @@ Click the minimap button or type `/cn next`. The addon scores every objective it
 | **Appearances** | Transmog progress per category |
 | **Titles** | Per character, so you can see which alt already earned one |
 | **Professions & recipes** | Skill levels, and which of your characters knows which recipe |
-| **Harvested quests** | Names, zones, coordinates and levels captured automatically as you play |
+| **Currencies** | Caps, and unfilled weekly earning that resets whether you use it or not |
 
 ---
 
@@ -50,38 +52,36 @@ Click the minimap button or type `/cn next`. The addon scores every objective it
 A minimap button and a five-tab window. Everything the slash commands do is reachable by clicking.
 
 - **Next** — the recommendation, its reasoning, and Navigate / Defer / Ignore. Below it, the ranked alternatives; click any to inspect it.
-- **Zone** — a live nearest-first sweep of your current map. Click a row to set a waypoint.
-- **Collections** — account completion per category, collected over known.
+- **Zone** — a live nearest-first sweep of your current map.
+- **Collections** — account completion per category.
 - **Scans** — counts and one-click scans for each subsystem.
 - **Settings** — priority mode, debug output, minimap button, window position.
 
-Keybindings are under **Key Bindings → AddOns**: toggle the window, recommend next, navigate to the recommendation.
+Keybindings live under **Key Bindings → AddOns**.
 
 ### Priority modes
 
-`balanced`, `fastest`, `zone`, `quests`, `achievements`, `reputation`, `pets`, `professions`, `recipes`, `collections`, `legacy`. Cycle them from the Settings tab or with `/cn mode`.
+`balanced`, `fastest`, `zone`, `quests`, `achievements`, `reputation`, `pets`, `professions`, `recipes`, `collections`, `legacy`. Cycle from the Settings tab or with `/cn mode`.
 
 ---
 
 ## Commands
 
-`/cn` for status, `/cn help` for the full list.
+`/cn` for status, `/cn help` for all 60-plus.
 
 ```
 /cn next                 Recommend the next objective
-/cn list [count]         Show the top scored objectives
+/cn now                  Everything expiring soon
+/cn rares                Rares and treasures up right now
 /cn zone [stop]          Route this zone, or navigate to a stop
-/cn go [questID]         Set a waypoint
-/cn why <questID>        Explain why a quest is not available
-/cn where <questID>      Show what location is known, and from which source
-/cn rep <faction>        Standing, scope, and the best character for it
+/cn breakdown [category] What is left in each category, and why
+/cn warband              Your roster and combined coverage
+/cn who <type> <id>      Which character should do this
+/cn why <questID>        Why a quest is not available
+/cn currencies           Caps and unfilled weekly earning
 /cn paragon              Paragon rewards ready to collect
-/cn closest [count]      Achievements nearest to completion
-/cn pets | mounts | toys | appearances | titles | professions | recipes
-/cn providers            Which external data addons were detected
-/cn lookup <questID>     Ask every external provider about one quest
-/cn harvest              What has been collected from your play
-/cn export [all]         Emit harvested quests as data rows
+/cn closest              Achievements nearest to completion
+/cn export               Emit harvested quest data
 ```
 
 ---
@@ -90,22 +90,20 @@ Keybindings are under **Key Bindings → AddOns**: toggle the window, recommend 
 
 Stated plainly, because finding these out yourself feels like a bug:
 
-- **Recipes need the profession window open once.** The client only exposes a recipe list while that profession's window is open. This is a restriction in the game, not a design choice. The addon captures each list automatically the first time you open a profession, and tells you which ones it is still waiting on rather than reporting zero.
-- **No zone completion percentages.** A percentage needs a denominator you can trust, and the curated static database does not yet have zone coverage. The addon reports counts of what remains instead of showing a number you would act on and shouldn't.
-- **Appearances are tracked per category, not per item.** Enumerating every appearance source is tens of thousands of entries; the actionable question is which slot is furthest from done. A dedicated wardrobe addon is the right tool for per-item work.
-- **Achievements only become recommendations when nearly complete.** A zero-progress achievement is a project, not a next action, and including them would bury everything else.
+- **No invented percentages.** Where the client cannot tell the addon how many things exist — quests, factions, recipes — it reports counts and says why there is no percentage. A number that looks authoritative and isn't is worse than no number.
+- **Recipes need the profession window open once.** The client only exposes a recipe list while that window is open. The addon captures each one automatically the first time you open it, and tells you which are still outstanding rather than reporting zero.
+- **Appearances are tracked per category, not per item.** Enumerating every appearance source is tens of thousands of entries; the actionable question is which slot is furthest from done.
+- **Achievements only become recommendations when nearly complete.** A zero-progress achievement is a project, not a next action.
 - **Warband comparisons need more than one character logged in.** The addon can only reason about characters it has seen.
-- **Harvested prerequisites are suggestions, not facts.** Quests you completed shortly before another became available are recorded as *possible* prerequisites, kept separate from real data, and never used to decide whether something is locked. They appear in exports as commented lines for a human to confirm. Completing A before B does not make A a prerequisite.
+- **Harvested prerequisites are suggestions, not facts.** Quests completed shortly before another became available are recorded as *possible* prerequisites, kept separate from real data, and never used to decide whether something is locked.
 
 ---
 
 ## Optional integrations
 
-**TomTom** for waypoints. Without it, navigation falls back to Blizzard map pins and the quest tracking arrow — everything still works.
+**TomTom** for waypoints. Without it, navigation falls back to Blizzard map pins and the quest tracking arrow.
 
-**AllTheThings** and **BtWQuests** are read at runtime when installed, for quest names, coordinates, source quests and prerequisite chains.
-
-Their internals are not published contracts, so every access is probed and wrapped: an update to either can make a provider go quiet, but cannot break this addon. `/cn providers` reports exactly which entry points resolved, so you can tell the difference between "not installed" and "changed shape".
+**AllTheThings** and **BtWQuests** are read at runtime when installed, for quest names, coordinates, source quests and prerequisite chains. Their internals are not published contracts, so every access is probed and wrapped: an update to either can make a provider go quiet, but cannot break this addon. `/cn providers` shows exactly what resolved.
 
 None are required. Completion Navigator is a decision layer, not a replacement for their data.
 
@@ -113,7 +111,7 @@ None are required. Completion Navigator is a decision layer, not a replacement f
 
 ## Status
 
-Version 0.9.0. The subsystems above are implemented and tested; the curated static quest database is still small, which is what limits prerequisite forensics and zone percentages today. Expect changes before 1.0.
+Version 0.12.0. All subsystems above are implemented and tested. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
 
 Bug reports and feature requests: [GitHub issues](https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/issues), or email developer@dambeaverstudios.com.
 

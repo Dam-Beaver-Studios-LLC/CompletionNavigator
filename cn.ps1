@@ -100,7 +100,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.11.0"
+CN.version     = "0.12.0"
 CN.dbVersion   = 2
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -4543,6 +4543,64 @@ function Blizzard.ClassifyVignette(atlasName)
     end
 
     return "UNKNOWN"
+end
+
+------------------------------------------------------------
+-- CURRENCIES
+------------------------------------------------------------
+
+function Blizzard.GetCurrencyList()
+    local results = {}
+
+    if not C_CurrencyInfo or not C_CurrencyInfo.GetCurrencyListSize then
+        return results
+    end
+
+    local ok, size = pcall(C_CurrencyInfo.GetCurrencyListSize)
+
+    if not ok or type(size) ~= "number" then
+        return results
+    end
+
+    for index = 1, size do
+        local gotInfo, info = pcall(C_CurrencyInfo.GetCurrencyListInfo, index)
+
+        if gotInfo and type(info) == "table" and not info.isHeader and info.name then
+            table.insert(results, {
+                currencyID   = info.currencyID,
+                name         = info.name,
+                quantity     = info.quantity or 0,
+                maxQuantity  = info.maxQuantity or 0,
+                totalEarned  = info.totalEarned or 0,
+                quality      = info.quality,
+                discovered   = info.discovered ~= false,
+
+                -- Weekly caps are the actionable part: a capped currency is
+                -- earning potential being thrown away every week it sits.
+                canEarnPerWeek     = info.canEarnPerWeek and true or false,
+                earnedThisWeek     = info.quantityEarnedThisWeek or 0,
+                maxWeeklyQuantity  = info.maxWeeklyQuantity or 0,
+
+                useTotalEarnedForMaxQty = info.useTotalEarnedForMaxQty and true or false,
+            })
+        end
+    end
+
+    return results
+end
+
+function Blizzard.GetCurrency(currencyID)
+    if not C_CurrencyInfo or not C_CurrencyInfo.GetCurrencyInfo then
+        return nil
+    end
+
+    local ok, info = pcall(C_CurrencyInfo.GetCurrencyInfo, currencyID)
+
+    if not ok or type(info) ~= "table" then
+        return nil
+    end
+
+    return info
 end
 '@
 
@@ -9968,6 +10026,770 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Currencies.lua'] = @'
+-- Modules/Currencies.lua
+-- Completion Navigator :: currencies, caps, and wasted earning potential.
+--
+-- A currency total on its own is not a decision. What matters is whether you
+-- are at a cap, because a capped currency is earning potential you are
+-- throwing away, and a weekly cap you have not filled resets in a few days
+-- whether you use it or not.
+--
+-- Both of those are time-sensitive, which is why this module contributes to
+-- the opportunity side of the scoring rather than sitting in a list.
+
+local ADDON_NAME, CN = ...
+
+local Currencies = CN:RegisterModule("Currencies")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+-- Currency quantities are character state; which currencies exist is not.
+local function NameStore()
+    return CN.Account("currencyNames")
+end
+
+local function CharacterStore(character)
+    character = character or CN.character
+
+    if not character then
+        return nil
+    end
+
+    character.currencies = character.currencies or {}
+
+    return character.currencies
+end
+
+Currencies.NameStore      = NameStore
+Currencies.CharacterStore = CharacterStore
+
+------------------------------------------------------------
+-- SCAN
+------------------------------------------------------------
+
+function Currencies.Scan()
+    local names = NameStore()
+    local mine  = CharacterStore()
+
+    if not mine then
+        return 0, 0, 0
+    end
+
+    local seen, atCap, weeklyRemaining = 0, 0, 0
+
+    for _, currency in ipairs(Blizzard.GetCurrencyList()) do
+        if currency.currencyID then
+            names[currency.currencyID] = currency.name
+
+            local capped = currency.maxQuantity > 0
+                and currency.quantity >= currency.maxQuantity
+
+            local weeklyLeft = 0
+
+            if currency.maxWeeklyQuantity > 0 then
+                weeklyLeft = math.max(0,
+                    currency.maxWeeklyQuantity - currency.earnedThisWeek)
+            end
+
+            mine[currency.currencyID] = {
+                currencyID        = currency.currencyID,
+                quantity          = currency.quantity,
+                maxQuantity       = currency.maxQuantity,
+                totalEarned       = currency.totalEarned,
+                earnedThisWeek    = currency.earnedThisWeek,
+                maxWeeklyQuantity = currency.maxWeeklyQuantity,
+                capped            = capped,
+                weeklyRemaining   = weeklyLeft,
+                lastSeen          = time(),
+            }
+
+            seen = seen + 1
+
+            if capped then
+                atCap = atCap + 1
+            end
+
+            if weeklyLeft > 0 then
+                weeklyRemaining = weeklyRemaining + 1
+            end
+        end
+    end
+
+    CN.Account("collectionScans").currencies = time()
+
+    return seen, atCap, weeklyRemaining
+end
+
+------------------------------------------------------------
+-- QUERIES
+------------------------------------------------------------
+
+function Currencies.Capped(character)
+    local capped = {}
+
+    for currencyID, record in pairs(CharacterStore(character) or {}) do
+        if record.capped then
+            table.insert(capped, {
+                currencyID = currencyID,
+                name       = NameStore()[currencyID],
+                quantity   = record.quantity,
+                maximum    = record.maxQuantity,
+            })
+        end
+    end
+
+    table.sort(capped, function(a, b) return (a.name or "") < (b.name or "") end)
+
+    return capped
+end
+
+function Currencies.WeeklyUnfilled(character)
+    local rows = {}
+
+    for currencyID, record in pairs(CharacterStore(character) or {}) do
+        if record.weeklyRemaining and record.weeklyRemaining > 0 then
+            table.insert(rows, {
+                currencyID = currencyID,
+                name       = NameStore()[currencyID],
+                remaining  = record.weeklyRemaining,
+                earned     = record.earnedThisWeek,
+                maximum    = record.maxWeeklyQuantity,
+            })
+        end
+    end
+
+    table.sort(rows, function(a, b) return (a.remaining or 0) > (b.remaining or 0) end)
+
+    return rows
+end
+
+function Currencies.Summary(character)
+    local store = CharacterStore(character) or {}
+
+    return {
+        known           = CN.CountKeys(store),
+        capped          = #Currencies.Capped(character),
+        weeklyUnfilled  = #Currencies.WeeklyUnfilled(character),
+    }
+end
+
+function Currencies.Resolve(text)
+    local currencyID = CN.ToID(text)
+
+    if currencyID and NameStore()[currencyID] then
+        return currencyID
+    end
+
+    if not text or text == "" then
+        return nil
+    end
+
+    local needle  = string.lower(text)
+    local matches = {}
+
+    for id, name in pairs(NameStore()) do
+        if name and string.find(string.lower(name), needle, 1, true) then
+            table.insert(matches, { id = id, name = name })
+        end
+    end
+
+    if #matches == 0 then
+        return nil
+    end
+
+    table.sort(matches, function(a, b) return #a.name < #b.name end)
+
+    return matches[1].id
+end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- A capped currency is not a place to travel to, so these carry no
+-- coordinates. They surface as high-priority advisories: stop earning this
+-- and go spend it.
+CN.RegisterCandidateProvider("Currencies", function()
+    local candidates = {}
+
+    for _, currency in ipairs(Currencies.Capped()) do
+        if not CN.IsIgnored(CN.objectiveTypes.CURRENCY, currency.currencyID)
+            and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, currency.currencyID) then
+
+            table.insert(candidates, CN.NewObjective({
+                id               = currency.currencyID,
+                type             = CN.objectiveTypes.CURRENCY,
+                name             = "Spend " .. tostring(currency.name),
+                accountWide      = false,
+                completionValue  = 2,
+                limitedTimeBonus = 1,
+                travelCost       = 0,
+                reasons          = {
+                    "at cap: " .. tostring(currency.quantity)
+                        .. " / " .. tostring(currency.maximum),
+                    "further earning is wasted until you spend it",
+                },
+            }))
+        end
+    end
+
+    return candidates
+end)
+
+------------------------------------------------------------
+-- EVENTS
+------------------------------------------------------------
+
+local lastScan = 0
+
+CN:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function()
+    local now = time()
+
+    if now - lastScan < 10 then
+        return
+    end
+
+    lastScan = now
+
+    Currencies.Scan()
+end)
+
+CN:OnLogin(function()
+    Currencies.Scan()
+end)
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "currencies",
+    aliases = { "currency" },
+    order   = 77,
+    help    = "Show currency caps and unfilled weekly earning.",
+    handler = function()
+        local counts = Currencies.Summary()
+
+        if counts.known == 0 then
+            Print("No currency data yet. Run /cn currencyscan.")
+            return
+        end
+
+        Print("Currencies tracked: " .. counts.known)
+
+        local capped = Currencies.Capped()
+
+        if #capped > 0 then
+            Print("|cffff4444At cap (" .. #capped .. ") - spend these:|r")
+
+            for _, currency in ipairs(capped) do
+                Print("  " .. tostring(currency.name)
+                    .. " |cff999999" .. currency.quantity
+                    .. " / " .. currency.maximum .. "|r")
+            end
+        end
+
+        local weekly = Currencies.WeeklyUnfilled()
+
+        if #weekly > 0 then
+            Print("Weekly earning still available (" .. #weekly .. "):")
+
+            for index = 1, math.min(#weekly, 8) do
+                local currency = weekly[index]
+
+                Print("  " .. tostring(currency.name)
+                    .. " |cff999999" .. currency.earned .. " / " .. currency.maximum
+                    .. ", " .. currency.remaining .. " left this week|r")
+            end
+        end
+
+        if #capped == 0 and #weekly == 0 then
+            Print("Nothing capped, nothing left to earn this week.")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "currencyscan",
+    order   = 78,
+    help    = "Rescan currencies for this character.",
+    handler = function()
+        local seen, atCap, weekly = Currencies.Scan()
+
+        Print("Scanned " .. seen .. " currencies.")
+        Print("At cap: " .. atCap .. "   With weekly earning left: " .. weekly)
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
+$Embedded['Modules\Breakdown.lua'] = @'
+-- Modules/Breakdown.lua
+-- Completion Navigator :: "why isn't this 100%?"
+--
+-- Every other module answers what it tracks. None of them answer the
+-- question a completionist actually asks, which is why a category is not
+-- finished and what specifically is in the way.
+--
+-- Two rules shape this module.
+--
+-- 1. A percentage is only shown where the denominator is trustworthy. The
+--    client knows exactly how many mounts exist; nobody knows how many
+--    quests exist. Where the denominator is unknown, counts are shown and
+--    the reason is stated, rather than inventing a number that looks
+--    authoritative and is not.
+--
+-- 2. Every line says what to do next, not just what is missing. "4 vendor
+--    recipes" is trivia; "4 recipes, open the profession window to see
+--    which" is an instruction.
+
+local ADDON_NAME, CN = ...
+
+local Breakdown = CN:RegisterModule("Breakdown")
+
+local Print = CN.Print
+
+-- "1 are locked" reads as a bug even when the number is right.
+local function Are(count)
+    return count == 1 and "is" or "are"
+end
+
+local function Plural(count, singular, plural)
+    return count == 1 and singular or (plural or (singular .. "s"))
+end
+
+------------------------------------------------------------
+-- REGISTRY
+------------------------------------------------------------
+
+-- Each category reports: collected, total (or nil when unknowable),
+-- remaining lines, and the next action.
+Breakdown.categories = {}
+
+function Breakdown.Register(definition)
+    if type(definition) ~= "table" or not definition.name then
+        return
+    end
+
+    definition.order = definition.order or 100
+
+    table.insert(Breakdown.categories, definition)
+
+    table.sort(Breakdown.categories, function(a, b)
+        if a.order == b.order then
+            return a.name < b.name
+        end
+
+        return a.order < b.order
+    end)
+end
+
+------------------------------------------------------------
+-- REPORT
+------------------------------------------------------------
+
+local function Percentage(collected, total)
+    if not total or total <= 0 then
+        return nil
+    end
+
+    return collected / total * 100
+end
+
+function Breakdown.Report(categoryName)
+    local rows = {}
+
+    for _, category in ipairs(Breakdown.categories) do
+        if not categoryName
+            or string.lower(category.name) == string.lower(categoryName) then
+
+            local ok, result = pcall(category.report)
+
+            if ok and type(result) == "table" then
+                result.name  = category.name
+                result.order = category.order
+
+                table.insert(rows, result)
+            end
+        end
+    end
+
+    return rows
+end
+
+------------------------------------------------------------
+-- BUILT-IN CATEGORIES
+------------------------------------------------------------
+
+Breakdown.Register{
+    name  = "Mounts",
+    order = 10,
+    report = function()
+        local module = CN:GetModule("Mounts")
+
+        if not module then return nil end
+
+        local counts = module.Summary()
+
+        local reasons = {}
+
+        if counts.wrongFaction > 0 then
+            table.insert(reasons, counts.wrongFaction .. " " .. Are(counts.wrongFaction)
+                .. " locked to the opposite faction")
+        end
+
+        return {
+            collected = counts.collected,
+            total     = counts.known,
+            remaining = counts.missing,
+            reasons   = reasons,
+            action    = counts.known == 0 and "/cn mountscan" or nil,
+        }
+    end,
+}
+
+Breakdown.Register{
+    name  = "Pets",
+    order = 11,
+    report = function()
+        local module = CN:GetModule("Pets")
+
+        if not module then return nil end
+
+        local counts = module.Summary()
+
+        local reasons = {}
+
+        if counts.unobtainable > 0 then
+            table.insert(reasons, counts.unobtainable .. " " .. Are(counts.unobtainable)
+                .. " no longer obtainable and can never be collected")
+        end
+
+        if counts.wildMissing > 0 then
+            table.insert(reasons, counts.wildMissing .. " " .. Are(counts.wildMissing) .. " "
+                .. Plural(counts.wildMissing, "a wild pet", "wild pets")
+                .. " you can catch in the world")
+        end
+
+        return {
+            collected = counts.collected,
+            total     = counts.known,
+            remaining = counts.missing,
+            reasons   = reasons,
+            action    = counts.known == 0 and "/cn petscan" or nil,
+        }
+    end,
+}
+
+Breakdown.Register{
+    name  = "Toys",
+    order = 12,
+    report = function()
+        local module = CN:GetModule("Toys")
+
+        if not module then return nil end
+
+        local counts = module.Summary()
+
+        return {
+            collected = counts.collected,
+            total     = counts.known,
+            remaining = counts.missing,
+            action    = counts.known == 0 and "/cn toyscan" or nil,
+        }
+    end,
+}
+
+Breakdown.Register{
+    name  = "Appearances",
+    order = 13,
+    report = function()
+        local module = CN:GetModule("Appearances")
+
+        if not module then return nil end
+
+        local counts = module.Summary()
+        local rows   = module.Remaining()
+
+        local reasons = {}
+
+        for index = 1, math.min(3, #rows) do
+            table.insert(reasons, rows[index].name .. ": "
+                .. rows[index].remaining .. " left")
+        end
+
+        return {
+            collected = counts.collected,
+            total     = counts.total,
+            remaining = counts.total - counts.collected,
+            reasons   = reasons,
+            action    = counts.categories == 0 and "/cn appearancescan" or nil,
+        }
+    end,
+}
+
+Breakdown.Register{
+    name  = "Achievements",
+    order = 14,
+    report = function()
+        local module = CN:GetModule("Achievements")
+
+        if not module then return nil end
+
+        local counts = module.Summary()
+
+        local reasons = {}
+
+        if counts.nearlyDone > 0 then
+            table.insert(reasons, counts.nearlyDone .. " " .. Are(counts.nearlyDone)
+                .. " within two criteria of finishing")
+        end
+
+        return {
+            collected = counts.completed,
+            total     = counts.total,
+            remaining = counts.total - counts.completed,
+            reasons   = reasons,
+            action    = counts.total == 0 and "/cn achievescan"
+                or (counts.nearlyDone > 0 and "/cn closest" or nil),
+        }
+    end,
+}
+
+Breakdown.Register{
+    name  = "Titles",
+    order = 15,
+    report = function()
+        local module = CN:GetModule("Titles")
+
+        if not module then return nil end
+
+        local counts = module.Summary()
+
+        local reasons = {}
+
+        if counts.onAccount > counts.onThisOne then
+            local elsewhere = counts.onAccount - counts.onThisOne
+
+            table.insert(reasons, elsewhere .. " " .. Are(elsewhere)
+                .. " held by another character, not this one")
+        end
+
+        return {
+            collected = counts.onAccount,
+            total     = counts.known,
+            remaining = counts.known - counts.onAccount,
+            reasons   = reasons,
+            action    = counts.known == 0 and "/cn titlescan" or nil,
+        }
+    end,
+}
+
+Breakdown.Register{
+    name  = "Reputations",
+    order = 16,
+    report = function()
+        local module = CN:GetModule("Reputations")
+
+        if not module then return nil end
+
+        local counts = module.Summary()
+
+        local reasons = {}
+
+        if counts.paragonPending > 0 then
+            table.insert(reasons, counts.paragonPending .. " " .. Plural(counts.paragonPending, "has", "have")
+                .. " a Paragon reward waiting to be collected")
+        end
+
+        if counts.character > 0 then
+            table.insert(reasons, counts.character .. " " .. Are(counts.character)
+                .. " character-specific, so an alt may be further ahead")
+        end
+
+        -- Total factions in the game is not knowable from the client.
+        return {
+            collected = counts.exalted + counts.maxedRenown,
+            total     = nil,
+            remaining = nil,
+            unknownTotal = "the client does not expose how many factions exist",
+            reasons   = reasons,
+            action    = (counts.account + counts.character) == 0
+                and "/cn repscan"
+                or (counts.paragonPending > 0 and "/cn paragon" or nil),
+        }
+    end,
+}
+
+Breakdown.Register{
+    name  = "Recipes",
+    order = 17,
+    report = function()
+        local module = CN:GetModule("Professions")
+
+        if not module then return nil end
+
+        local waiting = module.AwaitingRecipeCapture()
+
+        local reasons = {}
+
+        if #waiting > 0 then
+            table.insert(reasons, "recipe lists not captured for: "
+                .. table.concat(waiting, ", "))
+        end
+
+        local known = 0
+
+        for _, record in ipairs(module.Summary()) do
+            known = known + (record.recipeKnown or 0)
+        end
+
+        return {
+            collected    = known,
+            total        = nil,
+            unknownTotal = "recipes are only countable while a profession window is open",
+            reasons      = reasons,
+            action       = #waiting > 0 and "open each profession window once" or nil,
+        }
+    end,
+}
+
+Breakdown.Register{
+    name  = "Quests",
+    order = 18,
+    report = function()
+        local discovered = CN.CountKeys(CN.Account("discoveredQuests"))
+
+        local completed = 0
+
+        for _, status in pairs(CN.Account("questStatus")) do
+            if status.characterCompleted then
+                completed = completed + 1
+            end
+        end
+
+        return {
+            collected    = completed,
+            total        = nil,
+            unknownTotal = "no API reports how many quests exist; "
+                .. "only quests this addon has seen can be counted",
+            reasons      = {
+                discovered .. " quests discovered so far",
+                CN.CountKeys(CN.Account("questHarvest")) .. " harvested with location data",
+            },
+            action = "/cn harvest",
+        }
+    end,
+}
+
+Breakdown.Register{
+    name  = "Currencies",
+    order = 19,
+    report = function()
+        local module = CN:GetModule("Currencies")
+
+        if not module then return nil end
+
+        local counts = module.Summary()
+
+        local reasons = {}
+
+        if counts.capped > 0 then
+            table.insert(reasons, counts.capped .. " " .. Are(counts.capped)
+                .. " at cap; further earning is wasted")
+        end
+
+        if counts.weeklyUnfilled > 0 then
+            table.insert(reasons, counts.weeklyUnfilled .. " still " .. Plural(counts.weeklyUnfilled, "has", "have")
+                .. " weekly earning available")
+        end
+
+        return {
+            collected    = counts.known - counts.capped,
+            total        = nil,
+            unknownTotal = "currencies are a state to manage, not a set to complete",
+            reasons      = reasons,
+            action       = counts.capped > 0 and "/cn currencies" or nil,
+        }
+    end,
+}
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+local function PrintRow(row)
+    local percentage = Percentage(row.collected, row.total)
+
+    if percentage then
+        Print(string.format("|cffffd100%s|r  %d / %d  (%.1f%%)",
+            row.name, row.collected, row.total, percentage))
+    else
+        Print(string.format("|cffffd100%s|r  %d collected",
+            row.name, row.collected or 0))
+
+        if row.unknownTotal then
+            Print("    |cff999999no percentage: " .. row.unknownTotal .. "|r")
+        end
+    end
+
+    for _, reason in ipairs(row.reasons or {}) do
+        Print("    " .. reason)
+    end
+
+    if row.action then
+        Print("    |cffffff00-> " .. row.action .. "|r")
+    end
+end
+
+CN:RegisterCommand{
+    name    = "breakdown",
+    aliases = { "remaining" },
+    args    = "[category]",
+    order   = 19,
+    help    = "Explain what is left in each category, and why.",
+    handler = function(args)
+        local requested = args ~= "" and args or nil
+
+        local rows = Breakdown.Report(requested)
+
+        if #rows == 0 then
+            if requested then
+                Print("No category matches: " .. requested)
+
+                local names = {}
+
+                for _, category in ipairs(Breakdown.categories) do
+                    table.insert(names, category.name)
+                end
+
+                Print("Try: " .. table.concat(names, ", "))
+            else
+                Print("Nothing to report yet. Run the scans first.")
+            end
+
+            return
+        end
+
+        Print("What is left, and why:")
+
+        for _, row in ipairs(rows) do
+            PrintRow(row)
+        end
+
+        if not requested then
+            Print("|cff999999/cn breakdown <category> for one at a time.|r")
+        end
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -9987,7 +10809,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.11.0
+## Version: 0.12.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -10018,6 +10840,8 @@ Providers\TomTom.lua
 Data\Quests.lua
 Modules\Achievements.lua
 Modules\Appearances.lua
+Modules\Breakdown.lua
+Modules\Currencies.lua
 Modules\Harvest.lua
 Modules\Mounts.lua
 Modules\Opportunities.lua
@@ -10162,6 +10986,29 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.12.0]
+
+### Added
+
+- **"Why isn't this 100%?"** `/cn breakdown` explains what is left in every
+  category and why, with a concrete next action per line rather than a bare
+  count. `/cn breakdown <category>` for one at a time.
+  Percentages appear only where the denominator is trustworthy. The client
+  knows how many mounts exist; nothing knows how many quests exist. Where a
+  total is unknowable the addon says so and shows counts, instead of
+  inventing a number that looks authoritative.
+- **Currencies.** Caps and weekly earning, tracked per character.
+  A capped currency is earning potential being thrown away, so it surfaces
+  as a time-sensitive recommendation to go spend it. Unfilled weekly caps
+  are reported because they reset whether you use them or not.
+  `/cn currencies`, `/cn currencyscan`.
+
+### Fixed
+
+- Singular/plural agreement in breakdown output. "1 are locked to the
+  opposite faction" reads as a bug even when the number is correct.
+
 
 ## [0.11.0]
 

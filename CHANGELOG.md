@@ -7,6 +7,29 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.12.0]
+
+### Added
+
+- **"Why isn't this 100%?"** `/cn breakdown` explains what is left in every
+  category and why, with a concrete next action per line rather than a bare
+  count. `/cn breakdown <category>` for one at a time.
+  Percentages appear only where the denominator is trustworthy. The client
+  knows how many mounts exist; nothing knows how many quests exist. Where a
+  total is unknowable the addon says so and shows counts, instead of
+  inventing a number that looks authoritative.
+- **Currencies.** Caps and weekly earning, tracked per character.
+  A capped currency is earning potential being thrown away, so it surfaces
+  as a time-sensitive recommendation to go spend it. Unfilled weekly caps
+  are reported because they reset whether you use them or not.
+  `/cn currencies`, `/cn currencyscan`.
+
+### Fixed
+
+- Singular/plural agreement in breakdown output. "1 are locked to the
+  opposite faction" reads as a bug even when the number is correct.
+
+
 ## [0.11.0]
 
 ### Added

@@ -1140,3 +1140,61 @@ function Blizzard.ClassifyVignette(atlasName)
 
     return "UNKNOWN"
 end
+
+------------------------------------------------------------
+-- CURRENCIES
+------------------------------------------------------------
+
+function Blizzard.GetCurrencyList()
+    local results = {}
+
+    if not C_CurrencyInfo or not C_CurrencyInfo.GetCurrencyListSize then
+        return results
+    end
+
+    local ok, size = pcall(C_CurrencyInfo.GetCurrencyListSize)
+
+    if not ok or type(size) ~= "number" then
+        return results
+    end
+
+    for index = 1, size do
+        local gotInfo, info = pcall(C_CurrencyInfo.GetCurrencyListInfo, index)
+
+        if gotInfo and type(info) == "table" and not info.isHeader and info.name then
+            table.insert(results, {
+                currencyID   = info.currencyID,
+                name         = info.name,
+                quantity     = info.quantity or 0,
+                maxQuantity  = info.maxQuantity or 0,
+                totalEarned  = info.totalEarned or 0,
+                quality      = info.quality,
+                discovered   = info.discovered ~= false,
+
+                -- Weekly caps are the actionable part: a capped currency is
+                -- earning potential being thrown away every week it sits.
+                canEarnPerWeek     = info.canEarnPerWeek and true or false,
+                earnedThisWeek     = info.quantityEarnedThisWeek or 0,
+                maxWeeklyQuantity  = info.maxWeeklyQuantity or 0,
+
+                useTotalEarnedForMaxQty = info.useTotalEarnedForMaxQty and true or false,
+            })
+        end
+    end
+
+    return results
+end
+
+function Blizzard.GetCurrency(currencyID)
+    if not C_CurrencyInfo or not C_CurrencyInfo.GetCurrencyInfo then
+        return nil
+    end
+
+    local ok, info = pcall(C_CurrencyInfo.GetCurrencyInfo, currencyID)
+
+    if not ok or type(info) ~= "table" then
+        return nil
+    end
+
+    return info
+end
