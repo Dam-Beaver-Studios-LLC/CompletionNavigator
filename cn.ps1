@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.24.3'
+$script:ToolkitVersion = '0.24.4'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.24.3"
+CN.version     = "0.24.4"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -18366,7 +18366,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.24.3
+## Version: 0.24.4
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -18579,6 +18579,31 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.24.4]
+
+Consequence of the previous fix. No addon changes.
+
+### Fixed
+
+- **The new toolchain installs into the repository, and the checks started
+  reading it.** The install directory is named `.lua`, so a search for files
+  matching `*.lua` matched the directory itself and handed it to the compiler,
+  which reasonably objected that it is a directory. Underneath it sat several
+  thousand third-party files besides, some malformed on purpose because they
+  are another project's test fixtures.
+  Every search for Lua files is now restricted to regular files and scoped to
+  ours, and the linter is configured to match. The rule excludes dotted
+  directories as a class rather than naming today's, so the next tool that
+  installs somewhere new is already covered.
+
+### Added
+
+- The syntax check now reports how many files it examined and fails if that
+  number is implausibly small. A search that matches nothing passes silently,
+  which is a worse failure than the one it replaced.
+- The test suite plants a deliberately malformed file where the toolchain
+  installs and asserts that neither the syntax check nor the linter reads it.
 
 ## [0.24.3]
 
@@ -19868,15 +19893,32 @@ jobs:
           luac -v || true
           luacheck --version
 
+      # Only OUR Lua. The toolchain is built into .lua/ in this same workspace,
+      # which drags several thousand third-party files into any naive `find` --
+      # including LuaRocks' own test fixtures, some of which are deliberately
+      # malformed. Excluding every dotted directory covers .git, .github, .lua,
+      # .lua-build and .luarocks in one rule, and covers whatever the next
+      # tool decides to name its install directory.
       - name: Syntax check every Lua file
         run: |
           status=0
+          count=0
           while IFS= read -r file; do
+            count=$((count + 1))
             if ! luac5.4 -p "$file"; then
               echo "SYNTAX ERROR: $file"
               status=1
             fi
-          done < <(find . -name '*.lua' -not -path './.git/*')
+          done < <(find . -type f -name '*.lua' -not -path './.*')
+          echo "checked $count file(s)"
+
+          # A find that silently matches nothing would pass this step while
+          # checking nothing at all.
+          if [ "$count" -lt 10 ]; then
+            echo "::error::Only $count Lua files were found; the search is wrong."
+            status=1
+          fi
+
           exit $status
 
       - name: Verify the .toc lists every Lua file
@@ -19890,7 +19932,7 @@ jobs:
               echo "NOT IN TOC: $rel"
               status=1
             fi
-          done < <(find . -name '*.lua' -not -path './.git/*' \
+          done < <(find . -type f -name '*.lua' -not -path './.*' \
                      -not -name 'harness.lua' -not -name 'bench.lua')
           exit $status
 
@@ -20099,8 +20141,15 @@ files["Providers/Blizzard.lua"] = {
 files["harness.lua"] = { ignore = { "1" }, unused = false }
 files["bench.lua"]   = { ignore = { "1" }, unused = false }
 
+-- CI builds the Lua toolchain into the workspace, so the repository root now
+-- contains thousands of third-party .lua files belonging to LuaRocks and its
+-- dependencies. They are not ours and must not be analysed.
 exclude_files = {
     "_backups/",
+    ".lua/**",
+    ".lua-build/**",
+    ".luarocks/**",
+    ".install/**",
 }
 '@
 

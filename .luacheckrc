@@ -111,6 +111,13 @@ files["Providers/Blizzard.lua"] = {
 files["harness.lua"] = { ignore = { "1" }, unused = false }
 files["bench.lua"]   = { ignore = { "1" }, unused = false }
 
+-- CI builds the Lua toolchain into the workspace, so the repository root now
+-- contains thousands of third-party .lua files belonging to LuaRocks and its
+-- dependencies. They are not ours and must not be analysed.
 exclude_files = {
     "_backups/",
+    ".lua/**",
+    ".lua-build/**",
+    ".luarocks/**",
+    ".install/**",
 }

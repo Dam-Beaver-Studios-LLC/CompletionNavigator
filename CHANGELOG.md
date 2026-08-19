@@ -7,6 +7,31 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.24.4]
+
+Consequence of the previous fix. No addon changes.
+
+### Fixed
+
+- **The new toolchain installs into the repository, and the checks started
+  reading it.** The install directory is named `.lua`, so a search for files
+  matching `*.lua` matched the directory itself and handed it to the compiler,
+  which reasonably objected that it is a directory. Underneath it sat several
+  thousand third-party files besides, some malformed on purpose because they
+  are another project's test fixtures.
+  Every search for Lua files is now restricted to regular files and scoped to
+  ours, and the linter is configured to match. The rule excludes dotted
+  directories as a class rather than naming today's, so the next tool that
+  installs somewhere new is already covered.
+
+### Added
+
+- The syntax check now reports how many files it examined and fails if that
+  number is implausibly small. A search that matches nothing passes silently,
+  which is a worse failure than the one it replaced.
+- The test suite plants a deliberately malformed file where the toolchain
+  installs and asserts that neither the syntax check nor the linter reads it.
+
 ## [0.24.3]
 
 The release pipeline stops depending on the runner's package manager. No addon

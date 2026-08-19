@@ -102,15 +102,32 @@ jobs:
           luac -v || true
           luacheck --version
 
+      # Only OUR Lua. The toolchain is built into .lua/ in this same workspace,
+      # which drags several thousand third-party files into any naive `find` --
+      # including LuaRocks' own test fixtures, some of which are deliberately
+      # malformed. Excluding every dotted directory covers .git, .github, .lua,
+      # .lua-build and .luarocks in one rule, and covers whatever the next
+      # tool decides to name its install directory.
       - name: Syntax check every Lua file
         run: |
           status=0
+          count=0
           while IFS= read -r file; do
+            count=$((count + 1))
             if ! luac5.4 -p "$file"; then
               echo "SYNTAX ERROR: $file"
               status=1
             fi
-          done < <(find . -name '*.lua' -not -path './.git/*')
+          done < <(find . -type f -name '*.lua' -not -path './.*')
+          echo "checked $count file(s)"
+
+          # A find that silently matches nothing would pass this step while
+          # checking nothing at all.
+          if [ "$count" -lt 10 ]; then
+            echo "::error::Only $count Lua files were found; the search is wrong."
+            status=1
+          fi
+
           exit $status
 
       - name: Verify the .toc lists every Lua file
@@ -124,7 +141,7 @@ jobs:
               echo "NOT IN TOC: $rel"
               status=1
             fi
-          done < <(find . -name '*.lua' -not -path './.git/*' \
+          done < <(find . -type f -name '*.lua' -not -path './.*' \
                      -not -name 'harness.lua' -not -name 'bench.lua')
           exit $status
 
