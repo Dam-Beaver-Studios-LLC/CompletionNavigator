@@ -7,6 +7,31 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.24.3]
+
+The release pipeline stops depending on the runner's package manager. No addon
+changes.
+
+### Fixed
+
+- **The previous fix was the wrong fix, and I should say so plainly.** 0.24.2
+  bounded how long `apt-get` would wait for the dpkg lock, on the theory that
+  the lock was held briefly at boot. It is not held briefly. Bounding the wait
+  changed a build that hung for thirty-eight minutes into a build that failed
+  after six, which is better but is not working.
+  Lua, LuaRocks and luacheck now come from setup actions that build the
+  toolchain into the workspace. There is no shared lock, no package database
+  and no other process to contend with, so the entire failure class is gone
+  rather than merely reported faster.
+- Coverage no longer installs anything of its own, and locates luacov by asking
+  LuaRocks where it put it instead of guessing from a list of directories. The
+  workspace-local install used by CI appears in none of the paths it guessed.
+
+### Added
+
+- The test suite asserts that Lua arrives from a setup action and not from
+  `apt-get`, so a later edit cannot quietly reintroduce the hang.
+
 ## [0.24.2]
 
 The other half of the release problem. No addon changes.

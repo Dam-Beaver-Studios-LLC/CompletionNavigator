@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.24.2'
+$script:ToolkitVersion = '0.24.3'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.24.2"
+CN.version     = "0.24.3"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -18366,7 +18366,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.24.2
+## Version: 0.24.3
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -18579,6 +18579,31 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.24.3]
+
+The release pipeline stops depending on the runner's package manager. No addon
+changes.
+
+### Fixed
+
+- **The previous fix was the wrong fix, and I should say so plainly.** 0.24.2
+  bounded how long `apt-get` would wait for the dpkg lock, on the theory that
+  the lock was held briefly at boot. It is not held briefly. Bounding the wait
+  changed a build that hung for thirty-eight minutes into a build that failed
+  after six, which is better but is not working.
+  Lua, LuaRocks and luacheck now come from setup actions that build the
+  toolchain into the workspace. There is no shared lock, no package database
+  and no other process to contend with, so the entire failure class is gone
+  rather than merely reported faster.
+- Coverage no longer installs anything of its own, and locates luacov by asking
+  LuaRocks where it put it instead of guessing from a list of directories. The
+  workspace-local install used by CI appears in none of the paths it guessed.
+
+### Added
+
+- The test suite asserts that Lua arrives from a setup action and not from
+  `apt-get`, so a later edit cannot quietly reintroduce the hang.
 
 ## [0.24.2]
 
@@ -19800,34 +19825,48 @@ jobs:
             esac
           done
 
-      # Fails the build before publishing if any Lua file is malformed.
-      # ubuntu-latest runs unattended-upgrades shortly after boot, which holds
-      # the dpkg lock. apt-get waits for that lock FOREVER by default -- there
-      # is no timeout unless you ask for one. That is how a release wedged here
-      # for thirty-eight minutes while reporting "in progress", looking for all
-      # the world like it was still doing something.
+      # The Lua toolchain does NOT come from apt, deliberately.
       #
-      # DPkg::Lock::Timeout bounds the wait. The retry loop covers a transient
-      # mirror failure, which is the other way this step dies.
+      # ubuntu-latest runs unattended-upgrades shortly after boot, which holds
+      # the dpkg lock. apt-get waits for that lock FOREVER by default, so this
+      # step wedged for thirty-eight minutes on one release while reporting
+      # "in progress". Bounding the wait only converted the hang into a
+      # failure: the lock was still held, so apt still could not run.
+      #
+      # These actions download and build the toolchain into .lua/ in the
+      # workspace. No package manager, no shared lock, nothing to contend with.
       - name: Install Lua
         timeout-minutes: 6
-        env:
-          DEBIAN_FRONTEND: noninteractive
+        uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: "5.4"
+
+      - name: Install LuaRocks
+        timeout-minutes: 6
+        uses: leafo/gh-actions-luarocks@v6
+
+      # luacheck is the only tool the blocking steps need; luacov is optional
+      # and the coverage step tolerates its absence.
+      #
+      # The shims matter. Every downstream step, coverage.sh, and the local
+      # test suite all invoke `lua5.4` and `luac5.4` by name, and the test
+      # suite asserts CI runs those exact commands. The actions above install
+      # plain `lua` and `luac`, so alias them rather than editing the command
+      # in six places and breaking that parity check.
+      - name: Install Lua tooling
+        timeout-minutes: 6
         run: |
-          APT="sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3"
+          luarocks install luacheck
+          luarocks install luacov || echo "luacov unavailable; coverage will skip"
 
-          for attempt in 1 2 3; do
-            if $APT update && $APT install -y --no-install-recommends lua5.4 lua-check; then
-              luac5.4 -v || true
-              exit 0
-            fi
+          mkdir -p "$HOME/bin"
+          ln -sf "$(command -v lua)"  "$HOME/bin/lua5.4"
+          ln -sf "$(command -v luac)" "$HOME/bin/luac5.4"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
 
-            echo "apt attempt $attempt did not succeed; retrying in 10s"
-            sleep 10
-          done
-
-          echo "::error::Could not install Lua after three attempts."
-          exit 1
+          lua -v
+          luac -v || true
+          luacheck --version
 
       - name: Syntax check every Lua file
         run: |
@@ -19894,12 +19933,7 @@ jobs:
       - name: Coverage
         continue-on-error: true
         timeout-minutes: 6
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends luarocks || true
-          sudo luarocks install luacov || echo "luacov unavailable; coverage will skip"
-          bash coverage.sh . 80
+        run: bash coverage.sh . 80
 
       # The packager SKIPS the CurseForge upload silently when CF_API_KEY is
       # missing -- the build still goes green and no file appears. Fail here
