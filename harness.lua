@@ -155,6 +155,14 @@ local questLog = {
     { questID = 9002, title = "Test Quest Beta",        isHeader = false },
 }
 
+-- Titles the client knows about but which are NOT in the log: available
+-- quests still have names.
+local offeredTitles = {
+    [9100] = "Pick Me Up",
+    [9101] = "Already Done",
+    [9102] = "Daily Offer",
+}
+
 local pendingLoad = {}
 
 C_QuestLog = {
@@ -167,7 +175,7 @@ C_QuestLog = {
         for _, entry in ipairs(questLog) do
             if entry.questID == id then return entry.title end
         end
-        return nil
+        return offeredTitles[id]
     end,
     RequestLoadQuestByID   = function(id) table.insert(pendingLoad, id) end,
     GetNumQuestLogEntries  = function() return #questLog end,
@@ -186,10 +194,32 @@ C_QuestLog = {
         end
         return nil
     end,
-    -- 9002 is only findable through the map POI list.
+    -- The map POI list, which carries BOTH the quests you already have and
+    -- the ones standing in the zone waiting to be picked up.
+    --
+    -- The old stub returned only an in-log quest, which is exactly why the
+    -- addon shipped for twenty-two releases unable to see an available quest:
+    -- the test data had none either.
     GetQuestsOnMap = function(mapID)
         if mapID ~= 94 then return {} end
-        return { { questID = 9002, x = 0.61, y = 0.48 } }
+
+        return {
+            -- In the log already; findable only through this list.
+            { questID = 9002, x = 0.61, y = 0.48,
+              isQuestStart = false, inProgress = true },
+
+            -- An exclamation mark: offered here, not accepted, not done.
+            { questID = 9100, x = 0.33, y = 0.27,
+              isQuestStart = true, inProgress = false, isDaily = false },
+
+            -- A daily, also available.
+            { questID = 9102, x = 0.44, y = 0.66,
+              isQuestStart = true, inProgress = false, isDaily = true },
+
+            -- A quest start for something already completed: must be ignored.
+            { questID = 9101, x = 0.50, y = 0.50,
+              isQuestStart = true, inProgress = false },
+        }
     end,
     IsWorldQuest = function(id) return id >= 70000 end,
     GetQuestTagInfo = function(id)
@@ -2191,6 +2221,89 @@ assert((byType.TITLE or 0) == 0,
     "titles must not be recommended: there is no source data to act on")
 
 print("  titles correctly absent (no source data exists)")
+
+print("\nAvailable quests:")
+
+-- Reported from live play: "it only shows the quests you have accepted --
+-- I don't see where it shows the quest pending to be accepted in the zone",
+-- and "'new' is always 0".
+--
+-- Both had the same root cause: every quest source the addon read was the
+-- quest LOG, which by definition contains only quests already taken.
+local questsModule = CN:GetModule("Quests")
+
+local availableHere = questsModule.AvailableOnMap(94)
+
+local availableIDs = {}
+for _, poi in ipairs(availableHere) do availableIDs[#availableIDs + 1] = poi.questID end
+
+print("  available to pick up = " .. table.concat(availableIDs, ", "))
+
+assert(#availableHere == 2,
+    "two quests are offered and not yet done, got " .. #availableHere)
+
+for _, poi in ipairs(availableHere) do
+    assert(poi.questID ~= 9002, "a quest already in the log is not 'available'")
+    assert(poi.questID ~= 9101, "a completed quest must never be offered again")
+    assert(poi.x and poi.y, "an available quest must carry its pin coordinates")
+end
+
+-- They must reach the recommendation list, which is the actual complaint.
+CN.InvalidateCandidates()
+
+local offered = {}
+
+for _, objective in ipairs(CN.CollectCandidates(true)) do
+    if objective.type == "QUEST" then offered[objective.id] = objective end
+end
+
+assert(offered[9100], "an available quest must become a candidate")
+assert(offered[9102], "an available daily must become a candidate")
+assert(not offered[9101], "a completed quest must not become a candidate")
+
+print("  available quests reach the recommendation list")
+
+-- With a name, not a bare id: "Quest 9100" is not a recommendation.
+assert(offered[9100].name == "Pick Me Up",
+    "an available quest must be named, got " .. tostring(offered[9100].name))
+
+-- With coordinates, so it can actually be navigated to.
+assert(offered[9100].x and offered[9100].y,
+    "an available quest must be navigable")
+
+-- And it must say why it is being suggested.
+local said = table.concat(offered[9100].reasons or {}, " | ")
+
+assert(said:find("available to pick up", 1, true),
+    "an available quest must explain itself, got " .. said)
+
+print("  named, navigable, and explained: " .. said)
+
+-- An available quest should outrank an accepted one that has made no
+-- progress: walking twenty yards to collect it is the cheaper action.
+assert((offered[9100].completionValue or 0) > 1,
+    "an available quest must be weighted above a bare accepted quest")
+
+print("  weighted above an untouched accepted quest")
+
+-- "new is always 0": discovery only ever walked the quest log, so after the
+-- first scan there was nothing left to discover, forever.
+CN.Account("discoveredQuests")[9100] = nil
+CN.Account("discoveredQuests")[9102] = nil
+
+local discoveredSeen, discoveredNew = questsModule.DiscoverActive()
+
+print("  discover: seen = " .. discoveredSeen .. ", new = " .. discoveredNew)
+
+assert(discoveredNew >= 2,
+    "available quests must count as newly discovered, got " .. discoveredNew)
+
+-- Running it again finds nothing new, which is correct.
+local _, againNew = questsModule.DiscoverActive()
+
+assert(againNew == 0, "a second scan must find nothing new, got " .. againNew)
+
+print("  second scan correctly finds nothing new")
 
 print("\nPrerequisite confidence:")
 

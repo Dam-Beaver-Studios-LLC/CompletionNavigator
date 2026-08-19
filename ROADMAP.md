@@ -1,10 +1,12 @@
 # Completion Navigator â€” Roadmap
 
-Current version: **0.22.0** Â· 42 Lua files Â· ~18,700 lines Â· 87 slash commands Â· 15 candidate providers Â· 10 UI tabs Â· 85% test coverage
+Current version: **0.23.0** Â· 42 Lua files Â· ~18,900 lines Â· 87 slash commands Â· 15 candidate providers Â· 10 UI tabs Â· 85% test coverage
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
 This is an audit of what is built against what was designed, not a wishlist. Every item below was found by reading the code, not by imagining features.
+
+**A note on how defects get found here.** Two of the worst bugs so far â€” an arrow that pointed the wrong way, and an addon that could not see an unaccepted quest â€” survived a passing test suite because the *test data* had the same blind spot as the code. A stub that only models the cases the code already handles cannot fail. When adding tests, add the case the code does **not** handle first.
 
 ---
 

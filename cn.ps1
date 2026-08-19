@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.22.0'
+$script:ToolkitVersion = '0.23.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.22.0"
+CN.version     = "0.23.0"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -5374,6 +5374,48 @@ function Blizzard.GetQuestPOIOnMap(questID, uiMapID)
     return nil, nil
 end
 
+-- Every quest POI the client would draw on a map, with its flags.
+--
+-- This is where the quests you have NOT accepted live. `isQuestStart` marks
+-- the exclamation-mark pins -- a quest offered by an NPC standing there -- and
+-- `inProgress` distinguishes those from the ones already in your log.
+--
+-- The addon read this API from the beginning and threw all of that away: it
+-- only ever asked "where is this specific quest I already have?". So every
+-- quest available in the zone was structurally invisible, which is exactly
+-- what a player noticed in game.
+function Blizzard.GetQuestPOIsOnMap(uiMapID)
+    if not uiMapID or not C_QuestLog or not C_QuestLog.GetQuestsOnMap then
+        return {}
+    end
+
+    local ok, quests = pcall(C_QuestLog.GetQuestsOnMap, uiMapID)
+
+    if not ok or type(quests) ~= "table" then
+        return {}
+    end
+
+    local pois = {}
+
+    for _, info in ipairs(quests) do
+        if type(info) == "table" and info.questID then
+            table.insert(pois, {
+                questID      = info.questID,
+                x            = info.x,
+                y            = info.y,
+                mapID        = info.mapID or uiMapID,
+                isQuestStart = info.isQuestStart and true or false,
+                inProgress   = info.inProgress and true or false,
+                isDaily      = info.isDaily and true or false,
+                isMeta       = info.isMeta and true or false,
+                tagType      = info.questTagType,
+            })
+        end
+    end
+
+    return pois
+end
+
 -- Returns mapID, x, y for the next thing the player must physically do for
 -- this quest, trying every source the client exposes before giving up.
 function Blizzard.GetQuestWaypoint(questID, preferredMapID)
@@ -7705,6 +7747,37 @@ end
 
 CN.RecordDiscoveredQuest = Quests.RecordDiscovered
 
+-- Quests you could walk up to and accept right now, on one map.
+--
+-- These are the exclamation marks. Until 0.23.0 the addon could not see them
+-- at all: it read the quest LOG, which by definition contains only quests you
+-- have already taken. "What should I do next?" cannot be answered honestly
+-- while the answer "pick up that quest twenty yards away" is invisible.
+function Quests.AvailableOnMap(mapID)
+    mapID = mapID or select(1, CN.GetPlayerPosition())
+
+    if not mapID then
+        return {}
+    end
+
+    local available = {}
+
+    for _, poi in ipairs(Blizzard.GetQuestPOIsOnMap(mapID)) do
+        -- A quest start you have not taken and have not already finished.
+        if poi.isQuestStart
+            and not poi.inProgress
+            and not Blizzard.IsQuestInLog(poi.questID)
+            and not Quests.IsCompletedByCharacter(poi.questID) then
+
+            table.insert(available, poi)
+        end
+    end
+
+    table.sort(available, function(a, b) return a.questID < b.questID end)
+
+    return available
+end
+
 function Quests.DiscoverActive()
     local entries = Blizzard.GetQuestLogEntries()
 
@@ -7723,6 +7796,29 @@ function Quests.DiscoverActive()
 
         if info.title and info.title ~= "" then
             Quests.SetMetadata(info.questID, info.title, "questlog")
+        end
+
+        seen = seen + 1
+    end
+
+    -- Quests offered in this zone but not yet accepted.
+    --
+    -- Without these, "new" settled at zero permanently after the first scan:
+    -- the only thing being discovered was your own quest log, which stops
+    -- changing the moment you have scanned it once.
+    for _, poi in ipairs(Quests.AvailableOnMap()) do
+        if Quests.RecordDiscovered(poi.questID, "available") then
+            new = new + 1
+        end
+
+        local title = Blizzard.GetQuestTitle(poi.questID, true)
+
+        if title and title ~= "" then
+            Quests.SetMetadata(poi.questID, title, "available")
+        end
+
+        if poi.x and poi.y then
+            Quests.SetLocation(poi.questID, poi.mapID, poi.x, poi.y, "available")
         end
 
         seen = seen + 1
@@ -7938,7 +8034,7 @@ CN.RegisterCandidateProvider("Quests", function()
 
     local seen = {}
 
-    local function add(questID, name, isActive)
+    local function add(questID, name, isActive, availablePOI)
         if not questID or seen[questID] then
             return
         end
@@ -7955,6 +8051,26 @@ CN.RegisterCandidateProvider("Quests", function()
         local reasons = {}
         local value   = 1
         local travel  = 0
+
+        -- An available quest carries its own pin, which is more current than
+        -- anything recorded earlier.
+        if availablePOI then
+            mapID  = availablePOI.mapID or mapID
+            x      = availablePOI.x or x
+            y      = availablePOI.y or y
+            source = "available"
+
+            -- Weighted above an accepted quest you have not started: going to
+            -- get a quest is cheap, it is right here, and it unlocks
+            -- everything that quest leads to.
+            value = value + 2
+
+            table.insert(reasons, "available to pick up in this zone")
+
+            if availablePOI.isDaily then
+                table.insert(reasons, "daily")
+            end
+        end
 
         if isActive then
             if Blizzard.IsQuestReadyForTurnIn(questID) then
@@ -8012,6 +8128,20 @@ CN.RegisterCandidateProvider("Quests", function()
 
     for _, info in ipairs(Blizzard.GetQuestLogEntries()) do
         add(info.questID, info.title, true)
+    end
+
+    -- Quests standing in this zone waiting to be picked up.
+    --
+    -- This is the fix for the most basic possible complaint: the addon showed
+    -- only quests you had already accepted, so it could never tell you to go
+    -- and get one. Picking up a quest twenty yards away is often the single
+    -- best next action available, and it was invisible.
+    for _, poi in ipairs(Quests.AvailableOnMap(playerMap)) do
+        local name = Quests.GetName(poi.questID)
+            or Blizzard.GetQuestTitle(poi.questID, true)
+            or ("Quest " .. poi.questID)
+
+        add(poi.questID, name, false, poi)
     end
 
     -- Curated quests that are not in the log and not yet completed.
@@ -17957,7 +18087,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.22.0
+## Version: 0.23.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -18170,6 +18300,48 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.23.0]
+
+Reported from live play: *"it only shows the quests you have accepted -- I
+don't see where it shows the quest pending to be accepted in the zone"*, and
+*"'new' is always 0"*.
+
+Both were the same defect, and it was a bad one.
+
+### Fixed
+
+- **The addon could not see a quest until you had already accepted it.**
+  Every quest source it read was the quest log, which by definition contains
+  only quests you have already taken. So the exclamation marks standing in
+  front of you -- often the single best next action available -- were
+  structurally invisible, and an addon whose entire purpose is answering
+  *"what should I do next?"* could never answer *"go and pick that up"*.
+  The client had the data the whole time. `C_QuestLog.GetQuestsOnMap` returns
+  every quest pin with an `isQuestStart` flag, and the addon called that same
+  function from the first build -- but only ever to ask "where is this one
+  quest I already have?", discarding everything else it returned.
+  Available quests now become recommendations, with their names, their pin
+  coordinates, and a reason that says what they are. They are weighted above
+  an accepted quest you have not started, because walking twenty yards to
+  collect one is the cheaper action and it unlocks whatever follows.
+- **`new` was permanently zero.** Discovery walked the quest log and nothing
+  else, so once your own quests had been scanned there was nothing left to
+  discover, ever. It now records available quests too, and counts them.
+- Available quests flow into `/cn zone`, so a zone sweep routes you past the
+  quests you have not picked up rather than only the ones you have.
+
+### Notes
+
+- The harness stub was complicit. It returned a single in-log quest from
+  `GetQuestsOnMap` and no quest starts at all, so the test data had exactly
+  the same blind spot as the code and could never have caught this. It now
+  returns in-log quests, offered quests, a daily, and a quest start for
+  something already completed -- and the suite asserts the completed one is
+  never offered again.
+- Found by a player, not by a test. That is the second time a stub modelled
+  the world too simply and hid a real defect; the pattern to watch for is test
+  data that only contains the cases the code already handles.
 
 ## [0.22.0]
 
@@ -18911,11 +19083,13 @@ below. Numbers are from that benchmark.
 $Embedded['ROADMAP.md'] = @'
 # Completion Navigator — Roadmap
 
-Current version: **0.22.0** · 42 Lua files · ~18,700 lines · 87 slash commands · 15 candidate providers · 10 UI tabs · 85% test coverage
+Current version: **0.23.0** · 42 Lua files · ~18,900 lines · 87 slash commands · 15 candidate providers · 10 UI tabs · 85% test coverage
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
 This is an audit of what is built against what was designed, not a wishlist. Every item below was found by reading the code, not by imagining features.
+
+**A note on how defects get found here.** Two of the worst bugs so far — an arrow that pointed the wrong way, and an addon that could not see an unaccepted quest — survived a passing test suite because the *test data* had the same blind spot as the code. A stub that only models the cases the code already handles cannot fail. When adding tests, add the case the code does **not** handle first.
 
 ---
 
@@ -19614,6 +19788,14 @@ local questLog = {
     { questID = 9002, title = "Test Quest Beta",        isHeader = false },
 }
 
+-- Titles the client knows about but which are NOT in the log: available
+-- quests still have names.
+local offeredTitles = {
+    [9100] = "Pick Me Up",
+    [9101] = "Already Done",
+    [9102] = "Daily Offer",
+}
+
 local pendingLoad = {}
 
 C_QuestLog = {
@@ -19626,7 +19808,7 @@ C_QuestLog = {
         for _, entry in ipairs(questLog) do
             if entry.questID == id then return entry.title end
         end
-        return nil
+        return offeredTitles[id]
     end,
     RequestLoadQuestByID   = function(id) table.insert(pendingLoad, id) end,
     GetNumQuestLogEntries  = function() return #questLog end,
@@ -19645,10 +19827,32 @@ C_QuestLog = {
         end
         return nil
     end,
-    -- 9002 is only findable through the map POI list.
+    -- The map POI list, which carries BOTH the quests you already have and
+    -- the ones standing in the zone waiting to be picked up.
+    --
+    -- The old stub returned only an in-log quest, which is exactly why the
+    -- addon shipped for twenty-two releases unable to see an available quest:
+    -- the test data had none either.
     GetQuestsOnMap = function(mapID)
         if mapID ~= 94 then return {} end
-        return { { questID = 9002, x = 0.61, y = 0.48 } }
+
+        return {
+            -- In the log already; findable only through this list.
+            { questID = 9002, x = 0.61, y = 0.48,
+              isQuestStart = false, inProgress = true },
+
+            -- An exclamation mark: offered here, not accepted, not done.
+            { questID = 9100, x = 0.33, y = 0.27,
+              isQuestStart = true, inProgress = false, isDaily = false },
+
+            -- A daily, also available.
+            { questID = 9102, x = 0.44, y = 0.66,
+              isQuestStart = true, inProgress = false, isDaily = true },
+
+            -- A quest start for something already completed: must be ignored.
+            { questID = 9101, x = 0.50, y = 0.50,
+              isQuestStart = true, inProgress = false },
+        }
     end,
     IsWorldQuest = function(id) return id >= 70000 end,
     GetQuestTagInfo = function(id)
@@ -21650,6 +21854,89 @@ assert((byType.TITLE or 0) == 0,
     "titles must not be recommended: there is no source data to act on")
 
 print("  titles correctly absent (no source data exists)")
+
+print("\nAvailable quests:")
+
+-- Reported from live play: "it only shows the quests you have accepted --
+-- I don't see where it shows the quest pending to be accepted in the zone",
+-- and "'new' is always 0".
+--
+-- Both had the same root cause: every quest source the addon read was the
+-- quest LOG, which by definition contains only quests already taken.
+local questsModule = CN:GetModule("Quests")
+
+local availableHere = questsModule.AvailableOnMap(94)
+
+local availableIDs = {}
+for _, poi in ipairs(availableHere) do availableIDs[#availableIDs + 1] = poi.questID end
+
+print("  available to pick up = " .. table.concat(availableIDs, ", "))
+
+assert(#availableHere == 2,
+    "two quests are offered and not yet done, got " .. #availableHere)
+
+for _, poi in ipairs(availableHere) do
+    assert(poi.questID ~= 9002, "a quest already in the log is not 'available'")
+    assert(poi.questID ~= 9101, "a completed quest must never be offered again")
+    assert(poi.x and poi.y, "an available quest must carry its pin coordinates")
+end
+
+-- They must reach the recommendation list, which is the actual complaint.
+CN.InvalidateCandidates()
+
+local offered = {}
+
+for _, objective in ipairs(CN.CollectCandidates(true)) do
+    if objective.type == "QUEST" then offered[objective.id] = objective end
+end
+
+assert(offered[9100], "an available quest must become a candidate")
+assert(offered[9102], "an available daily must become a candidate")
+assert(not offered[9101], "a completed quest must not become a candidate")
+
+print("  available quests reach the recommendation list")
+
+-- With a name, not a bare id: "Quest 9100" is not a recommendation.
+assert(offered[9100].name == "Pick Me Up",
+    "an available quest must be named, got " .. tostring(offered[9100].name))
+
+-- With coordinates, so it can actually be navigated to.
+assert(offered[9100].x and offered[9100].y,
+    "an available quest must be navigable")
+
+-- And it must say why it is being suggested.
+local said = table.concat(offered[9100].reasons or {}, " | ")
+
+assert(said:find("available to pick up", 1, true),
+    "an available quest must explain itself, got " .. said)
+
+print("  named, navigable, and explained: " .. said)
+
+-- An available quest should outrank an accepted one that has made no
+-- progress: walking twenty yards to collect it is the cheaper action.
+assert((offered[9100].completionValue or 0) > 1,
+    "an available quest must be weighted above a bare accepted quest")
+
+print("  weighted above an untouched accepted quest")
+
+-- "new is always 0": discovery only ever walked the quest log, so after the
+-- first scan there was nothing left to discover, forever.
+CN.Account("discoveredQuests")[9100] = nil
+CN.Account("discoveredQuests")[9102] = nil
+
+local discoveredSeen, discoveredNew = questsModule.DiscoverActive()
+
+print("  discover: seen = " .. discoveredSeen .. ", new = " .. discoveredNew)
+
+assert(discoveredNew >= 2,
+    "available quests must count as newly discovered, got " .. discoveredNew)
+
+-- Running it again finds nothing new, which is correct.
+local _, againNew = questsModule.DiscoverActive()
+
+assert(againNew == 0, "a second scan must find nothing new, got " .. againNew)
+
+print("  second scan correctly finds nothing new")
 
 print("\nPrerequisite confidence:")
 

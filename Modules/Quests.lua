@@ -130,6 +130,37 @@ end
 
 CN.RecordDiscoveredQuest = Quests.RecordDiscovered
 
+-- Quests you could walk up to and accept right now, on one map.
+--
+-- These are the exclamation marks. Until 0.23.0 the addon could not see them
+-- at all: it read the quest LOG, which by definition contains only quests you
+-- have already taken. "What should I do next?" cannot be answered honestly
+-- while the answer "pick up that quest twenty yards away" is invisible.
+function Quests.AvailableOnMap(mapID)
+    mapID = mapID or select(1, CN.GetPlayerPosition())
+
+    if not mapID then
+        return {}
+    end
+
+    local available = {}
+
+    for _, poi in ipairs(Blizzard.GetQuestPOIsOnMap(mapID)) do
+        -- A quest start you have not taken and have not already finished.
+        if poi.isQuestStart
+            and not poi.inProgress
+            and not Blizzard.IsQuestInLog(poi.questID)
+            and not Quests.IsCompletedByCharacter(poi.questID) then
+
+            table.insert(available, poi)
+        end
+    end
+
+    table.sort(available, function(a, b) return a.questID < b.questID end)
+
+    return available
+end
+
 function Quests.DiscoverActive()
     local entries = Blizzard.GetQuestLogEntries()
 
@@ -148,6 +179,29 @@ function Quests.DiscoverActive()
 
         if info.title and info.title ~= "" then
             Quests.SetMetadata(info.questID, info.title, "questlog")
+        end
+
+        seen = seen + 1
+    end
+
+    -- Quests offered in this zone but not yet accepted.
+    --
+    -- Without these, "new" settled at zero permanently after the first scan:
+    -- the only thing being discovered was your own quest log, which stops
+    -- changing the moment you have scanned it once.
+    for _, poi in ipairs(Quests.AvailableOnMap()) do
+        if Quests.RecordDiscovered(poi.questID, "available") then
+            new = new + 1
+        end
+
+        local title = Blizzard.GetQuestTitle(poi.questID, true)
+
+        if title and title ~= "" then
+            Quests.SetMetadata(poi.questID, title, "available")
+        end
+
+        if poi.x and poi.y then
+            Quests.SetLocation(poi.questID, poi.mapID, poi.x, poi.y, "available")
         end
 
         seen = seen + 1
@@ -363,7 +417,7 @@ CN.RegisterCandidateProvider("Quests", function()
 
     local seen = {}
 
-    local function add(questID, name, isActive)
+    local function add(questID, name, isActive, availablePOI)
         if not questID or seen[questID] then
             return
         end
@@ -380,6 +434,26 @@ CN.RegisterCandidateProvider("Quests", function()
         local reasons = {}
         local value   = 1
         local travel  = 0
+
+        -- An available quest carries its own pin, which is more current than
+        -- anything recorded earlier.
+        if availablePOI then
+            mapID  = availablePOI.mapID or mapID
+            x      = availablePOI.x or x
+            y      = availablePOI.y or y
+            source = "available"
+
+            -- Weighted above an accepted quest you have not started: going to
+            -- get a quest is cheap, it is right here, and it unlocks
+            -- everything that quest leads to.
+            value = value + 2
+
+            table.insert(reasons, "available to pick up in this zone")
+
+            if availablePOI.isDaily then
+                table.insert(reasons, "daily")
+            end
+        end
 
         if isActive then
             if Blizzard.IsQuestReadyForTurnIn(questID) then
@@ -437,6 +511,20 @@ CN.RegisterCandidateProvider("Quests", function()
 
     for _, info in ipairs(Blizzard.GetQuestLogEntries()) do
         add(info.questID, info.title, true)
+    end
+
+    -- Quests standing in this zone waiting to be picked up.
+    --
+    -- This is the fix for the most basic possible complaint: the addon showed
+    -- only quests you had already accepted, so it could never tell you to go
+    -- and get one. Picking up a quest twenty yards away is often the single
+    -- best next action available, and it was invisible.
+    for _, poi in ipairs(Quests.AvailableOnMap(playerMap)) do
+        local name = Quests.GetName(poi.questID)
+            or Blizzard.GetQuestTitle(poi.questID, true)
+            or ("Quest " .. poi.questID)
+
+        add(poi.questID, name, false, poi)
     end
 
     -- Curated quests that are not in the log and not yet completed.

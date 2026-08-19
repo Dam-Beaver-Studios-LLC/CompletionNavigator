@@ -14,6 +14,8 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 
 **Tells you what the Great Vault still needs.** Three rows, three thresholds each, and one item to choose at the end of the week. A row one activity short of a threshold with the reset approaching is the most actionable thing this addon can surface: *one more Heroic before Tuesday unlocks a second reward*. Capped rows are never suggested, because there is nothing left to earn from them.
 
+**Shows you the quests you have not picked up yet.** Not just what is in your log — the exclamation marks standing in the zone around you, named, located, and ranked. Collecting a quest twenty yards away is often the best next thing you can do, and it is treated that way.
+
 **Knows what expires.** World quests with real time remaining, daily and weekly resets, active world events, and rares that are up *this minute*. Urgency is weighted heavily and scaled steeply: something with an hour left dominates the list, something with three days left barely registers.
 
 **Finds rares and treasures that are actually up.** Driven by the client's live vignette data, not a static spawn list. A database tells you where a rare *can* spawn; a vignette tells you one is there now — which is the half that decides what you do next, and the half that doesn't go stale every patch.
@@ -48,7 +50,7 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 
 | Subsystem | What is recorded |
 |---|---|
-| **Quests** | Event-driven discovery, character vs account/Warband completion, coordinates, prerequisites |
+| **Quests** | Accepted *and* available-to-accept, event-driven discovery, character vs account/Warband completion, coordinates, prerequisites |
 | **World quests** | Live availability with real expiry times |
 | **Rares & treasures** | Live vignette detection, plus a spawn database built from your own play |
 | **Reputations** | Standing, Renown, Paragon, and whether each is account-wide or character-specific |
@@ -157,7 +159,7 @@ None are required. Completion Navigator is a decision layer, not a replacement f
 
 ## Status
 
-Version 0.22.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
+Version 0.23.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
 
 Bug reports and feature requests: [GitHub issues](https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/issues), or email developer@dambeaverstudios.com.
 

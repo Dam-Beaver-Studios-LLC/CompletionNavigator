@@ -111,6 +111,48 @@ function Blizzard.GetQuestPOIOnMap(questID, uiMapID)
     return nil, nil
 end
 
+-- Every quest POI the client would draw on a map, with its flags.
+--
+-- This is where the quests you have NOT accepted live. `isQuestStart` marks
+-- the exclamation-mark pins -- a quest offered by an NPC standing there -- and
+-- `inProgress` distinguishes those from the ones already in your log.
+--
+-- The addon read this API from the beginning and threw all of that away: it
+-- only ever asked "where is this specific quest I already have?". So every
+-- quest available in the zone was structurally invisible, which is exactly
+-- what a player noticed in game.
+function Blizzard.GetQuestPOIsOnMap(uiMapID)
+    if not uiMapID or not C_QuestLog or not C_QuestLog.GetQuestsOnMap then
+        return {}
+    end
+
+    local ok, quests = pcall(C_QuestLog.GetQuestsOnMap, uiMapID)
+
+    if not ok or type(quests) ~= "table" then
+        return {}
+    end
+
+    local pois = {}
+
+    for _, info in ipairs(quests) do
+        if type(info) == "table" and info.questID then
+            table.insert(pois, {
+                questID      = info.questID,
+                x            = info.x,
+                y            = info.y,
+                mapID        = info.mapID or uiMapID,
+                isQuestStart = info.isQuestStart and true or false,
+                inProgress   = info.inProgress and true or false,
+                isDaily      = info.isDaily and true or false,
+                isMeta       = info.isMeta and true or false,
+                tagType      = info.questTagType,
+            })
+        end
+    end
+
+    return pois
+end
+
 -- Returns mapID, x, y for the next thing the player must physically do for
 -- this quest, trying every source the client exposes before giving up.
 function Blizzard.GetQuestWaypoint(questID, preferredMapID)

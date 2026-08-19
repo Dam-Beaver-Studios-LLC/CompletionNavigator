@@ -7,6 +7,48 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.23.0]
+
+Reported from live play: *"it only shows the quests you have accepted -- I
+don't see where it shows the quest pending to be accepted in the zone"*, and
+*"'new' is always 0"*.
+
+Both were the same defect, and it was a bad one.
+
+### Fixed
+
+- **The addon could not see a quest until you had already accepted it.**
+  Every quest source it read was the quest log, which by definition contains
+  only quests you have already taken. So the exclamation marks standing in
+  front of you -- often the single best next action available -- were
+  structurally invisible, and an addon whose entire purpose is answering
+  *"what should I do next?"* could never answer *"go and pick that up"*.
+  The client had the data the whole time. `C_QuestLog.GetQuestsOnMap` returns
+  every quest pin with an `isQuestStart` flag, and the addon called that same
+  function from the first build -- but only ever to ask "where is this one
+  quest I already have?", discarding everything else it returned.
+  Available quests now become recommendations, with their names, their pin
+  coordinates, and a reason that says what they are. They are weighted above
+  an accepted quest you have not started, because walking twenty yards to
+  collect one is the cheaper action and it unlocks whatever follows.
+- **`new` was permanently zero.** Discovery walked the quest log and nothing
+  else, so once your own quests had been scanned there was nothing left to
+  discover, ever. It now records available quests too, and counts them.
+- Available quests flow into `/cn zone`, so a zone sweep routes you past the
+  quests you have not picked up rather than only the ones you have.
+
+### Notes
+
+- The harness stub was complicit. It returned a single in-log quest from
+  `GetQuestsOnMap` and no quest starts at all, so the test data had exactly
+  the same blind spot as the code and could never have caught this. It now
+  returns in-log quests, offered quests, a daily, and a quest start for
+  something already completed -- and the suite asserts the completed one is
+  never offered again.
+- Found by a player, not by a test. That is the second time a stub modelled
+  the world too simply and hid a real defect; the pattern to watch for is test
+  data that only contains the cases the code already handles.
+
 ## [0.22.0]
 
 `/cn why` has been able to explain why a quest is locked since the first build,
