@@ -12,6 +12,12 @@ local ADDON_NAME, CN = ...
 
 CN.blockReasons = {
     PREREQUISITE_QUEST   = "Prerequisite quest incomplete",
+
+    -- Deliberately worded as an observation rather than a fact. The addon
+    -- inferred this from the same ordering repeating across several
+    -- characters; that is good evidence and it is not curated data, and the
+    -- wording has to carry that difference.
+    LIKELY_PREREQUISITE  = "Probably needs another quest first",
     REPUTATION_TOO_LOW   = "Reputation too low",
     MISSING_PROFESSION   = "Required profession missing",
     PROFESSION_SKILL     = "Profession skill too low",
@@ -36,6 +42,7 @@ CN.blockReasons = {
 -- Populated by Data/*.lua files. Shape:
 --   CN.dependencies[objectiveKey] = {
 --       requires = { objectiveKey, ... },
+--       observedRequires = { questID, ... },  -- inferred, not curated
 --       unlocks  = { objectiveKey, ... },
 --       requiresReputation = { factionID = , standing = },
 --       requiresProfession = { professionID = , skill = },

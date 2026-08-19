@@ -121,12 +121,34 @@ end
 -- INFERRED PREREQUISITES
 ------------------------------------------------------------
 
--- When a quest is accepted, every quest completed immediately beforehand in
--- the same zone is a *candidate* prerequisite. This is a correlation, not a
--- fact, so it is stored separately from real prerequisite data and is never
--- fed to the eligibility checker. It exists to make curation quicker: the
--- export marks these as comments for a human to confirm.
+-- When a quest is accepted, every quest completed immediately beforehand is a
+-- *candidate* prerequisite. One observation is a correlation and nothing more.
+--
+-- What turns correlation into something usable is REPETITION ACROSS
+-- CHARACTERS. If quest B follows quest A on one character, that is the order
+-- you happened to play. If it follows on three characters, that is the game
+-- telling you A gates B -- because independent playthroughs do not agree by
+-- accident, and an alt cannot inherit the coincidence.
+--
+-- So observations accumulate per prerequisite, counted by distinct character,
+-- and only cross into the dependency graph once enough characters agree. Even
+-- then they are labelled as observed, never as fact, and curated data always
+-- wins over them.
 local recentTurnIns = {}
+
+-- How many DISTINCT characters must show the same ordering. Two is a
+-- coincidence you could plausibly hit; three is a pattern.
+Harvest.confidenceThreshold = 3
+
+-- Forgets recent turn-ins.
+--
+-- Called on login: a quest accepted in this session must not be correlated
+-- with one turned in before the last logout. The 300-second window mostly
+-- covers that already, but "mostly" is how a false prerequisite gets recorded
+-- and then repeated on other characters until it looks confident.
+function Harvest.ResetRecent()
+    recentTurnIns = {}
+end
 
 function Harvest.NoteTurnIn(questID)
     table.insert(recentTurnIns, 1, { questID = questID, at = time() })
@@ -136,6 +158,15 @@ function Harvest.NoteTurnIn(questID)
     end
 end
 
+-- observed[prereqID] = { seen = n, characters = { [key] = true } }
+local function Observations(record)
+    record.observed = record.observed or {}
+
+    return record.observed
+end
+
+Harvest.Observations = Observations
+
 function Harvest.NoteAccepted(questID)
     local record = Store()[questID]
 
@@ -143,19 +174,105 @@ function Harvest.NoteAccepted(questID)
         return
     end
 
-    local candidates = {}
+    local observed = Observations(record)
+
+    local characterKey = CN.characterKey or "unknown"
 
     for _, entry in ipairs(recentTurnIns) do
         -- Only within a short window; anything older is coincidence.
         if time() - entry.at <= 300 and entry.questID ~= questID then
-            table.insert(candidates, entry.questID)
+            local candidate = observed[entry.questID]
+
+            if not candidate then
+                candidate = { seen = 0, characters = {} }
+                observed[entry.questID] = candidate
+            end
+
+            candidate.seen = candidate.seen + 1
+
+            -- Counted by character, not by sighting: doing the same chain
+            -- twice on one character is still one character's opinion.
+            candidate.characters[characterKey] = true
+        end
+    end
+end
+
+-- How many distinct characters have shown this ordering.
+function Harvest.Confidence(record, prerequisiteID)
+    local observed = record and record.observed
+
+    local candidate = observed and observed[prerequisiteID]
+
+    if not candidate then
+        return 0
+    end
+
+    return CN.CountKeys(candidate.characters or {})
+end
+
+-- Prerequisites confident enough to act on, for one quest.
+function Harvest.ConfidentPrerequisites(questID)
+    local record = Store()[questID]
+
+    if not record or not record.observed then
+        return {}
+    end
+
+    local confident = {}
+
+    for prerequisiteID in pairs(record.observed) do
+        if Harvest.Confidence(record, prerequisiteID) >= Harvest.confidenceThreshold then
+            table.insert(confident, prerequisiteID)
         end
     end
 
-    if #candidates > 0 then
-        record.maybeRequires = candidates
-    end
+    table.sort(confident)
+
+    return confident
 end
+
+-- Everything currently confident, across every harvested quest.
+function Harvest.AllConfident()
+    local edges = {}
+
+    for questID, record in pairs(Store()) do
+        local confident = Harvest.ConfidentPrerequisites(questID)
+
+        if #confident > 0 then
+            edges[questID] = confident
+        end
+    end
+
+    return edges
+end
+
+-- Feeds confident observations into the dependency graph.
+--
+-- They go in under `observedRequires`, NOT `requires`. The eligibility checker
+-- reads both but reports them differently, so "you have not done X" and "on
+-- three of your characters X came first" never read as the same claim.
+function Harvest.PublishConfident()
+    local published = 0
+
+    for questID, prerequisites in pairs(Harvest.AllConfident()) do
+        CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
+            observedRequires = prerequisites,
+        })
+
+        published = published + 1
+    end
+
+    if published > 0 then
+        DebugPrint("Published " .. published .. " observed prerequisite set(s).")
+    end
+
+    return published
+end
+
+CN:OnLogin(function()
+    Harvest.ResetRecent()
+    Harvest.PublishConfident()
+end)
 
 ------------------------------------------------------------
 -- SUMMARY
@@ -231,9 +348,34 @@ function Harvest.BuildExport(onlyLocated)
                 .. table.concat(record.requires, ", ") .. " },")
         end
 
-        if record.maybeRequires and #record.maybeRequires > 0 then
-            table.insert(lines, "        -- unconfirmed, observed order only: requires = { "
-                .. table.concat(record.maybeRequires, ", ") .. " },")
+        -- Confident observations become real rows; everything below the
+        -- threshold stays a comment for a human to confirm. The distinction
+        -- survives into the exported file, so curation never has to guess
+        -- which lines were inferred.
+        local confident = Harvest.ConfidentPrerequisites(record.questID)
+
+        if #confident > 0 then
+            table.insert(lines, "        -- observed on "
+                .. Harvest.confidenceThreshold .. "+ characters")
+            table.insert(lines, "        requires  = { "
+                .. table.concat(confident, ", ") .. " },")
+        end
+
+        local unconfirmed = {}
+
+        for prerequisiteID in pairs(record.observed or {}) do
+            local seen = Harvest.Confidence(record, prerequisiteID)
+
+            if seen < Harvest.confidenceThreshold then
+                table.insert(unconfirmed, prerequisiteID .. " (" .. seen .. ")")
+            end
+        end
+
+        table.sort(unconfirmed)
+
+        if #unconfirmed > 0 then
+            table.insert(lines, "        -- unconfirmed, character count in "
+                .. "brackets: " .. table.concat(unconfirmed, ", "))
         end
 
         table.insert(lines, "    },")

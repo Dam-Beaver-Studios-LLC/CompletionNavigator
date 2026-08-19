@@ -7,6 +7,55 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.22.0]
+
+`/cn why` has been able to explain why a quest is locked since the first build,
+and has had almost nothing to explain it with. This release gives it data.
+
+### Added
+
+- **Prerequisites inferred from repeated play, and gated on confidence.**
+  The addon has always noted which quests you turned in shortly before
+  accepting another. One such observation is the order you happened to play in
+  and nothing more, so it was never used for anything.
+  Observations now accumulate **per distinct character**, and only cross into
+  the dependency graph once **three different characters** show the same
+  ordering. Independent playthroughs do not agree by accident, and an alt
+  cannot inherit a coincidence. Repeating a chain on one character does not
+  raise confidence -- doing something twice is still one character's opinion.
+- **Inference is never presented as fact.** Confident edges are published as
+  `observedRequires`, never `requires`, and `/cn why` reports them as *"probably
+  needs another quest first"* with the character count attached, not as the
+  flat statement a curated prerequisite produces. The harness asserts an
+  inferred edge can never be written as a curated one.
+- `/cn export` and `.\cn.ps1 harvest` write confident observations as real
+  `requires` rows and everything below the threshold as a comment with its
+  character count, so curation never has to guess which lines were inferred.
+
+### Fixed
+
+- **Observed prerequisites could only ever apply to quests that already had
+  curated data.** The check sat inside the branch that runs when a static
+  record exists -- the exact opposite of the point, since inference matters
+  most where curation is absent. Found by a test that expected a block and got
+  silence.
+- **The correlation window now clears on login.** A quest accepted in a new
+  session could otherwise be correlated with one turned in before the last
+  logout. The 300-second window covered that in most cases, and "most" is how
+  a false prerequisite gets recorded and then repeated until it looks
+  confident.
+
+### Notes
+
+- Schema 3 -> 4. Existing observations are preserved and credited to one
+  unknown character each -- deliberately *below* the promotion threshold, so
+  data gathered before the addon counted characters is never promoted on the
+  strength of a count it never made.
+- Delves were assessed and deliberately not built. `C_DelvesUI` exposes UI
+  plumbing, not progress, and delve credit toward the Great Vault already
+  flows through the World row added in 0.18.0. A separate module would have
+  been guesswork duplicating something that already works.
+
 ## [0.21.0]
 
 ### Added

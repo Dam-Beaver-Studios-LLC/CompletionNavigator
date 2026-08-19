@@ -1,6 +1,6 @@
 # Completion Navigator â€” Roadmap
 
-Current version: **0.21.0** Â· 42 Lua files Â· ~18,300 lines Â· 87 slash commands Â· 15 candidate providers Â· 10 UI tabs Â· 85% test coverage
+Current version: **0.22.0** Â· 42 Lua files Â· ~18,700 lines Â· 87 slash commands Â· 15 candidate providers Â· 10 UI tabs Â· 85% test coverage
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
@@ -50,9 +50,11 @@ The reason it was not obvious: `/cn breakdown` and the Collections tab read the 
 **Effort:** moderate â€” five providers, each small.
 **Recommendation: build second.** It closes a stated capability the addon does not have.
 
-### 1.3 Delves
+### 1.3 Delves â€” **assessed, deliberately not built**
 
-**Status:** absent.
+**Status:** `C_DelvesUI` exposes UI plumbing (minimum level and similar), not progress. Delve credit toward the Great Vault already flows through the World row built in 0.18.0, so a separate module would duplicate working behaviour with guesswork. Revisit if Blizzard ships a progress API.
+
+#### Original finding
 
 Evergreen current-expansion content with weekly progression, tied to the vault. Naturally pairs with 1.1.
 
@@ -71,7 +73,11 @@ The addon is entirely solo-content-aware. A meaningful share of what a player "s
 
 ## Tier 2 â€” Existing features that are not yet load-bearing
 
-### 2.1 The dependency graph is empty
+### 2.1 The dependency graph â€” **option 2 DONE in 0.22.0**
+
+**Status:** observed orderings now promote into the graph once three distinct characters agree, published as `observedRequires` and reported as inference rather than fact. Option 1 (importing chains from BtWQuests) is still open and would add curated breadth on top.
+
+#### Original finding
 
 **Status:** exactly **one** `CN.AddDependency` call and **one** static quest row exist.
 

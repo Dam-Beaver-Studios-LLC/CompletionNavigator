@@ -246,6 +246,8 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
             end
         end
 
+
+
         if static.requiresLevel and UnitLevel("player") < static.requiresLevel then
             return states.LOCKED, CN.blockReasons.LEVEL_TOO_LOW, tostring(static.requiresLevel)
         end
@@ -253,6 +255,33 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
         if static.requiresFaction and CN.character
             and CN.character.faction ~= static.requiresFaction then
             return states.INELIGIBLE, CN.blockReasons.WRONG_FACTION, static.requiresFaction
+        end
+    end
+
+    -- Prerequisites nobody curated, inferred from repeated observation
+    -- across characters.
+    --
+    -- Reported as LIKELY_PREREQUISITE, never as PREREQUISITE_QUEST. The
+    -- addon has watched an ordering hold on several characters; that is
+    -- strong evidence and it is still not the same claim as knowing. It
+    -- must not be possible to mistake one for the other in the output.
+    local dependency = CN.GetDependency(
+        CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID))
+
+    if dependency and dependency.observedRequires then
+        local harvest = CN:GetModule("Harvest")
+
+        for _, prerequisiteID in ipairs(dependency.observedRequires) do
+            if not Quests.IsCompletedByCharacter(prerequisiteID) then
+                local characters = harvest
+                    and harvest.Confidence(harvest.Store()[questID], prerequisiteID)
+                    or 0
+
+                return states.LOCKED,
+                       CN.blockReasons.LIKELY_PREREQUISITE,
+                       (Quests.GetName(prerequisiteID) or ("quest " .. prerequisiteID))
+                           .. " (seen first on " .. characters .. " characters)"
+            end
         end
     end
 

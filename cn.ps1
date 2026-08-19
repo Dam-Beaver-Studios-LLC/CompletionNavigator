@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.21.0'
+$script:ToolkitVersion = '0.22.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,8 +108,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.21.0"
-CN.dbVersion   = 3
+CN.version     = "0.22.0"
+CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -450,6 +450,40 @@ CN.migrations = {
         for _, character in pairs(db.characters) do
             if type(character) == "table" then
                 character.settings = character.settings or {}
+            end
+        end
+    end,
+
+    -- 3 -> 4. Observed prerequisites gained a confidence count.
+    --
+    -- The old shape was a flat array of candidate quest IDs, overwritten on
+    -- every sighting, so it carried no idea of how often or on how many
+    -- characters an ordering had held. The new shape counts by character.
+    --
+    -- Existing observations are preserved and credited to one unknown
+    -- character each. That is deliberately BELOW the promotion threshold:
+    -- data gathered before the addon knew how to count characters must not
+    -- be promoted to a prerequisite on the strength of a count it never
+    -- actually made.
+    [3] = function(db)
+        db.account = db.account or {}
+
+        local harvest = db.account.questHarvest
+
+        if type(harvest) ~= "table" then
+            return
+        end
+
+        for _, record in pairs(harvest) do
+            if type(record) == "table" and type(record.maybeRequires) == "table" then
+                record.observed = record.observed or {}
+
+                for _, prerequisiteID in ipairs(record.maybeRequires) do
+                    record.observed[prerequisiteID] = record.observed[prerequisiteID]
+                        or { seen = 1, characters = { ["migrated"] = true } }
+                end
+
+                record.maybeRequires = nil
             end
         end
     end,
@@ -1104,6 +1138,12 @@ local ADDON_NAME, CN = ...
 
 CN.blockReasons = {
     PREREQUISITE_QUEST   = "Prerequisite quest incomplete",
+
+    -- Deliberately worded as an observation rather than a fact. The addon
+    -- inferred this from the same ordering repeating across several
+    -- characters; that is good evidence and it is not curated data, and the
+    -- wording has to carry that difference.
+    LIKELY_PREREQUISITE  = "Probably needs another quest first",
     REPUTATION_TOO_LOW   = "Reputation too low",
     MISSING_PROFESSION   = "Required profession missing",
     PROFESSION_SKILL     = "Profession skill too low",
@@ -1128,6 +1168,7 @@ CN.blockReasons = {
 -- Populated by Data/*.lua files. Shape:
 --   CN.dependencies[objectiveKey] = {
 --       requires = { objectiveKey, ... },
+--       observedRequires = { questID, ... },  -- inferred, not curated
 --       unlocks  = { objectiveKey, ... },
 --       requiresReputation = { factionID = , standing = },
 --       requiresProfession = { professionID = , skill = },
@@ -7780,6 +7821,8 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
             end
         end
 
+
+
         if static.requiresLevel and UnitLevel("player") < static.requiresLevel then
             return states.LOCKED, CN.blockReasons.LEVEL_TOO_LOW, tostring(static.requiresLevel)
         end
@@ -7787,6 +7830,33 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
         if static.requiresFaction and CN.character
             and CN.character.faction ~= static.requiresFaction then
             return states.INELIGIBLE, CN.blockReasons.WRONG_FACTION, static.requiresFaction
+        end
+    end
+
+    -- Prerequisites nobody curated, inferred from repeated observation
+    -- across characters.
+    --
+    -- Reported as LIKELY_PREREQUISITE, never as PREREQUISITE_QUEST. The
+    -- addon has watched an ordering hold on several characters; that is
+    -- strong evidence and it is still not the same claim as knowing. It
+    -- must not be possible to mistake one for the other in the output.
+    local dependency = CN.GetDependency(
+        CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID))
+
+    if dependency and dependency.observedRequires then
+        local harvest = CN:GetModule("Harvest")
+
+        for _, prerequisiteID in ipairs(dependency.observedRequires) do
+            if not Quests.IsCompletedByCharacter(prerequisiteID) then
+                local characters = harvest
+                    and harvest.Confidence(harvest.Store()[questID], prerequisiteID)
+                    or 0
+
+                return states.LOCKED,
+                       CN.blockReasons.LIKELY_PREREQUISITE,
+                       (Quests.GetName(prerequisiteID) or ("quest " .. prerequisiteID))
+                           .. " (seen first on " .. characters .. " characters)"
+            end
         end
     end
 
@@ -11312,12 +11382,34 @@ end
 -- INFERRED PREREQUISITES
 ------------------------------------------------------------
 
--- When a quest is accepted, every quest completed immediately beforehand in
--- the same zone is a *candidate* prerequisite. This is a correlation, not a
--- fact, so it is stored separately from real prerequisite data and is never
--- fed to the eligibility checker. It exists to make curation quicker: the
--- export marks these as comments for a human to confirm.
+-- When a quest is accepted, every quest completed immediately beforehand is a
+-- *candidate* prerequisite. One observation is a correlation and nothing more.
+--
+-- What turns correlation into something usable is REPETITION ACROSS
+-- CHARACTERS. If quest B follows quest A on one character, that is the order
+-- you happened to play. If it follows on three characters, that is the game
+-- telling you A gates B -- because independent playthroughs do not agree by
+-- accident, and an alt cannot inherit the coincidence.
+--
+-- So observations accumulate per prerequisite, counted by distinct character,
+-- and only cross into the dependency graph once enough characters agree. Even
+-- then they are labelled as observed, never as fact, and curated data always
+-- wins over them.
 local recentTurnIns = {}
+
+-- How many DISTINCT characters must show the same ordering. Two is a
+-- coincidence you could plausibly hit; three is a pattern.
+Harvest.confidenceThreshold = 3
+
+-- Forgets recent turn-ins.
+--
+-- Called on login: a quest accepted in this session must not be correlated
+-- with one turned in before the last logout. The 300-second window mostly
+-- covers that already, but "mostly" is how a false prerequisite gets recorded
+-- and then repeated on other characters until it looks confident.
+function Harvest.ResetRecent()
+    recentTurnIns = {}
+end
 
 function Harvest.NoteTurnIn(questID)
     table.insert(recentTurnIns, 1, { questID = questID, at = time() })
@@ -11327,6 +11419,15 @@ function Harvest.NoteTurnIn(questID)
     end
 end
 
+-- observed[prereqID] = { seen = n, characters = { [key] = true } }
+local function Observations(record)
+    record.observed = record.observed or {}
+
+    return record.observed
+end
+
+Harvest.Observations = Observations
+
 function Harvest.NoteAccepted(questID)
     local record = Store()[questID]
 
@@ -11334,19 +11435,105 @@ function Harvest.NoteAccepted(questID)
         return
     end
 
-    local candidates = {}
+    local observed = Observations(record)
+
+    local characterKey = CN.characterKey or "unknown"
 
     for _, entry in ipairs(recentTurnIns) do
         -- Only within a short window; anything older is coincidence.
         if time() - entry.at <= 300 and entry.questID ~= questID then
-            table.insert(candidates, entry.questID)
+            local candidate = observed[entry.questID]
+
+            if not candidate then
+                candidate = { seen = 0, characters = {} }
+                observed[entry.questID] = candidate
+            end
+
+            candidate.seen = candidate.seen + 1
+
+            -- Counted by character, not by sighting: doing the same chain
+            -- twice on one character is still one character's opinion.
+            candidate.characters[characterKey] = true
+        end
+    end
+end
+
+-- How many distinct characters have shown this ordering.
+function Harvest.Confidence(record, prerequisiteID)
+    local observed = record and record.observed
+
+    local candidate = observed and observed[prerequisiteID]
+
+    if not candidate then
+        return 0
+    end
+
+    return CN.CountKeys(candidate.characters or {})
+end
+
+-- Prerequisites confident enough to act on, for one quest.
+function Harvest.ConfidentPrerequisites(questID)
+    local record = Store()[questID]
+
+    if not record or not record.observed then
+        return {}
+    end
+
+    local confident = {}
+
+    for prerequisiteID in pairs(record.observed) do
+        if Harvest.Confidence(record, prerequisiteID) >= Harvest.confidenceThreshold then
+            table.insert(confident, prerequisiteID)
         end
     end
 
-    if #candidates > 0 then
-        record.maybeRequires = candidates
-    end
+    table.sort(confident)
+
+    return confident
 end
+
+-- Everything currently confident, across every harvested quest.
+function Harvest.AllConfident()
+    local edges = {}
+
+    for questID, record in pairs(Store()) do
+        local confident = Harvest.ConfidentPrerequisites(questID)
+
+        if #confident > 0 then
+            edges[questID] = confident
+        end
+    end
+
+    return edges
+end
+
+-- Feeds confident observations into the dependency graph.
+--
+-- They go in under `observedRequires`, NOT `requires`. The eligibility checker
+-- reads both but reports them differently, so "you have not done X" and "on
+-- three of your characters X came first" never read as the same claim.
+function Harvest.PublishConfident()
+    local published = 0
+
+    for questID, prerequisites in pairs(Harvest.AllConfident()) do
+        CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
+            observedRequires = prerequisites,
+        })
+
+        published = published + 1
+    end
+
+    if published > 0 then
+        DebugPrint("Published " .. published .. " observed prerequisite set(s).")
+    end
+
+    return published
+end
+
+CN:OnLogin(function()
+    Harvest.ResetRecent()
+    Harvest.PublishConfident()
+end)
 
 ------------------------------------------------------------
 -- SUMMARY
@@ -11422,9 +11609,34 @@ function Harvest.BuildExport(onlyLocated)
                 .. table.concat(record.requires, ", ") .. " },")
         end
 
-        if record.maybeRequires and #record.maybeRequires > 0 then
-            table.insert(lines, "        -- unconfirmed, observed order only: requires = { "
-                .. table.concat(record.maybeRequires, ", ") .. " },")
+        -- Confident observations become real rows; everything below the
+        -- threshold stays a comment for a human to confirm. The distinction
+        -- survives into the exported file, so curation never has to guess
+        -- which lines were inferred.
+        local confident = Harvest.ConfidentPrerequisites(record.questID)
+
+        if #confident > 0 then
+            table.insert(lines, "        -- observed on "
+                .. Harvest.confidenceThreshold .. "+ characters")
+            table.insert(lines, "        requires  = { "
+                .. table.concat(confident, ", ") .. " },")
+        end
+
+        local unconfirmed = {}
+
+        for prerequisiteID in pairs(record.observed or {}) do
+            local seen = Harvest.Confidence(record, prerequisiteID)
+
+            if seen < Harvest.confidenceThreshold then
+                table.insert(unconfirmed, prerequisiteID .. " (" .. seen .. ")")
+            end
+        end
+
+        table.sort(unconfirmed)
+
+        if #unconfirmed > 0 then
+            table.insert(lines, "        -- unconfirmed, character count in "
+                .. "brackets: " .. table.concat(unconfirmed, ", "))
         end
 
         table.insert(lines, "    },")
@@ -17745,7 +17957,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.21.0
+## Version: 0.22.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -17958,6 +18170,55 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.22.0]
+
+`/cn why` has been able to explain why a quest is locked since the first build,
+and has had almost nothing to explain it with. This release gives it data.
+
+### Added
+
+- **Prerequisites inferred from repeated play, and gated on confidence.**
+  The addon has always noted which quests you turned in shortly before
+  accepting another. One such observation is the order you happened to play in
+  and nothing more, so it was never used for anything.
+  Observations now accumulate **per distinct character**, and only cross into
+  the dependency graph once **three different characters** show the same
+  ordering. Independent playthroughs do not agree by accident, and an alt
+  cannot inherit a coincidence. Repeating a chain on one character does not
+  raise confidence -- doing something twice is still one character's opinion.
+- **Inference is never presented as fact.** Confident edges are published as
+  `observedRequires`, never `requires`, and `/cn why` reports them as *"probably
+  needs another quest first"* with the character count attached, not as the
+  flat statement a curated prerequisite produces. The harness asserts an
+  inferred edge can never be written as a curated one.
+- `/cn export` and `.\cn.ps1 harvest` write confident observations as real
+  `requires` rows and everything below the threshold as a comment with its
+  character count, so curation never has to guess which lines were inferred.
+
+### Fixed
+
+- **Observed prerequisites could only ever apply to quests that already had
+  curated data.** The check sat inside the branch that runs when a static
+  record exists -- the exact opposite of the point, since inference matters
+  most where curation is absent. Found by a test that expected a block and got
+  silence.
+- **The correlation window now clears on login.** A quest accepted in a new
+  session could otherwise be correlated with one turned in before the last
+  logout. The 300-second window covered that in most cases, and "most" is how
+  a false prerequisite gets recorded and then repeated until it looks
+  confident.
+
+### Notes
+
+- Schema 3 -> 4. Existing observations are preserved and credited to one
+  unknown character each -- deliberately *below* the promotion threshold, so
+  data gathered before the addon counted characters is never promoted on the
+  strength of a count it never made.
+- Delves were assessed and deliberately not built. `C_DelvesUI` exposes UI
+  plumbing, not progress, and delve credit toward the Great Vault already
+  flows through the World row added in 0.18.0. A separate module would have
+  been guesswork duplicating something that already works.
 
 ## [0.21.0]
 
@@ -18650,7 +18911,7 @@ below. Numbers are from that benchmark.
 $Embedded['ROADMAP.md'] = @'
 # Completion Navigator — Roadmap
 
-Current version: **0.21.0** · 42 Lua files · ~18,300 lines · 87 slash commands · 15 candidate providers · 10 UI tabs · 85% test coverage
+Current version: **0.22.0** · 42 Lua files · ~18,700 lines · 87 slash commands · 15 candidate providers · 10 UI tabs · 85% test coverage
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
@@ -18700,9 +18961,11 @@ The reason it was not obvious: `/cn breakdown` and the Collections tab read the 
 **Effort:** moderate — five providers, each small.
 **Recommendation: build second.** It closes a stated capability the addon does not have.
 
-### 1.3 Delves
+### 1.3 Delves — **assessed, deliberately not built**
 
-**Status:** absent.
+**Status:** `C_DelvesUI` exposes UI plumbing (minimum level and similar), not progress. Delve credit toward the Great Vault already flows through the World row built in 0.18.0, so a separate module would duplicate working behaviour with guesswork. Revisit if Blizzard ships a progress API.
+
+#### Original finding
 
 Evergreen current-expansion content with weekly progression, tied to the vault. Naturally pairs with 1.1.
 
@@ -18721,7 +18984,11 @@ The addon is entirely solo-content-aware. A meaningful share of what a player "s
 
 ## Tier 2 — Existing features that are not yet load-bearing
 
-### 2.1 The dependency graph is empty
+### 2.1 The dependency graph — **option 2 DONE in 0.22.0**
+
+**Status:** observed orderings now promote into the graph once three distinct characters agree, published as `observedRequires` and reported as inference rather than fact. Option 1 (importing chains from BtWQuests) is still open and would add curated breadth on top.
+
+#### Original finding
 
 **Status:** exactly **one** `CN.AddDependency` call and **one** static quest row exist.
 
@@ -21384,6 +21651,96 @@ assert((byType.TITLE or 0) == 0,
 
 print("  titles correctly absent (no source data exists)")
 
+print("\nPrerequisite confidence:")
+
+local harvestModule = CN:GetModule("Harvest")
+
+assert(harvestModule, "the Harvest module must load")
+
+local harvestStore = harvestModule.Store()
+
+-- An EVEN id: the stubbed client reports odd quest ids as already
+-- completed, and a completed quest is never blocked by anything.
+harvestStore[42002] = { questID = 42002, name = "Gated Quest" }
+
+-- Start from a clean window. Turn-ins from earlier in this test run are still
+-- inside the correlation window and would be counted too.
+harvestModule.ResetRecent()
+
+-- One character's ordering is a coincidence, not a prerequisite.
+CN.characterKey = "Alpha-Realm"
+harvestModule.NoteTurnIn(42000)
+harvestModule.NoteAccepted(42002)
+
+print("  after 1 character: confidence = "
+    .. harvestModule.Confidence(harvestStore[42002], 42000)
+    .. ", promoted = " .. #harvestModule.ConfidentPrerequisites(42002))
+
+assert(harvestModule.Confidence(harvestStore[42002], 42000) == 1,
+    "one character must count as one")
+assert(#harvestModule.ConfidentPrerequisites(42002) == 0,
+    "one character's ordering must NOT become a prerequisite")
+
+-- Repeating it on the SAME character must not raise confidence: doing a chain
+-- twice is still one character's opinion.
+harvestModule.NoteTurnIn(42000)
+harvestModule.NoteAccepted(42002)
+
+assert(harvestModule.Confidence(harvestStore[42002], 42000) == 1,
+    "repeating on one character must not raise confidence")
+
+print("  repeating on the same character does not raise confidence")
+
+-- A second character: closer, still short of the threshold.
+CN.characterKey = "Beta-Realm"
+harvestModule.NoteTurnIn(42000)
+harvestModule.NoteAccepted(42002)
+
+assert(harvestModule.Confidence(harvestStore[42002], 42000) == 2, "two characters must count as two")
+assert(#harvestModule.ConfidentPrerequisites(42002) == 0,
+    "two characters must still be below the threshold of "
+    .. harvestModule.confidenceThreshold)
+
+-- A third independent character. Playthroughs do not agree by accident.
+CN.characterKey = "Gamma-Realm"
+harvestModule.NoteTurnIn(42000)
+harvestModule.NoteAccepted(42002)
+
+local promoted = harvestModule.ConfidentPrerequisites(42002)
+
+print("  after 3 characters: confidence = "
+    .. harvestModule.Confidence(harvestStore[42002], 42000)
+    .. ", promoted = " .. #promoted)
+
+assert(#promoted == 1 and promoted[1] == 42000,
+    "three agreeing characters must promote the prerequisite")
+
+-- Publishing must reach the dependency graph as observedRequires, NEVER as
+-- requires: inference must not be able to masquerade as curated data.
+harvestModule.PublishConfident()
+
+local edge = CN.GetDependency(CN.ObjectiveKey("QUEST", 42002))
+
+assert(edge and edge.observedRequires, "confident edges must be published")
+assert(edge.requires == nil,
+    "an inferred prerequisite must never be written as a curated one")
+
+print("  published as observedRequires, not requires")
+
+-- And /cn why must report it as an observation, with the count.
+local blockedState, blockedReason, blockedDetail = CN.Explain("QUEST", 42002)
+
+print("  why -> " .. tostring(blockedReason) .. " :: " .. tostring(blockedDetail))
+
+assert(blockedReason == CN.blockReasons.LIKELY_PREREQUISITE,
+    "an inferred block must be reported as likely, not as fact")
+assert(tostring(blockedDetail):find("3 characters", 1, true),
+    "the explanation must say how many characters showed it, got " .. tostring(blockedDetail))
+
+CN.characterKey = nil
+harvestStore[42002] = nil
+CN.dependencies[CN.ObjectiveKey("QUEST", 42002)] = nil
+
 print("\nBroker and alerts:")
 
 local broker = CN:GetModule("Broker")
@@ -21799,7 +22156,7 @@ CN.SetIgnored("PET", 12345, false)
 
 print("  ignore fast path preserves real lookups")
 
-print("\nMigration 1 -> 3:")
+print("\nMigration 1 -> 4:")
 
 -- A database as an older build would have left it: schema version 1, the
 -- collection tables absent, and the minimap setting stored flat.
@@ -21829,7 +22186,7 @@ print("  minimap.angle     = " .. tostring(migrated.settings.minimap.angle))
 print("  discoveredQuests  = " .. count(migrated.account.discoveredQuests))
 print("  characters        = " .. count(migrated.characters))
 
-assert(migrated.version == 3, "the ladder must advance to the current schema version, got "
+assert(migrated.version == 4, "the ladder must advance to the current schema version, got "
     .. tostring(migrated.version))
 assert(type(migrated.settings.minimap) == "table",
     "the flat minimap boolean must become a table")
@@ -21863,7 +22220,7 @@ print("  per-character settings table created, empty, non-destructive")
 
 -- Running it again must be a no-op, not a second migration.
 CN.InitializeDatabase()
-assert(CompletionNavigatorDB.version == 3, "migration must be idempotent")
+assert(CompletionNavigatorDB.version == 4, "migration must be idempotent")
 
 print("  re-run is idempotent")
 

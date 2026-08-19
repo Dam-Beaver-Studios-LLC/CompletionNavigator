@@ -120,6 +120,40 @@ CN.migrations = {
             end
         end
     end,
+
+    -- 3 -> 4. Observed prerequisites gained a confidence count.
+    --
+    -- The old shape was a flat array of candidate quest IDs, overwritten on
+    -- every sighting, so it carried no idea of how often or on how many
+    -- characters an ordering had held. The new shape counts by character.
+    --
+    -- Existing observations are preserved and credited to one unknown
+    -- character each. That is deliberately BELOW the promotion threshold:
+    -- data gathered before the addon knew how to count characters must not
+    -- be promoted to a prerequisite on the strength of a count it never
+    -- actually made.
+    [3] = function(db)
+        db.account = db.account or {}
+
+        local harvest = db.account.questHarvest
+
+        if type(harvest) ~= "table" then
+            return
+        end
+
+        for _, record in pairs(harvest) do
+            if type(record) == "table" and type(record.maybeRequires) == "table" then
+                record.observed = record.observed or {}
+
+                for _, prerequisiteID in ipairs(record.maybeRequires) do
+                    record.observed[prerequisiteID] = record.observed[prerequisiteID]
+                        or { seen = 1, characters = { ["migrated"] = true } }
+                end
+
+                record.maybeRequires = nil
+            end
+        end
+    end,
 }
 
 local function Migrate(db)

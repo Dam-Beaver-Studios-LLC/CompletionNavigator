@@ -2192,6 +2192,96 @@ assert((byType.TITLE or 0) == 0,
 
 print("  titles correctly absent (no source data exists)")
 
+print("\nPrerequisite confidence:")
+
+local harvestModule = CN:GetModule("Harvest")
+
+assert(harvestModule, "the Harvest module must load")
+
+local harvestStore = harvestModule.Store()
+
+-- An EVEN id: the stubbed client reports odd quest ids as already
+-- completed, and a completed quest is never blocked by anything.
+harvestStore[42002] = { questID = 42002, name = "Gated Quest" }
+
+-- Start from a clean window. Turn-ins from earlier in this test run are still
+-- inside the correlation window and would be counted too.
+harvestModule.ResetRecent()
+
+-- One character's ordering is a coincidence, not a prerequisite.
+CN.characterKey = "Alpha-Realm"
+harvestModule.NoteTurnIn(42000)
+harvestModule.NoteAccepted(42002)
+
+print("  after 1 character: confidence = "
+    .. harvestModule.Confidence(harvestStore[42002], 42000)
+    .. ", promoted = " .. #harvestModule.ConfidentPrerequisites(42002))
+
+assert(harvestModule.Confidence(harvestStore[42002], 42000) == 1,
+    "one character must count as one")
+assert(#harvestModule.ConfidentPrerequisites(42002) == 0,
+    "one character's ordering must NOT become a prerequisite")
+
+-- Repeating it on the SAME character must not raise confidence: doing a chain
+-- twice is still one character's opinion.
+harvestModule.NoteTurnIn(42000)
+harvestModule.NoteAccepted(42002)
+
+assert(harvestModule.Confidence(harvestStore[42002], 42000) == 1,
+    "repeating on one character must not raise confidence")
+
+print("  repeating on the same character does not raise confidence")
+
+-- A second character: closer, still short of the threshold.
+CN.characterKey = "Beta-Realm"
+harvestModule.NoteTurnIn(42000)
+harvestModule.NoteAccepted(42002)
+
+assert(harvestModule.Confidence(harvestStore[42002], 42000) == 2, "two characters must count as two")
+assert(#harvestModule.ConfidentPrerequisites(42002) == 0,
+    "two characters must still be below the threshold of "
+    .. harvestModule.confidenceThreshold)
+
+-- A third independent character. Playthroughs do not agree by accident.
+CN.characterKey = "Gamma-Realm"
+harvestModule.NoteTurnIn(42000)
+harvestModule.NoteAccepted(42002)
+
+local promoted = harvestModule.ConfidentPrerequisites(42002)
+
+print("  after 3 characters: confidence = "
+    .. harvestModule.Confidence(harvestStore[42002], 42000)
+    .. ", promoted = " .. #promoted)
+
+assert(#promoted == 1 and promoted[1] == 42000,
+    "three agreeing characters must promote the prerequisite")
+
+-- Publishing must reach the dependency graph as observedRequires, NEVER as
+-- requires: inference must not be able to masquerade as curated data.
+harvestModule.PublishConfident()
+
+local edge = CN.GetDependency(CN.ObjectiveKey("QUEST", 42002))
+
+assert(edge and edge.observedRequires, "confident edges must be published")
+assert(edge.requires == nil,
+    "an inferred prerequisite must never be written as a curated one")
+
+print("  published as observedRequires, not requires")
+
+-- And /cn why must report it as an observation, with the count.
+local blockedState, blockedReason, blockedDetail = CN.Explain("QUEST", 42002)
+
+print("  why -> " .. tostring(blockedReason) .. " :: " .. tostring(blockedDetail))
+
+assert(blockedReason == CN.blockReasons.LIKELY_PREREQUISITE,
+    "an inferred block must be reported as likely, not as fact")
+assert(tostring(blockedDetail):find("3 characters", 1, true),
+    "the explanation must say how many characters showed it, got " .. tostring(blockedDetail))
+
+CN.characterKey = nil
+harvestStore[42002] = nil
+CN.dependencies[CN.ObjectiveKey("QUEST", 42002)] = nil
+
 print("\nBroker and alerts:")
 
 local broker = CN:GetModule("Broker")
@@ -2607,7 +2697,7 @@ CN.SetIgnored("PET", 12345, false)
 
 print("  ignore fast path preserves real lookups")
 
-print("\nMigration 1 -> 3:")
+print("\nMigration 1 -> 4:")
 
 -- A database as an older build would have left it: schema version 1, the
 -- collection tables absent, and the minimap setting stored flat.
@@ -2637,7 +2727,7 @@ print("  minimap.angle     = " .. tostring(migrated.settings.minimap.angle))
 print("  discoveredQuests  = " .. count(migrated.account.discoveredQuests))
 print("  characters        = " .. count(migrated.characters))
 
-assert(migrated.version == 3, "the ladder must advance to the current schema version, got "
+assert(migrated.version == 4, "the ladder must advance to the current schema version, got "
     .. tostring(migrated.version))
 assert(type(migrated.settings.minimap) == "table",
     "the flat minimap boolean must become a table")
@@ -2671,7 +2761,7 @@ print("  per-character settings table created, empty, non-destructive")
 
 -- Running it again must be a no-op, not a second migration.
 CN.InitializeDatabase()
-assert(CompletionNavigatorDB.version == 3, "migration must be idempotent")
+assert(CompletionNavigatorDB.version == 4, "migration must be idempotent")
 
 print("  re-run is idempotent")
 
