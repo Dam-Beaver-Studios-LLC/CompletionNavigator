@@ -38,6 +38,11 @@ CN.defaults = {
         -- of a player who has not asked for navigation.
         arrow        = true,
 
+        -- Announcing rares out loud is the noisiest thing this addon could
+        -- do, so it is opt-in. Unsolicited sound is worse than an uninvited
+        -- waypoint, and the waypoint is already off by default.
+        rareAlerts   = false,
+
         -- Minimap button placement is an angle in degrees around the
         -- minimap edge, so it survives UI scale and minimap size changes.
         minimap = {
@@ -98,6 +103,22 @@ CN.migrations = {
 
         db.settings.hideMinimap  = nil
         db.settings.minimapAngle = nil
+    end,
+
+    -- 2 -> 3. Per-character setting overrides.
+    --
+    -- Nothing to convert: every existing setting stays exactly where it is,
+    -- account-wide, and characters start with no overrides at all. This entry
+    -- exists so the ladder is explicit about the shape change rather than
+    -- relying on absence, and so the assertion below documents the intent.
+    [2] = function(db)
+        db.characters = db.characters or {}
+
+        for _, character in pairs(db.characters) do
+            if type(character) == "table" then
+                character.settings = character.settings or {}
+            end
+        end
     end,
 }
 
@@ -220,7 +241,28 @@ function CN.MarkScanned(key)
     end
 end
 
-function CN.Settings()
+------------------------------------------------------------
+-- SETTINGS AND PROFILES
+------------------------------------------------------------
+
+-- Settings are account-wide by default. Any single setting can be overridden
+-- per character, because some of them are genuinely character-shaped: a max
+-- level main and a levelling alt want different priority modes, and the
+-- character you happen to be on should decide that, not the last one you
+-- changed it on.
+--
+-- Overrides are stored SPARSELY -- only what a character has explicitly
+-- overridden. That means a new default added in a later release reaches every
+-- character, instead of being frozen at whatever the value was when the
+-- override was created.
+CN.characterOverridable = {
+    priorityMode = true,
+    autoWaypoint = true,
+    arrow        = true,
+    tooltips     = true,
+}
+
+local function AccountSettings()
     if not CN.db then
         return nil
     end
@@ -228,4 +270,123 @@ function CN.Settings()
     CN.db.settings = CN.db.settings or {}
 
     return CN.db.settings
+end
+
+CN.AccountSettings = AccountSettings
+
+local function Overrides(character)
+    character = character or CN.character
+
+    if not character then
+        return nil
+    end
+
+    character.settings = character.settings or {}
+
+    return character.settings
+end
+
+CN.SettingOverrides = Overrides
+
+function CN.IsOverridden(key)
+    local overrides = Overrides()
+
+    return overrides ~= nil and overrides[key] ~= nil
+end
+
+-- Sets a per-character override, or clears it when value is nil.
+function CN.SetOverride(key, value)
+    if not CN.characterOverridable[key] then
+        return false, "That setting is account-wide only."
+    end
+
+    local overrides = Overrides()
+
+    if not overrides then
+        return false, "No character is loaded yet."
+    end
+
+    overrides[key] = value
+
+    return true
+end
+
+function CN.ClearOverride(key)
+    local overrides = Overrides()
+
+    if overrides then
+        overrides[key] = nil
+    end
+
+    return true
+end
+
+-- The settings table every caller sees.
+--
+-- A proxy rather than a copy: reads fall through to the account table unless
+-- this character has overridden the key, and writes go to whichever level the
+-- key already lives at. Copying would have meant every existing call site
+-- needing to know which level it was talking to.
+local settingsProxy
+
+local function BuildProxy()
+    return setmetatable({}, {
+        __index = function(_, key)
+            local overrides = Overrides()
+
+            if overrides and overrides[key] ~= nil then
+                return overrides[key]
+            end
+
+            local account = AccountSettings()
+
+            return account and account[key]
+        end,
+
+        __newindex = function(_, key, value)
+            local overrides = Overrides()
+
+            -- Writing to a key this character has overridden updates the
+            -- override. Everything else is account-wide, which is the
+            -- behaviour every release before this one had.
+            if overrides and overrides[key] ~= nil then
+                overrides[key] = value
+                return
+            end
+
+            local account = AccountSettings()
+
+            if account then
+                account[key] = value
+            end
+        end,
+
+        -- pairs() over settings must see the merged view, or anything that
+        -- iterates them silently misses overrides.
+        __pairs = function()
+            local merged = {}
+
+            for key, value in pairs(AccountSettings() or {}) do
+                merged[key] = value
+            end
+
+            for key, value in pairs(Overrides() or {}) do
+                merged[key] = value
+            end
+
+            return next, merged, nil
+        end,
+    })
+end
+
+function CN.Settings()
+    if not CN.db then
+        return nil
+    end
+
+    AccountSettings()
+
+    settingsProxy = settingsProxy or BuildProxy()
+
+    return settingsProxy
 end

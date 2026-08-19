@@ -1,6 +1,6 @@
 # Completion Navigator â€” Roadmap
 
-Current version: **0.20.0** Â· 41 Lua files Â· ~17,400 lines Â· 82 slash commands Â· 15 candidate providers Â· 10 UI tabs
+Current version: **0.21.0** Â· 42 Lua files Â· ~18,300 lines Â· 87 slash commands Â· 15 candidate providers Â· 10 UI tabs Â· 85% test coverage
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
@@ -128,17 +128,17 @@ CurseForge asked about localization permissions at project setup, and the answer
 **Effort:** large but low-risk and highly parallelizable.
 **Recommendation:** do the *extraction* early â€” it gets harder every release. Translations can follow whenever.
 
-### 3.2 LibDataBroker
+### 3.2 LibDataBroker â€” **DONE in 0.21.0**
 
-**Status:** absent.
+**Status:** shipped as an optional integration, probed via LibStub and silent when absent. Historically: absent.
 
 Titan Panel and ElvUI users expect a datatext. A broker object showing the current recommendation, clickable to open the window, is roughly forty lines.
 
 **Effort:** small. **Risk:** low â€” but it is the first external library dependency, and the UI file's header explicitly notes that no libraries are embedded. Worth doing as an *optional* integration: detect LibStub, register if present, stay silent if not. Consistent with how TomTom/ATT/BtWQuests are handled.
 
-### 3.3 Per-character settings
+### 3.3 Per-character settings â€” **DONE in 0.21.0**
 
-**Status:** settings are account-wide only.
+**Status:** shipped. A proxy over the settings table resolves per-character overrides, stored sparsely so later default changes still reach everyone. Schema 2 -> 3. Historically: account-wide only.
 
 Priority mode in particular is character-shaped: a max-level main and a levelling alt want different answers. Auto-waypoint too.
 
@@ -146,9 +146,9 @@ Priority mode in particular is character-shaped: a max-level main and a levellin
 
 **Effort:** moderate. **Risk:** low-medium â€” settings migrations are where data gets destroyed, and the existing test asserts against exactly that.
 
-### 3.4 Rare spawn alerts
+### 3.4 Rare spawn alerts â€” **DONE in 0.21.0**
 
-**Status:** no sound or on-screen alerting anywhere.
+**Status:** shipped, off by default. Historically: no alerting anywhere.
 
 Vignette detection already works. A rare appearing that you have not cleared is worth an optional sound and a screen message. Must be **off by default** â€” unsolicited noise is worse than seizing the waypoint.
 
@@ -172,7 +172,11 @@ HandyNotes integration exists as a provider but the addon draws no pins of its o
 
 **Options:** a curated `Data\Community.lua` built from submitted exports (needs a submission path), or accepting an import string in-game. The former is a process problem more than a code problem.
 
-### 4.2 Test coverage measurement
+### 4.2 Test coverage measurement â€” **DONE in 0.21.0**
+
+**Status:** luacov runs in the suite and in CI with an 80% floor; currently 85%. It immediately found the TomTom provider at 41% â€” shipped in every release, never executed by a test.
+
+#### Original finding
 
 The harness and `pstest.sh` are strong but coverage is unmeasured â€” I do not know what fraction of the Lua is exercised. `luacov` under the harness would say.
 

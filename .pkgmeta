@@ -18,3 +18,4 @@ ignore:
   - harness.lua
   - bench.lua
   - pstest.sh
+  - coverage.sh

@@ -105,6 +105,14 @@ jobs:
             exit 1
           fi
 
+      # Coverage, with a floor. A test suite whose reach nobody measures
+      # drifts: it keeps passing while covering less and less of the addon.
+      - name: Coverage
+        run: |
+          sudo apt-get install -y luarocks
+          sudo luarocks install luacov
+          bash coverage.sh . 80
+
       # The packager SKIPS the CurseForge upload silently when CF_API_KEY is
       # missing -- the build still goes green and no file appears. Fail here
       # instead, so a missing or misnamed secret is obvious.

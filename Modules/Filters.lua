@@ -608,4 +608,59 @@ CN:RegisterCommand{
     end,
 }
 
+CN:RegisterCommand{
+    name    = "percharacter",
+    aliases = { "perchar" },
+    args    = "[setting]",
+    order   = 18,
+    help    = "Make a setting apply to this character only.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        local settings = CN.Settings()
+
+        if args ~= "" then
+            if not CN.characterOverridable[args] then
+                Print("That setting cannot be set per character: " .. args)
+                Print("|cff999999Overridable: priorityMode, autoWaypoint, "
+                    .. "arrow, tooltips|r")
+                return
+            end
+
+            if CN.IsOverridden(args) then
+                CN.ClearOverride(args)
+
+                Print(args .. " now follows the account setting again ("
+                    .. tostring(settings[args]) .. ").")
+            else
+                -- Seed the override with whatever this character sees now, so
+                -- taking control never changes the current behaviour.
+                local ok, message = CN.SetOverride(args, settings[args])
+
+                if not ok then
+                    Print(message)
+                    return
+                end
+
+                Print(args .. " is now set for this character only ("
+                    .. tostring(settings[args]) .. ").")
+            end
+        end
+
+        Print("Settings for " .. tostring(CN.characterKey or "this character") .. ":")
+
+        for _, key in ipairs({ "priorityMode", "autoWaypoint", "arrow", "tooltips" }) do
+            local overridden = CN.IsOverridden(key)
+
+            Print("  " .. key .. " = " .. tostring(settings[key])
+                .. (overridden
+                    and " |cffffff00this character only|r"
+                    or " |cff999999account-wide|r"))
+        end
+
+        Print("|cff999999/cn perchar priorityMode|r toggles whether a setting "
+            .. "is shared or per character.")
+    end,
+}
+
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.

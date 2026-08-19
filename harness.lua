@@ -726,6 +726,57 @@ C_WeeklyRewards = {
 
 function CN_TEST_SetVaultClaimable(value) weeklyClaimable = value end
 
+-- LibDataBroker, stubbed through LibStub. The broker is optional, so both
+-- halves need testing: present, and absent.
+local brokerObjects = {}
+
+local fakeLDB = {
+    NewDataObject = function(self, name, definition)
+        brokerObjects[name] = definition
+        return definition
+    end,
+}
+
+function LibStub(name, silent)
+    if name == "LibDataBroker-1.1" then
+        return fakeLDB
+    end
+
+    if silent then
+        return nil
+    end
+
+    error("library not found: " .. tostring(name))
+end
+
+function CN_TEST_BrokerObjects() return brokerObjects end
+
+-- TomTom, stubbed.
+--
+-- Coverage found this: the TomTom waypoint provider ships in every release and
+-- was never executed by a single test, because no TomTom existed to probe. A
+-- provider nobody runs is a provider nobody knows is broken.
+local tomtomWaypoints = {}
+
+TomTom = {
+    AddWaypoint = function(self, mapID, x, y, options)
+        local uid = { mapID = mapID, x = x, y = y, options = options }
+        table.insert(tomtomWaypoints, uid)
+        return uid
+    end,
+    RemoveWaypoint = function(self, uid)
+        for index, entry in ipairs(tomtomWaypoints) do
+            if entry == uid then
+                table.remove(tomtomWaypoints, index)
+                return true
+            end
+        end
+        return false
+    end,
+}
+
+function CN_TEST_TomTomWaypoints() return tomtomWaypoints end
+
 function UnitExists(unit) return unit == "npc" or unit == "mouseover" end
 function UnitGUID(unit)
     if unit ~= "npc" and unit ~= "mouseover" then return nil end
@@ -1004,6 +1055,8 @@ local invocations = {
     "perf", "tooltips", "tooltips off", "tooltips on", "tooltips bogus",
     "vault", "greatvault",
     "show", "show pets", "show pets", "show only quests", "show all",
+    "alerts", "alerts on", "alerts off", "alerts bogus", "broker",
+    "perchar", "perchar priorityMode", "perchar priorityMode", "perchar nonsense",
     "show nonsense", "types",
     "arrow", "arrow off", "arrow on", "arrow bogus",
     "nav", "nav native", "nav tomtom", "nav auto", "nav nonsense", "here",
@@ -1959,6 +2012,44 @@ assert(nav.GetTarget() == nil, "clearing must drop the target")
 
 CN_TEST_SetFacing(0)
 
+-- TomTom stays supported, so it stays tested. Switching to it must actually
+-- route waypoints through TomTom rather than silently keeping the native one.
+local tomtomProvider = CN.waypointProviders["TomTom"]
+
+assert(tomtomProvider, "the TomTom provider must be registered")
+assert(tomtomProvider.IsAvailable(), "a stubbed TomTom must be detected")
+
+nav.SetPreference("tomtom")
+
+local preferredProvider, preferredName = CN.GetWaypointProvider()
+
+assert(preferredName == "TomTom",
+    "choosing TomTom must actually select it, got " .. tostring(preferredName))
+
+local beforeCount = #CN_TEST_TomTomWaypoints()
+
+CN.SetWaypoint(94, 0.3, 0.7, "Via TomTom")
+
+assert(#CN_TEST_TomTomWaypoints() == beforeCount + 1,
+    "a waypoint set while TomTom is chosen must reach TomTom")
+
+local lastWaypoint = CN_TEST_TomTomWaypoints()[#CN_TEST_TomTomWaypoints()]
+
+assert(lastWaypoint.mapID == 94 and lastWaypoint.options.title == "Via TomTom",
+    "TomTom must receive the map, coordinates and title")
+
+tomtomProvider.ClearAll()
+
+assert(#CN_TEST_TomTomWaypoints() == 0, "clearing must remove TomTom waypoints")
+
+-- And back to native, which must not need TomTom at all.
+nav.SetPreference("auto")
+
+assert(select(2, CN.GetWaypointProvider()) == "Native",
+    "resetting the preference must return to native navigation")
+
+print("  TomTom provider exercised and released")
+
 print("\nGreat Vault:")
 
 local vault = CN:GetModule("Vault")
@@ -2100,6 +2191,151 @@ assert((byType.TITLE or 0) == 0,
     "titles must not be recommended: there is no source data to act on")
 
 print("  titles correctly absent (no source data exists)")
+
+print("\nBroker and alerts:")
+
+local broker = CN:GetModule("Broker")
+
+assert(broker, "the Broker module must load")
+assert(broker.available, "a present LibDataBroker must be detected")
+
+local object = CN_TEST_BrokerObjects()["CompletionNavigator"]
+
+assert(object, "a data object must be registered")
+assert(object.type == "data source", "the object must declare itself a data source")
+assert(type(object.OnClick) == "function", "the broker must be clickable")
+
+broker.Refresh()
+
+print("  broker text = " .. tostring(object.text))
+
+assert(object.text and object.text ~= "", "the broker must show something")
+
+-- The tooltip must not throw, and must render through the same stub the
+-- addon's own tooltips use.
+GameTooltip:ClearLines()
+object.OnTooltipShow(GameTooltip)
+
+local brokerTip = table.concat(GameTooltip.lines, " | ")
+
+print("  broker tooltip = " .. brokerTip)
+
+assert(brokerTip:find("Completion Navigator", 1, true),
+    "the broker tooltip must identify the addon")
+
+-- Alerts are OFF by default. This is a deliberate courtesy, so assert it.
+assert(not broker.AlertsEnabled(),
+    "rare alerts must be off until asked for")
+
+assert(broker.CheckAlerts() == 0, "alerts must do nothing while disabled")
+
+CN.Settings().rareAlerts = true
+broker.ResetAnnounced()
+
+local firstPass = broker.CheckAlerts()
+
+print("  alerts sent on first pass = " .. firstPass)
+
+assert(firstPass > 0, "a live rare must be announced once alerts are on")
+
+-- And exactly once. A rare drifting in and out of vignette range must not
+-- announce itself repeatedly.
+local secondPass = broker.CheckAlerts()
+
+assert(secondPass == 0,
+    "a rare must be announced once, not repeatedly, got " .. secondPass)
+
+print("  announced once, not repeatedly")
+
+-- Changing zone resets the set, because a new zone is a new set of rares.
+fire("ZONE_CHANGED_NEW_AREA")
+
+assert(broker.CheckAlerts() > 0, "a zone change must allow announcing again")
+
+CN.Settings().rareAlerts = false
+
+print("  zone change resets the announced set")
+
+print("\nPer-character settings:")
+
+local liveSettings = CN.Settings()
+
+-- By default everything is account-wide: exactly the behaviour of every
+-- release before this one.
+assert(not CN.IsOverridden("priorityMode"),
+    "settings must be account-wide until a character overrides them")
+
+liveSettings.priorityMode = "balanced"
+
+assert(CN.AccountSettings().priorityMode == "balanced",
+    "an unoverridden write must reach the account table")
+
+print("  unoverridden writes go account-wide")
+
+-- Taking an override must not change the current value, only where it lives.
+CN.SetOverride("priorityMode", liveSettings.priorityMode)
+
+assert(CN.IsOverridden("priorityMode"), "the override must be recorded")
+assert(liveSettings.priorityMode == "balanced",
+    "taking an override must not change what the setting currently is")
+
+-- Now writes must be isolated from the account.
+liveSettings.priorityMode = "pets"
+
+assert(liveSettings.priorityMode == "pets", "the override must be readable")
+assert(CN.AccountSettings().priorityMode == "balanced",
+    "an overridden write must NOT leak to the account setting, got "
+    .. tostring(CN.AccountSettings().priorityMode))
+
+print("  overridden writes stay on the character (account still 'balanced')")
+
+-- Another character must not see this character's override.
+local thisCharacter = CN.character
+
+CN.character = { name = "Other", settings = {} }
+
+assert(liveSettings.priorityMode == "balanced",
+    "a different character must see the account setting, got "
+    .. tostring(liveSettings.priorityMode))
+
+CN.character = thisCharacter
+
+assert(liveSettings.priorityMode == "pets",
+    "switching back must restore this character's override")
+
+print("  a second character sees the account value, not the override")
+
+-- Releasing it must fall back to the account value, not the last override.
+CN.ClearOverride("priorityMode")
+
+assert(not CN.IsOverridden("priorityMode"), "the override must be releasable")
+assert(liveSettings.priorityMode == "balanced",
+    "releasing an override must fall back to the account value")
+
+print("  releasing falls back to the account value")
+
+-- Only whitelisted keys may be overridden: a typo must not silently create a
+-- per-character setting nothing reads.
+local refused = CN.SetOverride("notARealSetting", true)
+
+assert(refused == false, "an unknown setting must not be overridable")
+
+-- pairs() must see the merged view, or anything iterating settings misses
+-- overrides entirely.
+CN.SetOverride("arrow", false)
+
+local sawArrow = nil
+
+for key, value in pairs(liveSettings) do
+    if key == "arrow" then sawArrow = value end
+end
+
+assert(sawArrow == false,
+    "iterating settings must see overrides, got " .. tostring(sawArrow))
+
+CN.ClearOverride("arrow")
+
+print("  iteration sees the merged view")
 
 print("\nType filtering:")
 
@@ -2371,7 +2607,7 @@ CN.SetIgnored("PET", 12345, false)
 
 print("  ignore fast path preserves real lookups")
 
-print("\nMigration 1 -> 2:")
+print("\nMigration 1 -> 3:")
 
 -- A database as an older build would have left it: schema version 1, the
 -- collection tables absent, and the minimap setting stored flat.
@@ -2401,7 +2637,8 @@ print("  minimap.angle     = " .. tostring(migrated.settings.minimap.angle))
 print("  discoveredQuests  = " .. count(migrated.account.discoveredQuests))
 print("  characters        = " .. count(migrated.characters))
 
-assert(migrated.version == 2, "the ladder must advance the schema version")
+assert(migrated.version == 3, "the ladder must advance to the current schema version, got "
+    .. tostring(migrated.version))
 assert(type(migrated.settings.minimap) == "table",
     "the flat minimap boolean must become a table")
 assert(migrated.settings.minimap.hide == true,
@@ -2420,9 +2657,21 @@ assert(type(migrated.account.pets) == "table",
 assert(migrated.characters["Old-Char"].name == "Old",
     "existing characters must survive")
 
+-- 2 -> 3 must create the per-character settings table without touching
+-- anything that was already there.
+assert(type(migrated.characters["Old-Char"].settings) == "table",
+    "migration 2 must give every existing character a settings table")
+assert(migrated.characters["Old-Char"].level == 60,
+    "migration 2 must not disturb existing character data")
+assert(count(migrated.characters["Old-Char"].settings) == 0,
+    "an existing character must start with NO overrides, so account settings "
+    .. "still apply to them")
+
+print("  per-character settings table created, empty, non-destructive")
+
 -- Running it again must be a no-op, not a second migration.
 CN.InitializeDatabase()
-assert(CompletionNavigatorDB.version == 2, "migration must be idempotent")
+assert(CompletionNavigatorDB.version == 3, "migration must be idempotent")
 
 print("  re-run is idempotent")
 

@@ -36,6 +36,8 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 
 **Shows you only what you care about.** `/cn show only quests` while levelling, `/cn show pets` to drop a category you have finished with, or the *Filter types* button on the Next tab. Filtering changes what gets recommended, never what gets tracked — everything still appears in Remaining and Collections.
 
+**Settles per character where it matters.** Priority mode, auto-advance, the arrow and tooltips can each be set for one character instead of the whole account. A max-level main and a levelling alt want different answers.
+
 **Lets you undo hiding things.** Ignore or defer anything you are not interested in, then `/cn hidden` to see the list and `/cn unhide` to bring it back. Deferrals expire on their own.
 
 **Learns from your play.** Every quest you accept or turn in has its name, zone, coordinates and level recorded permanently. Every vendor you open records what it sells and where they stand. Every rare you see joins a spawn database. `/cn export` emits the quest data as ready-to-paste rows, so playing the game grows the database that ships to everyone.
@@ -99,6 +101,8 @@ Keybindings live under **Key Bindings → AddOns**.
 /cn nav                  Choose the navigation provider
 /cn here                 Where you are, and what is being tracked
 /cn show [type]          Choose which kinds of objective get recommended
+/cn perchar <setting>    Set something for this character only
+/cn alerts               Announce rares that appear near you
 /cn goal <type> <id>     Pin something to work toward
 /cn goals                Your goals, and what is known about reaching them
 /cn now                  Everything expiring soon
@@ -141,6 +145,8 @@ Stated plainly, because finding these out yourself feels like a bug:
 
 ## Optional integrations
 
+**LibDataBroker** is picked up automatically when a display addon supplies it — Titan Panel, ElvUI, ChocolateBar — showing the current recommendation in your bar.
+
 **TomTom** is no longer needed. Navigation is native: the addon draws its own arrow and computes its own distances. TomTom remains supported for anyone who prefers it — `/cn nav tomtom` — and Blizzard map pins remain available as a third option.
 
 **AllTheThings** and **BtWQuests** are read at runtime when installed, for quest names, coordinates, source quests and prerequisite chains. Their internals are not published contracts, so every access is probed and wrapped: an update to either can make a provider go quiet, but cannot break this addon. `/cn providers` shows exactly what resolved.
@@ -151,7 +157,7 @@ None are required. Completion Navigator is a decision layer, not a replacement f
 
 ## Status
 
-Version 0.20.1. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
+Version 0.21.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
 
 Bug reports and feature requests: [GitHub issues](https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/issues), or email developer@dambeaverstudios.com.
 

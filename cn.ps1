@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.20.1'
+$script:ToolkitVersion = '0.21.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,8 +108,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.20.1"
-CN.dbVersion   = 2
+CN.version     = "0.21.0"
+CN.dbVersion   = 3
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -371,6 +371,11 @@ CN.defaults = {
         -- of a player who has not asked for navigation.
         arrow        = true,
 
+        -- Announcing rares out loud is the noisiest thing this addon could
+        -- do, so it is opt-in. Unsolicited sound is worse than an uninvited
+        -- waypoint, and the waypoint is already off by default.
+        rareAlerts   = false,
+
         -- Minimap button placement is an angle in degrees around the
         -- minimap edge, so it survives UI scale and minimap size changes.
         minimap = {
@@ -431,6 +436,22 @@ CN.migrations = {
 
         db.settings.hideMinimap  = nil
         db.settings.minimapAngle = nil
+    end,
+
+    -- 2 -> 3. Per-character setting overrides.
+    --
+    -- Nothing to convert: every existing setting stays exactly where it is,
+    -- account-wide, and characters start with no overrides at all. This entry
+    -- exists so the ladder is explicit about the shape change rather than
+    -- relying on absence, and so the assertion below documents the intent.
+    [2] = function(db)
+        db.characters = db.characters or {}
+
+        for _, character in pairs(db.characters) do
+            if type(character) == "table" then
+                character.settings = character.settings or {}
+            end
+        end
     end,
 }
 
@@ -553,7 +574,28 @@ function CN.MarkScanned(key)
     end
 end
 
-function CN.Settings()
+------------------------------------------------------------
+-- SETTINGS AND PROFILES
+------------------------------------------------------------
+
+-- Settings are account-wide by default. Any single setting can be overridden
+-- per character, because some of them are genuinely character-shaped: a max
+-- level main and a levelling alt want different priority modes, and the
+-- character you happen to be on should decide that, not the last one you
+-- changed it on.
+--
+-- Overrides are stored SPARSELY -- only what a character has explicitly
+-- overridden. That means a new default added in a later release reaches every
+-- character, instead of being frozen at whatever the value was when the
+-- override was created.
+CN.characterOverridable = {
+    priorityMode = true,
+    autoWaypoint = true,
+    arrow        = true,
+    tooltips     = true,
+}
+
+local function AccountSettings()
     if not CN.db then
         return nil
     end
@@ -561,6 +603,125 @@ function CN.Settings()
     CN.db.settings = CN.db.settings or {}
 
     return CN.db.settings
+end
+
+CN.AccountSettings = AccountSettings
+
+local function Overrides(character)
+    character = character or CN.character
+
+    if not character then
+        return nil
+    end
+
+    character.settings = character.settings or {}
+
+    return character.settings
+end
+
+CN.SettingOverrides = Overrides
+
+function CN.IsOverridden(key)
+    local overrides = Overrides()
+
+    return overrides ~= nil and overrides[key] ~= nil
+end
+
+-- Sets a per-character override, or clears it when value is nil.
+function CN.SetOverride(key, value)
+    if not CN.characterOverridable[key] then
+        return false, "That setting is account-wide only."
+    end
+
+    local overrides = Overrides()
+
+    if not overrides then
+        return false, "No character is loaded yet."
+    end
+
+    overrides[key] = value
+
+    return true
+end
+
+function CN.ClearOverride(key)
+    local overrides = Overrides()
+
+    if overrides then
+        overrides[key] = nil
+    end
+
+    return true
+end
+
+-- The settings table every caller sees.
+--
+-- A proxy rather than a copy: reads fall through to the account table unless
+-- this character has overridden the key, and writes go to whichever level the
+-- key already lives at. Copying would have meant every existing call site
+-- needing to know which level it was talking to.
+local settingsProxy
+
+local function BuildProxy()
+    return setmetatable({}, {
+        __index = function(_, key)
+            local overrides = Overrides()
+
+            if overrides and overrides[key] ~= nil then
+                return overrides[key]
+            end
+
+            local account = AccountSettings()
+
+            return account and account[key]
+        end,
+
+        __newindex = function(_, key, value)
+            local overrides = Overrides()
+
+            -- Writing to a key this character has overridden updates the
+            -- override. Everything else is account-wide, which is the
+            -- behaviour every release before this one had.
+            if overrides and overrides[key] ~= nil then
+                overrides[key] = value
+                return
+            end
+
+            local account = AccountSettings()
+
+            if account then
+                account[key] = value
+            end
+        end,
+
+        -- pairs() over settings must see the merged view, or anything that
+        -- iterates them silently misses overrides.
+        __pairs = function()
+            local merged = {}
+
+            for key, value in pairs(AccountSettings() or {}) do
+                merged[key] = value
+            end
+
+            for key, value in pairs(Overrides() or {}) do
+                merged[key] = value
+            end
+
+            return next, merged, nil
+        end,
+    })
+end
+
+function CN.Settings()
+    if not CN.db then
+        return nil
+    end
+
+    AccountSettings()
+
+    settingsProxy = settingsProxy or BuildProxy()
+
+    return settingsProxy
 end
 '@
 
@@ -14216,6 +14377,61 @@ CN:RegisterCommand{
     end,
 }
 
+CN:RegisterCommand{
+    name    = "percharacter",
+    aliases = { "perchar" },
+    args    = "[setting]",
+    order   = 18,
+    help    = "Make a setting apply to this character only.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        local settings = CN.Settings()
+
+        if args ~= "" then
+            if not CN.characterOverridable[args] then
+                Print("That setting cannot be set per character: " .. args)
+                Print("|cff999999Overridable: priorityMode, autoWaypoint, "
+                    .. "arrow, tooltips|r")
+                return
+            end
+
+            if CN.IsOverridden(args) then
+                CN.ClearOverride(args)
+
+                Print(args .. " now follows the account setting again ("
+                    .. tostring(settings[args]) .. ").")
+            else
+                -- Seed the override with whatever this character sees now, so
+                -- taking control never changes the current behaviour.
+                local ok, message = CN.SetOverride(args, settings[args])
+
+                if not ok then
+                    Print(message)
+                    return
+                end
+
+                Print(args .. " is now set for this character only ("
+                    .. tostring(settings[args]) .. ").")
+            end
+        end
+
+        Print("Settings for " .. tostring(CN.characterKey or "this character") .. ":")
+
+        for _, key in ipairs({ "priorityMode", "autoWaypoint", "arrow", "tooltips" }) do
+            local overridden = CN.IsOverridden(key)
+
+            Print("  " .. key .. " = " .. tostring(settings[key])
+                .. (overridden
+                    and " |cffffff00this character only|r"
+                    or " |cff999999account-wide|r"))
+        end
+
+        Print("|cff999999/cn perchar priorityMode|r toggles whether a setting "
+            .. "is shared or per character.")
+    end,
+}
+
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
@@ -17214,6 +17430,302 @@ end)
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Broker.lua'] = @'
+-- Modules/Broker.lua
+-- Completion Navigator :: LibDataBroker feed, and rare-spawn alerts.
+--
+-- Two small things that share a theme: telling you something without you
+-- having to ask.
+--
+-- The broker is the addon's answer to "what next?" displayed permanently in
+-- whatever bar you already run -- Titan Panel, ElvUI, ChocolateBar. This is
+-- the only place the addon touches an external library, and it does so the
+-- same way it touches TomTom and AllTheThings: probed, wrapped, optional. If
+-- LibDataBroker is not installed nothing happens and nothing is said, because
+-- an addon complaining about a library you never asked for is noise.
+--
+-- Alerts are OFF by default. Unsolicited sound is worse than a waypoint you
+-- did not ask for, and this addon has already decided how it feels about that.
+
+local ADDON_NAME, CN = ...
+
+local Broker = CN:RegisterModule("Broker")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+------------------------------------------------------------
+-- LIBDATABROKER
+------------------------------------------------------------
+
+Broker.available = false
+
+local dataObject
+
+local function CurrentText()
+    local ok, results = pcall(CN.Recommend, 1)
+
+    if not ok or not results or not results[1] then
+        return "Completion Navigator", "nothing actionable"
+    end
+
+    local objective = results[1]
+
+    return tostring(objective.name or objective.id), tostring(objective.type)
+end
+
+Broker.CurrentText = CurrentText
+
+function Broker.Refresh()
+    if not dataObject then
+        return
+    end
+
+    local name, kind = CurrentText()
+
+    dataObject.text  = name
+    dataObject.value = name
+    dataObject.label = kind
+end
+
+function Broker.Install()
+    if Broker.available or not LibStub then
+        return Broker.available
+    end
+
+    -- LibStub's silent form: it returns nil rather than throwing when the
+    -- library is absent, which is exactly what optional means.
+    local ok, ldb = pcall(LibStub, "LibDataBroker-1.1", true)
+
+    if not ok or not ldb then
+        return false
+    end
+
+    local created, object = pcall(ldb.NewDataObject, ldb, "CompletionNavigator", {
+        type  = "data source",
+        text  = "Completion Navigator",
+        icon  = CN.MEDIA_PATH .. "Logo",
+
+        OnClick = function(_, button)
+            if button == "RightButton" then
+                local results = CN.Recommend(1)
+
+                if results and results[1] then
+                    CN.NavigateToObjective(results[1])
+                end
+
+                return
+            end
+
+            if CN.UI and CN.UI.Toggle then
+                CN.UI.Toggle()
+            end
+        end,
+
+        OnTooltipShow = function(tooltip)
+            if not tooltip or not tooltip.AddLine then
+                return
+            end
+
+            tooltip:AddLine("Completion Navigator")
+
+            local results = CN.Recommend(3)
+
+            if not results or #results == 0 then
+                tooltip:AddLine("Nothing actionable yet.", 0.6, 0.6, 0.6)
+                tooltip:AddLine("Run /cn setup once.", 0.6, 0.6, 0.6)
+                return
+            end
+
+            for index, objective in ipairs(results) do
+                tooltip:AddLine(
+                    (index == 1 and "Next: " or "     ")
+                        .. tostring(objective.name or objective.id),
+                    index == 1 and 0.365 or 0.7,
+                    index == 1 and 0.824 or 0.7,
+                    index == 1 and 0.984 or 0.7)
+            end
+
+            tooltip:AddLine(" ")
+            tooltip:AddLine("Left-click to open, right-click to navigate.", 1, 1, 1)
+        end,
+    })
+
+    if not created or not object then
+        return false
+    end
+
+    dataObject      = object
+    Broker.available = true
+
+    Broker.Refresh()
+
+    DebugPrint("LibDataBroker feed registered.")
+
+    return true
+end
+
+------------------------------------------------------------
+-- RARE ALERTS
+------------------------------------------------------------
+
+-- Which vignettes have already been announced this session. A rare drifting
+-- in and out of vignette range must not announce itself repeatedly.
+local announced = {}
+
+function Broker.AlertsEnabled()
+    local settings = CN.Settings()
+
+    -- Off by default, deliberately. See the file header.
+    return settings and settings.rareAlerts == true
+end
+
+function Broker.ResetAnnounced()
+    announced = {}
+end
+
+-- Returns the vignettes worth announcing: up right now, not already announced,
+-- not already cleared by this character, and not something you have ignored.
+function Broker.PendingAlerts()
+    local rares = CN:GetModule("Rares")
+
+    if not rares then
+        return {}
+    end
+
+    local pending = {}
+
+    for _, vignette in ipairs(rares.GetActive()) do
+        local id = vignette.vignetteID
+
+        if id
+            and not announced[id]
+            and vignette.kind == "RARE"
+            and not rares.IsClearedByCharacter(id)
+            and not CN.IsIgnored(CN.objectiveTypes.RARE, id) then
+
+            table.insert(pending, vignette)
+        end
+    end
+
+    return pending
+end
+
+function Broker.Announce(vignette)
+    announced[vignette.vignetteID] = time()
+
+    Print("|cff5DD2FBRare up:|r " .. tostring(vignette.name or "unknown")
+        .. (vignette.x and vignette.y
+            and string.format(" |cff999999%.1f, %.1f|r",
+                vignette.x * 100, vignette.y * 100)
+            or ""))
+
+    if PlaySound then
+        -- A quiet, non-alarming stock sound. Raid warnings are for raids.
+        pcall(PlaySound, 8959, "Master")
+    end
+
+    return true
+end
+
+function Broker.CheckAlerts()
+    if not Broker.AlertsEnabled() then
+        return 0
+    end
+
+    local sent = 0
+
+    for _, vignette in ipairs(Broker.PendingAlerts()) do
+        Broker.Announce(vignette)
+
+        sent = sent + 1
+    end
+
+    return sent
+end
+
+------------------------------------------------------------
+-- EVENTS
+------------------------------------------------------------
+
+for _, event in ipairs({ "VIGNETTE_MINIMAP_UPDATED", "VIGNETTES_UPDATED" }) do
+    CN:RegisterEvent(event, function()
+        local ok, err = pcall(Broker.CheckAlerts)
+
+        if not ok then
+            DebugPrint("Rare alert check failed: " .. tostring(err))
+        end
+    end)
+end
+
+-- A new zone is a new set of rares; nothing carries over.
+CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
+    Broker.ResetAnnounced()
+end)
+
+CN:OnLogin(function()
+    Broker.Install()
+end)
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "alerts",
+    args    = "[on or off]",
+    order   = 44,
+    help    = "Announce rares that appear near you.",
+    handler = function(args)
+        local settings = CN.Settings()
+
+        args = string.lower(CN.Trim(args or ""))
+
+        if args == "on" then
+            settings.rareAlerts = true
+        elseif args == "off" then
+            settings.rareAlerts = false
+        elseif args ~= "" then
+            Print("Usage: /cn alerts [on or off]")
+            return
+        else
+            settings.rareAlerts = not Broker.AlertsEnabled()
+        end
+
+        Print("Rare alerts: " .. CN.YesNo(Broker.AlertsEnabled()))
+
+        if Broker.AlertsEnabled() then
+            Print("|cff999999Announced once each, only for rares you have not "
+                .. "already cleared, and reset when you change zone.|r")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "broker",
+    order   = 45,
+    help    = "Show LibDataBroker status.",
+    handler = function()
+        if Broker.available then
+            local name = CurrentText()
+
+            Print("LibDataBroker feed: " .. CN.YesNo(true))
+            Print("Currently showing: |cffffff00" .. tostring(name) .. "|r")
+            Print("|cff999999Add it from your display addon: Titan Panel, "
+                .. "ElvUI datatexts, ChocolateBar.|r")
+            return
+        end
+
+        Print("LibDataBroker feed: " .. CN.YesNo(false))
+        Print("|cff999999LibDataBroker is not installed, which is fine -- it is "
+            .. "optional. Display addons like Titan Panel and ElvUI ship it, "
+            .. "and the feed appears automatically when one of them is present.|r")
+    end,
+}
+
+-- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -17233,7 +17745,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.20.1
+## Version: 0.21.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -17266,6 +17778,7 @@ Data\Quests.lua
 Modules\Achievements.lua
 Modules\Appearances.lua
 Modules\Breakdown.lua
+Modules\Broker.lua
 Modules\Currencies.lua
 Modules\Exploration.lua
 Modules\Filters.lua
@@ -17445,6 +17958,45 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.21.0]
+
+### Added
+
+- **Per-character settings.** Priority mode, auto-advance, the arrow and
+  tooltips can each be set for one character instead of the whole account.
+  `/cn perchar priorityMode` takes control of a setting; running it again hands
+  it back. A max-level main and a levelling alt want different answers, and the
+  character you are on should decide that rather than the last one you changed
+  it on.
+  Overrides are stored sparsely -- only what a character explicitly took over --
+  so a default changed in a later release still reaches everyone, instead of
+  being frozen at whatever it was when the override was made. Schema 2 -> 3;
+  nothing moves, and every existing character starts with no overrides at all.
+- **LibDataBroker feed.** Titan Panel, ElvUI datatexts and ChocolateBar can
+  show the current recommendation, click to open the window, right-click to
+  navigate. It is the only external library the addon touches, and it is
+  handled like every other optional integration: probed, wrapped, silent when
+  absent. `/cn broker` reports whether it resolved.
+- **Rare alerts.** `/cn alerts on` announces rares that appear near you, once
+  each, only for ones you have not already cleared, reset when you change zone.
+  **Off by default** -- unsolicited sound is worse than an uninvited waypoint,
+  and the waypoint is already off by default.
+- **Coverage measurement**, wired into the test suite and CI with an 80% floor.
+  A suite whose reach nobody measures drifts: it keeps passing while covering
+  less and less. Currently **85%**.
+
+### Fixed
+
+- **The TomTom provider had never been executed by a single test.** Coverage
+  found it at 41% -- it shipped in every release with no test able to reach it,
+  because no TomTom existed to probe. It is stubbed now, and the suite asserts
+  that choosing TomTom actually routes waypoints through TomTom rather than
+  silently keeping the native one.
+- **`cn.ps1` wrote shell scripts with CRLF line endings.** A CRLF shell script
+  fails with `$'\r': command not found`, which reads like a corrupt file rather
+  than a line-ending problem. `.sh`, `.yml` and `.yaml` are now written LF,
+  since those are the files a Linux CI runner executes.
 
 ## [0.20.1]
 
@@ -18098,7 +18650,7 @@ below. Numbers are from that benchmark.
 $Embedded['ROADMAP.md'] = @'
 # Completion Navigator — Roadmap
 
-Current version: **0.20.0** · 41 Lua files · ~17,400 lines · 82 slash commands · 15 candidate providers · 10 UI tabs
+Current version: **0.21.0** · 42 Lua files · ~18,300 lines · 87 slash commands · 15 candidate providers · 10 UI tabs · 85% test coverage
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
@@ -18226,17 +18778,17 @@ CurseForge asked about localization permissions at project setup, and the answer
 **Effort:** large but low-risk and highly parallelizable.
 **Recommendation:** do the *extraction* early — it gets harder every release. Translations can follow whenever.
 
-### 3.2 LibDataBroker
+### 3.2 LibDataBroker — **DONE in 0.21.0**
 
-**Status:** absent.
+**Status:** shipped as an optional integration, probed via LibStub and silent when absent. Historically: absent.
 
 Titan Panel and ElvUI users expect a datatext. A broker object showing the current recommendation, clickable to open the window, is roughly forty lines.
 
 **Effort:** small. **Risk:** low — but it is the first external library dependency, and the UI file's header explicitly notes that no libraries are embedded. Worth doing as an *optional* integration: detect LibStub, register if present, stay silent if not. Consistent with how TomTom/ATT/BtWQuests are handled.
 
-### 3.3 Per-character settings
+### 3.3 Per-character settings — **DONE in 0.21.0**
 
-**Status:** settings are account-wide only.
+**Status:** shipped. A proxy over the settings table resolves per-character overrides, stored sparsely so later default changes still reach everyone. Schema 2 -> 3. Historically: account-wide only.
 
 Priority mode in particular is character-shaped: a max-level main and a levelling alt want different answers. Auto-waypoint too.
 
@@ -18244,9 +18796,9 @@ Priority mode in particular is character-shaped: a max-level main and a levellin
 
 **Effort:** moderate. **Risk:** low-medium — settings migrations are where data gets destroyed, and the existing test asserts against exactly that.
 
-### 3.4 Rare spawn alerts
+### 3.4 Rare spawn alerts — **DONE in 0.21.0**
 
-**Status:** no sound or on-screen alerting anywhere.
+**Status:** shipped, off by default. Historically: no alerting anywhere.
 
 Vignette detection already works. A rare appearing that you have not cleared is worth an optional sound and a screen message. Must be **off by default** — unsolicited noise is worse than seizing the waypoint.
 
@@ -18270,7 +18822,11 @@ HandyNotes integration exists as a provider but the addon draws no pins of its o
 
 **Options:** a curated `Data\Community.lua` built from submitted exports (needs a submission path), or accepting an import string in-game. The former is a process problem more than a code problem.
 
-### 4.2 Test coverage measurement
+### 4.2 Test coverage measurement — **DONE in 0.21.0**
+
+**Status:** luacov runs in the suite and in CI with an 80% floor; currently 85%. It immediately found the TomTom provider at 41% — shipped in every release, never executed by a test.
+
+#### Original finding
 
 The harness and `pstest.sh` are strong but coverage is unmeasured — I do not know what fraction of the Lua is exercised. `luacov` under the harness would say.
 
@@ -18346,6 +18902,7 @@ ignore:
   - harness.lua
   - bench.lua
   - pstest.sh
+  - coverage.sh
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -18455,6 +19012,14 @@ jobs:
             echo "The test suite cannot run, so this release is not verified."
             exit 1
           fi
+
+      # Coverage, with a floor. A test suite whose reach nobody measures
+      # drifts: it keeps passing while covering less and less of the addon.
+      - name: Coverage
+        run: |
+          sudo apt-get install -y luarocks
+          sudo luarocks install luacov
+          bash coverage.sh . 80
 
       # The packager SKIPS the CurseForge upload silently when CF_API_KEY is
       # missing -- the build still goes green and no file appears. Fail here
@@ -19353,6 +19918,57 @@ C_WeeklyRewards = {
 
 function CN_TEST_SetVaultClaimable(value) weeklyClaimable = value end
 
+-- LibDataBroker, stubbed through LibStub. The broker is optional, so both
+-- halves need testing: present, and absent.
+local brokerObjects = {}
+
+local fakeLDB = {
+    NewDataObject = function(self, name, definition)
+        brokerObjects[name] = definition
+        return definition
+    end,
+}
+
+function LibStub(name, silent)
+    if name == "LibDataBroker-1.1" then
+        return fakeLDB
+    end
+
+    if silent then
+        return nil
+    end
+
+    error("library not found: " .. tostring(name))
+end
+
+function CN_TEST_BrokerObjects() return brokerObjects end
+
+-- TomTom, stubbed.
+--
+-- Coverage found this: the TomTom waypoint provider ships in every release and
+-- was never executed by a single test, because no TomTom existed to probe. A
+-- provider nobody runs is a provider nobody knows is broken.
+local tomtomWaypoints = {}
+
+TomTom = {
+    AddWaypoint = function(self, mapID, x, y, options)
+        local uid = { mapID = mapID, x = x, y = y, options = options }
+        table.insert(tomtomWaypoints, uid)
+        return uid
+    end,
+    RemoveWaypoint = function(self, uid)
+        for index, entry in ipairs(tomtomWaypoints) do
+            if entry == uid then
+                table.remove(tomtomWaypoints, index)
+                return true
+            end
+        end
+        return false
+    end,
+}
+
+function CN_TEST_TomTomWaypoints() return tomtomWaypoints end
+
 function UnitExists(unit) return unit == "npc" or unit == "mouseover" end
 function UnitGUID(unit)
     if unit ~= "npc" and unit ~= "mouseover" then return nil end
@@ -19631,6 +20247,8 @@ local invocations = {
     "perf", "tooltips", "tooltips off", "tooltips on", "tooltips bogus",
     "vault", "greatvault",
     "show", "show pets", "show pets", "show only quests", "show all",
+    "alerts", "alerts on", "alerts off", "alerts bogus", "broker",
+    "perchar", "perchar priorityMode", "perchar priorityMode", "perchar nonsense",
     "show nonsense", "types",
     "arrow", "arrow off", "arrow on", "arrow bogus",
     "nav", "nav native", "nav tomtom", "nav auto", "nav nonsense", "here",
@@ -20586,6 +21204,44 @@ assert(nav.GetTarget() == nil, "clearing must drop the target")
 
 CN_TEST_SetFacing(0)
 
+-- TomTom stays supported, so it stays tested. Switching to it must actually
+-- route waypoints through TomTom rather than silently keeping the native one.
+local tomtomProvider = CN.waypointProviders["TomTom"]
+
+assert(tomtomProvider, "the TomTom provider must be registered")
+assert(tomtomProvider.IsAvailable(), "a stubbed TomTom must be detected")
+
+nav.SetPreference("tomtom")
+
+local preferredProvider, preferredName = CN.GetWaypointProvider()
+
+assert(preferredName == "TomTom",
+    "choosing TomTom must actually select it, got " .. tostring(preferredName))
+
+local beforeCount = #CN_TEST_TomTomWaypoints()
+
+CN.SetWaypoint(94, 0.3, 0.7, "Via TomTom")
+
+assert(#CN_TEST_TomTomWaypoints() == beforeCount + 1,
+    "a waypoint set while TomTom is chosen must reach TomTom")
+
+local lastWaypoint = CN_TEST_TomTomWaypoints()[#CN_TEST_TomTomWaypoints()]
+
+assert(lastWaypoint.mapID == 94 and lastWaypoint.options.title == "Via TomTom",
+    "TomTom must receive the map, coordinates and title")
+
+tomtomProvider.ClearAll()
+
+assert(#CN_TEST_TomTomWaypoints() == 0, "clearing must remove TomTom waypoints")
+
+-- And back to native, which must not need TomTom at all.
+nav.SetPreference("auto")
+
+assert(select(2, CN.GetWaypointProvider()) == "Native",
+    "resetting the preference must return to native navigation")
+
+print("  TomTom provider exercised and released")
+
 print("\nGreat Vault:")
 
 local vault = CN:GetModule("Vault")
@@ -20727,6 +21383,151 @@ assert((byType.TITLE or 0) == 0,
     "titles must not be recommended: there is no source data to act on")
 
 print("  titles correctly absent (no source data exists)")
+
+print("\nBroker and alerts:")
+
+local broker = CN:GetModule("Broker")
+
+assert(broker, "the Broker module must load")
+assert(broker.available, "a present LibDataBroker must be detected")
+
+local object = CN_TEST_BrokerObjects()["CompletionNavigator"]
+
+assert(object, "a data object must be registered")
+assert(object.type == "data source", "the object must declare itself a data source")
+assert(type(object.OnClick) == "function", "the broker must be clickable")
+
+broker.Refresh()
+
+print("  broker text = " .. tostring(object.text))
+
+assert(object.text and object.text ~= "", "the broker must show something")
+
+-- The tooltip must not throw, and must render through the same stub the
+-- addon's own tooltips use.
+GameTooltip:ClearLines()
+object.OnTooltipShow(GameTooltip)
+
+local brokerTip = table.concat(GameTooltip.lines, " | ")
+
+print("  broker tooltip = " .. brokerTip)
+
+assert(brokerTip:find("Completion Navigator", 1, true),
+    "the broker tooltip must identify the addon")
+
+-- Alerts are OFF by default. This is a deliberate courtesy, so assert it.
+assert(not broker.AlertsEnabled(),
+    "rare alerts must be off until asked for")
+
+assert(broker.CheckAlerts() == 0, "alerts must do nothing while disabled")
+
+CN.Settings().rareAlerts = true
+broker.ResetAnnounced()
+
+local firstPass = broker.CheckAlerts()
+
+print("  alerts sent on first pass = " .. firstPass)
+
+assert(firstPass > 0, "a live rare must be announced once alerts are on")
+
+-- And exactly once. A rare drifting in and out of vignette range must not
+-- announce itself repeatedly.
+local secondPass = broker.CheckAlerts()
+
+assert(secondPass == 0,
+    "a rare must be announced once, not repeatedly, got " .. secondPass)
+
+print("  announced once, not repeatedly")
+
+-- Changing zone resets the set, because a new zone is a new set of rares.
+fire("ZONE_CHANGED_NEW_AREA")
+
+assert(broker.CheckAlerts() > 0, "a zone change must allow announcing again")
+
+CN.Settings().rareAlerts = false
+
+print("  zone change resets the announced set")
+
+print("\nPer-character settings:")
+
+local liveSettings = CN.Settings()
+
+-- By default everything is account-wide: exactly the behaviour of every
+-- release before this one.
+assert(not CN.IsOverridden("priorityMode"),
+    "settings must be account-wide until a character overrides them")
+
+liveSettings.priorityMode = "balanced"
+
+assert(CN.AccountSettings().priorityMode == "balanced",
+    "an unoverridden write must reach the account table")
+
+print("  unoverridden writes go account-wide")
+
+-- Taking an override must not change the current value, only where it lives.
+CN.SetOverride("priorityMode", liveSettings.priorityMode)
+
+assert(CN.IsOverridden("priorityMode"), "the override must be recorded")
+assert(liveSettings.priorityMode == "balanced",
+    "taking an override must not change what the setting currently is")
+
+-- Now writes must be isolated from the account.
+liveSettings.priorityMode = "pets"
+
+assert(liveSettings.priorityMode == "pets", "the override must be readable")
+assert(CN.AccountSettings().priorityMode == "balanced",
+    "an overridden write must NOT leak to the account setting, got "
+    .. tostring(CN.AccountSettings().priorityMode))
+
+print("  overridden writes stay on the character (account still 'balanced')")
+
+-- Another character must not see this character's override.
+local thisCharacter = CN.character
+
+CN.character = { name = "Other", settings = {} }
+
+assert(liveSettings.priorityMode == "balanced",
+    "a different character must see the account setting, got "
+    .. tostring(liveSettings.priorityMode))
+
+CN.character = thisCharacter
+
+assert(liveSettings.priorityMode == "pets",
+    "switching back must restore this character's override")
+
+print("  a second character sees the account value, not the override")
+
+-- Releasing it must fall back to the account value, not the last override.
+CN.ClearOverride("priorityMode")
+
+assert(not CN.IsOverridden("priorityMode"), "the override must be releasable")
+assert(liveSettings.priorityMode == "balanced",
+    "releasing an override must fall back to the account value")
+
+print("  releasing falls back to the account value")
+
+-- Only whitelisted keys may be overridden: a typo must not silently create a
+-- per-character setting nothing reads.
+local refused = CN.SetOverride("notARealSetting", true)
+
+assert(refused == false, "an unknown setting must not be overridable")
+
+-- pairs() must see the merged view, or anything iterating settings misses
+-- overrides entirely.
+CN.SetOverride("arrow", false)
+
+local sawArrow = nil
+
+for key, value in pairs(liveSettings) do
+    if key == "arrow" then sawArrow = value end
+end
+
+assert(sawArrow == false,
+    "iterating settings must see overrides, got " .. tostring(sawArrow))
+
+CN.ClearOverride("arrow")
+
+print("  iteration sees the merged view")
 
 print("\nType filtering:")
 
@@ -20998,7 +21799,7 @@ CN.SetIgnored("PET", 12345, false)
 
 print("  ignore fast path preserves real lookups")
 
-print("\nMigration 1 -> 2:")
+print("\nMigration 1 -> 3:")
 
 -- A database as an older build would have left it: schema version 1, the
 -- collection tables absent, and the minimap setting stored flat.
@@ -21028,7 +21829,8 @@ print("  minimap.angle     = " .. tostring(migrated.settings.minimap.angle))
 print("  discoveredQuests  = " .. count(migrated.account.discoveredQuests))
 print("  characters        = " .. count(migrated.characters))
 
-assert(migrated.version == 2, "the ladder must advance the schema version")
+assert(migrated.version == 3, "the ladder must advance to the current schema version, got "
+    .. tostring(migrated.version))
 assert(type(migrated.settings.minimap) == "table",
     "the flat minimap boolean must become a table")
 assert(migrated.settings.minimap.hide == true,
@@ -21047,9 +21849,21 @@ assert(type(migrated.account.pets) == "table",
 assert(migrated.characters["Old-Char"].name == "Old",
     "existing characters must survive")
 
+-- 2 -> 3 must create the per-character settings table without touching
+-- anything that was already there.
+assert(type(migrated.characters["Old-Char"].settings) == "table",
+    "migration 2 must give every existing character a settings table")
+assert(migrated.characters["Old-Char"].level == 60,
+    "migration 2 must not disturb existing character data")
+assert(count(migrated.characters["Old-Char"].settings) == 0,
+    "an existing character must start with NO overrides, so account settings "
+    .. "still apply to them")
+
+print("  per-character settings table created, empty, non-destructive")
+
 -- Running it again must be a no-op, not a second migration.
 CN.InitializeDatabase()
-assert(CompletionNavigatorDB.version == 2, "migration must be idempotent")
+assert(CompletionNavigatorDB.version == 3, "migration must be idempotent")
 
 print("  re-run is idempotent")
 
@@ -21225,6 +22039,278 @@ bench("IsIgnored + IsDeferred x 10000", 20, function()
         CN.IsDeferred("PET", i)
     end
 end)
+'@
+
+$Embedded['coverage.sh'] = @'
+#!/bin/bash
+# Coverage over the offline harness.
+#
+# luacov installs under Lua 5.1 on this machine but is pure Lua, so 5.4 runs it
+# fine with the path pointed at it.
+set -e
+
+ROOT=${1:-build/CompletionNavigator}
+FLOOR=${2:-80}
+
+LUA51="/usr/local/share/lua/5.1/?.lua;/usr/local/share/lua/5.1/?/init.lua;;"
+
+# Write the config next to wherever we are running, so the same script works
+# from the development tree and from a freshly scaffolded copy.
+cat > .luacov <<CONFIG
+statsfile = "luacov.stats.out"
+reportfile = "luacov.report.out"
+include = { "${ROOT}/.*" }
+exclude = { "harness", "bench", "luacov" }
+CONFIG
+
+rm -f luacov.stats.out luacov.report.out
+
+LUA_PATH="$LUA51" lua5.4 -lluacov harness.lua "$ROOT" > /dev/null 2>&1
+
+LUA_PATH="$LUA51" lua5.4 -e 'require("luacov.reporter").report()' > /dev/null 2>&1
+
+TOTAL=$(grep -E "^Total" luacov.report.out | awk '{print $NF}' | tr -d '%')
+
+# The report lists every file twice: once with per-line detail, once in the
+# summary table. Only the summary rows have four columns.
+echo "Coverage by file, weakest first:"
+awk 'NF==4 && $1 ~ /\.lua$/ { gsub(/%/,"",$4); printf "  %6.2f%%  %s\n", $4, $1 }' \
+  luacov.report.out | sort -n | head -8
+
+echo ""
+echo "Total: ${TOTAL}%"
+
+# Compared as integers: bash cannot do floating point, and a floor is a floor.
+if [ "${TOTAL%.*}" -lt "$FLOOR" ]; then
+  echo "FAIL: coverage ${TOTAL}% is below the ${FLOOR}% floor"
+  exit 1
+fi
+
+echo "Above the ${FLOOR}% floor."
+'@
+
+$Embedded['pstest.sh'] = @'
+#!/bin/bash
+# End-to-end test of cn.ps1 against a real PowerShell host and a real git
+# remote. This is what was missing when a broken release path shipped.
+set -e
+PWSH=/opt/pwsh/pwsh
+SRC=/home/claude/cn/out/cn.ps1
+WORK=$(mktemp -d)
+REMOTE=$(mktemp -d)/remote.git
+VERSION=$(grep -oP 'ToolkitVersion = .\K[0-9.]+' "$SRC" | head -1)
+
+echo "Toolkit version: $VERSION"
+
+$PWSH -NoProfile -Command "
+\$e=\$null;\$t=\$null
+[System.Management.Automation.Language.Parser]::ParseFile('$SRC',[ref]\$t,[ref]\$e)|Out-Null
+if(\$e){\$e|%{Write-Host (\"line {0}: {1}\" -f \$_.Extent.StartLineNumber,\$_.Message)};exit 1}
+Write-Host '  parse ok'"
+
+cp "$SRC" "$WORK/cn.ps1"
+cd "$WORK"
+
+echo "  init"
+$PWSH -NoProfile -File ./cn.ps1 init > init.log 2>&1
+FILES=$(grep -cE "wrote  .*\.lua$" init.log)
+echo "    $FILES lua files scaffolded"
+EXPECTED=$(grep -cE '^\s*"[A-Za-z/]+\.lua",' /home/claude/cn/gen.py)
+[ "$FILES" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED lua files, scaffolded $FILES"; exit 1; }
+
+# The .toc must list only what the CLIENT loads. harness.lua stubs the whole
+# client API; listing it would replace live functions with fakes in game.
+grep -q 'harness.lua' CompletionNavigator.toc && { echo "FAIL: harness.lua is in the .toc"; exit 1; }
+grep -q 'bench.lua'   CompletionNavigator.toc && { echo "FAIL: bench.lua is in the .toc"; exit 1; }
+[ -f harness.lua ] || { echo "FAIL: harness.lua was not scaffolded"; exit 1; }
+echo "    test tooling present and excluded from the .toc"
+[ -f Media/Logo.tga ] || { echo "FAIL: Media/Logo.tga not scaffolded"; exit 1; }
+
+echo "  check"
+$PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
+grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
+
+echo "  release guard: wrong version"
+$PWSH -NoProfile -File ./cn.ps1 release 9.9.9 2>&1 | grep -q "carries version $VERSION" \
+  || { echo "FAIL: wrong-version guard"; exit 1; }
+grep -q "## Version: $VERSION" CompletionNavigator.toc || { echo "FAIL: guard modified the tree"; exit 1; }
+
+git init -q -b main . && git config user.email t@e.com && git config user.name T
+git add -A >/dev/null 2>&1 && git commit -qm init
+git init -q --bare "$REMOTE" && git remote add origin "$REMOTE" && git push -q -u origin main
+
+echo "  release: happy path"
+$PWSH -NoProfile -File ./cn.ps1 release "$VERSION" > release.log 2>&1
+grep -q "Pushed v$VERSION" release.log || { echo "FAIL: release did not push"; cat release.log; exit 1; }
+grep -q "RemoteException" release.log && { echo "FAIL: git output rendered as exception type"; exit 1; }
+
+echo "  release guard: duplicate tag"
+$PWSH -NoProfile -File ./cn.ps1 release "$VERSION" 2>&1 | grep -q "already exists" \
+  || { echo "FAIL: duplicate-tag guard"; exit 1; }
+
+echo "  doctor"
+$PWSH -NoProfile -File ./cn.ps1 doctor > doctor.log 2>&1
+grep -q "v$VERSION is on the remote" doctor.log || { echo "FAIL: doctor"; cat doctor.log; exit 1; }
+
+echo "  harvest: SavedVariables -> Data\\Quests.lua"
+cat > sv.lua <<'SAVEDVARS'
+
+CompletionNavigatorDB = {
+	["account"] = {
+		["questHarvest"] = {
+			[8237] = {
+				["name"] = "Already Curated",
+				["mapID"] = 94,
+				["x"] = 0.42,
+				["y"] = 0.55,
+			},
+			[71234] = {
+				["name"] = "A Quest With \"Quotes\" In It",
+				["zone"] = "Valdrakken",
+				["mapID"] = 2112,
+				["x"] = 0.611,
+				["y"] = 0.482,
+				["maybeRequires"] = {
+					1, 2,
+				},
+			},
+			[99001] = {
+				["name"] = "No Coordinates Known",
+			},
+		},
+		["questMetadata"] = {
+			[555] = { ["name"] = "Must Not Be Imported" },
+		},
+	},
+}
+SAVEDVARS
+
+$PWSH -NoProfile -File ./cn.ps1 harvest ./sv.lua > harvest.log 2>&1
+grep -q "new rows to add            1" harvest.log \
+  || { echo "FAIL: harvest should add exactly one located, uncurated quest"; cat harvest.log; exit 1; }
+
+grep -q '71234' Data/Quests.lua || { echo "FAIL: harvested quest not written"; exit 1; }
+grep -q '555'   Data/Quests.lua && { echo "FAIL: questMetadata leaked into the static database"; exit 1; }
+grep -q '99001' Data/Quests.lua && { echo "FAIL: unlocated quest added without -Force"; exit 1; }
+
+# Escaped quotes must survive the round trip, and the file must still be Lua.
+grep -q 'A Quest With .* In It' Data/Quests.lua || { echo "FAIL: quoted name mangled"; exit 1; }
+luac5.4 -p Data/Quests.lua || { echo "FAIL: harvest produced invalid Lua"; exit 1; }
+
+# Running it again must add nothing.
+$PWSH -NoProfile -File ./cn.ps1 harvest ./sv.lua > harvest2.log 2>&1
+grep -q "Nothing to add" harvest2.log || { echo "FAIL: harvest is not idempotent"; cat harvest2.log; exit 1; }
+
+# -Force reaches the unlocated ones.
+$PWSH -NoProfile -File ./cn.ps1 harvest ./sv.lua -Force > harvest3.log 2>&1
+grep -q '99001' Data/Quests.lua || { echo "FAIL: -Force did not include unlocated quests"; exit 1; }
+luac5.4 -p Data/Quests.lua || { echo "FAIL: -Force harvest produced invalid Lua"; exit 1; }
+
+# Leave the tree clean for the release steps below.
+git checkout -- Data/Quests.lua 2>/dev/null || true
+rm -f sv.lua harvest*.log
+
+echo "  coverage: harness exercises the addon"
+if command -v luacov >/dev/null 2>&1; then
+  # Run against the scaffolded tree, which is what actually ships.
+  # init writes files without the execute bit; invoke through the shell.
+  (cd "$WORK" && bash coverage.sh . 80 > coverage.log 2>&1) || {
+    echo "FAIL: coverage below floor"; tail -15 "$WORK/coverage.log"; exit 1; }
+  echo "    $(grep '^Total:' "$WORK/coverage.log")"
+else
+  echo "    luacov not installed; skipped"
+fi
+
+echo "  luacheck: static analysis of the scaffolded tree"
+if command -v luacheck >/dev/null 2>&1; then
+  cp /home/claude/cn/build/CompletionNavigator/.luacheckrc "$WORK/.luacheckrc"
+  (cd "$WORK" && luacheck . --no-color > luacheck.log 2>&1) || {
+    echo "FAIL: luacheck reported problems"; tail -30 "$WORK/luacheck.log"; exit 1; }
+  echo "    $(grep -oE 'Total: [0-9]+ warnings / [0-9]+ errors' "$WORK/luacheck.log")"
+else
+  echo "    luacheck not installed; skipped"
+fi
+
+echo "  lint: no unguarded native invocations"
+# Structural guarantee, not a behavioural one. Every native command must go
+# through Invoke-CNNative; a stray `2>&1` or a bare `git` call reintroduces
+# exactly the Windows PowerShell 5.1 failure this exists to prevent.
+python3 - /home/claude/cn/ps/cn.head.ps1 /home/claude/cn/ps/cn.body.ps1 <<'LINT'
+import re, sys
+
+problems  = []
+redirects = []
+bare_git  = []
+
+lines = []
+
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as fh:
+        for number, line in enumerate(fh, 1):
+            lines.append(("%s:%d" % (path.split("/")[-1], number), line))
+
+for number, line in lines:
+    stripped = line.strip()
+
+    # Comments are documentation, not invocations.
+    if stripped.startswith("#") or stripped.startswith("<#"):
+        continue
+
+    if "2>&1" in line:
+        redirects.append((number, stripped))
+
+    # A native git call that is not routed through the wrapper.
+    if re.match(r"^(\$\w+\s*=\s*)?(&\s*)?git\s+\S", stripped):
+        bare_git.append((number, stripped))
+
+# Exactly one redirect is allowed: the one inside Invoke-CNNative.
+if len(redirects) != 1 or "$Executable @Arguments" not in redirects[0][1]:
+    problems.append("2>&1 must appear exactly once, inside Invoke-CNNative:")
+    problems += ["    %s: %s" % r for r in redirects]
+
+if bare_git:
+    problems.append("git must be called through Invoke-CNGit:")
+    problems += ["    %s: %s" % r for r in bare_git]
+
+if problems:
+    print("FAIL: unguarded native invocation")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+LINT
+
+echo "  strict native error handling (approximates Windows PowerShell 5.1)"
+# On Windows PowerShell 5.1, stderr from a native command under 2>&1 becomes a
+# terminating error when $ErrorActionPreference is Stop. PowerShell 7 only does
+# this with $PSNativeCommandUseErrorActionPreference, so turn it on: without
+# it, this suite passes a script that dies on the user's machine. It already
+# did exactly that once.
+cd "$WORK"
+$PWSH -NoProfile -Command "
+\$PSNativeCommandUseErrorActionPreference = \$true
+\$ErrorActionPreference = 'Stop'
+& '$WORK/cn.ps1' doctor
+if (\$LASTEXITCODE -ne 0) { exit 1 }
+" > strict.log 2>&1 || { echo "FAIL: doctor dies under strict native error handling"; cat strict.log; exit 1; }
+
+grep -q "is on the remote" strict.log || { echo "FAIL: strict-mode doctor output wrong"; cat strict.log; exit 1; }
+
+# And the part that actually broke: a push, under strict handling.
+git tag -d "v$VERSION" >/dev/null 2>&1
+git push --delete origin "v$VERSION" >/dev/null 2>&1
+echo "probe" > probe.txt && git add probe.txt && git commit -qm probe
+
+$PWSH -NoProfile -Command "
+\$PSNativeCommandUseErrorActionPreference = \$true
+\$ErrorActionPreference = 'Stop'
+& '$WORK/cn.ps1' release '$VERSION'
+" > strictrelease.log 2>&1 || true
+
+grep -q "Pushed v$VERSION" strictrelease.log \
+  || { echo "FAIL: release does not survive strict native error handling"; cat strictrelease.log; exit 1; }
+
+echo "ALL POWERSHELL CHECKS PASSED"
+rm -rf "$WORK" "$(dirname "$REMOTE")"
 '@
 
 $EmbeddedBinary = [ordered]@{}
@@ -22304,10 +23390,24 @@ function Write-CNFile {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 
-    if (-not $Content.EndsWith("`n")) { $Content += "`r`n" }
+    if (-not $Content.EndsWith("`n")) { $Content += "`n" }
+
+    # Normalize to LF first, then decide.
+    $Content = $Content -replace "`r`n", "`n"
+
+    # Shell scripts MUST be LF. A CRLF shell script fails with
+    # "$'\r': command not found", which reads like a corrupt file rather than
+    # a line-ending problem. Same for anything a Linux CI runner executes.
+    $lfOnly = @('.sh', '.yml', '.yaml')
+
+    $extension = [System.IO.Path]::GetExtension($Relative)
+
+    if ($lfOnly -notcontains $extension) {
+        $Content = $Content -replace "`n", "`r`n"
+    }
 
     $encoding = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($full, ($Content -replace "`r`n", "`n" -replace "`n", "`r`n"), $encoding)
+    [System.IO.File]::WriteAllText($full, $Content, $encoding)
 }
 
 function Read-CNFile {
@@ -23464,7 +24564,8 @@ function Invoke-CNPackage {
     # in someone's AddOns folder would replace live functions with fakes.
     $excludedNames      = @('_backups', '.git', '.gitignore', '_to_delete',
                             '.github', '.pkgmeta', '_curseforge', '.luacheckrc',
-                            'ROADMAP.md', 'harness.lua', 'bench.lua', 'pstest.sh')
+                            'ROADMAP.md', 'harness.lua', 'bench.lua', 'pstest.sh',
+                            'coverage.sh', 'luacov.stats.out', 'luacov.report.out')
     $excludedExtensions = @('.ps1', '.psm1', '.zip', '.bak')
 
     $shipped = 0

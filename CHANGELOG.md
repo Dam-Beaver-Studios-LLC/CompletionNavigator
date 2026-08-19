@@ -7,6 +7,45 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.21.0]
+
+### Added
+
+- **Per-character settings.** Priority mode, auto-advance, the arrow and
+  tooltips can each be set for one character instead of the whole account.
+  `/cn perchar priorityMode` takes control of a setting; running it again hands
+  it back. A max-level main and a levelling alt want different answers, and the
+  character you are on should decide that rather than the last one you changed
+  it on.
+  Overrides are stored sparsely -- only what a character explicitly took over --
+  so a default changed in a later release still reaches everyone, instead of
+  being frozen at whatever it was when the override was made. Schema 2 -> 3;
+  nothing moves, and every existing character starts with no overrides at all.
+- **LibDataBroker feed.** Titan Panel, ElvUI datatexts and ChocolateBar can
+  show the current recommendation, click to open the window, right-click to
+  navigate. It is the only external library the addon touches, and it is
+  handled like every other optional integration: probed, wrapped, silent when
+  absent. `/cn broker` reports whether it resolved.
+- **Rare alerts.** `/cn alerts on` announces rares that appear near you, once
+  each, only for ones you have not already cleared, reset when you change zone.
+  **Off by default** -- unsolicited sound is worse than an uninvited waypoint,
+  and the waypoint is already off by default.
+- **Coverage measurement**, wired into the test suite and CI with an 80% floor.
+  A suite whose reach nobody measures drifts: it keeps passing while covering
+  less and less. Currently **85%**.
+
+### Fixed
+
+- **The TomTom provider had never been executed by a single test.** Coverage
+  found it at 41% -- it shipped in every release with no test able to reach it,
+  because no TomTom existed to probe. It is stubbed now, and the suite asserts
+  that choosing TomTom actually routes waypoints through TomTom rather than
+  silently keeping the native one.
+- **`cn.ps1` wrote shell scripts with CRLF line endings.** A CRLF shell script
+  fails with `$'\r': command not found`, which reads like a corrupt file rather
+  than a line-ending problem. `.sh`, `.yml` and `.yaml` are now written LF,
+  since those are the files a Linux CI runner executes.
+
 ## [0.20.1]
 
 The arrow pointed the wrong way. This fixes it, and fixes the reason the tests
