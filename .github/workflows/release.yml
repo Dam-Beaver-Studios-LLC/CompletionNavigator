@@ -13,6 +13,12 @@ jobs:
   release:
     runs-on: ubuntu-latest
 
+    # Without this, a hung step runs until GitHub's six-hour default kills it.
+    # A release that has hung for hours looks identical to one still working,
+    # which is exactly how a stuck run went unnoticed: it sat "in progress"
+    # indefinitely while nobody could tell it was dead.
+    timeout-minutes: 20
+
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -54,8 +60,33 @@ jobs:
           done
 
       # Fails the build before publishing if any Lua file is malformed.
+      # ubuntu-latest runs unattended-upgrades shortly after boot, which holds
+      # the dpkg lock. apt-get waits for that lock FOREVER by default -- there
+      # is no timeout unless you ask for one. That is how a release wedged here
+      # for thirty-eight minutes while reporting "in progress", looking for all
+      # the world like it was still doing something.
+      #
+      # DPkg::Lock::Timeout bounds the wait. The retry loop covers a transient
+      # mirror failure, which is the other way this step dies.
       - name: Install Lua
-        run: sudo apt-get update && sudo apt-get install -y lua5.4 lua-check
+        timeout-minutes: 6
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          APT="sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3"
+
+          for attempt in 1 2 3; do
+            if $APT update && $APT install -y --no-install-recommends lua5.4 lua-check; then
+              luac5.4 -v || true
+              exit 0
+            fi
+
+            echo "apt attempt $attempt did not succeed; retrying in 10s"
+            sleep 10
+          done
+
+          echo "::error::Could not install Lua after three attempts."
+          exit 1
 
       - name: Syntax check every Lua file
         run: |
@@ -87,6 +118,7 @@ jobs:
       # the class of bug a stubbed test harness hides, because the harness
       # defines the very globals a typo would otherwise expose.
       - name: Lint
+        timeout-minutes: 5
         run: luacheck . --no-color
 
       # The offline harness loads every file in .toc order against a stubbed
@@ -96,6 +128,7 @@ jobs:
       # This used to run only on the author's machine, which meant a release
       # could ship with it failing and nothing would say so.
       - name: Run the offline harness
+        timeout-minutes: 5
         run: |
           if [ -f harness.lua ]; then
             lua5.4 harness.lua .
@@ -119,8 +152,11 @@ jobs:
       # author's coverage report generated.
       - name: Coverage
         continue-on-error: true
+        timeout-minutes: 6
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get install -y luarocks || true
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends luarocks || true
           sudo luarocks install luacov || echo "luacov unavailable; coverage will skip"
           bash coverage.sh . 80
 

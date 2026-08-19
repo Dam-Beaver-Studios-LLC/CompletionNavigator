@@ -118,6 +118,25 @@ luac5.4 -p Data/Quests.lua || { echo "FAIL: -Force harvest produced invalid Lua"
 git checkout -- Data/Quests.lua 2>/dev/null || true
 rm -f sv.lua harvest*.log
 
+echo "  harness runs exactly as CI runs it"
+# CI invokes `lua5.4 harness.lua .` from the repository root. Everything else
+# here runs it from the development tree with a path argument, so this is the
+# one check that matches what the runner actually does.
+(cd "$WORK" && lua5.4 harness.lua . > ciharness.log 2>&1) || {
+  echo "FAIL: the harness does not pass the way CI runs it"
+  tail -20 "$WORK/ciharness.log"; exit 1; }
+grep -q "ALL HARNESS CHECKS PASSED" "$WORK/ciharness.log" || {
+  echo "FAIL: harness did not report success"; tail -20 "$WORK/ciharness.log"; exit 1; }
+echo "    passed from the repository root"
+
+echo "  luacheck runs exactly as CI runs it"
+if command -v luacheck >/dev/null 2>&1; then
+  (cd "$WORK" && luacheck . --no-color > cilint.log 2>&1) || {
+    echo "FAIL: luacheck does not pass the way CI runs it"
+    tail -20 "$WORK/cilint.log"; exit 1; }
+  echo "    $(grep -oE 'Total: [0-9]+ warnings / [0-9]+ errors' "$WORK/cilint.log")"
+fi
+
 echo "  coverage: harness exercises the addon"
 if command -v luacov >/dev/null 2>&1; then
   # Run against the scaffolded tree, which is what actually ships.
@@ -154,6 +173,33 @@ fi
 grep -q "skipping" "$WORK/nolua.log" || {
   echo "FAIL: coverage.sh must say why it skipped"; cat "$WORK/nolua.log"; exit 1; }
 echo "    $(head -1 "$WORK/nolua.log")"
+
+echo "  CI: the job cannot hang indefinitely"
+python3 - "$WORK/.github/workflows/release.yml" <<'TIMEOUT'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+if not re.search(r"^\s*timeout-minutes:\s*\d+", text, re.M):
+    print("FAIL: the workflow has no timeout-minutes anywhere.")
+    print("  A hung step runs for six hours and looks identical to a working one.")
+    sys.exit(1)
+
+# The job itself must be bounded, not only individual steps.
+job_timeout = re.search(r"runs-on:.*?\n(?:.*?\n)*?\s*timeout-minutes:\s*(\d+)", text)
+
+if not job_timeout:
+    print("FAIL: the job has no timeout-minutes; only steps are bounded.")
+    sys.exit(1)
+
+minutes = int(job_timeout.group(1))
+
+if minutes > 60:
+    print("FAIL: job timeout of %d minutes is too generous to notice a hang" % minutes)
+    sys.exit(1)
+
+print("    job bounded at %d minutes" % minutes)
+TIMEOUT
 
 echo "  CI: only real failures may block the packager"
 # Any blocking CI step must be one that indicates broken code. Optional

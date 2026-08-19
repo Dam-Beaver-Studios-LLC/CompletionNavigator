@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.24.1'
+$script:ToolkitVersion = '0.24.2'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.24.1"
+CN.version     = "0.24.2"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -18366,7 +18366,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.24.1
+## Version: 0.24.2
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -18579,6 +18579,42 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.24.2]
+
+The other half of the release problem. No addon changes.
+
+### Fixed
+
+- **A hung CI step ran for six hours and looked exactly like a working one.**
+  The workflow had no `timeout-minutes` anywhere, so GitHub's six-hour default
+  applied. A run that wedged on a package install simply sat "in progress"
+  indefinitely -- indistinguishable, from the outside, from one still doing
+  useful work. That is why a release appeared to have been pushed successfully
+  and then nothing ever arrived.
+  The job is now bounded at twenty minutes, and the steps that can realistically
+  wedge -- package installs, lint, the harness, coverage -- carry their own
+  limits. A hang now fails in minutes and says which step it was.
+- Package installs run with `DEBIAN_FRONTEND=noninteractive` and
+  `--no-install-recommends`. An apt configuration prompt on a runner waits on
+  stdin that will never arrive, which is the classic way this happens.
+- **The actual hang: apt waits for the dpkg lock forever.** A fresh Ubuntu
+  runner starts `unattended-upgrades` at boot, which holds the package lock for
+  a minute or two. `apt-get` has no default timeout on that lock -- it blocks
+  silently until the lock clears, and if the holder never exits, it blocks until
+  the job is killed. Two releases wedged there, one for thirty-eight minutes.
+  Every `apt-get` call now carries `DPkg::Lock::Timeout=120`, so it gives up
+  after two minutes instead of waiting indefinitely, plus `Acquire::Retries=3`
+  for transient mirror failures and an outer three-attempt retry loop. The step
+  either installs Lua or fails with a message, within its own six-minute bound.
+
+### Added
+
+- The test suite now asserts the workflow cannot hang: there must be a job-level
+  timeout, and it must be short enough that a wedged run is noticed rather than
+  discovered hours later. It also asserts that every `apt-get` invocation in the
+  workflow carries an explicit dpkg lock timeout, so this specific hang cannot
+  be reintroduced by a later edit.
 
 ## [0.24.1]
 
@@ -19718,6 +19754,12 @@ jobs:
   release:
     runs-on: ubuntu-latest
 
+    # Without this, a hung step runs until GitHub's six-hour default kills it.
+    # A release that has hung for hours looks identical to one still working,
+    # which is exactly how a stuck run went unnoticed: it sat "in progress"
+    # indefinitely while nobody could tell it was dead.
+    timeout-minutes: 20
+
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -19759,8 +19801,33 @@ jobs:
           done
 
       # Fails the build before publishing if any Lua file is malformed.
+      # ubuntu-latest runs unattended-upgrades shortly after boot, which holds
+      # the dpkg lock. apt-get waits for that lock FOREVER by default -- there
+      # is no timeout unless you ask for one. That is how a release wedged here
+      # for thirty-eight minutes while reporting "in progress", looking for all
+      # the world like it was still doing something.
+      #
+      # DPkg::Lock::Timeout bounds the wait. The retry loop covers a transient
+      # mirror failure, which is the other way this step dies.
       - name: Install Lua
-        run: sudo apt-get update && sudo apt-get install -y lua5.4 lua-check
+        timeout-minutes: 6
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          APT="sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3"
+
+          for attempt in 1 2 3; do
+            if $APT update && $APT install -y --no-install-recommends lua5.4 lua-check; then
+              luac5.4 -v || true
+              exit 0
+            fi
+
+            echo "apt attempt $attempt did not succeed; retrying in 10s"
+            sleep 10
+          done
+
+          echo "::error::Could not install Lua after three attempts."
+          exit 1
 
       - name: Syntax check every Lua file
         run: |
@@ -19792,6 +19859,7 @@ jobs:
       # the class of bug a stubbed test harness hides, because the harness
       # defines the very globals a typo would otherwise expose.
       - name: Lint
+        timeout-minutes: 5
         run: luacheck . --no-color
 
       # The offline harness loads every file in .toc order against a stubbed
@@ -19801,6 +19869,7 @@ jobs:
       # This used to run only on the author's machine, which meant a release
       # could ship with it failing and nothing would say so.
       - name: Run the offline harness
+        timeout-minutes: 5
         run: |
           if [ -f harness.lua ]; then
             lua5.4 harness.lua .
@@ -19824,8 +19893,11 @@ jobs:
       # author's coverage report generated.
       - name: Coverage
         continue-on-error: true
+        timeout-minutes: 6
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get install -y luarocks || true
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends luarocks || true
           sudo luarocks install luacov || echo "luacov unavailable; coverage will skip"
           bash coverage.sh . 80
 
@@ -23378,6 +23450,25 @@ luac5.4 -p Data/Quests.lua || { echo "FAIL: -Force harvest produced invalid Lua"
 git checkout -- Data/Quests.lua 2>/dev/null || true
 rm -f sv.lua harvest*.log
 
+echo "  harness runs exactly as CI runs it"
+# CI invokes `lua5.4 harness.lua .` from the repository root. Everything else
+# here runs it from the development tree with a path argument, so this is the
+# one check that matches what the runner actually does.
+(cd "$WORK" && lua5.4 harness.lua . > ciharness.log 2>&1) || {
+  echo "FAIL: the harness does not pass the way CI runs it"
+  tail -20 "$WORK/ciharness.log"; exit 1; }
+grep -q "ALL HARNESS CHECKS PASSED" "$WORK/ciharness.log" || {
+  echo "FAIL: harness did not report success"; tail -20 "$WORK/ciharness.log"; exit 1; }
+echo "    passed from the repository root"
+
+echo "  luacheck runs exactly as CI runs it"
+if command -v luacheck >/dev/null 2>&1; then
+  (cd "$WORK" && luacheck . --no-color > cilint.log 2>&1) || {
+    echo "FAIL: luacheck does not pass the way CI runs it"
+    tail -20 "$WORK/cilint.log"; exit 1; }
+  echo "    $(grep -oE 'Total: [0-9]+ warnings / [0-9]+ errors' "$WORK/cilint.log")"
+fi
+
 echo "  coverage: harness exercises the addon"
 if command -v luacov >/dev/null 2>&1; then
   # Run against the scaffolded tree, which is what actually ships.
@@ -23414,6 +23505,33 @@ fi
 grep -q "skipping" "$WORK/nolua.log" || {
   echo "FAIL: coverage.sh must say why it skipped"; cat "$WORK/nolua.log"; exit 1; }
 echo "    $(head -1 "$WORK/nolua.log")"
+
+echo "  CI: the job cannot hang indefinitely"
+python3 - "$WORK/.github/workflows/release.yml" <<'TIMEOUT'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+if not re.search(r"^\s*timeout-minutes:\s*\d+", text, re.M):
+    print("FAIL: the workflow has no timeout-minutes anywhere.")
+    print("  A hung step runs for six hours and looks identical to a working one.")
+    sys.exit(1)
+
+# The job itself must be bounded, not only individual steps.
+job_timeout = re.search(r"runs-on:.*?\n(?:.*?\n)*?\s*timeout-minutes:\s*(\d+)", text)
+
+if not job_timeout:
+    print("FAIL: the job has no timeout-minutes; only steps are bounded.")
+    sys.exit(1)
+
+minutes = int(job_timeout.group(1))
+
+if minutes > 60:
+    print("FAIL: job timeout of %d minutes is too generous to notice a hang" % minutes)
+    sys.exit(1)
+
+print("    job bounded at %d minutes" % minutes)
+TIMEOUT
 
 echo "  CI: only real failures may block the packager"
 # Any blocking CI step must be one that indicates broken code. Optional

@@ -7,6 +7,42 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.24.2]
+
+The other half of the release problem. No addon changes.
+
+### Fixed
+
+- **A hung CI step ran for six hours and looked exactly like a working one.**
+  The workflow had no `timeout-minutes` anywhere, so GitHub's six-hour default
+  applied. A run that wedged on a package install simply sat "in progress"
+  indefinitely -- indistinguishable, from the outside, from one still doing
+  useful work. That is why a release appeared to have been pushed successfully
+  and then nothing ever arrived.
+  The job is now bounded at twenty minutes, and the steps that can realistically
+  wedge -- package installs, lint, the harness, coverage -- carry their own
+  limits. A hang now fails in minutes and says which step it was.
+- Package installs run with `DEBIAN_FRONTEND=noninteractive` and
+  `--no-install-recommends`. An apt configuration prompt on a runner waits on
+  stdin that will never arrive, which is the classic way this happens.
+- **The actual hang: apt waits for the dpkg lock forever.** A fresh Ubuntu
+  runner starts `unattended-upgrades` at boot, which holds the package lock for
+  a minute or two. `apt-get` has no default timeout on that lock -- it blocks
+  silently until the lock clears, and if the holder never exits, it blocks until
+  the job is killed. Two releases wedged there, one for thirty-eight minutes.
+  Every `apt-get` call now carries `DPkg::Lock::Timeout=120`, so it gives up
+  after two minutes instead of waiting indefinitely, plus `Acquire::Retries=3`
+  for transient mirror failures and an outer three-attempt retry loop. The step
+  either installs Lua or fails with a message, within its own six-minute bound.
+
+### Added
+
+- The test suite now asserts the workflow cannot hang: there must be a job-level
+  timeout, and it must be short enough that a wedged run is noticed rather than
+  discovered hours later. It also asserts that every `apt-get` invocation in the
+  workflow carries an explicit dpkg lock timeout, so this specific hang cannot
+  be reintroduced by a later edit.
+
 ## [0.24.1]
 
 A release-blocking defect in CI. No addon changes.
