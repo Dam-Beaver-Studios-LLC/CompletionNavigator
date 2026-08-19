@@ -145,6 +145,82 @@ if command -v luacheck >/dev/null 2>&1; then
   echo "    $(grep -oE 'Total: [0-9]+ warnings / [0-9]+ errors' "$WORK/cilint.log")"
 fi
 
+echo "  the project page ships with the code"
+[ -f "$WORK/_curseforge/DESCRIPTION.md" ] || {
+  echo "FAIL: the CurseForge description was not scaffolded"; exit 1; }
+[ -f "$WORK/_curseforge/SUMMARY.txt" ] || {
+  echo "FAIL: the CurseForge summary was not scaffolded"; exit 1; }
+
+# The packaged addon must NOT contain it. It belongs in the repository, not
+# in a player's AddOns folder.
+grep -q "_curseforge" "$WORK/.pkgmeta" || {
+  echo "FAIL: .pkgmeta does not exclude _curseforge from the package"; exit 1; }
+
+# House rules, enforced rather than merely written down. Public-facing copy
+# for this project carries a heightened bar: no superlatives, no claims of
+# being the best or only anything, no promises about outcomes.
+#
+# Two hard limits sit alongside them. The summary has a length CurseForge
+# will reject beyond, and the description is pasted verbatim -- so an HTML
+# comment in it is a private note published by accident, invisible when
+# rendered and plainly readable to anyone who opens the file.
+python3 - "$WORK/_curseforge/DESCRIPTION.md" "$WORK/_curseforge/SUMMARY.txt" <<'COPYLINT'
+import re, sys
+
+banned = [
+    r"\bthe best\b", r"\bbest[- ]in[- ]class\b", r"\bworld[- ]class\b",
+    r"\bultimate\b", r"\bunmatched\b", r"\bunrivall?ed\b",
+    r"\bsuperior to\b", r"\bbetter than\b", r"\bthe only addon\b",
+    r"\bguarantee[ds]?\b", r"\bwill ensure\b", r"\bnever miss\b",
+    r"\bperfect\b", r"\bflawless\b", r"\brevolutionary\b",
+    r"\bgame[- ]changing\b", r"\bmust[- ]have\b",
+]
+
+problems = []
+
+for path in sys.argv[1:]:
+    text = open(path, encoding="utf-8").read()
+
+    # The comment block states the rules; it is allowed to name them.
+    body = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+    for pattern in banned:
+        for match in re.finditer(pattern, body, re.I):
+            line = body.count("\n", 0, match.start()) + 1
+            problems.append("%s:%d: %s" % (path.split("/")[-1], line, match.group(0)))
+
+description, summary = sys.argv[1], sys.argv[2]
+
+# CurseForge rejects a summary over 256 characters outright.
+summary_text = open(summary, encoding="utf-8").read().strip()
+
+if len(summary_text) > 256:
+    problems.append("SUMMARY.txt is %d characters; the limit is 256"
+                    % len(summary_text))
+
+if "\n" in summary_text:
+    problems.append("SUMMARY.txt must be a single line")
+
+# The description is pasted verbatim into a public page. Nothing internal
+# belongs in it, including inside a comment nobody expected to be read.
+body = open(description, encoding="utf-8").read()
+
+if re.search(r"<!--", body):
+    problems.append("DESCRIPTION.md contains an HTML comment; internal notes "
+                    "belong in RULES.md, which is not published")
+
+if not body.lstrip().startswith("# Completion Navigator"):
+    problems.append("DESCRIPTION.md must open with the title heading")
+
+if problems:
+    print("FAIL: public-facing copy breaks the house rules")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    copy passes the house rules (%d/256 chars)" % len(summary_text))
+COPYLINT
+
 echo "  CI ignores the toolchain it installs into the workspace"
 # CI builds Lua and LuaRocks into .lua/ in the repository root. Two distinct
 # problems follow, and a release failed on both at once:

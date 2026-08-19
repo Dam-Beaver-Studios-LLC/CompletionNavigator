@@ -35,6 +35,28 @@ Chase something.
   yet. Pinning an unscanned faction used to answer *"Faction 2600"*, which is
   the addon admitting it did not look.
 
+
+- **`_curseforge/DESCRIPTION.md` and `_curseforge/SUMMARY.txt` now ship with
+  the code.** The CurseForge page was written fresh at upload time, which
+  meant the only copy of it lived inside a web form: it could not be diffed,
+  it was never reviewed alongside the change that made it true, and it drifted
+  from what had actually shipped. It is now versioned next to the changelog,
+  scaffolded by `init` like every other file, and excluded from the packaged
+  addon by `.pkgmeta` -- it belongs in the repository, not in a player's
+  AddOns folder.
+- The house rules for that copy are enforced rather than written down. The
+  test suite fails the build on superlatives, on claims of being the best or
+  only anything, on promises about outcomes, on a summary over CurseForge's
+  256-character limit, and on any HTML comment in the description. A rule that
+  lives only in a comment is a rule that survives exactly as long as the
+  person who remembers it.
+- **Internal notes moved out of the published file.** The description carried
+  its own editing rules in an HTML comment at the top. That is invisible in a
+  rendered page and plainly readable to anyone who opens the file or pastes it
+  somewhere that does not render Markdown -- a private note published by
+  accident. The rules now live in `_curseforge/RULES.md`, which is not the
+  file anyone pastes, and the description opens with its title.
+
 ### Notes
 
 - **An appearance deliberately gets no progress bar.** An appearance needs

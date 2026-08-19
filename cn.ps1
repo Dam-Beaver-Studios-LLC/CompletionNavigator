@@ -20201,6 +20201,28 @@ Chase something.
   yet. Pinning an unscanned faction used to answer *"Faction 2600"*, which is
   the addon admitting it did not look.
 
+
+- **`_curseforge/DESCRIPTION.md` and `_curseforge/SUMMARY.txt` now ship with
+  the code.** The CurseForge page was written fresh at upload time, which
+  meant the only copy of it lived inside a web form: it could not be diffed,
+  it was never reviewed alongside the change that made it true, and it drifted
+  from what had actually shipped. It is now versioned next to the changelog,
+  scaffolded by `init` like every other file, and excluded from the packaged
+  addon by `.pkgmeta` -- it belongs in the repository, not in a player's
+  AddOns folder.
+- The house rules for that copy are enforced rather than written down. The
+  test suite fails the build on superlatives, on claims of being the best or
+  only anything, on promises about outcomes, on a summary over CurseForge's
+  256-character limit, and on any HTML comment in the description. A rule that
+  lives only in a comment is a rule that survives exactly as long as the
+  person who remembers it.
+- **Internal notes moved out of the published file.** The description carried
+  its own editing rules in an HTML comment at the top. That is invisible in a
+  rendered page and plainly readable to anyone who opens the file or pastes it
+  somewhere that does not render Markdown -- a private note published by
+  accident. The rules now live in `_curseforge/RULES.md`, which is not the
+  file anyone pastes, and the description opens with its title.
+
 ### Notes
 
 - **An appearance deliberately gets no progress bar.** An appearance needs
@@ -21494,6 +21516,140 @@ ignore:
   - bench.lua
   - pstest.sh
   - coverage.sh
+'@
+
+$Embedded['_curseforge\SUMMARY.txt'] = @'
+Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, batches nearby work into stops, draws the route on your map, and shows exactly what stands between you and the thing you are chasing.
+'@
+
+$Embedded['_curseforge\DESCRIPTION.md'] = @'
+# Completion Navigator
+
+Most completion addons answer **"what am I missing?"** and hand you a list of several thousand things. Completion Navigator answers a different question: **"what should I do next, what should I do while I am there, and how close am I to the thing I actually want?"**
+
+It reads what you have already earned across your Warband, works out what is reachable now, ranks it, groups the nearby pieces together, and routes you through them.
+
+---
+
+## Chase something
+
+Pin a mount, an appearance, an achievement, a reputation — anything you are working toward — and the addon lays out the path:
+
+```
+/cn chase rep 2600
+```
+
+> The Severed Threads — 1,200 of 3,000 reputation, next: 1,800 to the next rank
+> `========------------` 40%
+
+Every step in a chain carries a state. Done steps are behind you, one step is marked **next**, and blocked steps say what is blocking them. The **Next step** button goes to that step rather than to the goal itself — because the mount may be behind a dungeon you cannot enter yet, while its attunement quest is forty yards away.
+
+Where the game supplies a real denominator — achievement criteria, reputation standing — you get a real bar. Where it does not, you get the truth instead of a bar. An appearance has several sources and needs only one of them, so it lists them and says so rather than pretending you are "1 of 9" of the way there.
+
+## Plan a zone once, walk it once
+
+A quest is not one place. It is a **pick up**, a **do**, and a **turn in** — and treating it as a single dot is exactly why you cross a zone and come back.
+
+- Objectives within about seventy yards collapse into a single **stop**.
+- The route is solved stop to stop, then improved with a second pass to cut out doubling back.
+- Within a stop, things are ordered the way you would do them: collect the quests, do the work, hand them back.
+- Work that batches with other work **scores higher**, so the recommendation agrees with the route instead of sending you across the zone for one quest.
+
+`/cn zone` prints the sweep. *"3 things here — pick up 2, turn in 1."*
+
+## See the plan on your map
+
+The route is drawn on the world map as numbered pins, one per stop, in walking order.
+
+- Hover a pin to see what you do when you arrive, in order.
+- Click it to navigate there.
+- The next stop wears the addon's blue; later stops are dimmed.
+- One pin per stop, not per objective — a single pin reading "3 — pick up 2, do 4, hand in 1" tells you more than twelve overlapping pins on one camp.
+
+Toggle with `/cn pins`, or from the options panel.
+
+## Quests you have not picked up yet
+
+The exclamation marks in front of you are often the cheapest next action available. Completion Navigator reads available quests from the map, not only your quest log, so *"go and collect that one"* is an answer it can give — weighted above an accepted quest you have not started, because the walk is short and it unlocks whatever follows.
+
+## Navigation without another addon
+
+A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
+
+## Warband-aware
+
+Account-wide unlocks are recognised as account-wide. Something another character already earned is not recommended to this one, and the reason line says which character did it.
+
+## Show only what you care about
+
+Hide any objective type you are not working on — quests, pets, mounts, toys, appearances, reputations, professions, currencies, exploration, rares. Hidden types drop out of the recommendations **and** out of the route, so you are not walked to something you said you did not want. Collection totals still count everything.
+
+---
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `/cn` | What to do next |
+| `/cn chase <type> <id>` | What stands between you and a goal, step by step |
+| `/cn zone` | The full sweep for this zone, stop by stop |
+| `/cn pins` | Route pins on the world map — `on`, `off`, `refresh` |
+| `/cn go` | Navigate to the top recommendation |
+| `/cn why <id>` | Why this is recommended, and what is blocking it |
+| `/cn show` | Choose which kinds of objective appear |
+| `/cn goal <type> <id>` | Pin a goal and weight everything toward it |
+| `/cn vault` | Great Vault progress |
+| `/cn breakdown` | Collection totals by category |
+| `/cn setup` | Full rescan |
+| `/cn help` | Everything |
+
+There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs, and an optional LibDataBroker feed.
+
+---
+
+## Notes
+
+- Where the game does not provide a trustworthy denominator, this addon reports counts rather than inventing a completion percentage. That rule is why some things get a progress bar and others deliberately do not.
+- Nothing is taken over without being asked. Auto-advancing the waypoint and rare alerts are off by default.
+- No external server, no account required, no data leaves your machine.
+
+Completion Navigator is a product of **Dam Beaver Studios, LLC**. Authored by **Travis A. Bryan I**. Bug reports and feature requests are welcome on the issue tracker.
+'@
+
+$Embedded['_curseforge\RULES.md'] = @'
+# Project page: internal rules
+
+Not for publication. `DESCRIPTION.md` and `SUMMARY.txt` are pasted verbatim
+into CurseForge, so nothing internal belongs in either of them -- not even
+inside an HTML comment. A comment is invisible in a rendered page and plainly
+visible to anyone who opens the source or pastes the file somewhere that does
+not render Markdown, which makes it a private note published by accident.
+
+That is why this file exists separately, and why the test suite fails the
+build if a comment reappears in the description.
+
+## Hard limits
+
+- `SUMMARY.txt` must be **256 characters or fewer**, on a single line.
+  CurseForge rejects longer.
+- `DESCRIPTION.md` must contain no HTML comments and must begin with the
+  `# Completion Navigator` heading.
+
+## House rules for the copy
+
+Public-facing copy for this project carries a heightened bar. The test suite
+enforces these; they are not stylistic preferences.
+
+- No superlatives, and no claim of being the best or the only anything.
+- No promises about outcomes.
+- Other addons are named as things this one reads, never as things it beats.
+- No completion percentage the game itself did not supply.
+
+## When to update
+
+With the change that makes it true, in the same release. A description
+written fresh at upload time drifts from what shipped, and the only copy of
+it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -25818,6 +25974,82 @@ if command -v luacheck >/dev/null 2>&1; then
     tail -20 "$WORK/cilint.log"; exit 1; }
   echo "    $(grep -oE 'Total: [0-9]+ warnings / [0-9]+ errors' "$WORK/cilint.log")"
 fi
+
+echo "  the project page ships with the code"
+[ -f "$WORK/_curseforge/DESCRIPTION.md" ] || {
+  echo "FAIL: the CurseForge description was not scaffolded"; exit 1; }
+[ -f "$WORK/_curseforge/SUMMARY.txt" ] || {
+  echo "FAIL: the CurseForge summary was not scaffolded"; exit 1; }
+
+# The packaged addon must NOT contain it. It belongs in the repository, not
+# in a player's AddOns folder.
+grep -q "_curseforge" "$WORK/.pkgmeta" || {
+  echo "FAIL: .pkgmeta does not exclude _curseforge from the package"; exit 1; }
+
+# House rules, enforced rather than merely written down. Public-facing copy
+# for this project carries a heightened bar: no superlatives, no claims of
+# being the best or only anything, no promises about outcomes.
+#
+# Two hard limits sit alongside them. The summary has a length CurseForge
+# will reject beyond, and the description is pasted verbatim -- so an HTML
+# comment in it is a private note published by accident, invisible when
+# rendered and plainly readable to anyone who opens the file.
+python3 - "$WORK/_curseforge/DESCRIPTION.md" "$WORK/_curseforge/SUMMARY.txt" <<'COPYLINT'
+import re, sys
+
+banned = [
+    r"\bthe best\b", r"\bbest[- ]in[- ]class\b", r"\bworld[- ]class\b",
+    r"\bultimate\b", r"\bunmatched\b", r"\bunrivall?ed\b",
+    r"\bsuperior to\b", r"\bbetter than\b", r"\bthe only addon\b",
+    r"\bguarantee[ds]?\b", r"\bwill ensure\b", r"\bnever miss\b",
+    r"\bperfect\b", r"\bflawless\b", r"\brevolutionary\b",
+    r"\bgame[- ]changing\b", r"\bmust[- ]have\b",
+]
+
+problems = []
+
+for path in sys.argv[1:]:
+    text = open(path, encoding="utf-8").read()
+
+    # The comment block states the rules; it is allowed to name them.
+    body = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+    for pattern in banned:
+        for match in re.finditer(pattern, body, re.I):
+            line = body.count("\n", 0, match.start()) + 1
+            problems.append("%s:%d: %s" % (path.split("/")[-1], line, match.group(0)))
+
+description, summary = sys.argv[1], sys.argv[2]
+
+# CurseForge rejects a summary over 256 characters outright.
+summary_text = open(summary, encoding="utf-8").read().strip()
+
+if len(summary_text) > 256:
+    problems.append("SUMMARY.txt is %d characters; the limit is 256"
+                    % len(summary_text))
+
+if "\n" in summary_text:
+    problems.append("SUMMARY.txt must be a single line")
+
+# The description is pasted verbatim into a public page. Nothing internal
+# belongs in it, including inside a comment nobody expected to be read.
+body = open(description, encoding="utf-8").read()
+
+if re.search(r"<!--", body):
+    problems.append("DESCRIPTION.md contains an HTML comment; internal notes "
+                    "belong in RULES.md, which is not published")
+
+if not body.lstrip().startswith("# Completion Navigator"):
+    problems.append("DESCRIPTION.md must open with the title heading")
+
+if problems:
+    print("FAIL: public-facing copy breaks the house rules")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    copy passes the house rules (%d/256 chars)" % len(summary_text))
+COPYLINT
 
 echo "  CI ignores the toolchain it installs into the workspace"
 # CI builds Lua and LuaRocks into .lua/ in the repository root. Two distinct
