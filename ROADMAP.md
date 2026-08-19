@@ -116,7 +116,7 @@ Greedy nearest-neighbour is typically 15â€“25% worse than optimal and produ
 
 **Effort:** small. **Risk:** low. **Recommendation: build it.** Cheap and directly visible.
 
-### 2.3 Achievements only when nearly complete
+### 2.3 Achievements only when nearly complete â€” **criteria now enumerated in 0.26.0**
 
 **Status:** documented limitation â€” only achievements within 2 criteria become candidates.
 
@@ -124,7 +124,7 @@ Defensible as a default, and wrong as an absolute: a Goal pinned on an achieveme
 
 **Effort:** moderate. **Risk:** low.
 
-### 2.4 Appearances are per-category only
+### 2.4 Appearances are per-category only â€” **sources now enumerated in 0.26.0**
 
 **Status:** documented limitation. Tracked per slot, not per item.
 
@@ -180,6 +180,28 @@ Native navigation ships an on-screen arrow and sets a Blizzard map pin (0.19.0).
 Implemented as a pooled frame parented to the map canvas rather than as a `MapCanvasDataProvider`. The data-provider API is the blessed route and also a moving target that has broken addons across several expansions; the boring approach degrades to "no pins" instead of to a Lua error inside Blizzard's map code.
 
 **Still open here:** minimap pins for the nearest stop, and a pin for objectives whose coordinates are known but whose map is not the one on screen.
+
+### 2.5 Time-aware planning â€” **next**
+
+The router knows real yard distances between stops, so travel time is computable. Task time is not, and must not be invented: a fabricated estimate would break the addon's own rule against numbers the game did not supply. The honest version measures travel and *learns* task duration from observed completions, in the same way prerequisites are already learned from play.
+
+`/cn plan 30` then means something: the stops that fit thirty minutes, ordered, with the things that expire first weighted up. Reset and expiry deserve to be a first-class scoring dimension rather than a footnote -- "this is gone in six hours" is the strongest urgency signal the game has.
+
+**Effort:** moderate. **Risk:** low, provided the estimates stay honest about being estimates.
+
+### 2.6 Alt orchestration
+
+Warband data is collected and nothing routes across characters. "Do this on your Druid -- she is two quests from the same achievement, and the reputation is account-wide anyway" is a sentence no other addon says well, and every piece of data it needs is already stored.
+
+**Effort:** moderate. **Risk:** medium -- the recommendation is only as good as the last time each character logged in.
+
+### 2.7 First run and feel
+
+An addon is judged in its first sixty seconds, and this one currently opens with a slash command and a list. Onboarding that asks what the player is chasing, route progress that visibly checks off as they walk it, and a completion moment worth seeing.
+
+Deliberately after the above. Polish on top of thin features is lipstick.
+
+**Effort:** moderate. **Risk:** low.
 
 ---
 

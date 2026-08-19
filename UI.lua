@@ -1280,27 +1280,17 @@ UI.RegisterTab{
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 64)
 
-        panel.navigate = AddButton(panel, "Navigate", 110, function()
-            local goals = CN:GetModule("Goals")
+        -- "Next step", not "Navigate". They are different destinations and
+        -- the difference is the point: the mount is behind a dungeon you
+        -- cannot enter, but the attunement quest is forty yards away.
+        panel.navigate = AddButton(panel, "Next step", 110, function()
+            local chase = CN:GetModule("Chase")
 
-            if not goals or not panel.selected then
+            if not chase or not panel.selected then
                 return
             end
 
-            local plan = goals.Plan(panel.selected)
-
-            if plan.mapID and plan.x and plan.y then
-                CN.NavigateToObjective({
-                    id    = panel.selected.id,
-                    type  = panel.selected.type,
-                    name  = plan.name,
-                    mapID = plan.mapID,
-                    x     = plan.x,
-                    y     = plan.y,
-                })
-            else
-                CN.Print("No location is known for " .. tostring(plan.name) .. ".")
-            end
+            chase.NavigateNext(chase.Chain(panel.selected))
         end)
         panel.navigate:SetPoint("BOTTOMLEFT", 8, 34)
 
@@ -1367,25 +1357,48 @@ UI.RegisterTab{
 
         panel.selected = panel.selected or list[1]
 
+        local chase = CN:GetModule("Chase")
+
         local entries = {}
 
+        -- Step colours by state. The player should be able to find the one
+        -- actionable line without reading any of the others.
+        local stateColor = {
+            DONE    = "|cff73b873",
+            NEXT    = "|cff5dd2fb",
+            BLOCKED = "|cfff56b61",
+            TODO    = "|cffcccccc",
+            NOTE    = "|cff999999",
+        }
+
         for _, goal in ipairs(list) do
-            local plan = goals.Plan(goal)
+            local chain = chase and chase.Chain(goal) or { steps = {} }
 
             local isSelected = panel.selected
                 and panel.selected.type == goal.type
                 and panel.selected.id == goal.id
 
+            local fraction = chase and chase.Fraction(chain)
+
+            -- A bar only where the game supplied a denominator. Everywhere
+            -- else the line simply does not claim to know.
+            local progressText = ""
+
+            if chain.done then
+                progressText = " |cff73b873done|r"
+            elseif fraction then
+                progressText = string.format(" |cff5dd2fb%d%%|r",
+                    math.floor(fraction * 100 + 0.5))
+            end
+
             table.insert(entries, {
                 text = (isSelected and "|cff00ff00>|r " or "  ")
-                    .. (plan.done and "|cff999999" or "|cffffff00")
+                    .. (chain.done and "|cff999999" or "|cffffff00")
                     .. tostring(goal.name) .. "|r"
                     .. " |cff999999(" .. tostring(goal.type) .. ")|r"
-                    .. (plan.done and " |cff00ff00done|r" or ""),
+                    .. progressText,
 
-                tooltip = tostring(goal.name) .. "\n"
-                    .. (plan.source and (plan.source .. "\n") or "")
-                    .. table.concat(plan.steps, "\n"),
+                tooltip = chase and chase.Summarize(chain) or tostring(goal.name),
 
                 onClick = function()
                     panel.selected = goal
@@ -1393,25 +1406,64 @@ UI.RegisterTab{
                 end,
             })
 
-            if plan.source then
-                table.insert(entries, { text = "      |cff999999" .. plan.source .. "|r" })
-            end
+            -- Only the selected goal expands. Every chain open at once is a
+            -- wall of text, and the point of the panel is to make one path
+            -- readable.
+            if isSelected then
+                if fraction then
+                    table.insert(entries, {
+                        text = "      |cff5dd2fb" .. CN.ProgressBar(fraction, 24)
+                            .. "|r |cff999999" .. CN.Comma(chain.progress.done)
+                            .. " / " .. CN.Comma(chain.progress.total)
+                            .. " " .. tostring(chain.progress.unit) .. "|r",
+                    })
+                end
 
-            for _, step in ipairs(plan.steps) do
-                table.insert(entries, { text = "      |cff999999" .. step .. "|r" })
+                local shown = 0
+
+                for _, step in ipairs(chain.steps) do
+                    if shown >= 15 then
+                        table.insert(entries, {
+                            text = "      |cff999999... and "
+                                .. (#chain.steps - shown) .. " more|r",
+                        })
+                        break
+                    end
+
+                    local colour = stateColor[step.state] or "|cffcccccc"
+
+                    local marker = "  "
+
+                    if step.state == "DONE" then
+                        marker = "x "
+                    elseif step.state == "NEXT" then
+                        marker = "> "
+                    end
+
+                    table.insert(entries, {
+                        text = "      " .. colour .. marker .. step.text .. "|r",
+                    })
+
+                    shown = shown + 1
+                end
+
+                if chain.character then
+                    table.insert(entries, {
+                        text = "      |cff999999Best character: "
+                            .. tostring(chain.character) .. "|r",
+                    })
+                end
             end
         end
 
         panel.list:SetEntries(entries)
 
-        local plan = goals.Plan(panel.selected)
+        local selectedChain = chase and chase.Chain(panel.selected)
 
-        if plan.mapID and plan.x and plan.y then
-            panel.note:SetText("|cff999999Selected: " .. tostring(plan.name)
-                .. " -- " .. (plan.zone or ("map " .. plan.mapID)) .. "|r")
+        if selectedChain then
+            panel.note:SetText("|cff999999" .. chase.Summarize(selectedChain) .. "|r")
         else
-            panel.note:SetText("|cff999999Selected: " .. tostring(plan.name)
-                .. " -- no location known|r")
+            panel.note:SetText("")
         end
     end,
 }

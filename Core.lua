@@ -18,7 +18,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.25.0"
+CN.version     = "0.26.0"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -229,6 +229,58 @@ function CN.CountKeys(tbl)
     end
 
     return count
+end
+
+-- 1234567 -> "1,234,567".
+--
+-- Reputation numbers are the one place this addon prints figures large
+-- enough to be misread, and "42000 to go" reads as a different order of
+-- magnitude than "42,000 to go" at a glance.
+function CN.Comma(number)
+    number = tonumber(number)
+
+    if not number then
+        return "0"
+    end
+
+    local negative = number < 0
+
+    local text = tostring(math.floor(math.abs(number) + 0.5))
+
+    local formatted = text
+
+    while true do
+        local replaced
+
+        formatted, replaced = string.gsub(formatted, "^(%d+)(%d%d%d)", "%1,%2")
+
+        if replaced == 0 then
+            break
+        end
+    end
+
+    return (negative and "-" or "") .. formatted
+end
+
+-- A text progress bar, for chat.
+--
+-- Deliberately only ever called with a fraction the client vouched for.
+-- There is no overload that takes "roughly" -- a bar is the most confident
+-- shape information can take, and the addon does not spend that confidence
+-- on a guess.
+function CN.ProgressBar(fraction, width)
+    width = width or 20
+
+    if type(fraction) ~= "number" then
+        return string.rep("-", width)
+    end
+
+    if fraction < 0 then fraction = 0 end
+    if fraction > 1 then fraction = 1 end
+
+    local filled = math.floor(fraction * width + 0.5)
+
+    return string.rep("=", filled) .. string.rep("-", width - filled)
 end
 
 function CN.Trim(text)

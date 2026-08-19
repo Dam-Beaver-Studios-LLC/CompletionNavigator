@@ -815,6 +815,25 @@ function Blizzard.GetAchievementInCategory(categoryID, index)
 end
 
 -- Returns completedCriteria, totalCriteria for one achievement.
+-- The achievement's name, straight from the client.
+--
+-- Needed because a player can pin an achievement the addon has never scanned,
+-- and answering them with "Achievement 12345" is the addon admitting it did
+-- not look.
+function Blizzard.GetAchievementName(achievementID)
+    if not GetAchievementInfo or not achievementID then
+        return nil
+    end
+
+    local ok, _, name = pcall(GetAchievementInfo, achievementID)
+
+    if ok and name and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
 function Blizzard.GetAchievementProgress(achievementID)
     if not GetAchievementNumCriteria or not GetAchievementCriteriaInfo then
         return 0, 0
@@ -1422,6 +1441,110 @@ function Blizzard.GetIncompleteCriteria(achievementID, limit)
     end
 
     return missing
+end
+
+-- Every criterion, with its state, not only the missing ones.
+--
+-- GetIncompleteCriteria answers "what is left". A chain needs "what is the
+-- whole path, and where on it am I" -- the done ones are what make progress
+-- legible, and dropping them means the player sees five things left and no
+-- sense of whether that is five out of six or five out of fifty.
+function Blizzard.GetAchievementCriteriaList(achievementID, limit)
+    local criteria = {}
+
+    if not GetAchievementNumCriteria or not GetAchievementCriteriaInfo then
+        return criteria
+    end
+
+    local total = GetAchievementNumCriteria(achievementID) or 0
+
+    for index = 1, total do
+        local ok, description, _, completed, quantity, required =
+            pcall(GetAchievementCriteriaInfo, achievementID, index)
+
+        if ok and description and description ~= "" then
+            table.insert(criteria, {
+                index       = index,
+                description = description,
+                completed   = completed and true or false,
+                quantity    = quantity,
+                required    = required,
+            })
+
+            if limit and #criteria >= limit then
+                break
+            end
+        end
+    end
+
+    return criteria
+end
+
+-- How much standing remains before the next rank, and what that rank is.
+--
+-- Reputation is one of the few things in the game with a denominator the
+-- client will actually vouch for, which is why it gets a real number here
+-- while most of this addon refuses to invent one.
+function Blizzard.GetReputationRemaining(factionID)
+    local data = Blizzard.GetFactionByID(factionID)
+
+    if not data then
+        return nil
+    end
+
+    local current   = data.currentStanding or data.currentReactionThreshold
+    local threshold = data.nextReactionThreshold
+    local floor     = data.currentReactionThreshold
+
+    if not current or not threshold or not floor then
+        return nil
+    end
+
+    local earned = current - floor
+    local needed = threshold - floor
+
+    if needed <= 0 then
+        return nil
+    end
+
+    return {
+        earned    = earned,
+        needed    = needed,
+        remaining = math.max(0, needed - earned),
+        standing  = data.reaction,
+        name      = data.name,
+    }
+end
+
+-- Every way the game knows of to obtain an appearance.
+--
+-- An appearance is not one item. It is a set of sources -- a drop here, a
+-- vendor there, a quest reward -- and "which of these can I actually still
+-- get" is the question a transmog hunter is asking.
+function Blizzard.GetAppearanceSources(appearanceID)
+    local sources = {}
+
+    if not C_TransmogCollection or not C_TransmogCollection.GetAppearanceSources then
+        return sources
+    end
+
+    local ok, results = pcall(C_TransmogCollection.GetAppearanceSources, appearanceID)
+
+    if not ok or type(results) ~= "table" then
+        return sources
+    end
+
+    for _, source in ipairs(results) do
+        table.insert(sources, {
+            sourceID    = source.sourceID,
+            name        = source.name,
+            collected   = source.isCollected and true or false,
+            sourceType  = source.sourceType,
+            itemID      = source.itemID,
+        })
+    end
+
+    return sources
 end
 
 ------------------------------------------------------------

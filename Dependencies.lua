@@ -159,6 +159,55 @@ function CN.RegisterEligibilityChecker(objectiveType, checker)
     CN.eligibilityCheckers[objectiveType] = checker
 end
 
+-- Every quest that must be finished before this one, from whichever source
+-- knows: curated data, an external addon, or this account's own observed
+-- play. Observed prerequisites are included only once they have been seen
+-- often enough to be believed.
+function CN.GetPrerequisites(questID)
+    local quests = CN:GetModule("Quests")
+
+    if not quests or not quests.GetRecord then
+        return {}
+    end
+
+    local record = quests.GetRecord(questID)
+
+    local seen, ordered = {}, {}
+
+    local function add(list)
+        for _, prerequisiteID in ipairs(list or {}) do
+            if not seen[prerequisiteID] then
+                seen[prerequisiteID] = true
+                table.insert(ordered, prerequisiteID)
+            end
+        end
+    end
+
+    if record then
+        add(record.requires)
+    end
+
+    local harvest = CN.Account and CN.Account("questHarvest")
+
+    if harvest and harvest[questID] then
+        add(harvest[questID].observedRequires)
+    end
+
+    return ordered
+end
+
+-- Whether this character has finished a quest. Thin, but Chase should not
+-- have to know which module owns the answer.
+function CN.IsQuestComplete(questID)
+    local quests = CN:GetModule("Quests")
+
+    if quests and quests.IsCompletedByCharacter then
+        return quests.IsCompletedByCharacter(questID) and true or false
+    end
+
+    return false
+end
+
 function CN.Explain(objectiveType, id)
     if CN.IsIgnored(objectiveType, id) then
         return CN.objectiveStates.IGNORED, "Ignored by user", nil

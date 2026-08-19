@@ -1,0 +1,1 @@
+Answers "what should I do next?" instead of "what am I missing?" -- ranks your quests, collectibles and reputations by what is actually worth doing now, groups nearby work into stops so you stop running back and forth, and draws the route on your map.

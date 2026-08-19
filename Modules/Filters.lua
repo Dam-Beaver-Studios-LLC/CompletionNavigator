@@ -269,8 +269,22 @@ function Filters.DescribeObjective(objectiveType, id)
         return CN.GetQuestName(numericID) or ("Quest " .. numericID)
     end
 
+    -- Cached name first, then ask the client.
+    --
+    -- Names used to come only from a previous scan, so pinning something the
+    -- addon had not seen yet produced "Faction 2600" -- which is the addon
+    -- telling the player it does not know what they just asked for. The
+    -- client knows. Ask it.
     if objectiveType == types.REPUTATION and numericID then
-        return CN.Account("factionNames")[numericID] or ("Faction " .. numericID)
+        local cached = CN.Account("factionNames")[numericID]
+
+        if cached then
+            return cached
+        end
+
+        local data = CN.Blizzard.GetFactionByID(numericID)
+
+        return (data and data.name) or ("Faction " .. numericID)
     end
 
     if objectiveType == types.PET and numericID then
@@ -280,7 +294,14 @@ function Filters.DescribeObjective(objectiveType, id)
 
     if objectiveType == types.MOUNT and numericID then
         local record = CN.Account("mounts")[numericID]
-        return record and record.name or ("Mount " .. numericID)
+
+        if record and record.name then
+            return record.name
+        end
+
+        local live = CN.Blizzard.GetMountByID(numericID)
+
+        return (live and live.name) or ("Mount " .. numericID)
     end
 
     if objectiveType == types.TOY and numericID then
@@ -295,7 +316,13 @@ function Filters.DescribeObjective(objectiveType, id)
 
     if objectiveType == types.ACHIEVEMENT and numericID then
         local record = CN.Account("achievements")[numericID]
-        return record and record.name or ("Achievement " .. numericID)
+
+        if record and record.name then
+            return record.name
+        end
+
+        return CN.Blizzard.GetAchievementName(numericID)
+            or ("Achievement " .. numericID)
     end
 
     if objectiveType == types.CURRENCY and numericID then

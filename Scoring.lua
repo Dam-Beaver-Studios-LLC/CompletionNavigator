@@ -546,6 +546,26 @@ end
 
 CN.RankedCandidates = Ranked
 
+-- The live candidate for a type and id, or nil.
+--
+-- Chains reference objectives by identity rather than by value, because the
+-- interesting thing about a step is usually where it currently IS -- and that
+-- moves. Looking it up at navigation time gets the coordinates the providers
+-- have now, instead of the ones they had when the chain was drawn.
+function CN.FindCandidate(objectiveType, id)
+    if not objectiveType or not id then
+        return nil
+    end
+
+    for _, objective in ipairs(CN.CollectCandidates() or {}) do
+        if objective.type == objectiveType and objective.id == id then
+            return objective
+        end
+    end
+
+    return nil
+end
+
 function CN.Recommend(limit)
     limit = limit or 1
 

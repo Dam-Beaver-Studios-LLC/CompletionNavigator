@@ -65,6 +65,8 @@ end
 
 Goals.ResolveType = ResolveType
 
+Goals.ResolveType = ResolveType
+
 local function Key(objectiveType, id)
     return CN.ObjectiveKey(objectiveType, id)
 end
@@ -554,6 +556,8 @@ CN:RegisterCommand{
         end
 
         Print("Goal set: |cffffff00" .. tostring(message) .. "|r")
+        Print("|cff999999See the path with |cffffff00/cn chase " .. typeText
+            .. " " .. idText .. "|r")
 
         local list = Goals.List()
 

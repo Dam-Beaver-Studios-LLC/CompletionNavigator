@@ -537,10 +537,27 @@ local appearanceData = {
     [5] = { name = "Chest",    collected = 200, total = 410 },
 }
 
+-- An appearance has SOURCES -- several ways to obtain the same look -- and
+-- any one of them is enough. Modelling it as a single collected/not flag
+-- would let "1 of 4 sources" be presented as 25% of the way to an appearance
+-- the player has, in fact, already got.
+local appearanceSources = {
+    [8001] = {
+        { sourceID = 1, name = "Dropped by Some Boss",  isCollected = false, itemID = 501 },
+        { sourceID = 2, name = "Sold by Some Vendor",   isCollected = false, itemID = 502 },
+        { sourceID = 3, name = "Quest reward",          isCollected = false, itemID = 503 },
+    },
+    [8002] = {
+        { sourceID = 4, name = "Already have this one", isCollected = true,  itemID = 504 },
+        { sourceID = 5, name = "Another way entirely",  isCollected = false, itemID = 505 },
+    },
+}
+
 C_TransmogCollection = {
     GetCategoryInfo           = function(id) return appearanceData[id] and appearanceData[id].name or nil end,
     GetCategoryCollectedCount = function(id) return appearanceData[id] and appearanceData[id].collected or 0 end,
     GetCategoryTotal          = function(id) return appearanceData[id] and appearanceData[id].total or 0 end,
+    GetAppearanceSources      = function(id) return appearanceSources[id] end,
 }
 
 local titleList = {
@@ -602,10 +619,24 @@ function GetAchievementNumCriteria(id)
     return achievementData[id] and achievementData[id].criteria or 0
 end
 
+-- The real signature carries a quantity and a requirement after the
+-- completion flag, and some criteria are counters rather than checkboxes.
+-- Returning only three values modelled a world where every criterion is a
+-- checkbox, which is the kind of simplification that has hidden real bugs in
+-- this addon twice.
 function GetAchievementCriteriaInfo(id, index)
     local data = achievementData[id]
     if not data then return nil end
-    return "criterion " .. index, 1, index <= data.done
+
+    local completed = index <= data.done
+
+    -- Make the second criterion a counter, so anything reading quantity has
+    -- a case where it actually matters.
+    if index == 2 then
+        return "collect widgets", 1, completed, completed and 25 or 7, 25
+    end
+
+    return "criterion " .. index, 1, completed, completed and 1 or 0, 1
 end
 
 function GetNumCompletedAchievements() return 4, 1 end
@@ -3334,5 +3365,162 @@ do
 
     print("  zone route honours the type filter")
 end
+
+print("\nChase:")
+
+do
+    local chase = CN:GetModule("Chase")
+    local goalStore = CN:GetModule("Goals")
+
+    assert(chase, "the Chase module must load")
+
+    goalStore.Clear()
+
+    -- REPUTATION. The one place the client hands over a denominator it will
+    -- vouch for, so this is where a real fraction is allowed.
+    goalStore.Add(CN.objectiveTypes.REPUTATION, 2600)
+
+    local repChain
+
+    for _, goal in ipairs(goalStore.List()) do
+        if goal.type == CN.objectiveTypes.REPUTATION then
+            repChain = chase.Chain(goal)
+        end
+    end
+
+    assert(repChain, "a pinned reputation must produce a chain")
+    assert(repChain.progress, "reputation has a denominator, so it gets progress")
+    assert(repChain.progress.done == 1200,
+        "earned standing is measured from the rank floor, not from zero -- got "
+        .. tostring(repChain.progress.done))
+    assert(repChain.progress.total == 3000,
+        "the denominator is the width of the rank, got "
+        .. tostring(repChain.progress.total))
+
+    local fraction = chase.Fraction(repChain)
+
+    assert(fraction and math.abs(fraction - 0.4) < 0.001,
+        "4200 of a 3000-6000 rank is 40%, got " .. tostring(fraction))
+
+    -- The summary must be a sentence a player can act on, and must contain
+    -- the remaining amount rather than only the total.
+    local summary = chase.Summarize(repChain)
+
+    assert(summary:find("1,800"),
+        "the summary must say how much is LEFT: " .. summary)
+
+    -- ACHIEVEMENT. Criteria are countable, and the done ones must be shown --
+    -- five left means nothing without knowing five of how many.
+    goalStore.Clear()
+    goalStore.Add(CN.objectiveTypes.ACHIEVEMENT, 11)
+
+    local achChain = chase.Chain(goalStore.List()[1])
+
+    assert(achChain.progress and achChain.progress.total > 0,
+        "achievement criteria are countable")
+
+    local sawDone, sawNext, sawCounter = false, false, false
+
+    for _, step in ipairs(achChain.steps) do
+        if step.state == chase.states.DONE then sawDone = true end
+        if step.state == chase.states.NEXT then sawNext = true end
+        if step.text:find("/") then sawCounter = true end
+    end
+
+    assert(sawDone, "completed criteria must appear, not just the missing ones")
+    assert(sawNext, "exactly one outstanding criterion must be marked NEXT")
+    assert(sawCounter,
+        "a criterion carrying its own count must show it")
+
+    -- Only ONE step may be NEXT. Two next steps is not a plan.
+    local nextCount = 0
+
+    for _, step in ipairs(achChain.steps) do
+        if step.state == chase.states.NEXT then
+            nextCount = nextCount + 1
+        end
+    end
+
+    assert(nextCount == 1, "exactly one NEXT step, got " .. nextCount)
+
+    -- APPEARANCE. Any ONE source is enough, so a source count must NOT be
+    -- presented as progress. This is the case where an honest-looking
+    -- fraction would be actively wrong.
+    goalStore.Clear()
+    goalStore.Add(CN.objectiveTypes.APPEARANCE, 8001)
+
+    local appChain = chase.Chain(goalStore.List()[1])
+
+    assert(#appChain.steps > 0, "an appearance with sources must list them")
+    assert(appChain.progress == nil,
+        "an appearance needs ONE source, so 'x of y sources' is not progress "
+        .. "toward it and must not be offered as such")
+    assert(chase.Fraction(appChain) == nil,
+        "no denominator means no fraction, not a zero")
+
+    -- UNKNOWN SOURCE. The addon must say it does not know, rather than
+    -- inventing a single step and calling it a plan.
+    goalStore.Clear()
+    goalStore.Add(CN.objectiveTypes.MOUNT, 777)
+
+    local mountChain = chase.Chain(goalStore.List()[1])
+
+    assert(mountChain.progress == nil,
+        "a mount whose source is prose has no denominator")
+    assert(chase.Fraction(mountChain) == nil, "and therefore no bar")
+
+    -- ORDERING. The least-finished measurable goal comes first; finished
+    -- goals sink.
+    goalStore.Clear()
+    goalStore.Add(CN.objectiveTypes.REPUTATION, 2600)
+    goalStore.Add(CN.objectiveTypes.ACHIEVEMENT, 11)
+    goalStore.Add(CN.objectiveTypes.MOUNT, 777)
+
+    local all = chase.All()
+
+    assert(#all == 3, "every goal is chained, got " .. #all)
+
+    local previous = nil
+
+    for _, chain in ipairs(all) do
+        local value = chase.Fraction(chain)
+
+        if previous and value then
+            assert(previous >= value,
+                "measurable goals must be ordered by progress")
+        end
+
+        previous = value or previous
+    end
+
+    -- NAVIGATION targets the next STEP, not the goal.
+    do
+        local realSet = CN.SetWaypoint
+        local asked   = false
+
+        CN.SetWaypoint = function() asked = true return true end
+
+        chase.NavigateNext(repChain)
+
+        CN.SetWaypoint = realSet
+
+        -- Either it navigated or it said it could not; it must never error.
+        assert(type(asked) == "boolean", "navigation must not throw")
+    end
+
+    -- Chasing something not yet pinned must pin it, rather than telling the
+    -- player to run a second command to say what they just said.
+    goalStore.Clear()
+
+    CN.HandleSlashCommand("chase rep 2600")
+
+    assert(#goalStore.List() == 1,
+        "/cn chase on an unpinned goal must pin it")
+
+    goalStore.Clear()
+
+    print("  reputation, achievement, appearance and unknown-source chains")
+end
+
 
 print("\nALL HARNESS CHECKS PASSED")

@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.25.0'
+$script:ToolkitVersion = '0.26.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.25.0"
+CN.version     = "0.26.0"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -319,6 +319,58 @@ function CN.CountKeys(tbl)
     end
 
     return count
+end
+
+-- 1234567 -> "1,234,567".
+--
+-- Reputation numbers are the one place this addon prints figures large
+-- enough to be misread, and "42000 to go" reads as a different order of
+-- magnitude than "42,000 to go" at a glance.
+function CN.Comma(number)
+    number = tonumber(number)
+
+    if not number then
+        return "0"
+    end
+
+    local negative = number < 0
+
+    local text = tostring(math.floor(math.abs(number) + 0.5))
+
+    local formatted = text
+
+    while true do
+        local replaced
+
+        formatted, replaced = string.gsub(formatted, "^(%d+)(%d%d%d)", "%1,%2")
+
+        if replaced == 0 then
+            break
+        end
+    end
+
+    return (negative and "-" or "") .. formatted
+end
+
+-- A text progress bar, for chat.
+--
+-- Deliberately only ever called with a fraction the client vouched for.
+-- There is no overload that takes "roughly" -- a bar is the most confident
+-- shape information can take, and the addon does not spend that confidence
+-- on a guess.
+function CN.ProgressBar(fraction, width)
+    width = width or 20
+
+    if type(fraction) ~= "number" then
+        return string.rep("-", width)
+    end
+
+    if fraction < 0 then fraction = 0 end
+    if fraction > 1 then fraction = 1 end
+
+    local filled = math.floor(fraction * width + 0.5)
+
+    return string.rep("=", filled) .. string.rep("-", width - filled)
 end
 
 function CN.Trim(text)
@@ -1290,6 +1342,55 @@ CN.eligibilityCheckers = CN.eligibilityCheckers or {}
 
 function CN.RegisterEligibilityChecker(objectiveType, checker)
     CN.eligibilityCheckers[objectiveType] = checker
+end
+
+-- Every quest that must be finished before this one, from whichever source
+-- knows: curated data, an external addon, or this account's own observed
+-- play. Observed prerequisites are included only once they have been seen
+-- often enough to be believed.
+function CN.GetPrerequisites(questID)
+    local quests = CN:GetModule("Quests")
+
+    if not quests or not quests.GetRecord then
+        return {}
+    end
+
+    local record = quests.GetRecord(questID)
+
+    local seen, ordered = {}, {}
+
+    local function add(list)
+        for _, prerequisiteID in ipairs(list or {}) do
+            if not seen[prerequisiteID] then
+                seen[prerequisiteID] = true
+                table.insert(ordered, prerequisiteID)
+            end
+        end
+    end
+
+    if record then
+        add(record.requires)
+    end
+
+    local harvest = CN.Account and CN.Account("questHarvest")
+
+    if harvest and harvest[questID] then
+        add(harvest[questID].observedRequires)
+    end
+
+    return ordered
+end
+
+-- Whether this character has finished a quest. Thin, but Chase should not
+-- have to know which module owns the answer.
+function CN.IsQuestComplete(questID)
+    local quests = CN:GetModule("Quests")
+
+    if quests and quests.IsCompletedByCharacter then
+        return quests.IsCompletedByCharacter(questID) and true or false
+    end
+
+    return false
 end
 
 function CN.Explain(objectiveType, id)
@@ -2308,6 +2409,26 @@ local function Ranked()
 end
 
 CN.RankedCandidates = Ranked
+
+-- The live candidate for a type and id, or nil.
+--
+-- Chains reference objectives by identity rather than by value, because the
+-- interesting thing about a step is usually where it currently IS -- and that
+-- moves. Looking it up at navigation time gets the coordinates the providers
+-- have now, instead of the ones they had when the chain was drawn.
+function CN.FindCandidate(objectiveType, id)
+    if not objectiveType or not id then
+        return nil
+    end
+
+    for _, objective in ipairs(CN.CollectCandidates() or {}) do
+        if objective.type == objectiveType and objective.id == id then
+            return objective
+        end
+    end
+
+    return nil
+end
 
 function CN.Recommend(limit)
     limit = limit or 1
@@ -4666,27 +4787,17 @@ UI.RegisterTab{
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 64)
 
-        panel.navigate = AddButton(panel, "Navigate", 110, function()
-            local goals = CN:GetModule("Goals")
+        -- "Next step", not "Navigate". They are different destinations and
+        -- the difference is the point: the mount is behind a dungeon you
+        -- cannot enter, but the attunement quest is forty yards away.
+        panel.navigate = AddButton(panel, "Next step", 110, function()
+            local chase = CN:GetModule("Chase")
 
-            if not goals or not panel.selected then
+            if not chase or not panel.selected then
                 return
             end
 
-            local plan = goals.Plan(panel.selected)
-
-            if plan.mapID and plan.x and plan.y then
-                CN.NavigateToObjective({
-                    id    = panel.selected.id,
-                    type  = panel.selected.type,
-                    name  = plan.name,
-                    mapID = plan.mapID,
-                    x     = plan.x,
-                    y     = plan.y,
-                })
-            else
-                CN.Print("No location is known for " .. tostring(plan.name) .. ".")
-            end
+            chase.NavigateNext(chase.Chain(panel.selected))
         end)
         panel.navigate:SetPoint("BOTTOMLEFT", 8, 34)
 
@@ -4753,25 +4864,48 @@ UI.RegisterTab{
 
         panel.selected = panel.selected or list[1]
 
+        local chase = CN:GetModule("Chase")
+
         local entries = {}
 
+        -- Step colours by state. The player should be able to find the one
+        -- actionable line without reading any of the others.
+        local stateColor = {
+            DONE    = "|cff73b873",
+            NEXT    = "|cff5dd2fb",
+            BLOCKED = "|cfff56b61",
+            TODO    = "|cffcccccc",
+            NOTE    = "|cff999999",
+        }
+
         for _, goal in ipairs(list) do
-            local plan = goals.Plan(goal)
+            local chain = chase and chase.Chain(goal) or { steps = {} }
 
             local isSelected = panel.selected
                 and panel.selected.type == goal.type
                 and panel.selected.id == goal.id
 
+            local fraction = chase and chase.Fraction(chain)
+
+            -- A bar only where the game supplied a denominator. Everywhere
+            -- else the line simply does not claim to know.
+            local progressText = ""
+
+            if chain.done then
+                progressText = " |cff73b873done|r"
+            elseif fraction then
+                progressText = string.format(" |cff5dd2fb%d%%|r",
+                    math.floor(fraction * 100 + 0.5))
+            end
+
             table.insert(entries, {
                 text = (isSelected and "|cff00ff00>|r " or "  ")
-                    .. (plan.done and "|cff999999" or "|cffffff00")
+                    .. (chain.done and "|cff999999" or "|cffffff00")
                     .. tostring(goal.name) .. "|r"
                     .. " |cff999999(" .. tostring(goal.type) .. ")|r"
-                    .. (plan.done and " |cff00ff00done|r" or ""),
+                    .. progressText,
 
-                tooltip = tostring(goal.name) .. "\n"
-                    .. (plan.source and (plan.source .. "\n") or "")
-                    .. table.concat(plan.steps, "\n"),
+                tooltip = chase and chase.Summarize(chain) or tostring(goal.name),
 
                 onClick = function()
                     panel.selected = goal
@@ -4779,25 +4913,64 @@ UI.RegisterTab{
                 end,
             })
 
-            if plan.source then
-                table.insert(entries, { text = "      |cff999999" .. plan.source .. "|r" })
-            end
+            -- Only the selected goal expands. Every chain open at once is a
+            -- wall of text, and the point of the panel is to make one path
+            -- readable.
+            if isSelected then
+                if fraction then
+                    table.insert(entries, {
+                        text = "      |cff5dd2fb" .. CN.ProgressBar(fraction, 24)
+                            .. "|r |cff999999" .. CN.Comma(chain.progress.done)
+                            .. " / " .. CN.Comma(chain.progress.total)
+                            .. " " .. tostring(chain.progress.unit) .. "|r",
+                    })
+                end
 
-            for _, step in ipairs(plan.steps) do
-                table.insert(entries, { text = "      |cff999999" .. step .. "|r" })
+                local shown = 0
+
+                for _, step in ipairs(chain.steps) do
+                    if shown >= 15 then
+                        table.insert(entries, {
+                            text = "      |cff999999... and "
+                                .. (#chain.steps - shown) .. " more|r",
+                        })
+                        break
+                    end
+
+                    local colour = stateColor[step.state] or "|cffcccccc"
+
+                    local marker = "  "
+
+                    if step.state == "DONE" then
+                        marker = "x "
+                    elseif step.state == "NEXT" then
+                        marker = "> "
+                    end
+
+                    table.insert(entries, {
+                        text = "      " .. colour .. marker .. step.text .. "|r",
+                    })
+
+                    shown = shown + 1
+                end
+
+                if chain.character then
+                    table.insert(entries, {
+                        text = "      |cff999999Best character: "
+                            .. tostring(chain.character) .. "|r",
+                    })
+                end
             end
         end
 
         panel.list:SetEntries(entries)
 
-        local plan = goals.Plan(panel.selected)
+        local selectedChain = chase and chase.Chain(panel.selected)
 
-        if plan.mapID and plan.x and plan.y then
-            panel.note:SetText("|cff999999Selected: " .. tostring(plan.name)
-                .. " -- " .. (plan.zone or ("map " .. plan.mapID)) .. "|r")
+        if selectedChain then
+            panel.note:SetText("|cff999999" .. chase.Summarize(selectedChain) .. "|r")
         else
-            panel.note:SetText("|cff999999Selected: " .. tostring(plan.name)
-                .. " -- no location known|r")
+            panel.note:SetText("")
         end
     end,
 }
@@ -6337,6 +6510,25 @@ function Blizzard.GetAchievementInCategory(categoryID, index)
 end
 
 -- Returns completedCriteria, totalCriteria for one achievement.
+-- The achievement's name, straight from the client.
+--
+-- Needed because a player can pin an achievement the addon has never scanned,
+-- and answering them with "Achievement 12345" is the addon admitting it did
+-- not look.
+function Blizzard.GetAchievementName(achievementID)
+    if not GetAchievementInfo or not achievementID then
+        return nil
+    end
+
+    local ok, _, name = pcall(GetAchievementInfo, achievementID)
+
+    if ok and name and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
 function Blizzard.GetAchievementProgress(achievementID)
     if not GetAchievementNumCriteria or not GetAchievementCriteriaInfo then
         return 0, 0
@@ -6944,6 +7136,110 @@ function Blizzard.GetIncompleteCriteria(achievementID, limit)
     end
 
     return missing
+end
+
+-- Every criterion, with its state, not only the missing ones.
+--
+-- GetIncompleteCriteria answers "what is left". A chain needs "what is the
+-- whole path, and where on it am I" -- the done ones are what make progress
+-- legible, and dropping them means the player sees five things left and no
+-- sense of whether that is five out of six or five out of fifty.
+function Blizzard.GetAchievementCriteriaList(achievementID, limit)
+    local criteria = {}
+
+    if not GetAchievementNumCriteria or not GetAchievementCriteriaInfo then
+        return criteria
+    end
+
+    local total = GetAchievementNumCriteria(achievementID) or 0
+
+    for index = 1, total do
+        local ok, description, _, completed, quantity, required =
+            pcall(GetAchievementCriteriaInfo, achievementID, index)
+
+        if ok and description and description ~= "" then
+            table.insert(criteria, {
+                index       = index,
+                description = description,
+                completed   = completed and true or false,
+                quantity    = quantity,
+                required    = required,
+            })
+
+            if limit and #criteria >= limit then
+                break
+            end
+        end
+    end
+
+    return criteria
+end
+
+-- How much standing remains before the next rank, and what that rank is.
+--
+-- Reputation is one of the few things in the game with a denominator the
+-- client will actually vouch for, which is why it gets a real number here
+-- while most of this addon refuses to invent one.
+function Blizzard.GetReputationRemaining(factionID)
+    local data = Blizzard.GetFactionByID(factionID)
+
+    if not data then
+        return nil
+    end
+
+    local current   = data.currentStanding or data.currentReactionThreshold
+    local threshold = data.nextReactionThreshold
+    local floor     = data.currentReactionThreshold
+
+    if not current or not threshold or not floor then
+        return nil
+    end
+
+    local earned = current - floor
+    local needed = threshold - floor
+
+    if needed <= 0 then
+        return nil
+    end
+
+    return {
+        earned    = earned,
+        needed    = needed,
+        remaining = math.max(0, needed - earned),
+        standing  = data.reaction,
+        name      = data.name,
+    }
+end
+
+-- Every way the game knows of to obtain an appearance.
+--
+-- An appearance is not one item. It is a set of sources -- a drop here, a
+-- vendor there, a quest reward -- and "which of these can I actually still
+-- get" is the question a transmog hunter is asking.
+function Blizzard.GetAppearanceSources(appearanceID)
+    local sources = {}
+
+    if not C_TransmogCollection or not C_TransmogCollection.GetAppearanceSources then
+        return sources
+    end
+
+    local ok, results = pcall(C_TransmogCollection.GetAppearanceSources, appearanceID)
+
+    if not ok or type(results) ~= "table" then
+        return sources
+    end
+
+    for _, source in ipairs(results) do
+        table.insert(sources, {
+            sourceID    = source.sourceID,
+            name        = source.name,
+            collected   = source.isCollected and true or false,
+            sourceType  = source.sourceType,
+            itemID      = source.itemID,
+        })
+    end
+
+    return sources
 end
 
 ------------------------------------------------------------
@@ -14690,8 +14986,22 @@ function Filters.DescribeObjective(objectiveType, id)
         return CN.GetQuestName(numericID) or ("Quest " .. numericID)
     end
 
+    -- Cached name first, then ask the client.
+    --
+    -- Names used to come only from a previous scan, so pinning something the
+    -- addon had not seen yet produced "Faction 2600" -- which is the addon
+    -- telling the player it does not know what they just asked for. The
+    -- client knows. Ask it.
     if objectiveType == types.REPUTATION and numericID then
-        return CN.Account("factionNames")[numericID] or ("Faction " .. numericID)
+        local cached = CN.Account("factionNames")[numericID]
+
+        if cached then
+            return cached
+        end
+
+        local data = CN.Blizzard.GetFactionByID(numericID)
+
+        return (data and data.name) or ("Faction " .. numericID)
     end
 
     if objectiveType == types.PET and numericID then
@@ -14701,7 +15011,14 @@ function Filters.DescribeObjective(objectiveType, id)
 
     if objectiveType == types.MOUNT and numericID then
         local record = CN.Account("mounts")[numericID]
-        return record and record.name or ("Mount " .. numericID)
+
+        if record and record.name then
+            return record.name
+        end
+
+        local live = CN.Blizzard.GetMountByID(numericID)
+
+        return (live and live.name) or ("Mount " .. numericID)
     end
 
     if objectiveType == types.TOY and numericID then
@@ -14716,7 +15033,13 @@ function Filters.DescribeObjective(objectiveType, id)
 
     if objectiveType == types.ACHIEVEMENT and numericID then
         local record = CN.Account("achievements")[numericID]
-        return record and record.name or ("Achievement " .. numericID)
+
+        if record and record.name then
+            return record.name
+        end
+
+        return CN.Blizzard.GetAchievementName(numericID)
+            or ("Achievement " .. numericID)
     end
 
     if objectiveType == types.CURRENCY and numericID then
@@ -16296,6 +16619,8 @@ end
 
 Goals.ResolveType = ResolveType
 
+Goals.ResolveType = ResolveType
+
 local function Key(objectiveType, id)
     return CN.ObjectiveKey(objectiveType, id)
 end
@@ -16785,6 +17110,8 @@ CN:RegisterCommand{
         end
 
         Print("Goal set: |cffffff00" .. tostring(message) .. "|r")
+        Print("|cff999999See the path with |cffffff00/cn chase " .. typeText
+            .. " " .. idText .. "|r")
 
         local list = Goals.List()
 
@@ -16899,6 +17226,575 @@ CN:RegisterCommand{
 }
 
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
+'@
+
+$Embedded['Modules\Chase.lua'] = @'
+-- Modules/Chase.lua
+-- Completion Navigator :: what stands between you and the thing you want.
+--
+-- `/cn goal` has always been able to say "I want that" and re-weight the
+-- list accordingly. What it could never say is what the PATH is. A player
+-- chasing a mount got a line saying the mount was a goal, and nothing about
+-- which four things had to happen first, how many of them were already done,
+-- or which one to go and do now.
+--
+-- This is that path. Chase turns a goal into an ordered chain of steps, each
+-- one carrying a state -- done, next, blocked, or simply outstanding -- and,
+-- where the game will tell us, a real count.
+--
+-- ON NUMBERS. The addon's standing rule is that it does not invent a
+-- denominator. That rule is doing real work here, because a progress bar is
+-- exactly the kind of thing that begs to be faked. So:
+--
+--   * Achievement criteria, appearance sources, and reputation standing have
+--     denominators the client vouches for. Those get a fraction.
+--   * A mount whose source is a sentence of English does not. It gets the
+--     sentence, and no bar.
+--
+-- Showing "1 of 1 steps" for something we know nothing about would be a lie
+-- told in a font that looks like a fact.
+
+local ADDON_NAME, CN = ...
+
+local Chase = CN:RegisterModule("Chase")
+
+local Print = CN.Print
+
+local Blizzard = CN.Blizzard
+
+------------------------------------------------------------
+-- STEP STATES
+------------------------------------------------------------
+
+-- Ordered by how much the player needs to look at them.
+Chase.states = {
+    NEXT    = "NEXT",     -- go and do this one
+    TODO    = "TODO",     -- outstanding, but not the immediate move
+    BLOCKED = "BLOCKED",  -- cannot be done yet, and we know why
+    DONE    = "DONE",     -- already behind you
+    NOTE    = "NOTE",     -- context, not a step
+}
+
+Chase.stateLabels = {
+    NEXT    = "next",
+    TODO    = "to do",
+    BLOCKED = "blocked",
+    DONE    = "done",
+    NOTE    = "",
+}
+
+Chase.stateColors = {
+    NEXT    = { 0.365, 0.824, 0.984 },
+    TODO    = { 0.85, 0.85, 0.85 },
+    BLOCKED = { 0.96, 0.42, 0.38 },
+    DONE    = { 0.45, 0.72, 0.45 },
+    NOTE    = { 0.6, 0.6, 0.6 },
+}
+
+local function NewStep(state, text, extra)
+    local step = extra or {}
+
+    step.state = state
+    step.text  = text
+
+    return step
+end
+
+------------------------------------------------------------
+-- PER-TYPE CHAINS
+------------------------------------------------------------
+
+-- Each builder returns steps and, optionally, a progress table:
+--   { done = n, total = m, unit = "criteria" }
+--
+-- Returning no progress table is a positive statement -- "the game does not
+-- give me a trustworthy count here" -- not an oversight.
+
+local builders = {}
+
+builders.ACHIEVEMENT = function(goal)
+    local steps = {}
+
+    local criteria = Blizzard.GetAchievementCriteriaList(goal.id, 25) or {}
+
+    if #criteria == 0 then
+        return steps, nil
+    end
+
+    local done = 0
+    local first = true
+
+    for _, criterion in ipairs(criteria) do
+        local text = criterion.description
+
+        -- Some criteria carry their own counter. Where they do, it is the
+        -- most useful thing on the line.
+        if criterion.required and criterion.required > 1 and criterion.quantity then
+            text = string.format("%s (%d/%d)",
+                text, criterion.quantity, criterion.required)
+        end
+
+        if criterion.completed then
+            done = done + 1
+
+            table.insert(steps, NewStep(Chase.states.DONE, text))
+        else
+            local state = Chase.states.TODO
+
+            if first then
+                state = Chase.states.NEXT
+                first = false
+            end
+
+            table.insert(steps, NewStep(state, text))
+        end
+    end
+
+    return steps, { done = done, total = #criteria, unit = "criteria" }
+end
+
+builders.REPUTATION = function(goal)
+    local steps = {}
+
+    local standing = Blizzard.GetReputationRemaining(goal.id)
+
+    if not standing then
+        return steps, nil
+    end
+
+    if Blizzard.IsAccountWideReputation(goal.id) then
+        table.insert(steps, NewStep(Chase.states.NOTE,
+            "Account-wide: any character's progress counts."))
+    else
+        table.insert(steps, NewStep(Chase.states.NOTE,
+            "Character-specific: progress does not carry across your Warband."))
+    end
+
+    table.insert(steps, NewStep(Chase.states.NEXT, string.format(
+        "%s reputation to the next rank", CN.Comma(standing.remaining))))
+
+    return steps, {
+        done  = standing.earned,
+        total = standing.needed,
+        unit  = "reputation",
+    }
+end
+
+builders.APPEARANCE = function(goal)
+    local steps = {}
+
+    local sources = Blizzard.GetAppearanceSources(goal.id) or {}
+
+    if #sources == 0 then
+        return steps, nil
+    end
+
+    local collected = 0
+    local first = true
+
+    for _, source in ipairs(sources) do
+        local name = source.name or ("item " .. tostring(source.itemID or "?"))
+
+        if source.collected then
+            collected = collected + 1
+
+            table.insert(steps, NewStep(Chase.states.DONE, name))
+        else
+            local state = Chase.states.TODO
+
+            if first then
+                state = Chase.states.NEXT
+                first = false
+            end
+
+            table.insert(steps, NewStep(state, name, { itemID = source.itemID }))
+        end
+    end
+
+    -- An appearance needs ONE of its sources, not all of them, so the count
+    -- is deliberately not offered as progress toward the appearance. Saying
+    -- "1 of 9" would suggest eight more to go when in fact you are finished.
+    table.insert(steps, 1, NewStep(Chase.states.NOTE,
+        collected > 0
+            and "Collected. Any one source is enough."
+            or string.format("Any ONE of these %d sources unlocks it.", #sources)))
+
+    return steps, nil
+end
+
+builders.QUEST = function(goal)
+    local steps = {}
+
+    local dependencies = CN.GetPrerequisites and CN.GetPrerequisites(goal.id)
+
+    if type(dependencies) ~= "table" or #dependencies == 0 then
+        return steps, nil
+    end
+
+    local done = 0
+    local first = true
+
+    for _, questID in ipairs(dependencies) do
+        local name = Blizzard.GetQuestTitle(questID, true)
+            or ("Quest " .. tostring(questID))
+
+        if CN.IsQuestComplete and CN.IsQuestComplete(questID) then
+            done = done + 1
+
+            table.insert(steps, NewStep(Chase.states.DONE, name,
+                { objectiveType = CN.objectiveTypes.QUEST, objectiveID = questID }))
+        else
+            local state = Chase.states.TODO
+
+            if first then
+                state = Chase.states.NEXT
+                first = false
+            end
+
+            table.insert(steps, NewStep(state, name,
+                { objectiveType = CN.objectiveTypes.QUEST, objectiveID = questID }))
+        end
+    end
+
+    return steps, { done = done, total = #dependencies, unit = "prerequisites" }
+end
+
+Chase.builders = builders
+
+------------------------------------------------------------
+-- THE CHAIN
+------------------------------------------------------------
+
+-- The full picture for one goal: where it is, what remains, how far along
+-- you are, and which single step to go and do.
+function Chase.Chain(goal)
+    local chain = {
+        name  = goal and goal.name,
+        type  = goal and goal.type,
+        id    = goal and goal.id,
+        steps = {},
+    }
+
+    if type(goal) ~= "table" or not goal.type or not goal.id then
+        return chain
+    end
+
+    local goals = CN:GetModule("Goals")
+
+    -- Location, source and "who should do it" already exist. Reuse them
+    -- rather than growing a second, subtly different answer.
+    local plan = goals and goals.Plan(goal) or {}
+
+    chain.done      = plan.done
+    chain.source    = plan.source
+    chain.mapID     = plan.mapID
+    chain.x         = plan.x
+    chain.y         = plan.y
+    chain.zone      = plan.zone
+    chain.character = plan.character
+
+    if chain.done then
+        table.insert(chain.steps, NewStep(Chase.states.DONE, "Already complete."))
+
+        chain.progress = { done = 1, total = 1, unit = "steps" }
+
+        return chain
+    end
+
+    local builder = builders[goal.type]
+
+    if builder then
+        local ok, steps, progress = pcall(builder, goal)
+
+        if ok and type(steps) == "table" then
+            chain.steps    = steps
+            chain.progress = progress
+        end
+    end
+
+    -- Nothing structured? Fall back to what the existing planner knows, which
+    -- is prose rather than a chain -- and say so, rather than dressing a
+    -- sentence up as a step.
+    if #chain.steps == 0 then
+        for _, text in ipairs(plan.steps or {}) do
+            table.insert(chain.steps, NewStep(Chase.states.NOTE, text))
+        end
+
+        if chain.mapID and chain.x and chain.y then
+            table.insert(chain.steps, 1,
+                NewStep(Chase.states.NEXT, "Travel to " ..
+                    (chain.zone or ("map " .. tostring(chain.mapID))), {
+                    mapID = chain.mapID,
+                    x     = chain.x,
+                    y     = chain.y,
+                }))
+        end
+    end
+
+    chain.next = Chase.NextStep(chain)
+
+    return chain
+end
+
+-- The one step to go and do. Nil when everything outstanding is blocked or
+-- unknown, which is itself worth saying out loud.
+function Chase.NextStep(chain)
+    for _, step in ipairs(chain and chain.steps or {}) do
+        if step.state == Chase.states.NEXT then
+            return step
+        end
+    end
+
+    for _, step in ipairs(chain and chain.steps or {}) do
+        if step.state == Chase.states.TODO then
+            return step
+        end
+    end
+
+    return nil
+end
+
+-- A single line for chat: where you are, and what to do about it.
+function Chase.Summarize(chain)
+    if not chain or not chain.name then
+        return "Nothing to chase."
+    end
+
+    if chain.done then
+        return tostring(chain.name) .. " is complete."
+    end
+
+    local parts = {}
+
+    if chain.progress and chain.progress.total and chain.progress.total > 0 then
+        table.insert(parts, string.format("%s of %s %s",
+            CN.Comma(chain.progress.done or 0),
+            CN.Comma(chain.progress.total),
+            chain.progress.unit or "steps"))
+    end
+
+    local nextStep = chain.next or Chase.NextStep(chain)
+
+    if nextStep then
+        table.insert(parts, "next: " .. tostring(nextStep.text))
+    elseif #parts == 0 then
+        return tostring(chain.name)
+            .. " -- the game does not say how this is obtained."
+    end
+
+    return tostring(chain.name) .. " -- " .. table.concat(parts, ", ")
+end
+
+-- Percent complete, or nil. Nil is a real answer and callers must render it
+-- as "unknown" rather than as zero.
+function Chase.Fraction(chain)
+    local progress = chain and chain.progress
+
+    if not progress or not progress.total or progress.total <= 0 then
+        return nil
+    end
+
+    local fraction = (progress.done or 0) / progress.total
+
+    if fraction < 0 then return 0 end
+    if fraction > 1 then return 1 end
+
+    return fraction
+end
+
+-- Every goal, chained, with the least-finished first: the thing you are
+-- furthest from is the thing most in need of a plan.
+function Chase.All()
+    local goals = CN:GetModule("Goals")
+
+    if not goals then
+        return {}
+    end
+
+    local chains = {}
+
+    for _, goal in ipairs(goals.List()) do
+        table.insert(chains, Chase.Chain(goal))
+    end
+
+    table.sort(chains, function(a, b)
+        local left  = Chase.Fraction(a)
+        local right = Chase.Fraction(b)
+
+        -- Finished goals sink. Unmeasurable ones sit between measurable
+        -- progress and completion, because "no idea" is more actionable than
+        -- "done" and less actionable than "you are 80% there".
+        local leftDone  = a.done and 1 or 0
+        local rightDone = b.done and 1 or 0
+
+        if leftDone ~= rightDone then
+            return leftDone < rightDone
+        end
+
+        if left and right then
+            return left > right
+        end
+
+        if left or right then
+            return left ~= nil
+        end
+
+        return tostring(a.name) < tostring(b.name)
+    end)
+
+    return chains
+end
+
+------------------------------------------------------------
+-- NAVIGATION
+------------------------------------------------------------
+
+-- Go to the next step of a chain, not to the goal itself.
+--
+-- Those differ, and the difference is the whole point: the mount is in a
+-- dungeon you cannot enter yet, but the attunement quest is forty yards away.
+function Chase.NavigateNext(chain)
+    local step = chain and (chain.next or Chase.NextStep(chain))
+
+    if step and step.objectiveType and step.objectiveID then
+        local located = CN.FindCandidate
+            and CN.FindCandidate(step.objectiveType, step.objectiveID)
+
+        if located then
+            return CN.NavigateToObjective(located)
+        end
+    end
+
+    if step and step.mapID and step.x and step.y then
+        return CN.SetWaypoint(step.mapID, step.x, step.y, step.text)
+    end
+
+    if chain and chain.mapID and chain.x and chain.y then
+        return CN.SetWaypoint(chain.mapID, chain.x, chain.y, chain.name)
+    end
+
+    Print("No location is known for the next step of "
+        .. tostring(chain and chain.name or "that goal") .. ".")
+
+    return false
+end
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+local function PrintChain(chain)
+    Print(Chase.Summarize(chain))
+
+    local fraction = Chase.Fraction(chain)
+
+    if fraction then
+        Print(string.format("  |cff5dd2fb%s|r %d%%",
+            CN.ProgressBar and CN.ProgressBar(fraction, 20) or "",
+            math.floor(fraction * 100 + 0.5)))
+    end
+
+    local shown = 0
+
+    for _, step in ipairs(chain.steps) do
+        if shown >= 12 then
+            Print("  |cff999999... and " .. (#chain.steps - shown) .. " more|r")
+            break
+        end
+
+        local label = Chase.stateLabels[step.state] or ""
+
+        local colour = "|cffcccccc"
+
+        if step.state == Chase.states.DONE then
+            colour = "|cff73b873"
+        elseif step.state == Chase.states.NEXT then
+            colour = "|cff5dd2fb"
+        elseif step.state == Chase.states.BLOCKED then
+            colour = "|cfff56b61"
+        elseif step.state == Chase.states.NOTE then
+            colour = "|cff999999"
+        end
+
+        Print(string.format("  %s%s%s|r",
+            colour,
+            label ~= "" and ("[" .. label .. "] ") or "",
+            step.text))
+
+        shown = shown + 1
+    end
+
+    if chain.character then
+        Print("  |cff999999Best character: " .. tostring(chain.character) .. "|r")
+    end
+end
+
+Chase.PrintChain = PrintChain
+
+CN:RegisterCommand{
+    name    = "chase",
+    aliases = { "chain", "path" },
+    args    = "[type id, or nothing for all goals]",
+    order   = 16,
+    help    = "Show what stands between you and a goal, step by step.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        local goals = CN:GetModule("Goals")
+
+        if not goals then
+            Print("The Goals module is not loaded.")
+            return
+        end
+
+        if args ~= "" then
+            local typeText, idText = string.match(args, "^(%S+)%s+(%S+)$")
+
+            local objectiveType = typeText and goals.ResolveType(typeText)
+            local id            = idText and CN.ToID(idText)
+
+            if not objectiveType or not id then
+                Print("Usage: |cffffff00/cn chase <type> <id>|r"
+                    .. "   e.g. /cn chase mount 1234")
+                Print("|cff999999Types: quest, achievement, mount, pet, toy, "
+                    .. "recipe, title, rep, rare, currency|r")
+                return
+            end
+
+            -- Chasing something you have not pinned pins it. Asking for the
+            -- path to a thing is the clearest possible statement that you
+            -- want it, and making the player run two commands to say so once
+            -- is the addon being pedantic at the player's expense.
+            if not goals.IsGoal(objectiveType, id) then
+                goals.Add(objectiveType, id)
+            end
+
+            for _, goal in ipairs(goals.List()) do
+                if goal.type == objectiveType and goal.id == id then
+                    PrintChain(Chase.Chain(goal))
+                    return
+                end
+            end
+
+            Print("Could not pin that as a goal.")
+            return
+        end
+
+        local chains = Chase.All()
+
+        if #chains == 0 then
+            Print("Nothing pinned. Try |cffffff00/cn chase mount 1234|r, or")
+            Print("|cffffff00/cn goal <type> <id>|r to pin something first.")
+            return
+        end
+
+        for _, chain in ipairs(chains) do
+            PrintChain(chain)
+        end
+    end,
+}
+
+return Chase
 '@
 
 $Embedded['Modules\Vault.lua'] = @'
@@ -19061,7 +19957,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.25.0
+## Version: 0.26.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -19095,6 +19991,7 @@ Modules\Achievements.lua
 Modules\Appearances.lua
 Modules\Breakdown.lua
 Modules\Broker.lua
+Modules\Chase.lua
 Modules\Currencies.lua
 Modules\Exploration.lua
 Modules\Filters.lua
@@ -19275,6 +20172,50 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.26.0]
+
+Chase something.
+
+### Added
+
+- **`/cn chase` — what actually stands between you and the thing you want.**
+  Pinning a goal has always re-weighted the list. It never said what the
+  *path* was: which steps remain, how many are already behind you, or which
+  one to go and do now. A goal was a preference, not a plan.
+  Now a goal becomes an ordered chain. Each step carries a state -- done,
+  next, to do, blocked -- and the one immediate move is marked and coloured so
+  it can be found without reading the rest. `/cn chase mount 1234` pins it and
+  prints the path in one go, because asking how to get something is the
+  clearest possible way of saying you want it.
+- **Progress, where the game will vouch for it.** Achievement criteria and
+  reputation standing have denominators the client supplies, so those get a
+  real bar and a real percentage. Chasing Revered now reads *"1,200 of 3,000
+  reputation, next: 1,800 to the next rank"* rather than a name and a shrug.
+- **The Goals panel is now a chase view.** The selected goal expands into its
+  chain, with completed steps struck through in green and the next one in the
+  addon's blue. The button says *Next step* rather than *Navigate*, because
+  those are different destinations -- the mount may be behind a dungeon you
+  cannot enter, while its attunement quest is forty yards away.
+- Names now come from the client when the addon has not scanned the thing
+  yet. Pinning an unscanned faction used to answer *"Faction 2600"*, which is
+  the addon admitting it did not look.
+
+### Notes
+
+- **An appearance deliberately gets no progress bar.** An appearance needs
+  *one* of its sources, not all of them, so "1 of 9 sources" would suggest
+  eight remaining for something already collected. It lists every source and
+  says plainly that any one is enough.
+  The same rule kills the bar for anything whose only known source is a
+  sentence of English: a mount described as dropping from a rare has no
+  denominator, so it gets the sentence and no bar. A progress bar is the most
+  confident shape information can take, and this addon does not spend that
+  confidence on a guess. The test suite asserts the absence, not just the
+  presence -- inventing a fraction fails the build.
+- Three new client accessors carry this: full achievement criteria with their
+  own counters, reputation remaining to the next rank, and every source of an
+  appearance. All read-only, all degrade to "the game does not say".
 
 ## [0.25.0]
 
@@ -20375,7 +21316,7 @@ Greedy nearest-neighbour is typically 15–25% worse than optimal and produces a
 
 **Effort:** small. **Risk:** low. **Recommendation: build it.** Cheap and directly visible.
 
-### 2.3 Achievements only when nearly complete
+### 2.3 Achievements only when nearly complete — **criteria now enumerated in 0.26.0**
 
 **Status:** documented limitation — only achievements within 2 criteria become candidates.
 
@@ -20383,7 +21324,7 @@ Defensible as a default, and wrong as an absolute: a Goal pinned on an achieveme
 
 **Effort:** moderate. **Risk:** low.
 
-### 2.4 Appearances are per-category only
+### 2.4 Appearances are per-category only — **sources now enumerated in 0.26.0**
 
 **Status:** documented limitation. Tracked per slot, not per item.
 
@@ -20439,6 +21380,28 @@ Native navigation ships an on-screen arrow and sets a Blizzard map pin (0.19.0).
 Implemented as a pooled frame parented to the map canvas rather than as a `MapCanvasDataProvider`. The data-provider API is the blessed route and also a moving target that has broken addons across several expansions; the boring approach degrades to "no pins" instead of to a Lua error inside Blizzard's map code.
 
 **Still open here:** minimap pins for the nearest stop, and a pin for objectives whose coordinates are known but whose map is not the one on screen.
+
+### 2.5 Time-aware planning — **next**
+
+The router knows real yard distances between stops, so travel time is computable. Task time is not, and must not be invented: a fabricated estimate would break the addon's own rule against numbers the game did not supply. The honest version measures travel and *learns* task duration from observed completions, in the same way prerequisites are already learned from play.
+
+`/cn plan 30` then means something: the stops that fit thirty minutes, ordered, with the things that expire first weighted up. Reset and expiry deserve to be a first-class scoring dimension rather than a footnote -- "this is gone in six hours" is the strongest urgency signal the game has.
+
+**Effort:** moderate. **Risk:** low, provided the estimates stay honest about being estimates.
+
+### 2.6 Alt orchestration
+
+Warband data is collected and nothing routes across characters. "Do this on your Druid -- she is two quests from the same achievement, and the reputation is account-wide anyway" is a sentence no other addon says well, and every piece of data it needs is already stored.
+
+**Effort:** moderate. **Risk:** medium -- the recommendation is only as good as the last time each character logged in.
+
+### 2.7 First run and feel
+
+An addon is judged in its first sixty seconds, and this one currently opens with a slash command and a list. Onboarding that asks what the player is chasing, route progress that visibly checks off as they walk it, and a completion moment worth seeing.
+
+Deliberately after the above. Polish on top of thin features is lipstick.
+
+**Effort:** moderate. **Risk:** low.
 
 ---
 
@@ -21438,10 +22401,27 @@ local appearanceData = {
     [5] = { name = "Chest",    collected = 200, total = 410 },
 }
 
+-- An appearance has SOURCES -- several ways to obtain the same look -- and
+-- any one of them is enough. Modelling it as a single collected/not flag
+-- would let "1 of 4 sources" be presented as 25% of the way to an appearance
+-- the player has, in fact, already got.
+local appearanceSources = {
+    [8001] = {
+        { sourceID = 1, name = "Dropped by Some Boss",  isCollected = false, itemID = 501 },
+        { sourceID = 2, name = "Sold by Some Vendor",   isCollected = false, itemID = 502 },
+        { sourceID = 3, name = "Quest reward",          isCollected = false, itemID = 503 },
+    },
+    [8002] = {
+        { sourceID = 4, name = "Already have this one", isCollected = true,  itemID = 504 },
+        { sourceID = 5, name = "Another way entirely",  isCollected = false, itemID = 505 },
+    },
+}
+
 C_TransmogCollection = {
     GetCategoryInfo           = function(id) return appearanceData[id] and appearanceData[id].name or nil end,
     GetCategoryCollectedCount = function(id) return appearanceData[id] and appearanceData[id].collected or 0 end,
     GetCategoryTotal          = function(id) return appearanceData[id] and appearanceData[id].total or 0 end,
+    GetAppearanceSources      = function(id) return appearanceSources[id] end,
 }
 
 local titleList = {
@@ -21503,10 +22483,24 @@ function GetAchievementNumCriteria(id)
     return achievementData[id] and achievementData[id].criteria or 0
 end
 
+-- The real signature carries a quantity and a requirement after the
+-- completion flag, and some criteria are counters rather than checkboxes.
+-- Returning only three values modelled a world where every criterion is a
+-- checkbox, which is the kind of simplification that has hidden real bugs in
+-- this addon twice.
 function GetAchievementCriteriaInfo(id, index)
     local data = achievementData[id]
     if not data then return nil end
-    return "criterion " .. index, 1, index <= data.done
+
+    local completed = index <= data.done
+
+    -- Make the second criterion a counter, so anything reading quantity has
+    -- a case where it actually matters.
+    if index == 2 then
+        return "collect widgets", 1, completed, completed and 25 or 7, 25
+    end
+
+    return "criterion " .. index, 1, completed, completed and 1 or 0, 1
 end
 
 function GetNumCompletedAchievements() return 4, 1 end
@@ -24235,6 +25229,163 @@ do
 
     print("  zone route honours the type filter")
 end
+
+print("\nChase:")
+
+do
+    local chase = CN:GetModule("Chase")
+    local goalStore = CN:GetModule("Goals")
+
+    assert(chase, "the Chase module must load")
+
+    goalStore.Clear()
+
+    -- REPUTATION. The one place the client hands over a denominator it will
+    -- vouch for, so this is where a real fraction is allowed.
+    goalStore.Add(CN.objectiveTypes.REPUTATION, 2600)
+
+    local repChain
+
+    for _, goal in ipairs(goalStore.List()) do
+        if goal.type == CN.objectiveTypes.REPUTATION then
+            repChain = chase.Chain(goal)
+        end
+    end
+
+    assert(repChain, "a pinned reputation must produce a chain")
+    assert(repChain.progress, "reputation has a denominator, so it gets progress")
+    assert(repChain.progress.done == 1200,
+        "earned standing is measured from the rank floor, not from zero -- got "
+        .. tostring(repChain.progress.done))
+    assert(repChain.progress.total == 3000,
+        "the denominator is the width of the rank, got "
+        .. tostring(repChain.progress.total))
+
+    local fraction = chase.Fraction(repChain)
+
+    assert(fraction and math.abs(fraction - 0.4) < 0.001,
+        "4200 of a 3000-6000 rank is 40%, got " .. tostring(fraction))
+
+    -- The summary must be a sentence a player can act on, and must contain
+    -- the remaining amount rather than only the total.
+    local summary = chase.Summarize(repChain)
+
+    assert(summary:find("1,800"),
+        "the summary must say how much is LEFT: " .. summary)
+
+    -- ACHIEVEMENT. Criteria are countable, and the done ones must be shown --
+    -- five left means nothing without knowing five of how many.
+    goalStore.Clear()
+    goalStore.Add(CN.objectiveTypes.ACHIEVEMENT, 11)
+
+    local achChain = chase.Chain(goalStore.List()[1])
+
+    assert(achChain.progress and achChain.progress.total > 0,
+        "achievement criteria are countable")
+
+    local sawDone, sawNext, sawCounter = false, false, false
+
+    for _, step in ipairs(achChain.steps) do
+        if step.state == chase.states.DONE then sawDone = true end
+        if step.state == chase.states.NEXT then sawNext = true end
+        if step.text:find("/") then sawCounter = true end
+    end
+
+    assert(sawDone, "completed criteria must appear, not just the missing ones")
+    assert(sawNext, "exactly one outstanding criterion must be marked NEXT")
+    assert(sawCounter,
+        "a criterion carrying its own count must show it")
+
+    -- Only ONE step may be NEXT. Two next steps is not a plan.
+    local nextCount = 0
+
+    for _, step in ipairs(achChain.steps) do
+        if step.state == chase.states.NEXT then
+            nextCount = nextCount + 1
+        end
+    end
+
+    assert(nextCount == 1, "exactly one NEXT step, got " .. nextCount)
+
+    -- APPEARANCE. Any ONE source is enough, so a source count must NOT be
+    -- presented as progress. This is the case where an honest-looking
+    -- fraction would be actively wrong.
+    goalStore.Clear()
+    goalStore.Add(CN.objectiveTypes.APPEARANCE, 8001)
+
+    local appChain = chase.Chain(goalStore.List()[1])
+
+    assert(#appChain.steps > 0, "an appearance with sources must list them")
+    assert(appChain.progress == nil,
+        "an appearance needs ONE source, so 'x of y sources' is not progress "
+        .. "toward it and must not be offered as such")
+    assert(chase.Fraction(appChain) == nil,
+        "no denominator means no fraction, not a zero")
+
+    -- UNKNOWN SOURCE. The addon must say it does not know, rather than
+    -- inventing a single step and calling it a plan.
+    goalStore.Clear()
+    goalStore.Add(CN.objectiveTypes.MOUNT, 777)
+
+    local mountChain = chase.Chain(goalStore.List()[1])
+
+    assert(mountChain.progress == nil,
+        "a mount whose source is prose has no denominator")
+    assert(chase.Fraction(mountChain) == nil, "and therefore no bar")
+
+    -- ORDERING. The least-finished measurable goal comes first; finished
+    -- goals sink.
+    goalStore.Clear()
+    goalStore.Add(CN.objectiveTypes.REPUTATION, 2600)
+    goalStore.Add(CN.objectiveTypes.ACHIEVEMENT, 11)
+    goalStore.Add(CN.objectiveTypes.MOUNT, 777)
+
+    local all = chase.All()
+
+    assert(#all == 3, "every goal is chained, got " .. #all)
+
+    local previous = nil
+
+    for _, chain in ipairs(all) do
+        local value = chase.Fraction(chain)
+
+        if previous and value then
+            assert(previous >= value,
+                "measurable goals must be ordered by progress")
+        end
+
+        previous = value or previous
+    end
+
+    -- NAVIGATION targets the next STEP, not the goal.
+    do
+        local realSet = CN.SetWaypoint
+        local asked   = false
+
+        CN.SetWaypoint = function() asked = true return true end
+
+        chase.NavigateNext(repChain)
+
+        CN.SetWaypoint = realSet
+
+        -- Either it navigated or it said it could not; it must never error.
+        assert(type(asked) == "boolean", "navigation must not throw")
+    end
+
+    -- Chasing something not yet pinned must pin it, rather than telling the
+    -- player to run a second command to say what they just said.
+    goalStore.Clear()
+
+    CN.HandleSlashCommand("chase rep 2600")
+
+    assert(#goalStore.List() == 1,
+        "/cn chase on an unpinned goal must pin it")
+
+    goalStore.Clear()
+
+    print("  reputation, achievement, appearance and unknown-source chains")
+end
+
 
 print("\nALL HARNESS CHECKS PASSED")
 '@

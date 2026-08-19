@@ -7,6 +7,50 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.26.0]
+
+Chase something.
+
+### Added
+
+- **`/cn chase` â€” what actually stands between you and the thing you want.**
+  Pinning a goal has always re-weighted the list. It never said what the
+  *path* was: which steps remain, how many are already behind you, or which
+  one to go and do now. A goal was a preference, not a plan.
+  Now a goal becomes an ordered chain. Each step carries a state -- done,
+  next, to do, blocked -- and the one immediate move is marked and coloured so
+  it can be found without reading the rest. `/cn chase mount 1234` pins it and
+  prints the path in one go, because asking how to get something is the
+  clearest possible way of saying you want it.
+- **Progress, where the game will vouch for it.** Achievement criteria and
+  reputation standing have denominators the client supplies, so those get a
+  real bar and a real percentage. Chasing Revered now reads *"1,200 of 3,000
+  reputation, next: 1,800 to the next rank"* rather than a name and a shrug.
+- **The Goals panel is now a chase view.** The selected goal expands into its
+  chain, with completed steps struck through in green and the next one in the
+  addon's blue. The button says *Next step* rather than *Navigate*, because
+  those are different destinations -- the mount may be behind a dungeon you
+  cannot enter, while its attunement quest is forty yards away.
+- Names now come from the client when the addon has not scanned the thing
+  yet. Pinning an unscanned faction used to answer *"Faction 2600"*, which is
+  the addon admitting it did not look.
+
+### Notes
+
+- **An appearance deliberately gets no progress bar.** An appearance needs
+  *one* of its sources, not all of them, so "1 of 9 sources" would suggest
+  eight remaining for something already collected. It lists every source and
+  says plainly that any one is enough.
+  The same rule kills the bar for anything whose only known source is a
+  sentence of English: a mount described as dropping from a rare has no
+  denominator, so it gets the sentence and no bar. A progress bar is the most
+  confident shape information can take, and this addon does not spend that
+  confidence on a guess. The test suite asserts the absence, not just the
+  presence -- inventing a fraction fails the build.
+- Three new client accessors carry this: full achievement criteria with their
+  own counters, reputation remaining to the next rank, and every source of an
+  appearance. All read-only, all degrade to "the game does not say".
+
 ## [0.25.0]
 
 The route, drawn on the map.
