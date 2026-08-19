@@ -462,7 +462,16 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     for _, objective in ipairs(candidates) do
         CN.ScoreObjective(objective)
 
-        if objective.mapID == mapID then
+        -- Honour the type filter. A player who has hidden everything but
+        -- quests is asking not to be routed to a pet, and a route that
+        -- ignores that sends them somewhere they deliberately said they did
+        -- not want to go. The filter is applied here rather than in the
+        -- providers for the same reason it is applied in ranking: it is a
+        -- display preference, and /cn breakdown must still see everything.
+        local visible = (not CN.IsObjectiveTypeEnabled)
+            or CN.IsObjectiveTypeEnabled(objective.type)
+
+        if objective.mapID == mapID and visible then
             if objective.x and objective.y then
                 table.insert(located, objective)
             else

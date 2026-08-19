@@ -72,6 +72,39 @@ date    = os.date
 function debugprofilestop() return os.clock() * 1000 end
 strtrim = function(s) return (tostring(s):gsub("^%s+", ""):gsub("%s+$", "")) end
 
+-- The world map, modelled with the shape MapPins actually reads.
+--
+-- Deliberately NOT a flat universal stub. The canvas has a real width and
+-- height because the pin arithmetic multiplies by them, and a stub returning
+-- a table there would turn a sign error into "attempt to perform arithmetic
+-- on a table value" -- an error about the stub, not about the addon. The
+-- displayed map is settable so the test can look at a map the player is not
+-- standing in, which is the case the routing start point gets wrong.
+local worldMapHooks = {}
+
+WorldMapFrame = {
+    displayedMapID = 2112,
+    shown          = false,
+
+    ScrollContainer = {
+        Child = (function()
+            local canvas = Frame()
+            function canvas:GetWidth()  return 1000 end
+            function canvas:GetHeight() return 666 end
+            return canvas
+        end)(),
+    },
+}
+
+function WorldMapFrame:GetMapID() return self.displayedMapID end
+function WorldMapFrame:IsShown()  return self.shown == true end
+function WorldMapFrame:HookScript(script, handler)
+    worldMapHooks[script] = worldMapHooks[script] or {}
+    table.insert(worldMapHooks[script], handler)
+end
+
+CN_TEST_WORLD_MAP_HOOKS = worldMapHooks
+
 local createdFrames = {}
 
 function CreateFrame(frameType, name, parent, template)
@@ -2979,5 +3012,327 @@ CN.InitializeDatabase()
 assert(CompletionNavigatorDB.version == 4, "migration must be idempotent")
 
 print("  re-run is idempotent")
+
+print("\nMap pins:")
+
+do
+    local pins = CN:GetModule("MapPins")
+
+    assert(pins, "the MapPins module must load")
+    assert(pins.IsEnabled(), "pins are on by default")
+
+    -- GEOMETRY.
+    --
+    -- The canvas is anchored from its TOPLEFT and grows downward, so y must
+    -- be NEGATED. A mirrored pin still lands somewhere plausible on screen,
+    -- which is exactly why looking at it would never reveal the bug: on a
+    -- roughly symmetrical map the wrong answer looks right.
+    local ox, oy = pins.CanvasOffset(0.25, 0.75, 1000, 666)
+
+    assert(math.abs(ox - 250) < 0.01,
+        "x offset must be the fraction of the width, got " .. tostring(ox))
+    assert(oy < 0,
+        "y offset must be NEGATIVE -- the canvas grows downward from TOPLEFT")
+    assert(math.abs(oy + 499.5) < 0.01,
+        "y offset must be minus the fraction of the height, got " .. tostring(oy))
+
+    -- A point in the top half must sit ABOVE a point in the bottom half.
+    local _, topY    = pins.CanvasOffset(0.5, 0.1, 1000, 666)
+    local _, bottomY = pins.CanvasOffset(0.5, 0.9, 1000, 666)
+
+    assert(topY > bottomY,
+        "a northern point must be higher on the canvas than a southern one")
+
+    assert(pins.CanvasOffset(nil, 0.5, 1000, 666) == nil,
+        "a pin with no coordinates has no offset")
+
+    -- SIZE. A hub holding more is drawn larger.
+    assert(pins.PinSize(6, 3) > pins.PinSize(1, 3),
+        "a busier hub must be a bigger pin")
+
+    -- LAYOUT.
+    local hubs = {
+        { x = 0.2, y = 0.3, mapID = 2112, objectives = {
+            { name = "Take This", phase = "PICKUP" },
+            { name = "Do This",   phase = "ACTIVE" },
+        } },
+        { x = 0.8, y = 0.9, mapID = 2112,
+          objectives = { { name = "Hand This In", phase = "TURNIN" } } },
+        { objectives = { { name = "Nowhere" } } },
+    }
+
+    local laid = pins.Layout(hubs)
+
+    assert(#laid == 2, "a hub with no coordinates cannot be drawn, got " .. #laid)
+    assert(laid[1].order == 1 and laid[2].order == 2,
+        "pins must be numbered in route order")
+    assert(laid[1].hubSize == 2, "pin must carry how much is at that stop")
+
+    -- The tooltip body must read in the order you would do things.
+    local lines = pins.DescribeLines(laid[1])
+
+    assert(#lines == 2, "every objective at the stop is described")
+    assert(lines[1]:find("Take This"), "first line is the first thing to do")
+
+    -- ROUTE START.
+    --
+    -- Looking at a map you are not standing in must NOT start the route from
+    -- your own position: your coordinates mean nothing on another map, and
+    -- using them orders the stops by distance from an arbitrary point.
+    local realPosition = CN.GetPlayerPosition
+    CN.GetPlayerPosition = function() return 2112, 0.11, 0.22 end
+
+    local sx, sy, fromPlayer = pins.RouteStart(2112)
+
+    assert(fromPlayer and math.abs(sx - 0.11) < 0.001,
+        "on your own map the route starts at your feet")
+
+    local ox2, oy2, otherMap = pins.RouteStart(84)
+
+    assert(not otherMap and ox2 == 0.5 and oy2 == 0.5,
+        "on someone else's map the route starts at the middle, not at you")
+
+    CN.GetPlayerPosition = realPosition
+
+    -- PLACEMENT against the stubbed canvas.
+    local canvas = WorldMapFrame.ScrollContainer.Child
+
+    local placed = pins.Place(laid, canvas)
+
+    assert(placed == 2, "both located pins must be placed, got " .. placed)
+
+    local first = _G["CompletionNavigatorMapPin1"]
+
+    assert(first and first:IsShown(), "the first pin must be visible")
+
+    -- Placing a SHORTER route must hide the surplus rather than leave stale
+    -- pins from the previous map on screen.
+    pins.Place({ laid[1] }, canvas)
+
+    local second = _G["CompletionNavigatorMapPin2"]
+
+    assert(not second:IsShown(),
+        "a pin left over from a longer route must be hidden, not stranded")
+
+    -- Refresh must do nothing at all while the map is closed.
+    WorldMapFrame.shown = false
+    assert(pins.Refresh() == 0, "no pins while the map is closed")
+
+    -- And must draw when it is open.
+    WorldMapFrame.shown = true
+    WorldMapFrame.displayedMapID = 2112
+
+    pins.InvalidateCache()
+
+    local drawn = pins.Refresh(true)
+
+    assert(type(drawn) == "number", "Refresh reports how many stops it drew")
+
+    -- Turning them off must clear the map, not merely stop adding to it.
+    pins.SetEnabled(false)
+    assert(not pins.IsEnabled(), "pins can be turned off")
+    assert(not _G["CompletionNavigatorMapPin1"]:IsShown(),
+        "turning pins off must remove the ones already drawn")
+
+    pins.SetEnabled(true)
+
+    -- The map is shared with every other addon, so the hooks must be HOOKED.
+    assert(pins.Install(), "the world map hooks must install")
+    assert(CN_TEST_WORLD_MAP_HOOKS["OnShow"], "OnShow must be hooked")
+    assert(CN_TEST_WORLD_MAP_HOOKS["OnHide"], "OnHide must be hooked")
+
+    -- Installing twice must not hook twice, or every map open redraws once
+    -- per reload the player has done this session.
+    do
+        local showHooks = #CN_TEST_WORLD_MAP_HOOKS["OnShow"]
+
+        pins.Install()
+
+        assert(#CN_TEST_WORLD_MAP_HOOKS["OnShow"] == showHooks,
+            "Install must be idempotent")
+    end
+
+    -- Firing the hooks must not error: they run inside Blizzard's map code,
+    -- where a Lua error is the player's problem and not obviously ours.
+    for _, mapHook in ipairs(CN_TEST_WORLD_MAP_HOOKS["OnShow"]) do
+        mapHook()
+    end
+
+    for _, mapHook in ipairs(CN_TEST_WORLD_MAP_HOOKS["OnHide"]) do
+        mapHook()
+    end
+
+    -- Tooltip and click behaviour. A pin the player cannot interrogate is
+    -- decoration.
+    WorldMapFrame.shown = true
+    pins.InvalidateCache()
+    pins.Place(laid, canvas)
+
+    do
+        local pin1 = _G["CompletionNavigatorMapPin1"]
+
+        pin1.scripts["OnEnter"](pin1)
+        pin1.scripts["OnLeave"](pin1)
+
+        -- Clicking a stop whose members carry no coordinates of their own
+        -- must still navigate -- to the stop. The pin was drawn somewhere;
+        -- refusing to go there is the addon contradicting its own map.
+        local realSet = CN.SetWaypoint
+        local setTo   = nil
+
+        CN.SetWaypoint = function(mapID, x, y, title)
+            setTo = { mapID = mapID, x = x, y = y, title = title }
+            return true
+        end
+
+        pin1.scripts["OnClick"](pin1)
+
+        CN.SetWaypoint = realSet
+
+        assert(setTo, "clicking a pin must set a waypoint even when its "
+            .. "members have no coordinates of their own")
+        assert(math.abs(setTo.x - 0.2) < 0.001 and setTo.mapID == 2112,
+            "the waypoint must be the STOP's position, got "
+            .. tostring(setTo.x))
+
+        -- A pin whose hub is empty must not navigate rather than error.
+        pin1.pin = { order = 1, objectives = {} }
+        pin1.scripts["OnClick"](pin1)
+        pin1.scripts["OnEnter"](pin1)
+    end
+
+    -- The route must survive being asked for a map that has nothing on it.
+    WorldMapFrame.displayedMapID = 999999
+    pins.InvalidateCache()
+
+    assert(pins.Refresh(true) == 0, "an empty map draws no pins")
+
+    -- And a map the client will not name at all.
+    WorldMapFrame.displayedMapID = nil
+    pins.InvalidateCache()
+    assert(pins.Refresh(true) == 0, "no map ID means no pins")
+
+    WorldMapFrame.displayedMapID = 2112
+
+    -- The cache must not rebuild the route for an unchanged map.
+    pins.InvalidateCache()
+    pins.HubsForMap(2112)
+
+    do
+        local rebuilds = 0
+
+        local realBuild = CN.BuildZoneRoute
+
+        CN.BuildZoneRoute = function(...)
+            rebuilds = rebuilds + 1
+            return realBuild(...)
+        end
+
+        pins.HubsForMap(2112)
+
+        assert(rebuilds == 0,
+            "an unchanged map must reuse the cached route, not rebuild it")
+
+        pins.HubsForMap(2112, true)
+
+        assert(rebuilds == 1, "a forced refresh must rebuild")
+
+        CN.BuildZoneRoute = realBuild
+    end
+
+    -- Layout must tolerate being handed nonsense rather than erroring inside
+    -- a map redraw.
+    assert(#pins.Layout(nil) == 0, "no hubs, no pins")
+    assert(#pins.DescribeLines(nil) == 0, "no pin, no lines")
+
+    -- A hub with more objectives than the tooltip shows must say so rather
+    -- than silently truncating.
+    --
+    -- Scoped: the main chunk is close to Lua's 200-local ceiling, and a test
+    -- that cannot be compiled is worse than one that was never written.
+    do
+        local big = { order = 1, objectives = {} }
+
+        for index = 1, 12 do
+            table.insert(big.objectives,
+                { name = "Thing " .. index, phase = "ACTIVE" })
+        end
+
+        local bigLines = pins.DescribeLines(big)
+
+        assert(bigLines[#bigLines]:find("more"),
+            "a long list must end by saying how much was left out")
+    end
+
+    print("  " .. #laid .. " stops laid out, geometry and pooling verified")
+end
+
+-- The zone router must honour the type filter. A player who has hidden
+-- everything but quests is asking not to be walked to a pet.
+--
+-- The test supplies its own non-quest stop rather than hoping the live
+-- candidate list happens to contain one. An earlier version of this check
+-- read whatever was already there, found only quests, and passed while
+-- asserting nothing at all.
+do
+    CN.RegisterCandidateProvider("HarnessFilterProbe", function()
+        return {
+            {
+                id     = "probe-pet",
+                type   = CN.objectiveTypes.PET,
+                name   = "Filterable Pet",
+                mapID  = 2112,
+                x      = 0.31,
+                y      = 0.42,
+            },
+        }
+    end)
+
+    CN.InvalidateCandidates("harness")
+
+    local unfiltered = CN.BuildZoneRoute(2112, 0.5, 0.5)
+
+    local sawPet = false
+
+    for _, objective in ipairs(unfiltered) do
+        if objective.type == CN.objectiveTypes.PET then
+            sawPet = true
+        end
+    end
+
+    assert(sawPet, "the probe pet must be routed before any filter is applied")
+
+    local typeFilters = CN:GetModule("Filters")
+
+    typeFilters.OnlyType(CN.objectiveTypes.QUEST)
+
+    CN.InvalidateCandidates("harness")
+
+    local after = CN.BuildZoneRoute(2112, 0.5, 0.5)
+
+    for _, objective in ipairs(after) do
+        assert(objective.type == CN.objectiveTypes.QUEST,
+            "a filtered-out type must not appear in the route: "
+            .. tostring(objective.type))
+    end
+
+    assert(#after < #unfiltered,
+        "filtering must actually remove stops from the route")
+
+    typeFilters.EnableAllTypes()
+
+    CN.candidateProviders["HarnessFilterProbe"] = nil
+
+    -- The timing table keeps a row for every provider that has ever run, so
+    -- a probe left there shows up in the benchmark as if it were part of the
+    -- addon.
+    if CN.providerTimings then
+        CN.providerTimings["HarnessFilterProbe"] = nil
+    end
+
+    CN.InvalidateCandidates("harness")
+
+    print("  zone route honours the type filter")
+end
 
 print("\nALL HARNESS CHECKS PASSED")

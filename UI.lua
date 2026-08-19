@@ -1757,6 +1757,20 @@ UI.RegisterTab{
             end)
         panel.arrow:SetPoint("TOPLEFT", panel.tooltips, "BOTTOMLEFT", 0, -6)
 
+        panel.pins = AddCheckbox(panel, "Show route pins on the world map",
+            function()
+                local pins = CN:GetModule("MapPins")
+                return pins and pins.IsEnabled()
+            end,
+            function(value)
+                local pins = CN:GetModule("MapPins")
+
+                if pins then
+                    pins.SetEnabled(value)
+                end
+            end)
+        panel.pins:SetPoint("TOPLEFT", panel.arrow, "BOTTOMLEFT", 0, -6)
+
         panel.setup = AddButton(panel, "Scan everything now", 180, function()
             local setup = CN:GetModule("Setup")
 
@@ -1764,7 +1778,7 @@ UI.RegisterTab{
                 setup.Run()
             end
         end)
-        panel.setup:SetPoint("TOPLEFT", panel.arrow, "BOTTOMLEFT", 0, -12)
+        panel.setup:SetPoint("TOPLEFT", panel.pins, "BOTTOMLEFT", 0, -12)
 
         panel.reset = AddButton(panel, "Reset window position", 180, function()
             CN.Settings().window = nil
@@ -1791,6 +1805,7 @@ UI.RegisterTab{
         panel.minimap.Refresh()
         panel.tooltips.Refresh()
         panel.arrow.Refresh()
+        panel.pins.Refresh()
 
         panel.about:SetText("Completion Navigator v" .. CN.version)
     end,

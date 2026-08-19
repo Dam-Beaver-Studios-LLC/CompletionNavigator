@@ -173,13 +173,13 @@ Vignette detection already works. A rare appearing that you have not cleared is 
 
 **Effort:** small. **Risk:** low.
 
-### 3.5 Minimap/world map pins â€” **partly done in 0.19.0**
+### 3.5 Minimap/world map pins â€” **DONE in 0.25.0**
 
-**Status:** native navigation ships an on-screen arrow and sets a Blizzard map pin. Drawing the addon's *own* pins on the world map â€” a whole zone sweep at once â€” is still outstanding.
+Native navigation ships an on-screen arrow and sets a Blizzard map pin (0.19.0). The addon now also draws its own numbered pins for a whole zone sweep at once â€” one per hub, in route order, with the do-order in the tooltip.
 
-HandyNotes integration exists as a provider but the addon draws no pins of its own. Drawing zone-sweep stops on the world map would make `/cn zone` far more legible.
+Implemented as a pooled frame parented to the map canvas rather than as a `MapCanvasDataProvider`. The data-provider API is the blessed route and also a moving target that has broken addons across several expansions; the boring approach degrades to "no pins" instead of to a Lua error inside Blizzard's map code.
 
-**Effort:** moderate. **Risk:** medium â€” map pin APIs churn between expansions.
+**Still open here:** minimap pins for the nearest stop, and a pin for objectives whose coordinates are known but whose map is not the one on screen.
 
 ---
 
@@ -232,7 +232,7 @@ Not a menu. This is what I would build, in this sequence:
 | 9 | **3.3 Per-character settings** | Needs a migration; do it when the ladder is quiet. |
 | 10 | **1.4 Group content** | Largest scope. Do it when the foundation above is solid. |
 
-Items 4.1, 2.3, 2.4 and 3.5 are worth doing but are not on the critical path.
+Items 4.1, 2.3 and 2.4 are worth doing but are not on the critical path.
 
 ---
 

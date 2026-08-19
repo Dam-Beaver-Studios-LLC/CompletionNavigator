@@ -7,6 +7,55 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.25.0]
+
+The route, drawn on the map.
+
+### Added
+
+- **Numbered route pins on the world map.** The addon has been grouping nearby
+  work into stops, ordering those stops to minimise walking, and improving the
+  order with a second pass -- and showing none of that. You saw a list and an
+  arrow, with no way to know that stops three through six were the same camp,
+  or that a doubling-back was deliberate.
+  Now each stop is a numbered pin, in the order you would walk it. Hovering
+  says what you do when you arrive -- pick up, do, hand in -- in that order.
+  Clicking navigates there. The next stop wears the addon's blue; the rest are
+  dimmed, so "where now" is answerable without reading numbers.
+- One pin per stop, not per objective. Twelve overlapping pins on one camp say
+  less than a single pin reading "3 -- pick up 2, do 4, hand in 1", and a map
+  that becomes unreadable when you have a lot to do fails exactly when it
+  matters. Busier stops are drawn larger; a crowded zone draws smaller pins
+  rather than fewer, since dropping stops would misrepresent the route.
+- `/cn pins` lists the current stops in the chat window, and `/cn pins on|off`
+  toggles them. There is a checkbox in the options panel as well. On by
+  default: pins are additive and read-only, and appear only on a map you have
+  deliberately opened.
+
+### Fixed
+
+- **Zone routes ignored the type filter.** Hiding everything but quests
+  changed the recommendation list and left the route alone, so `/cn zone`
+  would still walk you to a pet you had explicitly said you did not want to
+  see. The filter now applies to routing as well. Collection totals and
+  `/cn breakdown` still count everything, as before.
+- **The generator shipped stale copies of the test files.** `harness.lua`,
+  `bench.lua`, `coverage.sh` and `pstest.sh` existed twice -- once where they
+  are actually run, once in the build tree -- and the two drifted. The build
+  copies were what shipped, so CI ran a harness older than the one every local
+  run had just passed, and reported success for tests that no longer existed.
+  There is now one copy of each, and the generator refuses to run if a second
+  one reappears.
+
+### Notes
+
+- The pins are drawn for the map you are LOOKING at, which is not always the
+  map you are standing in. When you open a zone you are not in, the route is
+  ordered by how the stops relate to each other rather than by distance from
+  your character -- your coordinates mean nothing on another map, and using
+  them anyway produces an ordering that is arbitrary rather than merely
+  imperfect.
+
 ## [0.24.4]
 
 Consequence of the previous fix. No addon changes.

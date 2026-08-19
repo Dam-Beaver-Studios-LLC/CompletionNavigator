@@ -23,7 +23,15 @@ echo "  init"
 $PWSH -NoProfile -File ./cn.ps1 init > init.log 2>&1
 FILES=$(grep -cE "wrote  .*\.lua$" init.log)
 echo "    $FILES lua files scaffolded"
-EXPECTED=$(grep -cE '^\s*"[A-Za-z/]+\.lua",' /home/claude/cn/gen.py)
+# Count the ORDER list specifically, not every quoted .lua string in gen.py.
+# Grepping the whole file counted names that appear elsewhere in it and made
+# this check fail for a reason that had nothing to do with the scaffold.
+EXPECTED=$(python3 -c "
+import re
+text = open('/home/claude/cn/gen.py').read()
+block = re.search(r'^ORDER = \[(.*?)^\]', text, re.S | re.M).group(1)
+print(len(re.findall(r'\"[^\"]+\.lua\"', block)))
+")
 [ "$FILES" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED lua files, scaffolded $FILES"; exit 1; }
 
 # The .toc must list only what the CLIENT loads. harness.lua stubs the whole
@@ -137,6 +145,61 @@ if command -v luacheck >/dev/null 2>&1; then
   echo "    $(grep -oE 'Total: [0-9]+ warnings / [0-9]+ errors' "$WORK/cilint.log")"
 fi
 
+echo "  CI ignores the toolchain it installs into the workspace"
+# CI builds Lua and LuaRocks into .lua/ in the repository root. Two distinct
+# problems follow, and a release failed on both at once:
+#
+#   1. The install directory is itself named `.lua`, so `-name '*.lua'` matched
+#      a DIRECTORY and luac was handed it. "cannot read ./.lua: Is a directory".
+#   2. Under it sit thousands of third-party files, some deliberately malformed
+#      because they are another project's test fixtures.
+#
+# Poison the tree the same way the runner does -- a directory named .lua, and a
+# broken file inside it -- and prove the checks skip both.
+mkdir -p "$WORK/.lua/share/lua/5.4"
+printf 'this is not ) valid lua ((\n' > "$WORK/.lua/share/lua/5.4/fixture.lua"
+
+(cd "$WORK" && \
+  find . -type f -name '*.lua' -not -path './.*' -exec luac5.4 -p {} + > poison.log 2>&1) || {
+  echo "FAIL: the syntax check walks into the installed toolchain"
+  tail -10 "$WORK/poison.log"; exit 1; }
+
+if command -v luacheck >/dev/null 2>&1; then
+  (cd "$WORK" && luacheck . --no-color > poisonlint.log 2>&1) || {
+    echo "FAIL: luacheck analyses the installed toolchain"
+    tail -10 "$WORK/poisonlint.log"; exit 1; }
+fi
+
+rm -rf "$WORK/.lua" "$WORK/poison.log" "$WORK/poisonlint.log"
+echo "    third-party .lua files under dotted directories are skipped"
+
+echo "  CI: no Lua search may walk the workspace toolchain"
+python3 - "$WORK/.github/workflows/release.yml" <<'FINDLINT'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+searches = [line.strip() for line in text.splitlines()
+            if re.search(r"find .*-name '\*\.lua'", line)]
+
+if not searches:
+    print("FAIL: no Lua file search found; this lint is checking nothing.")
+    sys.exit(1)
+
+bad = [line for line in searches
+       if "-not -path './.*'" not in line or "-type f" not in line]
+
+if bad:
+    print("FAIL: a Lua file search is not scoped to our own files")
+    for line in bad:
+        print("  " + line)
+    print("  Needs -type f (the install directory is NAMED .lua) and")
+    print("  -not -path './.*' (the toolchain lives inside it).")
+    sys.exit(1)
+
+print("    every Lua search is scoped to our own files")
+FINDLINT
+
 echo "  coverage: harness exercises the addon"
 if command -v luacov >/dev/null 2>&1; then
   # Run against the scaffolded tree, which is what actually ships.
@@ -162,7 +225,11 @@ echo "  coverage degrades instead of blocking"
 # A developer tool being absent must never stop a release. This exact failure
 # shipped: coverage.sh hardcoded a luacov path, died on the CI runner, and the
 # packager never ran -- so a tagged release never reached CurseForge.
-(cd "$WORK" && sed 's#/usr/local/share/lua#/nonexistent/share/lua#g; s#/usr/share/lua#/nonexistent2/share/lua#g; s#$HOME/.luarocks/share/lua#/nonexistent3#g' coverage.sh > coverage_nolua.sh \
+#
+# Every way coverage.sh can find luacov must be blinded, or this passes while
+# proving nothing: once it learned to ask luarocks, blanking the hardcoded
+# directories alone left it finding luacov anyway.
+(cd "$WORK" && sed 's#/usr/local/share/lua#/nonexistent/share/lua#g; s#/usr/share/lua#/nonexistent2/share/lua#g; s#$HOME/.luarocks/share/lua#/nonexistent3#g; s#command -v luarocks#command -v definitely-not-luarocks#g' coverage.sh > coverage_nolua.sh \
   && bash coverage_nolua.sh . 80 > nolua.log 2>&1)
 NOLUA=$?
 if [ "$NOLUA" -ne 0 ]; then
@@ -201,6 +268,45 @@ if minutes > 60:
 print("    job bounded at %d minutes" % minutes)
 TIMEOUT
 
+echo "  CI: the toolchain does not come from the runner's package manager"
+python3 - "$WORK/.github/workflows/release.yml" <<'APTLOCK'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+# A fresh runner holds the dpkg lock via unattended-upgrades. apt-get has no
+# default timeout on that lock: it waits silently, forever. One release wedged
+# there for thirty-eight minutes. Bounding the wait did not help -- the lock
+# was still held, so the install failed instead of hanging.
+#
+# The toolchain now comes from setup actions that build into the workspace,
+# contending with nothing. Any apt-get reintroduced here must at minimum bound
+# the lock wait, and must not be how Lua itself arrives.
+calls = [line.strip() for line in text.splitlines()
+         if re.search(r"\bapt-get\b", line)
+         and not line.strip().startswith("#")]
+
+unbounded = [c for c in calls if "DPkg::Lock::Timeout" not in c]
+
+if unbounded:
+    print("FAIL: apt-get invocation with no dpkg lock timeout")
+    for call in unbounded:
+        print("  " + call)
+    print("  Add -o DPkg::Lock::Timeout=<seconds>; without it apt waits forever.")
+    sys.exit(1)
+
+if re.search(r"apt-get[^\n]*\b(lua5\.\d|lua-check|luarocks)\b", text):
+    print("FAIL: the Lua toolchain is being installed with apt-get.")
+    print("  That is the dpkg-lock hang. Use the setup actions instead.")
+    sys.exit(1)
+
+if not re.search(r"uses:\s*leafo/gh-actions-lua", text):
+    print("FAIL: no Lua setup action; something replaced it.")
+    sys.exit(1)
+
+print("    Lua from a setup action, %d bounded apt-get call(s)" % len(calls))
+APTLOCK
+
 echo "  CI: only real failures may block the packager"
 # Any blocking CI step must be one that indicates broken code. Optional
 # tooling steps must carry continue-on-error.
@@ -213,6 +319,7 @@ text = open(sys.argv[1], encoding="utf-8").read()
 # actually broken.
 blocking_allowed = {
     "Check out", "Fetch tags", "Verify a tag points at HEAD", "Install Lua",
+    "Install LuaRocks", "Install Lua tooling",
     "Syntax check every Lua file", "Verify the .toc lists every Lua file",
     "Lint", "Run the offline harness",
     "Verify the CurseForge token is available", "Package and upload",

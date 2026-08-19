@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.24.4'
+$script:ToolkitVersion = '0.25.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.24.4"
+CN.version     = "0.25.0"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -371,6 +371,12 @@ CN.defaults = {
         -- of a player who has not asked for navigation.
         arrow        = true,
 
+        -- Numbered route pins on the world map. On by default: like tooltip
+        -- lines they are additive and read-only, they appear only on a map
+        -- the player deliberately opened, and they are the only place the
+        -- routing engine's work is visible.
+        mapPins      = true,
+
         -- Announcing rares out loud is the noisiest thing this addon could
         -- do, so it is opt-in. Unsolicited sound is worse than an uninvited
         -- waypoint, and the waypoint is already off by default.
@@ -627,6 +633,7 @@ CN.characterOverridable = {
     autoWaypoint = true,
     arrow        = true,
     tooltips     = true,
+    mapPins      = true,
 }
 
 local function AccountSettings()
@@ -2930,7 +2937,16 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     for _, objective in ipairs(candidates) do
         CN.ScoreObjective(objective)
 
-        if objective.mapID == mapID then
+        -- Honour the type filter. A player who has hidden everything but
+        -- quests is asking not to be routed to a pet, and a route that
+        -- ignores that sends them somewhere they deliberately said they did
+        -- not want to go. The filter is applied here rather than in the
+        -- providers for the same reason it is applied in ranking: it is a
+        -- display preference, and /cn breakdown must still see everything.
+        local visible = (not CN.IsObjectiveTypeEnabled)
+            or CN.IsObjectiveTypeEnabled(objective.type)
+
+        if objective.mapID == mapID and visible then
             if objective.x and objective.y then
                 table.insert(located, objective)
             else
@@ -5127,6 +5143,20 @@ UI.RegisterTab{
             end)
         panel.arrow:SetPoint("TOPLEFT", panel.tooltips, "BOTTOMLEFT", 0, -6)
 
+        panel.pins = AddCheckbox(panel, "Show route pins on the world map",
+            function()
+                local pins = CN:GetModule("MapPins")
+                return pins and pins.IsEnabled()
+            end,
+            function(value)
+                local pins = CN:GetModule("MapPins")
+
+                if pins then
+                    pins.SetEnabled(value)
+                end
+            end)
+        panel.pins:SetPoint("TOPLEFT", panel.arrow, "BOTTOMLEFT", 0, -6)
+
         panel.setup = AddButton(panel, "Scan everything now", 180, function()
             local setup = CN:GetModule("Setup")
 
@@ -5134,7 +5164,7 @@ UI.RegisterTab{
                 setup.Run()
             end
         end)
-        panel.setup:SetPoint("TOPLEFT", panel.arrow, "BOTTOMLEFT", 0, -12)
+        panel.setup:SetPoint("TOPLEFT", panel.pins, "BOTTOMLEFT", 0, -12)
 
         panel.reset = AddButton(panel, "Reset window position", 180, function()
             CN.Settings().window = nil
@@ -5161,6 +5191,7 @@ UI.RegisterTab{
         panel.minimap.Refresh()
         panel.tooltips.Refresh()
         panel.arrow.Refresh()
+        panel.pins.Refresh()
 
         panel.about:SetText("Completion Navigator v" .. CN.version)
     end,
@@ -18051,6 +18082,670 @@ end)
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\MapPins.lua'] = @'
+-- Modules/MapPins.lua
+-- Completion Navigator :: the plan, drawn on the world map.
+--
+-- Everything else in this addon answers "what next?" one line at a time. That
+-- is the right answer to the question, but it hides the thing that actually
+-- makes the routing worth having: the SHAPE of the work. The router already
+-- groups objectives into hubs, orders the hubs to minimise walking, and
+-- improves that order with a 2-opt pass -- and until now a player saw none of
+-- it. They saw a list and an arrow, and had no way to know that stops three
+-- through six were all the same camp, or that the route doubles back for a
+-- reason.
+--
+-- So: one numbered pin per HUB, in route order, on the map you are looking at.
+-- The number is the order. The tooltip is what you do when you arrive, in the
+-- order you would do it. Clicking navigates there.
+--
+-- One pin per hub, not per objective. Twelve overlapping pins on one camp
+-- communicate less than a single pin reading "3 -- pick up 2, do 4, hand in
+-- 1", and a map that becomes unreadable when you have a lot to do is a map
+-- that fails exactly when it matters most.
+--
+-- Deliberately NOT a MapCanvasDataProvider. The data-provider API is the
+-- blessed route, and it is also a moving target that has broken addons across
+-- several expansions. A pooled frame parented to the canvas is boring, has no
+-- version surface to speak of, and degrades to "no pins" rather than to a Lua
+-- error inside Blizzard's map code.
+
+local ADDON_NAME, CN = ...
+
+local MapPins = CN:RegisterModule("MapPins")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+local function Settings()
+    return CN.Settings() or {}
+end
+
+------------------------------------------------------------
+-- ENABLEMENT
+------------------------------------------------------------
+
+-- On by default. Pins are additive and read-only -- like tooltip lines, and
+-- unlike the waypoint, they take nothing over and interrupt nothing. They
+-- also appear only on a map you have deliberately opened.
+function MapPins.IsEnabled()
+    return Settings().mapPins ~= false
+end
+
+function MapPins.SetEnabled(value)
+    Settings().mapPins = value and true or false
+
+    if value then
+        MapPins.Refresh(true)
+    else
+        MapPins.Clear()
+    end
+
+    return MapPins.IsEnabled()
+end
+
+------------------------------------------------------------
+-- GEOMETRY
+------------------------------------------------------------
+
+-- Normalised map coordinates to a canvas offset.
+--
+-- The canvas is anchored from its TOPLEFT and y grows DOWNWARD, while map
+-- coordinates also grow downward -- so the offset is +x and -y. Getting the
+-- sign wrong mirrors every pin vertically, which looks plausible on a
+-- symmetrical map and is completely wrong on every other one.
+--
+-- Pure, and tested as such: this is the one piece of the file that can be
+-- wrong in a way no amount of looking at the screen would reveal, because a
+-- mirrored pin is still a pin in a believable place.
+function MapPins.CanvasOffset(x, y, width, height)
+    if not x or not y or not width or not height then
+        return nil
+    end
+
+    return x * width, -(y * height)
+end
+
+MapPins.pinSize      = 26
+MapPins.maxPins      = 40
+MapPins.crowdedScale = 0.8
+
+-- How big a pin should be. A hub holding six things is worth more of the
+-- player's attention than one holding a single stray pet, and size is the
+-- cheapest way to say so without adding another colour to read.
+function MapPins.PinSize(hubSize, pinCount)
+    local size = MapPins.pinSize
+
+    if (hubSize or 1) > 1 then
+        size = size + math.min(10, (hubSize - 1) * 2)
+    end
+
+    -- A busy zone gets smaller pins rather than fewer of them. Dropping stops
+    -- silently would misrepresent the route; shrinking them does not.
+    if (pinCount or 0) > 12 then
+        size = size * MapPins.crowdedScale
+    end
+
+    return math.floor(size + 0.5)
+end
+
+------------------------------------------------------------
+-- LAYOUT
+------------------------------------------------------------
+
+-- Turns ordered hubs into pin descriptors. Pure: no frames, no client, no
+-- side effects. Everything that decides what a pin SAYS happens here, so it
+-- can be asserted offline.
+function MapPins.Layout(hubs)
+    local pins = {}
+
+    if type(hubs) ~= "table" then
+        return pins
+    end
+
+    local total = 0
+
+    for _, hub in ipairs(hubs) do
+        if hub.x and hub.y then
+            total = total + 1
+        end
+    end
+
+    for index, hub in ipairs(hubs) do
+        if #pins >= MapPins.maxPins then
+            break
+        end
+
+        -- A hub with no coordinates cannot be drawn. It is not dropped from
+        -- the route -- the list still reports it -- it simply has nowhere to
+        -- go on a map.
+        if hub.x and hub.y then
+            local objectives = hub.objectives or {}
+
+            table.insert(pins, {
+                order      = index,
+                mapID      = hub.mapID,
+                x          = hub.x,
+                y          = hub.y,
+                size       = MapPins.PinSize(#objectives, total),
+                hubSize    = #objectives,
+                summary    = CN.DescribeHub and CN.DescribeHub(hub) or nil,
+                objectives = objectives,
+            })
+        end
+    end
+
+    return pins
+end
+
+-- The tooltip body for one pin: what you do when you get there, in the order
+-- you would do it. The hub's objectives are already sorted pick up -> do ->
+-- hand in by the router, so this only has to not re-sort them.
+function MapPins.DescribeLines(pin)
+    local lines = {}
+
+    if not pin then
+        return lines
+    end
+
+    local quests = CN:GetModule("Quests")
+
+    local shown = 0
+
+    for _, objective in ipairs(pin.objectives or {}) do
+        if shown >= 8 then
+            table.insert(lines, string.format(
+                "and %d more", #pin.objectives - shown))
+            break
+        end
+
+        local verb = "do"
+
+        if objective.phase and quests and quests.PhaseVerb then
+            verb = quests.PhaseVerb(objective.phase)
+        end
+
+        table.insert(lines, string.format("%s: %s",
+            verb, tostring(objective.name or objective.id)))
+
+        shown = shown + 1
+    end
+
+    return lines
+end
+
+------------------------------------------------------------
+-- THE CANVAS
+------------------------------------------------------------
+
+-- Resolves the world map's canvas, or nil. Every layer here is optional
+-- because every layer is Blizzard's: if any of it moves, pins stop appearing
+-- and nothing else in the addon notices.
+function MapPins.Canvas()
+    local map = _G and _G.WorldMapFrame
+
+    if not map or not map.ScrollContainer then
+        return nil
+    end
+
+    return map.ScrollContainer.Child
+end
+
+-- Which map the player is LOOKING AT, which is not necessarily where they
+-- are standing.
+function MapPins.DisplayedMapID()
+    local map = _G and _G.WorldMapFrame
+
+    if not map or not map.GetMapID then
+        return nil
+    end
+
+    local ok, mapID = pcall(map.GetMapID, map)
+
+    if ok then
+        return mapID
+    end
+
+    return nil
+end
+
+function MapPins.IsMapShown()
+    local map = _G and _G.WorldMapFrame
+
+    if not map or not map.IsShown then
+        return false
+    end
+
+    local ok, shown = pcall(map.IsShown, map)
+
+    return ok and shown == true
+end
+
+------------------------------------------------------------
+-- THE ROUTE FOR A DISPLAYED MAP
+------------------------------------------------------------
+
+-- Where a route across THIS map should start.
+--
+-- If you are looking at the zone you are standing in, the route starts at
+-- your feet -- that is the whole point of routing. If you are looking at
+-- somewhere else, your position is meaningless there: using it would order
+-- the stops by their distance from a point on another continent, producing a
+-- route that is not merely suboptimal but arbitrary. Start from the middle
+-- instead, which orders the stops by their relationship to each other.
+function MapPins.RouteStart(displayedMapID)
+    local playerMap, x, y = nil, nil, nil
+
+    if CN.GetPlayerPosition then
+        local ok, a, b, c = pcall(CN.GetPlayerPosition)
+
+        if ok then
+            playerMap, x, y = a, b, c
+        end
+    end
+
+    if displayedMapID and playerMap == displayedMapID and x and y then
+        return x, y, true
+    end
+
+    return 0.5, 0.5, false
+end
+
+local cache = { mapID = nil, generation = nil, hubs = nil }
+
+function MapPins.InvalidateCache()
+    cache.mapID      = nil
+    cache.generation = nil
+    cache.hubs       = nil
+end
+
+local function CandidateGeneration()
+    if not CN.GetCandidateCacheState then
+        return 0
+    end
+
+    local ok, state = pcall(CN.GetCandidateCacheState)
+
+    if ok and state then
+        return state.generation or 0
+    end
+
+    return 0
+end
+
+-- Building a zone route means collecting and scoring every candidate, so it
+-- must not happen on every map pan. It happens when the map you are looking
+-- at changes, or when the underlying candidates do.
+function MapPins.HubsForMap(mapID, force)
+    if not mapID or not CN.BuildZoneRoute then
+        return nil
+    end
+
+    local generation = CandidateGeneration()
+
+    if not force
+        and cache.mapID == mapID
+        and cache.generation == generation
+        and cache.hubs then
+
+        return cache.hubs
+    end
+
+    local startX, startY = MapPins.RouteStart(mapID)
+
+    local ok, _, _, hubs = pcall(CN.BuildZoneRoute, mapID, startX, startY)
+
+    if not ok then
+        return nil
+    end
+
+    cache.mapID      = mapID
+    cache.generation = generation
+    cache.hubs       = hubs
+
+    return hubs
+end
+
+------------------------------------------------------------
+-- THE PINS THEMSELVES
+------------------------------------------------------------
+
+local pool = {}
+
+local function PinColor(order)
+    local nav = CN:GetModule("Navigation")
+
+    local palette = nav and nav.colors
+
+    if not palette then
+        return 0.365, 0.824, 0.984
+    end
+
+    -- The next stop wears the addon's blue. Everything after it is dimmed,
+    -- so "where do I go now" is answerable at a glance rather than by
+    -- reading numbers.
+    if order == 1 then
+        local c = palette.ON_COURSE
+        return c[1], c[2], c[3]
+    end
+
+    local c = palette.UNKNOWN
+
+    return c[1], c[2], c[3]
+end
+
+local function ShowPinTooltip(frame)
+    if not GameTooltip or not frame.pin then
+        return
+    end
+
+    GameTooltip:SetOwner(frame, "ANCHOR_RIGHT")
+
+    GameTooltip:AddLine(string.format("Stop %d", frame.pin.order), 1, 1, 1)
+
+    if frame.pin.summary then
+        GameTooltip:AddLine(frame.pin.summary, 0.365, 0.824, 0.984)
+    end
+
+    for _, line in ipairs(MapPins.DescribeLines(frame.pin)) do
+        GameTooltip:AddLine(line, 0.8, 0.8, 0.8)
+    end
+
+    GameTooltip:AddLine("Click to navigate here", 0.6, 0.6, 0.6)
+
+    GameTooltip:Show()
+end
+
+local function HidePinTooltip()
+    if GameTooltip then
+        GameTooltip:Hide()
+    end
+end
+
+-- Clicking navigates to the STOP, not to whichever objective happens to be
+-- listed first there.
+--
+-- Those are different things. An objective's own coordinates may be missing
+-- -- plenty of collectibles are known to be in a zone and nowhere more
+-- precise -- while the stop's are the centre of everything at it and always
+-- exist, because that is how the stop was formed. Routing to the member and
+-- finding it has no location would answer a click with "no coordinates are
+-- known", which from the player's side is the addon refusing to go to a place
+-- it just drew a pin on.
+local function ClickPin(frame)
+    local pin = frame.pin
+
+    if not pin then
+        return
+    end
+
+    for _, objective in ipairs(pin.objectives or {}) do
+        if objective.x and objective.y and CN.NavigateToObjective then
+            CN.NavigateToObjective(objective)
+            return
+        end
+    end
+
+    if pin.x and pin.y and pin.mapID and CN.SetWaypoint then
+        local first = (pin.objectives or {})[1]
+
+        CN.SetWaypoint(pin.mapID, pin.x, pin.y,
+            first and tostring(first.name or first.id) or
+                ("Stop " .. tostring(pin.order)))
+    end
+end
+
+local function AcquirePin(index, canvas)
+    if pool[index] then
+        return pool[index]
+    end
+
+    if not CreateFrame or not canvas then
+        return nil
+    end
+
+    local frame = CreateFrame("Button", "CompletionNavigatorMapPin" .. index, canvas)
+
+    frame:SetSize(MapPins.pinSize, MapPins.pinSize)
+
+    frame.texture = frame:CreateTexture(nil, "OVERLAY")
+    frame.texture:SetAllPoints()
+    frame.texture:SetTexture(CN.MEDIA_PATH .. "Arrow")
+
+    if not frame.texture:GetTexture() then
+        frame.texture:SetTexture("Interface\\Minimap\\MinimapArrow")
+    end
+
+    frame.label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.label:SetPoint("CENTER")
+
+    frame:SetScript("OnEnter", ShowPinTooltip)
+    frame:SetScript("OnLeave", HidePinTooltip)
+    frame:SetScript("OnClick", ClickPin)
+
+    pool[index] = frame
+
+    return frame
+end
+
+MapPins.AcquirePin = AcquirePin
+
+function MapPins.Clear()
+    for _, frame in ipairs(pool) do
+        frame:Hide()
+    end
+end
+
+-- Positions the pins. Separated from Refresh so the arithmetic can be driven
+-- offline against a stubbed canvas.
+function MapPins.Place(pins, canvas)
+    if not canvas then
+        return 0
+    end
+
+    local width  = canvas:GetWidth()
+    local height = canvas:GetHeight()
+
+    if not width or not height or width <= 0 or height <= 0 then
+        return 0
+    end
+
+    local placed = 0
+
+    for index, pin in ipairs(pins) do
+        local frame = AcquirePin(index, canvas)
+
+        if frame then
+            local offsetX, offsetY = MapPins.CanvasOffset(pin.x, pin.y, width, height)
+
+            if offsetX then
+                frame.pin = pin
+
+                frame:SetSize(pin.size, pin.size)
+                frame:ClearAllPoints()
+                frame:SetPoint("CENTER", canvas, "TOPLEFT", offsetX, offsetY)
+
+                frame.label:SetText(tostring(pin.order))
+                frame.texture:SetVertexColor(PinColor(pin.order))
+
+                frame:Show()
+
+                placed = placed + 1
+            end
+        end
+    end
+
+    -- Surplus frames from a busier map are hidden, never destroyed. Pin
+    -- frames are cheap to keep and expensive to churn.
+    for index = #pins + 1, #pool do
+        pool[index]:Hide()
+        pool[index].pin = nil
+    end
+
+    return placed
+end
+
+function MapPins.Refresh(force)
+    if not MapPins.IsEnabled() then
+        MapPins.Clear()
+        return 0
+    end
+
+    if not MapPins.IsMapShown() then
+        return 0
+    end
+
+    local canvas = MapPins.Canvas()
+
+    if not canvas then
+        return 0
+    end
+
+    local mapID = MapPins.DisplayedMapID()
+
+    if not mapID then
+        MapPins.Clear()
+        return 0
+    end
+
+    local hubs = MapPins.HubsForMap(mapID, force)
+
+    if not hubs then
+        MapPins.Clear()
+        return 0
+    end
+
+    local pins = MapPins.Layout(hubs)
+
+    local placed = MapPins.Place(pins, canvas)
+
+    DebugPrint(string.format("Map pins: %d stop(s) on map %s.",
+        placed, tostring(mapID)))
+
+    return placed
+end
+
+------------------------------------------------------------
+-- HOOKS
+------------------------------------------------------------
+
+local hooked = false
+
+-- Hooked, not overwritten. The world map is shared with every other addon
+-- the player runs, and replacing a script on it would break them.
+function MapPins.Install()
+    if hooked then
+        return true
+    end
+
+    local map = _G and _G.WorldMapFrame
+
+    if not map or not map.HookScript then
+        return false
+    end
+
+    map:HookScript("OnShow", function()
+        MapPins.Refresh()
+    end)
+
+    map:HookScript("OnHide", function()
+        MapPins.Clear()
+    end)
+
+    -- Panning to a different zone is a map change, not a redraw, so the
+    -- route must be rebuilt for the map now on screen.
+    if map.RegisterCallback and map.OnMapChanged then
+        pcall(map.RegisterCallback, map, "WorldMapOnMapChanged", function()
+            MapPins.Refresh()
+        end)
+    end
+
+    hooked = true
+
+    return true
+end
+
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    MapPins.Install()
+end)
+
+CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
+    MapPins.InvalidateCache()
+    MapPins.Refresh()
+end)
+
+CN:RegisterEvent("QUEST_LOG_UPDATE", function()
+    MapPins.InvalidateCache()
+end)
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "pins",
+    aliases = { "map" },
+    args    = "[on, off, or refresh]",
+    order   = 18,
+    help    = "Show the route as numbered pins on the world map.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        if args == "on" then
+            MapPins.SetEnabled(true)
+            Print("Map pins are on.")
+            return
+        end
+
+        if args == "off" then
+            MapPins.SetEnabled(false)
+            Print("Map pins are off.")
+            return
+        end
+
+        if args == "refresh" then
+            MapPins.InvalidateCache()
+
+            local placed = MapPins.Refresh(true)
+
+            Print(string.format("Redrew %d stop(s).", placed))
+            return
+        end
+
+        if not MapPins.IsEnabled() then
+            Print("Map pins are off. Turn them on with /cn pins on")
+            return
+        end
+
+        local mapID = MapPins.DisplayedMapID()
+
+        if not mapID then
+            Print("Map pins are on. Open the world map to see the route.")
+            return
+        end
+
+        local hubs = MapPins.HubsForMap(mapID)
+        local pins = MapPins.Layout(hubs or {})
+
+        if #pins == 0 then
+            Print("Nothing to route on this map.")
+            return
+        end
+
+        Print(string.format("%d stop(s) on this map:", #pins))
+
+        for _, pin in ipairs(pins) do
+            Print(string.format("  %d. %s (%d)",
+                pin.order,
+                tostring(pin.summary or "do " .. pin.hubSize),
+                pin.hubSize))
+        end
+    end,
+}
+
+return MapPins
+'@
+
 $Embedded['Modules\Broker.lua'] = @'
 -- Modules/Broker.lua
 -- Completion Navigator :: LibDataBroker feed, and rare-spawn alerts.
@@ -18366,7 +19061,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.24.4
+## Version: 0.25.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -18405,6 +19100,7 @@ Modules\Exploration.lua
 Modules\Filters.lua
 Modules\Goals.lua
 Modules\Harvest.lua
+Modules\MapPins.lua
 Modules\Mounts.lua
 Modules\Navigation.lua
 Modules\Opportunities.lua
@@ -18579,6 +19275,55 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.25.0]
+
+The route, drawn on the map.
+
+### Added
+
+- **Numbered route pins on the world map.** The addon has been grouping nearby
+  work into stops, ordering those stops to minimise walking, and improving the
+  order with a second pass -- and showing none of that. You saw a list and an
+  arrow, with no way to know that stops three through six were the same camp,
+  or that a doubling-back was deliberate.
+  Now each stop is a numbered pin, in the order you would walk it. Hovering
+  says what you do when you arrive -- pick up, do, hand in -- in that order.
+  Clicking navigates there. The next stop wears the addon's blue; the rest are
+  dimmed, so "where now" is answerable without reading numbers.
+- One pin per stop, not per objective. Twelve overlapping pins on one camp say
+  less than a single pin reading "3 -- pick up 2, do 4, hand in 1", and a map
+  that becomes unreadable when you have a lot to do fails exactly when it
+  matters. Busier stops are drawn larger; a crowded zone draws smaller pins
+  rather than fewer, since dropping stops would misrepresent the route.
+- `/cn pins` lists the current stops in the chat window, and `/cn pins on|off`
+  toggles them. There is a checkbox in the options panel as well. On by
+  default: pins are additive and read-only, and appear only on a map you have
+  deliberately opened.
+
+### Fixed
+
+- **Zone routes ignored the type filter.** Hiding everything but quests
+  changed the recommendation list and left the route alone, so `/cn zone`
+  would still walk you to a pet you had explicitly said you did not want to
+  see. The filter now applies to routing as well. Collection totals and
+  `/cn breakdown` still count everything, as before.
+- **The generator shipped stale copies of the test files.** `harness.lua`,
+  `bench.lua`, `coverage.sh` and `pstest.sh` existed twice -- once where they
+  are actually run, once in the build tree -- and the two drifted. The build
+  copies were what shipped, so CI ran a harness older than the one every local
+  run had just passed, and reported success for tests that no longer existed.
+  There is now one copy of each, and the generator refuses to run if a second
+  one reappears.
+
+### Notes
+
+- The pins are drawn for the map you are LOOKING at, which is not always the
+  map you are standing in. When you open a zone you are not in, the route is
+  ordered by how the stops relate to each other rather than by distance from
+  your character -- your coordinates mean nothing on another map, and using
+  them anyway produces an ordering that is arbitrary rather than merely
+  imperfect.
 
 ## [0.24.4]
 
@@ -19687,13 +20432,13 @@ Vignette detection already works. A rare appearing that you have not cleared is 
 
 **Effort:** small. **Risk:** low.
 
-### 3.5 Minimap/world map pins — **partly done in 0.19.0**
+### 3.5 Minimap/world map pins — **DONE in 0.25.0**
 
-**Status:** native navigation ships an on-screen arrow and sets a Blizzard map pin. Drawing the addon's *own* pins on the world map — a whole zone sweep at once — is still outstanding.
+Native navigation ships an on-screen arrow and sets a Blizzard map pin (0.19.0). The addon now also draws its own numbered pins for a whole zone sweep at once — one per hub, in route order, with the do-order in the tooltip.
 
-HandyNotes integration exists as a provider but the addon draws no pins of its own. Drawing zone-sweep stops on the world map would make `/cn zone` far more legible.
+Implemented as a pooled frame parented to the map canvas rather than as a `MapCanvasDataProvider`. The data-provider API is the blessed route and also a moving target that has broken addons across several expansions; the boring approach degrades to "no pins" instead of to a Lua error inside Blizzard's map code.
 
-**Effort:** moderate. **Risk:** medium — map pin APIs churn between expansions.
+**Still open here:** minimap pins for the nearest stop, and a pin for objectives whose coordinates are known but whose map is not the one on screen.
 
 ---
 
@@ -19746,7 +20491,7 @@ Not a menu. This is what I would build, in this sequence:
 | 9 | **3.3 Per-character settings** | Needs a migration; do it when the ladder is quiet. |
 | 10 | **1.4 Group content** | Largest scope. Do it when the foundation above is solid. |
 
-Items 4.1, 2.3, 2.4 and 3.5 are worth doing but are not on the critical path.
+Items 4.1, 2.3 and 2.4 are worth doing but are not on the critical path.
 
 ---
 
@@ -20227,6 +20972,39 @@ date    = os.date
 -- provider-timing path would otherwise never execute offline.
 function debugprofilestop() return os.clock() * 1000 end
 strtrim = function(s) return (tostring(s):gsub("^%s+", ""):gsub("%s+$", "")) end
+
+-- The world map, modelled with the shape MapPins actually reads.
+--
+-- Deliberately NOT a flat universal stub. The canvas has a real width and
+-- height because the pin arithmetic multiplies by them, and a stub returning
+-- a table there would turn a sign error into "attempt to perform arithmetic
+-- on a table value" -- an error about the stub, not about the addon. The
+-- displayed map is settable so the test can look at a map the player is not
+-- standing in, which is the case the routing start point gets wrong.
+local worldMapHooks = {}
+
+WorldMapFrame = {
+    displayedMapID = 2112,
+    shown          = false,
+
+    ScrollContainer = {
+        Child = (function()
+            local canvas = Frame()
+            function canvas:GetWidth()  return 1000 end
+            function canvas:GetHeight() return 666 end
+            return canvas
+        end)(),
+    },
+}
+
+function WorldMapFrame:GetMapID() return self.displayedMapID end
+function WorldMapFrame:IsShown()  return self.shown == true end
+function WorldMapFrame:HookScript(script, handler)
+    worldMapHooks[script] = worldMapHooks[script] or {}
+    table.insert(worldMapHooks[script], handler)
+end
+
+CN_TEST_WORLD_MAP_HOOKS = worldMapHooks
 
 local createdFrames = {}
 
@@ -23136,6 +23914,328 @@ assert(CompletionNavigatorDB.version == 4, "migration must be idempotent")
 
 print("  re-run is idempotent")
 
+print("\nMap pins:")
+
+do
+    local pins = CN:GetModule("MapPins")
+
+    assert(pins, "the MapPins module must load")
+    assert(pins.IsEnabled(), "pins are on by default")
+
+    -- GEOMETRY.
+    --
+    -- The canvas is anchored from its TOPLEFT and grows downward, so y must
+    -- be NEGATED. A mirrored pin still lands somewhere plausible on screen,
+    -- which is exactly why looking at it would never reveal the bug: on a
+    -- roughly symmetrical map the wrong answer looks right.
+    local ox, oy = pins.CanvasOffset(0.25, 0.75, 1000, 666)
+
+    assert(math.abs(ox - 250) < 0.01,
+        "x offset must be the fraction of the width, got " .. tostring(ox))
+    assert(oy < 0,
+        "y offset must be NEGATIVE -- the canvas grows downward from TOPLEFT")
+    assert(math.abs(oy + 499.5) < 0.01,
+        "y offset must be minus the fraction of the height, got " .. tostring(oy))
+
+    -- A point in the top half must sit ABOVE a point in the bottom half.
+    local _, topY    = pins.CanvasOffset(0.5, 0.1, 1000, 666)
+    local _, bottomY = pins.CanvasOffset(0.5, 0.9, 1000, 666)
+
+    assert(topY > bottomY,
+        "a northern point must be higher on the canvas than a southern one")
+
+    assert(pins.CanvasOffset(nil, 0.5, 1000, 666) == nil,
+        "a pin with no coordinates has no offset")
+
+    -- SIZE. A hub holding more is drawn larger.
+    assert(pins.PinSize(6, 3) > pins.PinSize(1, 3),
+        "a busier hub must be a bigger pin")
+
+    -- LAYOUT.
+    local hubs = {
+        { x = 0.2, y = 0.3, mapID = 2112, objectives = {
+            { name = "Take This", phase = "PICKUP" },
+            { name = "Do This",   phase = "ACTIVE" },
+        } },
+        { x = 0.8, y = 0.9, mapID = 2112,
+          objectives = { { name = "Hand This In", phase = "TURNIN" } } },
+        { objectives = { { name = "Nowhere" } } },
+    }
+
+    local laid = pins.Layout(hubs)
+
+    assert(#laid == 2, "a hub with no coordinates cannot be drawn, got " .. #laid)
+    assert(laid[1].order == 1 and laid[2].order == 2,
+        "pins must be numbered in route order")
+    assert(laid[1].hubSize == 2, "pin must carry how much is at that stop")
+
+    -- The tooltip body must read in the order you would do things.
+    local lines = pins.DescribeLines(laid[1])
+
+    assert(#lines == 2, "every objective at the stop is described")
+    assert(lines[1]:find("Take This"), "first line is the first thing to do")
+
+    -- ROUTE START.
+    --
+    -- Looking at a map you are not standing in must NOT start the route from
+    -- your own position: your coordinates mean nothing on another map, and
+    -- using them orders the stops by distance from an arbitrary point.
+    local realPosition = CN.GetPlayerPosition
+    CN.GetPlayerPosition = function() return 2112, 0.11, 0.22 end
+
+    local sx, sy, fromPlayer = pins.RouteStart(2112)
+
+    assert(fromPlayer and math.abs(sx - 0.11) < 0.001,
+        "on your own map the route starts at your feet")
+
+    local ox2, oy2, otherMap = pins.RouteStart(84)
+
+    assert(not otherMap and ox2 == 0.5 and oy2 == 0.5,
+        "on someone else's map the route starts at the middle, not at you")
+
+    CN.GetPlayerPosition = realPosition
+
+    -- PLACEMENT against the stubbed canvas.
+    local canvas = WorldMapFrame.ScrollContainer.Child
+
+    local placed = pins.Place(laid, canvas)
+
+    assert(placed == 2, "both located pins must be placed, got " .. placed)
+
+    local first = _G["CompletionNavigatorMapPin1"]
+
+    assert(first and first:IsShown(), "the first pin must be visible")
+
+    -- Placing a SHORTER route must hide the surplus rather than leave stale
+    -- pins from the previous map on screen.
+    pins.Place({ laid[1] }, canvas)
+
+    local second = _G["CompletionNavigatorMapPin2"]
+
+    assert(not second:IsShown(),
+        "a pin left over from a longer route must be hidden, not stranded")
+
+    -- Refresh must do nothing at all while the map is closed.
+    WorldMapFrame.shown = false
+    assert(pins.Refresh() == 0, "no pins while the map is closed")
+
+    -- And must draw when it is open.
+    WorldMapFrame.shown = true
+    WorldMapFrame.displayedMapID = 2112
+
+    pins.InvalidateCache()
+
+    local drawn = pins.Refresh(true)
+
+    assert(type(drawn) == "number", "Refresh reports how many stops it drew")
+
+    -- Turning them off must clear the map, not merely stop adding to it.
+    pins.SetEnabled(false)
+    assert(not pins.IsEnabled(), "pins can be turned off")
+    assert(not _G["CompletionNavigatorMapPin1"]:IsShown(),
+        "turning pins off must remove the ones already drawn")
+
+    pins.SetEnabled(true)
+
+    -- The map is shared with every other addon, so the hooks must be HOOKED.
+    assert(pins.Install(), "the world map hooks must install")
+    assert(CN_TEST_WORLD_MAP_HOOKS["OnShow"], "OnShow must be hooked")
+    assert(CN_TEST_WORLD_MAP_HOOKS["OnHide"], "OnHide must be hooked")
+
+    -- Installing twice must not hook twice, or every map open redraws once
+    -- per reload the player has done this session.
+    do
+        local showHooks = #CN_TEST_WORLD_MAP_HOOKS["OnShow"]
+
+        pins.Install()
+
+        assert(#CN_TEST_WORLD_MAP_HOOKS["OnShow"] == showHooks,
+            "Install must be idempotent")
+    end
+
+    -- Firing the hooks must not error: they run inside Blizzard's map code,
+    -- where a Lua error is the player's problem and not obviously ours.
+    for _, mapHook in ipairs(CN_TEST_WORLD_MAP_HOOKS["OnShow"]) do
+        mapHook()
+    end
+
+    for _, mapHook in ipairs(CN_TEST_WORLD_MAP_HOOKS["OnHide"]) do
+        mapHook()
+    end
+
+    -- Tooltip and click behaviour. A pin the player cannot interrogate is
+    -- decoration.
+    WorldMapFrame.shown = true
+    pins.InvalidateCache()
+    pins.Place(laid, canvas)
+
+    do
+        local pin1 = _G["CompletionNavigatorMapPin1"]
+
+        pin1.scripts["OnEnter"](pin1)
+        pin1.scripts["OnLeave"](pin1)
+
+        -- Clicking a stop whose members carry no coordinates of their own
+        -- must still navigate -- to the stop. The pin was drawn somewhere;
+        -- refusing to go there is the addon contradicting its own map.
+        local realSet = CN.SetWaypoint
+        local setTo   = nil
+
+        CN.SetWaypoint = function(mapID, x, y, title)
+            setTo = { mapID = mapID, x = x, y = y, title = title }
+            return true
+        end
+
+        pin1.scripts["OnClick"](pin1)
+
+        CN.SetWaypoint = realSet
+
+        assert(setTo, "clicking a pin must set a waypoint even when its "
+            .. "members have no coordinates of their own")
+        assert(math.abs(setTo.x - 0.2) < 0.001 and setTo.mapID == 2112,
+            "the waypoint must be the STOP's position, got "
+            .. tostring(setTo.x))
+
+        -- A pin whose hub is empty must not navigate rather than error.
+        pin1.pin = { order = 1, objectives = {} }
+        pin1.scripts["OnClick"](pin1)
+        pin1.scripts["OnEnter"](pin1)
+    end
+
+    -- The route must survive being asked for a map that has nothing on it.
+    WorldMapFrame.displayedMapID = 999999
+    pins.InvalidateCache()
+
+    assert(pins.Refresh(true) == 0, "an empty map draws no pins")
+
+    -- And a map the client will not name at all.
+    WorldMapFrame.displayedMapID = nil
+    pins.InvalidateCache()
+    assert(pins.Refresh(true) == 0, "no map ID means no pins")
+
+    WorldMapFrame.displayedMapID = 2112
+
+    -- The cache must not rebuild the route for an unchanged map.
+    pins.InvalidateCache()
+    pins.HubsForMap(2112)
+
+    do
+        local rebuilds = 0
+
+        local realBuild = CN.BuildZoneRoute
+
+        CN.BuildZoneRoute = function(...)
+            rebuilds = rebuilds + 1
+            return realBuild(...)
+        end
+
+        pins.HubsForMap(2112)
+
+        assert(rebuilds == 0,
+            "an unchanged map must reuse the cached route, not rebuild it")
+
+        pins.HubsForMap(2112, true)
+
+        assert(rebuilds == 1, "a forced refresh must rebuild")
+
+        CN.BuildZoneRoute = realBuild
+    end
+
+    -- Layout must tolerate being handed nonsense rather than erroring inside
+    -- a map redraw.
+    assert(#pins.Layout(nil) == 0, "no hubs, no pins")
+    assert(#pins.DescribeLines(nil) == 0, "no pin, no lines")
+
+    -- A hub with more objectives than the tooltip shows must say so rather
+    -- than silently truncating.
+    --
+    -- Scoped: the main chunk is close to Lua's 200-local ceiling, and a test
+    -- that cannot be compiled is worse than one that was never written.
+    do
+        local big = { order = 1, objectives = {} }
+
+        for index = 1, 12 do
+            table.insert(big.objectives,
+                { name = "Thing " .. index, phase = "ACTIVE" })
+        end
+
+        local bigLines = pins.DescribeLines(big)
+
+        assert(bigLines[#bigLines]:find("more"),
+            "a long list must end by saying how much was left out")
+    end
+
+    print("  " .. #laid .. " stops laid out, geometry and pooling verified")
+end
+
+-- The zone router must honour the type filter. A player who has hidden
+-- everything but quests is asking not to be walked to a pet.
+--
+-- The test supplies its own non-quest stop rather than hoping the live
+-- candidate list happens to contain one. An earlier version of this check
+-- read whatever was already there, found only quests, and passed while
+-- asserting nothing at all.
+do
+    CN.RegisterCandidateProvider("HarnessFilterProbe", function()
+        return {
+            {
+                id     = "probe-pet",
+                type   = CN.objectiveTypes.PET,
+                name   = "Filterable Pet",
+                mapID  = 2112,
+                x      = 0.31,
+                y      = 0.42,
+            },
+        }
+    end)
+
+    CN.InvalidateCandidates("harness")
+
+    local unfiltered = CN.BuildZoneRoute(2112, 0.5, 0.5)
+
+    local sawPet = false
+
+    for _, objective in ipairs(unfiltered) do
+        if objective.type == CN.objectiveTypes.PET then
+            sawPet = true
+        end
+    end
+
+    assert(sawPet, "the probe pet must be routed before any filter is applied")
+
+    local typeFilters = CN:GetModule("Filters")
+
+    typeFilters.OnlyType(CN.objectiveTypes.QUEST)
+
+    CN.InvalidateCandidates("harness")
+
+    local after = CN.BuildZoneRoute(2112, 0.5, 0.5)
+
+    for _, objective in ipairs(after) do
+        assert(objective.type == CN.objectiveTypes.QUEST,
+            "a filtered-out type must not appear in the route: "
+            .. tostring(objective.type))
+    end
+
+    assert(#after < #unfiltered,
+        "filtering must actually remove stops from the route")
+
+    typeFilters.EnableAllTypes()
+
+    CN.candidateProviders["HarnessFilterProbe"] = nil
+
+    -- The timing table keeps a row for every provider that has ever run, so
+    -- a probe left there shows up in the benchmark as if it were part of the
+    -- addon.
+    if CN.providerTimings then
+        CN.providerTimings["HarnessFilterProbe"] = nil
+    end
+
+    CN.InvalidateCandidates("harness")
+
+    print("  zone route honours the type filter")
+end
+
 print("\nALL HARNESS CHECKS PASSED")
 '@
 
@@ -23345,6 +24445,14 @@ fi
 # version's install directory works under any Lua interpreter.
 LUACOV_PATH=""
 
+# Ask luarocks first. It knows where it installed things, which a hardcoded
+# list of directories does not -- and a workspace-local rocks tree (which is
+# what CI now uses, having abandoned apt) appears in none of the usual places.
+if command -v luarocks >/dev/null 2>&1; then
+  ROCKS_PATH=$(luarocks path --lr-path 2>/dev/null)
+  [ -n "$ROCKS_PATH" ] && LUACOV_PATH="${ROCKS_PATH};${LUACOV_PATH}"
+fi
+
 for base in /usr/local/share/lua /usr/share/lua "$HOME/.luarocks/share/lua"; do
   [ -d "$base" ] || continue
 
@@ -23373,7 +24481,7 @@ cat > .luacov <<CONFIG
 statsfile = "luacov.stats.out"
 reportfile = "luacov.report.out"
 include = { "${ROOT}/.*" }
-exclude = { "harness", "bench", "luacov" }
+exclude = { "harness", "bench", "luacov", "^%./%.", "/%.lua/", "%.luarocks" }
 CONFIG
 
 rm -f luacov.stats.out luacov.report.out
@@ -23438,7 +24546,15 @@ echo "  init"
 $PWSH -NoProfile -File ./cn.ps1 init > init.log 2>&1
 FILES=$(grep -cE "wrote  .*\.lua$" init.log)
 echo "    $FILES lua files scaffolded"
-EXPECTED=$(grep -cE '^\s*"[A-Za-z/]+\.lua",' /home/claude/cn/gen.py)
+# Count the ORDER list specifically, not every quoted .lua string in gen.py.
+# Grepping the whole file counted names that appear elsewhere in it and made
+# this check fail for a reason that had nothing to do with the scaffold.
+EXPECTED=$(python3 -c "
+import re
+text = open('/home/claude/cn/gen.py').read()
+block = re.search(r'^ORDER = \[(.*?)^\]', text, re.S | re.M).group(1)
+print(len(re.findall(r'\"[^\"]+\.lua\"', block)))
+")
 [ "$FILES" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED lua files, scaffolded $FILES"; exit 1; }
 
 # The .toc must list only what the CLIENT loads. harness.lua stubs the whole
@@ -23552,6 +24668,61 @@ if command -v luacheck >/dev/null 2>&1; then
   echo "    $(grep -oE 'Total: [0-9]+ warnings / [0-9]+ errors' "$WORK/cilint.log")"
 fi
 
+echo "  CI ignores the toolchain it installs into the workspace"
+# CI builds Lua and LuaRocks into .lua/ in the repository root. Two distinct
+# problems follow, and a release failed on both at once:
+#
+#   1. The install directory is itself named `.lua`, so `-name '*.lua'` matched
+#      a DIRECTORY and luac was handed it. "cannot read ./.lua: Is a directory".
+#   2. Under it sit thousands of third-party files, some deliberately malformed
+#      because they are another project's test fixtures.
+#
+# Poison the tree the same way the runner does -- a directory named .lua, and a
+# broken file inside it -- and prove the checks skip both.
+mkdir -p "$WORK/.lua/share/lua/5.4"
+printf 'this is not ) valid lua ((\n' > "$WORK/.lua/share/lua/5.4/fixture.lua"
+
+(cd "$WORK" && \
+  find . -type f -name '*.lua' -not -path './.*' -exec luac5.4 -p {} + > poison.log 2>&1) || {
+  echo "FAIL: the syntax check walks into the installed toolchain"
+  tail -10 "$WORK/poison.log"; exit 1; }
+
+if command -v luacheck >/dev/null 2>&1; then
+  (cd "$WORK" && luacheck . --no-color > poisonlint.log 2>&1) || {
+    echo "FAIL: luacheck analyses the installed toolchain"
+    tail -10 "$WORK/poisonlint.log"; exit 1; }
+fi
+
+rm -rf "$WORK/.lua" "$WORK/poison.log" "$WORK/poisonlint.log"
+echo "    third-party .lua files under dotted directories are skipped"
+
+echo "  CI: no Lua search may walk the workspace toolchain"
+python3 - "$WORK/.github/workflows/release.yml" <<'FINDLINT'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+searches = [line.strip() for line in text.splitlines()
+            if re.search(r"find .*-name '\*\.lua'", line)]
+
+if not searches:
+    print("FAIL: no Lua file search found; this lint is checking nothing.")
+    sys.exit(1)
+
+bad = [line for line in searches
+       if "-not -path './.*'" not in line or "-type f" not in line]
+
+if bad:
+    print("FAIL: a Lua file search is not scoped to our own files")
+    for line in bad:
+        print("  " + line)
+    print("  Needs -type f (the install directory is NAMED .lua) and")
+    print("  -not -path './.*' (the toolchain lives inside it).")
+    sys.exit(1)
+
+print("    every Lua search is scoped to our own files")
+FINDLINT
+
 echo "  coverage: harness exercises the addon"
 if command -v luacov >/dev/null 2>&1; then
   # Run against the scaffolded tree, which is what actually ships.
@@ -23577,7 +24748,11 @@ echo "  coverage degrades instead of blocking"
 # A developer tool being absent must never stop a release. This exact failure
 # shipped: coverage.sh hardcoded a luacov path, died on the CI runner, and the
 # packager never ran -- so a tagged release never reached CurseForge.
-(cd "$WORK" && sed 's#/usr/local/share/lua#/nonexistent/share/lua#g; s#/usr/share/lua#/nonexistent2/share/lua#g; s#$HOME/.luarocks/share/lua#/nonexistent3#g' coverage.sh > coverage_nolua.sh \
+#
+# Every way coverage.sh can find luacov must be blinded, or this passes while
+# proving nothing: once it learned to ask luarocks, blanking the hardcoded
+# directories alone left it finding luacov anyway.
+(cd "$WORK" && sed 's#/usr/local/share/lua#/nonexistent/share/lua#g; s#/usr/share/lua#/nonexistent2/share/lua#g; s#$HOME/.luarocks/share/lua#/nonexistent3#g; s#command -v luarocks#command -v definitely-not-luarocks#g' coverage.sh > coverage_nolua.sh \
   && bash coverage_nolua.sh . 80 > nolua.log 2>&1)
 NOLUA=$?
 if [ "$NOLUA" -ne 0 ]; then
@@ -23616,6 +24791,45 @@ if minutes > 60:
 print("    job bounded at %d minutes" % minutes)
 TIMEOUT
 
+echo "  CI: the toolchain does not come from the runner's package manager"
+python3 - "$WORK/.github/workflows/release.yml" <<'APTLOCK'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+# A fresh runner holds the dpkg lock via unattended-upgrades. apt-get has no
+# default timeout on that lock: it waits silently, forever. One release wedged
+# there for thirty-eight minutes. Bounding the wait did not help -- the lock
+# was still held, so the install failed instead of hanging.
+#
+# The toolchain now comes from setup actions that build into the workspace,
+# contending with nothing. Any apt-get reintroduced here must at minimum bound
+# the lock wait, and must not be how Lua itself arrives.
+calls = [line.strip() for line in text.splitlines()
+         if re.search(r"\bapt-get\b", line)
+         and not line.strip().startswith("#")]
+
+unbounded = [c for c in calls if "DPkg::Lock::Timeout" not in c]
+
+if unbounded:
+    print("FAIL: apt-get invocation with no dpkg lock timeout")
+    for call in unbounded:
+        print("  " + call)
+    print("  Add -o DPkg::Lock::Timeout=<seconds>; without it apt waits forever.")
+    sys.exit(1)
+
+if re.search(r"apt-get[^\n]*\b(lua5\.\d|lua-check|luarocks)\b", text):
+    print("FAIL: the Lua toolchain is being installed with apt-get.")
+    print("  That is the dpkg-lock hang. Use the setup actions instead.")
+    sys.exit(1)
+
+if not re.search(r"uses:\s*leafo/gh-actions-lua", text):
+    print("FAIL: no Lua setup action; something replaced it.")
+    sys.exit(1)
+
+print("    Lua from a setup action, %d bounded apt-get call(s)" % len(calls))
+APTLOCK
+
 echo "  CI: only real failures may block the packager"
 # Any blocking CI step must be one that indicates broken code. Optional
 # tooling steps must carry continue-on-error.
@@ -23628,6 +24842,7 @@ text = open(sys.argv[1], encoding="utf-8").read()
 # actually broken.
 blocking_allowed = {
     "Check out", "Fetch tags", "Verify a tag points at HEAD", "Install Lua",
+    "Install LuaRocks", "Install Lua tooling",
     "Syntax check every Lua file", "Verify the .toc lists every Lua file",
     "Lint", "Run the offline harness",
     "Verify the CurseForge token is available", "Package and upload",

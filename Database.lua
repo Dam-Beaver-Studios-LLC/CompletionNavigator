@@ -38,6 +38,12 @@ CN.defaults = {
         -- of a player who has not asked for navigation.
         arrow        = true,
 
+        -- Numbered route pins on the world map. On by default: like tooltip
+        -- lines they are additive and read-only, they appear only on a map
+        -- the player deliberately opened, and they are the only place the
+        -- routing engine's work is visible.
+        mapPins      = true,
+
         -- Announcing rares out loud is the noisiest thing this addon could
         -- do, so it is opt-in. Unsolicited sound is worse than an uninvited
         -- waypoint, and the waypoint is already off by default.
@@ -294,6 +300,7 @@ CN.characterOverridable = {
     autoWaypoint = true,
     arrow        = true,
     tooltips     = true,
+    mapPins      = true,
 }
 
 local function AccountSettings()

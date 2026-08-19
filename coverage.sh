@@ -32,6 +32,14 @@ fi
 # version's install directory works under any Lua interpreter.
 LUACOV_PATH=""
 
+# Ask luarocks first. It knows where it installed things, which a hardcoded
+# list of directories does not -- and a workspace-local rocks tree (which is
+# what CI now uses, having abandoned apt) appears in none of the usual places.
+if command -v luarocks >/dev/null 2>&1; then
+  ROCKS_PATH=$(luarocks path --lr-path 2>/dev/null)
+  [ -n "$ROCKS_PATH" ] && LUACOV_PATH="${ROCKS_PATH};${LUACOV_PATH}"
+fi
+
 for base in /usr/local/share/lua /usr/share/lua "$HOME/.luarocks/share/lua"; do
   [ -d "$base" ] || continue
 
@@ -60,7 +68,7 @@ cat > .luacov <<CONFIG
 statsfile = "luacov.stats.out"
 reportfile = "luacov.report.out"
 include = { "${ROOT}/.*" }
-exclude = { "harness", "bench", "luacov" }
+exclude = { "harness", "bench", "luacov", "^%./%.", "/%.lua/", "%.luarocks" }
 CONFIG
 
 rm -f luacov.stats.out luacov.report.out
