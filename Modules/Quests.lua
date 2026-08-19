@@ -211,6 +211,21 @@ function Quests.AvailableOnMap(mapID)
     return available
 end
 
+-- How many quests are on offer here that you have not taken.
+--
+-- This is the number a player means by "new", and it took a fourteen-year-old
+-- to say so plainly. The addon used to report how many quests it had written
+-- into its own database for the first time -- a scanner statistic, correct and
+-- useless, which drops to zero forever once a zone has been walked. He read
+-- "0 new" in a zone with exclamation marks visible on his screen and
+-- concluded, reasonably, that the addon was broken.
+--
+-- A number shown to a player has to be about the player's world. If it is
+-- about the addon's bookkeeping it belongs in debug output.
+function Quests.AvailableCount(mapID)
+    return #Quests.AvailableOnMap(mapID)
+end
+
 function Quests.DiscoverActive()
     local entries = Blizzard.GetQuestLogEntries()
 
@@ -679,7 +694,8 @@ end)
 CN:OnLogin(function()
     local seen, new = Quests.DiscoverActive()
 
-    DebugPrint("Login quest scan: " .. seen .. " active, " .. new .. " new.")
+    DebugPrint("Login quest scan: " .. seen .. " active, "
+        .. new .. " newly recorded.")
 end)
 
 ------------------------------------------------------------
@@ -826,13 +842,61 @@ CN:RegisterCommand{
 }
 
 CN:RegisterCommand{
+    name    = "available",
+    aliases = { "pickup", "offered" },
+    args    = "[zone name is not needed; uses the zone you are in]",
+    order   = 13,
+    help    = "List the quests offered here that you have not accepted.",
+    handler = function()
+        local mapID = select(1, CN.GetPlayerPosition())
+
+        local available = Quests.AvailableOnMap(mapID)
+
+        if #available == 0 then
+            Print("Nothing here is offering you a quest you have not taken.")
+            Print("|cff999999That counts quest starts the map is showing. A "
+                .. "giver you have not walked past yet is not on the map, so "
+                .. "it is not counted.|r")
+            return
+        end
+
+        Print(#available .. " quest"
+            .. (#available == 1 and "" or "s")
+            .. " available to pick up here:")
+
+        for _, poi in ipairs(available) do
+            local title = Quests.GetName(poi.questID)
+                or Blizzard.GetQuestTitle(poi.questID, true)
+                or ("Quest " .. poi.questID)
+
+            local where = ""
+
+            if poi.x and poi.y then
+                where = string.format(" |cff999999(%.1f, %.1f)|r",
+                    poi.x * 100, poi.y * 100)
+            end
+
+            Print("  |cffffff00" .. title .. "|r" .. where)
+        end
+
+        Print("|cff999999These are in your recommendations and in |r/cn zone"
+            .. "|cff999999 too.|r")
+    end,
+}
+
+CN:RegisterCommand{
     name    = "discoveractive",
     order   = 26,
     help    = "Discover quests currently in the Quest Log.",
     handler = function()
-        local seen, new = Quests.DiscoverActive()
+        local seen, recorded = Quests.DiscoverActive()
 
-        Print("Active quests discovered: " .. seen .. " (" .. new .. " new).")
+        local available = Quests.AvailableCount()
+
+        Print("Quests: " .. seen .. " in your log, "
+            .. "|cffffff00" .. available .. "|r available to pick up here.")
+
+        DebugPrint(recorded .. " newly recorded in the database.")
     end,
 }
 

@@ -7,6 +7,40 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.26.1]
+
+Reported from live play, again: *"the '0 New' just confuses me -- I feel like
+'0 New' should show the amount of quests in the zone that are available but
+not accepted."*
+
+He is right, and this one was worse than a bug.
+
+### Fixed
+
+- **The addon was showing a player a number about itself.** "New" counted rows
+  written to the addon's own database for the first time. That is a scanner
+  statistic: accurate, and permanently zero once a zone has been walked, since
+  there is nothing left to record. A player reads "0 new" while looking at
+  exclamation marks on their screen and reasonably concludes the addon is
+  broken.
+  0.23.0 fixed the *cause* of that number sitting at zero. It never asked
+  whether the number belonged in front of a player at all. It did not.
+- Quest scans now report **how many quests are available to pick up where you
+  are standing** -- a fact about the world, which keeps being true after the
+  database has seen everything. The bookkeeping figure still exists and now
+  goes to debug output, where it was always the only thing it was useful for.
+- The Scans panel leads with the same number and demotes the database counts
+  to one dim line, in that order. A player reads the top line and stops.
+
+### Added
+
+- **`/cn available`** lists them, with coordinates: what is on offer here that
+  you have not taken. A count you cannot act on is half an answer.
+- The test suite now pins the *meaning*, not just the value: the count must
+  survive repeated scanning, because availability is a fact about the zone and
+  not about what the addon has recorded. Reverting to the old definition fails
+  the build.
+
 ## [0.26.0]
 
 Chase something.

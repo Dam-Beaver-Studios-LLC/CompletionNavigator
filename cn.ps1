@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.26.0'
+$script:ToolkitVersion = '0.26.1'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.26.0"
+CN.version     = "0.26.1"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -4381,10 +4381,14 @@ UI.RegisterTab{
             local module = CN:GetModule("Quests")
 
             if module then
-                local seen, new = module.DiscoverActive()
-                local scanned   = module.ScanKnown()
+                local seen, recorded = module.DiscoverActive()
+                local scanned        = module.ScanKnown()
 
-                Print("Quest scan: " .. seen .. " active, " .. new .. " new, "
+                Print("Quests: " .. seen .. " in your log, "
+                    .. "|cffffff00" .. module.AvailableCount() .. "|r "
+                    .. "available to pick up here.")
+
+                CN.DebugPrint(recorded .. " newly recorded, "
                     .. scanned .. " checked.")
             end
 
@@ -4409,10 +4413,26 @@ UI.RegisterTab{
     refresh = function(panel)
         local lines = {}
 
+        -- What is true of the player's world first; what is true of the
+        -- addon's database second, and marked as such. The order matters:
+        -- a player reads the top line and stops.
+        local questModule = CN:GetModule("Quests")
+
         table.insert(lines, "|cffffd100Quests|r")
-        table.insert(lines, "Discovered: " .. CN.CountKeys(CN.Account("discoveredQuests")))
-        table.insert(lines, "Names cached: " .. CN.CountKeys(CN.Account("questMetadata")))
-        table.insert(lines, "Statuses stored: " .. CN.CountKeys(CN.Account("questStatus")))
+
+        if questModule then
+            local available = questModule.AvailableCount()
+
+            table.insert(lines, "Available to pick up here: "
+                .. (available > 0 and "|cffffff00" or "|cff999999")
+                .. available .. "|r")
+            table.insert(lines, "In your log: " .. #CN.Blizzard.GetQuestLogEntries())
+        end
+
+        table.insert(lines, "|cff999999Database: "
+            .. CN.CountKeys(CN.Account("discoveredQuests")) .. " known, "
+            .. CN.CountKeys(CN.Account("questMetadata")) .. " named, "
+            .. CN.CountKeys(CN.Account("questStatus")) .. " tracked|r")
         table.insert(lines, " ")
 
         local reputations = CN:GetModule("Reputations")
@@ -8383,6 +8403,21 @@ function Quests.AvailableOnMap(mapID)
     return available
 end
 
+-- How many quests are on offer here that you have not taken.
+--
+-- This is the number a player means by "new", and it took a fourteen-year-old
+-- to say so plainly. The addon used to report how many quests it had written
+-- into its own database for the first time -- a scanner statistic, correct and
+-- useless, which drops to zero forever once a zone has been walked. He read
+-- "0 new" in a zone with exclamation marks visible on his screen and
+-- concluded, reasonably, that the addon was broken.
+--
+-- A number shown to a player has to be about the player's world. If it is
+-- about the addon's bookkeeping it belongs in debug output.
+function Quests.AvailableCount(mapID)
+    return #Quests.AvailableOnMap(mapID)
+end
+
 function Quests.DiscoverActive()
     local entries = Blizzard.GetQuestLogEntries()
 
@@ -8851,7 +8886,8 @@ end)
 CN:OnLogin(function()
     local seen, new = Quests.DiscoverActive()
 
-    DebugPrint("Login quest scan: " .. seen .. " active, " .. new .. " new.")
+    DebugPrint("Login quest scan: " .. seen .. " active, "
+        .. new .. " newly recorded.")
 end)
 
 ------------------------------------------------------------
@@ -8998,13 +9034,61 @@ CN:RegisterCommand{
 }
 
 CN:RegisterCommand{
+    name    = "available",
+    aliases = { "pickup", "offered" },
+    args    = "[zone name is not needed; uses the zone you are in]",
+    order   = 13,
+    help    = "List the quests offered here that you have not accepted.",
+    handler = function()
+        local mapID = select(1, CN.GetPlayerPosition())
+
+        local available = Quests.AvailableOnMap(mapID)
+
+        if #available == 0 then
+            Print("Nothing here is offering you a quest you have not taken.")
+            Print("|cff999999That counts quest starts the map is showing. A "
+                .. "giver you have not walked past yet is not on the map, so "
+                .. "it is not counted.|r")
+            return
+        end
+
+        Print(#available .. " quest"
+            .. (#available == 1 and "" or "s")
+            .. " available to pick up here:")
+
+        for _, poi in ipairs(available) do
+            local title = Quests.GetName(poi.questID)
+                or Blizzard.GetQuestTitle(poi.questID, true)
+                or ("Quest " .. poi.questID)
+
+            local where = ""
+
+            if poi.x and poi.y then
+                where = string.format(" |cff999999(%.1f, %.1f)|r",
+                    poi.x * 100, poi.y * 100)
+            end
+
+            Print("  |cffffff00" .. title .. "|r" .. where)
+        end
+
+        Print("|cff999999These are in your recommendations and in |r/cn zone"
+            .. "|cff999999 too.|r")
+    end,
+}
+
+CN:RegisterCommand{
     name    = "discoveractive",
     order   = 26,
     help    = "Discover quests currently in the Quest Log.",
     handler = function()
-        local seen, new = Quests.DiscoverActive()
+        local seen, recorded = Quests.DiscoverActive()
 
-        Print("Active quests discovered: " .. seen .. " (" .. new .. " new).")
+        local available = Quests.AvailableCount()
+
+        Print("Quests: " .. seen .. " in your log, "
+            .. "|cffffff00" .. available .. "|r available to pick up here.")
+
+        DebugPrint(recorded .. " newly recorded in the database.")
     end,
 }
 
@@ -19957,7 +20041,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.26.0
+## Version: 0.26.1
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -20172,6 +20256,40 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.26.1]
+
+Reported from live play, again: *"the '0 New' just confuses me -- I feel like
+'0 New' should show the amount of quests in the zone that are available but
+not accepted."*
+
+He is right, and this one was worse than a bug.
+
+### Fixed
+
+- **The addon was showing a player a number about itself.** "New" counted rows
+  written to the addon's own database for the first time. That is a scanner
+  statistic: accurate, and permanently zero once a zone has been walked, since
+  there is nothing left to record. A player reads "0 new" while looking at
+  exclamation marks on their screen and reasonably concludes the addon is
+  broken.
+  0.23.0 fixed the *cause* of that number sitting at zero. It never asked
+  whether the number belonged in front of a player at all. It did not.
+- Quest scans now report **how many quests are available to pick up where you
+  are standing** -- a fact about the world, which keeps being true after the
+  database has seen everything. The bookkeeping figure still exists and now
+  goes to debug output, where it was always the only thing it was useful for.
+- The Scans panel leads with the same number and demotes the database counts
+  to one dim line, in that order. A player reads the top line and stops.
+
+### Added
+
+- **`/cn available`** lists them, with coordinates: what is on offer here that
+  you have not taken. A count you cannot act on is half an answer.
+- The test suite now pins the *meaning*, not just the value: the count must
+  survive repeated scanning, because availability is a fact about the zone and
+  not about what the addon has recorded. Reverting to the old definition fails
+  the build.
 
 ## [0.26.0]
 
@@ -25540,6 +25658,58 @@ do
     goalStore.Clear()
 
     print("  reputation, achievement, appearance and unknown-source chains")
+end
+
+
+print("\nThe number a player reads:")
+
+do
+    local quests = CN:GetModule("Quests")
+
+    -- "New" used to mean "rows this addon wrote to its own database for the
+    -- first time". That is a scanner statistic: correct, and zero forever
+    -- once a zone has been walked. A player reads it as "quests I could go
+    -- and pick up right now", sees zero while looking at exclamation marks,
+    -- and concludes the addon is broken. Reported from live play, twice.
+    --
+    -- So the counter shown to a player must be about the WORLD, and it must
+    -- keep working after the database has seen everything.
+    local pickupCount = quests.AvailableCount()
+
+    assert(pickupCount > 0,
+        "the fixture zone offers quests, so the count must not be zero")
+
+    -- Scanning does not change it. This is the whole point: discovery
+    -- saturates, availability does not.
+    quests.DiscoverActive()
+    quests.DiscoverActive()
+
+    local afterScanning = quests.AvailableCount()
+
+    assert(afterScanning == pickupCount,
+        "availability must survive being scanned -- it is a fact about the "
+        .. "zone, not about what the addon has recorded. Was " .. pickupCount
+        .. ", became " .. afterScanning)
+
+    -- And the second scan must indeed have recorded nothing new, which is
+    -- exactly why the old number was useless.
+    local _, recorded = quests.DiscoverActive()
+
+    assert(recorded == 0,
+        "a repeated scan records nothing new; that is the statistic that "
+        .. "misled a player when it was shown to them")
+
+    -- Every counted quest must be one you could actually walk up to and take.
+    for _, poi in ipairs(quests.AvailableOnMap()) do
+        assert(not quests.IsCompletedByCharacter(poi.questID),
+            "a finished quest is not available to pick up")
+        assert(not CN.Blizzard.IsQuestInLog(poi.questID),
+            "a quest already in your log is not available to pick up")
+    end
+
+    CN.HandleSlashCommand("available")
+
+    print("  availability is a fact about the zone, not about the database")
 end
 
 

@@ -874,10 +874,14 @@ UI.RegisterTab{
             local module = CN:GetModule("Quests")
 
             if module then
-                local seen, new = module.DiscoverActive()
-                local scanned   = module.ScanKnown()
+                local seen, recorded = module.DiscoverActive()
+                local scanned        = module.ScanKnown()
 
-                Print("Quest scan: " .. seen .. " active, " .. new .. " new, "
+                Print("Quests: " .. seen .. " in your log, "
+                    .. "|cffffff00" .. module.AvailableCount() .. "|r "
+                    .. "available to pick up here.")
+
+                CN.DebugPrint(recorded .. " newly recorded, "
                     .. scanned .. " checked.")
             end
 
@@ -902,10 +906,26 @@ UI.RegisterTab{
     refresh = function(panel)
         local lines = {}
 
+        -- What is true of the player's world first; what is true of the
+        -- addon's database second, and marked as such. The order matters:
+        -- a player reads the top line and stops.
+        local questModule = CN:GetModule("Quests")
+
         table.insert(lines, "|cffffd100Quests|r")
-        table.insert(lines, "Discovered: " .. CN.CountKeys(CN.Account("discoveredQuests")))
-        table.insert(lines, "Names cached: " .. CN.CountKeys(CN.Account("questMetadata")))
-        table.insert(lines, "Statuses stored: " .. CN.CountKeys(CN.Account("questStatus")))
+
+        if questModule then
+            local available = questModule.AvailableCount()
+
+            table.insert(lines, "Available to pick up here: "
+                .. (available > 0 and "|cffffff00" or "|cff999999")
+                .. available .. "|r")
+            table.insert(lines, "In your log: " .. #CN.Blizzard.GetQuestLogEntries())
+        end
+
+        table.insert(lines, "|cff999999Database: "
+            .. CN.CountKeys(CN.Account("discoveredQuests")) .. " known, "
+            .. CN.CountKeys(CN.Account("questMetadata")) .. " named, "
+            .. CN.CountKeys(CN.Account("questStatus")) .. " tracked|r")
         table.insert(lines, " ")
 
         local reputations = CN:GetModule("Reputations")

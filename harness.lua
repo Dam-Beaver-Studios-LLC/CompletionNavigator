@@ -3523,4 +3523,56 @@ do
 end
 
 
+print("\nThe number a player reads:")
+
+do
+    local quests = CN:GetModule("Quests")
+
+    -- "New" used to mean "rows this addon wrote to its own database for the
+    -- first time". That is a scanner statistic: correct, and zero forever
+    -- once a zone has been walked. A player reads it as "quests I could go
+    -- and pick up right now", sees zero while looking at exclamation marks,
+    -- and concludes the addon is broken. Reported from live play, twice.
+    --
+    -- So the counter shown to a player must be about the WORLD, and it must
+    -- keep working after the database has seen everything.
+    local pickupCount = quests.AvailableCount()
+
+    assert(pickupCount > 0,
+        "the fixture zone offers quests, so the count must not be zero")
+
+    -- Scanning does not change it. This is the whole point: discovery
+    -- saturates, availability does not.
+    quests.DiscoverActive()
+    quests.DiscoverActive()
+
+    local afterScanning = quests.AvailableCount()
+
+    assert(afterScanning == pickupCount,
+        "availability must survive being scanned -- it is a fact about the "
+        .. "zone, not about what the addon has recorded. Was " .. pickupCount
+        .. ", became " .. afterScanning)
+
+    -- And the second scan must indeed have recorded nothing new, which is
+    -- exactly why the old number was useless.
+    local _, recorded = quests.DiscoverActive()
+
+    assert(recorded == 0,
+        "a repeated scan records nothing new; that is the statistic that "
+        .. "misled a player when it was shown to them")
+
+    -- Every counted quest must be one you could actually walk up to and take.
+    for _, poi in ipairs(quests.AvailableOnMap()) do
+        assert(not quests.IsCompletedByCharacter(poi.questID),
+            "a finished quest is not available to pick up")
+        assert(not CN.Blizzard.IsQuestInLog(poi.questID),
+            "a quest already in your log is not available to pick up")
+    end
+
+    CN.HandleSlashCommand("available")
+
+    print("  availability is a fact about the zone, not about the database")
+end
+
+
 print("\nALL HARNESS CHECKS PASSED")
