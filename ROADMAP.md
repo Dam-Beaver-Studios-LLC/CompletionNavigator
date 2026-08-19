@@ -1,12 +1,23 @@
 # Completion Navigator â€” Roadmap
 
-Current version: **0.23.0** Â· 42 Lua files Â· ~18,900 lines Â· 87 slash commands Â· 15 candidate providers Â· 10 UI tabs Â· 85% test coverage
+Current version: **0.24.0** Â· 42 Lua files Â· ~19,300 lines Â· 87 slash commands Â· 15 candidate providers Â· 10 UI tabs Â· 85% test coverage
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
 This is an audit of what is built against what was designed, not a wishlist. Every item below was found by reading the code, not by imagining features.
 
 **A note on how defects get found here.** Two of the worst bugs so far â€” an arrow that pointed the wrong way, and an addon that could not see an unaccepted quest â€” survived a passing test suite because the *test data* had the same blind spot as the code. A stub that only models the cases the code already handles cannot fail. When adding tests, add the case the code does **not** handle first.
+
+---
+
+## Known scope limits, stated plainly
+
+These are not roadmap items; they are the honest edges of what the addon can see.
+
+- **It sees available quests on your CURRENT map only**, because that is what the client's POI list exposes. It cannot enumerate every quest in the game, or tell you what is waiting three zones away.
+- **Eligibility filtering is mostly implicit.** The client only draws quest pins you qualify for, so class, race, level and faction gating is handled by not being shown â€” the addon's own eligibility rules exist but are backed by a nearly empty curated database, so it cannot proactively say *"that one is for a Druid."*
+- **Alt recommendations are strongest for reputation, recipes, titles and professions**, where the addon has per-character data. For quests it is weaker, because it only knows what your characters have actually done.
+- **Turn-in locations come from the client's own "next waypoint"**, which moves as you progress. The addon models the three phases but does not have an independent database of turn-in NPCs.
 
 ---
 

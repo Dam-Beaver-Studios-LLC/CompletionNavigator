@@ -177,6 +177,157 @@ function CN.ClusterByMap(objectives)
     return clusters
 end
 
+------------------------------------------------------------
+-- HUBS
+------------------------------------------------------------
+
+-- How close two stops must be to count as the same place, in yards.
+--
+-- Roughly "you can see both without moving". Quest givers standing together
+-- at a camp, and the NPC you hand four quests back to, are the cases this
+-- exists for.
+CN.hubRadiusYards = 70
+
+-- Distance between two objectives in real yards where the client can convert,
+-- falling back to normalized map units scaled to a plausible zone size.
+--
+-- The fallback matters: map coordinates are normalized per map, so the same
+-- 0.01 is a different real distance in every zone, and clustering on raw
+-- normalized distance would make hubs enormous in small zones and useless in
+-- large ones.
+function CN.ObjectiveDistanceYards(a, b)
+    if not (a and b and a.x and a.y and b.x and b.y) then
+        return nil
+    end
+
+    if a.mapID and b.mapID and a.mapID ~= b.mapID then
+        return nil
+    end
+
+    local navigation = CN:GetModule("Navigation")
+
+    if navigation and a.mapID then
+        local yards = navigation.DistanceYards(a.mapID, a.x, a.y, b.x, b.y)
+
+        if yards then
+            return yards
+        end
+    end
+
+    -- Fallback: assume a zone is about 2000 yards across. Crude, and only
+    -- used when the client will not convert.
+    local dx = a.x - b.x
+    local dy = a.y - b.y
+
+    return math.sqrt((dx * dx) + (dy * dy)) * 2000
+end
+
+-- Groups objectives that share a place.
+--
+-- This is the heart of not running back and forth. A route over individual
+-- objectives visits a camp three times if three things are there; a route
+-- over HUBS visits it once and does all three.
+--
+-- Single-link clustering: a stop joins a hub if it is within the radius of
+-- ANY member, which is what makes a row of quest givers along a road become
+-- one stop rather than four.
+function CN.ClusterByProximity(objectives, radiusYards)
+    radiusYards = radiusYards or CN.hubRadiusYards
+
+    local hubs = {}
+
+    for _, objective in ipairs(objectives) do
+        local joined = nil
+
+        for _, hub in ipairs(hubs) do
+            for _, member in ipairs(hub.objectives) do
+                local distance = CN.ObjectiveDistanceYards(objective, member)
+
+                if distance and distance <= radiusYards then
+                    joined = hub
+                    break
+                end
+            end
+
+            if joined then break end
+        end
+
+        if joined then
+            table.insert(joined.objectives, objective)
+        else
+            table.insert(hubs, {
+                mapID      = objective.mapID,
+                objectives = { objective },
+            })
+        end
+    end
+
+    -- A hub's position is the centre of what it contains, so routing between
+    -- hubs is routing between places rather than between arbitrary members.
+    for _, hub in ipairs(hubs) do
+        local sumX, sumY = 0, 0
+
+        for _, objective in ipairs(hub.objectives) do
+            sumX = sumX + objective.x
+            sumY = sumY + objective.y
+        end
+
+        hub.x = sumX / #hub.objectives
+        hub.y = sumY / #hub.objectives
+
+        -- Within a hub, order by what you would naturally do: collect quests,
+        -- do the work, hand them back.
+        local phaseOrder = { PICKUP = 1, ACTIVE = 2, TURNIN = 3 }
+
+        table.sort(hub.objectives, function(a, b)
+            local left  = phaseOrder[a.phase or ""] or 2
+            local right = phaseOrder[b.phase or ""] or 2
+
+            if left ~= right then
+                return left < right
+            end
+
+            return tostring(a.name) < tostring(b.name)
+        end)
+    end
+
+    return hubs
+end
+
+-- Describes what a hub is for, in the order you would do it.
+function CN.DescribeHub(hub)
+    local counts, order = {}, {}
+
+    for _, objective in ipairs(hub.objectives) do
+        local phase = objective.phase or "ACTIVE"
+
+        if not counts[phase] then
+            counts[phase] = 0
+            table.insert(order, phase)
+        end
+
+        counts[phase] = counts[phase] + 1
+    end
+
+    local phaseOrder = { PICKUP = 1, ACTIVE = 2, TURNIN = 3 }
+
+    table.sort(order, function(a, b)
+        return (phaseOrder[a] or 2) < (phaseOrder[b] or 2)
+    end)
+
+    local parts = {}
+
+    local quests = CN:GetModule("Quests")
+
+    for _, phase in ipairs(order) do
+        local verb = quests and quests.PhaseVerb(phase) or "do"
+
+        table.insert(parts, verb .. " " .. counts[phase])
+    end
+
+    return table.concat(parts, ", ")
+end
+
 -- Nearest-neighbour ordering from a starting point. Good enough for a
 -- zone sweep; a proper route solver can replace this later.
 -- Squared distance is enough for comparisons and avoids a sqrt per pair.
@@ -320,21 +471,41 @@ function CN.BuildZoneRoute(mapID, startX, startY)
         end
     end
 
-    local route = CN.OrderByProximity(located, startX, startY)
+    -- Route between PLACES, not between objectives.
+    --
+    -- Ordering individual objectives sends you to a camp, away, and back again
+    -- for each thing standing there. Grouping them first means you arrive
+    -- once, do everything -- collect the quests, then the work, then hand them
+    -- back -- and leave.
+    local hubs = CN.ClusterByProximity(located)
 
-    -- Greedy first, then improve. Nearest-neighbour gives a good starting
-    -- order cheaply; 2-opt removes the crossings it leaves behind.
-    local improved, saved = CN.ImproveRoute(route, startX, startY)
+    local orderedHubs = CN.OrderByProximity(hubs, startX, startY)
 
-    route = improved
+    local improvedHubs, saved = CN.ImproveRoute(orderedHubs, startX, startY)
+
+    orderedHubs = improvedHubs
 
     if saved and saved > 0.001 then
         CN.DebugPrint(string.format("Route shortened by %.1f%% by 2-opt.", saved * 100))
     end
 
-    CN.currentRoute = route
+    -- Flatten back to a stop list, hub by hub, so every existing caller keeps
+    -- working -- but the ORDER now keeps each place together.
+    local route = {}
 
-    return route, skipped
+    for hubIndex, hub in ipairs(orderedHubs) do
+        for _, objective in ipairs(hub.objectives) do
+            objective.hub      = hubIndex
+            objective.hubSize  = #hub.objectives
+
+            table.insert(route, objective)
+        end
+    end
+
+    CN.currentRoute = route
+    CN.currentHubs  = orderedHubs
+
+    return route, skipped, orderedHubs
 end
 
 -- Counts what remains in the zone, grouped by objective type. Deliberately
@@ -518,7 +689,7 @@ CN:RegisterCommand{
         local stop = CN.ToID(args)
 
         -- Re-routing on every call keeps the sweep honest as things complete.
-        local route, skipped = CN.BuildZoneRoute(mapID, playerX, playerY)
+        local route, skipped, hubs = CN.BuildZoneRoute(mapID, playerX, playerY)
 
         if stop then
             local objective = route[stop]
@@ -553,17 +724,61 @@ CN:RegisterCommand{
         CN.Print(zoneName .. " |cff999999(map " .. mapID .. ")|r - remaining: "
             .. table.concat(parts, ", "))
 
-        local shown = math.min(#route, 10)
+        -- Printed by PLACE, not by stop.
+        --
+        -- The stop numbers still run straight through the whole route, so
+        -- /cn zone <n> keeps working, but the grouping is what tells you that
+        -- four of them happen without moving.
+        local stopNumber = 0
+        local shown      = 0
 
-        for index = 1, shown do
-            local objective = route[index]
+        local quests = CN:GetModule("Quests")
 
-            CN.Print(index .. ". " .. tostring(objective.name or objective.id)
-                .. " |cff999999[" .. tostring(objective.type) .. "]|r")
+        for hubIndex, hub in ipairs(hubs or {}) do
+            if shown >= 10 then
+                break
+            end
+
+            if #hub.objectives > 1 then
+                CN.Print("|cff5DD2FB" .. hubIndex .. ") " .. #hub.objectives
+                    .. " things here|r |cff999999-- " .. CN.DescribeHub(hub) .. "|r")
+            end
+
+            for _, objective in ipairs(hub.objectives) do
+                stopNumber = stopNumber + 1
+
+                if shown < 10 then
+                    local verb = objective.phase and quests
+                        and quests.PhaseVerb(objective.phase)
+
+                    CN.Print((#hub.objectives > 1 and "   " or "")
+                        .. stopNumber .. ". "
+                        .. (verb and ("|cffffff00" .. verb .. "|r ") or "")
+                        .. tostring(objective.name or objective.id)
+                        .. " |cff999999[" .. tostring(objective.type) .. "]|r")
+
+                    shown = shown + 1
+                end
+            end
         end
 
         if #route > shown then
             CN.Print("|cff999999... and " .. (#route - shown) .. " more.|r")
+        end
+
+        -- The whole point, stated plainly when it applies.
+        local batched = 0
+
+        for _, hub in ipairs(hubs or {}) do
+            if #hub.objectives > 1 then
+                batched = batched + #hub.objectives
+            end
+        end
+
+        if batched > 0 then
+            CN.Print("|cff999999" .. batched .. " of " .. #route
+                .. " stops share a place with something else, so they are "
+                .. "grouped rather than visited twice.|r")
         end
 
         if #skipped > 0 then

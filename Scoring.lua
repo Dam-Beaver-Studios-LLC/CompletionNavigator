@@ -37,6 +37,13 @@ CN.scoreWeights = {
 -- baseline instead: not knowing where something is has a real cost.
 CN.unknownLocationCost = 3
 
+-- Doing something at a place you are going to anyway is cheaper than doing it
+-- somewhere else, and the engine should say so rather than leaving it to the
+-- route display. This is what stops a recommendation sending you across the
+-- zone for one quest when four things sit together on the way.
+CN.batchBonusPerNeighbour = 0.6
+CN.batchBonusCap          = 3
+
 -- Priority profiles have two independent levers:
 --   weights = override entries in scoreWeights (affects every objective)
 --   types   = multiply the final score for a given objective type
@@ -94,6 +101,12 @@ function CN.ScoreObjective(objective)
     score = score + (objective.unlockValue          or 0) * w.unlockValue
     score = score + (objective.limitedTimeBonus     or 0) * w.limitedTimeBonus
     score = score + (objective.nearbyBonus          or 0) * w.nearbyBonus
+
+    -- Everything else at the same place makes this stop worth more.
+    if objective.hubSize and objective.hubSize > 1 then
+        score = score + math.min(CN.batchBonusCap,
+            (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus
+    end
     score = score + (objective.userPreference       or 0) * w.userPreference
     score = score + (objective.characterSuitability or 0) * w.characterSuitability
     score = score + travel                                * w.travelCost

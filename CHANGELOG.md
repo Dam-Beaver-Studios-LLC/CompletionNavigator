@@ -7,6 +7,72 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.24.1]
+
+A release-blocking defect in CI. No addon changes.
+
+### Fixed
+
+- **CI silently stopped releases from reaching CurseForge.** The coverage step
+  added in 0.21.0 hardcoded the luacov path from the author's machine
+  (`/usr/local/share/lua/5.1`). On any host where luarocks installed luacov
+  somewhere else -- which includes the GitHub runner -- the script died under
+  `set -e` producing **no output at all**, the workflow stopped, and the
+  packager never ran. The tag was pushed, the release was validated, the log
+  looked almost fine, and no file appeared.
+  `coverage.sh` now locates luacov wherever the machine put it, and when it
+  genuinely cannot run it says so and exits successfully. A quality signal for
+  the author is not a reason to deny users a build.
+- The coverage step is marked `continue-on-error`. Lint and the harness still
+  block a release, because those mean the addon is broken. Missing developer
+  tooling does not.
+
+### Added
+
+- **The test suite now checks the CI workflow itself.** Any step that could
+  block a release must either be on an allow-list of things that indicate
+  genuinely broken code, or carry `continue-on-error`. Adding a fragile step
+  in front of the packager now fails the suite rather than a release.
+- A test that runs `coverage.sh` with luacov deliberately unreachable and
+  requires it to exit zero with an explanation.
+
+## [0.24.0]
+
+Stop running back and forth.
+
+### Added
+
+- **A quest is now three places, not one.** PICKUP, ACTIVE, TURNIN. Treating a
+  quest as a single point is exactly why an addon sends you across a zone and
+  back: it cannot tell that two quests share a giver, or that four you are
+  carrying all hand in at the same NPC. Naming the phase is what makes
+  batching possible at all, and every quest recommendation now says which one
+  it is -- *pick up*, *work on*, *turn in*.
+- **Routes are planned between places, not between objectives.** Stops within
+  about seventy yards of each other collapse into one hub, the route is solved
+  hub to hub, and within a hub the order is the order you would actually do it:
+  collect the quests, do the work, hand them back. `/cn zone` prints it that
+  way -- *"3 things here -- pick up 2, turn in 1"* -- and says how many of your
+  stops share a place with something else.
+  Single-link clustering, so a row of quest givers strung along a road becomes
+  one stop rather than four.
+- **The engine prefers work that batches**, rather than only displaying it that
+  way. An objective sharing a place with others scores higher than an identical
+  one standing alone, capped so a big cluster cannot drown out something
+  genuinely urgent. Without this the *route* would batch while the
+  *recommendation* still sent you across the zone for one quest.
+
+### Notes
+
+- Distances for clustering are computed in real yards through the client's
+  world positions, falling back to a scaled normalized distance when the client
+  will not convert. Clustering on raw map coordinates would make hubs enormous
+  in small zones and useless in large ones, because map coordinates are
+  normalized per map.
+- The harness outgrew Lua's 200-local limit for a single function. Self-
+  contained test sections are now scoped, which is better hygiene than it
+  sounds: it also stops one section's fixtures leaking into the next.
+
 ## [0.23.0]
 
 Reported from live play: *"it only shows the quests you have accepted -- I

@@ -136,6 +136,56 @@ CN.RecordDiscoveredQuest = Quests.RecordDiscovered
 -- at all: it read the quest LOG, which by definition contains only quests you
 -- have already taken. "What should I do next?" cannot be answered honestly
 -- while the answer "pick up that quest twenty yards away" is invisible.
+------------------------------------------------------------
+-- LIFECYCLE PHASE
+------------------------------------------------------------
+
+-- A quest is not one place. It is three, in order:
+--
+--   PICKUP  -- the exclamation mark, where you accept it
+--   ACTIVE  -- wherever its objectives actually are
+--   TURNIN  -- the question mark, where you hand it back
+--
+-- Treating a quest as a single point is why an addon sends you back and forth:
+-- it cannot tell that two quests share a giver, or that four you are carrying
+-- all hand in at the same NPC. Naming the phase is what makes batching
+-- possible at all.
+CN.questPhases = {
+    PICKUP = "PICKUP",
+    ACTIVE = "ACTIVE",
+    TURNIN = "TURNIN",
+}
+
+CN.questPhaseVerbs = {
+    PICKUP = "pick up",
+    ACTIVE = "work on",
+    TURNIN = "turn in",
+}
+
+function Quests.Phase(questID)
+    if not questID then
+        return nil
+    end
+
+    if Blizzard.IsQuestReadyForTurnIn(questID) then
+        return CN.questPhases.TURNIN
+    end
+
+    if Blizzard.IsQuestInLog(questID) then
+        return CN.questPhases.ACTIVE
+    end
+
+    if Quests.IsCompletedByCharacter(questID) then
+        return nil
+    end
+
+    return CN.questPhases.PICKUP
+end
+
+function Quests.PhaseVerb(phase)
+    return CN.questPhaseVerbs[phase] or "do"
+end
+
 function Quests.AvailableOnMap(mapID)
     mapID = mapID or select(1, CN.GetPlayerPosition())
 
@@ -502,6 +552,7 @@ CN.RegisterCandidateProvider("Quests", function()
             x                 = x,
             y                 = y,
             source            = source,
+            phase             = Quests.Phase(questID),
             state             = CN.objectiveStates.AVAILABLE,
             completionValue   = value,
             travelCost        = travel,

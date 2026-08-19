@@ -1,17 +1,61 @@
 #!/bin/bash
 # Coverage over the offline harness.
 #
-# luacov installs under Lua 5.1 on this machine but is pure Lua, so 5.4 runs it
-# fine with the path pointed at it.
-set -e
+# IMPORTANT: this script must NEVER block a release.
+#
+# It once did. It hardcoded the luacov path from the author's machine
+# (/usr/local/share/lua/5.1), so on any host where luarocks installed luacov
+# somewhere else the script died under `set -e` with no output at all -- and
+# because it ran in CI ahead of the packager, the whole release silently
+# stopped. A quality signal for the author is not a reason to deny users a
+# build.
+#
+# So: locate luacov rather than assume it, and when it genuinely cannot run,
+# say so clearly and exit 0.
 
 ROOT=${1:-build/CompletionNavigator}
 FLOOR=${2:-80}
 
-LUA51="/usr/local/share/lua/5.1/?.lua;/usr/local/share/lua/5.1/?/init.lua;;"
+note() { echo "coverage: $*"; }
 
-# Write the config next to wherever we are running, so the same script works
-# from the development tree and from a freshly scaffolded copy.
+if [ ! -f "$ROOT/CompletionNavigator.toc" ]; then
+  note "no addon tree at '$ROOT'; skipping."
+  exit 0
+fi
+
+if [ ! -f harness.lua ]; then
+  note "harness.lua not found; skipping."
+  exit 0
+fi
+
+# Find luacov wherever this machine put it. luacov is pure Lua, so any
+# version's install directory works under any Lua interpreter.
+LUACOV_PATH=""
+
+for base in /usr/local/share/lua /usr/share/lua "$HOME/.luarocks/share/lua"; do
+  [ -d "$base" ] || continue
+
+  for versioned in "$base"/*; do
+    if [ -f "$versioned/luacov.lua" ] || [ -d "$versioned/luacov" ]; then
+      LUACOV_PATH="$versioned/?.lua;$versioned/?/init.lua;$LUACOV_PATH"
+    fi
+  done
+done
+
+if [ -z "$LUACOV_PATH" ]; then
+  note "luacov is not installed; skipping coverage."
+  note "install it with:  luarocks install luacov"
+  exit 0
+fi
+
+export LUA_PATH="${LUACOV_PATH};;"
+
+# Confirm it actually loads before relying on it.
+if ! lua5.4 -e 'require("luacov.runner")' >/dev/null 2>&1; then
+  note "luacov was found but will not load; skipping coverage."
+  exit 0
+fi
+
 cat > .luacov <<CONFIG
 statsfile = "luacov.stats.out"
 reportfile = "luacov.report.out"
@@ -21,11 +65,21 @@ CONFIG
 
 rm -f luacov.stats.out luacov.report.out
 
-LUA_PATH="$LUA51" lua5.4 -lluacov harness.lua "$ROOT" > /dev/null 2>&1
+lua5.4 -lluacov harness.lua "$ROOT" > /dev/null 2>&1
 
-LUA_PATH="$LUA51" lua5.4 -e 'require("luacov.reporter").report()' > /dev/null 2>&1
+lua5.4 -e 'require("luacov.reporter").report()' > /dev/null 2>&1
+
+if [ ! -f luacov.report.out ]; then
+  note "no report was produced; skipping."
+  exit 0
+fi
 
 TOTAL=$(grep -E "^Total" luacov.report.out | awk '{print $NF}' | tr -d '%')
+
+if [ -z "$TOTAL" ]; then
+  note "report contained no total; skipping."
+  exit 0
+fi
 
 # The report lists every file twice: once with per-line detail, once in the
 # summary table. Only the summary rows have four columns.

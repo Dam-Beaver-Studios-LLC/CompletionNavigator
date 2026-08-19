@@ -1309,6 +1309,9 @@ assert(type(CompletionNavigator_NextObjective) == "function", "keybinding entry 
 assert(type(CompletionNavigator_Navigate) == "function", "keybinding entry point missing")
 assert(db.settings.minimap and db.settings.minimap.angle, "minimap settings must persist")
 
+-- Scoped: Lua caps a function at 200 locals and this file
+-- outgrew it. Each self-contained section gets its own scope.
+do
 print("\nRoute optimization:")
 
 -- A deliberately bad order: nearest-neighbour's classic failure is to strand
@@ -1350,6 +1353,7 @@ local tinyResult = CN.ImproveRoute(tiny, 0.5, 0.5)
 assert(#tinyResult == 2, "a two-stop route must survive untouched")
 
 print("  no stops lost, short routes untouched")
+end
 
 print("\nNavigation:")
 
@@ -2222,6 +2226,96 @@ assert((byType.TITLE or 0) == 0,
 
 print("  titles correctly absent (no source data exists)")
 
+-- Scoped: Lua caps a function at 200 locals and this file
+-- outgrew it. Each self-contained section gets its own scope.
+do
+print("\nHub batching:")
+
+-- The complaint this exists for: an addon that routes over individual
+-- objectives sends you to a camp, away, and back again for each thing
+-- standing there.
+--
+-- Three stops at one camp, two at another well away from it, and one loner.
+local camped = {
+    { name = "Giver A",  x = 0.300, y = 0.300, mapID = 94, phase = "PICKUP" },
+    { name = "Turn-in",  x = 0.302, y = 0.301, mapID = 94, phase = "TURNIN" },
+    { name = "Giver B",  x = 0.301, y = 0.303, mapID = 94, phase = "PICKUP" },
+    { name = "Far C",    x = 0.800, y = 0.800, mapID = 94, phase = "ACTIVE" },
+    { name = "Far D",    x = 0.803, y = 0.799, mapID = 94, phase = "ACTIVE" },
+    { name = "Loner",    x = 0.500, y = 0.100, mapID = 94, phase = "ACTIVE" },
+}
+
+local builtHubs = CN.ClusterByProximity(camped)
+
+print("  " .. #camped .. " stops collapsed into " .. #builtHubs .. " places")
+
+for index, hub in ipairs(builtHubs) do
+    local names = {}
+    for _, objective in ipairs(hub.objectives) do names[#names + 1] = objective.name end
+    print("    " .. index .. ") " .. CN.DescribeHub(hub)
+        .. " -- " .. table.concat(names, ", "))
+end
+
+assert(#builtHubs == 3,
+    "three distinct places expected, got " .. #builtHubs)
+
+-- Every stop must survive clustering. Losing one would silently drop work.
+local clustered = 0
+for _, hub in ipairs(builtHubs) do clustered = clustered + #hub.objectives end
+
+assert(clustered == #camped,
+    "clustering must not lose stops: " .. clustered .. " of " .. #camped)
+
+-- Within a hub, the order must be the order you would actually do it:
+-- collect quests before handing them back.
+for _, hub in ipairs(builtHubs) do
+    if #hub.objectives > 1 then
+        local sawTurnIn = false
+
+        for _, objective in ipairs(hub.objectives) do
+            if objective.phase == "TURNIN" then
+                sawTurnIn = true
+            elseif objective.phase == "PICKUP" then
+                assert(not sawTurnIn,
+                    "a pickup must be ordered before a turn-in at the same place")
+            end
+        end
+    end
+end
+
+print("  within a place, pickups come before turn-ins")
+
+-- And the description must name what you are there to do.
+local campHub
+
+for _, hub in ipairs(builtHubs) do
+    if #hub.objectives == 3 then campHub = hub end
+end
+
+assert(campHub, "the three-stop camp must be one hub")
+
+local described = CN.DescribeHub(campHub)
+
+assert(described:find("pick up 2", 1, true) and described:find("turn in 1", 1, true),
+    "a hub must say what it is for, got " .. described)
+
+print("  hub described as: " .. described)
+
+-- The engine must PREFER clustered work, not merely display it that way.
+local alone   = CN.NewObjective({ id = 1, name = "Alone", completionValue = 2 })
+local grouped = CN.NewObjective({ id = 2, name = "Grouped", completionValue = 2,
+                                  hubSize = 4 })
+
+local aloneScore   = CN.ScoreObjective(alone)
+local groupedScore = CN.ScoreObjective(grouped)
+
+print(string.format("  identical objective scores %.1f alone, %.1f in a group of 4",
+    aloneScore, groupedScore))
+
+assert(groupedScore > aloneScore,
+    "work that batches with other work must outrank identical work that does not")
+end
+
 print("\nAvailable quests:")
 
 -- Reported from live play: "it only shows the quests you have accepted --
@@ -2540,6 +2634,9 @@ CN.ClearOverride("arrow")
 
 print("  iteration sees the merged view")
 
+-- Scoped: Lua caps a function at 200 locals and this file
+-- outgrew it. Each self-contained section gets its own scope.
+do
 print("\nType filtering:")
 
 local typeFilters = CN:GetModule("Filters")
@@ -2617,6 +2714,7 @@ assert(typeFilters.ResolveType("nonsense") == nil, "unknown text must not resolv
 
 typeFilters.EnableAllTypes()
 CN.Recommend(1)
+end
 
 print("\nGoals:")
 
@@ -2743,6 +2841,9 @@ print("  goal weighting does not stack across rebuilds")
 goals.Clear()
 CN.CollectCandidates(true)
 
+-- Scoped: Lua caps a function at 200 locals and this file
+-- outgrew it. Each self-contained section gets its own scope.
+do
 print("\nBounded collection:")
 
 -- Ten entries, values 1 and 2, capped at 3: the three highest-valued win,
@@ -2809,6 +2910,7 @@ assert(CN.IsIgnored("PET", 99999) == false, "a populated list must still answer 
 CN.SetIgnored("PET", 12345, false)
 
 print("  ignore fast path preserves real lookups")
+end
 
 print("\nMigration 1 -> 4:")
 

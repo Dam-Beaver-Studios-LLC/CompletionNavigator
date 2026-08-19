@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.23.0'
+$script:ToolkitVersion = '0.24.1'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.23.0"
+CN.version     = "0.24.1"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -1793,6 +1793,13 @@ CN.scoreWeights = {
 -- baseline instead: not knowing where something is has a real cost.
 CN.unknownLocationCost = 3
 
+-- Doing something at a place you are going to anyway is cheaper than doing it
+-- somewhere else, and the engine should say so rather than leaving it to the
+-- route display. This is what stops a recommendation sending you across the
+-- zone for one quest when four things sit together on the way.
+CN.batchBonusPerNeighbour = 0.6
+CN.batchBonusCap          = 3
+
 -- Priority profiles have two independent levers:
 --   weights = override entries in scoreWeights (affects every objective)
 --   types   = multiply the final score for a given objective type
@@ -1850,6 +1857,12 @@ function CN.ScoreObjective(objective)
     score = score + (objective.unlockValue          or 0) * w.unlockValue
     score = score + (objective.limitedTimeBonus     or 0) * w.limitedTimeBonus
     score = score + (objective.nearbyBonus          or 0) * w.nearbyBonus
+
+    -- Everything else at the same place makes this stop worth more.
+    if objective.hubSize and objective.hubSize > 1 then
+        score = score + math.min(CN.batchBonusCap,
+            (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus
+    end
     score = score + (objective.userPreference       or 0) * w.userPreference
     score = score + (objective.characterSuitability or 0) * w.characterSuitability
     score = score + travel                                * w.travelCost
@@ -2632,6 +2645,157 @@ function CN.ClusterByMap(objectives)
     return clusters
 end
 
+------------------------------------------------------------
+-- HUBS
+------------------------------------------------------------
+
+-- How close two stops must be to count as the same place, in yards.
+--
+-- Roughly "you can see both without moving". Quest givers standing together
+-- at a camp, and the NPC you hand four quests back to, are the cases this
+-- exists for.
+CN.hubRadiusYards = 70
+
+-- Distance between two objectives in real yards where the client can convert,
+-- falling back to normalized map units scaled to a plausible zone size.
+--
+-- The fallback matters: map coordinates are normalized per map, so the same
+-- 0.01 is a different real distance in every zone, and clustering on raw
+-- normalized distance would make hubs enormous in small zones and useless in
+-- large ones.
+function CN.ObjectiveDistanceYards(a, b)
+    if not (a and b and a.x and a.y and b.x and b.y) then
+        return nil
+    end
+
+    if a.mapID and b.mapID and a.mapID ~= b.mapID then
+        return nil
+    end
+
+    local navigation = CN:GetModule("Navigation")
+
+    if navigation and a.mapID then
+        local yards = navigation.DistanceYards(a.mapID, a.x, a.y, b.x, b.y)
+
+        if yards then
+            return yards
+        end
+    end
+
+    -- Fallback: assume a zone is about 2000 yards across. Crude, and only
+    -- used when the client will not convert.
+    local dx = a.x - b.x
+    local dy = a.y - b.y
+
+    return math.sqrt((dx * dx) + (dy * dy)) * 2000
+end
+
+-- Groups objectives that share a place.
+--
+-- This is the heart of not running back and forth. A route over individual
+-- objectives visits a camp three times if three things are there; a route
+-- over HUBS visits it once and does all three.
+--
+-- Single-link clustering: a stop joins a hub if it is within the radius of
+-- ANY member, which is what makes a row of quest givers along a road become
+-- one stop rather than four.
+function CN.ClusterByProximity(objectives, radiusYards)
+    radiusYards = radiusYards or CN.hubRadiusYards
+
+    local hubs = {}
+
+    for _, objective in ipairs(objectives) do
+        local joined = nil
+
+        for _, hub in ipairs(hubs) do
+            for _, member in ipairs(hub.objectives) do
+                local distance = CN.ObjectiveDistanceYards(objective, member)
+
+                if distance and distance <= radiusYards then
+                    joined = hub
+                    break
+                end
+            end
+
+            if joined then break end
+        end
+
+        if joined then
+            table.insert(joined.objectives, objective)
+        else
+            table.insert(hubs, {
+                mapID      = objective.mapID,
+                objectives = { objective },
+            })
+        end
+    end
+
+    -- A hub's position is the centre of what it contains, so routing between
+    -- hubs is routing between places rather than between arbitrary members.
+    for _, hub in ipairs(hubs) do
+        local sumX, sumY = 0, 0
+
+        for _, objective in ipairs(hub.objectives) do
+            sumX = sumX + objective.x
+            sumY = sumY + objective.y
+        end
+
+        hub.x = sumX / #hub.objectives
+        hub.y = sumY / #hub.objectives
+
+        -- Within a hub, order by what you would naturally do: collect quests,
+        -- do the work, hand them back.
+        local phaseOrder = { PICKUP = 1, ACTIVE = 2, TURNIN = 3 }
+
+        table.sort(hub.objectives, function(a, b)
+            local left  = phaseOrder[a.phase or ""] or 2
+            local right = phaseOrder[b.phase or ""] or 2
+
+            if left ~= right then
+                return left < right
+            end
+
+            return tostring(a.name) < tostring(b.name)
+        end)
+    end
+
+    return hubs
+end
+
+-- Describes what a hub is for, in the order you would do it.
+function CN.DescribeHub(hub)
+    local counts, order = {}, {}
+
+    for _, objective in ipairs(hub.objectives) do
+        local phase = objective.phase or "ACTIVE"
+
+        if not counts[phase] then
+            counts[phase] = 0
+            table.insert(order, phase)
+        end
+
+        counts[phase] = counts[phase] + 1
+    end
+
+    local phaseOrder = { PICKUP = 1, ACTIVE = 2, TURNIN = 3 }
+
+    table.sort(order, function(a, b)
+        return (phaseOrder[a] or 2) < (phaseOrder[b] or 2)
+    end)
+
+    local parts = {}
+
+    local quests = CN:GetModule("Quests")
+
+    for _, phase in ipairs(order) do
+        local verb = quests and quests.PhaseVerb(phase) or "do"
+
+        table.insert(parts, verb .. " " .. counts[phase])
+    end
+
+    return table.concat(parts, ", ")
+end
+
 -- Nearest-neighbour ordering from a starting point. Good enough for a
 -- zone sweep; a proper route solver can replace this later.
 -- Squared distance is enough for comparisons and avoids a sqrt per pair.
@@ -2775,21 +2939,41 @@ function CN.BuildZoneRoute(mapID, startX, startY)
         end
     end
 
-    local route = CN.OrderByProximity(located, startX, startY)
+    -- Route between PLACES, not between objectives.
+    --
+    -- Ordering individual objectives sends you to a camp, away, and back again
+    -- for each thing standing there. Grouping them first means you arrive
+    -- once, do everything -- collect the quests, then the work, then hand them
+    -- back -- and leave.
+    local hubs = CN.ClusterByProximity(located)
 
-    -- Greedy first, then improve. Nearest-neighbour gives a good starting
-    -- order cheaply; 2-opt removes the crossings it leaves behind.
-    local improved, saved = CN.ImproveRoute(route, startX, startY)
+    local orderedHubs = CN.OrderByProximity(hubs, startX, startY)
 
-    route = improved
+    local improvedHubs, saved = CN.ImproveRoute(orderedHubs, startX, startY)
+
+    orderedHubs = improvedHubs
 
     if saved and saved > 0.001 then
         CN.DebugPrint(string.format("Route shortened by %.1f%% by 2-opt.", saved * 100))
     end
 
-    CN.currentRoute = route
+    -- Flatten back to a stop list, hub by hub, so every existing caller keeps
+    -- working -- but the ORDER now keeps each place together.
+    local route = {}
 
-    return route, skipped
+    for hubIndex, hub in ipairs(orderedHubs) do
+        for _, objective in ipairs(hub.objectives) do
+            objective.hub      = hubIndex
+            objective.hubSize  = #hub.objectives
+
+            table.insert(route, objective)
+        end
+    end
+
+    CN.currentRoute = route
+    CN.currentHubs  = orderedHubs
+
+    return route, skipped, orderedHubs
 end
 
 -- Counts what remains in the zone, grouped by objective type. Deliberately
@@ -2973,7 +3157,7 @@ CN:RegisterCommand{
         local stop = CN.ToID(args)
 
         -- Re-routing on every call keeps the sweep honest as things complete.
-        local route, skipped = CN.BuildZoneRoute(mapID, playerX, playerY)
+        local route, skipped, hubs = CN.BuildZoneRoute(mapID, playerX, playerY)
 
         if stop then
             local objective = route[stop]
@@ -3008,17 +3192,61 @@ CN:RegisterCommand{
         CN.Print(zoneName .. " |cff999999(map " .. mapID .. ")|r - remaining: "
             .. table.concat(parts, ", "))
 
-        local shown = math.min(#route, 10)
+        -- Printed by PLACE, not by stop.
+        --
+        -- The stop numbers still run straight through the whole route, so
+        -- /cn zone <n> keeps working, but the grouping is what tells you that
+        -- four of them happen without moving.
+        local stopNumber = 0
+        local shown      = 0
 
-        for index = 1, shown do
-            local objective = route[index]
+        local quests = CN:GetModule("Quests")
 
-            CN.Print(index .. ". " .. tostring(objective.name or objective.id)
-                .. " |cff999999[" .. tostring(objective.type) .. "]|r")
+        for hubIndex, hub in ipairs(hubs or {}) do
+            if shown >= 10 then
+                break
+            end
+
+            if #hub.objectives > 1 then
+                CN.Print("|cff5DD2FB" .. hubIndex .. ") " .. #hub.objectives
+                    .. " things here|r |cff999999-- " .. CN.DescribeHub(hub) .. "|r")
+            end
+
+            for _, objective in ipairs(hub.objectives) do
+                stopNumber = stopNumber + 1
+
+                if shown < 10 then
+                    local verb = objective.phase and quests
+                        and quests.PhaseVerb(objective.phase)
+
+                    CN.Print((#hub.objectives > 1 and "   " or "")
+                        .. stopNumber .. ". "
+                        .. (verb and ("|cffffff00" .. verb .. "|r ") or "")
+                        .. tostring(objective.name or objective.id)
+                        .. " |cff999999[" .. tostring(objective.type) .. "]|r")
+
+                    shown = shown + 1
+                end
+            end
         end
 
         if #route > shown then
             CN.Print("|cff999999... and " .. (#route - shown) .. " more.|r")
+        end
+
+        -- The whole point, stated plainly when it applies.
+        local batched = 0
+
+        for _, hub in ipairs(hubs or {}) do
+            if #hub.objectives > 1 then
+                batched = batched + #hub.objectives
+            end
+        end
+
+        if batched > 0 then
+            CN.Print("|cff999999" .. batched .. " of " .. #route
+                .. " stops share a place with something else, so they are "
+                .. "grouped rather than visited twice.|r")
         end
 
         if #skipped > 0 then
@@ -7753,6 +7981,56 @@ CN.RecordDiscoveredQuest = Quests.RecordDiscovered
 -- at all: it read the quest LOG, which by definition contains only quests you
 -- have already taken. "What should I do next?" cannot be answered honestly
 -- while the answer "pick up that quest twenty yards away" is invisible.
+------------------------------------------------------------
+-- LIFECYCLE PHASE
+------------------------------------------------------------
+
+-- A quest is not one place. It is three, in order:
+--
+--   PICKUP  -- the exclamation mark, where you accept it
+--   ACTIVE  -- wherever its objectives actually are
+--   TURNIN  -- the question mark, where you hand it back
+--
+-- Treating a quest as a single point is why an addon sends you back and forth:
+-- it cannot tell that two quests share a giver, or that four you are carrying
+-- all hand in at the same NPC. Naming the phase is what makes batching
+-- possible at all.
+CN.questPhases = {
+    PICKUP = "PICKUP",
+    ACTIVE = "ACTIVE",
+    TURNIN = "TURNIN",
+}
+
+CN.questPhaseVerbs = {
+    PICKUP = "pick up",
+    ACTIVE = "work on",
+    TURNIN = "turn in",
+}
+
+function Quests.Phase(questID)
+    if not questID then
+        return nil
+    end
+
+    if Blizzard.IsQuestReadyForTurnIn(questID) then
+        return CN.questPhases.TURNIN
+    end
+
+    if Blizzard.IsQuestInLog(questID) then
+        return CN.questPhases.ACTIVE
+    end
+
+    if Quests.IsCompletedByCharacter(questID) then
+        return nil
+    end
+
+    return CN.questPhases.PICKUP
+end
+
+function Quests.PhaseVerb(phase)
+    return CN.questPhaseVerbs[phase] or "do"
+end
+
 function Quests.AvailableOnMap(mapID)
     mapID = mapID or select(1, CN.GetPlayerPosition())
 
@@ -8119,6 +8397,7 @@ CN.RegisterCandidateProvider("Quests", function()
             x                 = x,
             y                 = y,
             source            = source,
+            phase             = Quests.Phase(questID),
             state             = CN.objectiveStates.AVAILABLE,
             completionValue   = value,
             travelCost        = travel,
@@ -18087,7 +18366,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.23.0
+## Version: 0.24.1
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -18300,6 +18579,72 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.24.1]
+
+A release-blocking defect in CI. No addon changes.
+
+### Fixed
+
+- **CI silently stopped releases from reaching CurseForge.** The coverage step
+  added in 0.21.0 hardcoded the luacov path from the author's machine
+  (`/usr/local/share/lua/5.1`). On any host where luarocks installed luacov
+  somewhere else -- which includes the GitHub runner -- the script died under
+  `set -e` producing **no output at all**, the workflow stopped, and the
+  packager never ran. The tag was pushed, the release was validated, the log
+  looked almost fine, and no file appeared.
+  `coverage.sh` now locates luacov wherever the machine put it, and when it
+  genuinely cannot run it says so and exits successfully. A quality signal for
+  the author is not a reason to deny users a build.
+- The coverage step is marked `continue-on-error`. Lint and the harness still
+  block a release, because those mean the addon is broken. Missing developer
+  tooling does not.
+
+### Added
+
+- **The test suite now checks the CI workflow itself.** Any step that could
+  block a release must either be on an allow-list of things that indicate
+  genuinely broken code, or carry `continue-on-error`. Adding a fragile step
+  in front of the packager now fails the suite rather than a release.
+- A test that runs `coverage.sh` with luacov deliberately unreachable and
+  requires it to exit zero with an explanation.
+
+## [0.24.0]
+
+Stop running back and forth.
+
+### Added
+
+- **A quest is now three places, not one.** PICKUP, ACTIVE, TURNIN. Treating a
+  quest as a single point is exactly why an addon sends you across a zone and
+  back: it cannot tell that two quests share a giver, or that four you are
+  carrying all hand in at the same NPC. Naming the phase is what makes
+  batching possible at all, and every quest recommendation now says which one
+  it is -- *pick up*, *work on*, *turn in*.
+- **Routes are planned between places, not between objectives.** Stops within
+  about seventy yards of each other collapse into one hub, the route is solved
+  hub to hub, and within a hub the order is the order you would actually do it:
+  collect the quests, do the work, hand them back. `/cn zone` prints it that
+  way -- *"3 things here -- pick up 2, turn in 1"* -- and says how many of your
+  stops share a place with something else.
+  Single-link clustering, so a row of quest givers strung along a road becomes
+  one stop rather than four.
+- **The engine prefers work that batches**, rather than only displaying it that
+  way. An objective sharing a place with others scores higher than an identical
+  one standing alone, capped so a big cluster cannot drown out something
+  genuinely urgent. Without this the *route* would batch while the
+  *recommendation* still sent you across the zone for one quest.
+
+### Notes
+
+- Distances for clustering are computed in real yards through the client's
+  world positions, falling back to a scaled normalized distance when the client
+  will not convert. Clustering on raw map coordinates would make hubs enormous
+  in small zones and useless in large ones, because map coordinates are
+  normalized per map.
+- The harness outgrew Lua's 200-local limit for a single function. Self-
+  contained test sections are now scoped, which is better hygiene than it
+  sounds: it also stops one section's fixtures leaking into the next.
 
 ## [0.23.0]
 
@@ -19083,13 +19428,24 @@ below. Numbers are from that benchmark.
 $Embedded['ROADMAP.md'] = @'
 # Completion Navigator — Roadmap
 
-Current version: **0.23.0** · 42 Lua files · ~18,900 lines · 87 slash commands · 15 candidate providers · 10 UI tabs · 85% test coverage
+Current version: **0.24.0** · 42 Lua files · ~19,300 lines · 87 slash commands · 15 candidate providers · 10 UI tabs · 85% test coverage
 
 Completion Navigator is a product of Dam Beaver Studios, LLC. Authored by Travis A. Bryan I.
 
 This is an audit of what is built against what was designed, not a wishlist. Every item below was found by reading the code, not by imagining features.
 
 **A note on how defects get found here.** Two of the worst bugs so far — an arrow that pointed the wrong way, and an addon that could not see an unaccepted quest — survived a passing test suite because the *test data* had the same blind spot as the code. A stub that only models the cases the code already handles cannot fail. When adding tests, add the case the code does **not** handle first.
+
+---
+
+## Known scope limits, stated plainly
+
+These are not roadmap items; they are the honest edges of what the addon can see.
+
+- **It sees available quests on your CURRENT map only**, because that is what the client's POI list exposes. It cannot enumerate every quest in the game, or tell you what is waiting three zones away.
+- **Eligibility filtering is mostly implicit.** The client only draws quest pins you qualify for, so class, race, level and faction gating is handled by not being shown — the addon's own eligibility rules exist but are backed by a nearly empty curated database, so it cannot proactively say *"that one is for a Druid."*
+- **Alt recommendations are strongest for reputation, recipes, titles and professions**, where the addon has per-character data. For quests it is weaker, because it only knows what your characters have actually done.
+- **Turn-in locations come from the client's own "next waypoint"**, which moves as you progress. The addon models the three phases but does not have an independent database of turn-in NPCs.
 
 ---
 
@@ -19456,10 +19812,21 @@ jobs:
 
       # Coverage, with a floor. A test suite whose reach nobody measures
       # drifts: it keeps passing while covering less and less of the addon.
+      #
+      # continue-on-error is deliberate and important. This step once blocked a
+      # release outright: coverage.sh hardcoded a luacov path from the author's
+      # machine, died silently on the runner, and the packager never ran -- so a
+      # tagged, pushed, validated release simply never reached CurseForge and
+      # the Actions log showed nothing useful.
+      #
+      # Lint and the harness SHOULD block a release; they catch broken code.
+      # A missing developer tool should not. Users do not care whether the
+      # author's coverage report generated.
       - name: Coverage
+        continue-on-error: true
         run: |
-          sudo apt-get install -y luarocks
-          sudo luarocks install luacov
+          sudo apt-get install -y luarocks || true
+          sudo luarocks install luacov || echo "luacov unavailable; coverage will skip"
           bash coverage.sh . 80
 
       # The packager SKIPS the CurseForge upload silently when CF_API_KEY is
@@ -19483,6 +19850,7 @@ jobs:
 
       # BigWigs' packager is the standard tool; it reads .pkgmeta, builds the
       # zip, and uploads to CurseForge, WoWInterface and Wago as configured.
+      # Reached regardless of the optional steps above.
       - name: Package and upload
         uses: BigWigsMods/packager@master
         env:
@@ -20942,6 +21310,9 @@ assert(type(CompletionNavigator_NextObjective) == "function", "keybinding entry 
 assert(type(CompletionNavigator_Navigate) == "function", "keybinding entry point missing")
 assert(db.settings.minimap and db.settings.minimap.angle, "minimap settings must persist")
 
+-- Scoped: Lua caps a function at 200 locals and this file
+-- outgrew it. Each self-contained section gets its own scope.
+do
 print("\nRoute optimization:")
 
 -- A deliberately bad order: nearest-neighbour's classic failure is to strand
@@ -20983,6 +21354,7 @@ local tinyResult = CN.ImproveRoute(tiny, 0.5, 0.5)
 assert(#tinyResult == 2, "a two-stop route must survive untouched")
 
 print("  no stops lost, short routes untouched")
+end
 
 print("\nNavigation:")
 
@@ -21855,6 +22227,96 @@ assert((byType.TITLE or 0) == 0,
 
 print("  titles correctly absent (no source data exists)")
 
+-- Scoped: Lua caps a function at 200 locals and this file
+-- outgrew it. Each self-contained section gets its own scope.
+do
+print("\nHub batching:")
+
+-- The complaint this exists for: an addon that routes over individual
+-- objectives sends you to a camp, away, and back again for each thing
+-- standing there.
+--
+-- Three stops at one camp, two at another well away from it, and one loner.
+local camped = {
+    { name = "Giver A",  x = 0.300, y = 0.300, mapID = 94, phase = "PICKUP" },
+    { name = "Turn-in",  x = 0.302, y = 0.301, mapID = 94, phase = "TURNIN" },
+    { name = "Giver B",  x = 0.301, y = 0.303, mapID = 94, phase = "PICKUP" },
+    { name = "Far C",    x = 0.800, y = 0.800, mapID = 94, phase = "ACTIVE" },
+    { name = "Far D",    x = 0.803, y = 0.799, mapID = 94, phase = "ACTIVE" },
+    { name = "Loner",    x = 0.500, y = 0.100, mapID = 94, phase = "ACTIVE" },
+}
+
+local builtHubs = CN.ClusterByProximity(camped)
+
+print("  " .. #camped .. " stops collapsed into " .. #builtHubs .. " places")
+
+for index, hub in ipairs(builtHubs) do
+    local names = {}
+    for _, objective in ipairs(hub.objectives) do names[#names + 1] = objective.name end
+    print("    " .. index .. ") " .. CN.DescribeHub(hub)
+        .. " -- " .. table.concat(names, ", "))
+end
+
+assert(#builtHubs == 3,
+    "three distinct places expected, got " .. #builtHubs)
+
+-- Every stop must survive clustering. Losing one would silently drop work.
+local clustered = 0
+for _, hub in ipairs(builtHubs) do clustered = clustered + #hub.objectives end
+
+assert(clustered == #camped,
+    "clustering must not lose stops: " .. clustered .. " of " .. #camped)
+
+-- Within a hub, the order must be the order you would actually do it:
+-- collect quests before handing them back.
+for _, hub in ipairs(builtHubs) do
+    if #hub.objectives > 1 then
+        local sawTurnIn = false
+
+        for _, objective in ipairs(hub.objectives) do
+            if objective.phase == "TURNIN" then
+                sawTurnIn = true
+            elseif objective.phase == "PICKUP" then
+                assert(not sawTurnIn,
+                    "a pickup must be ordered before a turn-in at the same place")
+            end
+        end
+    end
+end
+
+print("  within a place, pickups come before turn-ins")
+
+-- And the description must name what you are there to do.
+local campHub
+
+for _, hub in ipairs(builtHubs) do
+    if #hub.objectives == 3 then campHub = hub end
+end
+
+assert(campHub, "the three-stop camp must be one hub")
+
+local described = CN.DescribeHub(campHub)
+
+assert(described:find("pick up 2", 1, true) and described:find("turn in 1", 1, true),
+    "a hub must say what it is for, got " .. described)
+
+print("  hub described as: " .. described)
+
+-- The engine must PREFER clustered work, not merely display it that way.
+local alone   = CN.NewObjective({ id = 1, name = "Alone", completionValue = 2 })
+local grouped = CN.NewObjective({ id = 2, name = "Grouped", completionValue = 2,
+                                  hubSize = 4 })
+
+local aloneScore   = CN.ScoreObjective(alone)
+local groupedScore = CN.ScoreObjective(grouped)
+
+print(string.format("  identical objective scores %.1f alone, %.1f in a group of 4",
+    aloneScore, groupedScore))
+
+assert(groupedScore > aloneScore,
+    "work that batches with other work must outrank identical work that does not")
+end
+
 print("\nAvailable quests:")
 
 -- Reported from live play: "it only shows the quests you have accepted --
@@ -22173,6 +22635,9 @@ CN.ClearOverride("arrow")
 
 print("  iteration sees the merged view")
 
+-- Scoped: Lua caps a function at 200 locals and this file
+-- outgrew it. Each self-contained section gets its own scope.
+do
 print("\nType filtering:")
 
 local typeFilters = CN:GetModule("Filters")
@@ -22250,6 +22715,7 @@ assert(typeFilters.ResolveType("nonsense") == nil, "unknown text must not resolv
 
 typeFilters.EnableAllTypes()
 CN.Recommend(1)
+end
 
 print("\nGoals:")
 
@@ -22376,6 +22842,9 @@ print("  goal weighting does not stack across rebuilds")
 goals.Clear()
 CN.CollectCandidates(true)
 
+-- Scoped: Lua caps a function at 200 locals and this file
+-- outgrew it. Each self-contained section gets its own scope.
+do
 print("\nBounded collection:")
 
 -- Ten entries, values 1 and 2, capped at 3: the three highest-valued win,
@@ -22442,6 +22911,7 @@ assert(CN.IsIgnored("PET", 99999) == false, "a populated list must still answer 
 CN.SetIgnored("PET", 12345, false)
 
 print("  ignore fast path preserves real lookups")
+end
 
 print("\nMigration 1 -> 4:")
 
@@ -22689,17 +23159,61 @@ $Embedded['coverage.sh'] = @'
 #!/bin/bash
 # Coverage over the offline harness.
 #
-# luacov installs under Lua 5.1 on this machine but is pure Lua, so 5.4 runs it
-# fine with the path pointed at it.
-set -e
+# IMPORTANT: this script must NEVER block a release.
+#
+# It once did. It hardcoded the luacov path from the author's machine
+# (/usr/local/share/lua/5.1), so on any host where luarocks installed luacov
+# somewhere else the script died under `set -e` with no output at all -- and
+# because it ran in CI ahead of the packager, the whole release silently
+# stopped. A quality signal for the author is not a reason to deny users a
+# build.
+#
+# So: locate luacov rather than assume it, and when it genuinely cannot run,
+# say so clearly and exit 0.
 
 ROOT=${1:-build/CompletionNavigator}
 FLOOR=${2:-80}
 
-LUA51="/usr/local/share/lua/5.1/?.lua;/usr/local/share/lua/5.1/?/init.lua;;"
+note() { echo "coverage: $*"; }
 
-# Write the config next to wherever we are running, so the same script works
-# from the development tree and from a freshly scaffolded copy.
+if [ ! -f "$ROOT/CompletionNavigator.toc" ]; then
+  note "no addon tree at '$ROOT'; skipping."
+  exit 0
+fi
+
+if [ ! -f harness.lua ]; then
+  note "harness.lua not found; skipping."
+  exit 0
+fi
+
+# Find luacov wherever this machine put it. luacov is pure Lua, so any
+# version's install directory works under any Lua interpreter.
+LUACOV_PATH=""
+
+for base in /usr/local/share/lua /usr/share/lua "$HOME/.luarocks/share/lua"; do
+  [ -d "$base" ] || continue
+
+  for versioned in "$base"/*; do
+    if [ -f "$versioned/luacov.lua" ] || [ -d "$versioned/luacov" ]; then
+      LUACOV_PATH="$versioned/?.lua;$versioned/?/init.lua;$LUACOV_PATH"
+    fi
+  done
+done
+
+if [ -z "$LUACOV_PATH" ]; then
+  note "luacov is not installed; skipping coverage."
+  note "install it with:  luarocks install luacov"
+  exit 0
+fi
+
+export LUA_PATH="${LUACOV_PATH};;"
+
+# Confirm it actually loads before relying on it.
+if ! lua5.4 -e 'require("luacov.runner")' >/dev/null 2>&1; then
+  note "luacov was found but will not load; skipping coverage."
+  exit 0
+fi
+
 cat > .luacov <<CONFIG
 statsfile = "luacov.stats.out"
 reportfile = "luacov.report.out"
@@ -22709,11 +23223,21 @@ CONFIG
 
 rm -f luacov.stats.out luacov.report.out
 
-LUA_PATH="$LUA51" lua5.4 -lluacov harness.lua "$ROOT" > /dev/null 2>&1
+lua5.4 -lluacov harness.lua "$ROOT" > /dev/null 2>&1
 
-LUA_PATH="$LUA51" lua5.4 -e 'require("luacov.reporter").report()' > /dev/null 2>&1
+lua5.4 -e 'require("luacov.reporter").report()' > /dev/null 2>&1
+
+if [ ! -f luacov.report.out ]; then
+  note "no report was produced; skipping."
+  exit 0
+fi
 
 TOTAL=$(grep -E "^Total" luacov.report.out | awk '{print $NF}' | tr -d '%')
+
+if [ -z "$TOTAL" ]; then
+  note "report contained no total; skipping."
+  exit 0
+fi
 
 # The report lists every file twice: once with per-line detail, once in the
 # summary table. Only the summary rows have four columns.
@@ -22874,6 +23398,60 @@ if command -v luacheck >/dev/null 2>&1; then
 else
   echo "    luacheck not installed; skipped"
 fi
+
+echo "  coverage degrades instead of blocking"
+# A developer tool being absent must never stop a release. This exact failure
+# shipped: coverage.sh hardcoded a luacov path, died on the CI runner, and the
+# packager never ran -- so a tagged release never reached CurseForge.
+(cd "$WORK" && sed 's#/usr/local/share/lua#/nonexistent/share/lua#g; s#/usr/share/lua#/nonexistent2/share/lua#g; s#$HOME/.luarocks/share/lua#/nonexistent3#g' coverage.sh > coverage_nolua.sh \
+  && bash coverage_nolua.sh . 80 > nolua.log 2>&1)
+NOLUA=$?
+if [ "$NOLUA" -ne 0 ]; then
+  echo "FAIL: coverage.sh exits non-zero when luacov is missing; that blocks releases"
+  cat "$WORK/nolua.log"
+  exit 1
+fi
+grep -q "skipping" "$WORK/nolua.log" || {
+  echo "FAIL: coverage.sh must say why it skipped"; cat "$WORK/nolua.log"; exit 1; }
+echo "    $(head -1 "$WORK/nolua.log")"
+
+echo "  CI: only real failures may block the packager"
+# Any blocking CI step must be one that indicates broken code. Optional
+# tooling steps must carry continue-on-error.
+python3 - "$WORK/.github/workflows/release.yml" <<'CILINT'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+# Steps that are allowed to block a release, because they mean the addon is
+# actually broken.
+blocking_allowed = {
+    "Check out", "Fetch tags", "Verify a tag points at HEAD", "Install Lua",
+    "Syntax check every Lua file", "Verify the .toc lists every Lua file",
+    "Lint", "Run the offline harness",
+    "Verify the CurseForge token is available", "Package and upload",
+}
+
+steps = re.findall(r"- name: (.+?)\n(.*?)(?=\n      - name: |\Z)", text, re.S)
+
+problems = []
+
+for name, body in steps:
+    name = name.strip()
+    optional = "continue-on-error: true" in body
+
+    if name not in blocking_allowed and not optional:
+        problems.append("step '%s' can block a release but is not in the "
+                        "allow-list; add continue-on-error or justify it" % name)
+
+if problems:
+    print("FAIL: CI would block a release on a non-essential step")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    %d steps checked" % len(steps))
+CILINT
 
 echo "  lint: no unguarded native invocations"
 # Structural guarantee, not a behavioural one. Every native command must go

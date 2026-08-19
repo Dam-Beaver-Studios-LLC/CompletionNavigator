@@ -22,6 +22,8 @@ Run `/cn setup` once, then click the minimap button or type `/cn next`. The addo
 
 **Navigates, on its own.** An arrow that points at your destination, turns as you turn, colours by whether you are actually walking toward it, and reports real distance in yards rather than map percentage. No other addon required. TomTom is still supported for anyone who prefers its arrow — `/cn nav tomtom` — and quest locations are resolved from four separate client sources, not one.
 
+**Batches, instead of sending you back and forth.** A quest is three places — where you accept it, where you do it, where you hand it back — and the addon plans around all three. Stops within about seventy yards collapse into one place, and the route is solved place to place: arrive once, pick up everything on offer, do the work, hand it all back, leave. The recommendation engine prefers work that batches too, so it won't send you across the zone for one quest when four things sit together on the way.
+
 **Sweeps a zone.** `/cn zone` gathers everything obtainable on your current map and orders it into a real route — nearest-first, then improved to remove the doubling-back that a naive nearest-first ordering always leaves behind. Click any stop to route to it.
 
 **Understands your Warband.** Reputations, titles, professions, recipes and currencies are stored per character where the game scopes them that way. `/cn warband` shows your roster and combined coverage; `/cn who rep <faction>` tells you which character should do a job. Objectives another character is better suited to rank lower, and say so.
@@ -159,7 +161,7 @@ None are required. Completion Navigator is a decision layer, not a replacement f
 
 ## Status
 
-Version 0.23.0. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
+Version 0.24.1. All subsystems above are implemented and tested. The recommendation path is benchmarked against a retail-scale database rather than assumed: candidates are cached per provider and invalidated per event, so asking "what next?" costs a hundredth of a millisecond and hovering the minimap button does not cost you a frame. The curated static quest database is still small, which is what limits prerequisite forensics today — harvesting is designed to close that gap as people play.
 
 Bug reports and feature requests: [GitHub issues](https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/issues), or email developer@dambeaverstudios.com.
 

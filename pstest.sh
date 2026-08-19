@@ -139,6 +139,60 @@ else
   echo "    luacheck not installed; skipped"
 fi
 
+echo "  coverage degrades instead of blocking"
+# A developer tool being absent must never stop a release. This exact failure
+# shipped: coverage.sh hardcoded a luacov path, died on the CI runner, and the
+# packager never ran -- so a tagged release never reached CurseForge.
+(cd "$WORK" && sed 's#/usr/local/share/lua#/nonexistent/share/lua#g; s#/usr/share/lua#/nonexistent2/share/lua#g; s#$HOME/.luarocks/share/lua#/nonexistent3#g' coverage.sh > coverage_nolua.sh \
+  && bash coverage_nolua.sh . 80 > nolua.log 2>&1)
+NOLUA=$?
+if [ "$NOLUA" -ne 0 ]; then
+  echo "FAIL: coverage.sh exits non-zero when luacov is missing; that blocks releases"
+  cat "$WORK/nolua.log"
+  exit 1
+fi
+grep -q "skipping" "$WORK/nolua.log" || {
+  echo "FAIL: coverage.sh must say why it skipped"; cat "$WORK/nolua.log"; exit 1; }
+echo "    $(head -1 "$WORK/nolua.log")"
+
+echo "  CI: only real failures may block the packager"
+# Any blocking CI step must be one that indicates broken code. Optional
+# tooling steps must carry continue-on-error.
+python3 - "$WORK/.github/workflows/release.yml" <<'CILINT'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+# Steps that are allowed to block a release, because they mean the addon is
+# actually broken.
+blocking_allowed = {
+    "Check out", "Fetch tags", "Verify a tag points at HEAD", "Install Lua",
+    "Syntax check every Lua file", "Verify the .toc lists every Lua file",
+    "Lint", "Run the offline harness",
+    "Verify the CurseForge token is available", "Package and upload",
+}
+
+steps = re.findall(r"- name: (.+?)\n(.*?)(?=\n      - name: |\Z)", text, re.S)
+
+problems = []
+
+for name, body in steps:
+    name = name.strip()
+    optional = "continue-on-error: true" in body
+
+    if name not in blocking_allowed and not optional:
+        problems.append("step '%s' can block a release but is not in the "
+                        "allow-list; add continue-on-error or justify it" % name)
+
+if problems:
+    print("FAIL: CI would block a release on a non-essential step")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    %d steps checked" % len(steps))
+CILINT
+
 echo "  lint: no unguarded native invocations"
 # Structural guarantee, not a behavioural one. Every native command must go
 # through Invoke-CNNative; a stray `2>&1` or a bare `git` call reintroduces
