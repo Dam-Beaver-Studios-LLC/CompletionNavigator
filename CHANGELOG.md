@@ -7,6 +7,55 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.34.0]
+
+The arrow stopped working indoors, and now it can explain itself.
+
+### Fixed
+
+- **Stepping into a building, a cave or a city district stopped the arrow.**
+  The client answers "which map are you on" with the most *specific* map
+  containing you, so walking through a door changes it -- while you have moved
+  thirty yards. The arrow compared that to the destination's map, found them
+  different, and announced "another zone" while standing next to the thing it
+  was pointing at.
+  It now asks the client where you are **as expressed on the destination's
+  map**, which works for any map that can describe you, and only gives up when
+  the answer is genuinely nowhere -- another continent, or an instance. That
+  case still says so plainly rather than producing a confident arrow pointing
+  at nothing.
+  This is the same defect that made available quests invisible in a city in
+  0.27.0, in a different file, with the same cause: assuming the map under
+  your feet is the map the data is on.
+
+### Added
+
+- **`/cn navdiag` -- everything the arrow is thinking, in one command.**
+  Written because the arrow has been reported as misbehaving twice, and both
+  times the only available evidence was a description in prose. I guessed from
+  it twice and was wrong twice. Prose is a bad instrument.
+  It reports what is being tracked, where the client says you are, which way it
+  says you are facing, every intermediate value in the bearing, the rotation
+  actually applied to the texture, the colour that implies, and -- crucially --
+  which of the several things that can silently change your destination is
+  switched on. If the arrow does something surprising again, one command
+  produces the answer instead of a conversation.
+
+### Notes
+
+- The offline stub answered "where is the player on this map?" for *every*
+  map, including ones on other continents. That made "you are in a building
+  inside this zone" and "you are on another continent" indistinguishable --
+  two cases that need opposite behaviour from the arrow. The stub now refuses
+  maps that cannot place the player, which is what the client does.
+  Seventh instance of the same pattern, and the rule written down in 0.33.0
+  is what caught this one: ask which part of reality the stub is refusing to
+  model, and whether that is the part under test.
+- One test in this release had to be corrected rather than the code: it put
+  the player on a map the client could not place them on, which is a state the
+  client never produces. A test asserting behaviour in an impossible state
+  proves nothing about a real one.
+
 ## [0.33.0]
 
 The arrow. Reported twice, and I did not find it either time because I never

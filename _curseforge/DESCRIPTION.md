@@ -92,7 +92,7 @@ It searches the surrounding zone as well as the map under your feet, since a cit
 
 ## Navigation without another addon
 
-A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it â€” it turns and recolours the moment you pass the destination, and when it hands itself to the next stop it tells you which destination it is now pointing at rather than quietly changing what it means. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
+A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it â€” it turns and recolours the moment you pass the destination, keeps working when you step into a building or a cave, and when it hands itself to the next stop it tells you which destination it is now pointing at rather than quietly changing what it means. `/cn navdiag` shows every value it is using, if it ever does something you did not expect. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
 
 ## Warband-aware
 
@@ -162,6 +162,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn mode <focus>` | Aim the whole addon at one kind of play |
 | `/cn alts` | Which character should be doing what |
 | `/cn zones` | Which zone to work on next, and why |
+| `/cn navdiag` | Exactly what the arrow is doing, and why |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |

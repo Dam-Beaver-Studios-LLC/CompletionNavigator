@@ -330,6 +330,50 @@ function Navigation.BearingColor(relative)
 end
 
 -- Recomputes the arrow. Split out so the harness can drive it without a frame.
+-- The player's position expressed on a specific map, or nil.
+--
+-- Works for any map that can describe where the player is standing -- a zone
+-- while you are inside one of its buildings, for instance -- and returns nil
+-- when it genuinely cannot, which is the honest answer for another continent.
+function Navigation.PlayerPositionOnMap(mapID)
+    if not mapID or not C_Map or not C_Map.GetPlayerMapPosition then
+        return nil
+    end
+
+    local ok, position = pcall(C_Map.GetPlayerMapPosition, mapID, "player")
+
+    if not ok or not position then
+        return nil
+    end
+
+    local x, y
+
+    if position.GetXY then
+        local gotXY, gx, gy = pcall(position.GetXY, position)
+
+        if gotXY then
+            x, y = gx, gy
+        end
+    end
+
+    x = x or position.x
+    y = y or position.y
+
+    if not x or not y then
+        return nil
+    end
+
+    -- The client answers (0, 0) for a map that cannot place you, which is a
+    -- real coordinate on every map and therefore indistinguishable from a
+    -- corner. Treated as "cannot say", because a corner is a far less likely
+    -- place to be standing than nowhere.
+    if x == 0 and y == 0 then
+        return nil
+    end
+
+    return { x = x, y = y }
+end
+
 function Navigation.Compute()
     if not target then
         return nil
@@ -341,11 +385,37 @@ function Navigation.Compute()
         return { state = "NO_POSITION" }
     end
 
+    -- THE MAP UNDER YOUR FEET IS NOT THE MAP THE TARGET IS ON.
+    --
+    -- `GetBestMapForUnit` answers with the most SPECIFIC map containing you:
+    -- step into a building, a cave, an inn or a city district and it changes,
+    -- even though you have moved thirty yards. The arrow compared that to the
+    -- target's map, found them different, and gave up -- announcing "another
+    -- zone" while standing next to the destination.
+    --
+    -- This is the same defect that made available quests invisible in a city
+    -- in 0.27.0, in a different file. The fix is the same shape: ask the
+    -- client for the player's position expressed on the map that matters,
+    -- rather than assuming the two maps are the same one.
+    local onTargetMap = false
+
     if mapID ~= target.mapID then
-        return {
-            state = "WRONG_MAP",
-            zone  = target.zone or Blizzard.GetMapName(target.mapID),
-        }
+        local translated = Navigation.PlayerPositionOnMap(target.mapID)
+
+        if translated then
+            mapID   = target.mapID
+            playerX = translated.x
+            playerY = translated.y
+
+            onTargetMap = true
+        else
+            -- Genuinely somewhere the target's map cannot describe --
+            -- another continent, or an instance.
+            return {
+                state = "WRONG_MAP",
+                zone  = target.zone or Blizzard.GetMapName(target.mapID),
+            }
+        end
     end
 
     local facing = GetPlayerFacing and GetPlayerFacing() or nil
@@ -379,6 +449,10 @@ function Navigation.Compute()
         yards    = yards,
         facing   = facing,
         within   = within,
+        mapID    = mapID,
+        playerX  = playerX,
+        playerY  = playerY,
+        translated = onTargetMap,
     }
 end
 
@@ -605,6 +679,113 @@ function Navigation.StopTicker()
         ticker = nil
     end
 end
+
+------------------------------------------------------------
+-- DIAGNOSIS
+------------------------------------------------------------
+
+-- Everything the arrow is thinking, in one command.
+--
+-- Written because a player reported the arrow misbehaving twice, and both
+-- times the only evidence available was a description in prose. I guessed
+-- from it twice and was wrong twice. Prose is a bad instrument; this is a
+-- better one.
+--
+-- Reports what is being tracked, where the client says you are, which way it
+-- says you are facing, every intermediate value in the bearing, what was
+-- actually applied to the texture, and which of the several things that can
+-- silently change the destination is switched on.
+function Navigation.Diagnose()
+    local report = {}
+
+    local function add(label, value)
+        table.insert(report, { label = label, value = tostring(value) })
+    end
+
+    if not target then
+        add("target", "none -- nothing is being tracked")
+
+        return report
+    end
+
+    add("target", tostring(target.title or "untitled"))
+    add("target map", string.format("%s (%s)",
+        tostring(target.mapID), tostring(target.zone or "?")))
+    add("target coords", string.format("%.1f, %.1f",
+        (target.x or 0) * 100, (target.y or 0) * 100))
+    add("marked arrived", target.arrived and "yes" or "no")
+
+    local bestMap, px, py = CN.GetPlayerPosition()
+
+    add("your map", tostring(bestMap))
+    add("your coords", px and string.format("%.1f, %.1f", px * 100, py * 100)
+        or "the client will not say")
+
+    local state = Navigation.Compute() or {}
+
+    add("state", tostring(state.state))
+
+    if state.translated then
+        add("translation", "your position was expressed on the target's map")
+    end
+
+    add("facing (raw)", state.facing
+        and string.format("%.1f deg", math.deg(state.facing)) or "nil")
+    add("facing sign", tostring(Navigation.FacingSign())
+        .. " (flips if the arrow ever pointed backwards)")
+
+    add("relative bearing", state.relative
+        and string.format("%.1f deg", math.deg(state.relative))
+        or "nil -- no bearing could be computed")
+
+    if state.relative then
+        add("rotation applied", string.format("%.1f deg", math.deg(-state.relative)))
+
+        local off = math.abs(state.relative)
+
+        add("colour", off < 0.35 and "BLUE (on course)"
+            or off < 1.2 and "GOLD (drifting)"
+            or "RED (walking away)")
+    end
+
+    add("distance", Navigation.FormatDistance(state.yards))
+    add("arrival radius", Navigation.arrivalYards .. " yd")
+
+    add("provider", tostring(select(2, CN.GetWaypointProvider())))
+
+    -- The two settings that can change what the arrow means without the
+    -- player doing anything.
+    add("auto-advance", (CN.IsAutoWaypointEnabled and CN.IsAutoWaypointEnabled())
+        and "ON -- arriving re-points the arrow at the next thing"
+        or "off")
+
+    local follow = CN:GetModule("Follow")
+
+    add("follow mode", (follow and follow.active) and "ON" or "off")
+
+    return report
+end
+
+CN:RegisterCommand{
+    name    = "navdiag",
+    aliases = { "arrowdiag" },
+    order   = 30,
+    help    = "Show exactly what the navigation arrow is doing and why.",
+    handler = function()
+        local report = Navigation.Diagnose()
+
+        Print("Arrow diagnosis:")
+
+        for _, row in ipairs(report) do
+            Print(string.format("  |cff999999%-18s|r %s", row.label, row.value))
+        end
+
+        if not target then
+            Print("|cff999999Set one with |cffffff00/cn go|r"
+                .. "|cff999999 and run this again.|r")
+        end
+    end,
+}
 
 ------------------------------------------------------------
 -- WAYPOINT PROVIDER

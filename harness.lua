@@ -267,7 +267,23 @@ C_Map = {
     -- Fixed at one point, the stub could never express the case a player
     -- reported twice: walking past the destination and continuing. Every
     -- arrow test was therefore a test of standing still.
-    GetPlayerMapPosition = function()
+    -- A MOVABLE player, on a map that can refuse to place them.
+    --
+    -- The real API answers only for maps that can actually describe where the
+    -- player is standing -- the zone you are in, and the zone containing the
+    -- building you stepped into. For anywhere else it returns nil.
+    --
+    -- The stub used to answer for EVERY map, which is why nothing could tell
+    -- the difference between "you are in a building inside this zone" and
+    -- "you are on another continent". Those need opposite behaviour from the
+    -- arrow, and the stub made them identical.
+    --
+    -- CN_TEST_PLAYER_MAPS lists the maps that can place the player.
+    GetPlayerMapPosition = function(mapID)
+        if not CN_TEST_PLAYER_MAPS[mapID] then
+            return nil
+        end
+
         return {
             GetXY = function()
                 return CN_TEST_PLAYER_X or 0.42, CN_TEST_PLAYER_Y or 0.55
@@ -316,6 +332,9 @@ local offeredTitles = {
 local pendingLoad = {}
 
 CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
+
+-- Maps that can express where the player is standing.
+CN_TEST_PLAYER_MAPS = { [94] = true }
 
 C_QuestLog = {
     -- BUILDS A FRESH TABLE, because the client does.
@@ -4897,5 +4916,138 @@ print("\nThe arrow turns round when you walk past:")
 
     print("  turns round, recolours, announces a re-target, leaves nothing stale")
 end)()
+
+print("\nThe arrow survives walking indoors:")
+
+;(function()
+    local indoorNav = CN:GetModule("Navigation")
+
+    -- GetBestMapForUnit answers with the most SPECIFIC map containing you.
+    -- Step into a building, a cave, an inn or a city district and it changes
+    -- -- while you have moved thirty yards. The arrow compared that to the
+    -- target's map, found them different, and announced "another zone" while
+    -- standing next to the destination.
+    CN.SetWaypoint(94, 0.5, 0.4, "Just Outside")
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5, 0.5
+
+    playerFacing = 0
+
+    local outside = indoorNav.Compute()
+
+    assert(outside.state == "TRACKING", "tracking normally outdoors")
+    assert(outside.relative, "and it has a bearing")
+
+    -- Now step inside. The player's own map becomes the building, which the
+    -- zone can still place them on.
+    CN_TEST_PLAYER_MAPS[2500] = true
+
+    local realBest = C_Map.GetBestMapForUnit
+
+    C_Map.GetBestMapForUnit = function() return 2500 end
+
+    local indoors = indoorNav.Compute()
+
+    C_Map.GetBestMapForUnit = realBest
+    CN_TEST_PLAYER_MAPS[2500] = nil
+
+    assert(indoors.state ~= "WRONG_MAP",
+        "stepping into a building must not stop the arrow -- the zone can "
+        .. "still say where you are")
+    assert(indoors.translated == true,
+        "and the addon must say it translated the position rather than "
+        .. "pretending the maps were the same")
+    assert(indoors.relative,
+        "a bearing is still produced indoors")
+    assert(indoors.yards and indoors.yards > 0,
+        "and a real distance, got " .. tostring(indoors.yards))
+
+    -- A map that genuinely cannot place the player is still refused. Another
+    -- continent must not silently produce a confident arrow.
+    --
+    -- The player stays where they are -- on a map the client can place them
+    -- on, which is always true in practice. It is the TARGET's map that
+    -- cannot describe them. An earlier version of this check moved the
+    -- player to a map the client could not place them on either, which is a
+    -- state the client never produces.
+    CN.SetWaypoint(1234, 0.5, 0.4, "Another Continent")
+
+    local far = indoorNav.Compute()
+
+    assert(far.state == "WRONG_MAP",
+        "a target the client cannot place you against stays honest about it")
+
+    indoorNav.Clear()
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
+
+    print("  indoors keeps tracking; another continent still says so")
+end)()
+
+
+print("\nArrow diagnosis:")
+
+;(function()
+    local diagNav = CN:GetModule("Navigation")
+
+    -- With nothing tracked it must say so rather than printing an empty
+    -- report or erroring.
+    diagNav.Clear()
+
+    local idle = diagNav.Diagnose()
+
+    assert(#idle >= 1, "there is always a report")
+    assert(idle[1].value:find("none"), "and it says nothing is tracked")
+
+    -- With a target it must expose every intermediate value, because the
+    -- point is to replace a player describing the arrow in prose.
+    CN.SetWaypoint(94, 0.5, 0.4, "Diagnosed Destination")
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5, 0.6
+    playerFacing = 0
+
+    local report = diagNav.Diagnose()
+
+    local seen = {}
+
+    for _, row in ipairs(report) do
+        seen[row.label] = row.value
+    end
+
+    for _, required in ipairs({
+        "target", "target map", "target coords", "your map", "your coords",
+        "facing (raw)", "facing sign", "relative bearing", "rotation applied",
+        "colour", "distance", "provider", "auto-advance", "follow mode",
+        "marked arrived", "arrival radius", "state",
+    }) do
+        assert(seen[required],
+            "the diagnosis must report '" .. required
+            .. "' -- every one of these has been the answer to a real "
+            .. "question about this arrow")
+    end
+
+    assert(seen["colour"]:find("BLUE"),
+        "walking toward it reads BLUE, got " .. seen["colour"])
+
+    -- And past it, the same command must show the reversal.
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5, 0.2
+
+    local past = {}
+
+    for _, row in ipairs(diagNav.Diagnose()) do
+        past[row.label] = row.value
+    end
+
+    assert(past["colour"]:find("RED"),
+        "past it reads RED, got " .. tostring(past["colour"]))
+
+    CN.HandleSlashCommand("navdiag")
+
+    diagNav.Clear()
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
+
+    print("  every value the arrow uses is reportable")
+end)()
+
 
 print("\nALL HARNESS CHECKS PASSED")
