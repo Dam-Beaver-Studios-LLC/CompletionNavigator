@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.31.0'
+$script:ToolkitVersion = '0.32.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.31.0"
+CN.version     = "0.32.0"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -19117,14 +19117,57 @@ local sessionStart = {
 -- Lifetime quests completed by this character, straight from the client.
 -- Nil, not zero, when the client will not say -- an unknown total and a
 -- total of none are different facts.
-function Progress.LifetimeCompleted()
-    local ids = Blizzard.GetAllCompletedQuestIDs()
+--
+-- CACHED, and it needed to be.
+--
+-- `C_QuestLog.GetAllCompletedQuestIDs` does not hand back a number. It builds
+-- and returns a table containing every quest the character has ever finished
+-- -- tens of thousands of entries for anyone who has played a while, and this
+-- addon is aimed squarely at people who have. The Journey tab called it on
+-- every refresh to display one integer, allocating and discarding the
+-- player's entire quest history to count it.
+--
+-- The count only changes when a quest is turned in, and the addon already
+-- gets told when that happens. So: read it once, keep the number, and throw
+-- the cache away on the event that can change it.
+-- INVALIDATION, and a trap I walked into while writing it.
+--
+-- The obvious event list is "anything that could change the count", which
+-- includes QUEST_LOG_UPDATE. That event fires many times a second during
+-- normal play, so hooking it handed the entire saving straight back -- the
+-- benchmark went from 0.000ms to 0.244ms, which is to say back to uncached.
+-- A cache invalidated by a firehose is not a cache.
+--
+-- So: invalidate precisely on the events that certainly change the number,
+-- and bound the staleness for anything that slips through. A count that is
+-- at most a minute out of date is not a problem; a count that costs the
+-- player's entire quest history to display is.
+local lifetimeCache = { value = nil, valid = false, at = 0 }
 
-    if not ids then
-        return nil
+Progress.lifetimeMaxAgeSeconds = 60
+
+function Progress.InvalidateLifetime()
+    lifetimeCache.valid = false
+    lifetimeCache.value = nil
+end
+
+function Progress.LifetimeCompleted()
+    if lifetimeCache.valid
+        and (time() - lifetimeCache.at) < Progress.lifetimeMaxAgeSeconds then
+
+        return lifetimeCache.value
     end
 
-    return #ids
+    local ids = Blizzard.GetAllCompletedQuestIDs()
+
+    -- A nil answer is cached too. The client refusing to say is a stable
+    -- fact for the moment, and re-asking on every refresh in the hope of a
+    -- different answer is the same waste with extra steps.
+    lifetimeCache.value = ids and #ids or nil
+    lifetimeCache.valid = true
+    lifetimeCache.at    = time()
+
+    return lifetimeCache.value
 end
 
 ------------------------------------------------------------
@@ -19272,8 +19315,22 @@ end
 ------------------------------------------------------------
 
 CN:RegisterEvent("QUEST_TURNED_IN", function(_, questID)
+    Progress.InvalidateLifetime()
+
     Progress.NoteCompleted(questID)
 end)
+
+-- Abandoning a quest cannot lower the completed count, but a fresh login on
+-- a different character certainly changes it, and so does the client
+-- finishing its initial data load.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    Progress.InvalidateLifetime()
+end)
+
+-- Deliberately NOT hooked to QUEST_LOG_UPDATE. See the note on the cache:
+-- that event fires constantly and hooking it removed the entire benefit.
+-- Anything completed by a route the addon cannot see is picked up by the
+-- staleness bound instead.
 
 CN:OnLogin(function()
     Progress.BeginSession()
@@ -23725,7 +23782,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.31.0
+## Version: 0.32.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -23945,6 +24002,42 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.32.0]
+
+The quest counter was costing your entire quest history to display.
+
+### Fixed
+
+- **Reading "quests completed" allocated a copy of every quest you have ever
+  finished.** `C_QuestLog.GetAllCompletedQuestIDs` does not return a number;
+  it builds a table containing all of them -- tens of thousands of entries for
+  anyone who has played a while, which is exactly who this addon is for. The
+  Journey tab called it on every refresh to display one integer.
+  It is now read once and kept, so twenty-five refreshes cost one trip to the
+  client instead of twenty-five. Measured at a realistic twelve thousand
+  completed quests: **0.260ms per refresh, now 0.000ms.**
+- **The offline test stub was hiding it.** It handed back the same table on
+  every call, so reading the history looked free and the cost was invisible to
+  every test that had ever run. The stub now builds a fresh table, because
+  that is what the client does.
+  This is the fifth time in this project a stub has modelled the world more
+  cheaply than the world and hidden a real defect. The pattern is always the
+  same: a stub that costs less than the thing it stands for.
+
+### Notes
+
+- **I nearly shipped a cache that did not cache.** The obvious invalidation
+  list includes `QUEST_LOG_UPDATE`, which sounds right and fires many times a
+  second during normal play -- so hooking it handed the entire saving straight
+  back. The benchmark caught it: 0.000ms became 0.244ms, which is to say
+  exactly the number I had just removed.
+  Invalidation is now precise on the events that certainly change the count,
+  with a sixty-second staleness bound for anything that slips through. A count
+  a minute out of date is not a problem; a count that costs a quest history to
+  display is.
+  Both behaviours are asserted, including the negative one -- hooking the
+  chatty event fails the build.
 
 ## [0.31.0]
 
@@ -25837,7 +25930,7 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks — at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes — costs about **five milliseconds**, and the answer to "what next?" is served from cache in **three microseconds**.
 
-It gets there by not doing the same work twice. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
+It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer — the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 
 There is a benchmark in the repository, and the numbers above come out of it rather than out of a marketing meeting.
 
@@ -25889,7 +25982,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.31.0
+0.32.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -26390,6 +26483,12 @@ F.mapChildren = {
 
 F.completedQuestIDs = { 8237, 9002, 9500, 9501, 9502 }
 
+-- A REALISTIC history. Somebody doing three hundred quests in a weekend has
+-- tens of thousands of these within a year.
+for index = 1, 12000 do
+    F.completedQuestIDs[#F.completedQuestIDs + 1] = 50000 + index
+end
+
 F.gossipOffers = {}
 
 function CN_TEST_SetGossipOffers(offers) F.gossipOffers = offers or {} end
@@ -26526,7 +26625,22 @@ local offeredTitles = {
 local pendingLoad = {}
 
 C_QuestLog = {
-    GetAllCompletedQuestIDs = function() return F.completedQuestIDs end,
+    -- BUILDS A FRESH TABLE, because the client does.
+    --
+    -- The stub used to hand back the same table every call, which made
+    -- reading it look free and hid the fact that a UI refresh was allocating
+    -- a copy of the player's entire quest history. This is the fifth time in
+    -- this project a stub has modelled the world too simply and hidden a real
+    -- defect; the pattern is always a stub that is cheaper than the thing.
+    GetAllCompletedQuestIDs = function()
+        local copy = {}
+
+        for index = 1, #F.completedQuestIDs do
+            copy[index] = F.completedQuestIDs[index]
+        end
+
+        return copy
+    end,
     IsQuestFlaggedCompleted          = function(id)
         if id >= 70000 then return false end   -- world quests are fresh
         return id % 2 == 1
@@ -30041,7 +30155,7 @@ print("\nProgress:")
     -- counted rows this addon had written and started at zero.
     local lifetime = progress.LifetimeCompleted()
 
-    assert(lifetime == 5,
+    assert(lifetime == #F.completedQuestIDs,
         "the lifetime total is whatever the client says, got "
         .. tostring(lifetime))
 
@@ -30865,6 +30979,84 @@ print("\nWhich zone next:")
 end)()
 
 
+print("\nThe lifetime count does not cost a quest history:")
+
+;(function()
+    local progress = CN:GetModule("Progress")
+
+    -- The client does not return a number here. It builds a table containing
+    -- every quest the character has ever finished -- tens of thousands of
+    -- entries for the kind of player this addon is aimed at -- and the UI
+    -- called it on every refresh to display one integer.
+    local reads = 0
+
+    local realGet = CN.Blizzard.GetAllCompletedQuestIDs
+
+    CN.Blizzard.GetAllCompletedQuestIDs = function(...)
+        reads = reads + 1
+        return realGet(...)
+    end
+
+    progress.InvalidateLifetime()
+
+    for _ = 1, 25 do
+        progress.LifetimeCompleted()
+    end
+
+    assert(reads == 1,
+        "twenty-five reads of an unchanged count must cost one trip to the "
+        .. "client, cost " .. reads)
+
+    -- Turning a quest in genuinely changes it, so that must invalidate.
+    reads = 0
+
+    for _, dispatch in ipairs(CN.eventTable["QUEST_TURNED_IN"] or {}) do
+        dispatch("QUEST_TURNED_IN", 12345)
+    end
+
+    progress.LifetimeCompleted()
+
+    assert(reads == 1, "a turn-in must invalidate the count")
+
+    -- AND THE TRAP: QUEST_LOG_UPDATE fires many times a second. Hooking it
+    -- looked correct and handed the entire saving back -- the benchmark went
+    -- straight back to uncached. A cache invalidated by a firehose is not a
+    -- cache.
+    reads = 0
+
+    for _ = 1, 25 do
+        for _, dispatch in ipairs(CN.eventTable["QUEST_LOG_UPDATE"] or {}) do
+            dispatch("QUEST_LOG_UPDATE")
+        end
+
+        progress.LifetimeCompleted()
+    end
+
+    assert(reads <= 1,
+        "QUEST_LOG_UPDATE must NOT invalidate the lifetime count -- it fires "
+        .. "constantly and hooking it makes the cache useless. Cost "
+        .. reads .. " client reads across 25 events.")
+
+    CN.Blizzard.GetAllCompletedQuestIDs = realGet
+
+    -- A client that will not answer must still produce nil rather than zero:
+    -- unknown and none are different facts, and the cache must not turn one
+    -- into the other.
+    progress.InvalidateLifetime()
+
+    CN.Blizzard.GetAllCompletedQuestIDs = function() return nil end
+
+    assert(progress.LifetimeCompleted() == nil,
+        "an unavailable total stays nil, never zero")
+
+    CN.Blizzard.GetAllCompletedQuestIDs = realGet
+
+    progress.InvalidateLifetime()
+
+    print("  one client read for twenty-five refreshes")
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -31070,6 +31262,25 @@ do
     if alts then
         bench("Alts.Verdict()", 50, function()
             alts.Verdict()
+        end)
+    end
+
+    local progress = CN:GetModule("Progress")
+
+    if progress then
+        bench("Progress.Summary() (12k completed quests)", 50, function()
+            progress.Summary()
+        end)
+
+        -- QUEST_LOG_UPDATE fires many times a second during normal play. If
+        -- it invalidates the cache, the cache does nothing and this number
+        -- goes straight back to the uncached one.
+        bench("Summary under a chatty QUEST_LOG_UPDATE", 50, function()
+            for _, handler in ipairs(CN.eventTable["QUEST_LOG_UPDATE"] or {}) do
+                handler("QUEST_LOG_UPDATE")
+            end
+
+            progress.Summary()
         end)
     end
 end

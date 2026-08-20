@@ -63,14 +63,57 @@ local sessionStart = {
 -- Lifetime quests completed by this character, straight from the client.
 -- Nil, not zero, when the client will not say -- an unknown total and a
 -- total of none are different facts.
-function Progress.LifetimeCompleted()
-    local ids = Blizzard.GetAllCompletedQuestIDs()
+--
+-- CACHED, and it needed to be.
+--
+-- `C_QuestLog.GetAllCompletedQuestIDs` does not hand back a number. It builds
+-- and returns a table containing every quest the character has ever finished
+-- -- tens of thousands of entries for anyone who has played a while, and this
+-- addon is aimed squarely at people who have. The Journey tab called it on
+-- every refresh to display one integer, allocating and discarding the
+-- player's entire quest history to count it.
+--
+-- The count only changes when a quest is turned in, and the addon already
+-- gets told when that happens. So: read it once, keep the number, and throw
+-- the cache away on the event that can change it.
+-- INVALIDATION, and a trap I walked into while writing it.
+--
+-- The obvious event list is "anything that could change the count", which
+-- includes QUEST_LOG_UPDATE. That event fires many times a second during
+-- normal play, so hooking it handed the entire saving straight back -- the
+-- benchmark went from 0.000ms to 0.244ms, which is to say back to uncached.
+-- A cache invalidated by a firehose is not a cache.
+--
+-- So: invalidate precisely on the events that certainly change the number,
+-- and bound the staleness for anything that slips through. A count that is
+-- at most a minute out of date is not a problem; a count that costs the
+-- player's entire quest history to display is.
+local lifetimeCache = { value = nil, valid = false, at = 0 }
 
-    if not ids then
-        return nil
+Progress.lifetimeMaxAgeSeconds = 60
+
+function Progress.InvalidateLifetime()
+    lifetimeCache.valid = false
+    lifetimeCache.value = nil
+end
+
+function Progress.LifetimeCompleted()
+    if lifetimeCache.valid
+        and (time() - lifetimeCache.at) < Progress.lifetimeMaxAgeSeconds then
+
+        return lifetimeCache.value
     end
 
-    return #ids
+    local ids = Blizzard.GetAllCompletedQuestIDs()
+
+    -- A nil answer is cached too. The client refusing to say is a stable
+    -- fact for the moment, and re-asking on every refresh in the hope of a
+    -- different answer is the same waste with extra steps.
+    lifetimeCache.value = ids and #ids or nil
+    lifetimeCache.valid = true
+    lifetimeCache.at    = time()
+
+    return lifetimeCache.value
 end
 
 ------------------------------------------------------------
@@ -218,8 +261,22 @@ end
 ------------------------------------------------------------
 
 CN:RegisterEvent("QUEST_TURNED_IN", function(_, questID)
+    Progress.InvalidateLifetime()
+
     Progress.NoteCompleted(questID)
 end)
+
+-- Abandoning a quest cannot lower the completed count, but a fresh login on
+-- a different character certainly changes it, and so does the client
+-- finishing its initial data load.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    Progress.InvalidateLifetime()
+end)
+
+-- Deliberately NOT hooked to QUEST_LOG_UPDATE. See the note on the cache:
+-- that event fires constantly and hooking it removed the entire benefit.
+-- Anything completed by a route the addon cannot see is picked up by the
+-- staleness bound instead.
 
 CN:OnLogin(function()
     Progress.BeginSession()

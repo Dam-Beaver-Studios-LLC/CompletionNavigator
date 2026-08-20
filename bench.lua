@@ -200,4 +200,23 @@ do
             alts.Verdict()
         end)
     end
+
+    local progress = CN:GetModule("Progress")
+
+    if progress then
+        bench("Progress.Summary() (12k completed quests)", 50, function()
+            progress.Summary()
+        end)
+
+        -- QUEST_LOG_UPDATE fires many times a second during normal play. If
+        -- it invalidates the cache, the cache does nothing and this number
+        -- goes straight back to the uncached one.
+        bench("Summary under a chatty QUEST_LOG_UPDATE", 50, function()
+            for _, handler in ipairs(CN.eventTable["QUEST_LOG_UPDATE"] or {}) do
+                handler("QUEST_LOG_UPDATE")
+            end
+
+            progress.Summary()
+        end)
+    end
 end

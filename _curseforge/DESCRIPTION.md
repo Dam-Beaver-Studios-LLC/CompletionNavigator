@@ -184,7 +184,7 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks â€” at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes â€” costs about **five milliseconds**, and the answer to "what next?" is served from cache in **three microseconds**.
 
-It gets there by not doing the same work twice. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
+It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer â€” the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 
 There is a benchmark in the repository, and the numbers above come out of it rather than out of a marketing meeting.
 

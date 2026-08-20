@@ -7,6 +7,42 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.32.0]
+
+The quest counter was costing your entire quest history to display.
+
+### Fixed
+
+- **Reading "quests completed" allocated a copy of every quest you have ever
+  finished.** `C_QuestLog.GetAllCompletedQuestIDs` does not return a number;
+  it builds a table containing all of them -- tens of thousands of entries for
+  anyone who has played a while, which is exactly who this addon is for. The
+  Journey tab called it on every refresh to display one integer.
+  It is now read once and kept, so twenty-five refreshes cost one trip to the
+  client instead of twenty-five. Measured at a realistic twelve thousand
+  completed quests: **0.260ms per refresh, now 0.000ms.**
+- **The offline test stub was hiding it.** It handed back the same table on
+  every call, so reading the history looked free and the cost was invisible to
+  every test that had ever run. The stub now builds a fresh table, because
+  that is what the client does.
+  This is the fifth time in this project a stub has modelled the world more
+  cheaply than the world and hidden a real defect. The pattern is always the
+  same: a stub that costs less than the thing it stands for.
+
+### Notes
+
+- **I nearly shipped a cache that did not cache.** The obvious invalidation
+  list includes `QUEST_LOG_UPDATE`, which sounds right and fires many times a
+  second during normal play -- so hooking it handed the entire saving straight
+  back. The benchmark caught it: 0.000ms became 0.244ms, which is to say
+  exactly the number I had just removed.
+  Invalidation is now precise on the events that certainly change the count,
+  with a sixty-second staleness bound for anything that slips through. A count
+  a minute out of date is not a problem; a count that costs a quest history to
+  display is.
+  Both behaviours are asserted, including the negative one -- hooking the
+  chatty event fails the build.
+
 ## [0.31.0]
 
 Which zone next -- and two bugs that were hiding the answer.

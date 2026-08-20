@@ -127,6 +127,12 @@ F.mapChildren = {
 
 F.completedQuestIDs = { 8237, 9002, 9500, 9501, 9502 }
 
+-- A REALISTIC history. Somebody doing three hundred quests in a weekend has
+-- tens of thousands of these within a year.
+for index = 1, 12000 do
+    F.completedQuestIDs[#F.completedQuestIDs + 1] = 50000 + index
+end
+
 F.gossipOffers = {}
 
 function CN_TEST_SetGossipOffers(offers) F.gossipOffers = offers or {} end
@@ -263,7 +269,22 @@ local offeredTitles = {
 local pendingLoad = {}
 
 C_QuestLog = {
-    GetAllCompletedQuestIDs = function() return F.completedQuestIDs end,
+    -- BUILDS A FRESH TABLE, because the client does.
+    --
+    -- The stub used to hand back the same table every call, which made
+    -- reading it look free and hid the fact that a UI refresh was allocating
+    -- a copy of the player's entire quest history. This is the fifth time in
+    -- this project a stub has modelled the world too simply and hidden a real
+    -- defect; the pattern is always a stub that is cheaper than the thing.
+    GetAllCompletedQuestIDs = function()
+        local copy = {}
+
+        for index = 1, #F.completedQuestIDs do
+            copy[index] = F.completedQuestIDs[index]
+        end
+
+        return copy
+    end,
     IsQuestFlaggedCompleted          = function(id)
         if id >= 70000 then return false end   -- world quests are fresh
         return id % 2 == 1
@@ -3778,7 +3799,7 @@ print("\nProgress:")
     -- counted rows this addon had written and started at zero.
     local lifetime = progress.LifetimeCompleted()
 
-    assert(lifetime == 5,
+    assert(lifetime == #F.completedQuestIDs,
         "the lifetime total is whatever the client says, got "
         .. tostring(lifetime))
 
@@ -4599,6 +4620,84 @@ print("\nWhich zone next:")
     CN.HandleSlashCommand("zones")
 
     print("  " .. #closest .. " zones ranked, untouched included")
+end)()
+
+
+print("\nThe lifetime count does not cost a quest history:")
+
+;(function()
+    local progress = CN:GetModule("Progress")
+
+    -- The client does not return a number here. It builds a table containing
+    -- every quest the character has ever finished -- tens of thousands of
+    -- entries for the kind of player this addon is aimed at -- and the UI
+    -- called it on every refresh to display one integer.
+    local reads = 0
+
+    local realGet = CN.Blizzard.GetAllCompletedQuestIDs
+
+    CN.Blizzard.GetAllCompletedQuestIDs = function(...)
+        reads = reads + 1
+        return realGet(...)
+    end
+
+    progress.InvalidateLifetime()
+
+    for _ = 1, 25 do
+        progress.LifetimeCompleted()
+    end
+
+    assert(reads == 1,
+        "twenty-five reads of an unchanged count must cost one trip to the "
+        .. "client, cost " .. reads)
+
+    -- Turning a quest in genuinely changes it, so that must invalidate.
+    reads = 0
+
+    for _, dispatch in ipairs(CN.eventTable["QUEST_TURNED_IN"] or {}) do
+        dispatch("QUEST_TURNED_IN", 12345)
+    end
+
+    progress.LifetimeCompleted()
+
+    assert(reads == 1, "a turn-in must invalidate the count")
+
+    -- AND THE TRAP: QUEST_LOG_UPDATE fires many times a second. Hooking it
+    -- looked correct and handed the entire saving back -- the benchmark went
+    -- straight back to uncached. A cache invalidated by a firehose is not a
+    -- cache.
+    reads = 0
+
+    for _ = 1, 25 do
+        for _, dispatch in ipairs(CN.eventTable["QUEST_LOG_UPDATE"] or {}) do
+            dispatch("QUEST_LOG_UPDATE")
+        end
+
+        progress.LifetimeCompleted()
+    end
+
+    assert(reads <= 1,
+        "QUEST_LOG_UPDATE must NOT invalidate the lifetime count -- it fires "
+        .. "constantly and hooking it makes the cache useless. Cost "
+        .. reads .. " client reads across 25 events.")
+
+    CN.Blizzard.GetAllCompletedQuestIDs = realGet
+
+    -- A client that will not answer must still produce nil rather than zero:
+    -- unknown and none are different facts, and the cache must not turn one
+    -- into the other.
+    progress.InvalidateLifetime()
+
+    CN.Blizzard.GetAllCompletedQuestIDs = function() return nil end
+
+    assert(progress.LifetimeCompleted() == nil,
+        "an unavailable total stays nil, never zero")
+
+    CN.Blizzard.GetAllCompletedQuestIDs = realGet
+
+    progress.InvalidateLifetime()
+
+    print("  one client read for twenty-five refreshes")
 end)()
 
 
