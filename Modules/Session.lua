@@ -46,15 +46,53 @@ Session.defaultSpeed = 7
 
 Session.minSamples = 5
 
+-- THE CLOCK.
+--
+-- `time()` returns whole seconds. Sampling a ten-second interval with a
+-- one-second ruler is up to ten per cent of error baked into every estimate
+-- the planner produces, and it silently discarded every task that finished
+-- within the same second it was offered -- which, in the offline suite, was
+-- all of them. `GetTime()` is the client's fractional monotonic clock and is
+-- the right instrument for measuring a duration.
+--
+-- Kept behind a function so the offline harness can drive it.
+function Session.Now()
+    if GetTime then
+        return GetTime()
+    end
+
+    return os.clock()
+end
+
+-- Speed is kept in two buckets, not one.
+--
+-- A single median across mounted and unmounted travel is a number that is
+-- wrong in both states: too slow to plan a mounted route, too fast to plan a
+-- walk around a town. Two medians are two honest answers.
 local speed = {
-    lastMapID = nil,
-    lastX     = nil,
-    lastY     = nil,
-    lastAt    = nil,
-    samples   = {},
+    lastMapID  = nil,
+    lastX      = nil,
+    lastY      = nil,
+    lastAt     = nil,
+    lastMounted = nil,
+    samples    = { mounted = {}, onFoot = {} },
 }
 
 Session.speedSampleCap = 40
+
+local function Mounted()
+    if IsMounted and IsMounted() then
+        return true
+    end
+
+    if UnitOnTaxi and UnitOnTaxi("player") then
+        return true
+    end
+
+    return false
+end
+
+Session.IsMounted = Mounted
 
 -- Called on a slow clock. Measures the distance covered since the last look.
 --
@@ -64,18 +102,26 @@ Session.speedSampleCap = 40
 function Session.Observe()
     local mapID, x, y = CN.GetPlayerPosition()
 
-    local now = time()
+    local now     = Session.Now()
+    local mounted = Mounted()
 
     if not mapID or not x or not y then
         return nil
     end
 
-    local previousMap, previousX, previousY, previousAt =
-        speed.lastMapID, speed.lastX, speed.lastY, speed.lastAt
+    local previousMap, previousX, previousY, previousAt, previousMounted =
+        speed.lastMapID, speed.lastX, speed.lastY, speed.lastAt, speed.lastMounted
 
-    speed.lastMapID, speed.lastX, speed.lastY, speed.lastAt = mapID, x, y, now
+    speed.lastMapID, speed.lastX, speed.lastY = mapID, x, y
+    speed.lastAt, speed.lastMounted = now, mounted
 
     if previousMap ~= mapID or not previousAt then
+        return nil
+    end
+
+    -- Mounting halfway through an interval makes the sample a blend of both
+    -- speeds and belongs to neither bucket.
+    if previousMounted ~= mounted then
         return nil
     end
 
@@ -105,13 +151,15 @@ function Session.Observe()
         return nil
     end
 
-    table.insert(speed.samples, observed)
+    local bucket = mounted and speed.samples.mounted or speed.samples.onFoot
 
-    while #speed.samples > Session.speedSampleCap do
-        table.remove(speed.samples, 1)
+    table.insert(bucket, observed)
+
+    while #bucket > Session.speedSampleCap do
+        table.remove(bucket, 1)
     end
 
-    return observed
+    return observed, mounted
 end
 
 -- The median, not the mean: standing still for a minute should not halve the
@@ -140,16 +188,44 @@ end
 
 Session.Median = Median
 
-function Session.Speed()
-    if #speed.samples >= Session.minSamples then
-        return Median(speed.samples), true
+-- The speed to plan with.
+--
+-- Defaults to however the player is travelling right now, because that is
+-- the best available guess at how they will travel next. Falls back to the
+-- other bucket rather than to a constant: measured-but-wrong-state beats
+-- unmeasured.
+function Session.Speed(mounted)
+    if mounted == nil then
+        mounted = Mounted()
+    end
+
+    local preferred = mounted and speed.samples.mounted or speed.samples.onFoot
+    local other     = mounted and speed.samples.onFoot or speed.samples.mounted
+
+    if #preferred >= Session.minSamples then
+        return Median(preferred), true
+    end
+
+    if #other >= Session.minSamples then
+        return Median(other), false
     end
 
     return Session.defaultSpeed, false
 end
 
-function Session.SpeedSampleCount()
-    return #speed.samples
+function Session.SpeedSampleCount(mounted)
+    if mounted == nil then
+        return #speed.samples.mounted + #speed.samples.onFoot
+    end
+
+    return mounted and #speed.samples.mounted or #speed.samples.onFoot
+end
+
+function Session.SpeedBuckets()
+    return {
+        mounted = Median(speed.samples.mounted),
+        onFoot  = Median(speed.samples.onFoot),
+    }
 end
 
 ------------------------------------------------------------
@@ -168,7 +244,84 @@ Session.durationSampleCap  = 25
 -- When each objective was first put in front of the player. A completion
 -- timed from here is "how long it took once it was the thing to do", which is
 -- the number a plan needs.
+-- BOUNDED, because it was not.
+--
+-- Every objective the addon decorated used to get an entry here and only a
+-- completion removed one. Cross a dozen zones and it accumulates a timestamp
+-- for everything that ever scrolled past -- a slow leak I shipped in 0.28.0.
+--
+-- Two bounds now: entries expire, and the table is capped. Neither costs
+-- accuracy, because an entry older than the expiry window would have been
+-- rejected as implausible at completion time anyway.
 local offeredAt = {}
+local offeredCount = 0
+
+Session.offerMemoryCap     = 400
+Session.offerMemorySeconds = 1800
+
+-- HYSTERESIS, and why it is not optional.
+--
+-- Pruning the moment the table reaches its cap means every subsequent insert
+-- triggers a full sweep of four hundred entries. Recommend(25) does twenty
+-- five inserts, so a single call became ten thousand iterations -- measured
+-- at 1.5ms, up from 0.02ms. A fix for a memory leak that costs seventy times
+-- the CPU is not a fix.
+--
+-- So: let it overshoot by a quarter, then prune back to the cap. Sweeps
+-- happen once per hundred inserts instead of once per insert, and the table
+-- is still bounded, which was the entire point.
+Session.offerMemorySlack = 0.25
+
+local function Prune(force)
+    local trigger = Session.offerMemoryCap
+        * (1 + Session.offerMemorySlack)
+
+    if not force and offeredCount <= trigger then
+        return 0
+    end
+
+    local now = Session.Now()
+
+    local removed = 0
+
+    for key, at in pairs(offeredAt) do
+        if now - at > Session.offerMemorySeconds then
+            offeredAt[key] = nil
+            removed = removed + 1
+        end
+    end
+
+    offeredCount = offeredCount - removed
+
+    -- Still over cap after expiring? Drop the oldest until it fits. A
+    -- timestamp we cannot afford to keep is worth less than a bounded table.
+    if offeredCount > Session.offerMemoryCap then
+        local ordered = {}
+
+        for key, at in pairs(offeredAt) do
+            table.insert(ordered, { key = key, at = at })
+        end
+
+        table.sort(ordered, function(a, b) return a.at < b.at end)
+
+        local excess = offeredCount - Session.offerMemoryCap
+
+        for index = 1, excess do
+            offeredAt[ordered[index].key] = nil
+            removed = removed + 1
+        end
+
+        offeredCount = offeredCount - excess
+    end
+
+    return removed
+end
+
+Session.Prune = Prune
+
+function Session.OfferedCount()
+    return offeredCount
+end
 
 function Session.NoteOffered(objective)
     if type(objective) ~= "table" or not objective.type or not objective.id then
@@ -177,7 +330,14 @@ function Session.NoteOffered(objective)
 
     local key = tostring(objective.type) .. ":" .. tostring(objective.id)
 
-    offeredAt[key] = offeredAt[key] or time()
+    if offeredAt[key] then
+        return
+    end
+
+    offeredAt[key] = Session.Now()
+    offeredCount   = offeredCount + 1
+
+    Prune()
 end
 
 function Session.NoteCompleted(objectiveType, id)
@@ -189,17 +349,25 @@ function Session.NoteCompleted(objectiveType, id)
 
     local started = offeredAt[key]
 
-    offeredAt[key] = nil
+    if offeredAt[key] then
+        offeredAt[key] = nil
+        offeredCount   = offeredCount - 1
+    end
 
     if not started then
         return nil
     end
 
-    local elapsed = time() - started
+    local elapsed = Session.Now() - started
 
     -- Anything over twenty minutes was not "doing the thing", it was living
     -- your life with the thing still on the list.
-    if elapsed <= 0 or elapsed > 1200 then
+    --
+    -- The lower bound is now a fraction of a second rather than a whole one.
+    -- With a one-second clock, anything finished in the same second it was
+    -- offered read as zero elapsed and was thrown away -- which quietly
+    -- discarded exactly the fast turn-ins a quest grinder produces most of.
+    if elapsed <= 0.05 or elapsed > 1200 then
         return nil
     end
 
@@ -370,13 +538,28 @@ end
 -- WIRING
 ------------------------------------------------------------
 
--- Everything recommended is something the player has been offered, so this
--- is where the clock starts for duration learning.
-CN.RegisterCandidateDecorator("SessionTiming", function(objective)
-    Session.NoteOffered(objective)
+-- The clock starts when something is RECOMMENDED, not when it is collected.
+--
+-- 0.28.0 hung this on a candidate decorator, which meant a timestamp was
+-- taken for every objective the addon knew about on every rebuild -- two
+-- hundred at retail scale, the overwhelming majority of which the player
+-- never saw and no plan ever used. Wrong on cost and wrong on meaning: an
+-- objective sitting at rank 180 has not been "offered" to anybody.
+--
+-- Recommend() is the moment something is actually put in front of a player.
+function Session.NoteRecommended(list)
+    for index = 1, math.min(#list, Session.timedRecommendations) do
+        Session.NoteOffered(list[index])
+    end
 
-    return objective
-end)
+    return list
+end
+
+Session.timedRecommendations = 25
+
+if CN.RegisterRecommendationHook then
+    CN.RegisterRecommendationHook("SessionTiming", Session.NoteRecommended)
+end
 
 CN:RegisterEvent("QUEST_TURNED_IN", function(_, questID)
     Session.NoteCompleted(CN.objectiveTypes.QUEST, questID)

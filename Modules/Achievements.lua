@@ -36,6 +36,46 @@ end
 
 Achievements.Store = Store
 
+-- Bumped whenever the store is rewritten, so the candidate provider knows
+-- when its shortlist is stale. See CN.Shortlist.
+Achievements.revision = 0
+
+-- Within two criteria of finished. Everything else is a project rather than
+-- a next action, and there are three thousand of them.
+Achievements.nearlyDoneThreshold = 2
+
+local function IsNearlyDone(record)
+    local criteria = record and record.criteria or 0
+
+    if criteria <= 0 then
+        return false
+    end
+
+    local remaining = criteria - (record.done or 0)
+
+    return remaining > 0 and remaining <= Achievements.nearlyDoneThreshold
+end
+
+Achievements.IsNearlyDone = IsNearlyDone
+
+-- The shortlist: only the rows a provider could possibly use.
+function Achievements.Shortlist()
+    return CN.Shortlist("Achievements", Achievements.revision, function()
+        local list = {}
+
+        for achievementID, record in pairs(Store()) do
+            if IsNearlyDone(record) then
+                table.insert(list, { id = achievementID, record = record })
+            end
+        end
+
+        -- Deterministic order, so the cut is stable between rebuilds.
+        table.sort(list, function(a, b) return a.id < b.id end)
+
+        return list
+    end)
+end
+
 ------------------------------------------------------------
 -- SCAN
 ------------------------------------------------------------
@@ -51,6 +91,8 @@ function Achievements.Scan()
     local totals = Totals()
 
     Wipe(store)
+
+    Achievements.revision = Achievements.revision + 1
 
     local scanned, completed, nearlyDone = 0, 0, 0
 
@@ -219,7 +261,16 @@ end)
 -- achievement is a project, not a next action, and flooding the
 -- recommendation list with thousands of them would bury everything else.
 CN.RegisterCandidateProvider("Achievements", function()
-    local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
+    -- Iterates the shortlist, not the store. At retail scale that is a dozen
+    -- rows instead of three thousand, and the three thousand were being
+    -- rejected identically on every single rebuild.
+    local shortlist = {}
+
+    for _, entry in ipairs(Achievements.Shortlist()) do
+        shortlist[entry.id] = entry.record
+    end
+
+    local candidates, considered, dropped = CN.CollectBounded(shortlist, nil,
         function(achievementID, record)
             local criteria = record.criteria or 0
 
@@ -230,7 +281,7 @@ CN.RegisterCandidateProvider("Achievements", function()
             local remaining = criteria - (record.done or 0)
 
             -- A zero-progress achievement is a project, not a next action.
-            if remaining <= 0 or remaining > 2 then
+            if remaining <= 0 or remaining > Achievements.nearlyDoneThreshold then
                 return nil
             end
 
@@ -294,8 +345,18 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
             local done = Blizzard.GetAchievementProgress(achievementID)
 
             if done ~= record.done then
+                local wasNear = IsNearlyDone(record)
+
                 record.done     = done
                 record.lastSeen = time()
+
+                -- Only a change that crosses the shortlist boundary can
+                -- change what the provider would produce. Bumping the
+                -- revision on every criteria tick would rebuild the
+                -- shortlist constantly and give back the saving.
+                if wasNear ~= IsNearlyDone(record) then
+                    Achievements.revision = Achievements.revision + 1
+                end
             end
         end
     end

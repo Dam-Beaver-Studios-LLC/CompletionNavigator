@@ -27,6 +27,7 @@ read_globals = {
 
     -- Flat client API.
     "CreateFrame", "GetAchievementCriteriaInfo", "GetAchievementInfo",
+    "IsMounted", "UnitOnTaxi",
     "GetAchievementNumCriteria", "GetCategoryList", "GetCategoryNumAchievements",
     "GetCursorPosition", "GetItemInfo", "GetMerchantItemInfo",
     "GetMerchantItemLink", "GetMerchantNumItems", "GetNumCompletedAchievements",

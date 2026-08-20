@@ -198,6 +198,14 @@ CN.RegisterCandidateProvider("Currencies", function()
                 completionValue  = 2,
                 limitedTimeBonus = 1,
                 travelCost       = 0,
+
+                -- A capped currency is not "expiring", but every hour spent
+                -- at cap is earning thrown away, and the weekly reset is when
+                -- that waste is realised. Treating the reset as its deadline
+                -- makes the urgency curve say the true thing: this matters
+                -- more on Monday night than on Wednesday morning.
+                expiresIn        = CN.Blizzard.GetSecondsUntilWeeklyReset(),
+
                 reasons          = {
                     "at cap: " .. tostring(currency.quantity)
                         .. " / " .. tostring(currency.maximum),

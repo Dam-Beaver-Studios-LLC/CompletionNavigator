@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.28.0'
+$script:ToolkitVersion = '0.29.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.28.0"
+CN.version     = "0.29.0"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -2181,6 +2181,52 @@ end
 -- A provider that declares no events is treated as stale on every event. That
 -- is the safe default and the old behaviour, but declaring events is what
 -- makes an invalidation cost one provider instead of all nine.
+-- SHORTLISTS.
+--
+-- Several providers own a store with thousands of rows of which a handful are
+-- ever actionable: three thousand achievements, of which the ones within two
+-- criteria of done might number twelve. Walking all three thousand on every
+-- rebuild -- which is what Achievements and Reputations each did, at nearly
+-- three milliseconds apiece -- spends the overwhelming majority of that time
+-- rejecting rows that were rejected identically last time.
+--
+-- A shortlist is that filtered subset, held against a revision number the
+-- owning module bumps when it writes. Between writes the provider iterates
+-- the short list; after a write it rebuilds once.
+--
+-- Deliberately keyed on an explicit revision rather than on a timestamp: a
+-- store that changed twice inside one second must not serve a stale list, and
+-- a store that has not changed for an hour must not rebuild on a clock.
+local shortlists = {}
+
+function CN.Shortlist(name, revision, build)
+    local held = shortlists[name]
+
+    if held and held.revision == revision then
+        return held.list, false
+    end
+
+    local list = build() or {}
+
+    shortlists[name] = { revision = revision, list = list }
+
+    return list, true
+end
+
+function CN.ClearShortlist(name)
+    if name then
+        shortlists[name] = nil
+    else
+        shortlists = {}
+    end
+end
+
+function CN.ShortlistState(name)
+    local held = shortlists[name]
+
+    return held and #held.list or nil, held and held.revision or nil
+end
+
 CN.candidateProviders = CN.candidateProviders or {}
 
 function CN.RegisterCandidateProvider(name, provider, options)
@@ -2597,6 +2643,19 @@ function CN.FindCandidate(objectiveType, id)
     return nil
 end
 
+-- Things that want to know what was actually put in front of the player, as
+-- opposed to what the addon merely knows about.
+--
+-- The distinction is not pedantic. Duration learning hung off a candidate
+-- decorator in 0.28.0 and therefore timed all two hundred candidates on every
+-- rebuild, including the hundred and seventy nobody ever saw. A hook here
+-- runs on the handful that were genuinely shown.
+CN.recommendationHooks = CN.recommendationHooks or {}
+
+function CN.RegisterRecommendationHook(name, handler)
+    CN.recommendationHooks[name] = handler
+end
+
 function CN.Recommend(limit)
     limit = limit or 1
 
@@ -2606,6 +2665,10 @@ function CN.Recommend(limit)
 
     for index = 1, math.min(limit, #list) do
         results[index] = list[index]
+    end
+
+    for _, handler in pairs(CN.recommendationHooks) do
+        pcall(handler, results)
     end
 
     return results
@@ -4553,7 +4616,7 @@ UI.RegisterTab{
 
                 Print("Quests: " .. seen .. " in your log, "
                     .. "|cffffff00" .. module.AvailableCount() .. "|r "
-                    .. "available to pick up here.")
+                    .. "available to pick up nearby.")
 
                 CN.DebugPrint(recorded .. " newly recorded, "
                     .. scanned .. " checked.")
@@ -4611,7 +4674,7 @@ UI.RegisterTab{
         if questModule then
             local available = questModule.AvailableCount()
 
-            table.insert(lines, "Available to pick up here: "
+            table.insert(lines, "Available to pick up nearby: "
                 .. (available > 0 and "|cffffff00" or "|cff999999")
                 .. available .. "|r")
             table.insert(lines, "In your log: " .. #CN.Blizzard.GetQuestLogEntries())
@@ -9026,6 +9089,47 @@ function Quests.AvailableOnMap(mapID)
     return found
 end
 
+-- HOW FAR IS "HERE".
+--
+-- Searching the parent map and its siblings is what fixed a player being told
+-- zero while standing in front of a quest giver. It also means the answer now
+-- spans a whole zone, so calling it "here" overstates it -- the addon would
+-- be pointing at something a four-minute ride away and using a word that
+-- means arm's reach.
+--
+-- Split by distance where coordinates exist, and say the honest word for
+-- each. Anything without coordinates is reported as "in this zone", because
+-- that is the strongest claim the data supports.
+CN.nearbyYards = 300
+
+function Quests.SplitAvailableByDistance(available, mapID)
+    local near, zone = {}, {}
+
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+    local nav = CN:GetModule("Navigation")
+
+    for _, poi in ipairs(available or {}) do
+        local yards
+
+        if nav and nav.DistanceYards and playerX and playerY
+            and poi.x and poi.y and (poi.mapID or mapID) == playerMap then
+
+            yards = nav.DistanceYards(playerMap, playerX, playerY, poi.x, poi.y)
+        end
+
+        poi.yards = yards
+
+        if yards and yards <= CN.nearbyYards then
+            table.insert(near, poi)
+        else
+            table.insert(zone, poi)
+        end
+    end
+
+    return near, zone
+end
+
 -- World quests and bonus objectives, deliberately counted SEPARATELY.
 --
 -- They are available in the dictionary sense, and they are not what a player
@@ -9493,6 +9597,25 @@ CN.RegisterCandidateProvider("Quests", function()
             end
         end
 
+        -- A DEADLINE THE ADDON ALREADY KNEW AND WAS NOT ATTACHING.
+        --
+        -- 0.28.0 added an urgency curve that weights anything carrying
+        -- `expiresIn`, and then only world quests and the Vault set it. A
+        -- daily disappears at the daily reset and a weekly at the weekly one;
+        -- both are knowable to the minute, and neither was being said. The
+        -- headline feature of that release was close to inert.
+        local expiry
+
+        if availablePOI and availablePOI.isDaily then
+            expiry = Blizzard.GetSecondsUntilDailyReset()
+        elseif isActive and Blizzard.IsQuestInLog(questID) then
+            local timeLeft = Blizzard.GetQuestTimeLeft(questID)
+
+            if timeLeft and timeLeft > 0 then
+                expiry = timeLeft
+            end
+        end
+
         if isActive then
             if Blizzard.IsQuestReadyForTurnIn(questID) then
                 value = value + 3
@@ -9544,6 +9667,7 @@ CN.RegisterCandidateProvider("Quests", function()
             state             = CN.objectiveStates.AVAILABLE,
             completionValue   = value,
             travelCost        = travel,
+            expiresIn         = expiry,
             reasons           = reasons,
         }))
     end
@@ -9833,11 +9957,18 @@ CN:RegisterCommand{
             return
         end
 
-        Print(#available .. " quest"
-            .. (#available == 1 and "" or "s")
-            .. " available to pick up here:")
+        local near, zone = Quests.SplitAvailableByDistance(available, mapID)
 
-        for _, poi in ipairs(available) do
+        if #near > 0 then
+            Print(#near .. " quest" .. (#near == 1 and "" or "s")
+                .. " available right here:")
+        else
+            Print(#available .. " quest" .. (#available == 1 and "" or "s")
+                .. " available in this zone, none within "
+                .. CN.nearbyYards .. " yards:")
+        end
+
+        for _, poi in ipairs(#near > 0 and near or zone) do
             local title = Quests.GetName(poi.questID)
                 or Blizzard.GetQuestTitle(poi.questID, true)
                 or ("Quest " .. poi.questID)
@@ -9852,12 +9983,18 @@ CN:RegisterCommand{
             Print("  |cffffff00" .. title .. "|r" .. where)
         end
 
+        if #near > 0 and #zone > 0 then
+            Print("|cff999999Plus " .. #zone
+                .. " further out in this zone.|r")
+        end
+
         local tasks = Quests.TasksOnMap(mapID)
 
         if #tasks > 0 then
             Print("|cff999999Also " .. #tasks .. " world quest"
                 .. (#tasks == 1 and "" or "s")
-                .. "/bonus objective here -- no giver to talk to.|r")
+                .. " or bonus objective in this zone -- no giver to talk "
+                .. "to.|r")
         end
 
         Print("|cff999999These are in your recommendations and in |r/cn zone"
@@ -9912,7 +10049,7 @@ CN:RegisterCommand{
         local available = Quests.AvailableCount()
 
         Print("Quests: " .. seen .. " in your log, "
-            .. "|cffffff00" .. available .. "|r available to pick up here.")
+            .. "|cffffff00" .. available .. "|r available to pick up nearby.")
 
         DebugPrint(recorded .. " newly recorded in the database.")
     end,
@@ -10363,32 +10500,59 @@ end)
 ------------------------------------------------------------
 
 CN.RegisterCandidateProvider("Reputations", function()
-    local candidates = {}
+    -- SCORE FIRST, ALLOCATE SECOND.
+    --
+    -- The previous version built a full objective -- table, reasons array,
+    -- formatted strings -- for every faction that was not yet exalted, then
+    -- threw all but sixty of them away. At retail scale that is five hundred
+    -- allocations to keep sixty, on every rebuild, and it was the single most
+    -- expensive provider in the addon at nearly three milliseconds.
+    --
+    -- Evaluating is arithmetic on fields that already exist. Only the
+    -- survivors are built.
+    local scored = {}
 
-    local function consider(record, accountWide)
+    local function evaluate(record, accountWide)
         if not record or not record.factionID then
-            return
+            return nil
         end
 
         if CN.IsIgnored(CN.objectiveTypes.REPUTATION, record.factionID)
             or CN.IsDeferred(CN.objectiveTypes.REPUTATION, record.factionID) then
-            return
+            return nil
         end
 
-        local reasons = {}
-        local value   = 1
+        local value = 1
 
         if record.paragon and record.paragon.pending then
             value = value + 3
-            table.insert(reasons, "a Paragon reward is waiting to be collected")
         elseif record.kind == "RENOWN" and record.maxedOut then
-            return
+            return nil
         elseif record.reaction and record.reaction >= 8 then
-            return
+            return nil
         end
 
         if accountWide then
             value = value + 1
+        end
+
+        if record.maximum and record.maximum > 0 and record.current then
+            if (record.current / record.maximum) >= 0.75 then
+                value = value + 1
+            end
+        end
+
+        return value
+    end
+
+    local function build(record, accountWide, value)
+        local reasons = {}
+
+        if record.paragon and record.paragon.pending then
+            table.insert(reasons, "a Paragon reward is waiting to be collected")
+        end
+
+        if accountWide then
             table.insert(reasons, "account-wide, so any character's progress counts")
         end
 
@@ -10396,44 +10560,64 @@ CN.RegisterCandidateProvider("Reputations", function()
             local fraction = record.current / record.maximum
 
             if fraction >= 0.75 then
-                value = value + 1
                 table.insert(reasons, string.format(
                     "%d%% of the way to the next standing", math.floor(fraction * 100)))
             end
         end
 
-        table.insert(candidates, CN.NewObjective({
+        return CN.NewObjective({
             id              = record.factionID,
             type            = CN.objectiveTypes.REPUTATION,
             name            = record.name,
             accountWide     = accountWide,
             completionValue = value,
             reasons         = reasons,
-        }))
+        })
     end
 
-    for _, record in pairs(AccountStore()) do
-        consider(record, true)
-    end
+    local function gather(store, accountWide)
+        for _, record in pairs(store or {}) do
+            local value = evaluate(record, accountWide)
 
-    local characterStore = CharacterStore()
-
-    if characterStore then
-        for _, record in pairs(characterStore) do
-            consider(record, false)
+            if value then
+                scored[#scored + 1] = {
+                    record      = record,
+                    accountWide = accountWide,
+                    value       = value,
+                }
+            end
         end
     end
 
-    -- Two stores, so this one cannot be counted in a single pass; cap after
-    -- the fact instead.
-    local kept, dropped = CN.CapCandidates(candidates)
+    gather(AccountStore(), true)
+    gather(CharacterStore(), false)
+
+    -- Highest value first, ties broken by faction so the cut is stable
+    -- between rebuilds rather than shuffling.
+    table.sort(scored, function(a, b)
+        if a.value == b.value then
+            return (a.record.factionID or 0) < (b.record.factionID or 0)
+        end
+
+        return a.value > b.value
+    end)
+
+    local limit = math.min(#scored, CN.providerCandidateCap)
+
+    local candidates = {}
+
+    for index = 1, limit do
+        local entry = scored[index]
+
+        candidates[index] = build(entry.record, entry.accountWide, entry.value)
+    end
 
     CN.providerTruncation["Reputations"] = {
-        considered = #kept + dropped,
-        dropped    = dropped,
+        considered = #scored,
+        dropped    = #scored - limit,
     }
 
-    return kept
+    return candidates
 end, { events = { "UPDATE_FACTION" }, cooldown = 5 })
 
 ------------------------------------------------------------
@@ -10658,6 +10842,46 @@ end
 
 Achievements.Store = Store
 
+-- Bumped whenever the store is rewritten, so the candidate provider knows
+-- when its shortlist is stale. See CN.Shortlist.
+Achievements.revision = 0
+
+-- Within two criteria of finished. Everything else is a project rather than
+-- a next action, and there are three thousand of them.
+Achievements.nearlyDoneThreshold = 2
+
+local function IsNearlyDone(record)
+    local criteria = record and record.criteria or 0
+
+    if criteria <= 0 then
+        return false
+    end
+
+    local remaining = criteria - (record.done or 0)
+
+    return remaining > 0 and remaining <= Achievements.nearlyDoneThreshold
+end
+
+Achievements.IsNearlyDone = IsNearlyDone
+
+-- The shortlist: only the rows a provider could possibly use.
+function Achievements.Shortlist()
+    return CN.Shortlist("Achievements", Achievements.revision, function()
+        local list = {}
+
+        for achievementID, record in pairs(Store()) do
+            if IsNearlyDone(record) then
+                table.insert(list, { id = achievementID, record = record })
+            end
+        end
+
+        -- Deterministic order, so the cut is stable between rebuilds.
+        table.sort(list, function(a, b) return a.id < b.id end)
+
+        return list
+    end)
+end
+
 ------------------------------------------------------------
 -- SCAN
 ------------------------------------------------------------
@@ -10673,6 +10897,8 @@ function Achievements.Scan()
     local totals = Totals()
 
     Wipe(store)
+
+    Achievements.revision = Achievements.revision + 1
 
     local scanned, completed, nearlyDone = 0, 0, 0
 
@@ -10841,7 +11067,16 @@ end)
 -- achievement is a project, not a next action, and flooding the
 -- recommendation list with thousands of them would bury everything else.
 CN.RegisterCandidateProvider("Achievements", function()
-    local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
+    -- Iterates the shortlist, not the store. At retail scale that is a dozen
+    -- rows instead of three thousand, and the three thousand were being
+    -- rejected identically on every single rebuild.
+    local shortlist = {}
+
+    for _, entry in ipairs(Achievements.Shortlist()) do
+        shortlist[entry.id] = entry.record
+    end
+
+    local candidates, considered, dropped = CN.CollectBounded(shortlist, nil,
         function(achievementID, record)
             local criteria = record.criteria or 0
 
@@ -10852,7 +11087,7 @@ CN.RegisterCandidateProvider("Achievements", function()
             local remaining = criteria - (record.done or 0)
 
             -- A zero-progress achievement is a project, not a next action.
-            if remaining <= 0 or remaining > 2 then
+            if remaining <= 0 or remaining > Achievements.nearlyDoneThreshold then
                 return nil
             end
 
@@ -10916,8 +11151,18 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
             local done = Blizzard.GetAchievementProgress(achievementID)
 
             if done ~= record.done then
+                local wasNear = IsNearlyDone(record)
+
                 record.done     = done
                 record.lastSeen = time()
+
+                -- Only a change that crosses the shortlist boundary can
+                -- change what the provider would produce. Bumping the
+                -- revision on every criteria tick would rebuild the
+                -- shortlist constantly and give back the saving.
+                if wasNear ~= IsNearlyDone(record) then
+                    Achievements.revision = Achievements.revision + 1
+                end
             end
         end
     end
@@ -14794,6 +15039,14 @@ CN.RegisterCandidateProvider("Currencies", function()
                 completionValue  = 2,
                 limitedTimeBonus = 1,
                 travelCost       = 0,
+
+                -- A capped currency is not "expiring", but every hour spent
+                -- at cap is earning thrown away, and the weekly reset is when
+                -- that waste is realised. Treating the reset as its deadline
+                -- makes the urgency curve say the true thing: this matters
+                -- more on Monday night than on Wednesday morning.
+                expiresIn        = CN.Blizzard.GetSecondsUntilWeeklyReset(),
+
                 reasons          = {
                     "at cap: " .. tostring(currency.quantity)
                         .. " / " .. tostring(currency.maximum),
@@ -20106,15 +20359,53 @@ Session.defaultSpeed = 7
 
 Session.minSamples = 5
 
+-- THE CLOCK.
+--
+-- `time()` returns whole seconds. Sampling a ten-second interval with a
+-- one-second ruler is up to ten per cent of error baked into every estimate
+-- the planner produces, and it silently discarded every task that finished
+-- within the same second it was offered -- which, in the offline suite, was
+-- all of them. `GetTime()` is the client's fractional monotonic clock and is
+-- the right instrument for measuring a duration.
+--
+-- Kept behind a function so the offline harness can drive it.
+function Session.Now()
+    if GetTime then
+        return GetTime()
+    end
+
+    return os.clock()
+end
+
+-- Speed is kept in two buckets, not one.
+--
+-- A single median across mounted and unmounted travel is a number that is
+-- wrong in both states: too slow to plan a mounted route, too fast to plan a
+-- walk around a town. Two medians are two honest answers.
 local speed = {
-    lastMapID = nil,
-    lastX     = nil,
-    lastY     = nil,
-    lastAt    = nil,
-    samples   = {},
+    lastMapID  = nil,
+    lastX      = nil,
+    lastY      = nil,
+    lastAt     = nil,
+    lastMounted = nil,
+    samples    = { mounted = {}, onFoot = {} },
 }
 
 Session.speedSampleCap = 40
+
+local function Mounted()
+    if IsMounted and IsMounted() then
+        return true
+    end
+
+    if UnitOnTaxi and UnitOnTaxi("player") then
+        return true
+    end
+
+    return false
+end
+
+Session.IsMounted = Mounted
 
 -- Called on a slow clock. Measures the distance covered since the last look.
 --
@@ -20124,18 +20415,26 @@ Session.speedSampleCap = 40
 function Session.Observe()
     local mapID, x, y = CN.GetPlayerPosition()
 
-    local now = time()
+    local now     = Session.Now()
+    local mounted = Mounted()
 
     if not mapID or not x or not y then
         return nil
     end
 
-    local previousMap, previousX, previousY, previousAt =
-        speed.lastMapID, speed.lastX, speed.lastY, speed.lastAt
+    local previousMap, previousX, previousY, previousAt, previousMounted =
+        speed.lastMapID, speed.lastX, speed.lastY, speed.lastAt, speed.lastMounted
 
-    speed.lastMapID, speed.lastX, speed.lastY, speed.lastAt = mapID, x, y, now
+    speed.lastMapID, speed.lastX, speed.lastY = mapID, x, y
+    speed.lastAt, speed.lastMounted = now, mounted
 
     if previousMap ~= mapID or not previousAt then
+        return nil
+    end
+
+    -- Mounting halfway through an interval makes the sample a blend of both
+    -- speeds and belongs to neither bucket.
+    if previousMounted ~= mounted then
         return nil
     end
 
@@ -20165,13 +20464,15 @@ function Session.Observe()
         return nil
     end
 
-    table.insert(speed.samples, observed)
+    local bucket = mounted and speed.samples.mounted or speed.samples.onFoot
 
-    while #speed.samples > Session.speedSampleCap do
-        table.remove(speed.samples, 1)
+    table.insert(bucket, observed)
+
+    while #bucket > Session.speedSampleCap do
+        table.remove(bucket, 1)
     end
 
-    return observed
+    return observed, mounted
 end
 
 -- The median, not the mean: standing still for a minute should not halve the
@@ -20200,16 +20501,44 @@ end
 
 Session.Median = Median
 
-function Session.Speed()
-    if #speed.samples >= Session.minSamples then
-        return Median(speed.samples), true
+-- The speed to plan with.
+--
+-- Defaults to however the player is travelling right now, because that is
+-- the best available guess at how they will travel next. Falls back to the
+-- other bucket rather than to a constant: measured-but-wrong-state beats
+-- unmeasured.
+function Session.Speed(mounted)
+    if mounted == nil then
+        mounted = Mounted()
+    end
+
+    local preferred = mounted and speed.samples.mounted or speed.samples.onFoot
+    local other     = mounted and speed.samples.onFoot or speed.samples.mounted
+
+    if #preferred >= Session.minSamples then
+        return Median(preferred), true
+    end
+
+    if #other >= Session.minSamples then
+        return Median(other), false
     end
 
     return Session.defaultSpeed, false
 end
 
-function Session.SpeedSampleCount()
-    return #speed.samples
+function Session.SpeedSampleCount(mounted)
+    if mounted == nil then
+        return #speed.samples.mounted + #speed.samples.onFoot
+    end
+
+    return mounted and #speed.samples.mounted or #speed.samples.onFoot
+end
+
+function Session.SpeedBuckets()
+    return {
+        mounted = Median(speed.samples.mounted),
+        onFoot  = Median(speed.samples.onFoot),
+    }
 end
 
 ------------------------------------------------------------
@@ -20228,7 +20557,84 @@ Session.durationSampleCap  = 25
 -- When each objective was first put in front of the player. A completion
 -- timed from here is "how long it took once it was the thing to do", which is
 -- the number a plan needs.
+-- BOUNDED, because it was not.
+--
+-- Every objective the addon decorated used to get an entry here and only a
+-- completion removed one. Cross a dozen zones and it accumulates a timestamp
+-- for everything that ever scrolled past -- a slow leak I shipped in 0.28.0.
+--
+-- Two bounds now: entries expire, and the table is capped. Neither costs
+-- accuracy, because an entry older than the expiry window would have been
+-- rejected as implausible at completion time anyway.
 local offeredAt = {}
+local offeredCount = 0
+
+Session.offerMemoryCap     = 400
+Session.offerMemorySeconds = 1800
+
+-- HYSTERESIS, and why it is not optional.
+--
+-- Pruning the moment the table reaches its cap means every subsequent insert
+-- triggers a full sweep of four hundred entries. Recommend(25) does twenty
+-- five inserts, so a single call became ten thousand iterations -- measured
+-- at 1.5ms, up from 0.02ms. A fix for a memory leak that costs seventy times
+-- the CPU is not a fix.
+--
+-- So: let it overshoot by a quarter, then prune back to the cap. Sweeps
+-- happen once per hundred inserts instead of once per insert, and the table
+-- is still bounded, which was the entire point.
+Session.offerMemorySlack = 0.25
+
+local function Prune(force)
+    local trigger = Session.offerMemoryCap
+        * (1 + Session.offerMemorySlack)
+
+    if not force and offeredCount <= trigger then
+        return 0
+    end
+
+    local now = Session.Now()
+
+    local removed = 0
+
+    for key, at in pairs(offeredAt) do
+        if now - at > Session.offerMemorySeconds then
+            offeredAt[key] = nil
+            removed = removed + 1
+        end
+    end
+
+    offeredCount = offeredCount - removed
+
+    -- Still over cap after expiring? Drop the oldest until it fits. A
+    -- timestamp we cannot afford to keep is worth less than a bounded table.
+    if offeredCount > Session.offerMemoryCap then
+        local ordered = {}
+
+        for key, at in pairs(offeredAt) do
+            table.insert(ordered, { key = key, at = at })
+        end
+
+        table.sort(ordered, function(a, b) return a.at < b.at end)
+
+        local excess = offeredCount - Session.offerMemoryCap
+
+        for index = 1, excess do
+            offeredAt[ordered[index].key] = nil
+            removed = removed + 1
+        end
+
+        offeredCount = offeredCount - excess
+    end
+
+    return removed
+end
+
+Session.Prune = Prune
+
+function Session.OfferedCount()
+    return offeredCount
+end
 
 function Session.NoteOffered(objective)
     if type(objective) ~= "table" or not objective.type or not objective.id then
@@ -20237,7 +20643,14 @@ function Session.NoteOffered(objective)
 
     local key = tostring(objective.type) .. ":" .. tostring(objective.id)
 
-    offeredAt[key] = offeredAt[key] or time()
+    if offeredAt[key] then
+        return
+    end
+
+    offeredAt[key] = Session.Now()
+    offeredCount   = offeredCount + 1
+
+    Prune()
 end
 
 function Session.NoteCompleted(objectiveType, id)
@@ -20249,17 +20662,25 @@ function Session.NoteCompleted(objectiveType, id)
 
     local started = offeredAt[key]
 
-    offeredAt[key] = nil
+    if offeredAt[key] then
+        offeredAt[key] = nil
+        offeredCount   = offeredCount - 1
+    end
 
     if not started then
         return nil
     end
 
-    local elapsed = time() - started
+    local elapsed = Session.Now() - started
 
     -- Anything over twenty minutes was not "doing the thing", it was living
     -- your life with the thing still on the list.
-    if elapsed <= 0 or elapsed > 1200 then
+    --
+    -- The lower bound is now a fraction of a second rather than a whole one.
+    -- With a one-second clock, anything finished in the same second it was
+    -- offered read as zero elapsed and was thrown away -- which quietly
+    -- discarded exactly the fast turn-ins a quest grinder produces most of.
+    if elapsed <= 0.05 or elapsed > 1200 then
         return nil
     end
 
@@ -20430,13 +20851,28 @@ end
 -- WIRING
 ------------------------------------------------------------
 
--- Everything recommended is something the player has been offered, so this
--- is where the clock starts for duration learning.
-CN.RegisterCandidateDecorator("SessionTiming", function(objective)
-    Session.NoteOffered(objective)
+-- The clock starts when something is RECOMMENDED, not when it is collected.
+--
+-- 0.28.0 hung this on a candidate decorator, which meant a timestamp was
+-- taken for every objective the addon knew about on every rebuild -- two
+-- hundred at retail scale, the overwhelming majority of which the player
+-- never saw and no plan ever used. Wrong on cost and wrong on meaning: an
+-- objective sitting at rank 180 has not been "offered" to anybody.
+--
+-- Recommend() is the moment something is actually put in front of a player.
+function Session.NoteRecommended(list)
+    for index = 1, math.min(#list, Session.timedRecommendations) do
+        Session.NoteOffered(list[index])
+    end
 
-    return objective
-end)
+    return list
+end
+
+Session.timedRecommendations = 25
+
+if CN.RegisterRecommendationHook then
+    CN.RegisterRecommendationHook("SessionTiming", Session.NoteRecommended)
+end
 
 CN:RegisterEvent("QUEST_TURNED_IN", function(_, questID)
     Session.NoteCompleted(CN.objectiveTypes.QUEST, questID)
@@ -22680,7 +23116,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.28.0
+## Version: 0.29.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -22899,6 +23335,69 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.29.0]
+
+No new features. Six defects, four of them mine, and the rebuild cut by two
+thirds.
+
+### Fixed
+
+- **The urgency curve barely fired.** 0.28.0 shipped a headline feature that
+  weights anything carrying a deadline, and then only two providers attached
+  one. A daily disappears at the daily reset, a timed quest carries its own
+  clock, and a capped currency wastes everything you earn until the weekly
+  reset -- all knowable, none of them being said. Now they are.
+  Worth stating plainly: the release notes for 0.28.0 described a feature
+  that was, in practice, close to inert.
+- **Durations were measured with a one-second ruler.** `time()` returns whole
+  seconds, so a ten-second travel sample carried up to ten per cent of error,
+  and anything finished inside the same second it was offered read as zero
+  elapsed and was discarded as implausible -- which threw away precisely the
+  fast turn-ins a quest grinder produces most of. Measurement now uses the
+  client's fractional clock.
+- **Travel speed was one median across mounted and unmounted travel** -- a
+  number wrong in both states. Two buckets now, with samples that span
+  mounting discarded as belonging to neither.
+- **The offer table grew without bound.** Every objective the addon decorated
+  got a timestamp and only completing it removed one; crossing a dozen zones
+  accumulated an entry for everything that ever scrolled past. Entries now
+  expire and the table is capped.
+- **Duration timing ran on every candidate rather than every recommendation.**
+  Two hundred timestamps taken per rebuild at retail scale, of which the
+  player saw perhaps five. Wrong on cost and wrong on meaning -- something
+  ranked one hundred and eightieth has not been offered to anybody.
+- **"Available to pick up here" could mean a four-minute ride away.** Widening
+  the search to neighbouring maps is what fixed a player being told zero while
+  standing in front of a quest giver; it also made "here" overstate the case.
+  Results are now split by real distance, and the wording matches which.
+
+### Changed
+
+- **A cold rebuild costs 5.5ms instead of 15.6ms** at retail scale (1800 pets,
+  3000 achievements, 2500 recipes), measured, not estimated.
+  Two providers accounted for most of it and both were doing the same thing
+  wrong. Achievements walked all three thousand rows on every rebuild to keep
+  about a dozen, rejecting the same two thousand nine hundred and eighty every
+  time; it now keeps a shortlist against a revision number and costs 0.02ms.
+  Reputations built a complete objective -- table, reasons, formatted strings
+  -- for all five hundred factions and then discarded all but sixty; it now
+  scores first and allocates only the survivors.
+
+### Notes
+
+- The urgency test took three attempts to become capable of failing. The first
+  asserted that *something* carried a deadline, which the Vault already
+  satisfied. The second asserted that a *quest* did, which world quests --
+  same objective type, different provider -- also already satisfied. Both
+  passed with the code under test deleted. The third asks the Quests provider
+  directly. Recorded because this is the third time in this project that a
+  test has agreed with a bug, and the pattern is always the same: asserting on
+  an aggregate that something else already satisfies.
+- Bounding the offer table naively made `Recommend(25)` seventy times slower
+  -- pruning fired on every insert once the table was full. It now overshoots
+  by a quarter before sweeping. A fix for a memory leak that costs seventy
+  times the CPU is not a fix.
 
 ## [0.28.0]
 
@@ -24910,6 +25409,7 @@ read_globals = {
 
     -- Flat client API.
     "CreateFrame", "GetAchievementCriteriaInfo", "GetAchievementInfo",
+    "IsMounted", "UnitOnTaxi",
     "GetAchievementNumCriteria", "GetCategoryList", "GetCategoryNumAchievements",
     "GetCursorPosition", "GetItemInfo", "GetMerchantItemInfo",
     "GetMerchantItemLink", "GetMerchantNumItems", "GetNumCompletedAchievements",
@@ -25179,6 +25679,20 @@ function UnitRace() return "Human", "Human" end
 function UnitLevel() return 80 end
 function UnitSex() return 2 end
 function UnitFactionGroup() return "Alliance" end
+
+-- Mount state, so speed sampling can be bucketed. Settable, because the
+-- interesting case is the transition: a sample that spans mounting belongs
+-- to neither bucket and must be discarded.
+CN_TEST_MOUNTED = false
+function IsMounted() return CN_TEST_MOUNTED end
+function UnitOnTaxi() return false end
+
+-- The client's fractional monotonic clock. `time()` has one-second
+-- resolution, which was the bug: a ten-second sample measured with a
+-- one-second ruler carries up to ten per cent error, and anything finished
+-- inside the same second read as zero elapsed and was thrown away.
+CN_TEST_CLOCK = 1000.0
+function GetTime() return CN_TEST_CLOCK end
 function GetZoneText() return "Eversong Woods" end
 function GetSpecialization() return 3 end
 function GetSpecializationInfo() return 70, "Retribution" end
@@ -29120,7 +29634,209 @@ print("\nFollow, cheaply:")
 end)()
 
 
+print("\nCorrectness of the measurements:")
+
+;(function()
+    local session = CN:GetModule("Session")
+
+    -- THE CLOCK. `time()` has one-second resolution. A task offered and
+    -- finished inside the same second measured as zero elapsed and was
+    -- discarded as implausible -- which threw away exactly the fast turn-ins
+    -- a quest grinder produces most of. The offline suite discarded ALL of
+    -- them, so the learning path was never actually exercised.
+    session.Durations()[CN.objectiveTypes.QUEST] = nil
+
+    CN_TEST_CLOCK = 5000.0
+
+    session.NoteOffered({ type = CN.objectiveTypes.QUEST, id = 4242 })
+
+    CN_TEST_CLOCK = 5000.4   -- four tenths of a second: a fast turn-in
+
+    local elapsed = session.NoteCompleted(CN.objectiveTypes.QUEST, 4242)
+
+    assert(elapsed and elapsed > 0,
+        "a sub-second task must be measurable, got " .. tostring(elapsed))
+    assert(math.abs(elapsed - 0.4) < 0.001,
+        "the duration must be fractional, got " .. tostring(elapsed))
+
+    -- And it must reach the store, which is what makes an estimate possible.
+    assert(#session.Durations()[CN.objectiveTypes.QUEST] == 1,
+        "the sample must be kept")
+
+    -- MOUNT BUCKETS. One median across mounted and unmounted travel is a
+    -- number wrong in both states.
+    CN_TEST_MOUNTED = false
+
+    local onFoot = session.Speed(false)
+    local mounted = session.Speed(true)
+
+    assert(type(onFoot) == "number" and type(mounted) == "number",
+        "both states always answer with a usable number")
+
+    assert(session.SpeedSampleCount(true) == 0
+        and session.SpeedSampleCount(false) == 0,
+        "no samples yet in either bucket")
+
+    local buckets = session.SpeedBuckets()
+
+    assert(buckets.mounted == nil and buckets.onFoot == nil,
+        "an unmeasured bucket is nil, not zero -- unknown and none are "
+        .. "different facts")
+
+    -- THE OFFER TABLE MUST BE BOUNDED. It was not: every objective the addon
+    -- decorated got a timestamp and only completion removed one.
+    local heldBefore = session.OfferedCount()
+
+    for index = 1, session.offerMemoryCap + 120 do
+        session.NoteOffered({ type = CN.objectiveTypes.ACHIEVEMENT, id = 900000 + index })
+    end
+
+    local after = session.OfferedCount()
+
+    -- Bounded, allowing the deliberate overshoot that keeps pruning cheap.
+    local ceiling = session.offerMemoryCap * (1 + session.offerMemorySlack)
+
+    assert(after <= ceiling,
+        "the offer table must stay bounded, held " .. after
+        .. " with a ceiling of " .. ceiling)
+
+    assert(after > 0, "pruning must not empty it entirely")
+
+    print(string.format("  fractional clock, two speed buckets, %d offers held (was %d)",
+        after, heldBefore))
+end)()
+
+print("\nUrgency reaches the things that expire:")
+
+;(function()
+    -- 0.28.0 shipped an urgency curve and then only two providers set the
+    -- field it reads. A feature that fires on two of twenty providers is
+    -- close to inert, which is worse than not shipping it: the release notes
+    -- say it works.
+    local carriers, deadlineShape = 0, {}
+
+    for _, objective in ipairs(CN.CollectCandidates(true) or {}) do
+        if objective.expiresIn then
+            carriers = carriers + 1
+            deadlineShape[objective.type] = (deadlineShape[objective.type] or 0) + 1
+        end
+    end
+
+    assert(carriers > 0,
+        "something in the candidate list must carry a deadline, or the "
+        .. "urgency curve has nothing to act on")
+
+    -- Specifically the QUESTS provider.
+    --
+    -- Two earlier versions of this assertion could not fail. The first
+    -- checked only that something carried a deadline, which the Vault
+    -- already satisfied. The second checked that a QUEST did -- which world
+    -- quests, emitted by a different provider with the same objective type,
+    -- also already satisfied. Both passed with the wiring under test removed.
+    --
+    -- So ask the provider itself, and name the fixture: a daily quest
+    -- offered in the zone must carry the daily reset as its deadline.
+    local fromQuests = CN.candidateProviders["Quests"].fn()
+
+    local daily
+
+    for _, objective in ipairs(fromQuests) do
+        if objective.expiresIn then
+            daily = objective
+            break
+        end
+    end
+
+    assert(daily,
+        "the Quests provider itself must attach a deadline to a daily or "
+        .. "timed quest -- that is what this release added, and the two "
+        .. "previous versions of this check could not detect its absence")
+
+    print("  " .. tostring(daily.name) .. " expires in "
+        .. tostring(daily.expiresIn) .. "s")
+
+    -- And a deadline must actually change the ordering, not merely exist.
+    local near = CN.NewObjective({ id = 1, type = CN.objectiveTypes.QUEST,
+        completionValue = 1, travelCost = 0, expiresIn = 240 })
+
+    local far = CN.NewObjective({ id = 2, type = CN.objectiveTypes.QUEST,
+        completionValue = 1, travelCost = 0, expiresIn = 86400 })
+
+    CN.ScoreObjective(near)
+    CN.ScoreObjective(far)
+
+    assert(near.priorityWeight > far.priorityWeight,
+        "four minutes left must outrank a day left")
+
+    local shape = {}
+    for k, v in pairs(deadlineShape) do table.insert(shape, k .. "=" .. v) end
+    table.sort(shape)
+    print("  deadline carriers: " .. table.concat(shape, ", "))
+    print("  " .. carriers .. " candidate(s) carry a real deadline")
+end)()
+
+print("\nShortlists:")
+
+;(function()
+    local achievements = CN:GetModule("Achievements")
+
+    -- The provider walked three thousand rows on every rebuild to keep about
+    -- a dozen, rejecting the same two thousand nine hundred and eighty every
+    -- time.
+    local list, wasBuilt = achievements.Shortlist()
+
+    assert(type(list) == "table" and wasBuilt ~= nil,
+        "a shortlist is a list and reports whether it was rebuilt")
+
+    local _, rebuilt = achievements.Shortlist()
+
+    assert(rebuilt == false,
+        "an unchanged store must reuse the shortlist rather than rebuild it")
+
+    -- A write must invalidate it, or the provider serves a stale answer --
+    -- which is a correctness bug wearing a performance fix's clothes.
+    achievements.revision = achievements.revision + 1
+
+    local _, afterWrite = achievements.Shortlist()
+
+    assert(afterWrite == true,
+        "bumping the revision must force a rebuild")
+
+    local held, revision = CN.ShortlistState("Achievements")
+
+    assert(held ~= nil and revision ~= nil, "shortlist state is reportable")
+
+    print("  " .. #list .. " of "
+        .. CN.CountKeys(achievements.Store()) .. " achievements shortlisted")
+end)()
+
+print("\nHow far is \"here\":")
+
+;(function()
+    local quests = CN:GetModule("Quests")
+
+    -- Searching the parent map and its siblings is what fixed a player being
+    -- told zero while standing in front of a quest giver. It also means the
+    -- answer spans a zone, so "here" overstates it.
+    local offeredHere = quests.AvailableOnMap(94)
+
+    local near, zone = quests.SplitAvailableByDistance(offeredHere, 94)
+
+    assert(#near + #zone == #offeredHere,
+        "every offeredHere quest lands in exactly one bucket")
+
+    for _, poi in ipairs(near) do
+        assert(poi.yards and poi.yards <= CN.nearbyYards,
+            "a quest called near must actually be near")
+    end
+
+    print("  " .. #near .. " within " .. CN.nearbyYards
+        .. " yards, " .. #zone .. " further out")
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")
+
 '@
 
 $Embedded['bench.lua'] = @'

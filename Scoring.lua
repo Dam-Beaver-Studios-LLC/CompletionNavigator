@@ -239,6 +239,52 @@ end
 -- A provider that declares no events is treated as stale on every event. That
 -- is the safe default and the old behaviour, but declaring events is what
 -- makes an invalidation cost one provider instead of all nine.
+-- SHORTLISTS.
+--
+-- Several providers own a store with thousands of rows of which a handful are
+-- ever actionable: three thousand achievements, of which the ones within two
+-- criteria of done might number twelve. Walking all three thousand on every
+-- rebuild -- which is what Achievements and Reputations each did, at nearly
+-- three milliseconds apiece -- spends the overwhelming majority of that time
+-- rejecting rows that were rejected identically last time.
+--
+-- A shortlist is that filtered subset, held against a revision number the
+-- owning module bumps when it writes. Between writes the provider iterates
+-- the short list; after a write it rebuilds once.
+--
+-- Deliberately keyed on an explicit revision rather than on a timestamp: a
+-- store that changed twice inside one second must not serve a stale list, and
+-- a store that has not changed for an hour must not rebuild on a clock.
+local shortlists = {}
+
+function CN.Shortlist(name, revision, build)
+    local held = shortlists[name]
+
+    if held and held.revision == revision then
+        return held.list, false
+    end
+
+    local list = build() or {}
+
+    shortlists[name] = { revision = revision, list = list }
+
+    return list, true
+end
+
+function CN.ClearShortlist(name)
+    if name then
+        shortlists[name] = nil
+    else
+        shortlists = {}
+    end
+end
+
+function CN.ShortlistState(name)
+    local held = shortlists[name]
+
+    return held and #held.list or nil, held and held.revision or nil
+end
+
 CN.candidateProviders = CN.candidateProviders or {}
 
 function CN.RegisterCandidateProvider(name, provider, options)
@@ -655,6 +701,19 @@ function CN.FindCandidate(objectiveType, id)
     return nil
 end
 
+-- Things that want to know what was actually put in front of the player, as
+-- opposed to what the addon merely knows about.
+--
+-- The distinction is not pedantic. Duration learning hung off a candidate
+-- decorator in 0.28.0 and therefore timed all two hundred candidates on every
+-- rebuild, including the hundred and seventy nobody ever saw. A hook here
+-- runs on the handful that were genuinely shown.
+CN.recommendationHooks = CN.recommendationHooks or {}
+
+function CN.RegisterRecommendationHook(name, handler)
+    CN.recommendationHooks[name] = handler
+end
+
 function CN.Recommend(limit)
     limit = limit or 1
 
@@ -664,6 +723,10 @@ function CN.Recommend(limit)
 
     for index = 1, math.min(limit, #list) do
         results[index] = list[index]
+    end
+
+    for _, handler in pairs(CN.recommendationHooks) do
+        pcall(handler, results)
     end
 
     return results

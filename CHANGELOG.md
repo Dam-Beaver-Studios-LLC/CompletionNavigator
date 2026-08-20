@@ -7,6 +7,69 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.29.0]
+
+No new features. Six defects, four of them mine, and the rebuild cut by two
+thirds.
+
+### Fixed
+
+- **The urgency curve barely fired.** 0.28.0 shipped a headline feature that
+  weights anything carrying a deadline, and then only two providers attached
+  one. A daily disappears at the daily reset, a timed quest carries its own
+  clock, and a capped currency wastes everything you earn until the weekly
+  reset -- all knowable, none of them being said. Now they are.
+  Worth stating plainly: the release notes for 0.28.0 described a feature
+  that was, in practice, close to inert.
+- **Durations were measured with a one-second ruler.** `time()` returns whole
+  seconds, so a ten-second travel sample carried up to ten per cent of error,
+  and anything finished inside the same second it was offered read as zero
+  elapsed and was discarded as implausible -- which threw away precisely the
+  fast turn-ins a quest grinder produces most of. Measurement now uses the
+  client's fractional clock.
+- **Travel speed was one median across mounted and unmounted travel** -- a
+  number wrong in both states. Two buckets now, with samples that span
+  mounting discarded as belonging to neither.
+- **The offer table grew without bound.** Every objective the addon decorated
+  got a timestamp and only completing it removed one; crossing a dozen zones
+  accumulated an entry for everything that ever scrolled past. Entries now
+  expire and the table is capped.
+- **Duration timing ran on every candidate rather than every recommendation.**
+  Two hundred timestamps taken per rebuild at retail scale, of which the
+  player saw perhaps five. Wrong on cost and wrong on meaning -- something
+  ranked one hundred and eightieth has not been offered to anybody.
+- **"Available to pick up here" could mean a four-minute ride away.** Widening
+  the search to neighbouring maps is what fixed a player being told zero while
+  standing in front of a quest giver; it also made "here" overstate the case.
+  Results are now split by real distance, and the wording matches which.
+
+### Changed
+
+- **A cold rebuild costs 5.5ms instead of 15.6ms** at retail scale (1800 pets,
+  3000 achievements, 2500 recipes), measured, not estimated.
+  Two providers accounted for most of it and both were doing the same thing
+  wrong. Achievements walked all three thousand rows on every rebuild to keep
+  about a dozen, rejecting the same two thousand nine hundred and eighty every
+  time; it now keeps a shortlist against a revision number and costs 0.02ms.
+  Reputations built a complete objective -- table, reasons, formatted strings
+  -- for all five hundred factions and then discarded all but sixty; it now
+  scores first and allocates only the survivors.
+
+### Notes
+
+- The urgency test took three attempts to become capable of failing. The first
+  asserted that *something* carried a deadline, which the Vault already
+  satisfied. The second asserted that a *quest* did, which world quests --
+  same objective type, different provider -- also already satisfied. Both
+  passed with the code under test deleted. The third asks the Quests provider
+  directly. Recorded because this is the third time in this project that a
+  test has agreed with a bug, and the pattern is always the same: asserting on
+  an aggregate that something else already satisfies.
+- Bounding the offer table naively made `Recommend(25)` seventy times slower
+  -- pruning fired on every insert once the table was full. It now overshoots
+  by a quarter before sweeping. A fix for a memory leak that costs seventy
+  times the CPU is not a fix.
+
 ## [0.28.0]
 
 Time, focus, and one performance bug I put there myself.

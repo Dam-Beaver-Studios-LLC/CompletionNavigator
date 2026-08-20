@@ -879,7 +879,7 @@ UI.RegisterTab{
 
                 Print("Quests: " .. seen .. " in your log, "
                     .. "|cffffff00" .. module.AvailableCount() .. "|r "
-                    .. "available to pick up here.")
+                    .. "available to pick up nearby.")
 
                 CN.DebugPrint(recorded .. " newly recorded, "
                     .. scanned .. " checked.")
@@ -937,7 +937,7 @@ UI.RegisterTab{
         if questModule then
             local available = questModule.AvailableCount()
 
-            table.insert(lines, "Available to pick up here: "
+            table.insert(lines, "Available to pick up nearby: "
                 .. (available > 0 and "|cffffff00" or "|cff999999")
                 .. available .. "|r")
             table.insert(lines, "In your log: " .. #CN.Blizzard.GetQuestLogEntries())

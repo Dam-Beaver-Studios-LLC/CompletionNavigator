@@ -258,6 +258,47 @@ function Quests.AvailableOnMap(mapID)
     return found
 end
 
+-- HOW FAR IS "HERE".
+--
+-- Searching the parent map and its siblings is what fixed a player being told
+-- zero while standing in front of a quest giver. It also means the answer now
+-- spans a whole zone, so calling it "here" overstates it -- the addon would
+-- be pointing at something a four-minute ride away and using a word that
+-- means arm's reach.
+--
+-- Split by distance where coordinates exist, and say the honest word for
+-- each. Anything without coordinates is reported as "in this zone", because
+-- that is the strongest claim the data supports.
+CN.nearbyYards = 300
+
+function Quests.SplitAvailableByDistance(available, mapID)
+    local near, zone = {}, {}
+
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+    local nav = CN:GetModule("Navigation")
+
+    for _, poi in ipairs(available or {}) do
+        local yards
+
+        if nav and nav.DistanceYards and playerX and playerY
+            and poi.x and poi.y and (poi.mapID or mapID) == playerMap then
+
+            yards = nav.DistanceYards(playerMap, playerX, playerY, poi.x, poi.y)
+        end
+
+        poi.yards = yards
+
+        if yards and yards <= CN.nearbyYards then
+            table.insert(near, poi)
+        else
+            table.insert(zone, poi)
+        end
+    end
+
+    return near, zone
+end
+
 -- World quests and bonus objectives, deliberately counted SEPARATELY.
 --
 -- They are available in the dictionary sense, and they are not what a player
@@ -725,6 +766,25 @@ CN.RegisterCandidateProvider("Quests", function()
             end
         end
 
+        -- A DEADLINE THE ADDON ALREADY KNEW AND WAS NOT ATTACHING.
+        --
+        -- 0.28.0 added an urgency curve that weights anything carrying
+        -- `expiresIn`, and then only world quests and the Vault set it. A
+        -- daily disappears at the daily reset and a weekly at the weekly one;
+        -- both are knowable to the minute, and neither was being said. The
+        -- headline feature of that release was close to inert.
+        local expiry
+
+        if availablePOI and availablePOI.isDaily then
+            expiry = Blizzard.GetSecondsUntilDailyReset()
+        elseif isActive and Blizzard.IsQuestInLog(questID) then
+            local timeLeft = Blizzard.GetQuestTimeLeft(questID)
+
+            if timeLeft and timeLeft > 0 then
+                expiry = timeLeft
+            end
+        end
+
         if isActive then
             if Blizzard.IsQuestReadyForTurnIn(questID) then
                 value = value + 3
@@ -776,6 +836,7 @@ CN.RegisterCandidateProvider("Quests", function()
             state             = CN.objectiveStates.AVAILABLE,
             completionValue   = value,
             travelCost        = travel,
+            expiresIn         = expiry,
             reasons           = reasons,
         }))
     end
@@ -1065,11 +1126,18 @@ CN:RegisterCommand{
             return
         end
 
-        Print(#available .. " quest"
-            .. (#available == 1 and "" or "s")
-            .. " available to pick up here:")
+        local near, zone = Quests.SplitAvailableByDistance(available, mapID)
 
-        for _, poi in ipairs(available) do
+        if #near > 0 then
+            Print(#near .. " quest" .. (#near == 1 and "" or "s")
+                .. " available right here:")
+        else
+            Print(#available .. " quest" .. (#available == 1 and "" or "s")
+                .. " available in this zone, none within "
+                .. CN.nearbyYards .. " yards:")
+        end
+
+        for _, poi in ipairs(#near > 0 and near or zone) do
             local title = Quests.GetName(poi.questID)
                 or Blizzard.GetQuestTitle(poi.questID, true)
                 or ("Quest " .. poi.questID)
@@ -1084,12 +1152,18 @@ CN:RegisterCommand{
             Print("  |cffffff00" .. title .. "|r" .. where)
         end
 
+        if #near > 0 and #zone > 0 then
+            Print("|cff999999Plus " .. #zone
+                .. " further out in this zone.|r")
+        end
+
         local tasks = Quests.TasksOnMap(mapID)
 
         if #tasks > 0 then
             Print("|cff999999Also " .. #tasks .. " world quest"
                 .. (#tasks == 1 and "" or "s")
-                .. "/bonus objective here -- no giver to talk to.|r")
+                .. " or bonus objective in this zone -- no giver to talk "
+                .. "to.|r")
         end
 
         Print("|cff999999These are in your recommendations and in |r/cn zone"
@@ -1144,7 +1218,7 @@ CN:RegisterCommand{
         local available = Quests.AvailableCount()
 
         Print("Quests: " .. seen .. " in your log, "
-            .. "|cffffff00" .. available .. "|r available to pick up here.")
+            .. "|cffffff00" .. available .. "|r available to pick up nearby.")
 
         DebugPrint(recorded .. " newly recorded in the database.")
     end,

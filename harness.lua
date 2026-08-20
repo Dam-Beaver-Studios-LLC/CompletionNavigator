@@ -168,6 +168,20 @@ function UnitRace() return "Human", "Human" end
 function UnitLevel() return 80 end
 function UnitSex() return 2 end
 function UnitFactionGroup() return "Alliance" end
+
+-- Mount state, so speed sampling can be bucketed. Settable, because the
+-- interesting case is the transition: a sample that spans mounting belongs
+-- to neither bucket and must be discarded.
+CN_TEST_MOUNTED = false
+function IsMounted() return CN_TEST_MOUNTED end
+function UnitOnTaxi() return false end
+
+-- The client's fractional monotonic clock. `time()` has one-second
+-- resolution, which was the bug: a ten-second sample measured with a
+-- one-second ruler carries up to ten per cent error, and anything finished
+-- inside the same second read as zero elapsed and was thrown away.
+CN_TEST_CLOCK = 1000.0
+function GetTime() return CN_TEST_CLOCK end
 function GetZoneText() return "Eversong Woods" end
 function GetSpecialization() return 3 end
 function GetSpecializationInfo() return 70, "Retribution" end
@@ -4106,6 +4120,207 @@ print("\nFollow, cheaply:")
     follow.Stop()
 
     print("  four redraw queries, " .. collections .. " candidate walk(s)")
+end)()
+
+
+print("\nCorrectness of the measurements:")
+
+;(function()
+    local session = CN:GetModule("Session")
+
+    -- THE CLOCK. `time()` has one-second resolution. A task offered and
+    -- finished inside the same second measured as zero elapsed and was
+    -- discarded as implausible -- which threw away exactly the fast turn-ins
+    -- a quest grinder produces most of. The offline suite discarded ALL of
+    -- them, so the learning path was never actually exercised.
+    session.Durations()[CN.objectiveTypes.QUEST] = nil
+
+    CN_TEST_CLOCK = 5000.0
+
+    session.NoteOffered({ type = CN.objectiveTypes.QUEST, id = 4242 })
+
+    CN_TEST_CLOCK = 5000.4   -- four tenths of a second: a fast turn-in
+
+    local elapsed = session.NoteCompleted(CN.objectiveTypes.QUEST, 4242)
+
+    assert(elapsed and elapsed > 0,
+        "a sub-second task must be measurable, got " .. tostring(elapsed))
+    assert(math.abs(elapsed - 0.4) < 0.001,
+        "the duration must be fractional, got " .. tostring(elapsed))
+
+    -- And it must reach the store, which is what makes an estimate possible.
+    assert(#session.Durations()[CN.objectiveTypes.QUEST] == 1,
+        "the sample must be kept")
+
+    -- MOUNT BUCKETS. One median across mounted and unmounted travel is a
+    -- number wrong in both states.
+    CN_TEST_MOUNTED = false
+
+    local onFoot = session.Speed(false)
+    local mounted = session.Speed(true)
+
+    assert(type(onFoot) == "number" and type(mounted) == "number",
+        "both states always answer with a usable number")
+
+    assert(session.SpeedSampleCount(true) == 0
+        and session.SpeedSampleCount(false) == 0,
+        "no samples yet in either bucket")
+
+    local buckets = session.SpeedBuckets()
+
+    assert(buckets.mounted == nil and buckets.onFoot == nil,
+        "an unmeasured bucket is nil, not zero -- unknown and none are "
+        .. "different facts")
+
+    -- THE OFFER TABLE MUST BE BOUNDED. It was not: every objective the addon
+    -- decorated got a timestamp and only completion removed one.
+    local heldBefore = session.OfferedCount()
+
+    for index = 1, session.offerMemoryCap + 120 do
+        session.NoteOffered({ type = CN.objectiveTypes.ACHIEVEMENT, id = 900000 + index })
+    end
+
+    local after = session.OfferedCount()
+
+    -- Bounded, allowing the deliberate overshoot that keeps pruning cheap.
+    local ceiling = session.offerMemoryCap * (1 + session.offerMemorySlack)
+
+    assert(after <= ceiling,
+        "the offer table must stay bounded, held " .. after
+        .. " with a ceiling of " .. ceiling)
+
+    assert(after > 0, "pruning must not empty it entirely")
+
+    print(string.format("  fractional clock, two speed buckets, %d offers held (was %d)",
+        after, heldBefore))
+end)()
+
+print("\nUrgency reaches the things that expire:")
+
+;(function()
+    -- 0.28.0 shipped an urgency curve and then only two providers set the
+    -- field it reads. A feature that fires on two of twenty providers is
+    -- close to inert, which is worse than not shipping it: the release notes
+    -- say it works.
+    local carriers, deadlineShape = 0, {}
+
+    for _, objective in ipairs(CN.CollectCandidates(true) or {}) do
+        if objective.expiresIn then
+            carriers = carriers + 1
+            deadlineShape[objective.type] = (deadlineShape[objective.type] or 0) + 1
+        end
+    end
+
+    assert(carriers > 0,
+        "something in the candidate list must carry a deadline, or the "
+        .. "urgency curve has nothing to act on")
+
+    -- Specifically the QUESTS provider.
+    --
+    -- Two earlier versions of this assertion could not fail. The first
+    -- checked only that something carried a deadline, which the Vault
+    -- already satisfied. The second checked that a QUEST did -- which world
+    -- quests, emitted by a different provider with the same objective type,
+    -- also already satisfied. Both passed with the wiring under test removed.
+    --
+    -- So ask the provider itself, and name the fixture: a daily quest
+    -- offered in the zone must carry the daily reset as its deadline.
+    local fromQuests = CN.candidateProviders["Quests"].fn()
+
+    local daily
+
+    for _, objective in ipairs(fromQuests) do
+        if objective.expiresIn then
+            daily = objective
+            break
+        end
+    end
+
+    assert(daily,
+        "the Quests provider itself must attach a deadline to a daily or "
+        .. "timed quest -- that is what this release added, and the two "
+        .. "previous versions of this check could not detect its absence")
+
+    print("  " .. tostring(daily.name) .. " expires in "
+        .. tostring(daily.expiresIn) .. "s")
+
+    -- And a deadline must actually change the ordering, not merely exist.
+    local near = CN.NewObjective({ id = 1, type = CN.objectiveTypes.QUEST,
+        completionValue = 1, travelCost = 0, expiresIn = 240 })
+
+    local far = CN.NewObjective({ id = 2, type = CN.objectiveTypes.QUEST,
+        completionValue = 1, travelCost = 0, expiresIn = 86400 })
+
+    CN.ScoreObjective(near)
+    CN.ScoreObjective(far)
+
+    assert(near.priorityWeight > far.priorityWeight,
+        "four minutes left must outrank a day left")
+
+    local shape = {}
+    for k, v in pairs(deadlineShape) do table.insert(shape, k .. "=" .. v) end
+    table.sort(shape)
+    print("  deadline carriers: " .. table.concat(shape, ", "))
+    print("  " .. carriers .. " candidate(s) carry a real deadline")
+end)()
+
+print("\nShortlists:")
+
+;(function()
+    local achievements = CN:GetModule("Achievements")
+
+    -- The provider walked three thousand rows on every rebuild to keep about
+    -- a dozen, rejecting the same two thousand nine hundred and eighty every
+    -- time.
+    local list, wasBuilt = achievements.Shortlist()
+
+    assert(type(list) == "table" and wasBuilt ~= nil,
+        "a shortlist is a list and reports whether it was rebuilt")
+
+    local _, rebuilt = achievements.Shortlist()
+
+    assert(rebuilt == false,
+        "an unchanged store must reuse the shortlist rather than rebuild it")
+
+    -- A write must invalidate it, or the provider serves a stale answer --
+    -- which is a correctness bug wearing a performance fix's clothes.
+    achievements.revision = achievements.revision + 1
+
+    local _, afterWrite = achievements.Shortlist()
+
+    assert(afterWrite == true,
+        "bumping the revision must force a rebuild")
+
+    local held, revision = CN.ShortlistState("Achievements")
+
+    assert(held ~= nil and revision ~= nil, "shortlist state is reportable")
+
+    print("  " .. #list .. " of "
+        .. CN.CountKeys(achievements.Store()) .. " achievements shortlisted")
+end)()
+
+print("\nHow far is \"here\":")
+
+;(function()
+    local quests = CN:GetModule("Quests")
+
+    -- Searching the parent map and its siblings is what fixed a player being
+    -- told zero while standing in front of a quest giver. It also means the
+    -- answer spans a zone, so "here" overstates it.
+    local offeredHere = quests.AvailableOnMap(94)
+
+    local near, zone = quests.SplitAvailableByDistance(offeredHere, 94)
+
+    assert(#near + #zone == #offeredHere,
+        "every offeredHere quest lands in exactly one bucket")
+
+    for _, poi in ipairs(near) do
+        assert(poi.yards and poi.yards <= CN.nearbyYards,
+            "a quest called near must actually be near")
+    end
+
+    print("  " .. #near .. " within " .. CN.nearbyYards
+        .. " yards, " .. #zone .. " further out")
 end)()
 
 
