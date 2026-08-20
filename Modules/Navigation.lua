@@ -356,11 +356,29 @@ function Navigation.Compute()
     local yards = Navigation.DistanceYards(mapID, playerX, playerY,
         target.x, target.y)
 
+    local within = yards and yards <= Navigation.arrivalYards
+
+    -- ARRIVAL DOES NOT LATCH.
+    --
+    -- REPORTED FROM LIVE PLAY, TWICE: "I walked past it and the arrow did not
+    -- turn around." `target.arrived` was set once and never cleared, so a
+    -- player who walked through the destination and kept going was, as far as
+    -- this code was concerned, still arrived -- forever.
+    --
+    -- Walking back out of the arrival radius is the player un-arriving. Say
+    -- so, so that tracking resumes and the arrow turns round.
+    if target.arrived and yards and yards > (Navigation.arrivalYards * 2) then
+        target.arrived = false
+
+        DebugPrint("Left the destination; tracking it again.")
+    end
+
     return {
-        state    = (yards and yards <= Navigation.arrivalYards) and "ARRIVED" or "TRACKING",
+        state    = within and "ARRIVED" or "TRACKING",
         relative = relative,
         yards    = yards,
         facing   = facing,
+        within   = within,
     }
 end
 
@@ -441,12 +459,41 @@ function Navigation.NoteObservation(relative, yards)
     return true
 end
 
+-- Wipe what the arrow is showing.
+--
+-- Hiding a frame does not clear it. The rotation, the colour and the distance
+-- stay exactly as they were, so an arrow hidden while pointing north-east at
+-- "10 yd" is still pointing north-east at "10 yd" the moment anything shows
+-- it again -- a stale claim about a destination that is no longer being
+-- tracked. Costs nothing to reset; costs the player's trust not to.
+local function Blank()
+    if not arrow then
+        return
+    end
+
+    if arrow.texture then
+        arrow.texture:SetRotation(0)
+        arrow.texture:SetVertexColor(Navigation.BearingColor(nil))
+    end
+
+    if arrow.distance then
+        arrow.distance:SetText("")
+    end
+
+    if arrow.label then
+        arrow.label:SetText("")
+    end
+end
+
+Navigation.Blank = Blank
+
 local function Refresh()
     if not arrow then
         return
     end
 
     if not target or not Navigation.IsArrowEnabled() then
+        Blank()
         arrow:Hide()
         return
     end
@@ -502,12 +549,29 @@ function Navigation.Arrive()
 
     target.arrived = true
 
-    Print("Arrived: " .. tostring(target.title or "destination"))
+    local reached = tostring(target.title or "destination")
+
+    Print("Arrived: " .. reached)
 
     -- Arrival is exactly the moment auto-advance was designed for; before
     -- this, it could only re-point on a timer or an event.
     if CN.IsAutoWaypointEnabled and CN.IsAutoWaypointEnabled() then
         CN.AutoAdvance("arrival", true)
+
+        -- SAY SO WHEN THE ARROW NOW MEANS SOMETHING ELSE.
+        --
+        -- Auto-advance re-points at the next thing, and the arrow looks
+        -- absolutely identical doing it: same shape, same blue, still ahead
+        -- of you. A player who walks through a destination and sees the arrow
+        -- still pointing forward reasonably concludes it failed to turn
+        -- round, when in fact it is now pointing at something else. That was
+        -- reported as a bug twice, and it was a communication failure rather
+        -- than a maths one.
+        local now = target and tostring(target.title or "destination")
+
+        if now and now ~= reached then
+            Print("Now heading to: |cffffff00" .. now .. "|r")
+        end
     else
         Navigation.Clear()
     end
@@ -593,6 +657,7 @@ function Navigation.Clear()
     target = nil
 
     if arrow then
+        Blank()
         arrow:Hide()
     end
 

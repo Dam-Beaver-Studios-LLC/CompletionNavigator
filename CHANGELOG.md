@@ -7,6 +7,58 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.33.0]
+
+The arrow. Reported twice, and I did not find it either time because I never
+wrote the test that would have shown it.
+
+### Fixed
+
+- **Arriving re-pointed the arrow at a different destination without saying
+  so.** This is the actual defect behind *"I walked past it and the arrow did
+  not turn around."* With auto-advance on, reaching a destination hands the
+  arrow to the next thing on the route -- and the arrow looks absolutely
+  identical doing it. Same shape, same blue, still ahead of you, distance now
+  counting **up** because the new destination is further away than the one you
+  just walked through.
+  A player seeing that concludes the arrow failed to turn round, and they are
+  not wrong to: nothing on screen said the destination had changed. The addon
+  now names the new destination in chat and the arrow's own label updates to
+  match. The maths was never wrong; the communication was.
+- **Hiding the arrow left everything it was showing intact.** Rotation, colour
+  and distance were never reset, so an arrow hidden while pointing north-east
+  at "10 yd" was still pointing north-east at "10 yd" the instant anything
+  showed it again -- a stale claim about a destination nobody was tracking.
+- **Arrival latched permanently.** `arrived` was set once and never cleared,
+  so walking back out of range left the addon believing you were still there.
+  Defensive rather than load-bearing -- the arrow turned round correctly even
+  with the latch in place, and I am saying so rather than claiming a fix I did
+  not need to make -- but a flag that can only ever be set once is a bug
+  waiting for a caller.
+
+### Added
+
+- **The arrow is testable for the first time.** The offline harness's texture
+  stub accepted `SetRotation` and `SetVertexColor` and remembered neither, and
+  its font strings swallowed `SetText`. The single most visible thing this
+  addon draws had no test that could see which way it pointed or what colour
+  it was. Both now record, and so does the player's position -- which was a
+  fixed point, meaning every arrow test ever written tested standing still.
+- A walk-past test drives the real refresh path: approach, arrive, continue,
+  and assert the arrow turns a half circle, recolours, keeps reporting a real
+  distance, announces a re-target, and leaves nothing stale behind.
+
+### Notes
+
+- Six times now a stub has modelled the world more simply than the world and
+  hidden a defect: a flat map point, a quest list without quest starts, an
+  achievement criterion without a counter, a completed-quest list that cost
+  nothing to read, a fixture ordered the same way as the bug, and now a player
+  who could not move and an arrow whose direction nobody could read.
+  The pattern is exact enough to state as a rule: **when a test needs a stub,
+  the first question is which part of reality the stub is refusing to model,
+  and the second is whether that is the part under test.**
+
 ## [0.32.0]
 
 The quest counter was costing your entire quest history to display.

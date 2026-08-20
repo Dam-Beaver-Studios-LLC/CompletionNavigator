@@ -92,7 +92,7 @@ It searches the surrounding zone as well as the map under your feet, since a cit
 
 ## Navigation without another addon
 
-A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
+A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it â€” it turns and recolours the moment you pass the destination, and when it hands itself to the next stop it tells you which destination it is now pointing at rather than quietly changing what it means. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
 
 ## Warband-aware
 

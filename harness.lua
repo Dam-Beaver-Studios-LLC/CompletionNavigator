@@ -28,8 +28,44 @@ local function Frame()
     function f:IsShown() return f.shown == true end
     function f:Show() f.shown = true end
     function f:Hide() f.shown = false end
-    function f:CreateFontString() return Frame() end
-    function f:CreateTexture() return Frame() end
+    function f:CreateFontString()
+        local fs = Frame()
+
+        -- Record what was actually displayed. The universal stub swallowed
+        -- SetText, so no test could ever assert what the arrow said.
+        function fs:SetText(value) fs.text = value end
+        function fs:GetText() return fs.text end
+
+        return fs
+    end
+
+    function f:CreateTexture()
+        local t = Frame()
+
+        -- RECORD ROTATION AND COLOUR.
+        --
+        -- These fell through to the universal stub, which accepts anything
+        -- and remembers nothing. That is why the on-screen arrow -- the most
+        -- visible thing this addon draws -- had no test that could see which
+        -- way it pointed, and why a player had to report the same defect
+        -- twice.
+        function t:SetRotation(value) t.rotation = value end
+        function t:GetRotation() return t.rotation end
+
+        function t:SetVertexColor(r, g, b)
+            t.colour = { r = r, g = g, b = b }
+        end
+
+        function t:GetVertexColor()
+            local c = t.colour or {}
+            return c.r, c.g, c.b
+        end
+
+        function t:SetTexture(path) t.texturePath = path end
+        function t:GetTexture() return t.texturePath end
+
+        return t
+    end
 
     -- Numeric getters must return numbers, or arithmetic in the addon
     -- silently becomes "attempt to perform arithmetic on a table value".
@@ -226,7 +262,18 @@ end
 
 C_Map = {
     GetBestMapForUnit    = function() return 94 end,
-    GetPlayerMapPosition = function() return { GetXY = function() return 0.42, 0.55 end } end,
+    -- A MOVABLE player.
+    --
+    -- Fixed at one point, the stub could never express the case a player
+    -- reported twice: walking past the destination and continuing. Every
+    -- arrow test was therefore a test of standing still.
+    GetPlayerMapPosition = function()
+        return {
+            GetXY = function()
+                return CN_TEST_PLAYER_X or 0.42, CN_TEST_PLAYER_Y or 0.55
+            end,
+        }
+    end,
     GetMapInfo           = function(id)
         return F.mapTree[id] or { name = "Map" .. tostring(id), mapType = 3 }
     end,
@@ -267,6 +314,8 @@ local offeredTitles = {
 }
 
 local pendingLoad = {}
+
+CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
 
 C_QuestLog = {
     -- BUILDS A FRESH TABLE, because the client does.
@@ -4700,5 +4749,153 @@ print("\nThe lifetime count does not cost a quest history:")
     print("  one client read for twenty-five refreshes")
 end)()
 
+
+print("\nThe arrow turns round when you walk past:")
+
+;(function()
+    local arrowNav = CN:GetModule("Navigation")
+
+    arrowNav.SetFacingSign(1)
+
+    local arrow = arrowNav.BuildArrow()
+
+    local function colourOf()
+        local red = arrow.texture:GetVertexColor()
+        return red
+    end
+
+    local blue = arrowNav.colors.ON_COURSE[1]
+    local away = arrowNav.colors.AWAY[1]
+
+    ------------------------------------------------------------
+    -- Auto-advance ON, and the destination does not change.
+    --
+    -- This is the case a player hit twice: walk through the target, keep
+    -- going, and the arrow must turn round. It did not, because arrival
+    -- latched -- `arrived` was set once and never cleared, so the addon
+    -- believed the player was still there no matter how far they walked.
+    ------------------------------------------------------------
+    CN.Settings().autoWaypoint = true
+
+    local realAdvance = CN.AutoAdvance
+
+    CN.AutoAdvance = function() return false end   -- nothing better to point at
+
+    playerFacing = 0
+
+    CN.SetWaypoint(94, 0.5, 0.4, "The Destination")
+
+    local seen = {}
+
+    for _, py in ipairs({ 0.60, 0.45, 0.41, 0.39, 0.30, 0.20 }) do
+        CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5, py
+
+        arrowNav.Refresh()
+
+        table.insert(seen, {
+            y        = py,
+            rotation = arrow.texture.rotation,
+            red      = colourOf() and math.abs(colourOf() - away) < 0.01,
+            blue     = colourOf() and math.abs(colourOf() - blue) < 0.01,
+            text     = arrow.distance.text,
+        })
+    end
+
+    CN.AutoAdvance = realAdvance
+    CN.Settings().autoWaypoint = false
+
+    assert(seen[1].blue, "approaching the destination, the arrow is blue")
+
+    local last = seen[#seen]
+
+    assert(last.red,
+        "walking AWAY from the destination the arrow must turn red -- it "
+        .. "stayed blue for a player, twice")
+
+    assert(last.rotation and math.abs(math.abs(last.rotation) - math.pi) < 0.01,
+        "and it must point BACK at the destination, a half turn from where "
+        .. "it pointed on approach; got "
+        .. tostring(last.rotation and math.deg(last.rotation)))
+
+    assert(seen[1].rotation ~= last.rotation,
+        "the arrow must not be frozen in the direction it had on approach")
+
+    -- The distance must grow again, not stick at the arrival figure.
+    local approaching = tonumber(string.match(seen[1].text or "", "%d+"))
+    local leaving     = tonumber(string.match(last.text or "", "%d+"))
+
+    assert(approaching and leaving and leaving > 0,
+        "a real distance is shown throughout")
+
+    ------------------------------------------------------------
+    -- Nothing stale is left behind when tracking stops.
+    ------------------------------------------------------------
+    arrowNav.Clear()
+
+    assert((arrow.texture.rotation or 0) == 0,
+        "clearing must reset the rotation, not leave the last one showing")
+    assert(arrow.distance.text == "",
+        "and must clear the distance, not leave a number for a destination "
+        .. "nobody is tracking")
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
+
+    ------------------------------------------------------------
+    -- THE ACTUAL COMPLAINT.
+    --
+    -- Auto-advance ON, and arriving re-points at the NEXT thing. The arrow
+    -- looks absolutely identical doing it: same shape, same blue, still
+    -- ahead of you, distance now counting up because the new destination is
+    -- further away than the old one you just walked through.
+    --
+    -- A player seeing that concludes the arrow failed to turn round. They are
+    -- not wrong to: nothing on screen said the destination had changed. It
+    -- was reported as an arrow bug twice, and both times the arrow was
+    -- pointing correctly -- at something else.
+    ------------------------------------------------------------
+    CN.Settings().autoWaypoint = true
+
+    local realAdvance2 = CN.AutoAdvance
+
+    CN.AutoAdvance = function()
+        -- Whatever the router would have picked next.
+        CN.SetWaypoint(94, 0.5, 0.1, "Somewhere Else")
+        return true
+    end
+
+    output = {}
+
+    CN.SetWaypoint(94, 0.5, 0.4, "The Destination")
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5, 0.41
+
+    arrowNav.Refresh()
+
+    CN.AutoAdvance = realAdvance2
+    CN.Settings().autoWaypoint = false
+
+    local announced = false
+
+    for _, line in ipairs(output) do
+        if line:find("Now heading to") and line:find("Somewhere Else") then
+            announced = true
+        end
+    end
+
+    assert(announced,
+        "when arriving silently re-points the arrow at a different "
+        .. "destination, the addon must SAY so -- otherwise the player sees "
+        .. "an arrow that appears not to have turned round")
+
+    assert(arrow.label.text == "Somewhere Else",
+        "and the label must name the new destination, got "
+        .. tostring(arrow.label.text))
+
+    arrowNav.Clear()
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
+
+    print("  turns round, recolours, announces a re-target, leaves nothing stale")
+end)()
 
 print("\nALL HARNESS CHECKS PASSED")
