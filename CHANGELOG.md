@@ -7,6 +7,66 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.28.0]
+
+Time, focus, and one performance bug I put there myself.
+
+### Added
+
+- **`/cn plan 30` -- what fits in the time you actually have.** The most
+  common shape a play session has, and the addon had nothing to say about it.
+  It could rank everything and route between stops, and could not answer the
+  one question a person with a job and a bedtime asks before logging in.
+  The estimate is built from two halves and only one of them is guessed.
+  **Travel is computed** -- the router knows real yard distances, and the
+  addon now measures how fast you actually move by watching your position,
+  discarding flight paths and loading screens as implausible. **Task time is
+  learned**, timed from when something was first put in front of you, kept as
+  a median per type. Until a type has been watched enough times it has *no*
+  estimate, and the plan says "time unknown" rather than inventing one.
+  A plan therefore starts honest and vague and sharpens as it watches you
+  play. That is slower to become useful than a table of made-up constants and
+  it is the only version that is ever true.
+- **`/cn mode leveling` -- aim the whole addon in one command.** Levelling,
+  collecting, reputation, achievements, professions, everything. A focus sets
+  the weighting *and* the type filter together, because "I'm levelling
+  tonight" means both "prefer quests" and "stop showing me pets", and making
+  someone say that twice is the addon asking them to do its filing.
+  `/cn mode off` restores exactly what you had -- including types *you* had
+  hidden before, which the addon must not quietly undo.
+- The Journey tab gained one-click 30-minute and 1-hour plans.
+
+### Changed
+
+- **Urgency is a gradient now, not a flag.** A world quest with four days left
+  and one with nine minutes left used to score identically, which is exactly
+  backwards at the moment it matters. Anything carrying a deadline now gains
+  weight on a curve that stays flat until the last two hours and then climbs
+  hard -- steeply enough that the final ten minutes outrank the previous
+  hour, deliberately late so that "urgent" keeps meaning something.
+- `/cn mode` absorbed the new focus presets rather than sitting beside a
+  second command that also meant "what am I doing tonight". A bare profile
+  name still sets only the weighting, as before.
+
+### Fixed
+
+- **A performance regression I shipped in 0.27.0.** Follow mode asks three
+  questions per redraw -- is this stop finished, what does the header say,
+  what does the body say -- and each one walked the entire candidate list and
+  built a throwaway set of several thousand keys. Three full scans every
+  three seconds for an answer that could not have changed between them.
+  The index is now memoised against the candidate generation, so it is built
+  once per actual change instead of once per question. The test asserts four
+  consecutive redraw queries cost at most one walk; it currently costs zero.
+
+### Notes
+
+- The urgency test compares the curve's slope *per second* rather than raw
+  differences between unequally spaced samples. The first version of it
+  failed a correct curve, which is the test being wrong rather than the code
+  -- worth recording, because a test that fails for the wrong reason teaches
+  you to distrust the suite.
+
 ## [0.27.0]
 
 Four things, all of them traceable to one player's report of what he was
@@ -76,6 +136,11 @@ actually doing.
   `do` block shares the enclosing function's register budget, a function gets
   its own. This is a structural fix, not a workaround -- the file can now
   grow.
+- The project page regained the "what it tracks" table. It was dropped in
+  0.25.0 when the page was rewritten around new features -- which left the
+  page describing what the addon had just learned to do and no longer saying
+  what it covers. A reader deciding whether to install it needs the second
+  thing more than the first.
 - The zone-completion denominators are the game's, not ours. Counting "quests
   I know about" would give a denominator that grows as you play, so the
   percentage would fall as you did more. That is worse than no percentage,

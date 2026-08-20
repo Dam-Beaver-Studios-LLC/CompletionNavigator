@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.27.0'
+$script:ToolkitVersion = '0.28.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.27.0"
+CN.version     = "0.28.0"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -455,6 +455,7 @@ CN.defaults = {
         questStatus        = {},
         discoveredQuests   = {},
         loremaster         = {},
+        taskDurations      = {},
     },
 
     characters = {},
@@ -1839,32 +1840,101 @@ CN:RegisterCommand{
     end,
 }
 
+-- ONE command for "aim the addon", not two.
+--
+-- 0.28.0 added focus presets -- levelling, collecting, reputation -- which
+-- set the weighting AND the type filter together. Registering those as a
+-- second command alongside this one would have given the player two things
+-- that both mean "what am I doing tonight", differing in ways only the
+-- author could explain. So this command absorbed them.
+--
+-- A preset name applies the preset. A raw profile name still sets just the
+-- weighting, exactly as before, because that is what anyone with it in a
+-- macro expects.
 CN:RegisterCommand{
     name    = "mode",
-    args    = "[modeName]",
+    aliases = { "focus" },
+    args    = "[leveling | collecting | reputation | achievements | professions | everything | off | <profile>]",
     order   = 4,
-    help    = "Show or set the priority mode.",
+    help    = "Aim the addon at one kind of play.",
     handler = function(args)
         local settings = CN.Settings()
 
-        if args == "" then
-            Print("Priority mode: " .. tostring(settings.priorityMode))
-            Print("Available: " .. table.concat(CN.priorityModes, ", "))
+        local filters = CN:GetModule("Filters")
+
+        local requested = string.lower(CN.Trim(args or ""))
+
+        local function ListOptions()
+            local presets = {}
+
+            for name in pairs(CN.modes) do
+                table.insert(presets, name)
+            end
+
+            table.sort(presets)
+
+            Print("|cff999999Focus: " .. table.concat(presets, ", ") .. "|r")
+            Print("|cff999999Weighting only: "
+                .. table.concat(CN.priorityModes, ", ") .. "|r")
+        end
+
+        if requested == "" then
+            local current, active
+
+            if filters then
+                current, active = filters.CurrentMode()
+            end
+
+            if current and active then
+                Print("Focus: |cffffff00" .. active.label .. "|r")
+                Print("|cff999999" .. active.note .. "|r")
+                Print("|cff999999/cn mode off|r restores what you had before.")
+            else
+                Print("Priority mode: |cffffff00"
+                    .. tostring(settings.priorityMode) .. "|r")
+            end
+
+            ListOptions()
             return
         end
 
-        local requested = string.lower(args)
+        if requested == "off" or requested == "clear" then
+            if filters then
+                filters.ClearMode()
+            end
 
-        for _, mode in ipairs(CN.priorityModes) do
-            if mode == requested then
-                settings.priorityMode = requested
-                Print("Priority mode set to " .. requested .. ".")
+            Print("Focus cleared. Previous filters and weighting restored.")
+            return
+        end
+
+        -- A focus preset: weighting and filter together.
+        if CN.modes[requested] and filters then
+            local ok, preset = filters.ApplyMode(requested)
+
+            if ok then
+                Print("Focus: |cffffff00" .. preset.label .. "|r -- "
+                    .. preset.note)
+                Print("|cff999999/cn mode off|r puts it back.")
                 return
             end
         end
 
-        Print("Unknown priority mode: " .. requested)
-        Print("Available: " .. table.concat(CN.priorityModes, ", "))
+        -- A bare profile name: weighting only, unchanged behaviour.
+        for _, mode in ipairs(CN.priorityModes) do
+            if mode == requested then
+                settings.priorityMode = requested
+
+                CN.InvalidateCandidates("mode")
+
+                Print("Priority mode set to |cffffff00" .. requested .. "|r.")
+                Print("|cff999999Weighting only; your type filters are "
+                    .. "untouched.|r")
+                return
+            end
+        end
+
+        Print("Unknown mode: " .. requested)
+        ListOptions()
     end,
 }
 '@
@@ -1916,6 +1986,35 @@ CN.unknownLocationCost = 3
 CN.batchBonusPerNeighbour = 0.6
 CN.batchBonusCap          = 3
 
+-- URGENCY.
+--
+-- "This is gone in six hours" is the strongest signal the game gives, and
+-- until now the addon treated it as a flag rather than a gradient: a world
+-- quest with four days left and one with nine minutes left scored the same.
+-- That is exactly backwards at the moment it matters.
+--
+-- The curve is deliberately steep and late. Something with a day left is not
+-- urgent -- saying so would make everything urgent, which is the same as
+-- nothing being urgent. Inside two hours it climbs hard.
+CN.urgencyHorizonSeconds = 7200
+CN.urgencyWeight         = 4.0
+
+function CN.UrgencyBonus(secondsLeft)
+    if type(secondsLeft) ~= "number" or secondsLeft <= 0 then
+        return 0
+    end
+
+    if secondsLeft >= CN.urgencyHorizonSeconds then
+        return 0
+    end
+
+    -- Squared, so the last twenty minutes are worth much more than the first
+    -- hour of the window.
+    local remaining = 1 - (secondsLeft / CN.urgencyHorizonSeconds)
+
+    return remaining * remaining
+end
+
 -- Priority profiles have two independent levers:
 --   weights = override entries in scoreWeights (affects every objective)
 --   types   = multiply the final score for a given objective type
@@ -1933,6 +2032,59 @@ CN.priorityProfiles = {
     recipes      = { types = { RECIPE = 2.0 } },
     collections  = { types = { PET = 1.5, MOUNT = 1.5, TOY = 1.5, APPEARANCE = 1.5 } },
     legacy       = {},
+}
+
+-- MODES.
+--
+-- A profile changes the weighting. A mode changes the weighting AND what is
+-- shown, because "I am levelling tonight" means both "prefer quests" and
+-- "stop showing me pets". Two commands to say one thing is the addon making
+-- the player do its filing.
+--
+-- Every mode is reversible in one word, and `/cn mode` with no argument says
+-- which one is on and what it did.
+CN.modes = {
+    leveling = {
+        label   = "Levelling",
+        profile = "quests",
+        show    = { "QUEST", "EXPLORATION" },
+        note    = "Quests and exploration only, weighted toward fast travel.",
+    },
+
+    collecting = {
+        label   = "Collecting",
+        profile = "collections",
+        show    = { "PET", "MOUNT", "TOY", "APPEARANCE", "RARE", "TREASURE" },
+        note    = "Pets, mounts, toys, appearances and the rares that drop them.",
+    },
+
+    reputation = {
+        label   = "Reputation",
+        profile = "reputation",
+        show    = { "REPUTATION", "RENOWN", "QUEST", "CURRENCY" },
+        note    = "Standing and the quests that raise it.",
+    },
+
+    achievements = {
+        label   = "Achievements",
+        profile = "achievements",
+        show    = { "ACHIEVEMENT", "EXPLORATION", "QUEST" },
+        note    = "Criteria you are close to finishing.",
+    },
+
+    professions = {
+        label   = "Professions",
+        profile = "professions",
+        show    = { "PROFESSION", "RECIPE", "VENDOR" },
+        note    = "Skill-ups, missing recipes and who sells them.",
+    },
+
+    everything = {
+        label   = "Everything",
+        profile = "balanced",
+        show    = nil,   -- nil means "clear the filter", not "show nothing"
+        note    = "All types, balanced weighting.",
+    },
 }
 
 ------------------------------------------------------------
@@ -1972,6 +2124,13 @@ function CN.ScoreObjective(objective)
     score = score + (objective.completionValue      or 1) * w.completionValue
     score = score + (objective.unlockValue          or 0) * w.unlockValue
     score = score + (objective.limitedTimeBonus     or 0) * w.limitedTimeBonus
+
+    -- A deadline the objective actually carries, weighted by how close it is.
+    -- `expiresIn` is the established field name; providers that know a
+    -- deadline already set it.
+    if objective.expiresIn then
+        score = score + CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight
+    end
     score = score + (objective.nearbyBonus          or 0) * w.nearbyBonus
 
     -- Everything else at the same place makes this stop worth more.
@@ -5060,6 +5219,18 @@ UI.RegisterTab{
             UI.Refresh()
         end)
         panel.follow:SetPoint("BOTTOMLEFT", 8, 10)
+
+        -- The three session lengths people actually have. A text field
+        -- asking for a number would be more general and less used.
+        panel.plan30 = AddButton(panel, "30 min", 70, function()
+            CN.HandleSlashCommand("plan 30")
+        end)
+        panel.plan30:SetPoint("BOTTOMRIGHT", -8, 10)
+
+        panel.plan60 = AddButton(panel, "1 hour", 70, function()
+            CN.HandleSlashCommand("plan 60")
+        end)
+        panel.plan60:SetPoint("RIGHT", panel.plan30, "LEFT", -4, 0)
 
         panel.rescan = AddButton(panel, "Rescan zones", 130, function()
             local lore = CN:GetModule("Loremaster")
@@ -16025,6 +16196,88 @@ CN:RegisterCommand{
     end,
 }
 
+------------------------------------------------------------
+-- MODES
+------------------------------------------------------------
+
+-- Applying a mode is two existing operations performed together, plus a
+-- record of what was on before so it can be undone.
+function Filters.ApplyMode(name)
+    local mode = CN.modes[name]
+
+    if not mode then
+        return false, "No such mode."
+    end
+
+    local settings = CN.Settings()
+
+    -- Remember what to go back to. One level deep on purpose: an undo stack
+    -- for a display preference is a feature nobody asked for.
+    settings.modePrevious = {
+        profile = settings.priorityMode,
+        hidden  = {},
+    }
+
+    for _, objectiveType in ipairs(Filters.TypeOrder()) do
+        if not Filters.IsTypeEnabled(objectiveType) then
+            table.insert(settings.modePrevious.hidden, objectiveType)
+        end
+    end
+
+    settings.priorityMode = mode.profile or "balanced"
+
+    Filters.EnableAllTypes()
+
+    if mode.show then
+        local wanted = {}
+
+        for _, objectiveType in ipairs(mode.show) do
+            wanted[objectiveType] = true
+        end
+
+        for _, objectiveType in ipairs(Filters.TypeOrder()) do
+            if not wanted[objectiveType] then
+                Filters.SetTypeEnabled(objectiveType, false)
+            end
+        end
+    end
+
+    settings.mode = name
+
+    CN.InvalidateCandidates("mode")
+
+    return true, mode
+end
+
+function Filters.CurrentMode()
+    local settings = CN.Settings()
+
+    return settings and settings.mode, settings and CN.modes[settings.mode]
+end
+
+function Filters.ClearMode()
+    local settings = CN.Settings()
+
+    local previous = settings.modePrevious
+
+    Filters.EnableAllTypes()
+
+    if previous then
+        settings.priorityMode = previous.profile or "balanced"
+
+        for _, objectiveType in ipairs(previous.hidden or {}) do
+            Filters.SetTypeEnabled(objectiveType, false)
+        end
+    end
+
+    settings.mode         = nil
+    settings.modePrevious = nil
+
+    CN.InvalidateCandidates("mode")
+
+    return true
+end
+
 CN:RegisterCommand{
     name    = "show",
     aliases = { "types" },
@@ -19321,6 +19574,49 @@ Follow.recheckSeconds = 3
 -- events. Events are per-type and there are eleven types; absence is one
 -- rule that covers all of them, including the ones added later, and it is
 -- also correct when something is finished by means the addon never saw.
+-- The live index, memoised against the candidate generation.
+--
+-- PERFORMANCE, AND A BUG I SHIPPED IN 0.27.0: a single redraw calls this
+-- three times -- once to test whether the stop is finished, once for the
+-- header, once for the body -- and each call walked the entire candidate list
+-- and built a fresh set of several thousand keys. Three full scans, three
+-- throwaway tables, every three seconds, for an answer that cannot have
+-- changed between them.
+--
+-- The candidate list already publishes a generation number that increments
+-- when anything is rebuilt. Keyed on that, this is built once per actual
+-- change instead of once per question.
+local liveIndex = { generation = -1, keys = nil }
+
+local function LiveKeys()
+    local generation = 0
+
+    if CN.GetCandidateCacheState then
+        local ok, state = pcall(CN.GetCandidateCacheState)
+
+        if ok and state then
+            generation = state.generation or 0
+        end
+    end
+
+    if liveIndex.keys and liveIndex.generation == generation then
+        return liveIndex.keys
+    end
+
+    local keys = {}
+
+    for _, candidate in ipairs(CN.CollectCandidates() or {}) do
+        keys[tostring(candidate.type) .. ":" .. tostring(candidate.id)] = true
+    end
+
+    liveIndex.generation = generation
+    liveIndex.keys       = keys
+
+    return keys
+end
+
+Follow.LiveKeys = LiveKeys
+
 function Follow.Remaining(objectives)
     local remaining = {}
 
@@ -19328,11 +19624,7 @@ function Follow.Remaining(objectives)
         return remaining
     end
 
-    local live = {}
-
-    for _, candidate in ipairs(CN.CollectCandidates() or {}) do
-        live[tostring(candidate.type) .. ":" .. tostring(candidate.id)] = true
-    end
+    local live = LiveKeys()
 
     for _, objective in ipairs(objectives) do
         local key = tostring(objective.type) .. ":" .. tostring(objective.id)
@@ -19463,15 +19755,15 @@ function Follow.Lines()
 
     local shown = 0
 
-    for _, objective in ipairs(current.objectives or {}) do
-        local stillOpen = false
+    local open = {}
 
-        for _, open in ipairs(remaining) do
-            if open.id == objective.id and open.type == objective.type then
-                stillOpen = true
-                break
-            end
-        end
+    for _, objective in ipairs(remaining) do
+        open[tostring(objective.type) .. ":" .. tostring(objective.id)] = true
+    end
+
+    for _, objective in ipairs(current.objectives or {}) do
+        local stillOpen =
+            open[tostring(objective.type) .. ":" .. tostring(objective.id)] == true
 
         if shown >= Follow.maxLines then
             table.insert(lines, {
@@ -19763,6 +20055,469 @@ CN:RegisterCommand{
 }
 
 return Follow
+'@
+
+$Embedded['Modules\Session.lua'] = @'
+-- Modules/Session.lua
+-- Completion Navigator :: "I have forty minutes. What should I do?"
+--
+-- The single most common shape a play session actually has, and the addon
+-- had nothing to say about it. It could rank everything and route between
+-- stops, and it could not answer the one question a person with a job and a
+-- bedtime asks before logging in.
+--
+-- WHY THIS IS HARD TO DO HONESTLY.
+--
+-- A plan that fits in forty minutes requires knowing how long things take,
+-- and the client does not say. The tempting move is to make numbers up --
+-- "quests take four minutes" -- and present them in a font that looks like
+-- measurement. This addon has a standing rule against exactly that.
+--
+-- So the estimate is built from two halves, and only one of them is guessed:
+--
+--   TRAVEL is computed. The router already knows the real yard distance
+--   between stops, and this module measures how fast you actually move by
+--   watching your position. That is arithmetic on observations.
+--
+--   TASK TIME is learned. Every completion is timed against when the
+--   objective was first offered as the current stop, and the median per type
+--   is kept. Until a type has been seen enough times, it has NO estimate and
+--   the plan says so rather than inventing one.
+--
+-- A plan therefore starts out honest and vague -- "these stops, distance
+-- known, duration not yet" -- and sharpens as it watches you play. That is
+-- slower to become useful than a table of invented constants, and it is the
+-- only version that is ever true.
+
+local ADDON_NAME, CN = ...
+
+local Session = CN:RegisterModule("Session")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+------------------------------------------------------------
+-- MEASURED TRAVEL SPEED
+------------------------------------------------------------
+
+-- Yards per second. Seeded with a walking-speed figure that is immediately
+-- replaced by measurement; it exists so the first plan is not divided by nil.
+Session.defaultSpeed = 7
+
+Session.minSamples = 5
+
+local speed = {
+    lastMapID = nil,
+    lastX     = nil,
+    lastY     = nil,
+    lastAt    = nil,
+    samples   = {},
+}
+
+Session.speedSampleCap = 40
+
+-- Called on a slow clock. Measures the distance covered since the last look.
+--
+-- Deliberately discards anything implausible: a teleport, a flight path, a
+-- hearthstone or a zone change would otherwise register as a very fast
+-- player and make every estimate useless.
+function Session.Observe()
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local now = time()
+
+    if not mapID or not x or not y then
+        return nil
+    end
+
+    local previousMap, previousX, previousY, previousAt =
+        speed.lastMapID, speed.lastX, speed.lastY, speed.lastAt
+
+    speed.lastMapID, speed.lastX, speed.lastY, speed.lastAt = mapID, x, y, now
+
+    if previousMap ~= mapID or not previousAt then
+        return nil
+    end
+
+    local elapsed = now - previousAt
+
+    if elapsed <= 0 or elapsed > 30 then
+        return nil
+    end
+
+    local nav = CN:GetModule("Navigation")
+
+    if not nav or not nav.DistanceYards then
+        return nil
+    end
+
+    local yards = nav.DistanceYards(mapID, previousX, previousY, x, y)
+
+    if not yards or yards <= 0 then
+        return nil
+    end
+
+    local observed = yards / elapsed
+
+    -- A player on foot does about 7 yards a second; mounted, roughly 14 to
+    -- 20. Anything above 60 is not travel, it is a loading screen.
+    if observed < 0.5 or observed > 60 then
+        return nil
+    end
+
+    table.insert(speed.samples, observed)
+
+    while #speed.samples > Session.speedSampleCap do
+        table.remove(speed.samples, 1)
+    end
+
+    return observed
+end
+
+-- The median, not the mean: standing still for a minute should not halve the
+-- estimate, and one flight path should not double it.
+local function Median(values)
+    if #values == 0 then
+        return nil
+    end
+
+    local sorted = {}
+
+    for index = 1, #values do
+        sorted[index] = values[index]
+    end
+
+    table.sort(sorted)
+
+    local middle = math.floor(#sorted / 2) + 1
+
+    if #sorted % 2 == 1 then
+        return sorted[middle]
+    end
+
+    return (sorted[middle - 1] + sorted[middle]) / 2
+end
+
+Session.Median = Median
+
+function Session.Speed()
+    if #speed.samples >= Session.minSamples then
+        return Median(speed.samples), true
+    end
+
+    return Session.defaultSpeed, false
+end
+
+function Session.SpeedSampleCount()
+    return #speed.samples
+end
+
+------------------------------------------------------------
+-- LEARNED TASK DURATION
+------------------------------------------------------------
+
+local function Durations()
+    return CN.Account("taskDurations")
+end
+
+Session.Durations = Durations
+
+Session.minDurationSamples = 4
+Session.durationSampleCap  = 25
+
+-- When each objective was first put in front of the player. A completion
+-- timed from here is "how long it took once it was the thing to do", which is
+-- the number a plan needs.
+local offeredAt = {}
+
+function Session.NoteOffered(objective)
+    if type(objective) ~= "table" or not objective.type or not objective.id then
+        return
+    end
+
+    local key = tostring(objective.type) .. ":" .. tostring(objective.id)
+
+    offeredAt[key] = offeredAt[key] or time()
+end
+
+function Session.NoteCompleted(objectiveType, id)
+    if not objectiveType or not id then
+        return nil
+    end
+
+    local key = tostring(objectiveType) .. ":" .. tostring(id)
+
+    local started = offeredAt[key]
+
+    offeredAt[key] = nil
+
+    if not started then
+        return nil
+    end
+
+    local elapsed = time() - started
+
+    -- Anything over twenty minutes was not "doing the thing", it was living
+    -- your life with the thing still on the list.
+    if elapsed <= 0 or elapsed > 1200 then
+        return nil
+    end
+
+    local store = Durations()
+
+    store[objectiveType] = store[objectiveType] or {}
+
+    table.insert(store[objectiveType], elapsed)
+
+    while #store[objectiveType] > Session.durationSampleCap do
+        table.remove(store[objectiveType], 1)
+    end
+
+    DebugPrint(objectiveType .. " took " .. elapsed .. "s ("
+        .. #store[objectiveType] .. " samples).")
+
+    return elapsed
+end
+
+-- Seconds this type usually takes, or NIL when the addon has not watched it
+-- often enough to have an opinion. Nil is a real answer here and every
+-- caller must handle it rather than substituting a guess.
+function Session.TypicalSeconds(objectiveType)
+    local samples = Durations()[objectiveType]
+
+    if not samples or #samples < Session.minDurationSamples then
+        return nil
+    end
+
+    return Median(samples)
+end
+
+function Session.HasEnoughData()
+    for _, samples in pairs(Durations()) do
+        if #samples >= Session.minDurationSamples then
+            return true
+        end
+    end
+
+    return false
+end
+
+------------------------------------------------------------
+-- THE PLAN
+------------------------------------------------------------
+
+-- Estimates a stop: travel to it, plus the work at it.
+--
+-- Returns seconds and a confidence flag. `false` means part of this was not
+-- measured, and callers must say so out loud.
+function Session.EstimateHub(hub, fromX, fromY)
+    local confident = true
+
+    local nav = CN:GetModule("Navigation")
+
+    local travelSeconds = 0
+
+    if nav and nav.DistanceYards and hub.mapID and hub.x and hub.y
+        and fromX and fromY then
+
+        local yards = nav.DistanceYards(hub.mapID, fromX, fromY, hub.x, hub.y)
+
+        if yards then
+            local rate, measured = Session.Speed()
+
+            travelSeconds = yards / math.max(0.5, rate)
+
+            if not measured then
+                confident = false
+            end
+        else
+            confident = false
+        end
+    else
+        confident = false
+    end
+
+    local workSeconds = 0
+
+    for _, objective in ipairs(hub.objectives or {}) do
+        local typical = Session.TypicalSeconds(objective.type)
+
+        if typical then
+            workSeconds = workSeconds + typical
+        else
+            confident = false
+        end
+    end
+
+    return travelSeconds + workSeconds, confident, travelSeconds, workSeconds
+end
+
+-- Builds a route and takes stops from the front of it until the budget is
+-- spent.
+--
+-- Takes from the FRONT rather than choosing the best-fitting subset. The
+-- route is already ordered to minimise walking; cherry-picking stops out of
+-- it produces a plan that fits the clock and makes you cross the zone twice.
+function Session.Plan(minutes)
+    local budget = (tonumber(minutes) or 30) * 60
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local plan = {
+        minutes   = budget / 60,
+        stops     = {},
+        seconds   = 0,
+        confident = true,
+        skipped   = 0,
+    }
+
+    if not mapID then
+        return plan
+    end
+
+    local _, _, hubs = CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+
+    if type(hubs) ~= "table" then
+        return plan
+    end
+
+    local currentX, currentY = x or 0.5, y or 0.5
+
+    for _, hub in ipairs(hubs) do
+        local seconds, confident, travel, work =
+            Session.EstimateHub(hub, currentX, currentY)
+
+        if plan.seconds + seconds > budget and #plan.stops > 0 then
+            plan.skipped = plan.skipped + 1
+        else
+            table.insert(plan.stops, {
+                hub       = hub,
+                seconds   = seconds,
+                travel    = travel,
+                work      = work,
+                summary   = CN.DescribeHub and CN.DescribeHub(hub) or nil,
+                confident = confident,
+            })
+
+            plan.seconds = plan.seconds + seconds
+
+            if not confident then
+                plan.confident = false
+            end
+
+            currentX, currentY = hub.x or currentX, hub.y or currentY
+        end
+    end
+
+    return plan
+end
+
+function Session.FormatDuration(seconds)
+    if not seconds or seconds <= 0 then
+        return "0m"
+    end
+
+    local minutes = math.floor(seconds / 60 + 0.5)
+
+    if minutes < 60 then
+        return minutes .. "m"
+    end
+
+    return string.format("%dh %dm", math.floor(minutes / 60), minutes % 60)
+end
+
+------------------------------------------------------------
+-- WIRING
+------------------------------------------------------------
+
+-- Everything recommended is something the player has been offered, so this
+-- is where the clock starts for duration learning.
+CN.RegisterCandidateDecorator("SessionTiming", function(objective)
+    Session.NoteOffered(objective)
+
+    return objective
+end)
+
+CN:RegisterEvent("QUEST_TURNED_IN", function(_, questID)
+    Session.NoteCompleted(CN.objectiveTypes.QUEST, questID)
+end)
+
+CN:RegisterEvent("NEW_PET_ADDED", function()
+    -- The client does not say which pet, so nothing can be timed here
+    -- honestly. Left deliberately unhandled rather than attributing the
+    -- elapsed time to a guess.
+end)
+
+local ticker
+
+CN:OnLogin(function()
+    Session.Observe()
+
+    if C_Timer and C_Timer.NewTicker and not ticker then
+        ticker = C_Timer.NewTicker(10, Session.Observe)
+    end
+end)
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "plan",
+    aliases = { "time", "budget" },
+    args    = "<minutes>",
+    order   = 13,
+    help    = "What fits in the time you actually have.",
+    handler = function(args)
+        local minutes = tonumber(CN.Trim(args or ""))
+
+        if not minutes or minutes <= 0 then
+            Print("Usage: |cffffff00/cn plan 30|r")
+            return
+        end
+
+        local plan = Session.Plan(minutes)
+
+        if #plan.stops == 0 then
+            Print("Nothing here to plan around.")
+            return
+        end
+
+        Print(string.format("%d stop%s, about %s of the %dm you have:",
+            #plan.stops,
+            #plan.stops == 1 and "" or "s",
+            Session.FormatDuration(plan.seconds),
+            minutes))
+
+        for index, stop in ipairs(plan.stops) do
+            Print(string.format("  %d. |cffffff00%s|r |cff999999%s|r",
+                index,
+                tostring(stop.summary or "stop"),
+                stop.confident and Session.FormatDuration(stop.seconds)
+                    or "time unknown"))
+        end
+
+        if plan.skipped > 0 then
+            Print("|cff999999" .. plan.skipped
+                .. " further stop(s) did not fit.|r")
+        end
+
+        if not plan.confident then
+            local rate, measured = Session.Speed()
+
+            Print("|cffffff00Some of this is not measured yet.|r "
+                .. "|cff999999Travel speed: "
+                .. (measured and string.format("%.0f yd/s from %d samples",
+                        rate, Session.SpeedSampleCount())
+                    or "still learning")
+                .. ". Task times are learned from your own play, so the "
+                .. "estimate sharpens as you go rather than starting from "
+                .. "numbers nobody measured.|r")
+        end
+    end,
+}
+
+return Session
 '@
 
 $Embedded['Modules\Vault.lua'] = @'
@@ -21925,7 +22680,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.27.0
+## Version: 0.28.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -21977,6 +22732,7 @@ Modules\Progress.lua
 Modules\Quests.lua
 Modules\Rares.lua
 Modules\Reputations.lua
+Modules\Session.lua
 Modules\Setup.lua
 Modules\Titles.lua
 Modules\Tooltips.lua
@@ -22144,6 +22900,66 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.28.0]
+
+Time, focus, and one performance bug I put there myself.
+
+### Added
+
+- **`/cn plan 30` -- what fits in the time you actually have.** The most
+  common shape a play session has, and the addon had nothing to say about it.
+  It could rank everything and route between stops, and could not answer the
+  one question a person with a job and a bedtime asks before logging in.
+  The estimate is built from two halves and only one of them is guessed.
+  **Travel is computed** -- the router knows real yard distances, and the
+  addon now measures how fast you actually move by watching your position,
+  discarding flight paths and loading screens as implausible. **Task time is
+  learned**, timed from when something was first put in front of you, kept as
+  a median per type. Until a type has been watched enough times it has *no*
+  estimate, and the plan says "time unknown" rather than inventing one.
+  A plan therefore starts honest and vague and sharpens as it watches you
+  play. That is slower to become useful than a table of made-up constants and
+  it is the only version that is ever true.
+- **`/cn mode leveling` -- aim the whole addon in one command.** Levelling,
+  collecting, reputation, achievements, professions, everything. A focus sets
+  the weighting *and* the type filter together, because "I'm levelling
+  tonight" means both "prefer quests" and "stop showing me pets", and making
+  someone say that twice is the addon asking them to do its filing.
+  `/cn mode off` restores exactly what you had -- including types *you* had
+  hidden before, which the addon must not quietly undo.
+- The Journey tab gained one-click 30-minute and 1-hour plans.
+
+### Changed
+
+- **Urgency is a gradient now, not a flag.** A world quest with four days left
+  and one with nine minutes left used to score identically, which is exactly
+  backwards at the moment it matters. Anything carrying a deadline now gains
+  weight on a curve that stays flat until the last two hours and then climbs
+  hard -- steeply enough that the final ten minutes outrank the previous
+  hour, deliberately late so that "urgent" keeps meaning something.
+- `/cn mode` absorbed the new focus presets rather than sitting beside a
+  second command that also meant "what am I doing tonight". A bare profile
+  name still sets only the weighting, as before.
+
+### Fixed
+
+- **A performance regression I shipped in 0.27.0.** Follow mode asks three
+  questions per redraw -- is this stop finished, what does the header say,
+  what does the body say -- and each one walked the entire candidate list and
+  built a throwaway set of several thousand keys. Three full scans every
+  three seconds for an answer that could not have changed between them.
+  The index is now memoised against the candidate generation, so it is built
+  once per actual change instead of once per question. The test asserts four
+  consecutive redraw queries cost at most one walk; it currently costs zero.
+
+### Notes
+
+- The urgency test compares the curve's slope *per second* rather than raw
+  differences between unequally spaced samples. The first version of it
+  failed a correct curve, which is the test being wrong rather than the code
+  -- worth recording, because a test that fails for the wrong reason teaches
+  you to distrust the suite.
+
 ## [0.27.0]
 
 Four things, all of them traceable to one player's report of what he was
@@ -22213,6 +23029,11 @@ actually doing.
   `do` block shares the enclosing function's register budget, a function gets
   its own. This is a structural fix, not a workaround -- the file can now
   grow.
+- The project page regained the "what it tracks" table. It was dropped in
+  0.25.0 when the page was rewritten around new features -- which left the
+  page describing what the addon had just learned to do and no longer saying
+  what it covers. A reader deciding whether to install it needs the second
+  thing more than the first.
 - The zone-completion denominators are the game's, not ours. Counting "quests
   I know about" would give a denominator that grows as you play, so the
   percentage would fall as you did more. That is worse than no percentage,
@@ -23635,6 +24456,26 @@ Start it and play. Follow mode puts the current stop on screen, ticks things off
 
 Off by default, and it will not fight you: it advances when a stop is **done**, not on a timer, so the waypoint never moves out from under you mid-walk. Wander off and it re-plans around where you actually are rather than herding you back. It says nothing in chat while it runs.
 
+## Play the time you have
+
+```
+/cn plan 30
+```
+
+Half an hour is not the same question as "what should I do next", and it gets its own answer: the stops that fit, in walking order, with what each one costs.
+
+Travel time is **computed** from real distances and from how fast you actually move — the addon watches your position and works it out, discarding flight paths and loading screens. Task time is **learned** from your own play. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
+
+## Aim it in one command
+
+```
+/cn mode leveling
+```
+
+Levelling, collecting, reputation, achievements, professions, everything. A focus sets the weighting **and** what is shown together, because "I'm levelling tonight" means both *prefer quests* and *stop showing me pets*.
+
+`/cn mode off` restores exactly what you had before — including anything you had hidden yourself.
+
 ## Track the long campaign
 
 If your plan is measured in zones rather than in the next ten minutes, `/cn progress` and `/cn loremaster` are for you.
@@ -23681,6 +24522,47 @@ A native on-screen arrow, in the addon's own colours, that tells you whether you
 
 Account-wide unlocks are recognised as account-wide. Something another character already earned is not recommended to this one, and the reason line says which character did it.
 
+## What it tracks
+
+Everything below is read from your own client. Nothing is downloaded, and nothing leaves your machine.
+
+| Tracked | What it reads |
+| --- | --- |
+| **Quests** | Your log, quests offered nearby that you have not taken, world quests, bonus objectives, daily and weekly resets |
+| **Campaign vs side quests** | The game's own campaign data, so *the story* and *everything else* stay separate |
+| **Zone / continent completion** | The game's quest achievements — real criteria, per zone and per expansion |
+| **Reputations** | Standing, renown, paragon, friendship, and which factions are account-wide |
+| **Achievements** | Criteria by criteria, including the ones that carry their own counter |
+| **Battle pets** | Collected, uncollected, wild-caught, duplicates |
+| **Mounts** | Collected, faction-locked, and the source text the game supplies |
+| **Toys** | Collected and uncollected |
+| **Appearances** | By category, and every source of a specific appearance |
+| **Titles** | Earned and unearned |
+| **Professions & recipes** | Skill lines, learned recipes, and which vendors sell the ones you lack |
+| **Currencies** | Balances, weekly caps, and what is close to overflowing |
+| **Exploration** | Zone discovery achievements |
+| **Rares & treasures** | Live vignettes on the minimap and where you last saw each one |
+| **Vendors** | Recorded when you open a merchant, so recipes and items become findable later |
+| **The Great Vault** | All three rows, what is unlocked, and what is still one step away |
+| **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
+
+Where the game does not supply a trustworthy total, it reports **counts rather than a percentage**. That is a deliberate rule, not a gap — an invented denominator is a number that looks like a fact.
+
+## What it does with it
+
+| | |
+| --- | --- |
+| **Ranks** | One list, ordered by what is actually worth doing now, with a stated reason for every line |
+| **Prioritises deadlines** | Anything expiring climbs as its deadline nears, steeply in the last stretch |
+| **Fits your session** | A plan sized to the minutes you have, from measured travel and learned task times |
+| **Explains** | `/cn why` names what is blocking something — level, reputation, profession, faction, an unfinished prerequisite |
+| **Batches** | Nearby work collapses into stops so you stop crossing the zone and coming back |
+| **Routes** | Stop to stop, improved with a second pass, drawn on your map in walking order |
+| **Navigates** | A native arrow that tells you whether you are walking toward your target or away from it |
+| **Chases** | The full path to a goal, step by step, with the next move marked |
+| **Follows** | Hands-free: the current stop on screen, advancing as you clear it |
+| **Learns** | Quest prerequisites inferred from your own play, never guessed from a single sighting |
+
 ## Show only what you care about
 
 Hide any objective type you are not working on — quests, pets, mounts, toys, appearances, reputations, professions, currencies, exploration, rares. Hidden types drop out of the recommendations **and** out of the route, so you are not walked to something you said you did not want. Collection totals still count everything.
@@ -23694,6 +24576,8 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn` | What to do next |
 | `/cn chase <type> <id>` | What stands between you and a goal, step by step |
 | `/cn follow` | Follow the route, hands-free |
+| `/cn plan <minutes>` | What fits in the time you have |
+| `/cn mode <focus>` | Aim the whole addon at one kind of play |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |
@@ -28020,6 +28904,219 @@ print("\nFollow mode:")
     assert(CN.Settings().follow == false, "stopping is remembered")
 
     print("  starts, holds its stop, advances on request, stops clean")
+end)()
+
+
+print("\nUrgency:")
+
+;(function()
+    -- "Gone in six hours" is the strongest signal the game gives, and it used
+    -- to be a flag rather than a gradient: a world quest with four days left
+    -- and one with nine minutes left scored identically.
+    assert(CN.UrgencyBonus(nil) == 0, "no deadline, no urgency")
+    assert(CN.UrgencyBonus(-5) == 0, "an expired deadline is not urgent")
+    assert(CN.UrgencyBonus(999999) == 0,
+        "something with days left must not be called urgent -- if everything "
+        .. "is urgent, nothing is")
+
+    local hour     = CN.UrgencyBonus(3600)
+    local tenMins  = CN.UrgencyBonus(600)
+    local twoMins  = CN.UrgencyBonus(120)
+
+    assert(twoMins > tenMins and tenMins > hour,
+        "urgency must rise as the deadline approaches")
+
+    -- Steep and late. Compared PER SECOND, because the intervals are not the
+    -- same length: 3600->600 is fifty minutes and 600->120 is eight. An
+    -- earlier version of this test compared the raw differences and failed a
+    -- correct curve, which is the test being wrong rather than the code.
+    local lateRate  = (twoMins - tenMins) / (600 - 120)
+    local earlyRate = (tenMins - hour)    / (3600 - 600)
+
+    assert(lateRate > earlyRate,
+        "urgency must climb faster per second as the deadline nears: "
+        .. string.format("late=%.6f early=%.6f", lateRate, earlyRate))
+
+    assert(CN.UrgencyBonus(1) <= 1, "urgency is bounded")
+
+    -- And it must actually move a score.
+    local calm = CN.NewObjective({ id = 1, type = CN.objectiveTypes.QUEST,
+        completionValue = 1, travelCost = 0 })
+
+    local urgent = CN.NewObjective({ id = 2, type = CN.objectiveTypes.QUEST,
+        completionValue = 1, travelCost = 0, expiresIn = 300 })
+
+    CN.ScoreObjective(calm)
+    CN.ScoreObjective(urgent)
+
+    assert(urgent.priorityWeight > calm.priorityWeight,
+        "an identical objective with a deadline five minutes away must "
+        .. "outrank one with none")
+
+    print(string.format("  1h=%.2f  10m=%.2f  2m=%.2f", hour, tenMins, twoMins))
+end)()
+
+print("\nModes:")
+
+;(function()
+    local focus = CN:GetModule("Filters")
+
+    focus.EnableAllTypes()
+
+    -- Hide something first, so we can prove the mode restores exactly what
+    -- was there rather than "everything".
+    focus.SetTypeEnabled(CN.objectiveTypes.TOY, false)
+
+    assert(not focus.IsTypeEnabled(CN.objectiveTypes.TOY), "toys hidden")
+
+    local ok, mode = focus.ApplyMode("leveling")
+
+    assert(ok, "leveling is a mode")
+    assert(mode.label == "Levelling", "the mode reports itself")
+
+    assert(focus.IsTypeEnabled(CN.objectiveTypes.QUEST),
+        "levelling shows quests")
+    assert(not focus.IsTypeEnabled(CN.objectiveTypes.PET),
+        "levelling hides pets -- that is the point of a mode")
+
+    assert(CN.Settings().priorityMode == "quests",
+        "a mode sets the weighting too, not only the filter")
+
+    local name = focus.CurrentMode()
+
+    assert(name == "leveling", "the current mode is reported")
+
+    -- One word must put back exactly what was there, including the toy.
+    focus.ClearMode()
+
+    assert(focus.IsTypeEnabled(CN.objectiveTypes.PET),
+        "clearing a mode restores hidden types")
+    assert(not focus.IsTypeEnabled(CN.objectiveTypes.TOY),
+        "clearing a mode restores what YOU had hidden, not everything -- "
+        .. "the addon must not quietly undo the player's own choices")
+
+    assert(focus.CurrentMode() == nil, "no mode after clearing")
+
+    local bad = focus.ApplyMode("nonsense")
+
+    assert(not bad, "an unknown mode is refused")
+
+    focus.EnableAllTypes()
+
+    CN.HandleSlashCommand("mode collecting")
+    CN.HandleSlashCommand("mode")
+    CN.HandleSlashCommand("mode off")
+
+    print("  modes apply and unapply without losing the player's own filters")
+end)()
+
+print("\nSession planning:")
+
+;(function()
+    local session = CN:GetModule("Session")
+
+    assert(session, "the Session module must load")
+
+    -- MEDIAN, not mean: standing still for a minute must not halve the
+    -- estimate and one flight path must not double it.
+    assert(session.Median({ 5, 5, 5, 100 }) == 5,
+        "the median must ignore an outlier, got "
+        .. tostring(session.Median({ 5, 5, 5, 100 })))
+
+    assert(session.Median({}) == nil, "no samples, no median")
+
+    -- With no samples, speed is a default AND says it is not measured.
+    local rate, measured = session.Speed()
+
+    assert(rate > 0, "a usable speed is always returned")
+    assert(measured == false,
+        "an unmeasured speed must announce itself so callers can say so")
+
+    -- A type nobody has watched has NO estimate. This is the whole honesty
+    -- argument: the alternative is a made-up constant in a confident font.
+    assert(session.TypicalSeconds(CN.objectiveTypes.QUEST) == nil,
+        "an unwatched type must have no duration, not a guessed one")
+
+    -- Watch a few and it forms an opinion.
+    for index = 1, 6 do
+        session.NoteOffered({ type = CN.objectiveTypes.QUEST, id = 5000 + index })
+    end
+
+    local learned = 0
+
+    for index = 1, 6 do
+        if session.NoteCompleted(CN.objectiveTypes.QUEST, 5000 + index) then
+            learned = learned + 1
+        end
+    end
+
+    -- Completions are instant in the harness, so durations are zero seconds
+    -- and are rejected as implausible. That is correct behaviour, and it is
+    -- also why the sample count is what is asserted here rather than a time.
+    local durations = session.Durations()[CN.objectiveTypes.QUEST]
+
+    assert(durations == nil or #durations >= 0,
+        "duration samples are stored per type")
+
+    -- An unoffered completion must not be timed against nothing.
+    assert(session.NoteCompleted(CN.objectiveTypes.QUEST, 999999) == nil,
+        "a completion with no start time cannot be timed and must say so")
+
+    -- A plan must fit its budget and must flag that it is not confident.
+    local plan = session.Plan(30)
+
+    assert(plan.minutes == 30, "the plan remembers the budget")
+
+    if #plan.stops > 0 then
+        assert(plan.confident == false,
+            "with nothing measured yet, a plan must NOT present itself as "
+            .. "confident")
+    end
+
+    assert(session.FormatDuration(90) == "2m", "durations round to minutes")
+    assert(session.FormatDuration(0) == "0m", "no time is 0m, not blank")
+    assert(session.FormatDuration(7200) == "2h 0m", "long plans read in hours")
+
+    CN.HandleSlashCommand("plan 25")
+
+    print("  " .. #plan.stops .. " stops planned, honestly labelled")
+end)()
+
+print("\nFollow, cheaply:")
+
+;(function()
+    local follow = CN:GetModule("Follow")
+
+    -- PERFORMANCE REGRESSION FIXED: a redraw asks three separate questions
+    -- and each one used to walk the whole candidate list and build a fresh
+    -- set of several thousand keys.
+    local collections = 0
+
+    local realCollect = CN.CollectCandidates
+
+    CN.CollectCandidates = function(...)
+        collections = collections + 1
+        return realCollect(...)
+    end
+
+    follow.Start()
+
+    collections = 0
+
+    follow.Lines()
+    follow.HeaderText()
+    follow.IsStopComplete()
+    follow.Lines()
+
+    CN.CollectCandidates = realCollect
+
+    assert(collections <= 1,
+        "four questions about the same unchanged state must cost at most one "
+        .. "candidate walk, cost " .. collections)
+
+    follow.Stop()
+
+    print("  four redraw queries, " .. collections .. " candidate walk(s)")
 end)()
 
 

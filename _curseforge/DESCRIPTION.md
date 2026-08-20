@@ -31,6 +31,26 @@ Start it and play. Follow mode puts the current stop on screen, ticks things off
 
 Off by default, and it will not fight you: it advances when a stop is **done**, not on a timer, so the waypoint never moves out from under you mid-walk. Wander off and it re-plans around where you actually are rather than herding you back. It says nothing in chat while it runs.
 
+## Play the time you have
+
+```
+/cn plan 30
+```
+
+Half an hour is not the same question as "what should I do next", and it gets its own answer: the stops that fit, in walking order, with what each one costs.
+
+Travel time is **computed** from real distances and from how fast you actually move â€” the addon watches your position and works it out, discarding flight paths and loading screens. Task time is **learned** from your own play. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
+
+## Aim it in one command
+
+```
+/cn mode leveling
+```
+
+Levelling, collecting, reputation, achievements, professions, everything. A focus sets the weighting **and** what is shown together, because "I'm levelling tonight" means both *prefer quests* and *stop showing me pets*.
+
+`/cn mode off` restores exactly what you had before â€” including anything you had hidden yourself.
+
 ## Track the long campaign
 
 If your plan is measured in zones rather than in the next ten minutes, `/cn progress` and `/cn loremaster` are for you.
@@ -77,6 +97,47 @@ A native on-screen arrow, in the addon's own colours, that tells you whether you
 
 Account-wide unlocks are recognised as account-wide. Something another character already earned is not recommended to this one, and the reason line says which character did it.
 
+## What it tracks
+
+Everything below is read from your own client. Nothing is downloaded, and nothing leaves your machine.
+
+| Tracked | What it reads |
+| --- | --- |
+| **Quests** | Your log, quests offered nearby that you have not taken, world quests, bonus objectives, daily and weekly resets |
+| **Campaign vs side quests** | The game's own campaign data, so *the story* and *everything else* stay separate |
+| **Zone / continent completion** | The game's quest achievements â€” real criteria, per zone and per expansion |
+| **Reputations** | Standing, renown, paragon, friendship, and which factions are account-wide |
+| **Achievements** | Criteria by criteria, including the ones that carry their own counter |
+| **Battle pets** | Collected, uncollected, wild-caught, duplicates |
+| **Mounts** | Collected, faction-locked, and the source text the game supplies |
+| **Toys** | Collected and uncollected |
+| **Appearances** | By category, and every source of a specific appearance |
+| **Titles** | Earned and unearned |
+| **Professions & recipes** | Skill lines, learned recipes, and which vendors sell the ones you lack |
+| **Currencies** | Balances, weekly caps, and what is close to overflowing |
+| **Exploration** | Zone discovery achievements |
+| **Rares & treasures** | Live vignettes on the minimap and where you last saw each one |
+| **Vendors** | Recorded when you open a merchant, so recipes and items become findable later |
+| **The Great Vault** | All three rows, what is unlocked, and what is still one step away |
+| **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
+
+Where the game does not supply a trustworthy total, it reports **counts rather than a percentage**. That is a deliberate rule, not a gap â€” an invented denominator is a number that looks like a fact.
+
+## What it does with it
+
+| | |
+| --- | --- |
+| **Ranks** | One list, ordered by what is actually worth doing now, with a stated reason for every line |
+| **Prioritises deadlines** | Anything expiring climbs as its deadline nears, steeply in the last stretch |
+| **Fits your session** | A plan sized to the minutes you have, from measured travel and learned task times |
+| **Explains** | `/cn why` names what is blocking something â€” level, reputation, profession, faction, an unfinished prerequisite |
+| **Batches** | Nearby work collapses into stops so you stop crossing the zone and coming back |
+| **Routes** | Stop to stop, improved with a second pass, drawn on your map in walking order |
+| **Navigates** | A native arrow that tells you whether you are walking toward your target or away from it |
+| **Chases** | The full path to a goal, step by step, with the next move marked |
+| **Follows** | Hands-free: the current stop on screen, advancing as you clear it |
+| **Learns** | Quest prerequisites inferred from your own play, never guessed from a single sighting |
+
 ## Show only what you care about
 
 Hide any objective type you are not working on â€” quests, pets, mounts, toys, appearances, reputations, professions, currencies, exploration, rares. Hidden types drop out of the recommendations **and** out of the route, so you are not walked to something you said you did not want. Collection totals still count everything.
@@ -90,6 +151,8 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn` | What to do next |
 | `/cn chase <type> <id>` | What stands between you and a goal, step by step |
 | `/cn follow` | Follow the route, hands-free |
+| `/cn plan <minutes>` | What fits in the time you have |
+| `/cn mode <focus>` | Aim the whole addon at one kind of play |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |

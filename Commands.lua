@@ -174,31 +174,100 @@ CN:RegisterCommand{
     end,
 }
 
+-- ONE command for "aim the addon", not two.
+--
+-- 0.28.0 added focus presets -- levelling, collecting, reputation -- which
+-- set the weighting AND the type filter together. Registering those as a
+-- second command alongside this one would have given the player two things
+-- that both mean "what am I doing tonight", differing in ways only the
+-- author could explain. So this command absorbed them.
+--
+-- A preset name applies the preset. A raw profile name still sets just the
+-- weighting, exactly as before, because that is what anyone with it in a
+-- macro expects.
 CN:RegisterCommand{
     name    = "mode",
-    args    = "[modeName]",
+    aliases = { "focus" },
+    args    = "[leveling | collecting | reputation | achievements | professions | everything | off | <profile>]",
     order   = 4,
-    help    = "Show or set the priority mode.",
+    help    = "Aim the addon at one kind of play.",
     handler = function(args)
         local settings = CN.Settings()
 
-        if args == "" then
-            Print("Priority mode: " .. tostring(settings.priorityMode))
-            Print("Available: " .. table.concat(CN.priorityModes, ", "))
+        local filters = CN:GetModule("Filters")
+
+        local requested = string.lower(CN.Trim(args or ""))
+
+        local function ListOptions()
+            local presets = {}
+
+            for name in pairs(CN.modes) do
+                table.insert(presets, name)
+            end
+
+            table.sort(presets)
+
+            Print("|cff999999Focus: " .. table.concat(presets, ", ") .. "|r")
+            Print("|cff999999Weighting only: "
+                .. table.concat(CN.priorityModes, ", ") .. "|r")
+        end
+
+        if requested == "" then
+            local current, active
+
+            if filters then
+                current, active = filters.CurrentMode()
+            end
+
+            if current and active then
+                Print("Focus: |cffffff00" .. active.label .. "|r")
+                Print("|cff999999" .. active.note .. "|r")
+                Print("|cff999999/cn mode off|r restores what you had before.")
+            else
+                Print("Priority mode: |cffffff00"
+                    .. tostring(settings.priorityMode) .. "|r")
+            end
+
+            ListOptions()
             return
         end
 
-        local requested = string.lower(args)
+        if requested == "off" or requested == "clear" then
+            if filters then
+                filters.ClearMode()
+            end
 
-        for _, mode in ipairs(CN.priorityModes) do
-            if mode == requested then
-                settings.priorityMode = requested
-                Print("Priority mode set to " .. requested .. ".")
+            Print("Focus cleared. Previous filters and weighting restored.")
+            return
+        end
+
+        -- A focus preset: weighting and filter together.
+        if CN.modes[requested] and filters then
+            local ok, preset = filters.ApplyMode(requested)
+
+            if ok then
+                Print("Focus: |cffffff00" .. preset.label .. "|r -- "
+                    .. preset.note)
+                Print("|cff999999/cn mode off|r puts it back.")
                 return
             end
         end
 
-        Print("Unknown priority mode: " .. requested)
-        Print("Available: " .. table.concat(CN.priorityModes, ", "))
+        -- A bare profile name: weighting only, unchanged behaviour.
+        for _, mode in ipairs(CN.priorityModes) do
+            if mode == requested then
+                settings.priorityMode = requested
+
+                CN.InvalidateCandidates("mode")
+
+                Print("Priority mode set to |cffffff00" .. requested .. "|r.")
+                Print("|cff999999Weighting only; your type filters are "
+                    .. "untouched.|r")
+                return
+            end
+        end
+
+        Print("Unknown mode: " .. requested)
+        ListOptions()
     end,
 }

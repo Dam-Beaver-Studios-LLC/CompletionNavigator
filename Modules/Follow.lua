@@ -60,6 +60,49 @@ Follow.recheckSeconds = 3
 -- events. Events are per-type and there are eleven types; absence is one
 -- rule that covers all of them, including the ones added later, and it is
 -- also correct when something is finished by means the addon never saw.
+-- The live index, memoised against the candidate generation.
+--
+-- PERFORMANCE, AND A BUG I SHIPPED IN 0.27.0: a single redraw calls this
+-- three times -- once to test whether the stop is finished, once for the
+-- header, once for the body -- and each call walked the entire candidate list
+-- and built a fresh set of several thousand keys. Three full scans, three
+-- throwaway tables, every three seconds, for an answer that cannot have
+-- changed between them.
+--
+-- The candidate list already publishes a generation number that increments
+-- when anything is rebuilt. Keyed on that, this is built once per actual
+-- change instead of once per question.
+local liveIndex = { generation = -1, keys = nil }
+
+local function LiveKeys()
+    local generation = 0
+
+    if CN.GetCandidateCacheState then
+        local ok, state = pcall(CN.GetCandidateCacheState)
+
+        if ok and state then
+            generation = state.generation or 0
+        end
+    end
+
+    if liveIndex.keys and liveIndex.generation == generation then
+        return liveIndex.keys
+    end
+
+    local keys = {}
+
+    for _, candidate in ipairs(CN.CollectCandidates() or {}) do
+        keys[tostring(candidate.type) .. ":" .. tostring(candidate.id)] = true
+    end
+
+    liveIndex.generation = generation
+    liveIndex.keys       = keys
+
+    return keys
+end
+
+Follow.LiveKeys = LiveKeys
+
 function Follow.Remaining(objectives)
     local remaining = {}
 
@@ -67,11 +110,7 @@ function Follow.Remaining(objectives)
         return remaining
     end
 
-    local live = {}
-
-    for _, candidate in ipairs(CN.CollectCandidates() or {}) do
-        live[tostring(candidate.type) .. ":" .. tostring(candidate.id)] = true
-    end
+    local live = LiveKeys()
 
     for _, objective in ipairs(objectives) do
         local key = tostring(objective.type) .. ":" .. tostring(objective.id)
@@ -202,15 +241,15 @@ function Follow.Lines()
 
     local shown = 0
 
-    for _, objective in ipairs(current.objectives or {}) do
-        local stillOpen = false
+    local open = {}
 
-        for _, open in ipairs(remaining) do
-            if open.id == objective.id and open.type == objective.type then
-                stillOpen = true
-                break
-            end
-        end
+    for _, objective in ipairs(remaining) do
+        open[tostring(objective.type) .. ":" .. tostring(objective.id)] = true
+    end
+
+    for _, objective in ipairs(current.objectives or {}) do
+        local stillOpen =
+            open[tostring(objective.type) .. ":" .. tostring(objective.id)] == true
 
         if shown >= Follow.maxLines then
             table.insert(lines, {

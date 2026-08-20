@@ -70,6 +70,7 @@ CN.defaults = {
         questStatus        = {},
         discoveredQuests   = {},
         loremaster         = {},
+        taskDurations      = {},
     },
 
     characters = {},

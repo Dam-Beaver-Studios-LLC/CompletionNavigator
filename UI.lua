@@ -1546,6 +1546,18 @@ UI.RegisterTab{
         end)
         panel.follow:SetPoint("BOTTOMLEFT", 8, 10)
 
+        -- The three session lengths people actually have. A text field
+        -- asking for a number would be more general and less used.
+        panel.plan30 = AddButton(panel, "30 min", 70, function()
+            CN.HandleSlashCommand("plan 30")
+        end)
+        panel.plan30:SetPoint("BOTTOMRIGHT", -8, 10)
+
+        panel.plan60 = AddButton(panel, "1 hour", 70, function()
+            CN.HandleSlashCommand("plan 60")
+        end)
+        panel.plan60:SetPoint("RIGHT", panel.plan30, "LEFT", -4, 0)
+
         panel.rescan = AddButton(panel, "Rescan zones", 130, function()
             local lore = CN:GetModule("Loremaster")
 

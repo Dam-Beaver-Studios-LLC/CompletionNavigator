@@ -569,6 +569,88 @@ CN:RegisterCommand{
     end,
 }
 
+------------------------------------------------------------
+-- MODES
+------------------------------------------------------------
+
+-- Applying a mode is two existing operations performed together, plus a
+-- record of what was on before so it can be undone.
+function Filters.ApplyMode(name)
+    local mode = CN.modes[name]
+
+    if not mode then
+        return false, "No such mode."
+    end
+
+    local settings = CN.Settings()
+
+    -- Remember what to go back to. One level deep on purpose: an undo stack
+    -- for a display preference is a feature nobody asked for.
+    settings.modePrevious = {
+        profile = settings.priorityMode,
+        hidden  = {},
+    }
+
+    for _, objectiveType in ipairs(Filters.TypeOrder()) do
+        if not Filters.IsTypeEnabled(objectiveType) then
+            table.insert(settings.modePrevious.hidden, objectiveType)
+        end
+    end
+
+    settings.priorityMode = mode.profile or "balanced"
+
+    Filters.EnableAllTypes()
+
+    if mode.show then
+        local wanted = {}
+
+        for _, objectiveType in ipairs(mode.show) do
+            wanted[objectiveType] = true
+        end
+
+        for _, objectiveType in ipairs(Filters.TypeOrder()) do
+            if not wanted[objectiveType] then
+                Filters.SetTypeEnabled(objectiveType, false)
+            end
+        end
+    end
+
+    settings.mode = name
+
+    CN.InvalidateCandidates("mode")
+
+    return true, mode
+end
+
+function Filters.CurrentMode()
+    local settings = CN.Settings()
+
+    return settings and settings.mode, settings and CN.modes[settings.mode]
+end
+
+function Filters.ClearMode()
+    local settings = CN.Settings()
+
+    local previous = settings.modePrevious
+
+    Filters.EnableAllTypes()
+
+    if previous then
+        settings.priorityMode = previous.profile or "balanced"
+
+        for _, objectiveType in ipairs(previous.hidden or {}) do
+            Filters.SetTypeEnabled(objectiveType, false)
+        end
+    end
+
+    settings.mode         = nil
+    settings.modePrevious = nil
+
+    CN.InvalidateCandidates("mode")
+
+    return true
+end
+
 CN:RegisterCommand{
     name    = "show",
     aliases = { "types" },

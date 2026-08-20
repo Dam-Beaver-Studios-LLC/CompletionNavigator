@@ -44,6 +44,35 @@ CN.unknownLocationCost = 3
 CN.batchBonusPerNeighbour = 0.6
 CN.batchBonusCap          = 3
 
+-- URGENCY.
+--
+-- "This is gone in six hours" is the strongest signal the game gives, and
+-- until now the addon treated it as a flag rather than a gradient: a world
+-- quest with four days left and one with nine minutes left scored the same.
+-- That is exactly backwards at the moment it matters.
+--
+-- The curve is deliberately steep and late. Something with a day left is not
+-- urgent -- saying so would make everything urgent, which is the same as
+-- nothing being urgent. Inside two hours it climbs hard.
+CN.urgencyHorizonSeconds = 7200
+CN.urgencyWeight         = 4.0
+
+function CN.UrgencyBonus(secondsLeft)
+    if type(secondsLeft) ~= "number" or secondsLeft <= 0 then
+        return 0
+    end
+
+    if secondsLeft >= CN.urgencyHorizonSeconds then
+        return 0
+    end
+
+    -- Squared, so the last twenty minutes are worth much more than the first
+    -- hour of the window.
+    local remaining = 1 - (secondsLeft / CN.urgencyHorizonSeconds)
+
+    return remaining * remaining
+end
+
 -- Priority profiles have two independent levers:
 --   weights = override entries in scoreWeights (affects every objective)
 --   types   = multiply the final score for a given objective type
@@ -61,6 +90,59 @@ CN.priorityProfiles = {
     recipes      = { types = { RECIPE = 2.0 } },
     collections  = { types = { PET = 1.5, MOUNT = 1.5, TOY = 1.5, APPEARANCE = 1.5 } },
     legacy       = {},
+}
+
+-- MODES.
+--
+-- A profile changes the weighting. A mode changes the weighting AND what is
+-- shown, because "I am levelling tonight" means both "prefer quests" and
+-- "stop showing me pets". Two commands to say one thing is the addon making
+-- the player do its filing.
+--
+-- Every mode is reversible in one word, and `/cn mode` with no argument says
+-- which one is on and what it did.
+CN.modes = {
+    leveling = {
+        label   = "Levelling",
+        profile = "quests",
+        show    = { "QUEST", "EXPLORATION" },
+        note    = "Quests and exploration only, weighted toward fast travel.",
+    },
+
+    collecting = {
+        label   = "Collecting",
+        profile = "collections",
+        show    = { "PET", "MOUNT", "TOY", "APPEARANCE", "RARE", "TREASURE" },
+        note    = "Pets, mounts, toys, appearances and the rares that drop them.",
+    },
+
+    reputation = {
+        label   = "Reputation",
+        profile = "reputation",
+        show    = { "REPUTATION", "RENOWN", "QUEST", "CURRENCY" },
+        note    = "Standing and the quests that raise it.",
+    },
+
+    achievements = {
+        label   = "Achievements",
+        profile = "achievements",
+        show    = { "ACHIEVEMENT", "EXPLORATION", "QUEST" },
+        note    = "Criteria you are close to finishing.",
+    },
+
+    professions = {
+        label   = "Professions",
+        profile = "professions",
+        show    = { "PROFESSION", "RECIPE", "VENDOR" },
+        note    = "Skill-ups, missing recipes and who sells them.",
+    },
+
+    everything = {
+        label   = "Everything",
+        profile = "balanced",
+        show    = nil,   -- nil means "clear the filter", not "show nothing"
+        note    = "All types, balanced weighting.",
+    },
 }
 
 ------------------------------------------------------------
@@ -100,6 +182,13 @@ function CN.ScoreObjective(objective)
     score = score + (objective.completionValue      or 1) * w.completionValue
     score = score + (objective.unlockValue          or 0) * w.unlockValue
     score = score + (objective.limitedTimeBonus     or 0) * w.limitedTimeBonus
+
+    -- A deadline the objective actually carries, weighted by how close it is.
+    -- `expiresIn` is the established field name; providers that know a
+    -- deadline already set it.
+    if objective.expiresIn then
+        score = score + CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight
+    end
     score = score + (objective.nearbyBonus          or 0) * w.nearbyBonus
 
     -- Everything else at the same place makes this stop worth more.

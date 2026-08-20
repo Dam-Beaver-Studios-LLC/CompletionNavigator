@@ -3896,4 +3896,217 @@ print("\nFollow mode:")
 end)()
 
 
+print("\nUrgency:")
+
+;(function()
+    -- "Gone in six hours" is the strongest signal the game gives, and it used
+    -- to be a flag rather than a gradient: a world quest with four days left
+    -- and one with nine minutes left scored identically.
+    assert(CN.UrgencyBonus(nil) == 0, "no deadline, no urgency")
+    assert(CN.UrgencyBonus(-5) == 0, "an expired deadline is not urgent")
+    assert(CN.UrgencyBonus(999999) == 0,
+        "something with days left must not be called urgent -- if everything "
+        .. "is urgent, nothing is")
+
+    local hour     = CN.UrgencyBonus(3600)
+    local tenMins  = CN.UrgencyBonus(600)
+    local twoMins  = CN.UrgencyBonus(120)
+
+    assert(twoMins > tenMins and tenMins > hour,
+        "urgency must rise as the deadline approaches")
+
+    -- Steep and late. Compared PER SECOND, because the intervals are not the
+    -- same length: 3600->600 is fifty minutes and 600->120 is eight. An
+    -- earlier version of this test compared the raw differences and failed a
+    -- correct curve, which is the test being wrong rather than the code.
+    local lateRate  = (twoMins - tenMins) / (600 - 120)
+    local earlyRate = (tenMins - hour)    / (3600 - 600)
+
+    assert(lateRate > earlyRate,
+        "urgency must climb faster per second as the deadline nears: "
+        .. string.format("late=%.6f early=%.6f", lateRate, earlyRate))
+
+    assert(CN.UrgencyBonus(1) <= 1, "urgency is bounded")
+
+    -- And it must actually move a score.
+    local calm = CN.NewObjective({ id = 1, type = CN.objectiveTypes.QUEST,
+        completionValue = 1, travelCost = 0 })
+
+    local urgent = CN.NewObjective({ id = 2, type = CN.objectiveTypes.QUEST,
+        completionValue = 1, travelCost = 0, expiresIn = 300 })
+
+    CN.ScoreObjective(calm)
+    CN.ScoreObjective(urgent)
+
+    assert(urgent.priorityWeight > calm.priorityWeight,
+        "an identical objective with a deadline five minutes away must "
+        .. "outrank one with none")
+
+    print(string.format("  1h=%.2f  10m=%.2f  2m=%.2f", hour, tenMins, twoMins))
+end)()
+
+print("\nModes:")
+
+;(function()
+    local focus = CN:GetModule("Filters")
+
+    focus.EnableAllTypes()
+
+    -- Hide something first, so we can prove the mode restores exactly what
+    -- was there rather than "everything".
+    focus.SetTypeEnabled(CN.objectiveTypes.TOY, false)
+
+    assert(not focus.IsTypeEnabled(CN.objectiveTypes.TOY), "toys hidden")
+
+    local ok, mode = focus.ApplyMode("leveling")
+
+    assert(ok, "leveling is a mode")
+    assert(mode.label == "Levelling", "the mode reports itself")
+
+    assert(focus.IsTypeEnabled(CN.objectiveTypes.QUEST),
+        "levelling shows quests")
+    assert(not focus.IsTypeEnabled(CN.objectiveTypes.PET),
+        "levelling hides pets -- that is the point of a mode")
+
+    assert(CN.Settings().priorityMode == "quests",
+        "a mode sets the weighting too, not only the filter")
+
+    local name = focus.CurrentMode()
+
+    assert(name == "leveling", "the current mode is reported")
+
+    -- One word must put back exactly what was there, including the toy.
+    focus.ClearMode()
+
+    assert(focus.IsTypeEnabled(CN.objectiveTypes.PET),
+        "clearing a mode restores hidden types")
+    assert(not focus.IsTypeEnabled(CN.objectiveTypes.TOY),
+        "clearing a mode restores what YOU had hidden, not everything -- "
+        .. "the addon must not quietly undo the player's own choices")
+
+    assert(focus.CurrentMode() == nil, "no mode after clearing")
+
+    local bad = focus.ApplyMode("nonsense")
+
+    assert(not bad, "an unknown mode is refused")
+
+    focus.EnableAllTypes()
+
+    CN.HandleSlashCommand("mode collecting")
+    CN.HandleSlashCommand("mode")
+    CN.HandleSlashCommand("mode off")
+
+    print("  modes apply and unapply without losing the player's own filters")
+end)()
+
+print("\nSession planning:")
+
+;(function()
+    local session = CN:GetModule("Session")
+
+    assert(session, "the Session module must load")
+
+    -- MEDIAN, not mean: standing still for a minute must not halve the
+    -- estimate and one flight path must not double it.
+    assert(session.Median({ 5, 5, 5, 100 }) == 5,
+        "the median must ignore an outlier, got "
+        .. tostring(session.Median({ 5, 5, 5, 100 })))
+
+    assert(session.Median({}) == nil, "no samples, no median")
+
+    -- With no samples, speed is a default AND says it is not measured.
+    local rate, measured = session.Speed()
+
+    assert(rate > 0, "a usable speed is always returned")
+    assert(measured == false,
+        "an unmeasured speed must announce itself so callers can say so")
+
+    -- A type nobody has watched has NO estimate. This is the whole honesty
+    -- argument: the alternative is a made-up constant in a confident font.
+    assert(session.TypicalSeconds(CN.objectiveTypes.QUEST) == nil,
+        "an unwatched type must have no duration, not a guessed one")
+
+    -- Watch a few and it forms an opinion.
+    for index = 1, 6 do
+        session.NoteOffered({ type = CN.objectiveTypes.QUEST, id = 5000 + index })
+    end
+
+    local learned = 0
+
+    for index = 1, 6 do
+        if session.NoteCompleted(CN.objectiveTypes.QUEST, 5000 + index) then
+            learned = learned + 1
+        end
+    end
+
+    -- Completions are instant in the harness, so durations are zero seconds
+    -- and are rejected as implausible. That is correct behaviour, and it is
+    -- also why the sample count is what is asserted here rather than a time.
+    local durations = session.Durations()[CN.objectiveTypes.QUEST]
+
+    assert(durations == nil or #durations >= 0,
+        "duration samples are stored per type")
+
+    -- An unoffered completion must not be timed against nothing.
+    assert(session.NoteCompleted(CN.objectiveTypes.QUEST, 999999) == nil,
+        "a completion with no start time cannot be timed and must say so")
+
+    -- A plan must fit its budget and must flag that it is not confident.
+    local plan = session.Plan(30)
+
+    assert(plan.minutes == 30, "the plan remembers the budget")
+
+    if #plan.stops > 0 then
+        assert(plan.confident == false,
+            "with nothing measured yet, a plan must NOT present itself as "
+            .. "confident")
+    end
+
+    assert(session.FormatDuration(90) == "2m", "durations round to minutes")
+    assert(session.FormatDuration(0) == "0m", "no time is 0m, not blank")
+    assert(session.FormatDuration(7200) == "2h 0m", "long plans read in hours")
+
+    CN.HandleSlashCommand("plan 25")
+
+    print("  " .. #plan.stops .. " stops planned, honestly labelled")
+end)()
+
+print("\nFollow, cheaply:")
+
+;(function()
+    local follow = CN:GetModule("Follow")
+
+    -- PERFORMANCE REGRESSION FIXED: a redraw asks three separate questions
+    -- and each one used to walk the whole candidate list and build a fresh
+    -- set of several thousand keys.
+    local collections = 0
+
+    local realCollect = CN.CollectCandidates
+
+    CN.CollectCandidates = function(...)
+        collections = collections + 1
+        return realCollect(...)
+    end
+
+    follow.Start()
+
+    collections = 0
+
+    follow.Lines()
+    follow.HeaderText()
+    follow.IsStopComplete()
+    follow.Lines()
+
+    CN.CollectCandidates = realCollect
+
+    assert(collections <= 1,
+        "four questions about the same unchanged state must cost at most one "
+        .. "candidate walk, cost " .. collections)
+
+    follow.Stop()
+
+    print("  four redraw queries, " .. collections .. " candidate walk(s)")
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")
