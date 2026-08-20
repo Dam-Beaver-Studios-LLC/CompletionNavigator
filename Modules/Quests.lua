@@ -186,6 +186,24 @@ function Quests.PhaseVerb(phase)
     return CN.questPhaseVerbs[phase] or "do"
 end
 
+-- Quests offered near you that you have not taken.
+--
+-- REPORTED FROM LIVE PLAY: "I'm literally standing in front of one to pick
+-- up" while this returned zero. Three separate reasons that can happen, and
+-- the old version was vulnerable to all three:
+--
+--   1. WRONG MAP. GetBestMapForUnit answers with the most specific map you
+--      are standing on -- a city, a cave, a building interior. Quest starts
+--      belonging to the surrounding zone are registered against the PARENT
+--      map, so asking only about your own map misses them. This is the most
+--      likely cause and the cheapest to fix: ask the neighbourhood.
+--   2. THE MAP SIMPLY DOES NOT SAY. A giver whose pin the client has not
+--      loaded is invisible to every map query. The only thing that cannot be
+--      wrong is the conversation itself, so talking to an NPC now records
+--      what they offered.
+--
+-- Sources are unioned and each result says where it came from, because when
+-- this is wrong again the first question will be "which source found it".
 function Quests.AvailableOnMap(mapID)
     mapID = mapID or select(1, CN.GetPlayerPosition())
 
@@ -193,22 +211,209 @@ function Quests.AvailableOnMap(mapID)
         return {}
     end
 
-    local available = {}
+    local found, seen = {}, {}
 
-    for _, poi in ipairs(Blizzard.GetQuestPOIsOnMap(mapID)) do
-        -- A quest start you have not taken and have not already finished.
-        if poi.isQuestStart
-            and not poi.inProgress
-            and not Blizzard.IsQuestInLog(poi.questID)
-            and not Quests.IsCompletedByCharacter(poi.questID) then
+    local function consider(poi, source)
+        if not poi or not poi.questID or seen[poi.questID] then
+            return
+        end
 
-            table.insert(available, poi)
+        if Blizzard.IsQuestInLog(poi.questID) then
+            return
+        end
+
+        if Quests.IsCompletedByCharacter(poi.questID) then
+            return
+        end
+
+        seen[poi.questID] = true
+
+        poi.source = source
+
+        table.insert(found, poi)
+    end
+
+    -- 1. Every map in the neighbourhood, not just the one under your feet.
+    for _, relatedID in ipairs(Blizzard.RelatedMapIDs(mapID)) do
+        for _, poi in ipairs(Blizzard.GetQuestPOIsOnMap(relatedID)) do
+            if poi.isQuestStart and not poi.inProgress then
+                consider(poi, "map")
+            end
         end
     end
 
-    table.sort(available, function(a, b) return a.questID < b.questID end)
+    -- 2. Anything an NPC has actually offered us, remembered from the
+    --    conversation. Only kept while it is still plausibly nearby.
+    for questID, record in pairs(Quests.RecentOffers()) do
+        consider({
+            questID = questID,
+            mapID   = record.mapID,
+            x       = record.x,
+            y       = record.y,
+        }, "offered")
+    end
 
-    return available
+    table.sort(found, function(a, b) return a.questID < b.questID end)
+
+    return found
+end
+
+-- World quests and bonus objectives, deliberately counted SEPARATELY.
+--
+-- They are available in the dictionary sense, and they are not what a player
+-- means by "quests I can pick up here" -- there is no exclamation mark and
+-- nobody to talk to. Folding them into that number makes it stop matching
+-- what is on the screen, which is the entire complaint this code exists to
+-- answer.
+function Quests.TasksOnMap(mapID)
+    mapID = mapID or select(1, CN.GetPlayerPosition())
+
+    if not mapID then
+        return {}
+    end
+
+    local tasks = {}
+
+    for _, task in ipairs(Blizzard.GetTaskQuestsOnMap(mapID)) do
+        if not Quests.IsCompletedByCharacter(task.questID) then
+            table.insert(tasks, task)
+        end
+    end
+
+    return tasks
+end
+
+------------------------------------------------------------
+-- WHAT AN NPC ACTUALLY OFFERED
+------------------------------------------------------------
+
+-- A conversation cannot be wrong about what it is offering. Map data can.
+local recentOffers = {}
+
+Quests.offerMemorySeconds = 900
+
+function Quests.RecentOffers()
+    local now = time()
+
+    for questID, record in pairs(recentOffers) do
+        if now - (record.at or 0) > Quests.offerMemorySeconds then
+            recentOffers[questID] = nil
+        end
+    end
+
+    return recentOffers
+end
+
+function Quests.NoteOffered(questID, title)
+    if not questID or Quests.IsCompletedByCharacter(questID) then
+        return false
+    end
+
+    if Blizzard.IsQuestInLog(questID) then
+        return false
+    end
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    recentOffers[questID] = {
+        at    = time(),
+        mapID = mapID,
+        x     = x,
+        y     = y,
+    }
+
+    if title and title ~= "" then
+        Quests.SetMetadata(questID, title, "offered")
+    end
+
+    if mapID and x and y then
+        Quests.SetLocation(questID, mapID, x, y, "offered")
+    end
+
+    Quests.RecordDiscovered(questID, "offered")
+
+    DebugPrint("Noted quest " .. questID .. " offered by an NPC here.")
+
+    return true
+end
+
+function Quests.ForgetOffer(questID)
+    if questID then
+        recentOffers[questID] = nil
+    end
+end
+
+-- Talking to someone is the single most reliable moment to learn that a
+-- quest exists here, so take it every time.
+CN:RegisterEvent("GOSSIP_SHOW", function()
+    for _, offer in ipairs(Blizzard.GetGossipAvailableQuests()) do
+        Quests.NoteOffered(offer.questID, offer.title)
+    end
+end)
+
+CN:RegisterEvent("QUEST_DETAIL", function()
+    Quests.NoteOffered(Blizzard.GetActiveQuestOffer(), GetTitleText and GetTitleText())
+end)
+
+CN:RegisterEvent("QUEST_ACCEPTED", function(_, questID)
+    Quests.ForgetOffer(questID)
+end)
+
+------------------------------------------------------------
+-- DIAGNOSIS
+------------------------------------------------------------
+
+-- When a player says "it says zero and I am standing in front of one", the
+-- useful reply is not a guess. It is a listing of every map that was asked,
+-- what each one answered, and why each answer was rejected.
+function Quests.AvailableDiagnostic(mapID)
+    mapID = mapID or select(1, CN.GetPlayerPosition())
+
+    local report = {
+        mapID  = mapID,
+        maps   = {},
+        counts = { start = 0, inLog = 0, completed = 0, notStart = 0, task = 0, offered = 0 },
+    }
+
+    if not mapID then
+        return report
+    end
+
+    for _, relatedID in ipairs(Blizzard.RelatedMapIDs(mapID)) do
+        local pois = Blizzard.GetQuestPOIsOnMap(relatedID)
+
+        local row = {
+            mapID = relatedID,
+            name  = Blizzard.GetMapName(relatedID),
+            pois  = #pois,
+            starts = 0,
+            usable = 0,
+        }
+
+        for _, poi in ipairs(pois) do
+            if poi.isQuestStart and not poi.inProgress then
+                row.starts = row.starts + 1
+
+                if Blizzard.IsQuestInLog(poi.questID) then
+                    report.counts.inLog = report.counts.inLog + 1
+                elseif Quests.IsCompletedByCharacter(poi.questID) then
+                    report.counts.completed = report.counts.completed + 1
+                else
+                    row.usable = row.usable + 1
+                    report.counts.start = report.counts.start + 1
+                end
+            else
+                report.counts.notStart = report.counts.notStart + 1
+            end
+        end
+
+        table.insert(report.maps, row)
+    end
+
+    report.counts.task    = #Blizzard.GetTaskQuestsOnMap(mapID)
+    report.counts.offered = CN.CountKeys(Quests.RecentOffers())
+
+    return report
 end
 
 -- How many quests are on offer here that you have not taken.
@@ -879,8 +1084,53 @@ CN:RegisterCommand{
             Print("  |cffffff00" .. title .. "|r" .. where)
         end
 
+        local tasks = Quests.TasksOnMap(mapID)
+
+        if #tasks > 0 then
+            Print("|cff999999Also " .. #tasks .. " world quest"
+                .. (#tasks == 1 and "" or "s")
+                .. "/bonus objective here -- no giver to talk to.|r")
+        end
+
         Print("|cff999999These are in your recommendations and in |r/cn zone"
             .. "|cff999999 too.|r")
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "whyzero",
+    aliases = { "diagquests" },
+    order   = 29,
+    help    = "Explain why the available-quest count is what it is.",
+    handler = function()
+        local report = Quests.AvailableDiagnostic()
+
+        if not report.mapID then
+            Print("The client will not say which map you are on.")
+            return
+        end
+
+        Print("Available-quest diagnosis for map " .. report.mapID
+            .. " (" .. tostring(Blizzard.GetMapName(report.mapID) or "?") .. "):")
+
+        for _, row in ipairs(report.maps) do
+            Print(string.format("  %-28s %3d pins, %2d starts, %2d usable",
+                tostring(row.name or row.mapID),
+                row.pois, row.starts, row.usable))
+        end
+
+        Print("Rejected: " .. report.counts.inLog .. " already in your log, "
+            .. report.counts.completed .. " already completed, "
+            .. report.counts.notStart .. " not quest starts.")
+
+        Print("Other sources: " .. report.counts.task .. " bonus/world, "
+            .. report.counts.offered .. " remembered from conversations.")
+
+        if report.counts.start == 0 and report.counts.offered == 0 then
+            Print("|cffffff00If you can see an exclamation mark from here, the "
+                .. "client has not published that pin to any of the maps "
+                .. "above. Talk to the NPC once and it will be remembered.|r")
+        end
     end,
 }
 

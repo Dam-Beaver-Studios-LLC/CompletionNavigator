@@ -913,6 +913,27 @@ UI.RegisterTab{
 
         table.insert(lines, "|cffffd100Quests|r")
 
+        -- The number he actually wanted back, first.
+        local progressModule = CN:GetModule("Progress")
+
+        if progressModule then
+            local summary = progressModule.Summary()
+
+            if summary.lifetime then
+                table.insert(lines, "Completed: |cffffd100"
+                    .. CN.Comma(summary.lifetime) .. "|r")
+            end
+
+            local todayLine = "Today: |cffffff00" .. summary.today .. "|r"
+
+            if summary.best > 0 then
+                todayLine = todayLine .. "   |cff999999best "
+                    .. summary.best .. "|r"
+            end
+
+            table.insert(lines, todayLine)
+        end
+
         if questModule then
             local available = questModule.AvailableCount()
 
@@ -1485,6 +1506,151 @@ UI.RegisterTab{
         else
             panel.note:SetText("")
         end
+    end,
+}
+
+------------------------------------------------------------
+-- TAB: JOURNEY
+------------------------------------------------------------
+
+-- Where a long campaign lives. A player working through every quest in the
+-- game is not served by a list of the next five things; they want to know
+-- how far they have come and which zone is closest to finished.
+UI.RegisterTab{
+    name  = "Journey",
+    order = 12,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.sub = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        panel.sub:SetPoint("TOPLEFT", panel.header, "BOTTOMLEFT", 0, -4)
+        panel.sub:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -52)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 40)
+
+        panel.follow = AddButton(panel, "Follow the route", 150, function()
+            local follow = CN:GetModule("Follow")
+
+            if follow then
+                follow.Toggle()
+            end
+
+            UI.Refresh()
+        end)
+        panel.follow:SetPoint("BOTTOMLEFT", 8, 10)
+
+        panel.rescan = AddButton(panel, "Rescan zones", 130, function()
+            local lore = CN:GetModule("Loremaster")
+
+            if lore then
+                lore.Scan()
+            end
+
+            UI.Refresh()
+        end)
+        panel.rescan:SetPoint("LEFT", panel.follow, "RIGHT", 6, 0)
+    end,
+
+    refresh = function(panel)
+        local progress = CN:GetModule("Progress")
+        local lore     = CN:GetModule("Loremaster")
+        local follow   = CN:GetModule("Follow")
+
+        if progress then
+            local summary = progress.Summary()
+
+            panel.header:SetText(summary.lifetime
+                and ("|cffffd100" .. CN.Comma(summary.lifetime)
+                    .. "|r quests completed")
+                or "Quest progress")
+
+            local parts = { summary.today .. " today" }
+
+            if summary.session > 0 then
+                table.insert(parts, summary.session .. " this session")
+            end
+
+            if summary.perHour then
+                table.insert(parts,
+                    string.format("%.0f per hour", summary.perHour))
+            end
+
+            if summary.best > 0 then
+                table.insert(parts, "best day " .. summary.best)
+            end
+
+            panel.sub:SetText("|cff999999" .. table.concat(parts, "   ") .. "|r")
+        else
+            panel.header:SetText("Quest progress")
+            panel.sub:SetText("")
+        end
+
+        panel.follow:SetText(follow and follow.active
+            and "Stop following" or "Follow the route")
+
+        local entries = {}
+
+        if lore then
+            local zone = lore.ForZone()
+
+            if zone then
+                local bar = ""
+
+                if (zone.criteria or 0) > 0 then
+                    bar = " |cff5dd2fb"
+                        .. CN.ProgressBar(zone.done / zone.criteria, 16)
+                        .. "|r " .. zone.done .. "/" .. zone.criteria
+                end
+
+                table.insert(entries, {
+                    text = "|cffffd100Here|r  " .. tostring(zone.name) .. bar,
+                })
+            end
+
+            local split = lore.SplitZoneWork()
+
+            if #split.story > 0 or #split.side > 0 then
+                table.insert(entries, {
+                    text = "      |cff999999" .. #split.story
+                        .. " story, " .. #split.side
+                        .. " side quests available here|r",
+                })
+            end
+
+            local closest = lore.Closest(12)
+
+            if #closest > 0 then
+                table.insert(entries, { text = " " })
+                table.insert(entries, { text = "|cffffd100Closest to finished|r" })
+
+                for _, entry in ipairs(closest) do
+                    table.insert(entries, {
+                        text = "  |cffffff00" .. tostring(entry.name) .. "|r"
+                            .. " |cff5dd2fb"
+                            .. CN.ProgressBar(entry.fraction, 14) .. "|r "
+                            .. entry.done .. "/" .. entry.criteria,
+
+                        tooltip = tostring(entry.category or ""),
+                    })
+                end
+            end
+        end
+
+        if #entries == 0 then
+            table.insert(entries, {
+                text = "|cff999999No zone achievements scanned yet. "
+                    .. "Press Rescan zones.|r",
+            })
+        end
+
+        panel.list:SetEntries(entries)
     end,
 }
 

@@ -105,6 +105,48 @@ end
 
 CN_TEST_WORLD_MAP_HOOKS = worldMapHooks
 
+-- Map topology. A player standing in a city is on a CHILD map; the zone's
+-- quest starts are registered against the parent. Modelling every map as an
+-- island is what let "0 available" ship while a quest giver was in view.
+-- One table, not six locals: the main chunk is at Lua's 200-local ceiling,
+-- and a fixture that cannot compile is not a fixture.
+local F = {}
+
+F.mapTree = {
+    [94]   = { name = "Eversong Woods", parentMapID = 1941, mapType = 3 },
+    [2112] = { name = "Valdrakken",     parentMapID = 2022, mapType = 4 },
+    [2022] = { name = "The Waking Shores", parentMapID = 1978, mapType = 3 },
+    [1941] = { name = "Quel'Thalas",    parentMapID = 0,     mapType = 2 },
+    [1978] = { name = "Dragon Isles",   parentMapID = 0,     mapType = 2 },
+}
+
+F.mapChildren = {
+    [2022] = { { mapID = 2112 } },
+    [1941] = { { mapID = 94 } },
+}
+
+F.completedQuestIDs = { 8237, 9002, 9500, 9501, 9502 }
+
+F.gossipOffers = {}
+
+function CN_TEST_SetGossipOffers(offers) F.gossipOffers = offers or {} end
+
+F.questOfferID = nil
+
+function CN_TEST_SetQuestOffer(id) F.questOfferID = id end
+function GetQuestID() return F.questOfferID or 0 end
+function GetTitleText() return "Offered By An NPC" end
+
+C_CampaignInfo = {
+    GetCampaignID = function(questID)
+        -- Odd quest IDs are campaign quests in the fixture, so the split has
+        -- something on both sides of it.
+        return (questID % 2 == 1) and 42 or nil
+    end,
+    GetCampaignInfo = function(id) return { name = "Campaign " .. id } end,
+    GetChapterIDs   = function() return { 1, 2, 3 } end,
+}
+
 local createdFrames = {}
 
 function CreateFrame(frameType, name, parent, template)
@@ -160,7 +202,10 @@ end
 C_Map = {
     GetBestMapForUnit    = function() return 94 end,
     GetPlayerMapPosition = function() return { GetXY = function() return 0.42, 0.55 end } end,
-    GetMapInfo           = function(id) return { name = "Map" .. tostring(id) } end,
+    GetMapInfo           = function(id)
+        return F.mapTree[id] or { name = "Map" .. tostring(id), mapType = 3 }
+    end,
+    GetMapChildrenInfo   = function(id) return F.mapChildren[id] or {} end,
     SetUserWaypoint      = function() end,
     ClearUserWaypoint    = function() end,
     -- A flat 1000x1000 yard square, so expected distances are checkable.
@@ -199,6 +244,7 @@ local offeredTitles = {
 local pendingLoad = {}
 
 C_QuestLog = {
+    GetAllCompletedQuestIDs = function() return F.completedQuestIDs end,
     IsQuestFlaggedCompleted          = function(id)
         if id >= 70000 then return false end   -- world quests are fresh
         return id % 2 == 1
@@ -450,6 +496,11 @@ C_GossipInfo = {
         return { friendshipFactionID = 2135, standing = 5000, reaction = "Buddy",
                  reactionThreshold = 4000, nextThreshold = 9000 }
     end,
+
+    -- What the NPC in front of you is offering. The one source of "there is
+    -- a quest here" that cannot be wrong, because you are in the
+    -- conversation.
+    GetAvailableQuests = function() return F.gossipOffers end,
 }
 
 
@@ -592,6 +643,27 @@ achievementDataExtra = {
 for id, data in pairs(achievementDataExtra) do achievementData[id] = data end
 
 function GetCategoryList() return { 92, 96, 97 } end
+
+-- The achievement category tree. 96 is Blizzard's "Quests" root; the others
+-- hang off it the way expansion and continent categories really do, so the
+-- tree walk has an actual tree to walk rather than a flat list that would
+-- pass without exercising anything.
+local achievementCategories = {
+    [96] = { name = "Quests",          parent = -1 },
+    [92] = { name = "Khaz Algar",      parent = 96 },
+    [97] = { name = "Dragon Isles",    parent = 96 },
+    [11] = { name = "Not A Quest Cat", parent = -1 },
+}
+
+function GetCategoryInfo(categoryID)
+    local entry = achievementCategories[categoryID]
+
+    if not entry then
+        return nil
+    end
+
+    return entry.name, entry.parent, 0
+end
 
 function GetCategoryNumAchievements(categoryID)
     local list = categoryAchievements[categoryID] or {}
@@ -1356,7 +1428,7 @@ for index, tab in ipairs(CN.UI.tabs) do
     end
 end
 
-assert(#CN.UI.tabs == 10, "expected ten registered tabs, got " .. #CN.UI.tabs)
+assert(#CN.UI.tabs == 11, "expected eleven registered tabs, got " .. #CN.UI.tabs)
 assert(CN.UI.selectedTab, "a tab should be selected once the window is opened")
 
 local built = 0
@@ -1769,6 +1841,11 @@ local function fire(event, ...)
     end
 end
 
+-- Sections further down run inside their own functions (Lua caps a function
+-- at 200 locals and this file is at the ceiling), so they cannot see the
+-- upvalue. Publish it.
+CN.FireEvent = fire
+
 CN.CollectCandidates(true)
 
 local firstState = CN.GetCandidateCacheState()
@@ -1776,7 +1853,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 15, "every candidate provider must register, got "
+assert(firstState.providers == 16, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -3046,7 +3123,7 @@ print("  re-run is idempotent")
 
 print("\nMap pins:")
 
-do
+;(function()
     local pins = CN:GetModule("MapPins")
 
     assert(pins, "the MapPins module must load")
@@ -3296,7 +3373,7 @@ do
     end
 
     print("  " .. #laid .. " stops laid out, geometry and pooling verified")
-end
+end)()
 
 -- The zone router must honour the type filter. A player who has hidden
 -- everything but quests is asking not to be walked to a pet.
@@ -3368,7 +3445,7 @@ end
 
 print("\nChase:")
 
-do
+;(function()
     local chase = CN:GetModule("Chase")
     local goalStore = CN:GetModule("Goals")
 
@@ -3520,12 +3597,12 @@ do
     goalStore.Clear()
 
     print("  reputation, achievement, appearance and unknown-source chains")
-end
+end)()
 
 
 print("\nThe number a player reads:")
 
-do
+;(function()
     local quests = CN:GetModule("Quests")
 
     -- "New" used to mean "rows this addon wrote to its own database for the
@@ -3572,7 +3649,251 @@ do
     CN.HandleSlashCommand("available")
 
     print("  availability is a fact about the zone, not about the database")
-end
+end)()
+
+
+print("\nStanding in front of a quest giver:")
+
+;(function()
+    local quests = CN:GetModule("Quests")
+
+    -- REPORTED FROM LIVE PLAY: "it now says '0 available to pick up here' but
+    -- I'm literally standing in front of one."
+    --
+    -- The fixture reproduces the most likely cause: the player is on map 94,
+    -- and a quest start is registered against the PARENT map, not theirs. The
+    -- old single-map query could not see it by construction.
+    local onOwnMap = 0
+
+    for _, poi in ipairs(quests.AvailableOnMap(94)) do
+        onOwnMap = onOwnMap + 1
+    end
+
+    assert(onOwnMap > 0, "the fixture zone must offer something")
+
+    -- A quest giver you have actually TALKED to cannot be missed, whatever
+    -- the map says. This is the backstop for the case where no map query
+    -- knows about the pin at all.
+    CN_TEST_SetGossipOffers({
+        { questID = 91234, title = "Right In Front Of You" },
+    })
+
+    CN.FireEvent("GOSSIP_SHOW")
+
+    local sawOffered = false
+
+    for _, poi in ipairs(quests.AvailableOnMap(94)) do
+        if poi.questID == 91234 then
+            sawOffered = true
+            assert(poi.source == "offered",
+                "a remembered conversation must say where it came from")
+        end
+    end
+
+    assert(sawOffered,
+        "a quest an NPC offered us must be counted as available even when no "
+        .. "map query knows about it")
+
+    -- Accepting it must remove it. Otherwise the count grows every time he
+    -- talks to anyone.
+    CN.FireEvent("QUEST_ACCEPTED", 91234)
+
+    for _, poi in ipairs(quests.AvailableOnMap(94)) do
+        assert(poi.questID ~= 91234,
+            "an accepted quest must stop being 'available to pick up'")
+    end
+
+    CN_TEST_SetGossipOffers({})
+
+    -- The neighbourhood must actually be walked: own map, parent, siblings.
+    local related = CN.Blizzard.RelatedMapIDs(2112)
+
+    local sawParent = false
+
+    for _, id in ipairs(related) do
+        if id == 2022 then sawParent = true end
+    end
+
+    assert(sawParent,
+        "a player in a city must have the surrounding zone searched too -- "
+        .. "that is where the quest starts are registered")
+
+    -- A continent must NOT be walked. That is a scan, not a lookup.
+    for _, id in ipairs(CN.Blizzard.RelatedMapIDs(94)) do
+        assert(id ~= 0, "the world map is never a neighbour")
+    end
+
+    -- World quests are counted SEPARATELY. Folding them in makes the number
+    -- stop matching the exclamation marks on screen, which is the whole
+    -- complaint.
+    local pickups = #quests.AvailableOnMap(94)
+    local tasks   = #quests.TasksOnMap(94)
+
+    assert(tasks > 0, "the fixture has world quests")
+
+    for _, poi in ipairs(quests.AvailableOnMap(94)) do
+        assert(poi.source ~= "task",
+            "a world quest is not something you walk up to and pick up")
+    end
+
+    -- And the diagnosis must be able to explain itself.
+    local report = quests.AvailableDiagnostic(94)
+
+    assert(#report.maps > 0, "the diagnosis must list the maps it asked")
+
+    CN.HandleSlashCommand("whyzero")
+
+    print("  " .. pickups .. " to pick up, " .. tasks
+        .. " world quests, counted separately")
+end)()
+
+print("\nProgress:")
+
+;(function()
+    local progress = CN:GetModule("Progress")
+
+    assert(progress, "the Progress module must load")
+
+    -- The lifetime total comes from the CLIENT, so it is right on a fresh
+    -- install with no scan history -- unlike the number it replaced, which
+    -- counted rows this addon had written and started at zero.
+    local lifetime = progress.LifetimeCompleted()
+
+    assert(lifetime == 5,
+        "the lifetime total is whatever the client says, got "
+        .. tostring(lifetime))
+
+    progress.BeginSession()
+
+    local atStart = progress.Summary()
+
+    assert(atStart.session == 0, "a session starts at zero")
+
+    CN.FireEvent("QUEST_TURNED_IN", 12345)
+    CN.FireEvent("QUEST_TURNED_IN", 12346)
+
+    local after = progress.Summary()
+
+    assert(after.today >= 2, "turn-ins must count toward today, got " .. after.today)
+    assert(after.session >= 2, "and toward the session")
+    assert(after.best >= 2, "a best day is recorded")
+
+    -- A rate needs enough time behind it to mean anything; five minutes in,
+    -- "240 per hour" is arithmetic dressed as insight.
+    assert(after.perHour == nil,
+        "no rate is offered until the session is long enough to support one")
+
+    assert(progress.Describe():find("completed"),
+        "the one-line summary must lead with the real total")
+
+    CN.HandleSlashCommand("progress")
+
+    print("  lifetime " .. lifetime .. ", today " .. after.today
+        .. ", session " .. after.session)
+end)()
+
+print("\nLoremaster:")
+
+;(function()
+    local lore = CN:GetModule("Loremaster")
+
+    assert(lore, "the Loremaster module must load")
+
+    local scanned = lore.Scan()
+
+    assert(scanned > 0, "quest achievements must be found, got " .. scanned)
+
+    -- Progress here is REAL because it was read, not computed. The client
+    -- supplies both halves of every fraction.
+    local closest = lore.Closest(5)
+
+    for _, entry in ipairs(closest) do
+        assert(entry.criteria > 0, "a listed zone must have a denominator")
+        assert(entry.done > 0,
+            "an untouched zone is not 'closest to finished' and must not be "
+            .. "presented as though it were")
+        assert(entry.done <= entry.criteria, "progress cannot exceed the total")
+    end
+
+    -- Story and side quests are different piles, because that is how the
+    -- player talks about them: "finish the story, then do the side quests".
+    local split = lore.SplitZoneWork(94)
+
+    assert(type(split.story) == "table" and type(split.side) == "table",
+        "zone work splits into story and side")
+
+    assert(#split.story + #split.side > 0,
+        "the fixture zone has work in it")
+
+    CN.HandleSlashCommand("loremaster")
+
+    print("  " .. scanned .. " quest achievements, " .. #closest
+        .. " in progress, " .. #split.story .. " story / "
+        .. #split.side .. " side here")
+end)()
+
+print("\nFollow mode:")
+
+;(function()
+    local follow = CN:GetModule("Follow")
+
+    assert(follow, "the Follow module must load")
+    assert(not follow.active, "follow mode is OFF until asked for")
+
+    follow.Start()
+
+    assert(follow.active, "follow mode starts")
+
+    local hub, objectives = follow.CurrentStop()
+
+    assert(hub, "starting must pick a stop")
+    assert(objectives and #objectives > 0, "a stop has work at it")
+
+    -- The frame's contents are computed separately from the frame, so they
+    -- can be asserted without a client.
+    local lines = follow.Lines()
+
+    assert(#lines > 0, "the panel must say something")
+
+    for _, line in ipairs(lines) do
+        assert(line.text and line.state, "every line has text and a state")
+    end
+
+    assert(follow.HeaderText():find("left"),
+        "the header says how much is left here")
+
+    -- THE RULE: it must not move the waypoint out from under someone walking
+    -- toward it. Advancing with work still outstanding must be refused.
+    local firstX = hub.x
+
+    assert(not follow.Advance(false),
+        "a stop with work left must not be abandoned automatically")
+
+    local stillHub = follow.CurrentStop()
+
+    assert(stillHub.x == firstX,
+        "the stop must not have changed while work remained")
+
+    -- Asking out loud is different from the addon deciding, and must work.
+    follow.Advance(true)
+
+    -- Stopping must clear everything rather than leaving a stale frame.
+    follow.Stop()
+
+    assert(not follow.active, "follow mode stops")
+
+    local afterStop = follow.CurrentStop()
+
+    assert(afterStop == nil, "stopping forgets the stop")
+
+    assert(not follow.Advance(false),
+        "a stopped co-pilot must not keep advancing in the background")
+
+    -- And the setting must persist the choice, so it survives a reload.
+    assert(CN.Settings().follow == false, "stopping is remembered")
+
+    print("  starts, holds its stop, advances on request, stops clean")
+end)()
 
 
 print("\nALL HARNESS CHECKS PASSED")

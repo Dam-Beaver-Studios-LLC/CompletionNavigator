@@ -19,7 +19,8 @@ self = false
 read_globals = {
     -- Namespaced client API.
     "C_AchievementInfo", "C_Calendar", "C_CurrencyInfo", "C_DateAndTime",
-    "C_GossipInfo", "C_Item", "C_MajorFactions", "C_Map", "C_MerchantFrame",
+    "C_CampaignInfo", "C_GossipInfo", "C_Item", "C_MajorFactions", "C_Map",
+    "C_MerchantFrame",
     "C_MountJournal", "C_PetJournal", "C_QuestLog", "C_Reputation",
     "C_SuperTrack", "C_TaskQuest", "C_Timer", "C_ToyBox", "C_TradeSkillUI",
     "C_TransmogCollection", "C_VignetteInfo", "C_WeeklyRewards",
@@ -35,6 +36,7 @@ read_globals = {
     "UnitFactionGroup", "UnitGUID", "UnitLevel", "UnitName", "UnitRace",
     "UnitSex", "PlaySound", "PlaySoundFile", "GetTime", "UnitPosition",
     "GetPlayerFacing", "InCombatLockdown", "IsInInstance", "GetBindingKey",
+    "GetQuestID", "GetTitleText", "GetCategoryInfo",
 
     -- Globals the client defines that are not functions.
     "Enum", "GameTooltip", "Minimap", "UIParent", "UISpecialFrames",

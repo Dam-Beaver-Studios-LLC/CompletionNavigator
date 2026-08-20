@@ -21,6 +21,26 @@ Every step in a chain carries a state. Done steps are behind you, one step is ma
 
 Where the game supplies a real denominator â€” achievement criteria, reputation standing â€” you get a real bar. Where it does not, you get the truth instead of a bar. An appearance has several sources and needs only one of them, so it lists them and says so rather than pretending you are "1 of 9" of the way there.
 
+## Follow the route
+
+Start it and play. Follow mode puts the current stop on screen, ticks things off as you finish them, and moves to the next stop when this one is clear â€” with the arrow already pointed the right way.
+
+```
+/cn follow
+```
+
+Off by default, and it will not fight you: it advances when a stop is **done**, not on a timer, so the waypoint never moves out from under you mid-walk. Wander off and it re-plans around where you actually are rather than herding you back. It says nothing in chat while it runs.
+
+## Track the long campaign
+
+If your plan is measured in zones rather than in the next ten minutes, `/cn progress` and `/cn loremaster` are for you.
+
+- **`/cn progress`** â€” quests completed on this character, today, this session, your best day, and your rate.
+- **`/cn loremaster`** â€” zones, continents and expansions, with the game's own quest achievements as the yardstick. Which zone is closest to finished, and how much is left in it.
+- Story and side quests are counted separately, because *finish the story, then do the side quests* is how people actually play.
+
+The **Journey** tab holds all of it in one place.
+
 ## Plan a zone once, walk it once
 
 A quest is not one place. It is a **pick up**, a **do**, and a **turn in** â€” and treating it as a single dot is exactly why you cross a zone and come back.
@@ -47,6 +67,8 @@ Toggle with `/cn pins`, or from the options panel.
 
 The exclamation marks in front of you are often the cheapest next action available. Completion Navigator reads available quests from the map, not only your quest log, so *"go and collect that one"* is an answer it can give â€” weighted above an accepted quest you have not started, because the walk is short and it unlocks whatever follows.
 
+It searches the surrounding zone as well as the map under your feet, since a city is a different map from the zone containing it, and it remembers what an NPC offered you when you spoke to them. `/cn available` lists them; `/cn whyzero` explains the count when it looks wrong.
+
 ## Navigation without another addon
 
 A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
@@ -67,6 +89,10 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | --- | --- |
 | `/cn` | What to do next |
 | `/cn chase <type> <id>` | What stands between you and a goal, step by step |
+| `/cn follow` | Follow the route, hands-free |
+| `/cn progress` | Quests completed: lifetime, today, this session |
+| `/cn loremaster` | Zone, continent and expansion completion |
+| `/cn available` | Quests offered here that you have not taken |
 | `/cn zone` | The full sweep for this zone, stop by stop |
 | `/cn pins` | Route pins on the world map â€” `on`, `off`, `refresh` |
 | `/cn go` | Navigate to the top recommendation |

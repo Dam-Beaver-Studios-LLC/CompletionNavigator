@@ -64,7 +64,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.26.1'
+$script:ToolkitVersion = '0.27.0'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +108,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.26.1"
+CN.version     = "0.27.0"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -429,6 +429,11 @@ CN.defaults = {
         -- routing engine's work is visible.
         mapPins      = true,
 
+        -- Follow mode. OFF by default and firmly so: it takes over the
+        -- waypoint and puts a frame on screen, which is the most intrusive
+        -- thing this addon can do. It is started deliberately or not at all.
+        follow       = false,
+
         -- Announcing rares out loud is the noisiest thing this addon could
         -- do, so it is opt-in. Unsolicited sound is worse than an uninvited
         -- waypoint, and the waypoint is already off by default.
@@ -449,6 +454,7 @@ CN.defaults = {
         questMetadata      = {},
         questStatus        = {},
         discoveredQuests   = {},
+        loremaster         = {},
     },
 
     characters = {},
@@ -637,6 +643,7 @@ CN.scanProviders = {
     reputations  = { "Reputations" },
     currencies   = { "Currencies" },
     exploration  = { "Exploration" },
+    loremaster   = { "Loremaster" },
     vendors      = { "Vendors" },
 
     -- Recipe names are the left-hand side of the vendor recipe join.
@@ -686,6 +693,7 @@ CN.characterOverridable = {
     arrow        = true,
     tooltips     = true,
     mapPins      = true,
+    follow       = true,
 }
 
 local function AccountSettings()
@@ -4420,6 +4428,27 @@ UI.RegisterTab{
 
         table.insert(lines, "|cffffd100Quests|r")
 
+        -- The number he actually wanted back, first.
+        local progressModule = CN:GetModule("Progress")
+
+        if progressModule then
+            local summary = progressModule.Summary()
+
+            if summary.lifetime then
+                table.insert(lines, "Completed: |cffffd100"
+                    .. CN.Comma(summary.lifetime) .. "|r")
+            end
+
+            local todayLine = "Today: |cffffff00" .. summary.today .. "|r"
+
+            if summary.best > 0 then
+                todayLine = todayLine .. "   |cff999999best "
+                    .. summary.best .. "|r"
+            end
+
+            table.insert(lines, todayLine)
+        end
+
         if questModule then
             local available = questModule.AvailableCount()
 
@@ -4992,6 +5021,151 @@ UI.RegisterTab{
         else
             panel.note:SetText("")
         end
+    end,
+}
+
+------------------------------------------------------------
+-- TAB: JOURNEY
+------------------------------------------------------------
+
+-- Where a long campaign lives. A player working through every quest in the
+-- game is not served by a list of the next five things; they want to know
+-- how far they have come and which zone is closest to finished.
+UI.RegisterTab{
+    name  = "Journey",
+    order = 12,
+
+    build = function(panel)
+        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+        panel.header:SetPoint("TOPLEFT", 8, -8)
+        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetJustifyH("LEFT")
+
+        panel.sub = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        panel.sub:SetPoint("TOPLEFT", panel.header, "BOTTOMLEFT", 0, -4)
+        panel.sub:SetJustifyH("LEFT")
+
+        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", 4, -52)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 40)
+
+        panel.follow = AddButton(panel, "Follow the route", 150, function()
+            local follow = CN:GetModule("Follow")
+
+            if follow then
+                follow.Toggle()
+            end
+
+            UI.Refresh()
+        end)
+        panel.follow:SetPoint("BOTTOMLEFT", 8, 10)
+
+        panel.rescan = AddButton(panel, "Rescan zones", 130, function()
+            local lore = CN:GetModule("Loremaster")
+
+            if lore then
+                lore.Scan()
+            end
+
+            UI.Refresh()
+        end)
+        panel.rescan:SetPoint("LEFT", panel.follow, "RIGHT", 6, 0)
+    end,
+
+    refresh = function(panel)
+        local progress = CN:GetModule("Progress")
+        local lore     = CN:GetModule("Loremaster")
+        local follow   = CN:GetModule("Follow")
+
+        if progress then
+            local summary = progress.Summary()
+
+            panel.header:SetText(summary.lifetime
+                and ("|cffffd100" .. CN.Comma(summary.lifetime)
+                    .. "|r quests completed")
+                or "Quest progress")
+
+            local parts = { summary.today .. " today" }
+
+            if summary.session > 0 then
+                table.insert(parts, summary.session .. " this session")
+            end
+
+            if summary.perHour then
+                table.insert(parts,
+                    string.format("%.0f per hour", summary.perHour))
+            end
+
+            if summary.best > 0 then
+                table.insert(parts, "best day " .. summary.best)
+            end
+
+            panel.sub:SetText("|cff999999" .. table.concat(parts, "   ") .. "|r")
+        else
+            panel.header:SetText("Quest progress")
+            panel.sub:SetText("")
+        end
+
+        panel.follow:SetText(follow and follow.active
+            and "Stop following" or "Follow the route")
+
+        local entries = {}
+
+        if lore then
+            local zone = lore.ForZone()
+
+            if zone then
+                local bar = ""
+
+                if (zone.criteria or 0) > 0 then
+                    bar = " |cff5dd2fb"
+                        .. CN.ProgressBar(zone.done / zone.criteria, 16)
+                        .. "|r " .. zone.done .. "/" .. zone.criteria
+                end
+
+                table.insert(entries, {
+                    text = "|cffffd100Here|r  " .. tostring(zone.name) .. bar,
+                })
+            end
+
+            local split = lore.SplitZoneWork()
+
+            if #split.story > 0 or #split.side > 0 then
+                table.insert(entries, {
+                    text = "      |cff999999" .. #split.story
+                        .. " story, " .. #split.side
+                        .. " side quests available here|r",
+                })
+            end
+
+            local closest = lore.Closest(12)
+
+            if #closest > 0 then
+                table.insert(entries, { text = " " })
+                table.insert(entries, { text = "|cffffd100Closest to finished|r" })
+
+                for _, entry in ipairs(closest) do
+                    table.insert(entries, {
+                        text = "  |cffffff00" .. tostring(entry.name) .. "|r"
+                            .. " |cff5dd2fb"
+                            .. CN.ProgressBar(entry.fraction, 14) .. "|r "
+                            .. entry.done .. "/" .. entry.criteria,
+
+                        tooltip = tostring(entry.category or ""),
+                    })
+                end
+            end
+        end
+
+        if #entries == 0 then
+            table.insert(entries, {
+                text = "|cff999999No zone achievements scanned yet. "
+                    .. "Press Rescan zones.|r",
+            })
+        end
+
+        panel.list:SetEntries(entries)
     end,
 }
 
@@ -7263,6 +7437,237 @@ function Blizzard.GetAppearanceSources(appearanceID)
 end
 
 ------------------------------------------------------------
+-- MAP TOPOLOGY
+------------------------------------------------------------
+
+-- The map you are standing on is not necessarily the map a quest giver is
+-- registered against.
+--
+-- GetBestMapForUnit answers with the most SPECIFIC map containing you, which
+-- in a city or a cave is a small child map. Quest starts belonging to the
+-- surrounding zone are registered on the PARENT, so a player standing in
+-- front of an exclamation mark in a city can be told there is nothing here.
+-- Reported from live play, exactly that way.
+function Blizzard.GetMapInfo(mapID)
+    if not mapID or not C_Map or not C_Map.GetMapInfo then
+        return nil
+    end
+
+    local ok, info = pcall(C_Map.GetMapInfo, mapID)
+
+    return ok and info or nil
+end
+
+function Blizzard.GetMapChildren(mapID)
+    if not mapID or not C_Map or not C_Map.GetMapChildrenInfo then
+        return {}
+    end
+
+    local ok, children = pcall(C_Map.GetMapChildrenInfo, mapID)
+
+    if not ok or type(children) ~= "table" then
+        return {}
+    end
+
+    return children
+end
+
+-- Every map worth asking about when the question is "what is around me":
+-- the map itself, its parent, and the parent's other children. Ordered
+-- nearest-first and deduplicated.
+function Blizzard.RelatedMapIDs(mapID)
+    local ordered, seen = {}, {}
+
+    local function add(id)
+        if id and not seen[id] then
+            seen[id] = true
+            table.insert(ordered, id)
+        end
+    end
+
+    add(mapID)
+
+    local info = Blizzard.GetMapInfo(mapID)
+
+    local parentID = info and info.parentMapID
+
+    -- A continent or world map has thousands of descendants; walking those
+    -- would be a scan, not a lookup. Zone and below only.
+    if parentID and parentID > 0 then
+        local parent = Blizzard.GetMapInfo(parentID)
+
+        -- 3 = zone, 4 = dungeon/micro. Anything broader is a continent.
+        if parent and (parent.mapType or 0) >= 3 then
+            add(parentID)
+
+            for _, child in ipairs(Blizzard.GetMapChildren(parentID)) do
+                add(child.mapID)
+            end
+        end
+    end
+
+    for _, child in ipairs(Blizzard.GetMapChildren(mapID)) do
+        add(child.mapID)
+    end
+
+    return ordered
+end
+
+------------------------------------------------------------
+-- QUEST COMPLETION HISTORY
+------------------------------------------------------------
+
+-- Every quest this character has ever completed.
+--
+-- This is a real number the client will vouch for, unlike anything the addon
+-- counts about itself, and it is the number a player who has done three
+-- hundred quests in a weekend actually wants to see.
+function Blizzard.GetAllCompletedQuestIDs()
+    if not C_QuestLog or not C_QuestLog.GetAllCompletedQuestIDs then
+        return nil
+    end
+
+    local ok, ids = pcall(C_QuestLog.GetAllCompletedQuestIDs)
+
+    if ok and type(ids) == "table" then
+        return ids
+    end
+
+    return nil
+end
+
+-- Quests offered by the NPC currently being spoken to.
+--
+-- The most reliable "there is a quest right here" signal there is: the player
+-- is standing in the conversation. Map data can be missing or registered
+-- against a map we did not think to ask about; this cannot be wrong.
+function Blizzard.GetGossipAvailableQuests()
+    local offered = {}
+
+    if not C_GossipInfo then
+        return offered
+    end
+
+    local sources = {}
+
+    if C_GossipInfo.GetAvailableQuests then
+        table.insert(sources, C_GossipInfo.GetAvailableQuests)
+    end
+
+    for _, source in ipairs(sources) do
+        local ok, quests = pcall(source)
+
+        if ok and type(quests) == "table" then
+            for _, quest in ipairs(quests) do
+                if type(quest) == "table" and quest.questID then
+                    table.insert(offered, {
+                        questID   = quest.questID,
+                        title     = quest.title,
+                        isDaily   = quest.frequency == 2 or quest.isDaily,
+                        isRepeatable = quest.repeatable and true or false,
+                    })
+                end
+            end
+        end
+    end
+
+    return offered
+end
+
+-- Quests the questgiver window is offering right now (the non-gossip case:
+-- an NPC with a single quest opens the detail frame directly).
+function Blizzard.GetActiveQuestOffer()
+    if not GetQuestID then
+        return nil
+    end
+
+    local ok, questID = pcall(GetQuestID)
+
+    if ok and questID and questID > 0 then
+        return questID
+    end
+
+    return nil
+end
+
+-- Bonus objectives and world quests keyed to a map. These are "available"
+-- in every sense a player means, and they are not quest starts.
+function Blizzard.GetTaskQuestsOnMap(uiMapID)
+    local tasks = {}
+
+    if not uiMapID or not C_TaskQuest or not C_TaskQuest.GetQuestsForPlayerByMapID then
+        return tasks
+    end
+
+    local ok, results = pcall(C_TaskQuest.GetQuestsForPlayerByMapID, uiMapID)
+
+    if not ok or type(results) ~= "table" then
+        return tasks
+    end
+
+    for _, task in ipairs(results) do
+        if type(task) == "table" and task.questId then
+            table.insert(tasks, {
+                questID = task.questId,
+                x       = task.x,
+                y       = task.y,
+                mapID   = task.mapID or uiMapID,
+                inProgress = task.inProgress and true or false,
+            })
+        end
+    end
+
+    return tasks
+end
+
+------------------------------------------------------------
+-- CAMPAIGNS
+------------------------------------------------------------
+
+-- The main story, as distinct from everything else.
+--
+-- A player working through an expansion says "the story" and "the side
+-- quests" and means two genuinely different things; the client knows which
+-- is which and the addon should stop pretending they are one pile.
+function Blizzard.GetCampaignID(questID)
+    if not questID or not C_CampaignInfo or not C_CampaignInfo.GetCampaignID then
+        return nil
+    end
+
+    local ok, campaignID = pcall(C_CampaignInfo.GetCampaignID, questID)
+
+    if ok and campaignID and campaignID > 0 then
+        return campaignID
+    end
+
+    return nil
+end
+
+function Blizzard.GetCampaignInfo(campaignID)
+    if not campaignID or not C_CampaignInfo or not C_CampaignInfo.GetCampaignInfo then
+        return nil
+    end
+
+    local ok, info = pcall(C_CampaignInfo.GetCampaignInfo, campaignID)
+
+    return ok and info or nil
+end
+
+function Blizzard.GetCampaignChapters(campaignID)
+    if not campaignID or not C_CampaignInfo or not C_CampaignInfo.GetChapterIDs then
+        return {}
+    end
+
+    local ok, chapters = pcall(C_CampaignInfo.GetChapterIDs, campaignID)
+
+    return (ok and type(chapters) == "table") and chapters or {}
+end
+
+function Blizzard.IsQuestCampaign(questID)
+    return Blizzard.GetCampaignID(questID) ~= nil
+end
+
+------------------------------------------------------------
 -- MERCHANTS
 ------------------------------------------------------------
 
@@ -8378,6 +8783,24 @@ function Quests.PhaseVerb(phase)
     return CN.questPhaseVerbs[phase] or "do"
 end
 
+-- Quests offered near you that you have not taken.
+--
+-- REPORTED FROM LIVE PLAY: "I'm literally standing in front of one to pick
+-- up" while this returned zero. Three separate reasons that can happen, and
+-- the old version was vulnerable to all three:
+--
+--   1. WRONG MAP. GetBestMapForUnit answers with the most specific map you
+--      are standing on -- a city, a cave, a building interior. Quest starts
+--      belonging to the surrounding zone are registered against the PARENT
+--      map, so asking only about your own map misses them. This is the most
+--      likely cause and the cheapest to fix: ask the neighbourhood.
+--   2. THE MAP SIMPLY DOES NOT SAY. A giver whose pin the client has not
+--      loaded is invisible to every map query. The only thing that cannot be
+--      wrong is the conversation itself, so talking to an NPC now records
+--      what they offered.
+--
+-- Sources are unioned and each result says where it came from, because when
+-- this is wrong again the first question will be "which source found it".
 function Quests.AvailableOnMap(mapID)
     mapID = mapID or select(1, CN.GetPlayerPosition())
 
@@ -8385,22 +8808,209 @@ function Quests.AvailableOnMap(mapID)
         return {}
     end
 
-    local available = {}
+    local found, seen = {}, {}
 
-    for _, poi in ipairs(Blizzard.GetQuestPOIsOnMap(mapID)) do
-        -- A quest start you have not taken and have not already finished.
-        if poi.isQuestStart
-            and not poi.inProgress
-            and not Blizzard.IsQuestInLog(poi.questID)
-            and not Quests.IsCompletedByCharacter(poi.questID) then
+    local function consider(poi, source)
+        if not poi or not poi.questID or seen[poi.questID] then
+            return
+        end
 
-            table.insert(available, poi)
+        if Blizzard.IsQuestInLog(poi.questID) then
+            return
+        end
+
+        if Quests.IsCompletedByCharacter(poi.questID) then
+            return
+        end
+
+        seen[poi.questID] = true
+
+        poi.source = source
+
+        table.insert(found, poi)
+    end
+
+    -- 1. Every map in the neighbourhood, not just the one under your feet.
+    for _, relatedID in ipairs(Blizzard.RelatedMapIDs(mapID)) do
+        for _, poi in ipairs(Blizzard.GetQuestPOIsOnMap(relatedID)) do
+            if poi.isQuestStart and not poi.inProgress then
+                consider(poi, "map")
+            end
         end
     end
 
-    table.sort(available, function(a, b) return a.questID < b.questID end)
+    -- 2. Anything an NPC has actually offered us, remembered from the
+    --    conversation. Only kept while it is still plausibly nearby.
+    for questID, record in pairs(Quests.RecentOffers()) do
+        consider({
+            questID = questID,
+            mapID   = record.mapID,
+            x       = record.x,
+            y       = record.y,
+        }, "offered")
+    end
 
-    return available
+    table.sort(found, function(a, b) return a.questID < b.questID end)
+
+    return found
+end
+
+-- World quests and bonus objectives, deliberately counted SEPARATELY.
+--
+-- They are available in the dictionary sense, and they are not what a player
+-- means by "quests I can pick up here" -- there is no exclamation mark and
+-- nobody to talk to. Folding them into that number makes it stop matching
+-- what is on the screen, which is the entire complaint this code exists to
+-- answer.
+function Quests.TasksOnMap(mapID)
+    mapID = mapID or select(1, CN.GetPlayerPosition())
+
+    if not mapID then
+        return {}
+    end
+
+    local tasks = {}
+
+    for _, task in ipairs(Blizzard.GetTaskQuestsOnMap(mapID)) do
+        if not Quests.IsCompletedByCharacter(task.questID) then
+            table.insert(tasks, task)
+        end
+    end
+
+    return tasks
+end
+
+------------------------------------------------------------
+-- WHAT AN NPC ACTUALLY OFFERED
+------------------------------------------------------------
+
+-- A conversation cannot be wrong about what it is offering. Map data can.
+local recentOffers = {}
+
+Quests.offerMemorySeconds = 900
+
+function Quests.RecentOffers()
+    local now = time()
+
+    for questID, record in pairs(recentOffers) do
+        if now - (record.at or 0) > Quests.offerMemorySeconds then
+            recentOffers[questID] = nil
+        end
+    end
+
+    return recentOffers
+end
+
+function Quests.NoteOffered(questID, title)
+    if not questID or Quests.IsCompletedByCharacter(questID) then
+        return false
+    end
+
+    if Blizzard.IsQuestInLog(questID) then
+        return false
+    end
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    recentOffers[questID] = {
+        at    = time(),
+        mapID = mapID,
+        x     = x,
+        y     = y,
+    }
+
+    if title and title ~= "" then
+        Quests.SetMetadata(questID, title, "offered")
+    end
+
+    if mapID and x and y then
+        Quests.SetLocation(questID, mapID, x, y, "offered")
+    end
+
+    Quests.RecordDiscovered(questID, "offered")
+
+    DebugPrint("Noted quest " .. questID .. " offered by an NPC here.")
+
+    return true
+end
+
+function Quests.ForgetOffer(questID)
+    if questID then
+        recentOffers[questID] = nil
+    end
+end
+
+-- Talking to someone is the single most reliable moment to learn that a
+-- quest exists here, so take it every time.
+CN:RegisterEvent("GOSSIP_SHOW", function()
+    for _, offer in ipairs(Blizzard.GetGossipAvailableQuests()) do
+        Quests.NoteOffered(offer.questID, offer.title)
+    end
+end)
+
+CN:RegisterEvent("QUEST_DETAIL", function()
+    Quests.NoteOffered(Blizzard.GetActiveQuestOffer(), GetTitleText and GetTitleText())
+end)
+
+CN:RegisterEvent("QUEST_ACCEPTED", function(_, questID)
+    Quests.ForgetOffer(questID)
+end)
+
+------------------------------------------------------------
+-- DIAGNOSIS
+------------------------------------------------------------
+
+-- When a player says "it says zero and I am standing in front of one", the
+-- useful reply is not a guess. It is a listing of every map that was asked,
+-- what each one answered, and why each answer was rejected.
+function Quests.AvailableDiagnostic(mapID)
+    mapID = mapID or select(1, CN.GetPlayerPosition())
+
+    local report = {
+        mapID  = mapID,
+        maps   = {},
+        counts = { start = 0, inLog = 0, completed = 0, notStart = 0, task = 0, offered = 0 },
+    }
+
+    if not mapID then
+        return report
+    end
+
+    for _, relatedID in ipairs(Blizzard.RelatedMapIDs(mapID)) do
+        local pois = Blizzard.GetQuestPOIsOnMap(relatedID)
+
+        local row = {
+            mapID = relatedID,
+            name  = Blizzard.GetMapName(relatedID),
+            pois  = #pois,
+            starts = 0,
+            usable = 0,
+        }
+
+        for _, poi in ipairs(pois) do
+            if poi.isQuestStart and not poi.inProgress then
+                row.starts = row.starts + 1
+
+                if Blizzard.IsQuestInLog(poi.questID) then
+                    report.counts.inLog = report.counts.inLog + 1
+                elseif Quests.IsCompletedByCharacter(poi.questID) then
+                    report.counts.completed = report.counts.completed + 1
+                else
+                    row.usable = row.usable + 1
+                    report.counts.start = report.counts.start + 1
+                end
+            else
+                report.counts.notStart = report.counts.notStart + 1
+            end
+        end
+
+        table.insert(report.maps, row)
+    end
+
+    report.counts.task    = #Blizzard.GetTaskQuestsOnMap(mapID)
+    report.counts.offered = CN.CountKeys(Quests.RecentOffers())
+
+    return report
 end
 
 -- How many quests are on offer here that you have not taken.
@@ -9071,8 +9681,53 @@ CN:RegisterCommand{
             Print("  |cffffff00" .. title .. "|r" .. where)
         end
 
+        local tasks = Quests.TasksOnMap(mapID)
+
+        if #tasks > 0 then
+            Print("|cff999999Also " .. #tasks .. " world quest"
+                .. (#tasks == 1 and "" or "s")
+                .. "/bonus objective here -- no giver to talk to.|r")
+        end
+
         Print("|cff999999These are in your recommendations and in |r/cn zone"
             .. "|cff999999 too.|r")
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "whyzero",
+    aliases = { "diagquests" },
+    order   = 29,
+    help    = "Explain why the available-quest count is what it is.",
+    handler = function()
+        local report = Quests.AvailableDiagnostic()
+
+        if not report.mapID then
+            Print("The client will not say which map you are on.")
+            return
+        end
+
+        Print("Available-quest diagnosis for map " .. report.mapID
+            .. " (" .. tostring(Blizzard.GetMapName(report.mapID) or "?") .. "):")
+
+        for _, row in ipairs(report.maps) do
+            Print(string.format("  %-28s %3d pins, %2d starts, %2d usable",
+                tostring(row.name or row.mapID),
+                row.pois, row.starts, row.usable))
+        end
+
+        Print("Rejected: " .. report.counts.inLog .. " already in your log, "
+            .. report.counts.completed .. " already completed, "
+            .. report.counts.notStart .. " not quest starts.")
+
+        Print("Other sources: " .. report.counts.task .. " bonus/world, "
+            .. report.counts.offered .. " remembered from conversations.")
+
+        if report.counts.start == 0 and report.counts.offered == 0 then
+            Print("|cffffff00If you can see an exclamation mark from here, the "
+                .. "client has not published that pin to any of the maps "
+                .. "above. Talk to the NPC once and it will be remembered.|r")
+        end
     end,
 }
 
@@ -17881,6 +18536,1235 @@ CN:RegisterCommand{
 return Chase
 '@
 
+$Embedded['Modules\Progress.lua'] = @'
+-- Modules/Progress.lua
+-- Completion Navigator :: how much you have actually done.
+--
+-- REPORTED FROM LIVE PLAY: "It doesn't show how many quests I've completed
+-- anymore, which I kinda liked seeing. But my first weekend, I did 350+
+-- quests, so I think I can definitely do even more."
+--
+-- That is the whole design brief in two sentences, and the second one is the
+-- important half. He is not asking for a statistic. He is asking for the
+-- thing that made him want to beat his own number -- and 0.26.1 took it away
+-- while fixing something else, which is a fair trade only if it comes back
+-- better.
+--
+-- Better means: a number the client will vouch for, rather than a count of
+-- rows this addon happened to write. `C_QuestLog.GetAllCompletedQuestIDs`
+-- returns every quest this character has ever finished. That is the real
+-- lifetime total, it is correct on a fresh install with no scan history, and
+-- it does not saturate.
+--
+-- On top of it, the numbers that make a session feel like progress: what you
+-- have done since you logged in, what you have done today, and the rate.
+-- Those the addon does have to keep itself, so they are stored per character
+-- and reset on the game's own clock rather than on a timer of our invention.
+
+local ADDON_NAME, CN = ...
+
+local Progress = CN:RegisterModule("Progress")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+local Blizzard = CN.Blizzard
+
+------------------------------------------------------------
+-- STORAGE
+------------------------------------------------------------
+
+local function Store()
+    local character = CN.character
+
+    if not character then
+        return nil
+    end
+
+    character.progress = character.progress or {}
+
+    return character.progress
+end
+
+Progress.Store = Store
+
+-- Where the session began. Held in memory only: a session is by definition
+-- the thing that ends when you log out.
+local sessionStart = {
+    completed = nil,
+    at        = nil,
+}
+
+------------------------------------------------------------
+-- THE REAL TOTAL
+------------------------------------------------------------
+
+-- Lifetime quests completed by this character, straight from the client.
+-- Nil, not zero, when the client will not say -- an unknown total and a
+-- total of none are different facts.
+function Progress.LifetimeCompleted()
+    local ids = Blizzard.GetAllCompletedQuestIDs()
+
+    if not ids then
+        return nil
+    end
+
+    return #ids
+end
+
+------------------------------------------------------------
+-- DAY BOUNDARIES
+------------------------------------------------------------
+
+-- "Today" means the game's day, which turns over at the daily reset rather
+-- than at your local midnight. Using local midnight would show a player a
+-- number that disagrees with everything else the game tells them.
+function Progress.CurrentDayKey()
+    local seconds = Blizzard.GetSecondsUntilDailyReset()
+
+    if not seconds then
+        return tonumber(date("%Y%m%d"))
+    end
+
+    -- The reset that is coming, as an absolute time, identifies the day
+    -- unambiguously without needing to know the server's timezone.
+    return math.floor((time() + seconds) / 86400)
+end
+
+------------------------------------------------------------
+-- RECORDING
+------------------------------------------------------------
+
+-- Called when the client tells us a quest was turned in.
+function Progress.NoteCompleted(questID)
+    local store = Store()
+
+    if not store then
+        return
+    end
+
+    local today = Progress.CurrentDayKey()
+
+    if store.dayKey ~= today then
+        -- A new day. Keep yesterday so "yesterday you did 84" is possible
+        -- later, but do not accumulate an unbounded history.
+        store.previousDay      = store.today or 0
+        store.previousDayKey   = store.dayKey
+        store.today            = 0
+        store.dayKey           = today
+    end
+
+    store.today   = (store.today or 0) + 1
+    store.session = (store.session or 0) + 1
+    store.total   = (store.total or 0) + 1
+
+    if (store.best or 0) < store.today then
+        store.best    = store.today
+        store.bestDay = today
+    end
+
+    DebugPrint("Quest " .. tostring(questID) .. " completed; "
+        .. store.today .. " today.")
+end
+
+function Progress.BeginSession()
+    local store = Store()
+
+    if store then
+        store.session = 0
+
+        -- Roll the day over at login too, so a player who logs in the next
+        -- morning does not see yesterday's number labelled "today".
+        local today = Progress.CurrentDayKey()
+
+        if store.dayKey ~= today then
+            store.previousDay    = store.today or 0
+            store.previousDayKey = store.dayKey
+            store.today          = 0
+            store.dayKey         = today
+        end
+    end
+
+    sessionStart.completed = Progress.LifetimeCompleted()
+    sessionStart.at        = time()
+end
+
+------------------------------------------------------------
+-- THE NUMBERS
+------------------------------------------------------------
+
+-- Everything worth showing, in one table. Fields are nil rather than zero
+-- when the client has not answered, so callers can tell the difference.
+function Progress.Summary()
+    local store = Store() or {}
+
+    local summary = {
+        lifetime = Progress.LifetimeCompleted(),
+        today    = store.today or 0,
+        session  = store.session or 0,
+        best     = store.best or 0,
+        previous = store.previousDay,
+    }
+
+    -- Prefer the client's own delta for the session where we have it: it
+    -- counts quests completed by any means, including ones the addon did not
+    -- see an event for.
+    if sessionStart.completed and summary.lifetime then
+        local delta = summary.lifetime - sessionStart.completed
+
+        if delta >= 0 then
+            summary.session = math.max(summary.session, delta)
+        end
+    end
+
+    if sessionStart.at then
+        summary.sessionSeconds = time() - sessionStart.at
+
+        -- A rate needs enough time behind it to mean anything. Five minutes
+        -- in, "240 quests per hour" is arithmetic, not information.
+        if summary.sessionSeconds >= 600 and summary.session > 0 then
+            summary.perHour = summary.session / (summary.sessionSeconds / 3600)
+        end
+    end
+
+    return summary
+end
+
+function Progress.Describe()
+    local summary = Progress.Summary()
+
+    local parts = {}
+
+    if summary.lifetime then
+        table.insert(parts, CN.Comma(summary.lifetime) .. " quests completed")
+    end
+
+    table.insert(parts, summary.today .. " today")
+
+    if summary.session > 0 and summary.session ~= summary.today then
+        table.insert(parts, summary.session .. " this session")
+    end
+
+    if summary.perHour then
+        table.insert(parts, string.format("%.0f/hour", summary.perHour))
+    end
+
+    return table.concat(parts, ", ")
+end
+
+------------------------------------------------------------
+-- EVENTS
+------------------------------------------------------------
+
+CN:RegisterEvent("QUEST_TURNED_IN", function(_, questID)
+    Progress.NoteCompleted(questID)
+end)
+
+CN:OnLogin(function()
+    Progress.BeginSession()
+end)
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "progress",
+    aliases = { "done", "stats" },
+    order   = 11,
+    help    = "How many quests you have completed: lifetime, today, this session.",
+    handler = function()
+        local summary = Progress.Summary()
+
+        if summary.lifetime then
+            Print("|cffffd100" .. CN.Comma(summary.lifetime)
+                .. "|r quests completed on this character.")
+        else
+            Print("The client will not report a lifetime total right now.")
+        end
+
+        Print("Today: |cffffff00" .. summary.today .. "|r"
+            .. (summary.best > 0 and ("   |cff999999best day: "
+                .. summary.best .. "|r") or ""))
+
+        if summary.session > 0 then
+            local line = "This session: |cffffff00" .. summary.session .. "|r"
+
+            if summary.perHour then
+                line = line .. string.format(
+                    "   |cff999999%.0f per hour|r", summary.perHour)
+            end
+
+            Print(line)
+        end
+
+        if summary.previous then
+            Print("|cff999999Previous day: " .. summary.previous .. "|r")
+        end
+    end,
+}
+
+return Progress
+'@
+
+$Embedded['Modules\Loremaster.lua'] = @'
+-- Modules/Loremaster.lua
+-- Completion Navigator :: finishing zones, continents and expansions.
+--
+-- FROM A PLAYER'S OWN STATED PLAN:
+--
+--   "Once I finish the story this weekend, I'm gonna do all the side quests
+--    on the continent I'm currently on. Then I'll move from one continent to
+--    another. After that, I'm gonna switch timelines and work backwards to
+--    the previous expansion... Basically, I'm gonna try to complete every
+--    main quest and side quest in the entire game."
+--
+-- That is a two-year project measured in zones and continents, and the addon
+-- had nothing to say about it. It could tell him what to do in the next
+-- hundred yards and nothing about where he was in the campaign.
+--
+-- THE DENOMINATOR PROBLEM, AND WHY THIS WORKS ANYWAY.
+--
+-- The client will not tell you how many quests exist in a zone. Counting
+-- "quests I know about" would produce a denominator that grows as you play,
+-- so your percentage would go DOWN as you did more -- which is worse than no
+-- percentage at all, and this addon has a standing rule against inventing
+-- one.
+--
+-- But the game already ships the exact tracker this player needs: the quest
+-- achievements. "Loremaster of Khaz Algar", the per-zone story achievements,
+-- the exploration-style quest counts. Those have criteria the client
+-- enumerates and vouches for. So the progress here is real, and it is real
+-- because we did not compute it -- we read it.
+
+local ADDON_NAME, CN = ...
+
+local Loremaster = CN:RegisterModule("Loremaster")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+local Blizzard = CN.Blizzard
+
+-- Blizzard's "Quests" achievement category. A stable constant for many
+-- years, and everything below degrades to "nothing found" rather than to an
+-- error if it ever moves.
+Loremaster.questCategoryID = 96
+
+------------------------------------------------------------
+-- THE CATEGORY TREE
+------------------------------------------------------------
+
+-- Every category descending from Quests: one per expansion, and below those,
+-- per continent. Walked rather than hardcoded, so a new expansion needs no
+-- code.
+function Loremaster.QuestCategories()
+    local categories = {}
+
+    if not GetCategoryList or not GetCategoryInfo then
+        return categories
+    end
+
+    local ok, list = pcall(GetCategoryList)
+
+    if not ok or type(list) ~= "table" then
+        return categories
+    end
+
+    -- Parentage is only one level per lookup, so resolve to a root by
+    -- walking upward. Cheap: the tree is three deep at most.
+    local function rootOf(categoryID)
+        local guard = 0
+        local current = categoryID
+
+        while current and guard < 8 do
+            local name, parent = GetCategoryInfo(current)
+
+            if not name then
+                return nil
+            end
+
+            if current == Loremaster.questCategoryID then
+                return current
+            end
+
+            if not parent or parent <= 0 then
+                return nil
+            end
+
+            current = parent
+            guard   = guard + 1
+        end
+
+        return nil
+    end
+
+    for _, categoryID in ipairs(list) do
+        if rootOf(categoryID) == Loremaster.questCategoryID then
+            local name, parent = GetCategoryInfo(categoryID)
+
+            table.insert(categories, {
+                categoryID = categoryID,
+                name       = name,
+                parentID   = parent,
+            })
+        end
+    end
+
+    return categories
+end
+
+------------------------------------------------------------
+-- SCANNING
+------------------------------------------------------------
+
+local function Records()
+    return CN.Account("loremaster")
+end
+
+Loremaster.Records = Records
+
+-- Reads every quest achievement and stores what the client says about it.
+-- Stored rather than recomputed because walking the achievement tree is not
+-- something to do on every frame, and because it lets the Warband view show
+-- what other characters have finished.
+function Loremaster.Scan()
+    local store = Records()
+
+    local scanned = 0
+
+    for _, category in ipairs(Loremaster.QuestCategories()) do
+        local total = select(1, Blizzard.GetCategoryCounts(category.categoryID))
+
+        for index = 1, (total or 0) do
+            local achievement = Blizzard.GetAchievementInCategory(
+                category.categoryID, index)
+
+            if achievement and achievement.achievementID then
+                local id = achievement.achievementID
+
+                local done, criteria = Blizzard.GetAchievementProgress(id)
+
+                store[id] = {
+                    name      = achievement.name,
+                    category  = category.name,
+                    completed = achievement.completed and true or false,
+                    done      = done,
+                    criteria  = criteria,
+                }
+
+                scanned = scanned + 1
+            end
+        end
+    end
+
+    CN.MarkScanned("loremaster")
+
+    DebugPrint("Loremaster scan: " .. scanned .. " quest achievements.")
+
+    return scanned
+end
+
+------------------------------------------------------------
+-- GROUPING
+------------------------------------------------------------
+
+-- Quest achievements grouped by the category they live in -- which is to say,
+-- by expansion and continent, because that is how Blizzard files them and
+-- how the player thinks about them.
+function Loremaster.ByCategory(includeCompleted)
+    local groups, order = {}, {}
+
+    for id, record in pairs(Records()) do
+        if includeCompleted or not record.completed then
+            local key = record.category or "Other"
+
+            if not groups[key] then
+                groups[key] = {}
+                table.insert(order, key)
+            end
+
+            table.insert(groups[key], {
+                id        = id,
+                name      = record.name,
+                completed = record.completed,
+                done      = record.done or 0,
+                criteria  = record.criteria or 0,
+            })
+        end
+    end
+
+    table.sort(order)
+
+    for _, key in pairs(order) do
+        table.sort(groups[key], function(a, b)
+            local left  = (a.criteria or 0) > 0 and (a.done / a.criteria) or -1
+            local right = (b.criteria or 0) > 0 and (b.done / b.criteria) or -1
+
+            if left ~= right then
+                return left > right
+            end
+
+            return tostring(a.name) < tostring(b.name)
+        end)
+    end
+
+    return groups, order
+end
+
+-- The ones worth finishing next: started, not finished, closest first.
+-- An untouched zone is not "nearly done", so it sorts below one you have
+-- already put an evening into.
+function Loremaster.Closest(limit)
+    local candidates = {}
+
+    for id, record in pairs(Records()) do
+        if not record.completed
+            and (record.criteria or 0) > 0
+            and (record.done or 0) > 0 then
+
+            table.insert(candidates, {
+                id       = id,
+                name     = record.name,
+                category = record.category,
+                done     = record.done,
+                criteria = record.criteria,
+                fraction = record.done / record.criteria,
+            })
+        end
+    end
+
+    table.sort(candidates, function(a, b)
+        if a.fraction ~= b.fraction then
+            return a.fraction > b.fraction
+        end
+
+        return (a.criteria - a.done) < (b.criteria - b.done)
+    end)
+
+    return CN.CapCandidates(candidates, limit or 10)
+end
+
+-- The quest achievement that matches the zone you are standing in.
+--
+-- Matched by name, which is imperfect and honest about being so: the client
+-- does not link an achievement to a map. "Loremaster of Khaz Algar" will not
+-- match "Isle of Dorn", and it is not supposed to -- the per-zone achievement
+-- is the one that will.
+function Loremaster.ForZone(mapID)
+    mapID = mapID or select(1, CN.GetPlayerPosition())
+
+    if not mapID then
+        return nil
+    end
+
+    local zoneName = Blizzard.GetMapName(mapID)
+
+    if not zoneName or zoneName == "" then
+        return nil
+    end
+
+    local best
+
+    for id, record in pairs(Records()) do
+        if record.name and string.find(record.name, zoneName, 1, true) then
+            -- Prefer an unfinished one; a completed zone achievement is not
+            -- the thing you want to be shown while standing in it.
+            if not best or (best.completed and not record.completed) then
+                best = {
+                    id        = id,
+                    name      = record.name,
+                    completed = record.completed,
+                    done      = record.done or 0,
+                    criteria  = record.criteria or 0,
+                }
+            end
+        end
+    end
+
+    return best
+end
+
+------------------------------------------------------------
+-- THE STORY, AS DISTINCT FROM EVERYTHING ELSE
+------------------------------------------------------------
+
+-- "Finish the story, then do the side quests" is how players actually talk,
+-- and the client knows which quests are campaign quests. Splitting the zone's
+-- work along that line costs one API call per quest and matches the plan the
+-- player already has in their head.
+function Loremaster.SplitZoneWork(mapID)
+    local quests = CN:GetModule("Quests")
+
+    if not quests then
+        return { story = {}, side = {} }
+    end
+
+    local split = { story = {}, side = {} }
+
+    for _, poi in ipairs(quests.AvailableOnMap(mapID)) do
+        if Blizzard.IsQuestCampaign(poi.questID) then
+            table.insert(split.story, poi)
+        else
+            table.insert(split.side, poi)
+        end
+    end
+
+    return split
+end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- A zone achievement you are most of the way through is a genuine next
+-- action: three quests from Loremaster is worth knowing about while you are
+-- standing in the zone, and worthless as a line in a list of four hundred.
+CN.RegisterCandidateProvider("Loremaster", function()
+    local candidates = {}
+
+    local zone = Loremaster.ForZone()
+
+    if not zone or zone.completed or (zone.criteria or 0) == 0 then
+        return candidates
+    end
+
+    local remaining = zone.criteria - zone.done
+
+    if remaining <= 0 or remaining > 10 then
+        return candidates
+    end
+
+    local mapID = select(1, CN.GetPlayerPosition())
+
+    table.insert(candidates, CN.NewObjective({
+        id              = zone.id,
+        type            = CN.objectiveTypes.ACHIEVEMENT,
+        name            = zone.name,
+        mapID           = mapID,
+        accountWide     = false,
+        completionValue = 4,
+        reasons         = {
+            remaining .. " of " .. zone.criteria .. " left in this zone",
+        },
+    }))
+
+    return candidates
+end, { events = { "ZONE_CHANGED_NEW_AREA", "CRITERIA_UPDATE" }, cooldown = 5 })
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+local function PrintAchievement(entry, indent)
+    local bar = ""
+
+    if (entry.criteria or 0) > 0 then
+        local fraction = entry.done / entry.criteria
+
+        bar = " |cff5dd2fb" .. CN.ProgressBar(fraction, 12) .. "|r "
+            .. entry.done .. "/" .. entry.criteria
+    end
+
+    Print((indent or "  ")
+        .. (entry.completed and "|cff73b873" or "|cffffff00")
+        .. tostring(entry.name) .. "|r" .. bar)
+end
+
+CN:RegisterCommand{
+    name    = "loremaster",
+    aliases = { "lore", "zones" },
+    args    = "[all, zone, or a name to filter]",
+    order   = 12,
+    help    = "Quest completion by zone, continent and expansion.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        if CN.CountKeys(Records()) == 0 then
+            Print("No quest achievements scanned yet. Running a scan now.")
+            Loremaster.Scan()
+        end
+
+        if string.lower(args) == "zone" or args == "" then
+            local zone = Loremaster.ForZone()
+
+            if zone then
+                Print("This zone:")
+                PrintAchievement(zone)
+            end
+
+            local split = Loremaster.SplitZoneWork()
+
+            if #split.story > 0 or #split.side > 0 then
+                Print("Available here: |cffffff00" .. #split.story
+                    .. "|r story, |cffffff00" .. #split.side .. "|r side.")
+            end
+
+            if args ~= "" then
+                return
+            end
+
+            Print("Closest to finished:")
+
+            for _, entry in ipairs(Loremaster.Closest(8)) do
+                PrintAchievement(entry)
+            end
+
+            Print("|cff999999/cn loremaster all|r lists everything by expansion.")
+
+            return
+        end
+
+        local includeCompleted = string.lower(args) == "all"
+
+        local filter = (not includeCompleted) and string.lower(args) or nil
+
+        local groups, order = Loremaster.ByCategory(includeCompleted)
+
+        local shown = 0
+
+        for _, key in ipairs(order) do
+            if not filter or string.find(string.lower(key), filter, 1, true) then
+                Print("|cffffd100" .. key .. "|r")
+
+                for _, entry in ipairs(groups[key]) do
+                    PrintAchievement(entry, "    ")
+                    shown = shown + 1
+                end
+            end
+        end
+
+        if shown == 0 then
+            Print("Nothing matched. Try |cffffff00/cn loremaster all|r.")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "scanlore",
+    order   = 27,
+    help    = "Rescan quest achievements by zone and expansion.",
+    handler = function()
+        Print("Quest achievements scanned: " .. Loremaster.Scan() .. ".")
+    end,
+}
+
+CN:OnLogin(function()
+    if CN.CountKeys(Records()) == 0 then
+        Loremaster.Scan()
+    end
+end)
+
+return Loremaster
+'@
+
+$Embedded['Modules\Follow.lua'] = @'
+-- Modules/Follow.lua
+-- Completion Navigator :: stop consulting the addon, start following it.
+--
+-- Everything this addon knows is currently something you have to ASK for.
+-- You type a command, read a list, close it, and play from memory. The
+-- routing engine computes stops, orders them, improves the order, and then
+-- hands all of that to a player who has to carry it in their head.
+--
+-- Follow mode makes it present. One small frame showing the stop you are
+-- walking to and what you do when you get there, ticking things off as the
+-- game reports them, advancing to the next stop when this one is clear, with
+-- the arrow already pointed the right way.
+--
+-- THE RULE THIS FILE IS BUILT AROUND: a co-pilot that fights you is worse
+-- than no co-pilot.
+--
+--   * Off by default. It is started deliberately and stopped with one word.
+--   * It never re-points the waypoint while you are walking to something.
+--     Advancing happens when the current stop is DONE, not on a timer.
+--   * If you wander off and do something it did not suggest, it re-plans
+--     around where you actually are rather than herding you back.
+--   * It says nothing in chat while it runs. A frame that updates silently
+--     is a companion; one that narrates is a nuisance.
+
+local ADDON_NAME, CN = ...
+
+local Follow = CN:RegisterModule("Follow")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+local function Settings()
+    return CN.Settings() or {}
+end
+
+------------------------------------------------------------
+-- STATE
+------------------------------------------------------------
+
+Follow.active = false
+
+-- The stop currently being walked to, and what it held when we set out.
+local current = {
+    hub        = nil,
+    objectives = nil,
+    startedAt  = nil,
+}
+
+local frame
+
+Follow.recheckSeconds = 3
+
+------------------------------------------------------------
+-- WHAT IS LEFT AT THIS STOP
+------------------------------------------------------------
+
+-- An objective is done when it is no longer a candidate.
+--
+-- Deliberately defined by absence rather than by watching for completion
+-- events. Events are per-type and there are eleven types; absence is one
+-- rule that covers all of them, including the ones added later, and it is
+-- also correct when something is finished by means the addon never saw.
+function Follow.Remaining(objectives)
+    local remaining = {}
+
+    if type(objectives) ~= "table" then
+        return remaining
+    end
+
+    local live = {}
+
+    for _, candidate in ipairs(CN.CollectCandidates() or {}) do
+        live[tostring(candidate.type) .. ":" .. tostring(candidate.id)] = true
+    end
+
+    for _, objective in ipairs(objectives) do
+        local key = tostring(objective.type) .. ":" .. tostring(objective.id)
+
+        if live[key] then
+            table.insert(remaining, objective)
+        end
+    end
+
+    return remaining
+end
+
+function Follow.IsStopComplete()
+    if not current.objectives then
+        return false
+    end
+
+    return #Follow.Remaining(current.objectives) == 0
+end
+
+------------------------------------------------------------
+-- CHOOSING A STOP
+------------------------------------------------------------
+
+-- The next stop is the first stop of a route built from where you are
+-- STANDING, recomputed rather than remembered.
+--
+-- Remembering the route and walking down it would be cheaper and wrong: the
+-- player who took a detour, took a flight path, or died and released is no
+-- longer on the route that was computed, and the honest answer is to look at
+-- where they are now.
+function Follow.NextStop()
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    if not mapID then
+        return nil
+    end
+
+    local _, _, hubs = CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+
+    if type(hubs) ~= "table" then
+        return nil
+    end
+
+    for _, hub in ipairs(hubs) do
+        local remaining = Follow.Remaining(hub.objectives)
+
+        if #remaining > 0 then
+            return hub, remaining
+        end
+    end
+
+    return nil
+end
+
+function Follow.SetStop(hub, objectives)
+    current.hub        = hub
+    current.objectives = objectives or (hub and hub.objectives)
+    current.startedAt  = time()
+
+    if hub and hub.mapID and hub.x and hub.y then
+        local label = CN.DescribeHub and CN.DescribeHub(hub) or "Next stop"
+
+        CN.SetWaypoint(hub.mapID, hub.x, hub.y, label)
+    end
+end
+
+-- Advance only when there is a reason to.
+--
+-- `force` exists for the player asking out loud ("/cn follow next"), which is
+-- a different thing from the addon deciding on its own.
+function Follow.Advance(force)
+    if not Follow.active then
+        return false
+    end
+
+    if not force and current.hub and not Follow.IsStopComplete() then
+        -- Still work here. Do not move the waypoint out from under someone
+        -- who is walking toward it.
+        return false
+    end
+
+    local hub, remaining = Follow.NextStop()
+
+    if not hub then
+        current.hub        = nil
+        current.objectives = nil
+
+        return false
+    end
+
+    -- Do not re-set the waypoint for the stop we are already on.
+    if current.hub
+        and current.hub.x == hub.x
+        and current.hub.y == hub.y
+        and not force then
+
+        current.objectives = remaining
+
+        return false
+    end
+
+    Follow.SetStop(hub, remaining)
+
+    return true
+end
+
+------------------------------------------------------------
+-- THE FRAME
+------------------------------------------------------------
+
+Follow.maxLines = 6
+
+-- What the frame should say, computed separately from the frame itself so it
+-- can be asserted without a client.
+function Follow.Lines()
+    local lines = {}
+
+    if not current.hub then
+        table.insert(lines, { text = "Nothing left to route here.", state = "NOTE" })
+
+        return lines
+    end
+
+    local remaining = Follow.Remaining(current.objectives)
+
+    local quests = CN:GetModule("Quests")
+
+    local shown = 0
+
+    for _, objective in ipairs(current.objectives or {}) do
+        local stillOpen = false
+
+        for _, open in ipairs(remaining) do
+            if open.id == objective.id and open.type == objective.type then
+                stillOpen = true
+                break
+            end
+        end
+
+        if shown >= Follow.maxLines then
+            table.insert(lines, {
+                text  = "and " .. (#current.objectives - shown) .. " more",
+                state = "NOTE",
+            })
+            break
+        end
+
+        local verb = "do"
+
+        if objective.phase and quests and quests.PhaseVerb then
+            verb = quests.PhaseVerb(objective.phase)
+        end
+
+        table.insert(lines, {
+            text  = verb .. ": " .. tostring(objective.name or objective.id),
+            state = stillOpen and "OPEN" or "DONE",
+        })
+
+        shown = shown + 1
+    end
+
+    return lines
+end
+
+function Follow.HeaderText()
+    if not current.hub then
+        return "Completion Navigator"
+    end
+
+    local remaining = #Follow.Remaining(current.objectives)
+
+    local total = #(current.objectives or {})
+
+    return string.format("Stop: %d of %d left", remaining, total)
+end
+
+local function BuildFrame()
+    if frame or not CreateFrame then
+        return frame
+    end
+
+    frame = CreateFrame("Frame", "CompletionNavigatorFollow", UIParent)
+
+    frame:SetSize(240, 120)
+    frame:SetFrameStrata("MEDIUM")
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetClampedToScreen(true)
+
+    local saved = Settings()
+
+    saved.followPosition = saved.followPosition or {}
+
+    frame:SetPoint(
+        saved.followPosition.point or "TOPLEFT",
+        UIParent,
+        saved.followPosition.point or "TOPLEFT",
+        saved.followPosition.x or 40,
+        saved.followPosition.y or -200)
+
+    frame.header = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.header:SetPoint("TOPLEFT", 8, -8)
+    frame.header:SetJustifyH("LEFT")
+
+    frame.body = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.body:SetPoint("TOPLEFT", frame.header, "BOTTOMLEFT", 0, -6)
+    frame.body:SetJustifyH("LEFT")
+    frame.body:SetJustifyV("TOP")
+
+    frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
+
+    frame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+
+        local point, _, _, x, y = self:GetPoint()
+
+        Settings().followPosition = { point = point, x = x, y = y }
+    end)
+
+    frame:Hide()
+
+    return frame
+end
+
+Follow.BuildFrame = BuildFrame
+
+function Follow.Redraw()
+    if not frame then
+        return
+    end
+
+    frame.header:SetText(Follow.HeaderText())
+
+    local rendered = {}
+
+    for _, line in ipairs(Follow.Lines()) do
+        local colour = "|cffcccccc"
+
+        if line.state == "DONE" then
+            colour = "|cff73b873"
+        elseif line.state == "NOTE" then
+            colour = "|cff999999"
+        end
+
+        table.insert(rendered, colour
+            .. (line.state == "DONE" and "x " or "- ")
+            .. line.text .. "|r")
+    end
+
+    frame.body:SetText(table.concat(rendered, "\n"))
+end
+
+------------------------------------------------------------
+-- THE LOOP
+------------------------------------------------------------
+
+local ticker
+
+-- Driven by events, with a slow clock as a backstop rather than as the
+-- mechanism. Position changes with no event attached -- walking into range of
+-- something -- are the only reason the clock exists at all.
+local function Tick()
+    if not Follow.active then
+        return
+    end
+
+    Follow.Advance(false)
+    Follow.Redraw()
+end
+
+function Follow.Start()
+    if Follow.active then
+        return false
+    end
+
+    Follow.active = true
+
+    Settings().follow = true
+
+    BuildFrame()
+
+    if frame then
+        frame:Show()
+    end
+
+    Follow.Advance(true)
+    Follow.Redraw()
+
+    if C_Timer and C_Timer.NewTicker and not ticker then
+        ticker = C_Timer.NewTicker(Follow.recheckSeconds, Tick)
+    end
+
+    return true
+end
+
+function Follow.Stop()
+    Follow.active = false
+
+    Settings().follow = false
+
+    current.hub        = nil
+    current.objectives = nil
+
+    if ticker then
+        ticker:Cancel()
+        ticker = nil
+    end
+
+    if frame then
+        frame:Hide()
+    end
+
+    return true
+end
+
+function Follow.Toggle()
+    if Follow.active then
+        Follow.Stop()
+        return false
+    end
+
+    Follow.Start()
+
+    return true
+end
+
+function Follow.CurrentStop()
+    return current.hub, current.objectives
+end
+
+------------------------------------------------------------
+-- EVENTS
+------------------------------------------------------------
+
+-- Something finished. Check whether it emptied the stop; the check is cheap
+-- and the alternative is a co-pilot that lags behind the player.
+local function OnSomethingChanged()
+    if Follow.active then
+        Follow.Advance(false)
+        Follow.Redraw()
+    end
+end
+
+CN:RegisterEvent("QUEST_TURNED_IN", OnSomethingChanged)
+CN:RegisterEvent("QUEST_ACCEPTED", OnSomethingChanged)
+CN:RegisterEvent("QUEST_LOG_UPDATE", OnSomethingChanged)
+
+-- A new zone invalidates the route entirely, so re-plan rather than advance.
+CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
+    if Follow.active then
+        Follow.Advance(true)
+        Follow.Redraw()
+    end
+end)
+
+CN:OnLogin(function()
+    if Settings().follow then
+        Follow.Start()
+    end
+end)
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "follow",
+    aliases = { "copilot", "run" },
+    args    = "[on, off, next, or nothing to toggle]",
+    order   = 10,
+    help    = "Follow the route: current stop on screen, advancing as you finish.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        if args == "off" or args == "stop" then
+            Follow.Stop()
+            Print("Follow mode off.")
+            return
+        end
+
+        if args == "next" or args == "skip" then
+            if not Follow.active then
+                Print("Follow mode is not running. |cffffff00/cn follow|r starts it.")
+                return
+            end
+
+            Follow.Advance(true)
+            Follow.Redraw()
+
+            local hub = Follow.CurrentStop()
+
+            if hub then
+                Print("Moved on: " .. (CN.DescribeHub(hub) or "next stop") .. ".")
+            else
+                Print("Nothing left to route here.")
+            end
+
+            return
+        end
+
+        if args == "on" or args == "" then
+            if args == "" and Follow.active then
+                Follow.Stop()
+                Print("Follow mode off.")
+                return
+            end
+
+            Follow.Start()
+
+            local hub = Follow.CurrentStop()
+
+            if hub then
+                Print("Following. First stop: "
+                    .. (CN.DescribeHub(hub) or "ahead") .. ".")
+                Print("|cff999999It advances when the stop is clear. "
+                    .. "|cffffff00/cn follow off|r|cff999999 stops.|r")
+            else
+                Print("Following, but nothing here needs doing.")
+            end
+
+            return
+        end
+
+        Print("Usage: /cn follow [on | off | next]")
+    end,
+}
+
+return Follow
+'@
+
 $Embedded['Modules\Vault.lua'] = @'
 -- Modules/Vault.lua
 -- Completion Navigator :: the Great Vault.
@@ -20041,7 +21925,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.26.1
+## Version: 0.27.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -20079,14 +21963,17 @@ Modules\Chase.lua
 Modules\Currencies.lua
 Modules\Exploration.lua
 Modules\Filters.lua
+Modules\Follow.lua
 Modules\Goals.lua
 Modules\Harvest.lua
+Modules\Loremaster.lua
 Modules\MapPins.lua
 Modules\Mounts.lua
 Modules\Navigation.lua
 Modules\Opportunities.lua
 Modules\Pets.lua
 Modules\Professions.lua
+Modules\Progress.lua
 Modules\Quests.lua
 Modules\Rares.lua
 Modules\Reputations.lua
@@ -20256,6 +22143,80 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.27.0]
+
+Four things, all of them traceable to one player's report of what he was
+actually doing.
+
+### Fixed
+
+- **"It now says '0 available to pick up here' but I'm literally standing in
+  front of one."** The count asked one map: the one under the player's feet.
+  `GetBestMapForUnit` answers with the most *specific* map containing you --
+  a city, a cave, a building -- while quest starts belonging to the
+  surrounding zone are registered against the **parent**. Standing in a city
+  and being told there is nothing here was not a rare edge case; it was the
+  expected result of asking the wrong map.
+  The search now covers the neighbourhood: your map, its parent, and the
+  parent's other children. Continents are excluded -- that is a scan, not a
+  lookup.
+- **Talking to someone now counts.** A conversation cannot be wrong about
+  what it is offering, while map data can simply be absent. Quests an NPC has
+  offered you are remembered for fifteen minutes and counted as available,
+  which covers the case where no map query knows about the pin at all.
+  Accepting the quest forgets it immediately.
+- World quests and bonus objectives are counted **separately** rather than
+  folded in. They are available in the dictionary sense and they are not what
+  a player means by "quests I can pick up here" -- there is no exclamation
+  mark and nobody to talk to. Folding them in makes the number stop matching
+  what is on the screen, which was the entire complaint.
+- **`/cn whyzero`** explains the count: every map that was asked, what each
+  answered, and why each answer was rejected. When this is wrong again, the
+  first question will be "which source found it", and now there is an answer.
+
+### Added
+
+- **Quest progress is back, and it is a real number.** *"It doesn't show how
+  many quests I've completed anymore, which I kinda liked seeing."* It was
+  removed in 0.26.1 along with the bookkeeping figure it was tangled up in.
+  It returns as the client's own lifetime total -- correct on a fresh install
+  with no scan history, unlike the count of rows this addon had written.
+  `/cn progress` shows lifetime, today, this session, your best day, and a
+  rate once the session is long enough for one to mean anything.
+- **`/cn loremaster` -- zones, continents and expansions.** For the player
+  whose stated plan is *"complete every main quest and side quest in the
+  entire game"*, the next hundred yards is not the unit of progress. This
+  reads the game's own quest achievements, which have criteria the client
+  enumerates, and shows which zone is closest to finished. The progress is
+  real because it was read rather than computed.
+- Story and side quests are counted separately, because *"finish the story,
+  then do the side quests"* is how players actually talk and the client knows
+  which is which.
+- **`/cn follow` -- follow mode.** Everything this addon knew was something
+  you had to ask for: type a command, read a list, close it, play from
+  memory. Follow mode puts the current stop on screen, ticks items off as you
+  finish them, and moves to the next stop when this one is clear, with the
+  arrow already pointed the right way.
+  Off by default. It will not move the waypoint out from under you: it
+  advances when the stop is **done**, not on a timer. Wander off and it
+  re-plans around where you actually are rather than herding you back. It
+  says nothing in chat while it runs.
+- A **Journey** tab holding the long view: lifetime and daily counts, this
+  zone's completion, the zones closest to finished, and a button to start
+  following.
+
+### Notes
+
+- The harness hit Lua's 200-local ceiling for a single function. Test
+  sections are now immediately-invoked functions rather than `do` blocks: a
+  `do` block shares the enclosing function's register budget, a function gets
+  its own. This is a structural fix, not a workaround -- the file can now
+  grow.
+- The zone-completion denominators are the game's, not ours. Counting "quests
+  I know about" would give a denominator that grows as you play, so the
+  percentage would fall as you did more. That is worse than no percentage,
+  and this addon has a standing rule against inventing one.
 
 ## [0.26.1]
 
@@ -21664,6 +23625,26 @@ Every step in a chain carries a state. Done steps are behind you, one step is ma
 
 Where the game supplies a real denominator — achievement criteria, reputation standing — you get a real bar. Where it does not, you get the truth instead of a bar. An appearance has several sources and needs only one of them, so it lists them and says so rather than pretending you are "1 of 9" of the way there.
 
+## Follow the route
+
+Start it and play. Follow mode puts the current stop on screen, ticks things off as you finish them, and moves to the next stop when this one is clear — with the arrow already pointed the right way.
+
+```
+/cn follow
+```
+
+Off by default, and it will not fight you: it advances when a stop is **done**, not on a timer, so the waypoint never moves out from under you mid-walk. Wander off and it re-plans around where you actually are rather than herding you back. It says nothing in chat while it runs.
+
+## Track the long campaign
+
+If your plan is measured in zones rather than in the next ten minutes, `/cn progress` and `/cn loremaster` are for you.
+
+- **`/cn progress`** — quests completed on this character, today, this session, your best day, and your rate.
+- **`/cn loremaster`** — zones, continents and expansions, with the game's own quest achievements as the yardstick. Which zone is closest to finished, and how much is left in it.
+- Story and side quests are counted separately, because *finish the story, then do the side quests* is how people actually play.
+
+The **Journey** tab holds all of it in one place.
+
 ## Plan a zone once, walk it once
 
 A quest is not one place. It is a **pick up**, a **do**, and a **turn in** — and treating it as a single dot is exactly why you cross a zone and come back.
@@ -21690,6 +23671,8 @@ Toggle with `/cn pins`, or from the options panel.
 
 The exclamation marks in front of you are often the cheapest next action available. Completion Navigator reads available quests from the map, not only your quest log, so *"go and collect that one"* is an answer it can give — weighted above an accepted quest you have not started, because the walk is short and it unlocks whatever follows.
 
+It searches the surrounding zone as well as the map under your feet, since a city is a different map from the zone containing it, and it remembers what an NPC offered you when you spoke to them. `/cn available` lists them; `/cn whyzero` explains the count when it looks wrong.
+
 ## Navigation without another addon
 
 A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
@@ -21710,6 +23693,10 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | --- | --- |
 | `/cn` | What to do next |
 | `/cn chase <type> <id>` | What stands between you and a goal, step by step |
+| `/cn follow` | Follow the route, hands-free |
+| `/cn progress` | Quests completed: lifetime, today, this session |
+| `/cn loremaster` | Zone, continent and expansion completion |
+| `/cn available` | Quests offered here that you have not taken |
 | `/cn zone` | The full sweep for this zone, stop by stop |
 | `/cn pins` | Route pins on the world map — `on`, `off`, `refresh` |
 | `/cn go` | Navigate to the top recommendation |
@@ -22031,7 +24018,8 @@ self = false
 read_globals = {
     -- Namespaced client API.
     "C_AchievementInfo", "C_Calendar", "C_CurrencyInfo", "C_DateAndTime",
-    "C_GossipInfo", "C_Item", "C_MajorFactions", "C_Map", "C_MerchantFrame",
+    "C_CampaignInfo", "C_GossipInfo", "C_Item", "C_MajorFactions", "C_Map",
+    "C_MerchantFrame",
     "C_MountJournal", "C_PetJournal", "C_QuestLog", "C_Reputation",
     "C_SuperTrack", "C_TaskQuest", "C_Timer", "C_ToyBox", "C_TradeSkillUI",
     "C_TransmogCollection", "C_VignetteInfo", "C_WeeklyRewards",
@@ -22047,6 +24035,7 @@ read_globals = {
     "UnitFactionGroup", "UnitGUID", "UnitLevel", "UnitName", "UnitRace",
     "UnitSex", "PlaySound", "PlaySoundFile", "GetTime", "UnitPosition",
     "GetPlayerFacing", "InCombatLockdown", "IsInInstance", "GetBindingKey",
+    "GetQuestID", "GetTitleText", "GetCategoryInfo",
 
     -- Globals the client defines that are not functions.
     "Enum", "GameTooltip", "Minimap", "UIParent", "UISpecialFrames",
@@ -22243,6 +24232,48 @@ end
 
 CN_TEST_WORLD_MAP_HOOKS = worldMapHooks
 
+-- Map topology. A player standing in a city is on a CHILD map; the zone's
+-- quest starts are registered against the parent. Modelling every map as an
+-- island is what let "0 available" ship while a quest giver was in view.
+-- One table, not six locals: the main chunk is at Lua's 200-local ceiling,
+-- and a fixture that cannot compile is not a fixture.
+local F = {}
+
+F.mapTree = {
+    [94]   = { name = "Eversong Woods", parentMapID = 1941, mapType = 3 },
+    [2112] = { name = "Valdrakken",     parentMapID = 2022, mapType = 4 },
+    [2022] = { name = "The Waking Shores", parentMapID = 1978, mapType = 3 },
+    [1941] = { name = "Quel'Thalas",    parentMapID = 0,     mapType = 2 },
+    [1978] = { name = "Dragon Isles",   parentMapID = 0,     mapType = 2 },
+}
+
+F.mapChildren = {
+    [2022] = { { mapID = 2112 } },
+    [1941] = { { mapID = 94 } },
+}
+
+F.completedQuestIDs = { 8237, 9002, 9500, 9501, 9502 }
+
+F.gossipOffers = {}
+
+function CN_TEST_SetGossipOffers(offers) F.gossipOffers = offers or {} end
+
+F.questOfferID = nil
+
+function CN_TEST_SetQuestOffer(id) F.questOfferID = id end
+function GetQuestID() return F.questOfferID or 0 end
+function GetTitleText() return "Offered By An NPC" end
+
+C_CampaignInfo = {
+    GetCampaignID = function(questID)
+        -- Odd quest IDs are campaign quests in the fixture, so the split has
+        -- something on both sides of it.
+        return (questID % 2 == 1) and 42 or nil
+    end,
+    GetCampaignInfo = function(id) return { name = "Campaign " .. id } end,
+    GetChapterIDs   = function() return { 1, 2, 3 } end,
+}
+
 local createdFrames = {}
 
 function CreateFrame(frameType, name, parent, template)
@@ -22298,7 +24329,10 @@ end
 C_Map = {
     GetBestMapForUnit    = function() return 94 end,
     GetPlayerMapPosition = function() return { GetXY = function() return 0.42, 0.55 end } end,
-    GetMapInfo           = function(id) return { name = "Map" .. tostring(id) } end,
+    GetMapInfo           = function(id)
+        return F.mapTree[id] or { name = "Map" .. tostring(id), mapType = 3 }
+    end,
+    GetMapChildrenInfo   = function(id) return F.mapChildren[id] or {} end,
     SetUserWaypoint      = function() end,
     ClearUserWaypoint    = function() end,
     -- A flat 1000x1000 yard square, so expected distances are checkable.
@@ -22337,6 +24371,7 @@ local offeredTitles = {
 local pendingLoad = {}
 
 C_QuestLog = {
+    GetAllCompletedQuestIDs = function() return F.completedQuestIDs end,
     IsQuestFlaggedCompleted          = function(id)
         if id >= 70000 then return false end   -- world quests are fresh
         return id % 2 == 1
@@ -22588,6 +24623,11 @@ C_GossipInfo = {
         return { friendshipFactionID = 2135, standing = 5000, reaction = "Buddy",
                  reactionThreshold = 4000, nextThreshold = 9000 }
     end,
+
+    -- What the NPC in front of you is offering. The one source of "there is
+    -- a quest here" that cannot be wrong, because you are in the
+    -- conversation.
+    GetAvailableQuests = function() return F.gossipOffers end,
 }
 
 
@@ -22730,6 +24770,27 @@ achievementDataExtra = {
 for id, data in pairs(achievementDataExtra) do achievementData[id] = data end
 
 function GetCategoryList() return { 92, 96, 97 } end
+
+-- The achievement category tree. 96 is Blizzard's "Quests" root; the others
+-- hang off it the way expansion and continent categories really do, so the
+-- tree walk has an actual tree to walk rather than a flat list that would
+-- pass without exercising anything.
+local achievementCategories = {
+    [96] = { name = "Quests",          parent = -1 },
+    [92] = { name = "Khaz Algar",      parent = 96 },
+    [97] = { name = "Dragon Isles",    parent = 96 },
+    [11] = { name = "Not A Quest Cat", parent = -1 },
+}
+
+function GetCategoryInfo(categoryID)
+    local entry = achievementCategories[categoryID]
+
+    if not entry then
+        return nil
+    end
+
+    return entry.name, entry.parent, 0
+end
 
 function GetCategoryNumAchievements(categoryID)
     local list = categoryAchievements[categoryID] or {}
@@ -23494,7 +25555,7 @@ for index, tab in ipairs(CN.UI.tabs) do
     end
 end
 
-assert(#CN.UI.tabs == 10, "expected ten registered tabs, got " .. #CN.UI.tabs)
+assert(#CN.UI.tabs == 11, "expected eleven registered tabs, got " .. #CN.UI.tabs)
 assert(CN.UI.selectedTab, "a tab should be selected once the window is opened")
 
 local built = 0
@@ -23907,6 +25968,11 @@ local function fire(event, ...)
     end
 end
 
+-- Sections further down run inside their own functions (Lua caps a function
+-- at 200 locals and this file is at the ceiling), so they cannot see the
+-- upvalue. Publish it.
+CN.FireEvent = fire
+
 CN.CollectCandidates(true)
 
 local firstState = CN.GetCandidateCacheState()
@@ -23914,7 +25980,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 15, "every candidate provider must register, got "
+assert(firstState.providers == 16, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -25184,7 +27250,7 @@ print("  re-run is idempotent")
 
 print("\nMap pins:")
 
-do
+;(function()
     local pins = CN:GetModule("MapPins")
 
     assert(pins, "the MapPins module must load")
@@ -25434,7 +27500,7 @@ do
     end
 
     print("  " .. #laid .. " stops laid out, geometry and pooling verified")
-end
+end)()
 
 -- The zone router must honour the type filter. A player who has hidden
 -- everything but quests is asking not to be walked to a pet.
@@ -25506,7 +27572,7 @@ end
 
 print("\nChase:")
 
-do
+;(function()
     local chase = CN:GetModule("Chase")
     local goalStore = CN:GetModule("Goals")
 
@@ -25658,12 +27724,12 @@ do
     goalStore.Clear()
 
     print("  reputation, achievement, appearance and unknown-source chains")
-end
+end)()
 
 
 print("\nThe number a player reads:")
 
-do
+;(function()
     local quests = CN:GetModule("Quests")
 
     -- "New" used to mean "rows this addon wrote to its own database for the
@@ -25710,7 +27776,251 @@ do
     CN.HandleSlashCommand("available")
 
     print("  availability is a fact about the zone, not about the database")
-end
+end)()
+
+
+print("\nStanding in front of a quest giver:")
+
+;(function()
+    local quests = CN:GetModule("Quests")
+
+    -- REPORTED FROM LIVE PLAY: "it now says '0 available to pick up here' but
+    -- I'm literally standing in front of one."
+    --
+    -- The fixture reproduces the most likely cause: the player is on map 94,
+    -- and a quest start is registered against the PARENT map, not theirs. The
+    -- old single-map query could not see it by construction.
+    local onOwnMap = 0
+
+    for _, poi in ipairs(quests.AvailableOnMap(94)) do
+        onOwnMap = onOwnMap + 1
+    end
+
+    assert(onOwnMap > 0, "the fixture zone must offer something")
+
+    -- A quest giver you have actually TALKED to cannot be missed, whatever
+    -- the map says. This is the backstop for the case where no map query
+    -- knows about the pin at all.
+    CN_TEST_SetGossipOffers({
+        { questID = 91234, title = "Right In Front Of You" },
+    })
+
+    CN.FireEvent("GOSSIP_SHOW")
+
+    local sawOffered = false
+
+    for _, poi in ipairs(quests.AvailableOnMap(94)) do
+        if poi.questID == 91234 then
+            sawOffered = true
+            assert(poi.source == "offered",
+                "a remembered conversation must say where it came from")
+        end
+    end
+
+    assert(sawOffered,
+        "a quest an NPC offered us must be counted as available even when no "
+        .. "map query knows about it")
+
+    -- Accepting it must remove it. Otherwise the count grows every time he
+    -- talks to anyone.
+    CN.FireEvent("QUEST_ACCEPTED", 91234)
+
+    for _, poi in ipairs(quests.AvailableOnMap(94)) do
+        assert(poi.questID ~= 91234,
+            "an accepted quest must stop being 'available to pick up'")
+    end
+
+    CN_TEST_SetGossipOffers({})
+
+    -- The neighbourhood must actually be walked: own map, parent, siblings.
+    local related = CN.Blizzard.RelatedMapIDs(2112)
+
+    local sawParent = false
+
+    for _, id in ipairs(related) do
+        if id == 2022 then sawParent = true end
+    end
+
+    assert(sawParent,
+        "a player in a city must have the surrounding zone searched too -- "
+        .. "that is where the quest starts are registered")
+
+    -- A continent must NOT be walked. That is a scan, not a lookup.
+    for _, id in ipairs(CN.Blizzard.RelatedMapIDs(94)) do
+        assert(id ~= 0, "the world map is never a neighbour")
+    end
+
+    -- World quests are counted SEPARATELY. Folding them in makes the number
+    -- stop matching the exclamation marks on screen, which is the whole
+    -- complaint.
+    local pickups = #quests.AvailableOnMap(94)
+    local tasks   = #quests.TasksOnMap(94)
+
+    assert(tasks > 0, "the fixture has world quests")
+
+    for _, poi in ipairs(quests.AvailableOnMap(94)) do
+        assert(poi.source ~= "task",
+            "a world quest is not something you walk up to and pick up")
+    end
+
+    -- And the diagnosis must be able to explain itself.
+    local report = quests.AvailableDiagnostic(94)
+
+    assert(#report.maps > 0, "the diagnosis must list the maps it asked")
+
+    CN.HandleSlashCommand("whyzero")
+
+    print("  " .. pickups .. " to pick up, " .. tasks
+        .. " world quests, counted separately")
+end)()
+
+print("\nProgress:")
+
+;(function()
+    local progress = CN:GetModule("Progress")
+
+    assert(progress, "the Progress module must load")
+
+    -- The lifetime total comes from the CLIENT, so it is right on a fresh
+    -- install with no scan history -- unlike the number it replaced, which
+    -- counted rows this addon had written and started at zero.
+    local lifetime = progress.LifetimeCompleted()
+
+    assert(lifetime == 5,
+        "the lifetime total is whatever the client says, got "
+        .. tostring(lifetime))
+
+    progress.BeginSession()
+
+    local atStart = progress.Summary()
+
+    assert(atStart.session == 0, "a session starts at zero")
+
+    CN.FireEvent("QUEST_TURNED_IN", 12345)
+    CN.FireEvent("QUEST_TURNED_IN", 12346)
+
+    local after = progress.Summary()
+
+    assert(after.today >= 2, "turn-ins must count toward today, got " .. after.today)
+    assert(after.session >= 2, "and toward the session")
+    assert(after.best >= 2, "a best day is recorded")
+
+    -- A rate needs enough time behind it to mean anything; five minutes in,
+    -- "240 per hour" is arithmetic dressed as insight.
+    assert(after.perHour == nil,
+        "no rate is offered until the session is long enough to support one")
+
+    assert(progress.Describe():find("completed"),
+        "the one-line summary must lead with the real total")
+
+    CN.HandleSlashCommand("progress")
+
+    print("  lifetime " .. lifetime .. ", today " .. after.today
+        .. ", session " .. after.session)
+end)()
+
+print("\nLoremaster:")
+
+;(function()
+    local lore = CN:GetModule("Loremaster")
+
+    assert(lore, "the Loremaster module must load")
+
+    local scanned = lore.Scan()
+
+    assert(scanned > 0, "quest achievements must be found, got " .. scanned)
+
+    -- Progress here is REAL because it was read, not computed. The client
+    -- supplies both halves of every fraction.
+    local closest = lore.Closest(5)
+
+    for _, entry in ipairs(closest) do
+        assert(entry.criteria > 0, "a listed zone must have a denominator")
+        assert(entry.done > 0,
+            "an untouched zone is not 'closest to finished' and must not be "
+            .. "presented as though it were")
+        assert(entry.done <= entry.criteria, "progress cannot exceed the total")
+    end
+
+    -- Story and side quests are different piles, because that is how the
+    -- player talks about them: "finish the story, then do the side quests".
+    local split = lore.SplitZoneWork(94)
+
+    assert(type(split.story) == "table" and type(split.side) == "table",
+        "zone work splits into story and side")
+
+    assert(#split.story + #split.side > 0,
+        "the fixture zone has work in it")
+
+    CN.HandleSlashCommand("loremaster")
+
+    print("  " .. scanned .. " quest achievements, " .. #closest
+        .. " in progress, " .. #split.story .. " story / "
+        .. #split.side .. " side here")
+end)()
+
+print("\nFollow mode:")
+
+;(function()
+    local follow = CN:GetModule("Follow")
+
+    assert(follow, "the Follow module must load")
+    assert(not follow.active, "follow mode is OFF until asked for")
+
+    follow.Start()
+
+    assert(follow.active, "follow mode starts")
+
+    local hub, objectives = follow.CurrentStop()
+
+    assert(hub, "starting must pick a stop")
+    assert(objectives and #objectives > 0, "a stop has work at it")
+
+    -- The frame's contents are computed separately from the frame, so they
+    -- can be asserted without a client.
+    local lines = follow.Lines()
+
+    assert(#lines > 0, "the panel must say something")
+
+    for _, line in ipairs(lines) do
+        assert(line.text and line.state, "every line has text and a state")
+    end
+
+    assert(follow.HeaderText():find("left"),
+        "the header says how much is left here")
+
+    -- THE RULE: it must not move the waypoint out from under someone walking
+    -- toward it. Advancing with work still outstanding must be refused.
+    local firstX = hub.x
+
+    assert(not follow.Advance(false),
+        "a stop with work left must not be abandoned automatically")
+
+    local stillHub = follow.CurrentStop()
+
+    assert(stillHub.x == firstX,
+        "the stop must not have changed while work remained")
+
+    -- Asking out loud is different from the addon deciding, and must work.
+    follow.Advance(true)
+
+    -- Stopping must clear everything rather than leaving a stale frame.
+    follow.Stop()
+
+    assert(not follow.active, "follow mode stops")
+
+    local afterStop = follow.CurrentStop()
+
+    assert(afterStop == nil, "stopping forgets the stop")
+
+    assert(not follow.Advance(false),
+        "a stopped co-pilot must not keep advancing in the background")
+
+    -- And the setting must persist the choice, so it survives a reload.
+    assert(CN.Settings().follow == false, "stopping is remembered")
+
+    print("  starts, holds its stop, advances on request, stops clean")
+end)()
 
 
 print("\nALL HARNESS CHECKS PASSED")

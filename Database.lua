@@ -44,6 +44,11 @@ CN.defaults = {
         -- routing engine's work is visible.
         mapPins      = true,
 
+        -- Follow mode. OFF by default and firmly so: it takes over the
+        -- waypoint and puts a frame on screen, which is the most intrusive
+        -- thing this addon can do. It is started deliberately or not at all.
+        follow       = false,
+
         -- Announcing rares out loud is the noisiest thing this addon could
         -- do, so it is opt-in. Unsolicited sound is worse than an uninvited
         -- waypoint, and the waypoint is already off by default.
@@ -64,6 +69,7 @@ CN.defaults = {
         questMetadata      = {},
         questStatus        = {},
         discoveredQuests   = {},
+        loremaster         = {},
     },
 
     characters = {},
@@ -252,6 +258,7 @@ CN.scanProviders = {
     reputations  = { "Reputations" },
     currencies   = { "Currencies" },
     exploration  = { "Exploration" },
+    loremaster   = { "Loremaster" },
     vendors      = { "Vendors" },
 
     -- Recipe names are the left-hand side of the vendor recipe join.
@@ -301,6 +308,7 @@ CN.characterOverridable = {
     arrow        = true,
     tooltips     = true,
     mapPins      = true,
+    follow       = true,
 }
 
 local function AccountSettings()

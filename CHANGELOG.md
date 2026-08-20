@@ -7,6 +7,80 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.27.0]
+
+Four things, all of them traceable to one player's report of what he was
+actually doing.
+
+### Fixed
+
+- **"It now says '0 available to pick up here' but I'm literally standing in
+  front of one."** The count asked one map: the one under the player's feet.
+  `GetBestMapForUnit` answers with the most *specific* map containing you --
+  a city, a cave, a building -- while quest starts belonging to the
+  surrounding zone are registered against the **parent**. Standing in a city
+  and being told there is nothing here was not a rare edge case; it was the
+  expected result of asking the wrong map.
+  The search now covers the neighbourhood: your map, its parent, and the
+  parent's other children. Continents are excluded -- that is a scan, not a
+  lookup.
+- **Talking to someone now counts.** A conversation cannot be wrong about
+  what it is offering, while map data can simply be absent. Quests an NPC has
+  offered you are remembered for fifteen minutes and counted as available,
+  which covers the case where no map query knows about the pin at all.
+  Accepting the quest forgets it immediately.
+- World quests and bonus objectives are counted **separately** rather than
+  folded in. They are available in the dictionary sense and they are not what
+  a player means by "quests I can pick up here" -- there is no exclamation
+  mark and nobody to talk to. Folding them in makes the number stop matching
+  what is on the screen, which was the entire complaint.
+- **`/cn whyzero`** explains the count: every map that was asked, what each
+  answered, and why each answer was rejected. When this is wrong again, the
+  first question will be "which source found it", and now there is an answer.
+
+### Added
+
+- **Quest progress is back, and it is a real number.** *"It doesn't show how
+  many quests I've completed anymore, which I kinda liked seeing."* It was
+  removed in 0.26.1 along with the bookkeeping figure it was tangled up in.
+  It returns as the client's own lifetime total -- correct on a fresh install
+  with no scan history, unlike the count of rows this addon had written.
+  `/cn progress` shows lifetime, today, this session, your best day, and a
+  rate once the session is long enough for one to mean anything.
+- **`/cn loremaster` -- zones, continents and expansions.** For the player
+  whose stated plan is *"complete every main quest and side quest in the
+  entire game"*, the next hundred yards is not the unit of progress. This
+  reads the game's own quest achievements, which have criteria the client
+  enumerates, and shows which zone is closest to finished. The progress is
+  real because it was read rather than computed.
+- Story and side quests are counted separately, because *"finish the story,
+  then do the side quests"* is how players actually talk and the client knows
+  which is which.
+- **`/cn follow` -- follow mode.** Everything this addon knew was something
+  you had to ask for: type a command, read a list, close it, play from
+  memory. Follow mode puts the current stop on screen, ticks items off as you
+  finish them, and moves to the next stop when this one is clear, with the
+  arrow already pointed the right way.
+  Off by default. It will not move the waypoint out from under you: it
+  advances when the stop is **done**, not on a timer. Wander off and it
+  re-plans around where you actually are rather than herding you back. It
+  says nothing in chat while it runs.
+- A **Journey** tab holding the long view: lifetime and daily counts, this
+  zone's completion, the zones closest to finished, and a button to start
+  following.
+
+### Notes
+
+- The harness hit Lua's 200-local ceiling for a single function. Test
+  sections are now immediately-invoked functions rather than `do` blocks: a
+  `do` block shares the enclosing function's register budget, a function gets
+  its own. This is a structural fix, not a workaround -- the file can now
+  grow.
+- The zone-completion denominators are the game's, not ours. Counting "quests
+  I know about" would give a denominator that grows as you play, so the
+  percentage would fall as you did more. That is worse than no percentage,
+  and this addon has a standing rule against inventing one.
+
 ## [0.26.1]
 
 Reported from live play, again: *"the '0 New' just confuses me -- I feel like

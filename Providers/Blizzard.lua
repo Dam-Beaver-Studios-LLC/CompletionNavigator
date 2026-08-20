@@ -1548,6 +1548,237 @@ function Blizzard.GetAppearanceSources(appearanceID)
 end
 
 ------------------------------------------------------------
+-- MAP TOPOLOGY
+------------------------------------------------------------
+
+-- The map you are standing on is not necessarily the map a quest giver is
+-- registered against.
+--
+-- GetBestMapForUnit answers with the most SPECIFIC map containing you, which
+-- in a city or a cave is a small child map. Quest starts belonging to the
+-- surrounding zone are registered on the PARENT, so a player standing in
+-- front of an exclamation mark in a city can be told there is nothing here.
+-- Reported from live play, exactly that way.
+function Blizzard.GetMapInfo(mapID)
+    if not mapID or not C_Map or not C_Map.GetMapInfo then
+        return nil
+    end
+
+    local ok, info = pcall(C_Map.GetMapInfo, mapID)
+
+    return ok and info or nil
+end
+
+function Blizzard.GetMapChildren(mapID)
+    if not mapID or not C_Map or not C_Map.GetMapChildrenInfo then
+        return {}
+    end
+
+    local ok, children = pcall(C_Map.GetMapChildrenInfo, mapID)
+
+    if not ok or type(children) ~= "table" then
+        return {}
+    end
+
+    return children
+end
+
+-- Every map worth asking about when the question is "what is around me":
+-- the map itself, its parent, and the parent's other children. Ordered
+-- nearest-first and deduplicated.
+function Blizzard.RelatedMapIDs(mapID)
+    local ordered, seen = {}, {}
+
+    local function add(id)
+        if id and not seen[id] then
+            seen[id] = true
+            table.insert(ordered, id)
+        end
+    end
+
+    add(mapID)
+
+    local info = Blizzard.GetMapInfo(mapID)
+
+    local parentID = info and info.parentMapID
+
+    -- A continent or world map has thousands of descendants; walking those
+    -- would be a scan, not a lookup. Zone and below only.
+    if parentID and parentID > 0 then
+        local parent = Blizzard.GetMapInfo(parentID)
+
+        -- 3 = zone, 4 = dungeon/micro. Anything broader is a continent.
+        if parent and (parent.mapType or 0) >= 3 then
+            add(parentID)
+
+            for _, child in ipairs(Blizzard.GetMapChildren(parentID)) do
+                add(child.mapID)
+            end
+        end
+    end
+
+    for _, child in ipairs(Blizzard.GetMapChildren(mapID)) do
+        add(child.mapID)
+    end
+
+    return ordered
+end
+
+------------------------------------------------------------
+-- QUEST COMPLETION HISTORY
+------------------------------------------------------------
+
+-- Every quest this character has ever completed.
+--
+-- This is a real number the client will vouch for, unlike anything the addon
+-- counts about itself, and it is the number a player who has done three
+-- hundred quests in a weekend actually wants to see.
+function Blizzard.GetAllCompletedQuestIDs()
+    if not C_QuestLog or not C_QuestLog.GetAllCompletedQuestIDs then
+        return nil
+    end
+
+    local ok, ids = pcall(C_QuestLog.GetAllCompletedQuestIDs)
+
+    if ok and type(ids) == "table" then
+        return ids
+    end
+
+    return nil
+end
+
+-- Quests offered by the NPC currently being spoken to.
+--
+-- The most reliable "there is a quest right here" signal there is: the player
+-- is standing in the conversation. Map data can be missing or registered
+-- against a map we did not think to ask about; this cannot be wrong.
+function Blizzard.GetGossipAvailableQuests()
+    local offered = {}
+
+    if not C_GossipInfo then
+        return offered
+    end
+
+    local sources = {}
+
+    if C_GossipInfo.GetAvailableQuests then
+        table.insert(sources, C_GossipInfo.GetAvailableQuests)
+    end
+
+    for _, source in ipairs(sources) do
+        local ok, quests = pcall(source)
+
+        if ok and type(quests) == "table" then
+            for _, quest in ipairs(quests) do
+                if type(quest) == "table" and quest.questID then
+                    table.insert(offered, {
+                        questID   = quest.questID,
+                        title     = quest.title,
+                        isDaily   = quest.frequency == 2 or quest.isDaily,
+                        isRepeatable = quest.repeatable and true or false,
+                    })
+                end
+            end
+        end
+    end
+
+    return offered
+end
+
+-- Quests the questgiver window is offering right now (the non-gossip case:
+-- an NPC with a single quest opens the detail frame directly).
+function Blizzard.GetActiveQuestOffer()
+    if not GetQuestID then
+        return nil
+    end
+
+    local ok, questID = pcall(GetQuestID)
+
+    if ok and questID and questID > 0 then
+        return questID
+    end
+
+    return nil
+end
+
+-- Bonus objectives and world quests keyed to a map. These are "available"
+-- in every sense a player means, and they are not quest starts.
+function Blizzard.GetTaskQuestsOnMap(uiMapID)
+    local tasks = {}
+
+    if not uiMapID or not C_TaskQuest or not C_TaskQuest.GetQuestsForPlayerByMapID then
+        return tasks
+    end
+
+    local ok, results = pcall(C_TaskQuest.GetQuestsForPlayerByMapID, uiMapID)
+
+    if not ok or type(results) ~= "table" then
+        return tasks
+    end
+
+    for _, task in ipairs(results) do
+        if type(task) == "table" and task.questId then
+            table.insert(tasks, {
+                questID = task.questId,
+                x       = task.x,
+                y       = task.y,
+                mapID   = task.mapID or uiMapID,
+                inProgress = task.inProgress and true or false,
+            })
+        end
+    end
+
+    return tasks
+end
+
+------------------------------------------------------------
+-- CAMPAIGNS
+------------------------------------------------------------
+
+-- The main story, as distinct from everything else.
+--
+-- A player working through an expansion says "the story" and "the side
+-- quests" and means two genuinely different things; the client knows which
+-- is which and the addon should stop pretending they are one pile.
+function Blizzard.GetCampaignID(questID)
+    if not questID or not C_CampaignInfo or not C_CampaignInfo.GetCampaignID then
+        return nil
+    end
+
+    local ok, campaignID = pcall(C_CampaignInfo.GetCampaignID, questID)
+
+    if ok and campaignID and campaignID > 0 then
+        return campaignID
+    end
+
+    return nil
+end
+
+function Blizzard.GetCampaignInfo(campaignID)
+    if not campaignID or not C_CampaignInfo or not C_CampaignInfo.GetCampaignInfo then
+        return nil
+    end
+
+    local ok, info = pcall(C_CampaignInfo.GetCampaignInfo, campaignID)
+
+    return ok and info or nil
+end
+
+function Blizzard.GetCampaignChapters(campaignID)
+    if not campaignID or not C_CampaignInfo or not C_CampaignInfo.GetChapterIDs then
+        return {}
+    end
+
+    local ok, chapters = pcall(C_CampaignInfo.GetChapterIDs, campaignID)
+
+    return (ok and type(chapters) == "table") and chapters or {}
+end
+
+function Blizzard.IsQuestCampaign(questID)
+    return Blizzard.GetCampaignID(questID) ~= nil
+end
+
+------------------------------------------------------------
 -- MERCHANTS
 ------------------------------------------------------------
 
