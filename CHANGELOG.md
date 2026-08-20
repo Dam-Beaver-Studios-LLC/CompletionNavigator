@@ -7,6 +7,51 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.30.0]
+
+The rest of your Warband, and two things that were quietly throwing work away.
+
+### Added
+
+- **`/cn alts` -- should you be playing somebody else?** The addon has known
+  the answer for several releases and had no way to volunteer it. It could
+  tell you which character was best for one objective, when asked, buried in
+  `/cn why`. The question a player actually has runs the other way: *is the
+  character I am logged into the right one for tonight?*
+  It now looks at what is on your list, asks the Warband who each thing
+  belongs to, groups the answers by character, and says either "this one is
+  fine" or "your Druid could do four of these".
+- **It refuses to suggest a switch for account-wide progress**, which is the
+  one answer that would actively waste your time -- a loading screen to earn
+  something that would have counted anyway. There is a test for exactly that,
+  because it is the mistake this feature exists to avoid making.
+- **It says how old its information is.** Everything known about another
+  character is whatever that character recorded the last time it logged in. A
+  roster line reads "yesterday" or "3 weeks ago", and anything past a month
+  stops producing suggestions rather than presenting a stale snapshot as
+  current.
+- The verdict is deliberately conservative: one reason is not enough to
+  recommend a loading screen. A tool that suggests switching every time you
+  log in is a tool people turn off.
+
+### Fixed
+
+- **Follow mode moved your waypoint mid-fight.** Clearing the last objective
+  at a camp while something is hitting you caused the arrow and the waypoint
+  to swing to the next stop -- the single most intrusive moment the addon
+  could have chosen. Automatic advances now wait for the fight to end and then
+  happen immediately. Pressing the button yourself still works during combat;
+  you can see your own screen.
+- **Measured travel speed was thrown away on every reload.** The samples lived
+  in a table that died with the session, so a `/reload` -- which a player does
+  several times an hour -- put the planner back on a guessed constant. The
+  addon was permanently five samples away from being useful and never got
+  there. Samples are now kept per character and survive reloading, logging
+  out, and patch days.
+- Corrupt values in the saved samples are cleaned on load rather than filtered
+  on every read. SavedVariables outlive every version of this addon; junk left
+  in place is junk filtered forever.
+
 ## [0.29.0]
 
 No new features. Six defects, four of them mine, and the rebuild cut by two
@@ -54,6 +99,32 @@ thirds.
   Reputations built a complete objective -- table, reasons, formatted strings
   -- for all five hundred factions and then discarded all but sixty; it now
   scores first and allocates only the survivors.
+
+### Added
+
+- **The release now refuses to proceed until the project page has been
+  reviewed against it.** A release with no user-visible change legitimately
+  needs no new copy -- but that has to be a decision somebody made, and this
+  time it was an omission the author had to catch. `_curseforge/REVIEWED.txt`
+  carries the version the page was last considered against, and `check` fails
+  until it matches the tree. Editing the description satisfies it; deciding no
+  edit is needed means bumping the marker, which is a five-second
+  acknowledgement that the question was asked.
+  "How fast it is" and "how accurate it is" count as things a player notices.
+  That is written into the failure message, because the judgement that got
+  this wrong was mine.
+
+- **`cn.ps1 ci` replaces the standalone CI script, and explains its own
+  failures.** Checking a build twice per invocation against an unauthenticated
+  budget of sixty requests an hour means roughly thirty checks -- which
+  somebody watching a release will spend in ten minutes, after which every
+  call returns a bare `403 Forbidden` that says nothing about why.
+  It now reads the rate-limit headers and says which limit was hit and when it
+  clears, caches answers for twenty-five seconds so pressing it again costs
+  nothing, accepts a token for a budget of five thousand, and offers
+  `ci -Watch` to follow a run to completion on one invocation instead of being
+  re-run by hand. The repository is read from the git remote, so a fork
+  reports its own builds rather than the upstream's.
 
 ### Notes
 

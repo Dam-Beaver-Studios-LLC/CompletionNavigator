@@ -176,6 +176,11 @@ CN_TEST_MOUNTED = false
 function IsMounted() return CN_TEST_MOUNTED end
 function UnitOnTaxi() return false end
 
+-- Combat state. The interesting case is that the addon must NOT move a
+-- waypoint while the player is being hit by something.
+CN_TEST_IN_COMBAT = false
+function InCombatLockdown() return CN_TEST_IN_COMBAT end
+
 -- The client's fractional monotonic clock. `time()` has one-second
 -- resolution, which was the bug: a ten-second sample measured with a
 -- one-second ruler carries up to ten per cent error, and anything finished
@@ -4321,6 +4326,148 @@ print("\nHow far is \"here\":")
 
     print("  " .. #near .. " within " .. CN.nearbyYards
         .. " yards, " .. #zone .. " further out")
+end)()
+
+
+print("\nAlts:")
+
+;(function()
+    local alts = CN:GetModule("Alts")
+
+    assert(alts, "the Alts module must load")
+
+    -- STALENESS. A character last seen a month ago is described as it was a
+    -- month ago, and the addon must not build advice on it.
+    assert(alts.AgeDays(nil) == nil, "an unknown character has no age")
+    assert(alts.DescribeAge(nil) == "never seen", "and says so")
+
+    local fresh = { lastSeen = time() - 3600 }
+    local old   = { lastSeen = time() - (40 * 86400) }
+
+    assert(alts.DescribeAge(fresh) == "today", "an hour ago is today")
+    assert(alts.AgeDays(old) > alts.staleDays,
+        "forty days is past the staleness threshold")
+
+    -- ACCOUNT-WIDE WORK MUST NEVER PRODUCE A SWITCH.
+    --
+    -- This is the one answer that would actively waste the player's time: a
+    -- loading screen to earn something that would have counted anyway.
+    local warband = CN:GetModule("Warband")
+
+    local realWhoShould = warband.WhoShould
+
+    warband.WhoShould = function()
+        return "Someone-Else", "details", "account-wide"
+    end
+
+    local assignments = alts.Assignments()
+
+    warband.WhoShould = realWhoShould
+
+    assert(#assignments == 0,
+        "account-wide progress must never produce a suggestion to switch "
+        .. "characters -- the loading screen buys nothing")
+
+    -- A GENUINE reason does produce one.
+    warband.WhoShould = function(objectiveType)
+        if objectiveType == CN.objectiveTypes.REPUTATION then
+            return "Otherchar-Testrealm", "Revered", "highest standing"
+        end
+
+        return nil
+    end
+
+    local real = alts.Assignments()
+
+    warband.WhoShould = realWhoShould
+
+    for _, assignment in ipairs(real) do
+        assert(assignment.key ~= CN.characterKey,
+            "never suggest switching to the character you are already on")
+    end
+
+    -- THE VERDICT IS CONSERVATIVE ON PURPOSE.
+    local _, verdict = alts.Verdict()
+
+    assert(type(verdict) == "string" and #verdict > 0,
+        "there is always a plain-language answer")
+
+    CN.HandleSlashCommand("alts")
+
+    print("  " .. #real .. " assignment(s); account-wide correctly ignored")
+end)()
+
+print("\nFollow stays out of a fight:")
+
+;(function()
+    local follow = CN:GetModule("Follow")
+
+    follow.Start()
+
+    CN_TEST_IN_COMBAT = true
+
+    local advanced = follow.Advance()
+
+    assert(advanced == false,
+        "the waypoint must not move while the player is in combat")
+    assert(follow.deferred == true,
+        "and the addon must remember that it held something back")
+
+    -- The player pressing the button is still obeyed. They can see their
+    -- own screen.
+    follow.Advance(true)
+
+    CN_TEST_IN_COMBAT = false
+
+    print("  combat defers an automatic advance, not a requested one")
+
+    follow.Stop()
+end)()
+
+print("\nMeasurements survive a reload:")
+
+;(function()
+    local session = CN:GetModule("Session")
+
+    -- Speed lived in a table that died with the session, so every /reload --
+    -- which a player does several times an hour -- threw the measurements
+    -- away and put the planner back on a guessed constant. The addon was
+    -- permanently five samples from being useful and never got there.
+    local stored = session.Persisted()
+
+    assert(stored, "there is somewhere to persist to")
+
+    stored.onFoot = { 6.5, 7.0, 7.5, 6.8, 7.2 }
+    stored.mounted = {}
+
+    local loaded = session.LoadSamples()
+
+    assert(loaded == 5, "stored samples must be reloaded, got " .. loaded)
+
+    local rate, measured = session.Speed(false)
+
+    assert(measured == true,
+        "reloaded samples must count as measured, or persisting them "
+        .. "achieved nothing")
+    assert(math.abs(rate - 7.0) < 0.001,
+        "the median of the reloaded samples, got " .. tostring(rate))
+
+    -- Nonsense in the saved variables must not poison the estimate.
+    stored.onFoot = { 7.0, -5, 900, "banana", 7.4 }
+
+    session.LoadSamples()
+
+    for _, value in ipairs(session.Persisted().onFoot) do
+        assert(type(value) == "number", "stored samples stay numeric")
+    end
+
+    local safeRate = session.Speed(false)
+
+    assert(safeRate > 0.5 and safeRate < 60,
+        "a corrupt sample must not produce an absurd speed, got "
+        .. tostring(safeRate))
+
+    print("  samples reload and survive corruption")
 end)()
 
 

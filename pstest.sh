@@ -46,6 +46,19 @@ echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
 grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
+echo "  release guard: the project page must be reviewed"
+# A release with no user-visible change legitimately needs no new copy -- but
+# that has to be a decision somebody made. It was not; it was an omission, and
+# the author had to ask why the description had not been updated.
+cp _curseforge/REVIEWED.txt _curseforge/REVIEWED.bak
+printf '0.0.1\n' > _curseforge/REVIEWED.txt
+$PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q "last reviewed for 0.0.1" \
+  || { echo "FAIL: a stale project-page review must block the release"; exit 1; }
+mv _curseforge/REVIEWED.bak _curseforge/REVIEWED.txt
+$PWSH -NoProfile -File ./cn.ps1 check > check2.log 2>&1
+grep -q "All checks passed" check2.log \
+  || { echo "FAIL: check does not pass once the page is reviewed"; cat check2.log; exit 1; }
+
 echo "  release guard: wrong version"
 $PWSH -NoProfile -File ./cn.ps1 release 9.9.9 2>&1 | grep -q "carries version $VERSION" \
   || { echo "FAIL: wrong-version guard"; exit 1; }

@@ -78,6 +78,82 @@ local speed = {
     samples    = { mounted = {}, onFoot = {} },
 }
 
+-- SAMPLES SURVIVE A RELOAD.
+--
+-- They did not. Speed was measured into a table that lived and died with the
+-- session, so every `/reload` -- which a player does several times an hour --
+-- threw away the measurements and put the planner back on a guessed constant.
+-- The addon was permanently five samples from being useful and never got
+-- there.
+--
+-- Stored per character, because a druid in travel form and a warrior on foot
+-- are different measurements and averaging them helps nobody.
+local function Persisted()
+    local character = CN.character
+
+    if not character then
+        return nil
+    end
+
+    character.speedSamples = character.speedSamples or {}
+
+    character.speedSamples.mounted = character.speedSamples.mounted or {}
+    character.speedSamples.onFoot  = character.speedSamples.onFoot or {}
+
+    return character.speedSamples
+end
+
+Session.Persisted = Persisted
+
+function Session.LoadSamples()
+    local stored = Persisted()
+
+    if not stored then
+        return 0
+    end
+
+    local loaded = 0
+
+    for _, bucket in ipairs({ "mounted", "onFoot" }) do
+        speed.samples[bucket] = {}
+
+        for _, value in ipairs(stored[bucket] or {}) do
+            if type(value) == "number" and value > 0.5 and value < 60 then
+                table.insert(speed.samples[bucket], value)
+                loaded = loaded + 1
+            end
+        end
+    end
+
+    -- Write the cleaned set back.
+    --
+    -- SavedVariables are a file on disk that other things can touch and that
+    -- survives every future version of this addon. Filtering junk on read and
+    -- leaving it in place means filtering the same junk on every login
+    -- forever; cleaning it means the corruption is dealt with once.
+    Session.SaveSamples()
+
+    return loaded
+end
+
+function Session.SaveSamples()
+    local stored = Persisted()
+
+    if not stored then
+        return false
+    end
+
+    for _, bucket in ipairs({ "mounted", "onFoot" }) do
+        stored[bucket] = {}
+
+        for _, value in ipairs(speed.samples[bucket]) do
+            table.insert(stored[bucket], value)
+        end
+    end
+
+    return true
+end
+
 Session.speedSampleCap = 40
 
 local function Mounted()
@@ -158,6 +234,11 @@ function Session.Observe()
     while #bucket > Session.speedSampleCap do
         table.remove(bucket, 1)
     end
+
+    -- Written straight through. A measurement kept only in memory is a
+    -- measurement thrown away at the next reload, which is what this used
+    -- to do.
+    Session.SaveSamples()
 
     return observed, mounted
 end
@@ -574,6 +655,8 @@ end)
 local ticker
 
 CN:OnLogin(function()
+    Session.LoadSamples()
+
     Session.Observe()
 
     if C_Timer and C_Timer.NewTicker and not ticker then

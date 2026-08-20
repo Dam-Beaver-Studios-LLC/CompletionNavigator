@@ -45,7 +45,12 @@ param(
     [double] $Y,
     [string] $Requires,
     [string] $Email,
-    [switch] $Force
+    [switch] $Force,
+
+    # `ci -Watch` follows a run to completion instead of the author
+    # re-running the command every thirty seconds, which is how an
+    # unauthenticated API budget of sixty an hour gets spent in ten minutes.
+    [switch] $Watch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,7 +69,11 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.29.0'
+$script:ToolkitVersion = '0.30.0'
+
+# The repository the CI commands ask about. Derived from the git remote when
+# there is one, so a fork does not report the upstream's builds.
+$script:Repo = 'Dam-Beaver-Studios-LLC/CompletionNavigator'
 
 # Fixed load order for root-level files. Anything not listed here sorts after
 # these, alphabetically, inside its own folder group.
@@ -108,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.29.0"
+CN.version     = "0.30.0"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -19954,6 +19963,22 @@ function Follow.Advance(force)
         return false
     end
 
+    -- NOT DURING A FIGHT.
+    --
+    -- Advancing mid-combat re-points the arrow and the waypoint at the next
+    -- camp while the player is being hit by something at this one. It is the
+    -- single most intrusive moment the addon could pick, and there is no
+    -- version of "you finished that stop" that is urgent enough to deliver
+    -- during a fight. The stop is still finished thirty seconds later.
+    --
+    -- A forced advance -- the player pressing the button -- is still obeyed.
+    -- They can see their own screen.
+    if not force and InCombatLockdown and InCombatLockdown() then
+        Follow.deferred = true
+
+        return false
+    end
+
     if not force and current.hub and not Follow.IsStopComplete() then
         -- Still work here. Do not move the waypoint out from under someone
         -- who is walking toward it.
@@ -20307,6 +20332,15 @@ CN:RegisterCommand{
     end,
 }
 
+-- Whatever was held back during the fight happens the moment it ends.
+CN:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+    if Follow.active and Follow.deferred then
+        Follow.deferred = false
+
+        Follow.Advance()
+    end
+end)
+
 return Follow
 '@
 
@@ -20391,6 +20425,82 @@ local speed = {
     samples    = { mounted = {}, onFoot = {} },
 }
 
+-- SAMPLES SURVIVE A RELOAD.
+--
+-- They did not. Speed was measured into a table that lived and died with the
+-- session, so every `/reload` -- which a player does several times an hour --
+-- threw away the measurements and put the planner back on a guessed constant.
+-- The addon was permanently five samples from being useful and never got
+-- there.
+--
+-- Stored per character, because a druid in travel form and a warrior on foot
+-- are different measurements and averaging them helps nobody.
+local function Persisted()
+    local character = CN.character
+
+    if not character then
+        return nil
+    end
+
+    character.speedSamples = character.speedSamples or {}
+
+    character.speedSamples.mounted = character.speedSamples.mounted or {}
+    character.speedSamples.onFoot  = character.speedSamples.onFoot or {}
+
+    return character.speedSamples
+end
+
+Session.Persisted = Persisted
+
+function Session.LoadSamples()
+    local stored = Persisted()
+
+    if not stored then
+        return 0
+    end
+
+    local loaded = 0
+
+    for _, bucket in ipairs({ "mounted", "onFoot" }) do
+        speed.samples[bucket] = {}
+
+        for _, value in ipairs(stored[bucket] or {}) do
+            if type(value) == "number" and value > 0.5 and value < 60 then
+                table.insert(speed.samples[bucket], value)
+                loaded = loaded + 1
+            end
+        end
+    end
+
+    -- Write the cleaned set back.
+    --
+    -- SavedVariables are a file on disk that other things can touch and that
+    -- survives every future version of this addon. Filtering junk on read and
+    -- leaving it in place means filtering the same junk on every login
+    -- forever; cleaning it means the corruption is dealt with once.
+    Session.SaveSamples()
+
+    return loaded
+end
+
+function Session.SaveSamples()
+    local stored = Persisted()
+
+    if not stored then
+        return false
+    end
+
+    for _, bucket in ipairs({ "mounted", "onFoot" }) do
+        stored[bucket] = {}
+
+        for _, value in ipairs(speed.samples[bucket]) do
+            table.insert(stored[bucket], value)
+        end
+    end
+
+    return true
+end
+
 Session.speedSampleCap = 40
 
 local function Mounted()
@@ -20471,6 +20581,11 @@ function Session.Observe()
     while #bucket > Session.speedSampleCap do
         table.remove(bucket, 1)
     end
+
+    -- Written straight through. A measurement kept only in memory is a
+    -- measurement thrown away at the next reload, which is what this used
+    -- to do.
+    Session.SaveSamples()
 
     return observed, mounted
 end
@@ -20887,6 +21002,8 @@ end)
 local ticker
 
 CN:OnLogin(function()
+    Session.LoadSamples()
+
     Session.Observe()
 
     if C_Timer and C_Timer.NewTicker and not ticker then
@@ -20954,6 +21071,301 @@ CN:RegisterCommand{
 }
 
 return Session
+'@
+
+$Embedded['Modules\Alts.lua'] = @'
+-- Modules/Alts.lua
+-- Completion Navigator :: which character should be doing this.
+--
+-- The addon has known the answer for a while and had no way to volunteer it.
+-- `Warband.WhoShould` answers one objective at a time, when asked, buried in
+-- `/cn why`. The question a player actually has is the other way round:
+--
+--   "Is the character I am logged into the right one to be playing tonight?"
+--
+-- Nothing answered that. Every recommendation was implicitly "do this, here,
+-- now, as you", even when the honest answer was "your Druid is two quests
+-- from the same reward and this reputation does not carry across anyway".
+--
+-- WHAT THIS CAN AND CANNOT KNOW.
+--
+-- Everything here is built from what each character recorded the last time it
+-- logged in. That is a real limitation and it is not a small one: a character
+-- last seen three weeks ago is described as it was three weeks ago. The addon
+-- says so rather than presenting stale data as current, and weights a
+-- recommendation down as it ages -- a suggestion to switch to a character
+-- whose data predates a patch is worth less than one about yesterday's.
+--
+-- It also refuses to recommend switching for anything account-wide. If the
+-- progress carries across the Warband, the character doing it is irrelevant
+-- and saying otherwise would be advice that costs a loading screen and buys
+-- nothing.
+
+local ADDON_NAME, CN = ...
+
+local Alts = CN:RegisterModule("Alts")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+------------------------------------------------------------
+-- STALENESS
+------------------------------------------------------------
+
+-- How old a character's data is, in days.
+function Alts.AgeDays(character)
+    if not character or not character.lastSeen then
+        return nil
+    end
+
+    return (time() - character.lastSeen) / 86400
+end
+
+-- Past this, the addon still reports what it knows but stops making
+-- suggestions from it. A month-old snapshot of a character is a description
+-- of a character that may not exist in that form any more.
+Alts.staleDays = 30
+
+function Alts.DescribeAge(character)
+    local days = Alts.AgeDays(character)
+
+    if not days then
+        return "never seen"
+    end
+
+    if days < 1 then
+        return "today"
+    end
+
+    if days < 2 then
+        return "yesterday"
+    end
+
+    if days < 14 then
+        return string.format("%d days ago", math.floor(days))
+    end
+
+    return string.format("%d weeks ago", math.floor(days / 7))
+end
+
+------------------------------------------------------------
+-- WHAT IS WORTH SWITCHING FOR
+------------------------------------------------------------
+
+-- Only character-specific work can justify a switch. Account-wide progress
+-- is, by definition, indifferent to who does it.
+Alts.switchableTypes = {
+    REPUTATION = true,
+    RECIPE     = true,
+    PROFESSION = true,
+    TITLE      = true,
+    QUEST      = true,
+}
+
+-- One assignment: a character, a reason, and what it is for.
+local function NewAssignment(key, character, objective, reason)
+    return {
+        key       = key,
+        name      = character and character.name or key,
+        realm     = character and character.realm,
+        class     = character and character.class,
+        level     = character and character.level,
+        ageDays   = Alts.AgeDays(character),
+        objective = objective,
+        reason    = reason,
+    }
+end
+
+-- For each of the top recommendations, ask whether somebody else should be
+-- doing it.
+--
+-- Bounded deliberately: this walks the roster per objective, and answering
+-- for two hundred candidates would cost more than the answer is worth. The
+-- things a player will actually do next are the things worth asking about.
+Alts.considered = 20
+
+function Alts.Assignments()
+    local assignments = {}
+
+    if not CN.Recommend then
+        return assignments
+    end
+
+    local warband = CN:GetModule("Warband")
+
+    if not warband or not warband.WhoShould then
+        return assignments
+    end
+
+    local seen = {}
+
+    for _, objective in ipairs(CN.Recommend(Alts.considered) or {}) do
+        if Alts.switchableTypes[objective.type] then
+            local ok, bestKey, detail, scope =
+                pcall(warband.WhoShould, objective.type, objective.id)
+
+            -- "account-wide" is a real answer meaning the question does not
+            -- apply, and must never become a suggestion to switch.
+            if ok and bestKey and scope ~= "account-wide"
+                and bestKey ~= CN.characterKey then
+
+                local character = CN.db and CN.db.characters
+                    and CN.db.characters[bestKey]
+
+                local age = Alts.AgeDays(character)
+
+                if not age or age <= Alts.staleDays then
+                    local key = bestKey .. "|" .. tostring(objective.type)
+                        .. "|" .. tostring(objective.id)
+
+                    if not seen[key] then
+                        seen[key] = true
+
+                        table.insert(assignments,
+                            NewAssignment(bestKey, character, objective,
+                                detail and (scope .. ": " .. detail) or scope))
+                    end
+                end
+            end
+        end
+    end
+
+    return assignments
+end
+
+-- Grouped by character, because "switch to this one" is the decision, and
+-- three reasons to switch to the same character is a stronger case than one.
+function Alts.ByCharacter()
+    local grouped, order = {}, {}
+
+    for _, assignment in ipairs(Alts.Assignments()) do
+        if not grouped[assignment.key] then
+            grouped[assignment.key] = {
+                key     = assignment.key,
+                name    = assignment.name,
+                realm   = assignment.realm,
+                class   = assignment.class,
+                level   = assignment.level,
+                ageDays = assignment.ageDays,
+                items   = {},
+            }
+
+            table.insert(order, assignment.key)
+        end
+
+        table.insert(grouped[assignment.key].items, assignment)
+    end
+
+    local rows = {}
+
+    for _, key in ipairs(order) do
+        table.insert(rows, grouped[key])
+    end
+
+    -- The strongest case first: most reasons, then freshest data.
+    table.sort(rows, function(a, b)
+        if #a.items ~= #b.items then
+            return #a.items > #b.items
+        end
+
+        return (a.ageDays or math.huge) < (b.ageDays or math.huge)
+    end)
+
+    return rows
+end
+
+------------------------------------------------------------
+-- THE VERDICT
+------------------------------------------------------------
+
+-- Should you be playing somebody else?
+--
+-- Answers "no" far more often than "yes", and that is correct. A tool that
+-- suggests a loading screen every time you log in is a tool people turn off.
+Alts.minimumReasons = 2
+
+function Alts.Verdict()
+    local rows = Alts.ByCharacter()
+
+    if #rows == 0 then
+        return nil, "This character is the right one for everything on the list."
+    end
+
+    local best = rows[1]
+
+    if #best.items < Alts.minimumReasons then
+        return nil, string.format(
+            "Nothing worth a loading screen. %s could do 1 of these, which is "
+            .. "not enough to switch for.", tostring(best.name))
+    end
+
+    return best, string.format("%s could do %d of these.",
+        tostring(best.name), #best.items)
+end
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "alts",
+    aliases = { "who", "warband" },
+    order   = 12,
+    help    = "Which character should be doing what, and whether to switch.",
+    handler = function()
+        local warband = CN:GetModule("Warband")
+
+        if not warband then
+            Print("The Warband module is not loaded.")
+            return
+        end
+
+        local roster = warband.Roster()
+
+        if #roster <= 1 then
+            Print("Only this character has been seen. Log in on another and "
+                .. "it will be recorded.")
+            return
+        end
+
+        local best, verdict = Alts.Verdict()
+
+        Print(verdict)
+
+        if best then
+            Print("|cffffd100" .. tostring(best.name) .. "|r"
+                .. (best.level and (" (" .. best.level .. ")") or "")
+                .. " |cff999999last played "
+                .. Alts.DescribeAge({ lastSeen = time() - ((best.ageDays or 0) * 86400) })
+                .. "|r")
+
+            for _, item in ipairs(best.items) do
+                Print("  |cffffff00" .. tostring(item.objective.name)
+                    .. "|r |cff999999" .. tostring(item.reason) .. "|r")
+            end
+        end
+
+        Print(" ")
+        Print("Your Warband:")
+
+        for _, row in ipairs(roster) do
+            local character = CN.db and CN.db.characters
+                and CN.db.characters[row.key]
+
+            Print(string.format("  %s%-18s|r %-4s %-10s |cff999999%s|r",
+                row.isCurrent and "|cff00ff00" or "|cffffffff",
+                tostring(row.name),
+                tostring(row.level or "?"),
+                tostring(row.class or ""),
+                Alts.DescribeAge(character)))
+        end
+
+        Print("|cff999999Everything here is what each character recorded the "
+            .. "last time it logged in.|r")
+    end,
+}
+
+return Alts
 '@
 
 $Embedded['Modules\Vault.lua'] = @'
@@ -23116,7 +23528,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.29.0
+## Version: 0.30.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -23147,6 +23559,7 @@ Providers\StaticData.lua
 Providers\TomTom.lua
 Data\Quests.lua
 Modules\Achievements.lua
+Modules\Alts.lua
 Modules\Appearances.lua
 Modules\Breakdown.lua
 Modules\Broker.lua
@@ -23336,6 +23749,51 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.30.0]
+
+The rest of your Warband, and two things that were quietly throwing work away.
+
+### Added
+
+- **`/cn alts` -- should you be playing somebody else?** The addon has known
+  the answer for several releases and had no way to volunteer it. It could
+  tell you which character was best for one objective, when asked, buried in
+  `/cn why`. The question a player actually has runs the other way: *is the
+  character I am logged into the right one for tonight?*
+  It now looks at what is on your list, asks the Warband who each thing
+  belongs to, groups the answers by character, and says either "this one is
+  fine" or "your Druid could do four of these".
+- **It refuses to suggest a switch for account-wide progress**, which is the
+  one answer that would actively waste your time -- a loading screen to earn
+  something that would have counted anyway. There is a test for exactly that,
+  because it is the mistake this feature exists to avoid making.
+- **It says how old its information is.** Everything known about another
+  character is whatever that character recorded the last time it logged in. A
+  roster line reads "yesterday" or "3 weeks ago", and anything past a month
+  stops producing suggestions rather than presenting a stale snapshot as
+  current.
+- The verdict is deliberately conservative: one reason is not enough to
+  recommend a loading screen. A tool that suggests switching every time you
+  log in is a tool people turn off.
+
+### Fixed
+
+- **Follow mode moved your waypoint mid-fight.** Clearing the last objective
+  at a camp while something is hitting you caused the arrow and the waypoint
+  to swing to the next stop -- the single most intrusive moment the addon
+  could have chosen. Automatic advances now wait for the fight to end and then
+  happen immediately. Pressing the button yourself still works during combat;
+  you can see your own screen.
+- **Measured travel speed was thrown away on every reload.** The samples lived
+  in a table that died with the session, so a `/reload` -- which a player does
+  several times an hour -- put the planner back on a guessed constant. The
+  addon was permanently five samples away from being useful and never got
+  there. Samples are now kept per character and survive reloading, logging
+  out, and patch days.
+- Corrupt values in the saved samples are cleaned on load rather than filtered
+  on every read. SavedVariables outlive every version of this addon; junk left
+  in place is junk filtered forever.
+
 ## [0.29.0]
 
 No new features. Six defects, four of them mine, and the rebuild cut by two
@@ -23383,6 +23841,32 @@ thirds.
   Reputations built a complete objective -- table, reasons, formatted strings
   -- for all five hundred factions and then discarded all but sixty; it now
   scores first and allocates only the survivors.
+
+### Added
+
+- **The release now refuses to proceed until the project page has been
+  reviewed against it.** A release with no user-visible change legitimately
+  needs no new copy -- but that has to be a decision somebody made, and this
+  time it was an omission the author had to catch. `_curseforge/REVIEWED.txt`
+  carries the version the page was last considered against, and `check` fails
+  until it matches the tree. Editing the description satisfies it; deciding no
+  edit is needed means bumping the marker, which is a five-second
+  acknowledgement that the question was asked.
+  "How fast it is" and "how accurate it is" count as things a player notices.
+  That is written into the failure message, because the judgement that got
+  this wrong was mine.
+
+- **`cn.ps1 ci` replaces the standalone CI script, and explains its own
+  failures.** Checking a build twice per invocation against an unauthenticated
+  budget of sixty requests an hour means roughly thirty checks -- which
+  somebody watching a release will spend in ten minutes, after which every
+  call returns a bare `403 Forbidden` that says nothing about why.
+  It now reads the rate-limit headers and says which limit was hit and when it
+  clears, caches answers for twenty-five seconds so pressing it again costs
+  nothing, accepts a token for a budget of five thousand, and offers
+  `ci -Watch` to follow a run to completion on one invocation instead of being
+  re-run by hand. The repository is read from the git remote, so a fork
+  reports its own builds rather than the upstream's.
 
 ### Notes
 
@@ -25021,6 +25505,12 @@ A native on-screen arrow, in the addon's own colours, that tells you whether you
 
 Account-wide unlocks are recognised as account-wide. Something another character already earned is not recommended to this one, and the reason line says which character did it.
 
+```
+/cn alts
+```
+
+And it will tell you when you are on the wrong character — *"your Druid could do four of these"* — grouped by who, with the reason for each. It stays quiet when the answer is "you are fine where you are", never suggests switching for progress that is account-wide anyway, and says how long ago each character was last played, because that is how old its information is.
+
 ## What it tracks
 
 Everything below is read from your own client. Nothing is downloaded, and nothing leaves your machine.
@@ -25052,7 +25542,7 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | | |
 | --- | --- |
 | **Ranks** | One list, ordered by what is actually worth doing now, with a stated reason for every line |
-| **Prioritises deadlines** | Anything expiring climbs as its deadline nears, steeply in the last stretch |
+| **Prioritises deadlines** | Dailies, timed quests, world quests, capped currencies and the Vault all climb as their reset approaches, steeply in the last stretch |
 | **Fits your session** | A plan sized to the minutes you have, from measured travel and learned task times |
 | **Explains** | `/cn why` names what is blocking something — level, reputation, profession, faction, an unfinished prerequisite |
 | **Batches** | Nearby work collapses into stops so you stop crossing the zone and coming back |
@@ -25077,6 +25567,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn follow` | Follow the route, hands-free |
 | `/cn plan <minutes>` | What fits in the time you have |
 | `/cn mode <focus>` | Aim the whole addon at one kind of play |
+| `/cn alts` | Which character should be doing what |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |
@@ -25095,9 +25586,19 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 ---
 
+## Built to stay out of the way
+
+An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks — at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes — costs about **five milliseconds**, and the answer to "what next?" is served from cache in **three microseconds**.
+
+It gets there by not doing the same work twice. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
+
+There is a benchmark in the repository, and the numbers above come out of it rather than out of a marketing meeting.
+
 ## Notes
 
 - Where the game does not provide a trustworthy denominator, this addon reports counts rather than inventing a completion percentage. That rule is why some things get a progress bar and others deliberately do not.
+- "Available to pick up nearby" counts what is genuinely within reach and reports anything further out separately, rather than calling a four-minute ride "here".
+- Follow mode never moves your waypoint during a fight. Whatever it was going to do happens when the fight ends.
 - Nothing is taken over without being asked. Auto-advancing the waypoint and rare alerts are off by default.
 - No external server, no account required, no data leaves your machine.
 
@@ -25138,6 +25639,10 @@ enforces these; they are not stylistic preferences.
 With the change that makes it true, in the same release. A description
 written fresh at upload time drifts from what shipped, and the only copy of
 it ends up inside a web form that cannot be diffed.
+'@
+
+$Embedded['_curseforge\REVIEWED.txt'] = @'
+0.30.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -25686,6 +26191,11 @@ function UnitFactionGroup() return "Alliance" end
 CN_TEST_MOUNTED = false
 function IsMounted() return CN_TEST_MOUNTED end
 function UnitOnTaxi() return false end
+
+-- Combat state. The interesting case is that the addon must NOT move a
+-- waypoint while the player is being hit by something.
+CN_TEST_IN_COMBAT = false
+function InCombatLockdown() return CN_TEST_IN_COMBAT end
 
 -- The client's fractional monotonic clock. `time()` has one-second
 -- resolution, which was the bug: a ten-second sample measured with a
@@ -29835,6 +30345,148 @@ print("\nHow far is \"here\":")
 end)()
 
 
+print("\nAlts:")
+
+;(function()
+    local alts = CN:GetModule("Alts")
+
+    assert(alts, "the Alts module must load")
+
+    -- STALENESS. A character last seen a month ago is described as it was a
+    -- month ago, and the addon must not build advice on it.
+    assert(alts.AgeDays(nil) == nil, "an unknown character has no age")
+    assert(alts.DescribeAge(nil) == "never seen", "and says so")
+
+    local fresh = { lastSeen = time() - 3600 }
+    local old   = { lastSeen = time() - (40 * 86400) }
+
+    assert(alts.DescribeAge(fresh) == "today", "an hour ago is today")
+    assert(alts.AgeDays(old) > alts.staleDays,
+        "forty days is past the staleness threshold")
+
+    -- ACCOUNT-WIDE WORK MUST NEVER PRODUCE A SWITCH.
+    --
+    -- This is the one answer that would actively waste the player's time: a
+    -- loading screen to earn something that would have counted anyway.
+    local warband = CN:GetModule("Warband")
+
+    local realWhoShould = warband.WhoShould
+
+    warband.WhoShould = function()
+        return "Someone-Else", "details", "account-wide"
+    end
+
+    local assignments = alts.Assignments()
+
+    warband.WhoShould = realWhoShould
+
+    assert(#assignments == 0,
+        "account-wide progress must never produce a suggestion to switch "
+        .. "characters -- the loading screen buys nothing")
+
+    -- A GENUINE reason does produce one.
+    warband.WhoShould = function(objectiveType)
+        if objectiveType == CN.objectiveTypes.REPUTATION then
+            return "Otherchar-Testrealm", "Revered", "highest standing"
+        end
+
+        return nil
+    end
+
+    local real = alts.Assignments()
+
+    warband.WhoShould = realWhoShould
+
+    for _, assignment in ipairs(real) do
+        assert(assignment.key ~= CN.characterKey,
+            "never suggest switching to the character you are already on")
+    end
+
+    -- THE VERDICT IS CONSERVATIVE ON PURPOSE.
+    local _, verdict = alts.Verdict()
+
+    assert(type(verdict) == "string" and #verdict > 0,
+        "there is always a plain-language answer")
+
+    CN.HandleSlashCommand("alts")
+
+    print("  " .. #real .. " assignment(s); account-wide correctly ignored")
+end)()
+
+print("\nFollow stays out of a fight:")
+
+;(function()
+    local follow = CN:GetModule("Follow")
+
+    follow.Start()
+
+    CN_TEST_IN_COMBAT = true
+
+    local advanced = follow.Advance()
+
+    assert(advanced == false,
+        "the waypoint must not move while the player is in combat")
+    assert(follow.deferred == true,
+        "and the addon must remember that it held something back")
+
+    -- The player pressing the button is still obeyed. They can see their
+    -- own screen.
+    follow.Advance(true)
+
+    CN_TEST_IN_COMBAT = false
+
+    print("  combat defers an automatic advance, not a requested one")
+
+    follow.Stop()
+end)()
+
+print("\nMeasurements survive a reload:")
+
+;(function()
+    local session = CN:GetModule("Session")
+
+    -- Speed lived in a table that died with the session, so every /reload --
+    -- which a player does several times an hour -- threw the measurements
+    -- away and put the planner back on a guessed constant. The addon was
+    -- permanently five samples from being useful and never got there.
+    local stored = session.Persisted()
+
+    assert(stored, "there is somewhere to persist to")
+
+    stored.onFoot = { 6.5, 7.0, 7.5, 6.8, 7.2 }
+    stored.mounted = {}
+
+    local loaded = session.LoadSamples()
+
+    assert(loaded == 5, "stored samples must be reloaded, got " .. loaded)
+
+    local rate, measured = session.Speed(false)
+
+    assert(measured == true,
+        "reloaded samples must count as measured, or persisting them "
+        .. "achieved nothing")
+    assert(math.abs(rate - 7.0) < 0.001,
+        "the median of the reloaded samples, got " .. tostring(rate))
+
+    -- Nonsense in the saved variables must not poison the estimate.
+    stored.onFoot = { 7.0, -5, 900, "banana", 7.4 }
+
+    session.LoadSamples()
+
+    for _, value in ipairs(session.Persisted().onFoot) do
+        assert(type(value) == "number", "stored samples stay numeric")
+    end
+
+    local safeRate = session.Speed(false)
+
+    assert(safeRate > 0.5 and safeRate < 60,
+        "a corrupt sample must not produce an absurd speed, got "
+        .. tostring(safeRate))
+
+    print("  samples reload and survive corruption")
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -30168,6 +30820,19 @@ echo "    test tooling present and excluded from the .toc"
 echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
 grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
+
+echo "  release guard: the project page must be reviewed"
+# A release with no user-visible change legitimately needs no new copy -- but
+# that has to be a decision somebody made. It was not; it was an omission, and
+# the author had to ask why the description had not been updated.
+cp _curseforge/REVIEWED.txt _curseforge/REVIEWED.bak
+printf '0.0.1\n' > _curseforge/REVIEWED.txt
+$PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q "last reviewed for 0.0.1" \
+  || { echo "FAIL: a stale project-page review must block the release"; exit 1; }
+mv _curseforge/REVIEWED.bak _curseforge/REVIEWED.txt
+$PWSH -NoProfile -File ./cn.ps1 check > check2.log 2>&1
+grep -q "All checks passed" check2.log \
+  || { echo "FAIL: check does not pass once the page is reviewed"; cat check2.log; exit 1; }
 
 echo "  release guard: wrong version"
 $PWSH -NoProfile -File ./cn.ps1 release 9.9.9 2>&1 | grep -q "carries version $VERSION" \
@@ -32541,6 +33206,303 @@ function Invoke-CNRestore {
     Write-Host "Restored $($archive.Name)" -ForegroundColor Green
 }
 
+function Get-CNGitHubToken {
+    # A token turns 60 requests an hour into 5000. Read from the environment
+    # first, then from a file the user can drop next to the toolkit.
+    #
+    # NEVER written by this script and never echoed. If it ends up in a file
+    # it is because the user put it there deliberately.
+    foreach ($name in 'CN_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN') {
+        $value = [System.Environment]::GetEnvironmentVariable($name)
+
+        if ($value) { return $value.Trim() }
+    }
+
+    $tokenFile = Join-Path $script:Root '.github-token'
+
+    if (Test-Path $tokenFile) {
+        $value = (Get-Content $tokenFile -Raw).Trim()
+
+        if ($value) { return $value }
+    }
+
+    return $null
+}
+
+function Invoke-CNGitHubApi {
+    param(
+        [Parameter(Mandatory)] [string] $Uri,
+        [int] $CacheSeconds = 25
+    )
+
+    # A cache, because the usual way to hit the rate limit is a person
+    # pressing the same command repeatedly while waiting for a build. Two
+    # calls per run against a budget of sixty an hour is about thirty runs;
+    # somebody watching a release will do that in ten minutes.
+    $cacheDir = Join-Path ([System.IO.Path]::GetTempPath()) 'cn-ci-cache'
+
+    if (-not (Test-Path $cacheDir)) {
+        New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+    }
+
+    $key   = [System.BitConverter]::ToString(
+        [System.Security.Cryptography.MD5]::Create().ComputeHash(
+            [System.Text.Encoding]::UTF8.GetBytes($Uri))).Replace('-', '')
+
+    $cacheFile = Join-Path $cacheDir "$key.json"
+
+    if ($CacheSeconds -gt 0 -and (Test-Path $cacheFile)) {
+        $age = (Get-Date) - (Get-Item $cacheFile).LastWriteTime
+
+        if ($age.TotalSeconds -lt $CacheSeconds) {
+            $script:LastCallWasCached = $true
+
+            return (Get-Content $cacheFile -Raw | ConvertFrom-Json)
+        }
+    }
+
+    $headers = @{
+        'User-Agent' = 'CompletionNavigator'
+        'Accept'     = 'application/vnd.github+json'
+    }
+
+    $token = Get-CNGitHubToken
+
+    if ($token) {
+        $headers['Authorization'] = "Bearer $token"
+    }
+
+    $script:LastCallWasCached = $false
+
+    try {
+        $response = Invoke-WebRequest -Uri $Uri -Headers $headers -UseBasicParsing
+
+        $script:RateRemaining = $response.Headers['X-RateLimit-Remaining']
+        $script:RateReset     = $response.Headers['X-RateLimit-Reset']
+
+        $response.Content | Set-Content -LiteralPath $cacheFile -Encoding UTF8
+
+        return ($response.Content | ConvertFrom-Json)
+    }
+    catch {
+        $status = $null
+
+        if ($_.Exception.Response) {
+            $status = [int] $_.Exception.Response.StatusCode
+        }
+
+        if ($status -eq 403 -or $status -eq 429) {
+            # This is almost never "forbidden". It is the unauthenticated
+            # budget of sixty requests an hour, spent.
+            $resetText = 'shortly'
+
+            try {
+                $resetHeader = $_.Exception.Response.Headers['X-RateLimit-Reset']
+
+                if ($resetHeader) {
+                    $resetAt = [DateTimeOffset]::FromUnixTimeSeconds([int64] $resetHeader).ToLocalTime()
+                    $minutes = [math]::Max(1, [math]::Ceiling(($resetAt - [DateTimeOffset]::Now).TotalMinutes))
+                    $resetText = "in about $minutes minute(s), at $($resetAt.ToString('HH:mm'))"
+                }
+            }
+            catch { }
+
+            Write-Host ''
+            Write-Host 'GitHub is rate-limiting this machine.' -ForegroundColor Yellow
+            Write-Host "  Unauthenticated callers get 60 requests an hour. Yours resets $resetText." -ForegroundColor Yellow
+            Write-Host ''
+            Write-Host '  Two ways forward:' -ForegroundColor Cyan
+            Write-Host '    1. Wait it out. Recent answers are cached for 25 seconds, so' -ForegroundColor Gray
+            Write-Host '       re-running immediately no longer costs anything.' -ForegroundColor Gray
+            Write-Host '    2. Use a token and get 5000 an hour instead:' -ForegroundColor Gray
+            Write-Host '         $env:CN_GITHUB_TOKEN = "ghp_yourtoken"' -ForegroundColor White
+            Write-Host '       A classic token with NO scopes ticked is enough for public' -ForegroundColor Gray
+            Write-Host '       repositories. Create one at github.com/settings/tokens.' -ForegroundColor Gray
+            Write-Host ''
+            Write-Host "  Meanwhile: https://github.com/$script:Repo/actions" -ForegroundColor Cyan
+
+            return $null
+        }
+
+        Write-Host "Could not reach the GitHub API: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "  https://github.com/$script:Repo/actions" -ForegroundColor Cyan
+
+        return $null
+    }
+}
+
+function Format-CNAge {
+    param([string] $Timestamp)
+
+    if (-not $Timestamp) { return '' }
+
+    $started = [datetime]::Parse($Timestamp).ToUniversalTime()
+    $span    = (Get-Date).ToUniversalTime() - $started
+
+    if ($span.TotalHours -ge 1) {
+        return ('{0:N0}h {1:N0}m' -f [math]::Floor($span.TotalHours), $span.Minutes)
+    }
+
+    return ('{0:N0}m' -f [math]::Max(0, $span.TotalMinutes))
+}
+
+function Resolve-CNRepo {
+    # Prefer the actual remote. Hard-coding the upstream means a fork reports
+    # somebody else's builds, which is worse than reporting none.
+    $url = Invoke-CNGit @('config', '--get', 'remote.origin.url') 2>$null
+
+    if ($url -and $url -match 'github\.com[:/](.+?)(?:\.git)?\s*$') {
+        $script:Repo = $Matches[1].Trim()
+    }
+
+    return $script:Repo
+}
+
+# One invocation, followed to the end.
+#
+# The previous tool answered once and left you to press it again, and the way
+# that ends is a 403 with no explanation of which 403 it is. Watching polls on
+# a sane interval, stops when the run stops, and costs two calls a minute
+# rather than two per keypress.
+function Invoke-CNCIWatch {
+    Resolve-CNRepo | Out-Null
+
+    Write-Host ''
+    Write-Host "Watching $script:Repo. Ctrl+C to stop." -ForegroundColor Cyan
+
+    $interval = if (Get-CNGitHubToken) { 15 } else { 40 }
+
+    while ($true) {
+        $runs = Invoke-CNGitHubApi -Uri "https://api.github.com/repos/$script:Repo/actions/runs?per_page=1" -CacheSeconds 0
+
+        if ($null -eq $runs) { return }
+
+        $latest = $runs.workflow_runs | Select-Object -First 1
+
+        if (-not $latest) {
+            Write-Host 'No runs found.' -ForegroundColor Yellow
+            return
+        }
+
+        $state = if ($latest.conclusion) { $latest.conclusion } else { $latest.status }
+
+        $stamp = (Get-Date).ToString('HH:mm:ss')
+
+        $colour = if ($latest.conclusion -eq 'success') { 'Green' }
+                  elseif ($latest.conclusion) { 'Red' }
+                  else { 'Yellow' }
+
+        Write-Host ("  [{0}] {1,-22} {2,-12} {3}" -f `
+            $stamp, $latest.display_title, $state, (Format-CNAge $latest.created_at)) -ForegroundColor $colour
+
+        if ($latest.status -eq 'completed') {
+            Write-Host ''
+
+            if ($latest.conclusion -eq 'success') {
+                Write-Host 'Done. The packager has uploaded to CurseForge.' -ForegroundColor Green
+            }
+            else {
+                Write-Host "Finished as: $($latest.conclusion)" -ForegroundColor Red
+                Write-Host '  Run .\cn.ps1 ci for the failing step.' -ForegroundColor Cyan
+            }
+
+            return
+        }
+
+        Start-Sleep -Seconds $interval
+    }
+}
+
+function Invoke-CNCI {
+    if ($Watch) {
+        Invoke-CNCIWatch
+        return
+    }
+
+    Resolve-CNRepo | Out-Null
+
+    $runs = Invoke-CNGitHubApi -Uri "https://api.github.com/repos/$script:Repo/actions/runs?per_page=5"
+
+    if ($null -eq $runs) { return }
+
+    Write-Host ''
+    Write-Host 'Recent workflow runs' -ForegroundColor Cyan
+
+    foreach ($r in $runs.workflow_runs) {
+        $colour = if ($r.conclusion -eq 'success') { 'Green' }
+                  elseif ($r.conclusion -eq 'failure') { 'Red' }
+                  elseif ($r.status -eq 'in_progress' -or $r.status -eq 'queued') { 'Yellow' }
+                  else { 'Gray' }
+
+        $state = if ($r.conclusion) { $r.conclusion } else { $r.status }
+
+        Write-Host ('  {0,-22} {1,-12} {2}' -f `
+            $r.display_title, $state, (Format-CNAge $r.created_at)) -ForegroundColor $colour
+    }
+
+    $latest = $runs.workflow_runs | Select-Object -First 1
+
+    if (-not $latest) { return }
+
+    Write-Host ''
+    Write-Host "Latest: $($latest.display_title)   started $(Format-CNAge $latest.created_at) ago" -ForegroundColor Cyan
+
+    $jobs = Invoke-CNGitHubApi -Uri $latest.jobs_url
+
+    if ($null -eq $jobs) { return }
+
+    foreach ($job in $jobs.jobs) {
+        Write-Host "  job '$($job.name)' is $($job.status)" -ForegroundColor Gray
+
+        $index = 0
+
+        foreach ($step in $job.steps) {
+            $index++
+
+            $state = if ($step.conclusion) { $step.conclusion } else { $step.status }
+
+            $colour = if ($step.conclusion -eq 'success') { 'DarkGray' }
+                      elseif ($step.conclusion -eq 'failure') { 'Red' }
+                      elseif ($step.status -eq 'in_progress') { 'Yellow' }
+                      else { 'DarkGray' }
+
+            $note = ''
+
+            if ($step.status -eq 'in_progress' -and $step.started_at) {
+                $running = Format-CNAge $step.started_at
+                $note = "  <-- running for $running"
+            }
+
+            Write-Host ('  {0,-3} {1,-42} {2}{3}' -f $index, $step.name, $state, $note) -ForegroundColor $colour
+        }
+
+        $failed = $job.steps | Where-Object { $_.conclusion -eq 'failure' } | Select-Object -First 1
+
+        if ($failed) {
+            Write-Host ''
+            Write-Host "FAILED AT: $($failed.name)" -ForegroundColor Red
+            Write-Host "  $($latest.html_url)" -ForegroundColor Cyan
+        }
+    }
+
+    Write-Host ''
+
+    if ($script:LastCallWasCached) {
+        Write-Host '  (cached; re-running within 25s costs no API budget)' -ForegroundColor DarkGray
+    }
+    elseif ($script:RateRemaining) {
+        $note = "  API budget remaining: $script:RateRemaining"
+
+        if (-not (Get-CNGitHubToken)) {
+            $note += ' of 60. Set $env:CN_GITHUB_TOKEN for 5000.'
+        }
+
+        $colour = if ([int] $script:RateRemaining -lt 10) { 'Yellow' } else { 'DarkGray' }
+
+        Write-Host $note -ForegroundColor $colour
+    }
+}
+
 function Invoke-CNCheck {
     $problems = 0
 
@@ -32674,6 +33636,39 @@ function Invoke-CNCheck {
         }
         elseif ($coreVersion -eq $script:ToolkitVersion) {
             Write-Host "  ok    toolkit and tree agree at $script:ToolkitVersion" -ForegroundColor DarkGray
+        }
+
+        # THE PROJECT PAGE MUST BE CONSIDERED EVERY RELEASE.
+        #
+        # Not "updated" -- considered. A release with no user-visible change
+        # legitimately needs no new copy, but that has to be a decision
+        # someone made, not one that happened because nobody looked. It
+        # happened because nobody looked, and the author had to ask.
+        #
+        # So the page carries the version it was last reviewed against, and
+        # this fails until that matches the tree. Editing the description
+        # updates it; deciding it needs no edit means bumping the marker,
+        # which is a five-second acknowledgement that the question was asked.
+        $reviewed = Read-CNFile '_curseforge\REVIEWED.txt'
+
+        if ($null -eq $reviewed) {
+            Write-Host '  FAIL  _curseforge\REVIEWED.txt is missing.' -ForegroundColor Red
+            Write-Host '        The project page must be reviewed against each release.' -ForegroundColor Red
+            $problems++
+        }
+        else {
+            $reviewed = $reviewed.Trim()
+
+            if ($coreVersion -and $reviewed -ne $coreVersion) {
+                Write-Host "  FAIL  the project page was last reviewed for $reviewed; the tree is $coreVersion." -ForegroundColor Red
+                Write-Host '        Update _curseforge\DESCRIPTION.md and SUMMARY.txt if this release' -ForegroundColor Red
+                Write-Host '        changes anything a player would notice -- including how fast or' -ForegroundColor Red
+                Write-Host '        how accurate it is -- then put the version in REVIEWED.txt.' -ForegroundColor Red
+                $problems++
+            }
+            else {
+                Write-Host "  ok    project page reviewed for $reviewed" -ForegroundColor DarkGray
+            }
         }
     }
 
@@ -33189,7 +34184,9 @@ function Invoke-CNRelease {
 
         Write-Host ''
         Write-Host "Pushed v$new. GitHub Actions packages and uploads to CurseForge." -ForegroundColor Green
-        Write-Host '  Watch it:  https://github.com/Dam-Beaver-Studios-LLC/CompletionNavigator/actions' -ForegroundColor DarkGray
+        Write-Host '  Watch it:  .\cn.ps1 ci -Watch' -ForegroundColor DarkGray
+        Write-Host '             (one command, follows the run to the end -- do not' -ForegroundColor DarkGray
+        Write-Host '              re-run ci in a loop; that is how the API budget goes)' -ForegroundColor DarkGray
         Write-Host '  Confirm:   .\cn.ps1 doctor' -ForegroundColor DarkGray
     }
     finally {
@@ -33512,6 +34509,7 @@ function Show-CNHelp {
     Write-Host '  package                         Build a distributable zip.'
     Write-Host '  savedvars [-Force]              Locate SavedVariables (-Force opens it).'
     Write-Host '  release <x.y.z>                Bump, commit, tag and push a release.'
+    Write-Host '  ci [-Watch]                    GitHub Actions status; -Watch follows a run to the end.'
     Write-Host '  doctor                         Report the whole release chain state.'
     Write-Host '  harvest [path]                 Fold harvested quests from SavedVariables into Data.'
     Write-Host '  relocate <path>                Copy the source out of Program Files.'
@@ -33551,6 +34549,8 @@ switch ($Command.ToLower()) {
     'sv'        { Invoke-CNSavedVars }
     'harvest'   { Invoke-CNHarvest }
     'release'   { Invoke-CNRelease }
+    'ci'        { Invoke-CNCI }
+    'actions'   { Invoke-CNCI }
     'doctor'    { Invoke-CNDoctor }
     'status'    { Invoke-CNDoctor }
     'relocate'  { Invoke-CNRelocate }

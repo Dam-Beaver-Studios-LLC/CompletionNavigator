@@ -187,6 +187,22 @@ function Follow.Advance(force)
         return false
     end
 
+    -- NOT DURING A FIGHT.
+    --
+    -- Advancing mid-combat re-points the arrow and the waypoint at the next
+    -- camp while the player is being hit by something at this one. It is the
+    -- single most intrusive moment the addon could pick, and there is no
+    -- version of "you finished that stop" that is urgent enough to deliver
+    -- during a fight. The stop is still finished thirty seconds later.
+    --
+    -- A forced advance -- the player pressing the button -- is still obeyed.
+    -- They can see their own screen.
+    if not force and InCombatLockdown and InCombatLockdown() then
+        Follow.deferred = true
+
+        return false
+    end
+
     if not force and current.hub and not Follow.IsStopComplete() then
         -- Still work here. Do not move the waypoint out from under someone
         -- who is walking toward it.
@@ -539,5 +555,14 @@ CN:RegisterCommand{
         Print("Usage: /cn follow [on | off | next]")
     end,
 }
+
+-- Whatever was held back during the fight happens the moment it ends.
+CN:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+    if Follow.active and Follow.deferred then
+        Follow.deferred = false
+
+        Follow.Advance()
+    end
+end)
 
 return Follow

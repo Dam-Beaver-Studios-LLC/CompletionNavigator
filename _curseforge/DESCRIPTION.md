@@ -97,6 +97,12 @@ A native on-screen arrow, in the addon's own colours, that tells you whether you
 
 Account-wide unlocks are recognised as account-wide. Something another character already earned is not recommended to this one, and the reason line says which character did it.
 
+```
+/cn alts
+```
+
+And it will tell you when you are on the wrong character â€” *"your Druid could do four of these"* â€” grouped by who, with the reason for each. It stays quiet when the answer is "you are fine where you are", never suggests switching for progress that is account-wide anyway, and says how long ago each character was last played, because that is how old its information is.
+
 ## What it tracks
 
 Everything below is read from your own client. Nothing is downloaded, and nothing leaves your machine.
@@ -128,7 +134,7 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | | |
 | --- | --- |
 | **Ranks** | One list, ordered by what is actually worth doing now, with a stated reason for every line |
-| **Prioritises deadlines** | Anything expiring climbs as its deadline nears, steeply in the last stretch |
+| **Prioritises deadlines** | Dailies, timed quests, world quests, capped currencies and the Vault all climb as their reset approaches, steeply in the last stretch |
 | **Fits your session** | A plan sized to the minutes you have, from measured travel and learned task times |
 | **Explains** | `/cn why` names what is blocking something â€” level, reputation, profession, faction, an unfinished prerequisite |
 | **Batches** | Nearby work collapses into stops so you stop crossing the zone and coming back |
@@ -153,6 +159,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn follow` | Follow the route, hands-free |
 | `/cn plan <minutes>` | What fits in the time you have |
 | `/cn mode <focus>` | Aim the whole addon at one kind of play |
+| `/cn alts` | Which character should be doing what |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |
@@ -171,9 +178,19 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 ---
 
+## Built to stay out of the way
+
+An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks â€” at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes â€” costs about **five milliseconds**, and the answer to "what next?" is served from cache in **three microseconds**.
+
+It gets there by not doing the same work twice. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
+
+There is a benchmark in the repository, and the numbers above come out of it rather than out of a marketing meeting.
+
 ## Notes
 
 - Where the game does not provide a trustworthy denominator, this addon reports counts rather than inventing a completion percentage. That rule is why some things get a progress bar and others deliberately do not.
+- "Available to pick up nearby" counts what is genuinely within reach and reports anything further out separately, rather than calling a four-minute ride "here".
+- Follow mode never moves your waypoint during a fight. Whatever it was going to do happens when the fight ends.
 - Nothing is taken over without being asked. Auto-advancing the waypoint and rare alerts are off by default.
 - No external server, no account required, no data leaves your machine.
 
