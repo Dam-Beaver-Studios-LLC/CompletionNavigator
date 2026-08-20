@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.30.0'
+$script:ToolkitVersion = '0.31.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.30.0"
+CN.version     = "0.31.0"
 CN.dbVersion   = 4
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -19530,34 +19530,87 @@ end
 -- The ones worth finishing next: started, not finished, closest first.
 -- An untouched zone is not "nearly done", so it sorts below one you have
 -- already put an evening into.
+-- The zones nearest to finished.
+--
+-- TWO BUGS LIVED HERE.
+--
+-- The first: this sorted candidates carefully by completion fraction and then
+-- handed the list to CN.CapCandidates, which re-sorts by `completionValue` --
+-- a field these rows do not have. Every row therefore compared equal and the
+-- tie-break took over, silently reordering the whole list alphabetically by
+-- achievement ID whenever there were more rows than the limit. The careful
+-- ordering above it was thrown away exactly when it mattered.
+--
+-- The second was worse for anyone actually working through content: rows with
+-- `done == 0` were excluded, so a zone you had never set foot in could never
+-- be recommended. For a player sweeping a continent, the untouched zones are
+-- precisely the ones they need to be pointed at.
+--
+-- Untouched zones are now included and ranked separately, because "you are
+-- 90% through this one" and "you have not started this one" are different
+-- suggestions and blending them by fraction would bury every fresh zone under
+-- every half-finished one forever.
 function Loremaster.Closest(limit)
-    local candidates = {}
+    local started, untouched = {}, {}
 
     for id, record in pairs(Records()) do
-        if not record.completed
-            and (record.criteria or 0) > 0
-            and (record.done or 0) > 0 then
-
-            table.insert(candidates, {
+        if not record.completed and (record.criteria or 0) > 0 then
+            local row = {
                 id       = id,
                 name     = record.name,
                 category = record.category,
-                done     = record.done,
+                done     = record.done or 0,
                 criteria = record.criteria,
-                fraction = record.done / record.criteria,
-            })
+                fraction = (record.done or 0) / record.criteria,
+            }
+
+            if row.done > 0 then
+                table.insert(started, row)
+            else
+                table.insert(untouched, row)
+            end
         end
     end
 
-    table.sort(candidates, function(a, b)
+    local function byProgress(a, b)
         if a.fraction ~= b.fraction then
             return a.fraction > b.fraction
         end
 
         return (a.criteria - a.done) < (b.criteria - b.done)
+    end
+
+    table.sort(started, byProgress)
+
+    -- Smallest first among the untouched: a fresh zone with twenty quests is
+    -- a better next step than one with ninety.
+    table.sort(untouched, function(a, b)
+        if a.criteria ~= b.criteria then
+            return a.criteria < b.criteria
+        end
+
+        return tostring(a.name) < tostring(b.name)
     end)
 
-    return CN.CapCandidates(candidates, limit or 10)
+    local ordered = {}
+
+    for _, row in ipairs(started) do
+        table.insert(ordered, row)
+    end
+
+    for _, row in ipairs(untouched) do
+        table.insert(ordered, row)
+    end
+
+    -- Truncate. Deliberately NOT CN.CapCandidates: that re-sorts, and the
+    -- ordering above is the entire product of this function.
+    limit = limit or 10
+
+    while #ordered > limit do
+        table.remove(ordered)
+    end
+
+    return ordered, #started, #untouched
 end
 
 -- The quest achievement that matches the zone you are standing in.
@@ -19599,6 +19652,150 @@ function Loremaster.ForZone(mapID)
 
     return best
 end
+
+------------------------------------------------------------
+-- WHICH ZONE NEXT
+------------------------------------------------------------
+
+-- The addon could answer "what next" and "where in this zone", and had
+-- nothing at all to say about "which zone".
+--
+-- That is the question somebody working through a continent asks every time
+-- they finish one, and answering it badly is worse than not answering: the
+-- wrong zone is twenty minutes of flying and a level range that wastes the
+-- quests. So it is built from things the client will actually vouch for --
+-- how much of each zone's quest achievement is done, how big what remains
+-- is, and whether the zone feeds something you said you were chasing -- and
+-- it says which of those reasons applied.
+
+-- A zone you are most of the way through beats a fresh one, because
+-- finishing is cheaper than starting and leaves fewer loose ends behind.
+Loremaster.nearlyDoneFraction = 0.6
+
+function Loremaster.NextZones(limit)
+    local rows = Loremaster.Closest(50)
+
+    local chased = {}
+
+    -- Anything pinned as a goal makes the zone that serves it worth more.
+    local goals = CN:GetModule("Goals")
+
+    if goals then
+        for _, goal in ipairs(goals.List()) do
+            if goal.type == CN.objectiveTypes.ACHIEVEMENT then
+                chased[goal.id] = true
+            end
+        end
+    end
+
+    local currentZone = Loremaster.ForZone()
+
+    local scored = {}
+
+    for _, row in ipairs(rows) do
+        local reasons = {}
+
+        local value = 0
+
+        if row.fraction >= Loremaster.nearlyDoneFraction then
+            value = value + 3
+            table.insert(reasons, string.format(
+                "%d%% done -- finishing is cheaper than starting",
+                math.floor(row.fraction * 100)))
+        elseif row.done > 0 then
+            value = value + 1
+            table.insert(reasons, string.format("%d of %d done",
+                row.done, row.criteria))
+        else
+            table.insert(reasons, string.format(
+                "not started, %d to do", row.criteria))
+        end
+
+        if chased[row.id] then
+            value = value + 4
+            table.insert(reasons, "you are chasing this")
+        end
+
+        -- The zone you are standing in costs nothing to reach.
+        if currentZone and currentZone.id == row.id then
+            value = value + 2
+            table.insert(reasons, "you are already here")
+        end
+
+        -- A small remainder is a session; a large one is a project.
+        local remaining = row.criteria - row.done
+
+        if remaining <= 5 then
+            value = value + 1
+            table.insert(reasons, remaining .. " left")
+        end
+
+        table.insert(scored, {
+            id        = row.id,
+            name      = row.name,
+            done      = row.done,
+            criteria  = row.criteria,
+            fraction  = row.fraction,
+            remaining = remaining,
+            value     = value,
+            here      = currentZone and currentZone.id == row.id or false,
+            reasons   = reasons,
+        })
+    end
+
+    table.sort(scored, function(a, b)
+        if a.value ~= b.value then
+            return a.value > b.value
+        end
+
+        if a.fraction ~= b.fraction then
+            return a.fraction > b.fraction
+        end
+
+        return tostring(a.name) < tostring(b.name)
+    end)
+
+    limit = limit or 5
+
+    while #scored > limit do
+        table.remove(scored)
+    end
+
+    return scored
+end
+
+CN:RegisterCommand{
+    name    = "zones",
+    aliases = { "nextzone", "wherenext" },
+    order   = 15,
+    help    = "Which zone to work on next, and why.",
+    handler = function()
+        local rows = Loremaster.NextZones(6)
+
+        if #rows == 0 then
+            Print("No unfinished zone achievements are recorded yet.")
+            Print("|cff999999Run |cffffff00/cn loremaster scan|r"
+                .. "|cff999999 to read them from the game.|r")
+            return
+        end
+
+        Print("Zones worth doing next:")
+
+        for index, row in ipairs(rows) do
+            Print(string.format("  %d. %s%s|r  |cff999999%d/%d|r",
+                index,
+                row.here and "|cff5dd2fb" or "|cffffff00",
+                tostring(row.name),
+                row.done, row.criteria))
+
+            Print("     |cff999999" .. table.concat(row.reasons, "; ") .. "|r")
+        end
+
+        Print("|cff999999Ordered by what is cheapest to finish, not by size. "
+            .. "Zones you have not started are included -- an earlier version "
+            .. "left them out entirely.|r")
+    end,
+}
 
 ------------------------------------------------------------
 -- THE STORY, AS DISTINCT FROM EVERYTHING ELSE
@@ -23528,7 +23725,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.30.0
+## Version: 0.31.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -23748,6 +23945,54 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.31.0]
+
+Which zone next -- and two bugs that were hiding the answer.
+
+### Added
+
+- **`/cn zones` -- which zone to work on next, and why.** The addon could
+  answer *what next* and *where in this zone*, and had nothing at all to say
+  about *which zone*. That is the question somebody working through a
+  continent asks every time they finish one.
+  Zones are ranked by what is cheapest to finish rather than by size: a zone
+  you are most of the way through beats a fresh one, a fresh small zone beats
+  a fresh enormous one, the zone you are standing in costs nothing to reach,
+  and anything you have pinned as a goal is lifted. Every line says which of
+  those reasons applied.
+
+### Fixed
+
+- **A zone you had never set foot in could never be recommended.** The
+  underlying list excluded anything with zero progress. For a player sweeping
+  a continent -- the exact person this is for -- the untouched zones are the
+  entire point. They are now included and ranked separately, because "you are
+  90% through this one" and "you have not started this one" are different
+  suggestions and blending them by percentage buries every fresh zone under
+  every half-finished one forever.
+- **The zone ordering was being thrown away.** The list was sorted carefully
+  by completion, then handed to a helper that re-sorts by a field these rows
+  do not carry -- so every row compared equal, the tie-break took over, and
+  the whole list silently collapsed to alphabetical by achievement ID. It only
+  bit when there were more zones than the display limit, which is to say:
+  always, on a real account.
+
+### Notes
+
+- Both bugs sat in eleven lines of code that had passed every release since
+  they were written, because nothing had ever asked the function for fewer
+  rows than it had.
+- Two tests in this release had to be corrected rather than the code.
+  The first demanded that a zone you are chasing outrank everything -- but a
+  zone with one quest left genuinely does beat a ninety-quest zone you have
+  merely pinned, and rewriting the scoring to satisfy the assertion would have
+  made the addon worse to make a line green. The second numbered its fixtures
+  in the correct order, so the broken ordering and the right one produced the
+  same list and the test passed against the bug; the IDs now run deliberately
+  backwards. That is the fourth time in this project a test has agreed with a
+  defect, and every one has been the same mistake: a fixture that cannot tell
+  the two answers apart.
 
 ## [0.30.0]
 
@@ -25465,6 +25710,7 @@ If your plan is measured in zones rather than in the next ten minutes, `/cn prog
 
 - **`/cn progress`** — quests completed on this character, today, this session, your best day, and your rate.
 - **`/cn loremaster`** — zones, continents and expansions, with the game's own quest achievements as the yardstick. Which zone is closest to finished, and how much is left in it.
+- **`/cn zones`** — which zone to work on next, and why. Ranked by what is cheapest to finish rather than by size: a zone you are most of the way through beats a fresh one, a small fresh zone beats an enormous one, and the zone you are standing in costs nothing to reach. Zones you have never started are included, which matters when you are working through a continent.
 - Story and side quests are counted separately, because *finish the story, then do the side quests* is how people actually play.
 
 The **Journey** tab holds all of it in one place.
@@ -25568,6 +25814,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn plan <minutes>` | What fits in the time you have |
 | `/cn mode <focus>` | Aim the whole addon at one kind of play |
 | `/cn alts` | Which character should be doing what |
+| `/cn zones` | Which zone to work on next, and why |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |
@@ -25642,7 +25889,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.30.0
+0.31.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -30487,6 +30734,137 @@ print("\nMeasurements survive a reload:")
 end)()
 
 
+print("\nWhich zone next:")
+
+;(function()
+    local lore = CN:GetModule("Loremaster")
+
+    assert(lore, "the Loremaster module must load")
+
+    local records = lore.Records and lore.Records() or nil
+
+    if not records then
+        print("  no record accessor; skipped")
+        return
+    end
+
+    -- Build a fixture with a known correct ordering, including an untouched
+    -- zone -- which the previous version excluded outright.
+    for id in pairs(records) do records[id] = nil end
+
+    -- IDs deliberately run OPPOSITE to the correct ordering.
+    --
+    -- The broken truncation collapsed the list to alphabetical-by-ID. A first
+    -- version of this fixture numbered the zones in their correct order, so
+    -- the wrong answer and the right answer were the same string and the test
+    -- passed against the bug. Numbering them backwards is what makes the
+    -- assertion capable of failing.
+    records[9009] = { name = "Nearly Done Zone", criteria = 10, done = 9, completed = false }
+    records[9007] = { name = "Halfway Zone",     criteria = 10, done = 5, completed = false }
+    records[9005] = { name = "Barely Started",   criteria = 10, done = 1, completed = false }
+    records[9003] = { name = "Untouched Small",  criteria = 8,  done = 0, completed = false }
+    records[9001] = { name = "Untouched Huge",   criteria = 90, done = 0, completed = false }
+    records[9011] = { name = "Finished Zone",    criteria = 10, done = 10, completed = true }
+
+    local closest, started, untouched = lore.Closest(10)
+
+    -- BUG 1: a zone with no progress could never be recommended. For someone
+    -- sweeping a continent, the untouched zones are the entire point.
+    assert(untouched == 2,
+        "zones with no progress must be included, got " .. tostring(untouched))
+    assert(started == 3, "three zones are part-done, got " .. tostring(started))
+
+    local names = {}
+
+    for _, row in ipairs(closest) do
+        table.insert(names, row.name)
+        assert(row.name ~= "Finished Zone", "a finished zone is not a suggestion")
+    end
+
+    -- BUG 2: the careful ordering was destroyed by a helper that re-sorts on
+    -- a field these rows do not have, collapsing the list to alphabetical by
+    -- ID. Truncating to fewer rows than exist is exactly when it bit.
+    assert(names[1] == "Nearly Done Zone",
+        "the zone closest to finished must come first, got "
+        .. tostring(names[1]))
+
+    local trimmed = lore.Closest(2)
+
+    assert(#trimmed == 2, "the limit is honoured")
+    assert(trimmed[1].name == "Nearly Done Zone" and trimmed[2].name == "Halfway Zone",
+        "truncating must keep the BEST rows, not re-sort them -- got "
+        .. tostring(trimmed[1].name) .. ", " .. tostring(trimmed[2].name))
+
+    -- Among untouched zones, the smaller one is the better next step.
+    local untouchedOrder = {}
+
+    for _, row in ipairs(closest) do
+        if row.done == 0 then
+            table.insert(untouchedOrder, row.name)
+        end
+    end
+
+    assert(untouchedOrder[1] == "Untouched Small",
+        "a fresh zone with fewer quests is the better start, got "
+        .. tostring(untouchedOrder[1]))
+
+    -- THE RECOMMENDATION.
+    local next5 = lore.NextZones(5)
+
+    assert(#next5 > 0, "there is always an answer when work remains")
+    assert(next5[1].name == "Nearly Done Zone",
+        "finishing beats starting, got " .. tostring(next5[1].name))
+    assert(#next5[1].reasons > 0, "and it says why")
+
+    -- Chasing a zone must lift it above one that is merely further along.
+    local pinned = CN:GetModule("Goals")
+
+    pinned.Clear()
+    pinned.Add(CN.objectiveTypes.ACHIEVEMENT, 9001)
+
+    local chased = lore.NextZones(5)
+
+    -- Chasing lifts a zone; it does not override arithmetic.
+    --
+    -- The first version of this assertion demanded the chased zone come
+    -- first outright, and failed -- against correct code. A zone with one
+    -- quest left genuinely does beat a ninety-quest zone you have merely
+    -- pinned, and rewriting the scoring to satisfy the test would have made
+    -- the addon worse to make a line green. The test was wrong.
+    local rankBefore, rankAfter
+
+    for index, row in ipairs(next5) do
+        if row.id == 9001 then rankBefore = index end
+    end
+
+    for index, row in ipairs(chased) do
+        if row.id == 9001 then rankAfter = index end
+    end
+
+    assert(rankAfter and rankBefore and rankAfter < rankBefore,
+        "chasing a zone must move it UP the list: was "
+        .. tostring(rankBefore) .. ", now " .. tostring(rankAfter))
+
+    local sawReason = false
+
+    for _, row in ipairs(chased) do
+        if row.id == 9001 then
+            for _, reason in ipairs(row.reasons) do
+                if reason:find("chasing") then sawReason = true end
+            end
+        end
+    end
+
+    assert(sawReason, "and the reason says so")
+
+    pinned.Clear()
+
+    CN.HandleSlashCommand("zones")
+
+    print("  " .. #closest .. " zones ranked, untouched included")
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -30660,6 +31038,41 @@ bench("IsIgnored + IsDeferred x 10000", 20, function()
         CN.IsDeferred("PET", i)
     end
 end)
+
+------------------------------------------------------------
+-- UI REFRESH
+------------------------------------------------------------
+--
+-- The path that runs while the window is open, which had never been measured.
+
+print("\nUI refresh (what an open window costs):")
+
+do
+    local goals = CN:GetModule("Goals")
+    local chase = CN:GetModule("Chase")
+
+    if goals and chase then
+        goals.Clear()
+
+        for index = 1, 8 do
+            goals.Add(CN.objectiveTypes.ACHIEVEMENT, 10 + (index % 4))
+        end
+
+        bench("Chase.All() with 8 goals", 50, function()
+            chase.All()
+        end)
+
+        goals.Clear()
+    end
+
+    local alts = CN:GetModule("Alts")
+
+    if alts then
+        bench("Alts.Verdict()", 50, function()
+            alts.Verdict()
+        end)
+    end
+end
 '@
 
 $Embedded['coverage.sh'] = @'

@@ -166,3 +166,38 @@ bench("IsIgnored + IsDeferred x 10000", 20, function()
         CN.IsDeferred("PET", i)
     end
 end)
+
+------------------------------------------------------------
+-- UI REFRESH
+------------------------------------------------------------
+--
+-- The path that runs while the window is open, which had never been measured.
+
+print("\nUI refresh (what an open window costs):")
+
+do
+    local goals = CN:GetModule("Goals")
+    local chase = CN:GetModule("Chase")
+
+    if goals and chase then
+        goals.Clear()
+
+        for index = 1, 8 do
+            goals.Add(CN.objectiveTypes.ACHIEVEMENT, 10 + (index % 4))
+        end
+
+        bench("Chase.All() with 8 goals", 50, function()
+            chase.All()
+        end)
+
+        goals.Clear()
+    end
+
+    local alts = CN:GetModule("Alts")
+
+    if alts then
+        bench("Alts.Verdict()", 50, function()
+            alts.Verdict()
+        end)
+    end
+end

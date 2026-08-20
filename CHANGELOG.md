@@ -7,6 +7,54 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.31.0]
+
+Which zone next -- and two bugs that were hiding the answer.
+
+### Added
+
+- **`/cn zones` -- which zone to work on next, and why.** The addon could
+  answer *what next* and *where in this zone*, and had nothing at all to say
+  about *which zone*. That is the question somebody working through a
+  continent asks every time they finish one.
+  Zones are ranked by what is cheapest to finish rather than by size: a zone
+  you are most of the way through beats a fresh one, a fresh small zone beats
+  a fresh enormous one, the zone you are standing in costs nothing to reach,
+  and anything you have pinned as a goal is lifted. Every line says which of
+  those reasons applied.
+
+### Fixed
+
+- **A zone you had never set foot in could never be recommended.** The
+  underlying list excluded anything with zero progress. For a player sweeping
+  a continent -- the exact person this is for -- the untouched zones are the
+  entire point. They are now included and ranked separately, because "you are
+  90% through this one" and "you have not started this one" are different
+  suggestions and blending them by percentage buries every fresh zone under
+  every half-finished one forever.
+- **The zone ordering was being thrown away.** The list was sorted carefully
+  by completion, then handed to a helper that re-sorts by a field these rows
+  do not carry -- so every row compared equal, the tie-break took over, and
+  the whole list silently collapsed to alphabetical by achievement ID. It only
+  bit when there were more zones than the display limit, which is to say:
+  always, on a real account.
+
+### Notes
+
+- Both bugs sat in eleven lines of code that had passed every release since
+  they were written, because nothing had ever asked the function for fewer
+  rows than it had.
+- Two tests in this release had to be corrected rather than the code.
+  The first demanded that a zone you are chasing outrank everything -- but a
+  zone with one quest left genuinely does beat a ninety-quest zone you have
+  merely pinned, and rewriting the scoring to satisfy the assertion would have
+  made the addon worse to make a line green. The second numbered its fixtures
+  in the correct order, so the broken ordering and the right one produced the
+  same list and the test passed against the bug; the IDs now run deliberately
+  backwards. That is the fourth time in this project a test has agreed with a
+  defect, and every one has been the same mistake: a fixture that cannot tell
+  the two answers apart.
+
 ## [0.30.0]
 
 The rest of your Warband, and two things that were quietly throwing work away.

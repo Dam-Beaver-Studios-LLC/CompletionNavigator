@@ -205,34 +205,87 @@ end
 -- The ones worth finishing next: started, not finished, closest first.
 -- An untouched zone is not "nearly done", so it sorts below one you have
 -- already put an evening into.
+-- The zones nearest to finished.
+--
+-- TWO BUGS LIVED HERE.
+--
+-- The first: this sorted candidates carefully by completion fraction and then
+-- handed the list to CN.CapCandidates, which re-sorts by `completionValue` --
+-- a field these rows do not have. Every row therefore compared equal and the
+-- tie-break took over, silently reordering the whole list alphabetically by
+-- achievement ID whenever there were more rows than the limit. The careful
+-- ordering above it was thrown away exactly when it mattered.
+--
+-- The second was worse for anyone actually working through content: rows with
+-- `done == 0` were excluded, so a zone you had never set foot in could never
+-- be recommended. For a player sweeping a continent, the untouched zones are
+-- precisely the ones they need to be pointed at.
+--
+-- Untouched zones are now included and ranked separately, because "you are
+-- 90% through this one" and "you have not started this one" are different
+-- suggestions and blending them by fraction would bury every fresh zone under
+-- every half-finished one forever.
 function Loremaster.Closest(limit)
-    local candidates = {}
+    local started, untouched = {}, {}
 
     for id, record in pairs(Records()) do
-        if not record.completed
-            and (record.criteria or 0) > 0
-            and (record.done or 0) > 0 then
-
-            table.insert(candidates, {
+        if not record.completed and (record.criteria or 0) > 0 then
+            local row = {
                 id       = id,
                 name     = record.name,
                 category = record.category,
-                done     = record.done,
+                done     = record.done or 0,
                 criteria = record.criteria,
-                fraction = record.done / record.criteria,
-            })
+                fraction = (record.done or 0) / record.criteria,
+            }
+
+            if row.done > 0 then
+                table.insert(started, row)
+            else
+                table.insert(untouched, row)
+            end
         end
     end
 
-    table.sort(candidates, function(a, b)
+    local function byProgress(a, b)
         if a.fraction ~= b.fraction then
             return a.fraction > b.fraction
         end
 
         return (a.criteria - a.done) < (b.criteria - b.done)
+    end
+
+    table.sort(started, byProgress)
+
+    -- Smallest first among the untouched: a fresh zone with twenty quests is
+    -- a better next step than one with ninety.
+    table.sort(untouched, function(a, b)
+        if a.criteria ~= b.criteria then
+            return a.criteria < b.criteria
+        end
+
+        return tostring(a.name) < tostring(b.name)
     end)
 
-    return CN.CapCandidates(candidates, limit or 10)
+    local ordered = {}
+
+    for _, row in ipairs(started) do
+        table.insert(ordered, row)
+    end
+
+    for _, row in ipairs(untouched) do
+        table.insert(ordered, row)
+    end
+
+    -- Truncate. Deliberately NOT CN.CapCandidates: that re-sorts, and the
+    -- ordering above is the entire product of this function.
+    limit = limit or 10
+
+    while #ordered > limit do
+        table.remove(ordered)
+    end
+
+    return ordered, #started, #untouched
 end
 
 -- The quest achievement that matches the zone you are standing in.
@@ -274,6 +327,150 @@ function Loremaster.ForZone(mapID)
 
     return best
 end
+
+------------------------------------------------------------
+-- WHICH ZONE NEXT
+------------------------------------------------------------
+
+-- The addon could answer "what next" and "where in this zone", and had
+-- nothing at all to say about "which zone".
+--
+-- That is the question somebody working through a continent asks every time
+-- they finish one, and answering it badly is worse than not answering: the
+-- wrong zone is twenty minutes of flying and a level range that wastes the
+-- quests. So it is built from things the client will actually vouch for --
+-- how much of each zone's quest achievement is done, how big what remains
+-- is, and whether the zone feeds something you said you were chasing -- and
+-- it says which of those reasons applied.
+
+-- A zone you are most of the way through beats a fresh one, because
+-- finishing is cheaper than starting and leaves fewer loose ends behind.
+Loremaster.nearlyDoneFraction = 0.6
+
+function Loremaster.NextZones(limit)
+    local rows = Loremaster.Closest(50)
+
+    local chased = {}
+
+    -- Anything pinned as a goal makes the zone that serves it worth more.
+    local goals = CN:GetModule("Goals")
+
+    if goals then
+        for _, goal in ipairs(goals.List()) do
+            if goal.type == CN.objectiveTypes.ACHIEVEMENT then
+                chased[goal.id] = true
+            end
+        end
+    end
+
+    local currentZone = Loremaster.ForZone()
+
+    local scored = {}
+
+    for _, row in ipairs(rows) do
+        local reasons = {}
+
+        local value = 0
+
+        if row.fraction >= Loremaster.nearlyDoneFraction then
+            value = value + 3
+            table.insert(reasons, string.format(
+                "%d%% done -- finishing is cheaper than starting",
+                math.floor(row.fraction * 100)))
+        elseif row.done > 0 then
+            value = value + 1
+            table.insert(reasons, string.format("%d of %d done",
+                row.done, row.criteria))
+        else
+            table.insert(reasons, string.format(
+                "not started, %d to do", row.criteria))
+        end
+
+        if chased[row.id] then
+            value = value + 4
+            table.insert(reasons, "you are chasing this")
+        end
+
+        -- The zone you are standing in costs nothing to reach.
+        if currentZone and currentZone.id == row.id then
+            value = value + 2
+            table.insert(reasons, "you are already here")
+        end
+
+        -- A small remainder is a session; a large one is a project.
+        local remaining = row.criteria - row.done
+
+        if remaining <= 5 then
+            value = value + 1
+            table.insert(reasons, remaining .. " left")
+        end
+
+        table.insert(scored, {
+            id        = row.id,
+            name      = row.name,
+            done      = row.done,
+            criteria  = row.criteria,
+            fraction  = row.fraction,
+            remaining = remaining,
+            value     = value,
+            here      = currentZone and currentZone.id == row.id or false,
+            reasons   = reasons,
+        })
+    end
+
+    table.sort(scored, function(a, b)
+        if a.value ~= b.value then
+            return a.value > b.value
+        end
+
+        if a.fraction ~= b.fraction then
+            return a.fraction > b.fraction
+        end
+
+        return tostring(a.name) < tostring(b.name)
+    end)
+
+    limit = limit or 5
+
+    while #scored > limit do
+        table.remove(scored)
+    end
+
+    return scored
+end
+
+CN:RegisterCommand{
+    name    = "zones",
+    aliases = { "nextzone", "wherenext" },
+    order   = 15,
+    help    = "Which zone to work on next, and why.",
+    handler = function()
+        local rows = Loremaster.NextZones(6)
+
+        if #rows == 0 then
+            Print("No unfinished zone achievements are recorded yet.")
+            Print("|cff999999Run |cffffff00/cn loremaster scan|r"
+                .. "|cff999999 to read them from the game.|r")
+            return
+        end
+
+        Print("Zones worth doing next:")
+
+        for index, row in ipairs(rows) do
+            Print(string.format("  %d. %s%s|r  |cff999999%d/%d|r",
+                index,
+                row.here and "|cff5dd2fb" or "|cffffff00",
+                tostring(row.name),
+                row.done, row.criteria))
+
+            Print("     |cff999999" .. table.concat(row.reasons, "; ") .. "|r")
+        end
+
+        Print("|cff999999Ordered by what is cheapest to finish, not by size. "
+            .. "Zones you have not started are included -- an earlier version "
+            .. "left them out entirely.|r")
+    end,
+}
 
 ------------------------------------------------------------
 -- THE STORY, AS DISTINCT FROM EVERYTHING ELSE

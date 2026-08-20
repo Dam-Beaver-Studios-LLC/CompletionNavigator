@@ -57,6 +57,7 @@ If your plan is measured in zones rather than in the next ten minutes, `/cn prog
 
 - **`/cn progress`** â€” quests completed on this character, today, this session, your best day, and your rate.
 - **`/cn loremaster`** â€” zones, continents and expansions, with the game's own quest achievements as the yardstick. Which zone is closest to finished, and how much is left in it.
+- **`/cn zones`** â€” which zone to work on next, and why. Ranked by what is cheapest to finish rather than by size: a zone you are most of the way through beats a fresh one, a small fresh zone beats an enormous one, and the zone you are standing in costs nothing to reach. Zones you have never started are included, which matters when you are working through a continent.
 - Story and side quests are counted separately, because *finish the story, then do the side quests* is how people actually play.
 
 The **Journey** tab holds all of it in one place.
@@ -160,6 +161,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn plan <minutes>` | What fits in the time you have |
 | `/cn mode <focus>` | Aim the whole addon at one kind of play |
 | `/cn alts` | Which character should be doing what |
+| `/cn zones` | Which zone to work on next, and why |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |

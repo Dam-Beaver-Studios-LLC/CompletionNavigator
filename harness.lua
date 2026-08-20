@@ -4471,4 +4471,135 @@ print("\nMeasurements survive a reload:")
 end)()
 
 
+print("\nWhich zone next:")
+
+;(function()
+    local lore = CN:GetModule("Loremaster")
+
+    assert(lore, "the Loremaster module must load")
+
+    local records = lore.Records and lore.Records() or nil
+
+    if not records then
+        print("  no record accessor; skipped")
+        return
+    end
+
+    -- Build a fixture with a known correct ordering, including an untouched
+    -- zone -- which the previous version excluded outright.
+    for id in pairs(records) do records[id] = nil end
+
+    -- IDs deliberately run OPPOSITE to the correct ordering.
+    --
+    -- The broken truncation collapsed the list to alphabetical-by-ID. A first
+    -- version of this fixture numbered the zones in their correct order, so
+    -- the wrong answer and the right answer were the same string and the test
+    -- passed against the bug. Numbering them backwards is what makes the
+    -- assertion capable of failing.
+    records[9009] = { name = "Nearly Done Zone", criteria = 10, done = 9, completed = false }
+    records[9007] = { name = "Halfway Zone",     criteria = 10, done = 5, completed = false }
+    records[9005] = { name = "Barely Started",   criteria = 10, done = 1, completed = false }
+    records[9003] = { name = "Untouched Small",  criteria = 8,  done = 0, completed = false }
+    records[9001] = { name = "Untouched Huge",   criteria = 90, done = 0, completed = false }
+    records[9011] = { name = "Finished Zone",    criteria = 10, done = 10, completed = true }
+
+    local closest, started, untouched = lore.Closest(10)
+
+    -- BUG 1: a zone with no progress could never be recommended. For someone
+    -- sweeping a continent, the untouched zones are the entire point.
+    assert(untouched == 2,
+        "zones with no progress must be included, got " .. tostring(untouched))
+    assert(started == 3, "three zones are part-done, got " .. tostring(started))
+
+    local names = {}
+
+    for _, row in ipairs(closest) do
+        table.insert(names, row.name)
+        assert(row.name ~= "Finished Zone", "a finished zone is not a suggestion")
+    end
+
+    -- BUG 2: the careful ordering was destroyed by a helper that re-sorts on
+    -- a field these rows do not have, collapsing the list to alphabetical by
+    -- ID. Truncating to fewer rows than exist is exactly when it bit.
+    assert(names[1] == "Nearly Done Zone",
+        "the zone closest to finished must come first, got "
+        .. tostring(names[1]))
+
+    local trimmed = lore.Closest(2)
+
+    assert(#trimmed == 2, "the limit is honoured")
+    assert(trimmed[1].name == "Nearly Done Zone" and trimmed[2].name == "Halfway Zone",
+        "truncating must keep the BEST rows, not re-sort them -- got "
+        .. tostring(trimmed[1].name) .. ", " .. tostring(trimmed[2].name))
+
+    -- Among untouched zones, the smaller one is the better next step.
+    local untouchedOrder = {}
+
+    for _, row in ipairs(closest) do
+        if row.done == 0 then
+            table.insert(untouchedOrder, row.name)
+        end
+    end
+
+    assert(untouchedOrder[1] == "Untouched Small",
+        "a fresh zone with fewer quests is the better start, got "
+        .. tostring(untouchedOrder[1]))
+
+    -- THE RECOMMENDATION.
+    local next5 = lore.NextZones(5)
+
+    assert(#next5 > 0, "there is always an answer when work remains")
+    assert(next5[1].name == "Nearly Done Zone",
+        "finishing beats starting, got " .. tostring(next5[1].name))
+    assert(#next5[1].reasons > 0, "and it says why")
+
+    -- Chasing a zone must lift it above one that is merely further along.
+    local pinned = CN:GetModule("Goals")
+
+    pinned.Clear()
+    pinned.Add(CN.objectiveTypes.ACHIEVEMENT, 9001)
+
+    local chased = lore.NextZones(5)
+
+    -- Chasing lifts a zone; it does not override arithmetic.
+    --
+    -- The first version of this assertion demanded the chased zone come
+    -- first outright, and failed -- against correct code. A zone with one
+    -- quest left genuinely does beat a ninety-quest zone you have merely
+    -- pinned, and rewriting the scoring to satisfy the test would have made
+    -- the addon worse to make a line green. The test was wrong.
+    local rankBefore, rankAfter
+
+    for index, row in ipairs(next5) do
+        if row.id == 9001 then rankBefore = index end
+    end
+
+    for index, row in ipairs(chased) do
+        if row.id == 9001 then rankAfter = index end
+    end
+
+    assert(rankAfter and rankBefore and rankAfter < rankBefore,
+        "chasing a zone must move it UP the list: was "
+        .. tostring(rankBefore) .. ", now " .. tostring(rankAfter))
+
+    local sawReason = false
+
+    for _, row in ipairs(chased) do
+        if row.id == 9001 then
+            for _, reason in ipairs(row.reasons) do
+                if reason:find("chasing") then sawReason = true end
+            end
+        end
+    end
+
+    assert(sawReason, "and the reason says so")
+
+    pinned.Clear()
+
+    CN.HandleSlashCommand("zones")
+
+    print("  " .. #closest .. " zones ranked, untouched included")
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")
