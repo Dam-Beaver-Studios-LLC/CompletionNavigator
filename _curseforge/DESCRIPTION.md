@@ -92,7 +92,11 @@ It searches the surrounding zone as well as the map under your feet, since a cit
 
 ## Navigation without another addon
 
-A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it â€” it turns and recolours the moment you pass the destination, keeps working when you step into a building or a cave, and when it hands itself to the next stop it tells you which destination it is now pointing at rather than quietly changing what it means. `/cn navdiag` shows every value it is using, if it ever does something you did not expect. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
+A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it â€” it turns and recolours the moment you pass the destination, keeps working when you step into a building or a cave, and when it hands itself to the next stop it tells you which destination it is now pointing at rather than quietly changing what it means.
+
+Its angles are measured in yards rather than in map percentages, because a map normalises to the same square regardless of the shape of the ground: a zone twice as wide as it is tall will skew any bearing taken from raw coordinates, and most zones are not square. And which way your client counts your facing â€” a convention that cannot be derived, only observed â€” is settled by watching you move, since the direction you moved is the direction you were facing. Strafing and walking backwards are discarded rather than counted, so nothing a knockback does can flip your arrow.
+
+`/cn navdiag` shows every value it is using, if it ever does something you did not expect. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
 
 ## Warband-aware
 
@@ -145,6 +149,20 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | **Follows** | Hands-free: the current stop on screen, advancing as you clear it |
 | **Learns** | Quest prerequisites inferred from your own play, never guessed from a single sighting |
 
+## Ask it whether it is working
+
+```
+/cn selftest
+```
+
+Thirteen checks that run against your own client and report what they actually found â€” whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+
+Every check exists because the thing it covers was once broken in a release, and was found by somebody playing rather than by a test. Checks report the value they saw rather than the word "failed", so a bug report is a copy and paste. A check the client cannot answer says so and skips â€” it does not quietly pass.
+
+## In your language
+
+German, Spanish, French, Italian, Korean, Portuguese, Russian and both Chinese scripts are started. Anything not yet translated falls back to English rather than to a blank label or a raw identifier, so a partly translated addon is still a working one. `/cn locale` says how far along your language is, and `/cn locale missing` prints exactly the list a translator would work from. Nothing was machine-translated to make that number look larger.
+
 ## Show only what you care about
 
 Hide any objective type you are not working on â€” quests, pets, mounts, toys, appearances, reputations, professions, currencies, exploration, rares. Hidden types drop out of the recommendations **and** out of the route, so you are not walked to something you said you did not want. Collection totals still count everything.
@@ -163,6 +181,8 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn alts` | Which character should be doing what |
 | `/cn zones` | Which zone to work on next, and why |
 | `/cn navdiag` | Exactly what the arrow is doing, and why |
+| `/cn selftest` | Check the addon against your live client and report what it finds |
+| `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |
 | `/cn progress` | Quests completed: lifetime, today, this session |

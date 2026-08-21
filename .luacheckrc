@@ -37,6 +37,7 @@ read_globals = {
     "UnitFactionGroup", "UnitGUID", "UnitLevel", "UnitName", "UnitRace",
     "UnitSex", "PlaySound", "PlaySoundFile", "GetTime", "UnitPosition",
     "GetPlayerFacing", "InCombatLockdown", "IsInInstance", "GetBindingKey",
+    "GetLocale",
     "GetQuestID", "GetTitleText", "GetCategoryInfo",
 
     -- Globals the client defines that are not functions.

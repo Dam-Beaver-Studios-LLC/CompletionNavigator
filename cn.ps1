@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.39.0'
+$script:ToolkitVersion = '0.40.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.39.0"
+CN.version     = "0.40.0"
 CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -2121,6 +2121,572 @@ CN:RegisterCommand{
         ListOptions()
     end,
 }
+'@
+
+$Embedded['Locale.lua'] = @'
+-- Locale.lua
+-- Completion Navigator :: translated strings, and what happens when there is
+-- no translation.
+--
+-- WHY IT IS BUILT THIS WAY.
+--
+-- The key IS the English string. `CN.L["Destination"]` in a client with no
+-- German table returns "Destination", which is exactly right: a missing
+-- translation shows English, never a blank label and never a raw identifier
+-- like "NAV_DEST_LABEL". Every addon that has invented its own key namespace
+-- has eventually shipped a screen reading "MISSING_KEY_47" to somebody.
+--
+-- That choice has one real cost, and it is worth stating rather than
+-- discovering: changing the English wording of a string silently orphans
+-- every translation of it. The lint in `cn.ps1 check` catches the reverse
+-- case -- a locale file translating a key that no longer exists -- and the
+-- untranslated-string report below catches this one, at runtime, on the
+-- machine where it actually matters.
+--
+-- WHAT IS AND IS NOT TRANSLATED.
+--
+-- The framework covers everything. The bundled translations do not: they
+-- cover the strings the player sees most, and the rest falls back to English
+-- until somebody who speaks the language sends better. `/cn locale` says
+-- exactly how far along that is rather than implying the addon is translated
+-- when it is a quarter translated. Machine-translating the remainder to make
+-- the number look better would produce a German player's first impression of
+-- this addon being written by someone who does not speak German.
+
+local ADDON_NAME, CN = ...
+
+------------------------------------------------------------
+-- THE TABLE
+------------------------------------------------------------
+
+CN.locales = CN.locales or {}
+
+-- Recorded rather than counted: a key that was actually asked for and had no
+-- translation is a real gap in this player's experience, which is a very
+-- different list from every key in the addon.
+CN.localeMisses = CN.localeMisses or {}
+
+local active = {}
+
+CN.L = setmetatable({}, {
+    __index = function(_, key)
+        if type(key) ~= "string" then
+            return key
+        end
+
+        local translated = active[key]
+
+        if translated then
+            return translated
+        end
+
+        CN.localeMisses[key] = true
+
+        return key
+    end,
+
+    -- Assigning into L would look like it worked and change nothing on the
+    -- next reload. Refuse loudly instead.
+    __newindex = function(_, key)
+        error("CN.L is read-only; register strings with CN.RegisterLocale (" ..
+            tostring(key) .. ")", 2)
+    end,
+})
+
+function CN.ClientLocale()
+    if GetLocale then
+        local ok, value = pcall(GetLocale)
+
+        if ok and value then
+            return value
+        end
+    end
+
+    return "enUS"
+end
+
+-- Locale files call this at load. Only the one matching the client is kept,
+-- so a player running an English client pays nothing for the other eight
+-- tables being in the package -- they are never merged into memory.
+function CN.RegisterLocale(code, strings)
+    if type(code) ~= "string" or type(strings) ~= "table" then
+        return false
+    end
+
+    CN.locales[code] = true
+
+    if code ~= CN.ClientLocale() then
+        return false
+    end
+
+    local added = 0
+
+    for key, value in pairs(strings) do
+        if type(key) == "string" and type(value) == "string" and value ~= "" then
+            active[key] = value
+            added = added + 1
+        end
+    end
+
+    return true, added
+end
+
+function CN.LocaleStats()
+    local translated = 0
+
+    for _ in pairs(active) do
+        translated = translated + 1
+    end
+
+    local missing, sample = 0, {}
+
+    for key in pairs(CN.localeMisses) do
+        missing = missing + 1
+
+        if #sample < 12 then
+            table.insert(sample, key)
+        end
+    end
+
+    table.sort(sample)
+
+    return {
+        locale     = CN.ClientLocale(),
+        translated = translated,
+        missing    = missing,
+        sample     = sample,
+        available  = CN.locales,
+    }
+end
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "locale",
+    args    = "[missing]",
+    order   = 33,
+    help    = "Which language the addon is using, and how much is translated.",
+    handler = function(args)
+        local Print = CN.Print
+
+        local stats = CN.LocaleStats()
+
+        args = string.lower(CN.Trim(args or ""))
+
+        Print("Client language: |cffffff00" .. stats.locale .. "|r")
+
+        if stats.locale == "enUS" or stats.locale == "enGB" then
+            -- English is the source language, not an untranslated one. Saying
+            -- "no translation available" to an English player would describe
+            -- a problem that does not exist.
+            Print("|cff999999The addon is written in English, so there is "
+                .. "nothing to translate here.|r")
+        elseif stats.translated == 0 then
+            Print("|cff999999No translation table for this language yet. "
+                .. "Everything shows in English, which is the intended "
+                .. "fallback rather than a fault -- and "
+                .. "|cffffff00/cn locale missing|r is the list a translator "
+                .. "would start from.|r")
+        else
+            Print(stats.translated .. " strings translated.")
+        end
+
+        if args == "missing" then
+            if stats.missing == 0 then
+                Print("Nothing has fallen back to English yet this session.")
+                return
+            end
+
+            Print(stats.missing .. " strings fell back to English this "
+                .. "session:")
+
+            for _, key in ipairs(stats.sample) do
+                Print("  |cff999999" .. key .. "|r")
+            end
+
+            if stats.missing > #stats.sample then
+                Print("  |cff999999... and "
+                    .. (stats.missing - #stats.sample) .. " more.|r")
+            end
+
+            return
+        end
+
+        if stats.missing > 0 then
+            Print("|cff999999" .. stats.missing .. " strings fell back to "
+                .. "English this session. |cffffff00/cn locale missing|r "
+                .. "lists them -- that list is exactly what a translator "
+                .. "needs.|r")
+        end
+
+        local languages = {}
+
+        for code in pairs(stats.available) do
+            table.insert(languages, code)
+        end
+
+        table.sort(languages)
+
+        Print("|cff999999Bundled: " .. table.concat(languages, ", ") .. ".|r")
+    end,
+}
+
+return CN.L
+'@
+
+$Embedded['Locales\enUS.lua'] = @'
+-- Locales/enUS.lua
+-- The canonical key list.
+--
+-- English needs no translation table -- the keys are English. This file exists
+-- so that there is one authoritative list of every key the addon uses, which
+-- `cn.ps1 check` lints every locale file against. A translator working from a
+-- key that no longer exists is translating something no player will ever see.
+--
+-- Add a key here in the same commit that introduces it, or the lint fails.
+
+local ADDON_NAME, CN = ...
+
+CN.localeKeys = {
+    -- Window tabs
+    "Next",
+    "Zone",
+    "Scans",
+    "Now",
+    "Warband",
+    "Vault",
+    "Goals",
+    "Journey",
+    "Remaining",
+    "Collections",
+    "Settings",
+
+    -- The arrow
+    "Destination",
+    "distance unknown",
+    "no position",
+    "another zone",
+    "Arrived: %s",
+    "Now heading to: %s",
+}
+
+CN.RegisterLocale("enUS", {})
+'@
+
+$Embedded['Locales\deDE.lua'] = @'
+-- Locales/deDE.lua
+-- Deutsch.
+--
+-- Only strings whose translation is certain are listed. A key left out falls
+-- back to English, which is a better outcome than a confident guess: a player
+-- reading English knows what it means, and a player reading a mistranslation
+-- does not know that is what they are reading.
+
+local ADDON_NAME, CN = ...
+
+CN.RegisterLocale("deDE", {
+    ["Next"] = "Nächstes",
+    ["Zone"] = "Zone",
+    ["Scans"] = "Scans",
+    ["Now"] = "Jetzt",
+    ["Warband"] = "Kriegsmeute",
+    ["Vault"] = "Schatzkammer",
+    ["Goals"] = "Ziele",
+    ["Journey"] = "Reise",
+    ["Remaining"] = "Verbleibend",
+    ["Collections"] = "Sammlungen",
+    ["Settings"] = "Einstellungen",
+    ["Destination"] = "Ziel",
+    ["distance unknown"] = "Entfernung unbekannt",
+    ["no position"] = "keine Position",
+    ["another zone"] = "andere Zone",
+    ["Arrived: %s"] = "Angekommen: %s",
+    ["Now heading to: %s"] = "Nächstes Ziel: %s",
+})
+'@
+
+$Embedded['Locales\esES.lua'] = @'
+-- Locales/esES.lua
+-- Español.
+--
+-- Only strings whose translation is certain are listed. A key left out falls
+-- back to English, which is a better outcome than a confident guess: a player
+-- reading English knows what it means, and a player reading a mistranslation
+-- does not know that is what they are reading.
+
+local ADDON_NAME, CN = ...
+
+CN.RegisterLocale("esES", {
+    ["Next"] = "Siguiente",
+    ["Zone"] = "Zona",
+    ["Scans"] = "Escaneos",
+    ["Now"] = "Ahora",
+    ["Warband"] = "Banda de guerra",
+    ["Vault"] = "Cámara",
+    ["Goals"] = "Objetivos",
+    ["Journey"] = "Viaje",
+    ["Remaining"] = "Restante",
+    ["Collections"] = "Colecciones",
+    ["Settings"] = "Ajustes",
+    ["Destination"] = "Destino",
+    ["distance unknown"] = "distancia desconocida",
+    ["no position"] = "sin posición",
+    ["another zone"] = "otra zona",
+    ["Arrived: %s"] = "Has llegado: %s",
+    ["Now heading to: %s"] = "Ahora hacia: %s",
+})
+'@
+
+$Embedded['Locales\esMX.lua'] = @'
+-- Locales/esMX.lua
+-- Español de México.
+--
+-- Only strings whose translation is certain are listed. A key left out falls
+-- back to English, which is a better outcome than a confident guess: a player
+-- reading English knows what it means, and a player reading a mistranslation
+-- does not know that is what they are reading.
+
+local ADDON_NAME, CN = ...
+
+CN.RegisterLocale("esMX", {
+    ["Next"] = "Siguiente",
+    ["Zone"] = "Zona",
+    ["Scans"] = "Escaneos",
+    ["Now"] = "Ahora",
+    ["Warband"] = "Banda de guerra",
+    ["Vault"] = "Cámara",
+    ["Goals"] = "Objetivos",
+    ["Journey"] = "Viaje",
+    ["Remaining"] = "Restante",
+    ["Collections"] = "Colecciones",
+    ["Settings"] = "Ajustes",
+    ["Destination"] = "Destino",
+    ["distance unknown"] = "distancia desconocida",
+    ["no position"] = "sin posición",
+    ["another zone"] = "otra zona",
+    ["Arrived: %s"] = "Has llegado: %s",
+    ["Now heading to: %s"] = "Ahora hacia: %s",
+})
+'@
+
+$Embedded['Locales\frFR.lua'] = @'
+-- Locales/frFR.lua
+-- Français.
+--
+-- Only strings whose translation is certain are listed. A key left out falls
+-- back to English, which is a better outcome than a confident guess: a player
+-- reading English knows what it means, and a player reading a mistranslation
+-- does not know that is what they are reading.
+
+local ADDON_NAME, CN = ...
+
+CN.RegisterLocale("frFR", {
+    ["Next"] = "Suivant",
+    ["Zone"] = "Zone",
+    ["Scans"] = "Analyses",
+    ["Now"] = "Maintenant",
+    ["Warband"] = "Bande de guerre",
+    ["Vault"] = "Coffre",
+    ["Goals"] = "Objectifs",
+    ["Journey"] = "Périple",
+    ["Remaining"] = "Restant",
+    ["Collections"] = "Collections",
+    ["Settings"] = "Réglages",
+    ["Destination"] = "Destination",
+    ["distance unknown"] = "distance inconnue",
+    ["no position"] = "position inconnue",
+    ["another zone"] = "autre zone",
+    ["Arrived: %s"] = "Arrivé : %s",
+    ["Now heading to: %s"] = "Nouvelle destination : %s",
+})
+'@
+
+$Embedded['Locales\itIT.lua'] = @'
+-- Locales/itIT.lua
+-- Italiano.
+--
+-- Only strings whose translation is certain are listed. A key left out falls
+-- back to English, which is a better outcome than a confident guess: a player
+-- reading English knows what it means, and a player reading a mistranslation
+-- does not know that is what they are reading.
+
+local ADDON_NAME, CN = ...
+
+CN.RegisterLocale("itIT", {
+    ["Next"] = "Successivo",
+    ["Zone"] = "Zona",
+    ["Scans"] = "Scansioni",
+    ["Now"] = "Adesso",
+    ["Warband"] = "Banda di guerra",
+    ["Vault"] = "Camera del Tesoro",
+    ["Goals"] = "Obiettivi",
+    ["Journey"] = "Viaggio",
+    ["Remaining"] = "Rimanente",
+    ["Collections"] = "Collezioni",
+    ["Settings"] = "Impostazioni",
+    ["Destination"] = "Destinazione",
+    ["distance unknown"] = "distanza sconosciuta",
+    ["no position"] = "nessuna posizione",
+    ["another zone"] = "un'altra zona",
+    ["Arrived: %s"] = "Arrivato: %s",
+    ["Now heading to: %s"] = "Ora verso: %s",
+})
+'@
+
+$Embedded['Locales\koKR.lua'] = @'
+-- Locales/koKR.lua
+-- 한국어.
+--
+-- Only strings whose translation is certain are listed. A key left out falls
+-- back to English, which is a better outcome than a confident guess: a player
+-- reading English knows what it means, and a player reading a mistranslation
+-- does not know that is what they are reading.
+
+local ADDON_NAME, CN = ...
+
+CN.RegisterLocale("koKR", {
+    ["Next"] = "다음",
+    ["Zone"] = "지역",
+    ["Scans"] = "검사",
+    ["Now"] = "지금",
+    ["Goals"] = "목표",
+    ["Journey"] = "여정",
+    ["Remaining"] = "남은 항목",
+    ["Collections"] = "수집품",
+    ["Settings"] = "설정",
+    ["Destination"] = "목적지",
+    ["distance unknown"] = "거리 알 수 없음",
+    ["no position"] = "위치 없음",
+    ["another zone"] = "다른 지역",
+    ["Arrived: %s"] = "도착: %s",
+    ["Now heading to: %s"] = "다음 목적지: %s",
+})
+'@
+
+$Embedded['Locales\ptBR.lua'] = @'
+-- Locales/ptBR.lua
+-- Português do Brasil.
+--
+-- Only strings whose translation is certain are listed. A key left out falls
+-- back to English, which is a better outcome than a confident guess: a player
+-- reading English knows what it means, and a player reading a mistranslation
+-- does not know that is what they are reading.
+
+local ADDON_NAME, CN = ...
+
+CN.RegisterLocale("ptBR", {
+    ["Next"] = "Próximo",
+    ["Zone"] = "Zona",
+    ["Scans"] = "Varreduras",
+    ["Now"] = "Agora",
+    ["Warband"] = "Bando de guerra",
+    ["Vault"] = "Cofre",
+    ["Goals"] = "Objetivos",
+    ["Journey"] = "Jornada",
+    ["Remaining"] = "Restante",
+    ["Collections"] = "Coleções",
+    ["Settings"] = "Configurações",
+    ["Destination"] = "Destino",
+    ["distance unknown"] = "distância desconhecida",
+    ["no position"] = "sem posição",
+    ["another zone"] = "outra zona",
+    ["Arrived: %s"] = "Chegou: %s",
+    ["Now heading to: %s"] = "Agora rumo a: %s",
+})
+'@
+
+$Embedded['Locales\ruRU.lua'] = @'
+-- Locales/ruRU.lua
+-- Русский.
+--
+-- Only strings whose translation is certain are listed. A key left out falls
+-- back to English, which is a better outcome than a confident guess: a player
+-- reading English knows what it means, and a player reading a mistranslation
+-- does not know that is what they are reading.
+
+local ADDON_NAME, CN = ...
+
+CN.RegisterLocale("ruRU", {
+    ["Next"] = "Далее",
+    ["Zone"] = "Зона",
+    ["Scans"] = "Сканирование",
+    ["Now"] = "Сейчас",
+    ["Goals"] = "Цели",
+    ["Journey"] = "Путь",
+    ["Remaining"] = "Осталось",
+    ["Collections"] = "Коллекции",
+    ["Settings"] = "Настройки",
+    ["Destination"] = "Пункт назначения",
+    ["distance unknown"] = "расстояние неизвестно",
+    ["no position"] = "нет координат",
+    ["another zone"] = "другая зона",
+    ["Arrived: %s"] = "Прибытие: %s",
+    ["Now heading to: %s"] = "Следующая цель: %s",
+})
+'@
+
+$Embedded['Locales\zhCN.lua'] = @'
+-- Locales/zhCN.lua
+-- 简体中文.
+--
+-- Only strings whose translation is certain are listed. A key left out falls
+-- back to English, which is a better outcome than a confident guess: a player
+-- reading English knows what it means, and a player reading a mistranslation
+-- does not know that is what they are reading.
+
+local ADDON_NAME, CN = ...
+
+CN.RegisterLocale("zhCN", {
+    ["Next"] = "下一步",
+    ["Zone"] = "区域",
+    ["Scans"] = "扫描",
+    ["Now"] = "当前",
+    ["Warband"] = "战团",
+    ["Vault"] = "宝库",
+    ["Goals"] = "目标",
+    ["Journey"] = "旅程",
+    ["Remaining"] = "剩余",
+    ["Collections"] = "收藏",
+    ["Settings"] = "设置",
+    ["Destination"] = "目的地",
+    ["distance unknown"] = "距离未知",
+    ["no position"] = "无位置",
+    ["another zone"] = "其他区域",
+    ["Arrived: %s"] = "已到达：%s",
+    ["Now heading to: %s"] = "现在前往：%s",
+})
+'@
+
+$Embedded['Locales\zhTW.lua'] = @'
+-- Locales/zhTW.lua
+-- 繁體中文.
+--
+-- Only strings whose translation is certain are listed. A key left out falls
+-- back to English, which is a better outcome than a confident guess: a player
+-- reading English knows what it means, and a player reading a mistranslation
+-- does not know that is what they are reading.
+
+local ADDON_NAME, CN = ...
+
+CN.RegisterLocale("zhTW", {
+    ["Next"] = "下一步",
+    ["Zone"] = "區域",
+    ["Scans"] = "掃描",
+    ["Now"] = "目前",
+    ["Goals"] = "目標",
+    ["Journey"] = "旅程",
+    ["Remaining"] = "剩餘",
+    ["Collections"] = "收藏",
+    ["Settings"] = "設定",
+    ["Destination"] = "目的地",
+    ["distance unknown"] = "距離未知",
+    ["no position"] = "無位置",
+    ["another zone"] = "其他區域",
+    ["Arrived: %s"] = "已抵達：%s",
+    ["Now heading to: %s"] = "現在前往：%s",
+})
 '@
 
 $Embedded['Scoring.lua'] = @'
@@ -4392,7 +4958,7 @@ function UI.RebuildTabs()
             window.tabButtons[index] = button
         end
 
-        button:SetText(tab.name)
+        button:SetText(CN.L[tab.name])
 
         -- GetTextWidth exists on Button, but guard anyway: a nil or
         -- non-numeric return here would break the whole window.
@@ -22525,6 +23091,18 @@ $Embedded['Modules\Navigation.lua'] = @'
 -- if you are lined up with the arrow, moving, and the distance is growing,
 -- the sign is wrong, and the addon flips it and says so. The game is the only
 -- thing that can settle this, so the game settles it.
+--
+-- 0.40.0 added a second, better source of that evidence, because the first
+-- one only fires when the player happens to be lined up with a target and
+-- walking. When you move at all, the direction you moved IS the direction you
+-- were facing, and only one of the two conventions agrees with that. See
+-- NoteMotion below. Strafing and walking backwards agree with neither, so
+-- they are discarded rather than voted on.
+--
+-- 0.40.0 also fixed an error that was present in every zone: angles were
+-- taken from raw map coordinates, which normalize to 0-1 regardless of the
+-- shape of the ground, so every bearing was stretched by the zone's aspect
+-- ratio. See MapScale.
 ------------------------------------------------------------------------------
 
 local ADDON_NAME, CN = ...
@@ -22577,13 +23155,69 @@ function Navigation.SetFacingSign(sign)
     end
 end
 
-function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing, sign)
+-- MAP COORDINATES ARE NOT SQUARE, AND ANGLES MEASURED IN THEM ARE WRONG.
+--
+-- Every map normalizes to 0-1 in both axes regardless of the shape of the
+-- ground it covers. A zone 3,000 yards wide and 2,000 yards tall therefore
+-- stretches its vertical axis by half again, and an angle computed from raw
+-- map deltas is distorted by exactly that ratio: a target genuinely 45
+-- degrees off reads as 56 degrees in that zone, and worse in a long one.
+--
+-- The arrow was doing that in every zone in the game. It is not enough to be
+-- noticed as "the arrow is broken" -- it is enough to be noticed as "the
+-- arrow is sloppy", and both complaints about the arrow so far have come with
+-- "it doesn't point quite right" attached.
+--
+-- The client will tell us the real width and height in yards, so ask once per
+-- map and scale the deltas into yards before taking the angle.
+local mapScales = {}
+
+function Navigation.MapScale(mapID)
+    if not mapID then
+        return 1, 1
+    end
+
+    local cached = mapScales[mapID]
+
+    if cached then
+        return cached[1], cached[2]
+    end
+
+    -- A tenth of the map, measured across the middle, where a map is least
+    -- likely to be doing something strange at its edges.
+    local span = 0.1
+
+    local xYards = Navigation.DistanceYards(mapID, 0.45, 0.5, 0.45 + span, 0.5)
+    local yYards = Navigation.DistanceYards(mapID, 0.5, 0.45, 0.5, 0.45 + span)
+
+    if not xYards or not yYards or xYards <= 0 or yYards <= 0 then
+        -- Do NOT cache a failure. A map the client would not convert during a
+        -- loading screen will convert a second later, and caching 1,1 would
+        -- keep the distortion for the rest of the session.
+        return 1, 1
+    end
+
+    xYards = xYards / span
+    yYards = yYards / span
+
+    mapScales[mapID] = { xYards, yYards }
+
+    return xYards, yYards
+end
+
+function Navigation.ForgetMapScales()
+    mapScales = {}
+end
+
+function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing, sign, mapID)
     if not (playerX and playerY and targetX and targetY and facing) then
         return nil
     end
 
-    local dx = targetX - playerX
-    local dy = targetY - playerY
+    local scaleX, scaleY = Navigation.MapScale(mapID)
+
+    local dx = (targetX - playerX) * scaleX
+    local dy = (targetY - playerY) * scaleY
 
     if dx == 0 and dy == 0 then
         return 0
@@ -22685,7 +23319,7 @@ end
 
 function Navigation.FormatDistance(yards)
     if not yards then
-        return "distance unknown"
+        return CN.L["distance unknown"]
     end
 
     if yards >= 1000 then
@@ -22906,7 +23540,7 @@ function Navigation.Compute()
     local facing = GetPlayerFacing and GetPlayerFacing() or nil
 
     local relative = Navigation.RelativeBearing(playerX, playerY,
-        target.x, target.y, facing)
+        target.x, target.y, facing, nil, mapID)
 
     local yards = Navigation.DistanceYards(mapID, playerX, playerY,
         target.x, target.y)
@@ -22964,6 +23598,201 @@ Navigation.calibrationSamples = 4
 function Navigation.ResetCalibration()
     calibration.lastDistance = nil
     calibration.growing      = 0
+end
+
+-- WHICH WAY DOES GetPlayerFacing COUNT?
+--
+-- Everything the arrow does rests on one unverified assumption: that the
+-- number the client gives for "facing" grows in the same rotational direction
+-- as the bearing computed from map coordinates. If it does not, the arrow is
+-- not backwards -- it is MIRRORED, wrong by twice your facing, which looks
+-- right when you face north and badly wrong when you face east. That is a
+-- much better description of what was reported twice than "backwards" was.
+--
+-- The old evidence for it was indirect: follow the arrow, and if the distance
+-- grows, the arrow is wrong. That only fires when the player happens to be
+-- lined up and walking, and cannot fire at all when nothing is targeted.
+--
+-- This is direct evidence instead, and it needs no target and no cooperation:
+-- when you MOVE, the direction you moved is the direction you were facing.
+-- Compute the bearing of your own movement, compare it against your facing
+-- under both conventions, and only one of them can agree. Strafing and
+-- walking backwards agree with neither, so they are discarded rather than
+-- voted on -- which is what makes this safe to run continuously.
+local motion = {
+    mapID   = nil,
+    x       = nil,
+    y       = nil,
+    agree   = 0,
+    against = 0,
+    samples = 0,
+    verdict = nil,
+}
+
+-- Consecutive agreeing samples before the sign is changed. At ten samples a
+-- second this is a fraction of a second of walking, but every one of them has
+-- to agree, and one strafe resets the count.
+Navigation.motionSamples   = 6
+
+-- Below this the player is standing still; above it, a loading screen, a
+-- flight path or a teleport.
+Navigation.motionMinYards  = 1.5
+Navigation.motionMaxYards  = 60
+
+-- How close a hypothesis has to be to count as agreeing, and how far the
+-- other one has to be to count as excluded.
+Navigation.motionAgree     = math.rad(25)
+Navigation.motionExclude   = math.rad(60)
+
+local function Normalize(angle)
+    while angle > math.pi do
+        angle = angle - (2 * math.pi)
+    end
+
+    while angle <= -math.pi do
+        angle = angle + (2 * math.pi)
+    end
+
+    return angle
+end
+
+Navigation.NormalizeAngle = Normalize
+
+function Navigation.ResetMotion()
+    motion.mapID   = nil
+    motion.x       = nil
+    motion.y       = nil
+    motion.agree   = 0
+    motion.against = 0
+end
+
+function Navigation.MotionState()
+    return {
+        samples = motion.samples,
+        agree   = motion.agree,
+        against = motion.against,
+        verdict = motion.verdict,
+        sign    = Navigation.FacingSign(),
+    }
+end
+
+-- Returns the sign the evidence supports, or nil when this sample said
+-- nothing. Separated from the sampling so it can be tested as arithmetic.
+function Navigation.SignFromMotion(moved, facing)
+    if not moved or not facing then
+        return nil
+    end
+
+    local withPlus  = math.abs(Normalize(moved - facing))
+    local withMinus = math.abs(Normalize(moved + facing))
+
+    if withPlus <= Navigation.motionAgree and withMinus >= Navigation.motionExclude then
+        return 1
+    end
+
+    if withMinus <= Navigation.motionAgree and withPlus >= Navigation.motionExclude then
+        return -1
+    end
+
+    -- Facing north or south makes both conventions agree, so the sample
+    -- cannot distinguish them and must not be counted as evidence for the one
+    -- we happen to be using.
+    return nil
+end
+
+function Navigation.NoteMotion()
+    if not GetPlayerFacing then
+        return nil
+    end
+
+    if UnitOnTaxi and UnitOnTaxi("player") then
+        Navigation.ResetMotion()
+        return nil
+    end
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    if not mapID or not x or not y then
+        Navigation.ResetMotion()
+        return nil
+    end
+
+    local previousMap, previousX, previousY = motion.mapID, motion.x, motion.y
+
+    motion.mapID, motion.x, motion.y = mapID, x, y
+
+    if previousMap ~= mapID or not previousX then
+        return nil
+    end
+
+    local scaleX, scaleY = Navigation.MapScale(mapID)
+
+    local dx = (x - previousX) * scaleX
+    local dy = (y - previousY) * scaleY
+
+    local yards = math.sqrt((dx * dx) + (dy * dy))
+
+    if yards < Navigation.motionMinYards then
+        -- Standing still is not evidence against anything; leave the tally.
+        return nil
+    end
+
+    if yards > Navigation.motionMaxYards then
+        Navigation.ResetMotion()
+        return nil
+    end
+
+    local facing = GetPlayerFacing()
+
+    if not facing then
+        return nil
+    end
+
+    local moved = math.atan(dx, -dy)
+
+    local supported = Navigation.SignFromMotion(moved, facing)
+
+    if not supported then
+        return nil
+    end
+
+    motion.samples = motion.samples + 1
+
+    if supported == Navigation.FacingSign() then
+        motion.agree   = motion.agree + 1
+        motion.against = 0
+
+        -- "corrected" is sticky. Once the sign has been changed this session,
+        -- every subsequent sample agrees with it by construction, and
+        -- overwriting the verdict with "confirmed" would erase the only
+        -- record that anything was ever wrong -- which is the single most
+        -- useful line in a bug report about the arrow.
+        if motion.verdict ~= "corrected" then
+            motion.verdict = "confirmed"
+        end
+
+        return nil
+    end
+
+    motion.against = motion.against + 1
+    motion.agree   = 0
+
+    if motion.against < Navigation.motionSamples then
+        return nil
+    end
+
+    motion.against = 0
+    motion.verdict = "corrected"
+
+    Navigation.SetFacingSign(supported)
+    Navigation.ResetCalibration()
+
+    Print("The arrow was reading your facing backwards. Corrected, and "
+        .. "remembered.")
+    DebugPrint("Facing sign is now " .. Navigation.FacingSign()
+        .. ", from " .. motion.samples .. " movement samples.")
+
+    return supported
 end
 
 function Navigation.NoteObservation(relative, yards)
@@ -23066,18 +23895,18 @@ local function Refresh()
 
     arrow:Show()
 
-    arrow.label:SetText(target.title or "Destination")
+    arrow.label:SetText(target.title or CN.L["Destination"])
 
     if state.state == "WRONG_MAP" then
         arrow.texture:SetRotation(0)
         arrow.texture:SetVertexColor(Navigation.BearingColor(nil))
-        arrow.distance:SetText("|cff999999" .. (state.zone or "another zone") .. "|r")
+        arrow.distance:SetText("|cff999999" .. (state.zone or CN.L["another zone"]) .. "|r")
         return
     end
 
     if state.state == "NO_POSITION" then
         arrow.texture:SetVertexColor(Navigation.BearingColor(nil))
-        arrow.distance:SetText("|cff999999no position|r")
+        arrow.distance:SetText("|cff999999" .. CN.L["no position"] .. "|r")
         return
     end
 
@@ -23110,7 +23939,7 @@ function Navigation.Arrive()
 
     local reached = tostring(target.title or "destination")
 
-    Print("Arrived: " .. reached)
+    Print(string.format(CN.L["Arrived: %s"], reached))
 
     -- Arrival is exactly the moment auto-advance was designed for; before
     -- this, it could only re-point on a timer or an event.
@@ -23129,7 +23958,8 @@ function Navigation.Arrive()
         local now = target and tostring(target.title or "destination")
 
         if now and now ~= reached then
-            Print("Now heading to: |cffffff00" .. now .. "|r")
+            Print(string.format(CN.L["Now heading to: %s"],
+                "|cffffff00" .. now .. "|r"))
         end
     else
         Navigation.Clear()
@@ -23150,6 +23980,11 @@ function Navigation.StartTicker()
     end
 
     ticker = C_Timer.NewTicker(Navigation.tickSeconds, function()
+        -- Before drawing, and regardless of what is being tracked: the
+        -- player's own movement is the only direct evidence of which way the
+        -- client counts facing, and it is free to read.
+        pcall(Navigation.NoteMotion)
+
         local ok, err = pcall(Refresh)
 
         if not ok then
@@ -23216,8 +24051,18 @@ function Navigation.Diagnose()
 
     add("facing (raw)", state.facing
         and string.format("%.1f deg", math.deg(state.facing)) or "nil")
+    local motionState = Navigation.MotionState()
+
     add("facing sign", tostring(Navigation.FacingSign())
         .. " (flips if the arrow ever pointed backwards)")
+    add("facing evidence", motionState.samples == 0
+        and "none yet -- walk a few yards with the arrow up"
+        or string.format("%d movement samples, %s",
+            motionState.samples, tostring(motionState.verdict)))
+
+    local scaleX, scaleY = Navigation.MapScale(state.mapID or bestMap)
+
+    add("map scale", string.format("%.0f x %.0f yards across", scaleX, scaleY))
 
     add("relative bearing", state.relative
         and string.format("%.1f deg", math.deg(state.relative))
@@ -23295,6 +24140,7 @@ function provider.SetWaypoint(mapID, x, y, title)
     }
 
     Navigation.ResetCalibration()
+    Navigation.ResetMotion()
 
     BuildArrow()
     Navigation.StartTicker()
@@ -24510,6 +25356,589 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\SelfTest.lua'] = @'
+-- Modules/SelfTest.lua
+-- Completion Navigator :: assertions that run where reality is.
+--
+-- WHY THIS EXISTS.
+--
+-- Seven times in this project's history, the offline test harness has modelled
+-- the world more simply than the world, and hidden a real defect by doing it:
+--
+--   * a map point modelled as a flat table when the client wants a vector
+--   * a quest list that contained no quest starts
+--   * an achievement criterion with no counter
+--   * a completed-quest list that cost nothing to read
+--   * a player who could not move
+--   * an arrow whose direction nothing could read
+--   * a map that would place the player anywhere it was asked about
+--
+-- Every one was found by somebody playing the game. None was found by the
+-- suite. And no amount of improving the harness fixes that, because the
+-- harness is the thing that is wrong: you cannot write a stub for the part of
+-- reality you did not know you were simplifying.
+--
+-- So these assertions do not run against a stub. They run against the live
+-- client, on the player's own character, and report what they actually got.
+-- When something is wrong, the answer is one command rather than a
+-- conversation.
+--
+-- RULES FOR A CHECK IN HERE.
+--
+--   * It must be read-only. A diagnostic that changes the game is a liability.
+--   * It must be fast. This runs on demand, but nobody waits.
+--   * It must report the VALUE it saw, not just pass or fail. "Failed" starts
+--     a conversation; "expected a number, got nil" ends one.
+--   * A client that cannot answer is a SKIP, not a failure. Being in a raid
+--     with the map API restricted is not a bug in this addon.
+
+local ADDON_NAME, CN = ...
+
+local SelfTest = CN:RegisterModule("SelfTest")
+
+local Print = CN.Print
+
+local Blizzard = CN.Blizzard
+
+------------------------------------------------------------
+-- REGISTRY
+------------------------------------------------------------
+
+SelfTest.results = { PASS = "PASS", FAIL = "FAIL", SKIP = "SKIP" }
+
+CN.selfTests = CN.selfTests or {}
+
+-- definition = {
+--     name  = "short label",
+--     area  = "grouping",
+--     run   = function() return status, detail end,
+-- }
+function CN.RegisterSelfTest(definition)
+    if type(definition) ~= "table" or type(definition.run) ~= "function" then
+        return false
+    end
+
+    definition.order = definition.order or (#CN.selfTests + 1)
+
+    table.insert(CN.selfTests, definition)
+
+    return true
+end
+
+function SelfTest.Run()
+    local rows = { passed = 0, failed = 0, skipped = 0, checks = {} }
+
+    local ordered = {}
+
+    for _, definition in ipairs(CN.selfTests) do
+        table.insert(ordered, definition)
+    end
+
+    table.sort(ordered, function(a, b)
+        if (a.area or "") ~= (b.area or "") then
+            return (a.area or "") < (b.area or "")
+        end
+
+        return (a.order or 0) < (b.order or 0)
+    end)
+
+    for _, definition in ipairs(ordered) do
+        -- A check that throws is a failed check, not a broken command. The
+        -- whole point is to survive a client that surprises us.
+        local ok, status, detail = pcall(definition.run)
+
+        if not ok then
+            -- `status` is the error message here, so read it BEFORE
+            -- overwriting it. Getting that order wrong produced a check that
+            -- reported "the check itself errored: FAIL", which is the least
+            -- useful sentence this module could possibly print.
+            detail = "the check itself errored: " .. tostring(status)
+            status = SelfTest.results.FAIL
+        end
+
+        status = status or SelfTest.results.SKIP
+
+        if status == SelfTest.results.PASS then
+            rows.passed = rows.passed + 1
+        elseif status == SelfTest.results.FAIL then
+            rows.failed = rows.failed + 1
+        else
+            rows.skipped = rows.skipped + 1
+        end
+
+        table.insert(rows.checks, {
+            name   = definition.name,
+            area   = definition.area or "general",
+            status = status,
+            detail = detail,
+        })
+    end
+
+    return rows
+end
+
+------------------------------------------------------------
+-- THE CHECKS
+------------------------------------------------------------
+
+local PASS = SelfTest.results.PASS
+local FAIL = SelfTest.results.FAIL
+local SKIP = SelfTest.results.SKIP
+
+-- 1. Can the client say where we are at all? Everything else depends on it.
+CN.RegisterSelfTest{
+    area = "position",
+    name = "the client reports your position",
+    run  = function()
+        local mapID, x, y = CN.GetPlayerPosition()
+
+        if not mapID then
+            return SKIP, "no map -- are you in an instance or a loading screen?"
+        end
+
+        if not x or not y then
+            return FAIL, "map " .. mapID .. " but no coordinates"
+        end
+
+        return PASS, string.format("map %d at %.1f, %.1f", mapID, x * 100, y * 100)
+    end,
+}
+
+-- 2. THE 0.19.0 BUG. GetWorldPosFromMapPos wants a Vector2D, not a UiMapPoint.
+--    Passing the wrong one returns nothing and every distance reads "unknown".
+--    The stub modelled both as the same shape, so the suite agreed with it.
+CN.RegisterSelfTest{
+    area = "position",
+    name = "map coordinates convert to world positions",
+    run  = function()
+        local mapID, x, y = CN.GetPlayerPosition()
+
+        if not mapID or not x then
+            return SKIP, "no position to convert"
+        end
+
+        local nav = CN:GetModule("Navigation")
+
+        if not nav then
+            return SKIP, "navigation module not loaded"
+        end
+
+        -- Distance from where we are to slightly north of it. Any real
+        -- number proves the conversion works.
+        local yards = nav.DistanceYards(mapID, x, y, x, math.max(0, y - 0.01))
+
+        if not yards then
+            return FAIL, "the client would not convert -- every distance in "
+                .. "the addon will read 'unknown'"
+        end
+
+        return PASS, string.format("%.0f yards per 1%% of this map", yards)
+    end,
+}
+
+-- 3. THE 0.34.0 BUG. Standing in a building changes which map you are "on",
+--    and the arrow gave up when that map differed from the destination's.
+CN.RegisterSelfTest{
+    area = "position",
+    name = "your position is expressible on the surrounding zone",
+    run  = function()
+        local mapID = CN.GetPlayerPosition()
+
+        if not mapID then
+            return SKIP, "no map"
+        end
+
+        local info = Blizzard.GetMapInfo(mapID)
+
+        local parentID = info and info.parentMapID
+
+        if not parentID or parentID == 0 then
+            return SKIP, "this map has no parent -- you are not indoors"
+        end
+
+        local nav = CN:GetModule("Navigation")
+
+        local translated = nav and nav.PlayerPositionOnMap(parentID)
+
+        if not translated then
+            return SKIP, "the parent map cannot place you, which is normal "
+                .. "for a continent"
+        end
+
+        return PASS, string.format("also %.1f, %.1f on map %d",
+            translated.x * 100, translated.y * 100, parentID)
+    end,
+}
+
+-- 4. THE BEARING MATHS, against cases whose answers are known independently
+--    of the code being checked.
+--
+--    NOT written the obvious way. The obvious way is to project a point in
+--    front of the player using the addon's own facing convention and then ask
+--    the addon which way that point is -- which is a tautology: it derives the
+--    expected answer from the thing under test, so it passes whether the
+--    convention is right or wrong. That is precisely the failure this module
+--    exists to stop, and it was in this file before it shipped.
+--
+--    Instead: fix the facing at zero, put a target somewhere whose bearing is
+--    known from the definition of the map (north is up, east is right), and
+--    require the stated answer.
+CN.RegisterSelfTest{
+    area = "navigation",
+    name = "the bearing maths gives known answers",
+    run  = function()
+        local nav = CN:GetModule("Navigation")
+
+        if not nav then
+            return SKIP, "navigation module not loaded"
+        end
+
+        local cases = {
+            { name = "north",  x = 0.5, y = 0.4, expected =   0 },
+            { name = "east",   x = 0.6, y = 0.5, expected =  90 },
+            { name = "south",  x = 0.5, y = 0.6, expected = 180 },
+            { name = "west",   x = 0.4, y = 0.5, expected = -90 },
+        }
+
+        for _, case in ipairs(cases) do
+            -- No mapID: unscaled, so the four cardinals stay cardinal.
+            local relative = nav.RelativeBearing(0.5, 0.5, case.x, case.y, 0, 1)
+
+            if not relative then
+                return FAIL, "no bearing could be computed at all"
+            end
+
+            local degrees = math.deg(relative)
+
+            -- Signed difference, wrapped, so that east reading as west is a
+            -- failure rather than the same distance from zero.
+            local off = math.abs(math.deg(
+                nav.NormalizeAngle(math.rad(degrees - case.expected))))
+
+            if off > 1 then
+                return FAIL, string.format(
+                    "a target due %s read as %.0f degrees, not %d",
+                    case.name, degrees, case.expected)
+            end
+        end
+
+        return PASS, "north, east, south and west all read correctly"
+    end,
+}
+
+-- 5. WHICH WAY THE CLIENT COUNTS FACING, from the player's own movement.
+--
+--    This is the one that would have ended two bug reports. It cannot be
+--    answered by arithmetic, because it is a fact about the client, so it is
+--    answered by evidence: when you walk, the direction you moved is the
+--    direction you were facing, and only one of the two conventions agrees
+--    with that.
+--
+--    No evidence yet is a SKIP with an instruction, not a pass. An
+--    unverified assumption reported as PASS is worse than no check.
+CN.RegisterSelfTest{
+    area = "navigation",
+    name = "your facing is being read the right way round",
+    run  = function()
+        local nav = CN:GetModule("Navigation")
+
+        if not nav then
+            return SKIP, "navigation module not loaded"
+        end
+
+        local state = nav.MotionState()
+
+        if state.samples == 0 then
+            return SKIP, "no movement seen yet -- point the arrow at "
+                .. "something with /cn go, walk forward a few seconds, and "
+                .. "run this again"
+        end
+
+        if state.verdict == "corrected" then
+            return PASS, "was backwards; corrected from your movement and "
+                .. "remembered (sign " .. tostring(state.sign) .. ")"
+        end
+
+        return PASS, string.format(
+            "confirmed against %d movement samples (sign %s)",
+            state.samples, tostring(state.sign))
+    end,
+}
+
+-- 6. MAP ASPECT RATIO. Angles taken from raw map coordinates are distorted by
+--    however far from square the zone is, which was wrong in every zone in
+--    the game until 0.40.0.
+CN.RegisterSelfTest{
+    area = "navigation",
+    name = "angles are corrected for the shape of the zone",
+    run  = function()
+        local nav = CN:GetModule("Navigation")
+
+        local mapID = CN.GetPlayerPosition()
+
+        if not nav or not mapID then
+            return SKIP, "no map"
+        end
+
+        local scaleX, scaleY = nav.MapScale(mapID)
+
+        if scaleX == 1 and scaleY == 1 then
+            return SKIP, "the client would not size this map"
+        end
+
+        local ratio = scaleX / scaleY
+
+        return PASS, string.format(
+            "%.0f x %.0f yards, ratio %.2f -- angles adjusted by it",
+            scaleX, scaleY, ratio)
+    end,
+}
+
+-- 7. THE 0.23.0 BUG. Every quest source read the quest log, so quests
+--    offered in front of the player were structurally invisible.
+CN.RegisterSelfTest{
+    area = "quests",
+    name = "the map reports quests you have NOT accepted",
+    run  = function()
+        local mapID = CN.GetPlayerPosition()
+
+        if not mapID then
+            return SKIP, "no map"
+        end
+
+        local pois = Blizzard.GetQuestPOIsOnMap(mapID)
+
+        if #pois == 0 then
+            return SKIP, "no quest pins on this map at all"
+        end
+
+        local starts = 0
+
+        for _, poi in ipairs(pois) do
+            if poi.isQuestStart then
+                starts = starts + 1
+            end
+        end
+
+        return PASS, string.format("%d pins, %d of them quest starts",
+            #pois, starts)
+    end,
+}
+
+-- 8. THE 0.32.0 BUG. This returns a table of every quest ever completed, not
+--    a count, and reading it on every refresh was expensive.
+CN.RegisterSelfTest{
+    area = "quests",
+    name = "your completed-quest history is readable",
+    run  = function()
+        local progress = CN:GetModule("Progress")
+
+        if not progress then
+            return SKIP, "progress module not loaded"
+        end
+
+        local total = progress.LifetimeCompleted()
+
+        if not total then
+            return SKIP, "the client will not report a lifetime total"
+        end
+
+        return PASS, CN.Comma(total) .. " quests completed on this character"
+    end,
+}
+
+-- 9. THE 0.26.0 BUG. A criterion can carry its own counter, and a stub that
+--    returned only three values hid that.
+CN.RegisterSelfTest{
+    area = "achievements",
+    name = "achievement criteria report their counters",
+    run  = function()
+        local achievements = CN:GetModule("Achievements")
+
+        if not achievements then
+            return SKIP, "achievements module not loaded"
+        end
+
+        local sampled, counted = 0, 0
+
+        for achievementID in pairs(achievements.Store()) do
+            local criteria = Blizzard.GetAchievementCriteriaList(achievementID, 6)
+
+            for _, criterion in ipairs(criteria) do
+                sampled = sampled + 1
+
+                if criterion.required and criterion.required > 1 then
+                    counted = counted + 1
+                end
+            end
+
+            if sampled >= 30 then
+                break
+            end
+        end
+
+        if sampled == 0 then
+            return SKIP, "nothing scanned yet -- run /cn setup"
+        end
+
+        return PASS, string.format("%d criteria read, %d carry a counter",
+            sampled, counted)
+    end,
+}
+
+-- 10. Names the addon deliberately stopped storing must come back live. If
+--    they do not, everything in the interface reads "Pet 12345".
+CN.RegisterSelfTest{
+    area = "names",
+    name = "names resolve from the client rather than from disk",
+    run  = function()
+        local checked, resolved = 0, 0
+
+        local pets = CN:GetModule("Pets")
+
+        if pets then
+            for speciesID in pairs(pets.Store()) do
+                checked = checked + 1
+
+                if Blizzard.GetPetName(speciesID) then
+                    resolved = resolved + 1
+                end
+
+                if checked >= 10 then
+                    break
+                end
+            end
+        end
+
+        if checked == 0 then
+            return SKIP, "no pets scanned yet"
+        end
+
+        if resolved == 0 then
+            return FAIL, "the pet journal named none of "
+                .. checked .. " -- the interface will show numbers"
+        end
+
+        return PASS, resolved .. " of " .. checked .. " named by the client"
+    end,
+}
+
+-- 11. The database is at the version this build expects. A migration that
+--    silently failed leaves a shape nothing else understands.
+CN.RegisterSelfTest{
+    area = "database",
+    name = "the database is at the expected version",
+    run  = function()
+        if not CN.db then
+            return FAIL, "no database loaded at all"
+        end
+
+        local version = CN.db.version
+
+        if version ~= CN.dbVersion then
+            return FAIL, "database is version " .. tostring(version)
+                .. ", this build expects " .. tostring(CN.dbVersion)
+        end
+
+        return PASS, "version " .. tostring(version)
+    end,
+}
+
+-- 12. Size, because it is rewritten on every logout and nobody notices it
+--     growing until logging out becomes slow.
+CN.RegisterSelfTest{
+    area = "database",
+    name = "saved data is a reasonable size",
+    run  = function()
+        if not CN.MeasureDatabase or not CN.db then
+            return SKIP, "cannot measure"
+        end
+
+        local bytes = CN.MeasureDatabase(CN.db)
+
+        local kb = bytes / 1024
+
+        if kb > 4096 then
+            return FAIL, string.format(
+                "%.0f KB -- unusually large; run /cn dbsize to see where", kb)
+        end
+
+        return PASS, string.format("%.0f KB", kb)
+    end,
+}
+
+-- 13. The recommendation engine produces something. An addon whose entire
+--     purpose is answering a question should be asked it.
+CN.RegisterSelfTest{
+    area = "engine",
+    name = "the engine can answer 'what next'",
+    run  = function()
+        local results = CN.Recommend(1)
+
+        if not results or #results == 0 then
+            return SKIP, "nothing actionable right now -- try /cn setup, or "
+                .. "check /cn show in case everything is filtered out"
+        end
+
+        local first = results[1]
+
+        return PASS, tostring(first.name or first.id)
+            .. " (" .. tostring(first.type) .. ")"
+    end,
+}
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "selftest",
+    aliases = { "diagnose", "check" },
+    order   = 32,
+    help    = "Check the addon against the live game and report what it finds.",
+    handler = function()
+        local rows = SelfTest.Run()
+
+        Print("Self-test: " .. #rows.checks .. " checks against the live client.")
+
+        local area
+
+        for _, check in ipairs(rows.checks) do
+            if check.area ~= area then
+                area = check.area
+
+                Print("|cffffd100" .. area .. "|r")
+            end
+
+            local colour = "|cff73b873"
+
+            if check.status == FAIL then
+                colour = "|cfff56b61"
+            elseif check.status == SKIP then
+                colour = "|cff999999"
+            end
+
+            Print(string.format("  %s%-4s|r %s", colour, check.status, check.name))
+
+            if check.detail then
+                Print("        |cff999999" .. check.detail .. "|r")
+            end
+        end
+
+        Print(string.format("%d passed, %d failed, %d skipped.",
+            rows.passed, rows.failed, rows.skipped))
+
+        if rows.failed > 0 then
+            Print("|cffffff00A failure above is a real defect. Copy this "
+                .. "output into a bug report -- it says more than any "
+                .. "description could.|r")
+        end
+    end,
+}
+
+return SelfTest
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -24529,7 +25958,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.39.0
+## Version: 0.40.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -24549,6 +25978,18 @@ Dependencies.lua
 Character.lua
 Events.lua
 Commands.lua
+Locale.lua
+Locales\enUS.lua
+Locales\deDE.lua
+Locales\esES.lua
+Locales\esMX.lua
+Locales\frFR.lua
+Locales\itIT.lua
+Locales\koKR.lua
+Locales\ptBR.lua
+Locales\ruRU.lua
+Locales\zhCN.lua
+Locales\zhTW.lua
 Scoring.lua
 Routing.lua
 UI.lua
@@ -24564,6 +26005,7 @@ Modules\Alts.lua
 Modules\Appearances.lua
 Modules\Breakdown.lua
 Modules\Broker.lua
+Modules\SelfTest.lua
 Modules\Chase.lua
 Modules\Currencies.lua
 Modules\Exploration.lua
@@ -24749,6 +26191,69 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.40.0]
+
+Two things the arrow was doing wrong in every zone, and the addon finally
+speaks more than one language.
+
+### Fixed
+
+- **Every bearing the arrow computed was stretched by the shape of the zone.**
+  Map coordinates run 0 to 1 across a map regardless of the ground underneath,
+  so a zone twice as wide as it is tall compresses east-west angles by half.
+  The arrow measured its angles in those raw coordinates, which means a target
+  genuinely 45 degrees off your left read as something else entirely --
+  in every zone in the game, on every target, since the arrow was written.
+  Bearings are now measured in yards, using the size the client reports for
+  the map you are standing in. Distances were always correct; angles now are
+  too.
+- **Which way the client counts your facing is now settled by watching you
+  move.** Whether `GetPlayerFacing` grows as you turn left or as you turn
+  right is a client convention that cannot be derived, and getting it wrong
+  does not make the arrow point backwards -- it makes it *mirrored*, wrong by
+  twice your facing, which looks correct when you face north and badly wrong
+  when you face east. The old evidence for it was indirect and only arrived
+  when you happened to be lined up with a target and walking. The new evidence
+  is direct: when you move, the direction you moved is the direction you were
+  facing, and only one of the two conventions agrees with that. Strafing and
+  walking backwards agree with neither and are discarded rather than voted on,
+  and six consecutive samples are required, so nothing a knockback or a lag
+  spike does can flip your arrow.
+
+### Added
+
+- **`/cn selftest`** -- thirteen checks that run against your live client and
+  report what they actually found: whether your position converts, whether the
+  arrow's facing has been confirmed against your own movement, whether the map
+  reports quests you have not accepted, whether achievement criteria carry
+  their counters, how large your saved data is, and whether the engine can
+  answer "what next" at all. Each check exists because something it covers was
+  once broken in a shipped release and was found by somebody playing rather
+  than by the test suite. A check that cannot be answered says so and skips;
+  it does not pass.
+- **Translation support, with nine languages started.** German, Spanish
+  (Spain and Mexico), French, Italian, Korean, Portuguese, Russian, and both
+  Chinese scripts. The framework covers the whole addon; the bundled
+  translations cover the strings you see most, and anything not yet translated
+  falls back to English rather than to a blank label. `/cn locale` says how
+  far along your language is, and `/cn locale missing` prints exactly the list
+  a translator would work from. Nothing was machine-translated to make that
+  number look better.
+
+### Notes
+
+- The self-test's bearing check was written the obvious way first: project a
+  point in front of the player using the addon's own facing convention, then
+  ask the addon which way that point is. It passed, and it would have passed
+  with the maths inverted, because it derived its expected answer from the
+  code it was checking. It was rewritten against cases whose answers come from
+  the definition of a map, and the suite now breaks the maths deliberately and
+  requires the check to notice.
+- The offline test suite modelled every map as a flat 1,000 by 1,000 yard
+  square for eight releases, which is why the angle error above survived every
+  test the addon has. The stub now describes maps that are not square, and one
+  of the new checks reports the real shape of the zone you are standing in.
 
 ## [0.39.0]
 
@@ -26907,7 +28412,11 @@ It searches the surrounding zone as well as the map under your feet, since a cit
 
 ## Navigation without another addon
 
-A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it — it turns and recolours the moment you pass the destination, keeps working when you step into a building or a cave, and when it hands itself to the next stop it tells you which destination it is now pointing at rather than quietly changing what it means. `/cn navdiag` shows every value it is using, if it ever does something you did not expect. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
+A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it — it turns and recolours the moment you pass the destination, keeps working when you step into a building or a cave, and when it hands itself to the next stop it tells you which destination it is now pointing at rather than quietly changing what it means.
+
+Its angles are measured in yards rather than in map percentages, because a map normalises to the same square regardless of the shape of the ground: a zone twice as wide as it is tall will skew any bearing taken from raw coordinates, and most zones are not square. And which way your client counts your facing — a convention that cannot be derived, only observed — is settled by watching you move, since the direction you moved is the direction you were facing. Strafing and walking backwards are discarded rather than counted, so nothing a knockback does can flip your arrow.
+
+`/cn navdiag` shows every value it is using, if it ever does something you did not expect. TomTom is used if you have it and is not required. HandyNotes, AllTheThings and BtWQuests are read when present, and nothing breaks when they are absent.
 
 ## Warband-aware
 
@@ -26960,6 +28469,20 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | **Follows** | Hands-free: the current stop on screen, advancing as you clear it |
 | **Learns** | Quest prerequisites inferred from your own play, never guessed from a single sighting |
 
+## Ask it whether it is working
+
+```
+/cn selftest
+```
+
+Thirteen checks that run against your own client and report what they actually found — whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+
+Every check exists because the thing it covers was once broken in a release, and was found by somebody playing rather than by a test. Checks report the value they saw rather than the word "failed", so a bug report is a copy and paste. A check the client cannot answer says so and skips — it does not quietly pass.
+
+## In your language
+
+German, Spanish, French, Italian, Korean, Portuguese, Russian and both Chinese scripts are started. Anything not yet translated falls back to English rather than to a blank label or a raw identifier, so a partly translated addon is still a working one. `/cn locale` says how far along your language is, and `/cn locale missing` prints exactly the list a translator would work from. Nothing was machine-translated to make that number look larger.
+
 ## Show only what you care about
 
 Hide any objective type you are not working on — quests, pets, mounts, toys, appearances, reputations, professions, currencies, exploration, rares. Hidden types drop out of the recommendations **and** out of the route, so you are not walked to something you said you did not want. Collection totals still count everything.
@@ -26978,6 +28501,8 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn alts` | Which character should be doing what |
 | `/cn zones` | Which zone to work on next, and why |
 | `/cn navdiag` | Exactly what the arrow is doing, and why |
+| `/cn selftest` | Check the addon against your live client and report what it finds |
+| `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |
 | `/cn progress` | Quests completed: lifetime, today, this session |
@@ -27057,7 +28582,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.39.0
+0.40.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -27339,6 +28864,7 @@ read_globals = {
     "UnitFactionGroup", "UnitGUID", "UnitLevel", "UnitName", "UnitRace",
     "UnitSex", "PlaySound", "PlaySoundFile", "GetTime", "UnitPosition",
     "GetPlayerFacing", "InCombatLockdown", "IsInInstance", "GetBindingKey",
+    "GetLocale",
     "GetQuestID", "GetTitleText", "GetCategoryInfo",
 
     -- Globals the client defines that are not functions.
@@ -27727,14 +29253,26 @@ C_Map = {
     GetMapChildrenInfo   = function(id) return F.mapChildren[id] or {} end,
     SetUserWaypoint      = function() end,
     ClearUserWaypoint    = function() end,
-    -- A flat 1000x1000 yard square, so expected distances are checkable.
+    -- NOT A SQUARE, because no zone in the game is one.
+    --
+    -- This stub was a flat 1000x1000 yard square for eight releases, which
+    -- made map coordinates isotropic -- one map unit east was the same number
+    -- of yards as one map unit south. Real maps normalize to 0-1 over ground
+    -- that is not square, so an angle taken from raw map coordinates is
+    -- stretched by the zone's aspect ratio, and the square stub hid that in
+    -- every test the addon has. Found by asking what the stub refused to
+    -- model; the answer was "the shape of the world".
+    --
+    -- CN_TEST_MAP_SPAN sets the width and height in yards.
     GetWorldPosFromMapPos = function(mapID, point)
         -- The real client wants a Vector2D. Handing it a UiMapPoint is the
         -- 0.19.0 bug; fail loudly rather than quietly returning a number.
         assert(point and point.x and point.y and not point.uiMapID,
             "GetWorldPosFromMapPos needs a Vector2D, not a UiMapPoint")
 
-        return 1, CreateVector2D(point.x * 1000, point.y * 1000)
+        local span = CN_TEST_MAP_SPAN or { 1000, 1000 }
+
+        return 1, CreateVector2D(point.x * span[1], point.y * span[2])
     end,
 }
 
@@ -27763,6 +29301,11 @@ local offeredTitles = {
 local pendingLoad = {}
 
 CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
+
+-- Width and height of the stub map, in yards. Square by default so that the
+-- distance figures elsewhere stay checkable by hand; tests that care about
+-- angles set it to something the shape of a real zone.
+CN_TEST_MAP_SPAN = { 1000, 1000 }
 
 -- Maps that can express where the player is standing.
 CN_TEST_PLAYER_MAPS = { [94] = true }
@@ -32937,6 +34480,393 @@ print("\nA reminder that stops when the thing is done:")
 end)()
 
 
+
+print("\nLocalization:")
+
+;(function()
+    -- The key IS the string, so a client with no table shows English rather
+    -- than a blank label or a raw identifier. This is the property that makes
+    -- shipping a half-translated addon safe.
+    assert(CN.L["Destination"] == "Destination",
+        "an untranslated key must return itself")
+
+    assert(CN.L["a string nobody has ever translated"]
+        == "a string nobody has ever translated",
+        "a key with no translation anywhere must still be readable")
+
+    -- Asking for it recorded it, which is the list a translator wants: the
+    -- strings THIS player actually saw fall back, not every key in the addon.
+    local stats = CN.LocaleStats()
+
+    assert(stats.missing >= 1,
+        "a key that fell back to English must be recorded as a gap")
+
+    -- Registering a table for a language the client is not running must not
+    -- apply it. Nine tables ship; eight of them must cost nothing.
+    CN.RegisterLocale("xxXX", { ["Destination"] = "WRONG" })
+
+    assert(CN.L["Destination"] == "Destination",
+        "another language's table must never apply to this client")
+
+    assert(CN.locales["xxXX"], "but it is still listed as bundled")
+
+    -- Writing to L would look like it worked and be gone on reload.
+    local wrote = pcall(function() CN.L["Destination"] = "nope" end)
+
+    assert(not wrote, "assigning into CN.L must fail loudly, not silently")
+
+    print("  missing translations fall back to English and are recorded")
+
+    ------------------------------------------------------------
+    -- EVERY TRANSLATED KEY MUST STILL EXIST.
+    --
+    -- The cost of using English as the key is that rewording a string orphans
+    -- its translations, silently. This is the lint that makes that loud: a
+    -- locale file translating a key the addon no longer uses is dead weight
+    -- at best and evidence of a lost translation at worst.
+    ------------------------------------------------------------
+    local known = {}
+
+    for _, key in ipairs(CN.localeKeys or {}) do
+        known[key] = true
+    end
+
+    assert(next(known), "the canonical key list must not be empty")
+
+    local checked, localeFiles = 0, 0
+
+    for code in pairs(CN.locales) do
+        local handle = io.open(ROOT .. "/Locales/" .. code .. ".lua", "r")
+
+        if handle then
+            localeFiles = localeFiles + 1
+
+            local body = handle:read("*a")
+
+            handle:close()
+
+            for key in body:gmatch('%[\"(.-)\"%]%s*=') do
+                assert(known[key],
+                    code .. " translates \"" .. key
+                    .. "\", which is not a key this addon uses any more")
+
+                checked = checked + 1
+            end
+        end
+    end
+
+    assert(localeFiles >= 2, "the locale files must be readable to be linted")
+
+    print("  " .. checked .. " translated strings across " .. localeFiles
+        .. " languages all match live keys")
+
+    -- The command a translator is told to run has to work in both of its
+    -- forms, including the one that lists nothing because nothing is missing.
+    CN.HandleSlashCommand("locale")
+    CN.HandleSlashCommand("locale missing")
+
+    local emptied = CN.localeMisses
+
+    CN.localeMisses = {}
+
+    CN.HandleSlashCommand("locale missing")
+
+    CN.localeMisses = emptied
+
+    -- And the sample must be bounded: a session that fell back on hundreds of
+    -- strings must not print hundreds of lines into the player's chat frame.
+    for index = 1, 40 do
+        local _ = CN.L["harness filler string " .. index]
+    end
+
+    local flooded = CN.LocaleStats()
+
+    assert(flooded.missing >= 40, "every gap is counted")
+    assert(#flooded.sample <= 12,
+        "but only a sample is printed, got " .. #flooded.sample)
+
+    print("  the report is bounded at " .. #flooded.sample
+        .. " lines with " .. flooded.missing .. " gaps")
+end)()
+
+print("\nSelf-test:")
+
+;(function()
+    local selftest = CN:GetModule("SelfTest")
+
+    assert(selftest, "the SelfTest module must load")
+
+    local registered = #CN.selfTests
+
+    assert(CN.RegisterSelfTest({ name = "nonsense" }) == false,
+        "a definition with nothing to run must be refused")
+
+    assert(#CN.selfTests == registered, "and must not be stored")
+
+    -- A CHECK THAT THROWS IS A FAILED CHECK, NOT A BROKEN COMMAND.
+    --
+    -- This is the whole reason the runner exists: these run against a live
+    -- client, which is exactly where an unexpected nil turns into an error,
+    -- and a diagnostic that dies on the first surprise is useless precisely
+    -- when it is needed.
+    CN.RegisterSelfTest{
+        area = "zzz-harness",
+        name = "a check that explodes",
+        run  = function()
+            error("boom")
+        end,
+    }
+
+    -- A check with nothing to say is a SKIP, never a pass.
+    CN.RegisterSelfTest{
+        area = "zzz-harness",
+        name = "a check that answers nothing",
+        run  = function() return nil end,
+    }
+
+    local rows = selftest.Run()
+
+    assert(rows.passed + rows.failed + rows.skipped == #rows.checks,
+        "every check must be counted exactly once")
+
+    local exploded, quiet
+
+    for _, check in ipairs(rows.checks) do
+        if check.name == "a check that explodes" then
+            exploded = check
+        elseif check.name == "a check that answers nothing" then
+            quiet = check
+        end
+    end
+
+    assert(exploded and exploded.status == "FAIL",
+        "a check that throws must be reported as a failure")
+    assert(exploded.detail and exploded.detail:find("boom"),
+        "and must say what it threw: " .. tostring(exploded and exploded.detail))
+    assert(quiet and quiet.status == "SKIP",
+        "a check that returns nothing must SKIP, never pass")
+
+    print("  a throwing check fails the check, not the command")
+
+    ------------------------------------------------------------
+    -- AND THE CHECKS THEMSELVES MUST NOT BE VACUOUS.
+    --
+    -- The bearing check in this module was written the obvious way first:
+    -- project a point ahead using the addon's own facing convention, then ask
+    -- the addon which way that point is. It passed. It would have passed with
+    -- the bearing maths inverted, because it derived its expected answer from
+    -- the code under test. Break the maths and require the check to notice.
+    ------------------------------------------------------------
+    local navigation = CN:GetModule("Navigation")
+
+    local realBearing = navigation.RelativeBearing
+
+    navigation.RelativeBearing = function(px, py, tx, ty, facing, sign, mapID)
+        local answer = realBearing(px, py, tx, ty, facing, sign, mapID)
+
+        -- Mirrored: the exact defect shipped in 0.19.0.
+        return answer and -answer
+    end
+
+    local mutated = selftest.Run()
+
+    navigation.RelativeBearing = realBearing
+
+    local caught = false
+
+    for _, check in ipairs(mutated.checks) do
+        if check.name == "the bearing maths gives known answers"
+            and check.status == "FAIL" then
+            caught = true
+        end
+    end
+
+    assert(caught,
+        "mirroring the bearing must fail the bearing check -- if it does "
+        .. "not, the check is decoration")
+
+    print("  the bearing check fails when the bearing is mirrored")
+
+    -- Remove the harness's own checks so the suite leaves nothing behind.
+    for index = #CN.selfTests, 1, -1 do
+        if CN.selfTests[index].area == "zzz-harness" then
+            table.remove(CN.selfTests, index)
+        end
+    end
+end)()
+
+print("\nWhich way the client counts facing:")
+
+;(function()
+    local navigation = CN:GetModule("Navigation")
+
+    ------------------------------------------------------------
+    -- THE ARITHMETIC.
+    --
+    -- Moving in the direction you face is evidence for one convention and
+    -- against the other -- but ONLY when the two conventions disagree.
+    -- Facing north, they agree, and a sample that cannot tell them apart must
+    -- not be counted as support for whichever one is live.
+    ------------------------------------------------------------
+    assert(navigation.SignFromMotion(math.rad(45), math.rad(45)) == 1,
+        "moving where you face, with facing counted clockwise, supports +1")
+
+    assert(navigation.SignFromMotion(math.rad(-45), math.rad(45)) == -1,
+        "the mirror image of that supports -1")
+
+    assert(navigation.SignFromMotion(0, 0) == nil,
+        "facing north cannot distinguish the two conventions")
+
+    assert(navigation.SignFromMotion(math.rad(135), math.rad(45)) == nil,
+        "strafing supports neither and must be discarded")
+
+    assert(navigation.SignFromMotion(math.rad(45 + 180), math.rad(45)) == nil,
+        "walking backwards supports neither and must be discarded")
+
+    print("  strafing and backpedalling are discarded, not voted on")
+
+    ------------------------------------------------------------
+    -- END TO END, THROUGH THE PATH THE GAME TAKES.
+    --
+    -- Not by calling SignFromMotion in a loop -- by moving the player and
+    -- letting the addon sample it, which is what actually happens in play.
+    ------------------------------------------------------------
+    local savedX, savedY = CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y
+    local savedSpan      = CN_TEST_MAP_SPAN
+
+    CN_TEST_MAP_SPAN = { 1000, 1000 }
+
+    navigation.ForgetMapScales()
+    navigation.SetFacingSign(1)
+    navigation.ResetMotion()
+
+    -- The client, in this scenario, counts facing counter-clockwise: the
+    -- player faces "45 degrees" and walks north-WEST. Under sign +1 the addon
+    -- believes north-east. It must work that out and flip itself.
+    CN_TEST_SetFacing(math.rad(45))
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5, 0.5
+
+    navigation.NoteMotion()
+
+    local step = 0.006
+
+    for _ = 1, navigation.motionSamples + 1 do
+        CN_TEST_PLAYER_X = CN_TEST_PLAYER_X - step
+        CN_TEST_PLAYER_Y = CN_TEST_PLAYER_Y - step
+
+        navigation.NoteMotion()
+    end
+
+    assert(navigation.FacingSign() == -1,
+        "walking where you face, against what the addon believes, must flip "
+        .. "the sign; it is still " .. navigation.FacingSign())
+
+    local state = navigation.MotionState()
+
+    assert(state.verdict == "corrected", "and must record why")
+
+    -- ONE SAMPLE MUST NOT DO IT. A single stray reading -- a knockback, a
+    -- door, a lag spike -- flipping the arrow would be worse than the bug.
+    navigation.SetFacingSign(1)
+    navigation.ResetMotion()
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5, 0.5
+    navigation.NoteMotion()
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5 - step, 0.5 - step
+    navigation.NoteMotion()
+
+    assert(navigation.FacingSign() == 1,
+        "one movement sample must not be enough to flip the arrow")
+
+    print("  a wrong facing convention corrects itself from movement, and "
+        .. "one stray sample does not")
+
+    CN_TEST_SetFacing(0)
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = savedX, savedY
+    CN_TEST_MAP_SPAN = savedSpan
+    navigation.ForgetMapScales()
+    navigation.SetFacingSign(1)
+    navigation.ResetMotion()
+end)()
+
+print("\nAngles on a map that is not square:")
+
+;(function()
+    local navigation = CN:GetModule("Navigation")
+
+    local savedSpan = CN_TEST_MAP_SPAN
+
+    -- Twice as wide as it is tall, which is nothing unusual for a zone.
+    CN_TEST_MAP_SPAN = { 2000, 1000 }
+
+    navigation.ForgetMapScales()
+
+    local scaleX, scaleY = navigation.MapScale(94)
+
+    assert(math.abs(scaleX - 2000) < 1 and math.abs(scaleY - 1000) < 1,
+        "the map's real size must come from the client, got "
+        .. scaleX .. " x " .. scaleY)
+
+    -- A target one map unit east and one map unit south of the player is NOT
+    -- at 135 degrees on this map: east is worth twice as many yards, so the
+    -- true bearing is further round. Raw map coordinates said 135 for eight
+    -- releases, in every zone in the game.
+    local relative = navigation.RelativeBearing(0.4, 0.4, 0.5, 0.5, 0, 1, 94)
+
+    local degrees = math.deg(relative)
+
+    local expected = math.deg(math.atan(2000 * 0.1, -(1000 * 0.1)))
+
+    assert(math.abs(degrees - expected) < 0.5,
+        "the bearing must be taken in yards, not in map units: expected "
+        .. string.format("%.1f", expected) .. ", got "
+        .. string.format("%.1f", degrees))
+
+    assert(math.abs(degrees - 135) > 5,
+        "and it must differ from the unscaled answer, or the correction is "
+        .. "doing nothing")
+
+    -- A SQUARE MAP MUST BE UNCHANGED. The correction has to be free where
+    -- there is nothing to correct.
+    CN_TEST_MAP_SPAN = { 1000, 1000 }
+
+    navigation.ForgetMapScales()
+
+    local square = math.deg(navigation.RelativeBearing(0.4, 0.4, 0.5, 0.5, 0, 1, 94))
+
+    assert(math.abs(square - 135) < 0.5,
+        "on a square map the answer must still be 135, got " .. square)
+
+    -- AND A MAP THE CLIENT WILL NOT SIZE MUST NOT BE CACHED AS SQUARE.
+    -- During a loading screen the conversion fails; caching 1,1 then would
+    -- keep the distortion for the rest of the session.
+    navigation.ForgetMapScales()
+
+    local realConvert = C_Map.GetWorldPosFromMapPos
+
+    C_Map.GetWorldPosFromMapPos = function() return nil, nil end
+
+    local failedX = navigation.MapScale(94)
+
+    C_Map.GetWorldPosFromMapPos = realConvert
+
+    assert(failedX == 1, "an unconvertible map falls back to unscaled")
+
+    local recoveredX = navigation.MapScale(94)
+
+    assert(math.abs(recoveredX - 1000) < 1,
+        "and must be asked again once the client can answer, got "
+        .. recoveredX)
+
+    print("  bearings are measured in yards, and a failed measurement is "
+        .. "not remembered")
+
+    CN_TEST_MAP_SPAN = savedSpan
+    navigation.ForgetMapScales()
+end)()
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -36198,6 +38128,55 @@ function Invoke-CNCheck {
             }
             else {
                 $seen[$cmd] = $file
+            }
+        }
+    }
+
+    # TRANSLATIONS OF STRINGS THAT NO LONGER EXIST.
+    #
+    # The key IS the English string, which is what makes a missing translation
+    # fall back to readable English instead of to a blank label. The price is
+    # that rewording a string silently orphans every translation of it: nothing
+    # errors, nothing is missing, the German player just quietly sees English
+    # again. Locales\enUS.lua carries the canonical key list, and this fails
+    # when a locale file translates something that is not on it.
+    $canonical = Read-CNFile 'Locales\enUS.lua'
+
+    if ($canonical) {
+        $known = @{}
+
+        foreach ($match in [regex]::Matches($canonical, '(?m)^\s*"((?:[^"\\]|\\.)*)",\s*$')) {
+            $known[$match.Groups[1].Value] = $true
+        }
+
+        if ($known.Count -eq 0) {
+            Write-Host '  FAIL  Locales\enUS.lua lists no keys.' -ForegroundColor Red
+            $problems++
+        }
+
+        $localeDir = Join-Path (Get-Location) 'Locales'
+
+        if (Test-Path $localeDir) {
+            $orphans = 0
+
+            foreach ($localeFile in Get-ChildItem -Path $localeDir -Filter '*.lua') {
+                if ($localeFile.Name -eq 'enUS.lua') { continue }
+
+                $body = Get-Content -Raw -LiteralPath $localeFile.FullName
+
+                foreach ($match in [regex]::Matches($body, '\["((?:[^"\\]|\\.)*)"\]\s*=')) {
+                    $key = $match.Groups[1].Value
+
+                    if (-not $known.ContainsKey($key)) {
+                        Write-Host "  FAIL  $($localeFile.Name) translates `"$key`", which is not a key this addon uses." -ForegroundColor Red
+                        $orphans++
+                        $problems++
+                    }
+                }
+            }
+
+            if ($orphans -eq 0) {
+                Write-Host "  ok    every translation matches one of $($known.Count) live strings" -ForegroundColor DarkGray
             }
         }
     }

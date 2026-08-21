@@ -7,6 +7,69 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.40.0]
+
+Two things the arrow was doing wrong in every zone, and the addon finally
+speaks more than one language.
+
+### Fixed
+
+- **Every bearing the arrow computed was stretched by the shape of the zone.**
+  Map coordinates run 0 to 1 across a map regardless of the ground underneath,
+  so a zone twice as wide as it is tall compresses east-west angles by half.
+  The arrow measured its angles in those raw coordinates, which means a target
+  genuinely 45 degrees off your left read as something else entirely --
+  in every zone in the game, on every target, since the arrow was written.
+  Bearings are now measured in yards, using the size the client reports for
+  the map you are standing in. Distances were always correct; angles now are
+  too.
+- **Which way the client counts your facing is now settled by watching you
+  move.** Whether `GetPlayerFacing` grows as you turn left or as you turn
+  right is a client convention that cannot be derived, and getting it wrong
+  does not make the arrow point backwards -- it makes it *mirrored*, wrong by
+  twice your facing, which looks correct when you face north and badly wrong
+  when you face east. The old evidence for it was indirect and only arrived
+  when you happened to be lined up with a target and walking. The new evidence
+  is direct: when you move, the direction you moved is the direction you were
+  facing, and only one of the two conventions agrees with that. Strafing and
+  walking backwards agree with neither and are discarded rather than voted on,
+  and six consecutive samples are required, so nothing a knockback or a lag
+  spike does can flip your arrow.
+
+### Added
+
+- **`/cn selftest`** -- thirteen checks that run against your live client and
+  report what they actually found: whether your position converts, whether the
+  arrow's facing has been confirmed against your own movement, whether the map
+  reports quests you have not accepted, whether achievement criteria carry
+  their counters, how large your saved data is, and whether the engine can
+  answer "what next" at all. Each check exists because something it covers was
+  once broken in a shipped release and was found by somebody playing rather
+  than by the test suite. A check that cannot be answered says so and skips;
+  it does not pass.
+- **Translation support, with nine languages started.** German, Spanish
+  (Spain and Mexico), French, Italian, Korean, Portuguese, Russian, and both
+  Chinese scripts. The framework covers the whole addon; the bundled
+  translations cover the strings you see most, and anything not yet translated
+  falls back to English rather than to a blank label. `/cn locale` says how
+  far along your language is, and `/cn locale missing` prints exactly the list
+  a translator would work from. Nothing was machine-translated to make that
+  number look better.
+
+### Notes
+
+- The self-test's bearing check was written the obvious way first: project a
+  point in front of the player using the addon's own facing convention, then
+  ask the addon which way that point is. It passed, and it would have passed
+  with the maths inverted, because it derived its expected answer from the
+  code it was checking. It was rewritten against cases whose answers come from
+  the definition of a map, and the suite now breaks the maths deliberately and
+  requires the check to notice.
+- The offline test suite modelled every map as a flat 1,000 by 1,000 yard
+  square for eight releases, which is why the angle error above survived every
+  test the addon has. The stub now describes maps that are not square, and one
+  of the new checks reports the real shape of the zone you are standing in.
+
 ## [0.39.0]
 
 An addon that knows nothing should say so more than once.

@@ -40,6 +40,18 @@
 -- if you are lined up with the arrow, moving, and the distance is growing,
 -- the sign is wrong, and the addon flips it and says so. The game is the only
 -- thing that can settle this, so the game settles it.
+--
+-- 0.40.0 added a second, better source of that evidence, because the first
+-- one only fires when the player happens to be lined up with a target and
+-- walking. When you move at all, the direction you moved IS the direction you
+-- were facing, and only one of the two conventions agrees with that. See
+-- NoteMotion below. Strafing and walking backwards agree with neither, so
+-- they are discarded rather than voted on.
+--
+-- 0.40.0 also fixed an error that was present in every zone: angles were
+-- taken from raw map coordinates, which normalize to 0-1 regardless of the
+-- shape of the ground, so every bearing was stretched by the zone's aspect
+-- ratio. See MapScale.
 ------------------------------------------------------------------------------
 
 local ADDON_NAME, CN = ...
@@ -92,13 +104,69 @@ function Navigation.SetFacingSign(sign)
     end
 end
 
-function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing, sign)
+-- MAP COORDINATES ARE NOT SQUARE, AND ANGLES MEASURED IN THEM ARE WRONG.
+--
+-- Every map normalizes to 0-1 in both axes regardless of the shape of the
+-- ground it covers. A zone 3,000 yards wide and 2,000 yards tall therefore
+-- stretches its vertical axis by half again, and an angle computed from raw
+-- map deltas is distorted by exactly that ratio: a target genuinely 45
+-- degrees off reads as 56 degrees in that zone, and worse in a long one.
+--
+-- The arrow was doing that in every zone in the game. It is not enough to be
+-- noticed as "the arrow is broken" -- it is enough to be noticed as "the
+-- arrow is sloppy", and both complaints about the arrow so far have come with
+-- "it doesn't point quite right" attached.
+--
+-- The client will tell us the real width and height in yards, so ask once per
+-- map and scale the deltas into yards before taking the angle.
+local mapScales = {}
+
+function Navigation.MapScale(mapID)
+    if not mapID then
+        return 1, 1
+    end
+
+    local cached = mapScales[mapID]
+
+    if cached then
+        return cached[1], cached[2]
+    end
+
+    -- A tenth of the map, measured across the middle, where a map is least
+    -- likely to be doing something strange at its edges.
+    local span = 0.1
+
+    local xYards = Navigation.DistanceYards(mapID, 0.45, 0.5, 0.45 + span, 0.5)
+    local yYards = Navigation.DistanceYards(mapID, 0.5, 0.45, 0.5, 0.45 + span)
+
+    if not xYards or not yYards or xYards <= 0 or yYards <= 0 then
+        -- Do NOT cache a failure. A map the client would not convert during a
+        -- loading screen will convert a second later, and caching 1,1 would
+        -- keep the distortion for the rest of the session.
+        return 1, 1
+    end
+
+    xYards = xYards / span
+    yYards = yYards / span
+
+    mapScales[mapID] = { xYards, yYards }
+
+    return xYards, yYards
+end
+
+function Navigation.ForgetMapScales()
+    mapScales = {}
+end
+
+function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing, sign, mapID)
     if not (playerX and playerY and targetX and targetY and facing) then
         return nil
     end
 
-    local dx = targetX - playerX
-    local dy = targetY - playerY
+    local scaleX, scaleY = Navigation.MapScale(mapID)
+
+    local dx = (targetX - playerX) * scaleX
+    local dy = (targetY - playerY) * scaleY
 
     if dx == 0 and dy == 0 then
         return 0
@@ -200,7 +268,7 @@ end
 
 function Navigation.FormatDistance(yards)
     if not yards then
-        return "distance unknown"
+        return CN.L["distance unknown"]
     end
 
     if yards >= 1000 then
@@ -421,7 +489,7 @@ function Navigation.Compute()
     local facing = GetPlayerFacing and GetPlayerFacing() or nil
 
     local relative = Navigation.RelativeBearing(playerX, playerY,
-        target.x, target.y, facing)
+        target.x, target.y, facing, nil, mapID)
 
     local yards = Navigation.DistanceYards(mapID, playerX, playerY,
         target.x, target.y)
@@ -479,6 +547,201 @@ Navigation.calibrationSamples = 4
 function Navigation.ResetCalibration()
     calibration.lastDistance = nil
     calibration.growing      = 0
+end
+
+-- WHICH WAY DOES GetPlayerFacing COUNT?
+--
+-- Everything the arrow does rests on one unverified assumption: that the
+-- number the client gives for "facing" grows in the same rotational direction
+-- as the bearing computed from map coordinates. If it does not, the arrow is
+-- not backwards -- it is MIRRORED, wrong by twice your facing, which looks
+-- right when you face north and badly wrong when you face east. That is a
+-- much better description of what was reported twice than "backwards" was.
+--
+-- The old evidence for it was indirect: follow the arrow, and if the distance
+-- grows, the arrow is wrong. That only fires when the player happens to be
+-- lined up and walking, and cannot fire at all when nothing is targeted.
+--
+-- This is direct evidence instead, and it needs no target and no cooperation:
+-- when you MOVE, the direction you moved is the direction you were facing.
+-- Compute the bearing of your own movement, compare it against your facing
+-- under both conventions, and only one of them can agree. Strafing and
+-- walking backwards agree with neither, so they are discarded rather than
+-- voted on -- which is what makes this safe to run continuously.
+local motion = {
+    mapID   = nil,
+    x       = nil,
+    y       = nil,
+    agree   = 0,
+    against = 0,
+    samples = 0,
+    verdict = nil,
+}
+
+-- Consecutive agreeing samples before the sign is changed. At ten samples a
+-- second this is a fraction of a second of walking, but every one of them has
+-- to agree, and one strafe resets the count.
+Navigation.motionSamples   = 6
+
+-- Below this the player is standing still; above it, a loading screen, a
+-- flight path or a teleport.
+Navigation.motionMinYards  = 1.5
+Navigation.motionMaxYards  = 60
+
+-- How close a hypothesis has to be to count as agreeing, and how far the
+-- other one has to be to count as excluded.
+Navigation.motionAgree     = math.rad(25)
+Navigation.motionExclude   = math.rad(60)
+
+local function Normalize(angle)
+    while angle > math.pi do
+        angle = angle - (2 * math.pi)
+    end
+
+    while angle <= -math.pi do
+        angle = angle + (2 * math.pi)
+    end
+
+    return angle
+end
+
+Navigation.NormalizeAngle = Normalize
+
+function Navigation.ResetMotion()
+    motion.mapID   = nil
+    motion.x       = nil
+    motion.y       = nil
+    motion.agree   = 0
+    motion.against = 0
+end
+
+function Navigation.MotionState()
+    return {
+        samples = motion.samples,
+        agree   = motion.agree,
+        against = motion.against,
+        verdict = motion.verdict,
+        sign    = Navigation.FacingSign(),
+    }
+end
+
+-- Returns the sign the evidence supports, or nil when this sample said
+-- nothing. Separated from the sampling so it can be tested as arithmetic.
+function Navigation.SignFromMotion(moved, facing)
+    if not moved or not facing then
+        return nil
+    end
+
+    local withPlus  = math.abs(Normalize(moved - facing))
+    local withMinus = math.abs(Normalize(moved + facing))
+
+    if withPlus <= Navigation.motionAgree and withMinus >= Navigation.motionExclude then
+        return 1
+    end
+
+    if withMinus <= Navigation.motionAgree and withPlus >= Navigation.motionExclude then
+        return -1
+    end
+
+    -- Facing north or south makes both conventions agree, so the sample
+    -- cannot distinguish them and must not be counted as evidence for the one
+    -- we happen to be using.
+    return nil
+end
+
+function Navigation.NoteMotion()
+    if not GetPlayerFacing then
+        return nil
+    end
+
+    if UnitOnTaxi and UnitOnTaxi("player") then
+        Navigation.ResetMotion()
+        return nil
+    end
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    if not mapID or not x or not y then
+        Navigation.ResetMotion()
+        return nil
+    end
+
+    local previousMap, previousX, previousY = motion.mapID, motion.x, motion.y
+
+    motion.mapID, motion.x, motion.y = mapID, x, y
+
+    if previousMap ~= mapID or not previousX then
+        return nil
+    end
+
+    local scaleX, scaleY = Navigation.MapScale(mapID)
+
+    local dx = (x - previousX) * scaleX
+    local dy = (y - previousY) * scaleY
+
+    local yards = math.sqrt((dx * dx) + (dy * dy))
+
+    if yards < Navigation.motionMinYards then
+        -- Standing still is not evidence against anything; leave the tally.
+        return nil
+    end
+
+    if yards > Navigation.motionMaxYards then
+        Navigation.ResetMotion()
+        return nil
+    end
+
+    local facing = GetPlayerFacing()
+
+    if not facing then
+        return nil
+    end
+
+    local moved = math.atan(dx, -dy)
+
+    local supported = Navigation.SignFromMotion(moved, facing)
+
+    if not supported then
+        return nil
+    end
+
+    motion.samples = motion.samples + 1
+
+    if supported == Navigation.FacingSign() then
+        motion.agree   = motion.agree + 1
+        motion.against = 0
+
+        -- "corrected" is sticky. Once the sign has been changed this session,
+        -- every subsequent sample agrees with it by construction, and
+        -- overwriting the verdict with "confirmed" would erase the only
+        -- record that anything was ever wrong -- which is the single most
+        -- useful line in a bug report about the arrow.
+        if motion.verdict ~= "corrected" then
+            motion.verdict = "confirmed"
+        end
+
+        return nil
+    end
+
+    motion.against = motion.against + 1
+    motion.agree   = 0
+
+    if motion.against < Navigation.motionSamples then
+        return nil
+    end
+
+    motion.against = 0
+    motion.verdict = "corrected"
+
+    Navigation.SetFacingSign(supported)
+    Navigation.ResetCalibration()
+
+    Print("The arrow was reading your facing backwards. Corrected, and "
+        .. "remembered.")
+    DebugPrint("Facing sign is now " .. Navigation.FacingSign()
+        .. ", from " .. motion.samples .. " movement samples.")
+
+    return supported
 end
 
 function Navigation.NoteObservation(relative, yards)
@@ -581,18 +844,18 @@ local function Refresh()
 
     arrow:Show()
 
-    arrow.label:SetText(target.title or "Destination")
+    arrow.label:SetText(target.title or CN.L["Destination"])
 
     if state.state == "WRONG_MAP" then
         arrow.texture:SetRotation(0)
         arrow.texture:SetVertexColor(Navigation.BearingColor(nil))
-        arrow.distance:SetText("|cff999999" .. (state.zone or "another zone") .. "|r")
+        arrow.distance:SetText("|cff999999" .. (state.zone or CN.L["another zone"]) .. "|r")
         return
     end
 
     if state.state == "NO_POSITION" then
         arrow.texture:SetVertexColor(Navigation.BearingColor(nil))
-        arrow.distance:SetText("|cff999999no position|r")
+        arrow.distance:SetText("|cff999999" .. CN.L["no position"] .. "|r")
         return
     end
 
@@ -625,7 +888,7 @@ function Navigation.Arrive()
 
     local reached = tostring(target.title or "destination")
 
-    Print("Arrived: " .. reached)
+    Print(string.format(CN.L["Arrived: %s"], reached))
 
     -- Arrival is exactly the moment auto-advance was designed for; before
     -- this, it could only re-point on a timer or an event.
@@ -644,7 +907,8 @@ function Navigation.Arrive()
         local now = target and tostring(target.title or "destination")
 
         if now and now ~= reached then
-            Print("Now heading to: |cffffff00" .. now .. "|r")
+            Print(string.format(CN.L["Now heading to: %s"],
+                "|cffffff00" .. now .. "|r"))
         end
     else
         Navigation.Clear()
@@ -665,6 +929,11 @@ function Navigation.StartTicker()
     end
 
     ticker = C_Timer.NewTicker(Navigation.tickSeconds, function()
+        -- Before drawing, and regardless of what is being tracked: the
+        -- player's own movement is the only direct evidence of which way the
+        -- client counts facing, and it is free to read.
+        pcall(Navigation.NoteMotion)
+
         local ok, err = pcall(Refresh)
 
         if not ok then
@@ -731,8 +1000,18 @@ function Navigation.Diagnose()
 
     add("facing (raw)", state.facing
         and string.format("%.1f deg", math.deg(state.facing)) or "nil")
+    local motionState = Navigation.MotionState()
+
     add("facing sign", tostring(Navigation.FacingSign())
         .. " (flips if the arrow ever pointed backwards)")
+    add("facing evidence", motionState.samples == 0
+        and "none yet -- walk a few yards with the arrow up"
+        or string.format("%d movement samples, %s",
+            motionState.samples, tostring(motionState.verdict)))
+
+    local scaleX, scaleY = Navigation.MapScale(state.mapID or bestMap)
+
+    add("map scale", string.format("%.0f x %.0f yards across", scaleX, scaleY))
 
     add("relative bearing", state.relative
         and string.format("%.1f deg", math.deg(state.relative))
@@ -810,6 +1089,7 @@ function provider.SetWaypoint(mapID, x, y, title)
     }
 
     Navigation.ResetCalibration()
+    Navigation.ResetMotion()
 
     BuildArrow()
     Navigation.StartTicker()

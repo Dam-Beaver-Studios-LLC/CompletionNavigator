@@ -296,14 +296,26 @@ C_Map = {
     GetMapChildrenInfo   = function(id) return F.mapChildren[id] or {} end,
     SetUserWaypoint      = function() end,
     ClearUserWaypoint    = function() end,
-    -- A flat 1000x1000 yard square, so expected distances are checkable.
+    -- NOT A SQUARE, because no zone in the game is one.
+    --
+    -- This stub was a flat 1000x1000 yard square for eight releases, which
+    -- made map coordinates isotropic -- one map unit east was the same number
+    -- of yards as one map unit south. Real maps normalize to 0-1 over ground
+    -- that is not square, so an angle taken from raw map coordinates is
+    -- stretched by the zone's aspect ratio, and the square stub hid that in
+    -- every test the addon has. Found by asking what the stub refused to
+    -- model; the answer was "the shape of the world".
+    --
+    -- CN_TEST_MAP_SPAN sets the width and height in yards.
     GetWorldPosFromMapPos = function(mapID, point)
         -- The real client wants a Vector2D. Handing it a UiMapPoint is the
         -- 0.19.0 bug; fail loudly rather than quietly returning a number.
         assert(point and point.x and point.y and not point.uiMapID,
             "GetWorldPosFromMapPos needs a Vector2D, not a UiMapPoint")
 
-        return 1, CreateVector2D(point.x * 1000, point.y * 1000)
+        local span = CN_TEST_MAP_SPAN or { 1000, 1000 }
+
+        return 1, CreateVector2D(point.x * span[1], point.y * span[2])
     end,
 }
 
@@ -332,6 +344,11 @@ local offeredTitles = {
 local pendingLoad = {}
 
 CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
+
+-- Width and height of the stub map, in yards. Square by default so that the
+-- distance figures elsewhere stay checkable by hand; tests that care about
+-- angles set it to something the shape of a real zone.
+CN_TEST_MAP_SPAN = { 1000, 1000 }
 
 -- Maps that can express where the player is standing.
 CN_TEST_PLAYER_MAPS = { [94] = true }
@@ -5505,5 +5522,392 @@ print("\nA reminder that stops when the thing is done:")
     print("  repeats until scanned, then silent")
 end)()
 
+
+
+print("\nLocalization:")
+
+;(function()
+    -- The key IS the string, so a client with no table shows English rather
+    -- than a blank label or a raw identifier. This is the property that makes
+    -- shipping a half-translated addon safe.
+    assert(CN.L["Destination"] == "Destination",
+        "an untranslated key must return itself")
+
+    assert(CN.L["a string nobody has ever translated"]
+        == "a string nobody has ever translated",
+        "a key with no translation anywhere must still be readable")
+
+    -- Asking for it recorded it, which is the list a translator wants: the
+    -- strings THIS player actually saw fall back, not every key in the addon.
+    local stats = CN.LocaleStats()
+
+    assert(stats.missing >= 1,
+        "a key that fell back to English must be recorded as a gap")
+
+    -- Registering a table for a language the client is not running must not
+    -- apply it. Nine tables ship; eight of them must cost nothing.
+    CN.RegisterLocale("xxXX", { ["Destination"] = "WRONG" })
+
+    assert(CN.L["Destination"] == "Destination",
+        "another language's table must never apply to this client")
+
+    assert(CN.locales["xxXX"], "but it is still listed as bundled")
+
+    -- Writing to L would look like it worked and be gone on reload.
+    local wrote = pcall(function() CN.L["Destination"] = "nope" end)
+
+    assert(not wrote, "assigning into CN.L must fail loudly, not silently")
+
+    print("  missing translations fall back to English and are recorded")
+
+    ------------------------------------------------------------
+    -- EVERY TRANSLATED KEY MUST STILL EXIST.
+    --
+    -- The cost of using English as the key is that rewording a string orphans
+    -- its translations, silently. This is the lint that makes that loud: a
+    -- locale file translating a key the addon no longer uses is dead weight
+    -- at best and evidence of a lost translation at worst.
+    ------------------------------------------------------------
+    local known = {}
+
+    for _, key in ipairs(CN.localeKeys or {}) do
+        known[key] = true
+    end
+
+    assert(next(known), "the canonical key list must not be empty")
+
+    local checked, localeFiles = 0, 0
+
+    for code in pairs(CN.locales) do
+        local handle = io.open(ROOT .. "/Locales/" .. code .. ".lua", "r")
+
+        if handle then
+            localeFiles = localeFiles + 1
+
+            local body = handle:read("*a")
+
+            handle:close()
+
+            for key in body:gmatch('%[\"(.-)\"%]%s*=') do
+                assert(known[key],
+                    code .. " translates \"" .. key
+                    .. "\", which is not a key this addon uses any more")
+
+                checked = checked + 1
+            end
+        end
+    end
+
+    assert(localeFiles >= 2, "the locale files must be readable to be linted")
+
+    print("  " .. checked .. " translated strings across " .. localeFiles
+        .. " languages all match live keys")
+
+    -- The command a translator is told to run has to work in both of its
+    -- forms, including the one that lists nothing because nothing is missing.
+    CN.HandleSlashCommand("locale")
+    CN.HandleSlashCommand("locale missing")
+
+    local emptied = CN.localeMisses
+
+    CN.localeMisses = {}
+
+    CN.HandleSlashCommand("locale missing")
+
+    CN.localeMisses = emptied
+
+    -- And the sample must be bounded: a session that fell back on hundreds of
+    -- strings must not print hundreds of lines into the player's chat frame.
+    for index = 1, 40 do
+        local _ = CN.L["harness filler string " .. index]
+    end
+
+    local flooded = CN.LocaleStats()
+
+    assert(flooded.missing >= 40, "every gap is counted")
+    assert(#flooded.sample <= 12,
+        "but only a sample is printed, got " .. #flooded.sample)
+
+    print("  the report is bounded at " .. #flooded.sample
+        .. " lines with " .. flooded.missing .. " gaps")
+end)()
+
+print("\nSelf-test:")
+
+;(function()
+    local selftest = CN:GetModule("SelfTest")
+
+    assert(selftest, "the SelfTest module must load")
+
+    local registered = #CN.selfTests
+
+    assert(CN.RegisterSelfTest({ name = "nonsense" }) == false,
+        "a definition with nothing to run must be refused")
+
+    assert(#CN.selfTests == registered, "and must not be stored")
+
+    -- A CHECK THAT THROWS IS A FAILED CHECK, NOT A BROKEN COMMAND.
+    --
+    -- This is the whole reason the runner exists: these run against a live
+    -- client, which is exactly where an unexpected nil turns into an error,
+    -- and a diagnostic that dies on the first surprise is useless precisely
+    -- when it is needed.
+    CN.RegisterSelfTest{
+        area = "zzz-harness",
+        name = "a check that explodes",
+        run  = function()
+            error("boom")
+        end,
+    }
+
+    -- A check with nothing to say is a SKIP, never a pass.
+    CN.RegisterSelfTest{
+        area = "zzz-harness",
+        name = "a check that answers nothing",
+        run  = function() return nil end,
+    }
+
+    local rows = selftest.Run()
+
+    assert(rows.passed + rows.failed + rows.skipped == #rows.checks,
+        "every check must be counted exactly once")
+
+    local exploded, quiet
+
+    for _, check in ipairs(rows.checks) do
+        if check.name == "a check that explodes" then
+            exploded = check
+        elseif check.name == "a check that answers nothing" then
+            quiet = check
+        end
+    end
+
+    assert(exploded and exploded.status == "FAIL",
+        "a check that throws must be reported as a failure")
+    assert(exploded.detail and exploded.detail:find("boom"),
+        "and must say what it threw: " .. tostring(exploded and exploded.detail))
+    assert(quiet and quiet.status == "SKIP",
+        "a check that returns nothing must SKIP, never pass")
+
+    print("  a throwing check fails the check, not the command")
+
+    ------------------------------------------------------------
+    -- AND THE CHECKS THEMSELVES MUST NOT BE VACUOUS.
+    --
+    -- The bearing check in this module was written the obvious way first:
+    -- project a point ahead using the addon's own facing convention, then ask
+    -- the addon which way that point is. It passed. It would have passed with
+    -- the bearing maths inverted, because it derived its expected answer from
+    -- the code under test. Break the maths and require the check to notice.
+    ------------------------------------------------------------
+    local navigation = CN:GetModule("Navigation")
+
+    local realBearing = navigation.RelativeBearing
+
+    navigation.RelativeBearing = function(px, py, tx, ty, facing, sign, mapID)
+        local answer = realBearing(px, py, tx, ty, facing, sign, mapID)
+
+        -- Mirrored: the exact defect shipped in 0.19.0.
+        return answer and -answer
+    end
+
+    local mutated = selftest.Run()
+
+    navigation.RelativeBearing = realBearing
+
+    local caught = false
+
+    for _, check in ipairs(mutated.checks) do
+        if check.name == "the bearing maths gives known answers"
+            and check.status == "FAIL" then
+            caught = true
+        end
+    end
+
+    assert(caught,
+        "mirroring the bearing must fail the bearing check -- if it does "
+        .. "not, the check is decoration")
+
+    print("  the bearing check fails when the bearing is mirrored")
+
+    -- Remove the harness's own checks so the suite leaves nothing behind.
+    for index = #CN.selfTests, 1, -1 do
+        if CN.selfTests[index].area == "zzz-harness" then
+            table.remove(CN.selfTests, index)
+        end
+    end
+end)()
+
+print("\nWhich way the client counts facing:")
+
+;(function()
+    local navigation = CN:GetModule("Navigation")
+
+    ------------------------------------------------------------
+    -- THE ARITHMETIC.
+    --
+    -- Moving in the direction you face is evidence for one convention and
+    -- against the other -- but ONLY when the two conventions disagree.
+    -- Facing north, they agree, and a sample that cannot tell them apart must
+    -- not be counted as support for whichever one is live.
+    ------------------------------------------------------------
+    assert(navigation.SignFromMotion(math.rad(45), math.rad(45)) == 1,
+        "moving where you face, with facing counted clockwise, supports +1")
+
+    assert(navigation.SignFromMotion(math.rad(-45), math.rad(45)) == -1,
+        "the mirror image of that supports -1")
+
+    assert(navigation.SignFromMotion(0, 0) == nil,
+        "facing north cannot distinguish the two conventions")
+
+    assert(navigation.SignFromMotion(math.rad(135), math.rad(45)) == nil,
+        "strafing supports neither and must be discarded")
+
+    assert(navigation.SignFromMotion(math.rad(45 + 180), math.rad(45)) == nil,
+        "walking backwards supports neither and must be discarded")
+
+    print("  strafing and backpedalling are discarded, not voted on")
+
+    ------------------------------------------------------------
+    -- END TO END, THROUGH THE PATH THE GAME TAKES.
+    --
+    -- Not by calling SignFromMotion in a loop -- by moving the player and
+    -- letting the addon sample it, which is what actually happens in play.
+    ------------------------------------------------------------
+    local savedX, savedY = CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y
+    local savedSpan      = CN_TEST_MAP_SPAN
+
+    CN_TEST_MAP_SPAN = { 1000, 1000 }
+
+    navigation.ForgetMapScales()
+    navigation.SetFacingSign(1)
+    navigation.ResetMotion()
+
+    -- The client, in this scenario, counts facing counter-clockwise: the
+    -- player faces "45 degrees" and walks north-WEST. Under sign +1 the addon
+    -- believes north-east. It must work that out and flip itself.
+    CN_TEST_SetFacing(math.rad(45))
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5, 0.5
+
+    navigation.NoteMotion()
+
+    local step = 0.006
+
+    for _ = 1, navigation.motionSamples + 1 do
+        CN_TEST_PLAYER_X = CN_TEST_PLAYER_X - step
+        CN_TEST_PLAYER_Y = CN_TEST_PLAYER_Y - step
+
+        navigation.NoteMotion()
+    end
+
+    assert(navigation.FacingSign() == -1,
+        "walking where you face, against what the addon believes, must flip "
+        .. "the sign; it is still " .. navigation.FacingSign())
+
+    local state = navigation.MotionState()
+
+    assert(state.verdict == "corrected", "and must record why")
+
+    -- ONE SAMPLE MUST NOT DO IT. A single stray reading -- a knockback, a
+    -- door, a lag spike -- flipping the arrow would be worse than the bug.
+    navigation.SetFacingSign(1)
+    navigation.ResetMotion()
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5, 0.5
+    navigation.NoteMotion()
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.5 - step, 0.5 - step
+    navigation.NoteMotion()
+
+    assert(navigation.FacingSign() == 1,
+        "one movement sample must not be enough to flip the arrow")
+
+    print("  a wrong facing convention corrects itself from movement, and "
+        .. "one stray sample does not")
+
+    CN_TEST_SetFacing(0)
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = savedX, savedY
+    CN_TEST_MAP_SPAN = savedSpan
+    navigation.ForgetMapScales()
+    navigation.SetFacingSign(1)
+    navigation.ResetMotion()
+end)()
+
+print("\nAngles on a map that is not square:")
+
+;(function()
+    local navigation = CN:GetModule("Navigation")
+
+    local savedSpan = CN_TEST_MAP_SPAN
+
+    -- Twice as wide as it is tall, which is nothing unusual for a zone.
+    CN_TEST_MAP_SPAN = { 2000, 1000 }
+
+    navigation.ForgetMapScales()
+
+    local scaleX, scaleY = navigation.MapScale(94)
+
+    assert(math.abs(scaleX - 2000) < 1 and math.abs(scaleY - 1000) < 1,
+        "the map's real size must come from the client, got "
+        .. scaleX .. " x " .. scaleY)
+
+    -- A target one map unit east and one map unit south of the player is NOT
+    -- at 135 degrees on this map: east is worth twice as many yards, so the
+    -- true bearing is further round. Raw map coordinates said 135 for eight
+    -- releases, in every zone in the game.
+    local relative = navigation.RelativeBearing(0.4, 0.4, 0.5, 0.5, 0, 1, 94)
+
+    local degrees = math.deg(relative)
+
+    local expected = math.deg(math.atan(2000 * 0.1, -(1000 * 0.1)))
+
+    assert(math.abs(degrees - expected) < 0.5,
+        "the bearing must be taken in yards, not in map units: expected "
+        .. string.format("%.1f", expected) .. ", got "
+        .. string.format("%.1f", degrees))
+
+    assert(math.abs(degrees - 135) > 5,
+        "and it must differ from the unscaled answer, or the correction is "
+        .. "doing nothing")
+
+    -- A SQUARE MAP MUST BE UNCHANGED. The correction has to be free where
+    -- there is nothing to correct.
+    CN_TEST_MAP_SPAN = { 1000, 1000 }
+
+    navigation.ForgetMapScales()
+
+    local square = math.deg(navigation.RelativeBearing(0.4, 0.4, 0.5, 0.5, 0, 1, 94))
+
+    assert(math.abs(square - 135) < 0.5,
+        "on a square map the answer must still be 135, got " .. square)
+
+    -- AND A MAP THE CLIENT WILL NOT SIZE MUST NOT BE CACHED AS SQUARE.
+    -- During a loading screen the conversion fails; caching 1,1 then would
+    -- keep the distortion for the rest of the session.
+    navigation.ForgetMapScales()
+
+    local realConvert = C_Map.GetWorldPosFromMapPos
+
+    C_Map.GetWorldPosFromMapPos = function() return nil, nil end
+
+    local failedX = navigation.MapScale(94)
+
+    C_Map.GetWorldPosFromMapPos = realConvert
+
+    assert(failedX == 1, "an unconvertible map falls back to unscaled")
+
+    local recoveredX = navigation.MapScale(94)
+
+    assert(math.abs(recoveredX - 1000) < 1,
+        "and must be asked again once the client can answer, got "
+        .. recoveredX)
+
+    print("  bearings are measured in yards, and a failed measurement is "
+        .. "not remembered")
+
+    CN_TEST_MAP_SPAN = savedSpan
+    navigation.ForgetMapScales()
+end)()
 
 print("\nALL HARNESS CHECKS PASSED")

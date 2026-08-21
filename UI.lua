@@ -471,7 +471,7 @@ function UI.RebuildTabs()
             window.tabButtons[index] = button
         end
 
-        button:SetText(tab.name)
+        button:SetText(CN.L[tab.name])
 
         -- GetTextWidth exists on Button, but guard anyway: a nil or
         -- non-numeric return here would break the whole window.
