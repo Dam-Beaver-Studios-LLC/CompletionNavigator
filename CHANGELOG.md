@@ -7,6 +7,117 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.46.0]
+
+A release about speed, and about how this project keeps discovering that its
+own test fixtures are smaller than the game. Three of the most expensive
+things the addon does were invisible in every benchmark it has ever run,
+because the fixtures behind them held three appearance sets, three bags of
+items and three flight points. Measured at the size the game actually
+produces, a cold rebuild cost **eleven and a half milliseconds** -- most of a
+frame, on every event that invalidates the list.
+
+It now costs **four**, with no answer changed.
+
+### Changed
+
+- **Costing a journey is twenty times cheaper.** The route search tries every
+  pairing of flight points, deliberately -- the nearest one to you and the
+  nearest one to your destination are frequently not the best route together.
+  That is still exactly what it does. What it no longer does is recompute
+  three distances inside every pairing: the walk at each end is measured once
+  per flight point instead of once per pair, the flight legs between points
+  are computed once per continent and kept until the list of points changes,
+  and an origin whose walk alone already costs more than the best route found
+  so far is abandoned without being examined. With a levelled character's
+  sixty flight points on a continent, one estimate fell from **1.48 ms to
+  0.04 ms**. Every objective that has a location pays this cost, so it
+  multiplied by the whole candidate list.
+- **Appearance sets are read once and kept until you collect one.** Scanning
+  them was the single most expensive thing in the addon -- **4.4 ms**, more
+  than every other source of recommendations added together -- and it ran on
+  every rebuild. Collections change rarely and the client announces it when
+  they do.
+- **Your bags are read once and kept until they change.** Same shape, smaller
+  number. The bank is deliberately kept separate: it is a different container
+  list read at a different time, and serving one from the other's cache would
+  report a bank you are not standing at.
+- **How long the addon waits before deciding you took its advice** now depends
+  on what the advice was. It was a flat twenty minutes for everything, which
+  is roughly right for a quest and badly wrong at both ends: a dungeon takes
+  most of an hour, and an appearance takes minutes. Reputation, renown and
+  instances now get ninety minutes, achievements and professions an hour,
+  appearances forty minutes.
+- **The grouped help was rebuilt.** A test written this release counted what
+  was actually in the "everything else" bucket: **74 of 123 commands**. The
+  groups had been describing an addon three releases smaller than this one,
+  and the catch-all had quietly become the main list -- which is the exact
+  state the grouping was introduced to fix. Seven groups now, covering
+  everything, and the build fails if more than two commands fall outside them.
+
+### Added
+
+- **`/cn urgency`** draws the deadline curve at ten distances from a reset, so
+  the weighting that decides "this expires tonight" can be looked at rather
+  than reasoned about. It has never been visible before.
+- **The recording that the test suite audits itself against now carries the
+  client version it was taken from**, and a recording older than the client
+  the addon claims to support is a build failure rather than a quiet pass. An
+  audit against a game that has since been patched is worse than no audit,
+  because it reports success.
+- **A missing recording is now a failure on a machine that has the game
+  installed.** It stays a printed notice where no client exists, because the
+  automated build has no game and never will -- but "unverified" had been
+  printing for months while every run still ended in *all checks passed*.
+
+### Fixed
+
+- **The travel estimate's reported legs are the legs it costed.** The rewrite
+  carries the walked distances internally as time and converts them back for
+  display; a wrong conversion there would be invisible in the total and wrong
+  on every screen showing the breakdown. There is now an assertion that the
+  parts add up to the whole.
+- **`NEW_TAXI_NODE` is not an event, and the addon was registering it.** The
+  client refuses an event name it does not have -- it throws rather than
+  ignoring -- so this produced a Lua error at every login, in a module that
+  had been shipping the line for several releases. The name was plausible and
+  invented. There is no discovery event; `TAXIMAP_OPENED` is the honest
+  substitute, since you discover a flight point by talking to the flight
+  master.
+- **One bad event name is no longer a Lua error at every login.** Registration
+  now goes through a guarded path: the client's refusal is caught, the name is
+  kept, and `/cn errors` will name it. A feature that quietly does not update
+  is a bad outcome; an error box on every login is a worse one.
+- **Handlers registered before the event frame existed were reaching the
+  client through an unguarded loop.** Most of the addon loads before
+  `Events.lua`, so that replay -- not the registration itself -- is where a
+  bad name from any earlier module actually reached the client. The guard now
+  covers both.
+- **The test suite could not see any of this, because the fake frame accepted
+  any string.** Tenth entry in this project's list of defects caused by a stub
+  simpler than the thing it stands for. The stub now refuses an event the
+  client does not have, exactly as the client does, and the harness fails on
+  anything the guarded path rejected -- production degrades, the build does
+  not. The list of real event names is maintained by hand, which is precisely
+  the fragile kind of artefact this keeps happening to, so `/cn capture` now
+  asks the live client to register every event the addon uses and records what
+  it refused. The audit fails on any refusal.
+- **`fixtures\captured.lua` was being counted as addon source.** The recording
+  is evidence, read only by the test harness, but it is a `.lua` file in the
+  tree -- so `check` warned that it was missing from the `.toc` and `sync`
+  would have listed it, handing the game a table of test data to load at
+  login. Everything under `fixtures\` is now excluded by directory.
+- **`check` said nothing when the tree was a release behind the toolkit.**
+  There was a guard for a `cn.ps1` *older* than the source it manages, because
+  that one would overwrite good source with old. The case that actually
+  happens is the reverse: a new `cn.ps1` arrives, `init` declines to overwrite
+  an existing tree, and every remaining line of the check reports contentedly
+  on the previous release. It now fails, and names the command that fixes it.
+- **A stale help entry named a command that does not exist.** Nothing errored
+  -- the entry simply did not appear, and a command became undiscoverable
+  while the help still looked complete. Every name in the help is now checked
+  against the commands that are actually registered.
+
 ## [0.45.0]
 
 Two promises this addon made in writing and did not keep, the last of the

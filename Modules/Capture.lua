@@ -305,6 +305,52 @@ CN.RegisterCapture{
     end,
 }
 
+-- WHICH OF THE EVENTS THIS ADDON REGISTERS ARE REAL.
+--
+-- Added in 0.46.0, after `NEW_TAXI_NODE` -- a name that does not exist and
+-- never has -- threw a Lua error at every login. The test suite could not see
+-- it because the stub frame accepted any string, and the fix for that is a
+-- list of real event names maintained by hand in the harness. A list
+-- maintained by hand is precisely the kind of thing this project keeps being
+-- caught by, so it needs checking against a client rather than against
+-- memory.
+--
+-- This asks the live client to register every event the addon uses, on a
+-- throwaway frame with no handler attached, and records the ones it refused.
+-- The harness fails on any refusal.
+CN.RegisterCapture{
+    name = "events",
+    run  = function()
+        if not CreateFrame then
+            return nil, "no frame factory"
+        end
+
+        local ok, probe = pcall(CreateFrame, "Frame")
+
+        if not ok or not probe then
+            return nil, "the client would not make a frame"
+        end
+
+        local refused, accepted = {}, 0
+
+        for event in pairs(CN.eventTable or {}) do
+            local registered = pcall(probe.RegisterEvent, probe, event)
+
+            if registered then
+                accepted = accepted + 1
+
+                pcall(probe.UnregisterEvent, probe, event)
+            else
+                table.insert(refused, event)
+            end
+        end
+
+        table.sort(refused)
+
+        return { accepted = accepted, refused = refused }
+    end,
+}
+
 ------------------------------------------------------------
 -- RUNNING IT
 ------------------------------------------------------------
@@ -332,6 +378,21 @@ function Capture.Run()
     records.build   = CN.version
     records.locale  = CN.ClientLocale and CN.ClientLocale() or nil
     records.recorded = time()
+
+    -- WHICH CLIENT THIS IS EVIDENCE ABOUT.
+    --
+    -- Added in 0.46.0, because a recording with no interface number cannot be
+    -- checked for staleness, and stale evidence is worse than none: it makes
+    -- the audit report success about a game that has since been patched. The
+    -- .toc's Interface line is the addon's claim about which client it
+    -- supports; this is the client that was actually running.
+    if GetBuildInfo then
+        local ok, _, _, _, interface = pcall(GetBuildInfo)
+
+        if ok then
+            records.interface = tonumber(interface)
+        end
+    end
 
     -- Written under the account table so it survives to the next logout and
     -- lands in SavedVariables, which is the only way it can reach the

@@ -48,8 +48,32 @@ end
 -- many were examined.
 Sets.scanCap = 400
 
+-- CACHED, BECAUSE THIS IS THE MOST EXPENSIVE THING IN THE ADDON WITHOUT IT.
+--
+-- Measured at realistic scale -- three thousand sets, which is roughly what
+-- the game holds -- the uncached scan cost 4.4 milliseconds per candidate
+-- rebuild: more than every other provider in the addon added together, and
+-- nearly half of a 16ms frame.
+--
+-- It was invisible in the first measurement because the fixture had three
+-- sets in it. That is the same trap as the map that was always square and the
+-- flying speed that was always rejected: a fixture small enough to read is a
+-- fixture too small to measure.
+--
+-- Collections change rarely and announce themselves, so the cache is held
+-- until the client says a transmog was collected.
+local cache = nil
+
+function Sets.Forget()
+    cache = nil
+end
+
 function Sets.All(limit)
     limit = limit or Sets.scanCap
+
+    if cache and cache.limit == limit then
+        return cache.rows, cache.readable, cache.examined
+    end
 
     local rows = {}
 
@@ -100,6 +124,13 @@ function Sets.All(limit)
             })
         end
     end
+
+    cache = {
+        rows     = rows,
+        readable = true,
+        examined = examined,
+        limit    = limit,
+    }
 
     return rows, true, examined
 end
@@ -203,6 +234,10 @@ end
 ------------------------------------------------------------
 -- CANDIDATES
 ------------------------------------------------------------
+
+CN:RegisterEvent("TRANSMOG_COLLECTION_UPDATED", function()
+    Sets.Forget()
+end)
 
 CN.RegisterCandidateProvider("Sets", function()
     local candidates = {}

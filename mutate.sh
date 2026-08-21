@@ -208,6 +208,74 @@ mutate "UI.lua" \
         panel.list:SetPoint(\"TOPLEFT\", panel.why, \"BOTTOMLEFT\", -4, -14)" \
     "a tab builder calls the list constructor as a global"
 
+# The two caches added in 0.46.0, after measuring them at realistic scale. A
+# cache that never invalidates is a worse bug than the 4.4ms it saved.
+mutate "Modules/Sets.lua" \
+    "CN:RegisterEvent(\"TRANSMOG_COLLECTION_UPDATED\", function()
+    Sets.Forget()
+end)" \
+    "CN:RegisterEvent(\"TRANSMOG_COLLECTION_UPDATED\", function()
+end)" \
+    "the appearance set cache never invalidates"
+
+mutate "Modules/Inventory.lua" \
+    "CN:RegisterEvent(\"BAG_UPDATE_DELAYED\", function()
+    Inventory.Forget()
+end)" \
+    "CN:RegisterEvent(\"BAG_UPDATE_DELAYED\", function()
+end)" \
+    "the bag cache never invalidates"
+
+mutate "Modules/Inventory.lua" \
+    "    if not containers and bagCache then" \
+    "    if bagCache then" \
+    "a bank scan is served from the bag cache"
+
+# The pair-search rewrite in 0.46.0. It made the same search twenty times
+# cheaper, which is exactly the kind of change that returns a slightly wrong
+# answer forever without ever erroring.
+mutate "Modules/Travel.lua" \
+    "                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
+                    < best.seconds then" \
+    "                and walkOut < (best.seconds * 0.5) then" \
+    "the pruning bound discards a route that would have won"
+
+mutate "Modules/Travel.lua" \
+    "function Travel.ForgetNodes()
+    nodeCache = {}
+    spanCache = {}
+end" \
+    "function Travel.ForgetNodes()
+    nodeCache = {}
+end" \
+    "the flight-leg distances outlive the node list they describe"
+
+mutate "Modules/Travel.lua" \
+    "                                runToNode   = walkOut * runSpeed," \
+    "                                runToNode   = walkOut," \
+    "the walk to the flight master is reported in seconds as yards"
+
+
+# The event guard added in 0.46.0, after an invented event name threw a Lua
+# error at every login and eighty files of tests could not see it.
+mutate "Core.lua" \
+    "    if CN.eventFrame then
+        CN.RegisterWithClient(event)
+    end" \
+    "    if CN.eventFrame then
+        pcall(CN.eventFrame.RegisterEvent, CN.eventFrame, event)
+    end" \
+    "a rejected event is swallowed without being recorded"
+
+mutate "Events.lua" \
+    "for event in pairs(CN.eventTable) do
+    CN.RegisterWithClient(event)
+end" \
+    "for event in pairs(CN.eventTable) do
+end" \
+    "handlers registered before Events.lua never reach the client"
+
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

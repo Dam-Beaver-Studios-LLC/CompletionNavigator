@@ -58,7 +58,7 @@ read_globals = {
     "C_Container", "GetInboxNumItems", "GetInboxHeaderInfo",
     "C_MythicPlus", "C_ChallengeMode", "C_Heirloom",
     "C_ToyBox", "PlayerHasToy",
-    "C_TransmogSets", "C_LFGList", "IsInGuild", "GetGuildInfo",
+    "C_TransmogSets", "C_LFGList", "IsInGuild", "GetGuildInfo", "GetBuildInfo",
     "IsSpellKnown", "IsPlayerSpell", "GetSpellCooldown", "GetItemCooldown",
     "GetItemCount", "GetBindLocation", "EJ_GetDifficulty", "GetDifficultyInfo",
     "SettingsPanel", "InterfaceOptions_AddCategory", "BackdropTemplateMixin",

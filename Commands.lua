@@ -42,23 +42,52 @@ CN.helpEssentials = {
 
 -- Groups, by what the player is trying to do rather than by which module
 -- happens to own the command.
+--
+-- REBUILT IN 0.46.0, when a test finally counted what the catch-all was
+-- holding: 74 of 123 commands. The groups were describing an addon three
+-- releases smaller than this one, and "Everything else" had quietly become
+-- the main list -- which is exactly the state the grouping was introduced to
+-- fix. A curated list of names rots silently unless something counts it.
 CN.helpGroups = {
     { title = "Deciding what to do",
-      names = { "next", "why", "order", "plan", "mode", "show", "learned",
-                "situation", "goal", "chase" } },
+      names = { "next", "why", "whyzero", "order", "urgency", "plan", "mode",
+                "show", "hidden", "unhide", "learned", "situation", "goal",
+                "goals", "ungoal", "gogoal", "chase", "closest", "now" } },
+
     { title = "Getting there",
       names = { "go", "travel", "nav", "navdiag", "arrow", "calibrate",
-                "pins", "follow", "zone", "nearby", "where am i" } },
+                "pins", "follow", "zone", "zones", "nearby", "where",
+                "where am i", "clearway", "auto", "providers", "setloc",
+                "tovendor" } },
+
     { title = "What is left",
-      names = { "progress", "loremaster", "zones", "available", "waiting",
-                "breakdown", "vault", "instances", "drops", "clock", "bags",
-                "orders", "alts" } },
+      names = { "progress", "loremaster", "available", "waiting", "breakdown",
+                "vault", "instances", "drops", "clock", "bags", "orders",
+                "alts", "warband", "who", "sets", "percharacter" } },
+
+    { title = "Your collections",
+      names = { "mounts", "pets", "toys", "titles", "appearances",
+                "achievements", "exploration", "currencies", "reps",
+                "professions", "recipes", "rares", "vendors", "sells",
+                "paragon", "quest", "queststatus", "discovered",
+                "discoveractive" } },
+
+    { title = "Scanning",
+      names = { "setup", "scanquests", "scanlore", "achievescan", "petscan",
+                "mountscan", "toyscan", "titlescan", "appearancescan",
+                "explorescan", "currencyscan", "repscan", "profscan",
+                "raredb", "harvestnow" } },
+
     { title = "Setting it up",
-      names = { "setup", "ui", "scale", "colourblind", "hud", "cues",
-                "locale", "welcome" } },
+      names = { "ui", "uistatus", "scale", "colourblind", "hud", "cues",
+                "keepfilter", "minimap", "tooltips", "broker", "alerts",
+                "locale", "welcome", "list" } },
+
     { title = "When something is wrong",
-      names = { "selftest", "errors", "dbsize", "capture", "contribute",
-                "harvest", "debug" } },
+      names = { "selftest", "errors", "dbsize", "cache", "perf", "capture",
+                "contribute", "harvest", "export", "debug", "status",
+                "lookup", "setquest", "rep", "title", "toy", "pet", "mount",
+                "rare", "recipe", "events" } },
 }
 
 local function PrintCommand(definition, indent)

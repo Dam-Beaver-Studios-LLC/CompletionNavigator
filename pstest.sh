@@ -64,6 +64,24 @@ $PWSH -NoProfile -File ./cn.ps1 release 9.9.9 2>&1 | grep -q "carries version $V
   || { echo "FAIL: wrong-version guard"; exit 1; }
 grep -q "## Version: $VERSION" CompletionNavigator.toc || { echo "FAIL: guard modified the tree"; exit 1; }
 
+echo "  check guard: a tree left behind by a refused init"
+# THE FAILURE THAT COST A RELEASE CYCLE.
+#
+# A new cn.ps1 arrives, `init` refuses because Core.lua already exists, and
+# the tree stays a release behind while every other line of `check` reports
+# happily on the OLD source. There was a branch for the opposite case -- a
+# cn.ps1 older than the tree -- and none at all for this one.
+cp Core.lua Core.bak
+sed -i 's/^CN.version     = "'"$VERSION"'"/CN.version     = "0.0.1"/' Core.lua
+sed -i 's/^## Version: '"$VERSION"'/## Version: 0.0.1/' CompletionNavigator.toc
+$PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q "but the tree on disk is 0.0.1" \
+  || { echo "FAIL: a tree behind the toolkit must be reported"; exit 1; }
+mv Core.bak Core.lua
+sed -i 's/^## Version: 0.0.1/## Version: '"$VERSION"'/' CompletionNavigator.toc
+$PWSH -NoProfile -File ./cn.ps1 check > check3.log 2>&1
+grep -q "All checks passed" check3.log \
+  || { echo "FAIL: check does not pass once the tree is current"; cat check3.log; exit 1; }
+
 git init -q -b main . && git config user.email t@e.com && git config user.name T
 git add -A >/dev/null 2>&1 && git commit -qm init
 git init -q --bare "$REMOTE" && git remote add origin "$REMOTE" && git push -q -u origin main

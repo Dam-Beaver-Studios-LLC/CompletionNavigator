@@ -34,8 +34,14 @@ end
 
 -- Anything registered before this file loaded still needs to be told to
 -- the client.
+--
+-- Through the guarded path, for the same reason Core registers through it:
+-- most of the addon loads BEFORE this file, so this loop is where a bad event
+-- name from any earlier module actually reaches the client. Registering
+-- directly here meant the guard in Core protected only the handful of
+-- registrations that happen after Events.lua.
 for event in pairs(CN.eventTable) do
-    eventFrame:RegisterEvent(event)
+    CN.RegisterWithClient(event)
 end
 
 ------------------------------------------------------------

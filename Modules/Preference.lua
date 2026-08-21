@@ -61,9 +61,31 @@ local DebugPrint = CN.DebugPrint
 Preference.minimumObservations = 25
 
 -- The window in which finishing something counts as having acted on it.
--- Twenty minutes: long enough to walk there and do it, short enough that
--- stumbling over it two hours later is not credited to the recommendation.
+--
+-- Twenty minutes suits a quest. It does not suit a raid lockout, which takes
+-- an evening, or a reputation, which takes a week -- and crediting those at
+-- twenty minutes meant the addon concluded the player ignores exactly the
+-- things that take longest to do.
+--
+-- Per type, therefore, with the old figure as the default. These are not
+-- measured -- they are how long the ACTIVITY takes, which the addon cannot
+-- observe before the fact -- so they are stated plainly as judgements rather
+-- than dressed up as data.
 Preference.actionWindowSeconds = 1200
+
+Preference.actionWindows = {
+    [CN.objectiveTypes.INSTANCE]   = 5400,   -- an evening's raid
+    [CN.objectiveTypes.REPUTATION] = 5400,
+    [CN.objectiveTypes.RENOWN]     = 5400,
+    [CN.objectiveTypes.ACHIEVEMENT] = 3600,
+    [CN.objectiveTypes.PROFESSION] = 3600,
+    [CN.objectiveTypes.APPEARANCE] = 2400,
+}
+
+function Preference.WindowFor(objectiveType)
+    return Preference.actionWindows[objectiveType]
+        or Preference.actionWindowSeconds
+end
 
 -- The full range of the multiplier. A type you always act on gets a modest
 -- push; one you never touch gets a modest shove. Both are small on purpose --
@@ -268,7 +290,9 @@ CN.RegisterRecommendationHook("Preference", function(results)
                     end
                 end
 
-                if not last or (now - last) > Preference.actionWindowSeconds then
+                if not last
+                    or (now - last) > Preference.WindowFor(objectiveType) then
+
                     row.shown = row.shown + 1
 
                     Observed()
@@ -344,7 +368,7 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
         local fallbackKey
 
         for candidateKey, when in pairs(shownAt) do
-            if (now - when) <= Preference.actionWindowSeconds
+            if (now - when) <= Preference.WindowFor(objectiveType)
                 and string.sub(candidateKey, 1, #objectiveType + 1)
                     == (objectiveType .. ":") then
 
@@ -372,7 +396,7 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
         return false
     end
 
-    if (now - last) > Preference.actionWindowSeconds then
+    if (now - last) > Preference.WindowFor(objectiveType) then
         shownAt[key] = nil
 
         return false

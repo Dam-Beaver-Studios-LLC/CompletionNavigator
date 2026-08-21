@@ -242,6 +242,12 @@ Another continent is costable now too, where a teleport you know lands on the ri
 
 Every term in the score for the top few, biggest first, adding up to the number shown. `/cn why` explains one objective; this explains the ranking â€” including why the thing you expected to see at the top is not.
 
+```
+/cn urgency
+```
+
+Deadlines are the heaviest thing in that score, and until now the curve behind them could only be reasoned about. This draws it: what a reset is worth at ten distances from it, from a week out to the last hour.
+
 ## It knows what you are in the middle of
 
 Dead, in a group, in an instance, or out in the world alone are four different situations, and only one of them makes "go and collect a battle pet" a sensible thing to say.
@@ -336,6 +342,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn clock` | Everything with a deadline that is not a quest |
 | `/cn nearby` | What is worth doing outside this zone, and how far away it is |
 | `/cn order` | Why the list is in the order it is in |
+| `/cn urgency` | What a deadline is worth, at every distance from it |
 | `/cn sets` | Appearance sets nearly finished, and your guild |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
@@ -360,7 +367,9 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 ## Built to stay out of the way
 
-An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks â€” at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes â€” costs about **five milliseconds**, and the answer to "what next?" is served from cache in **five microseconds**.
+An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks â€” at a realistic scale of 1,800 pets, 3,000 achievements, 2,500 recipes, 3,000 appearance sets, five full bags and a continent's worth of flight points â€” costs about **four milliseconds**, and the answer to "what next?" is served from cache in **five microseconds**.
+
+Those figures got better by making the benchmark harder. Three of the most expensive things the addon does had been measured against fixtures holding three appearance sets, three bags of items and three flight points, and at that size all three looked free. At the size the game actually produces, a rebuild cost eleven milliseconds â€” most of a frame, on every event that changes the answer. Costing a single journey has since gone from 1.48 milliseconds to 0.04, and no answer changed.
 
 Tooltip lines are the same story: hovering an item answers from an index rather than searching everything the addon knows, so mousing across a full bag costs nothing you can feel. It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer â€” the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 

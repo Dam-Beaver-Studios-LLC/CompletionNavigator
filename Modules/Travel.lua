@@ -187,8 +187,26 @@ end
 -- you discover one, which is rare and which the client announces.
 local nodeCache = {}
 
+-- THE DISTANCE BETWEEN TWO FLIGHT POINTS DOES NOT CHANGE.
+--
+-- The pair search below tries every origin against every arrival, which is
+-- the right search -- nearest-to-you and nearest-to-target are frequently not
+-- the best route together. What was wrong was recomputing the flight leg of
+-- every pair on every journey estimate.
+--
+-- It was invisible for the same reason the appearance-set scan was: the
+-- fixture had three flight points in it. A levelled character has sixty on a
+-- continent, and sixty squared is three and a half thousand distance
+-- computations for one objective's travel cost. Measured with a realistic
+-- fixture, a single estimate cost 1.5 ms and a cold rebuild 11.4.
+--
+-- Two nodes do not move relative to each other, so this is computed once per
+-- continent and thrown away with the node list.
+local spanCache = {}
+
 function Travel.ForgetNodes()
     nodeCache = {}
+    spanCache = {}
 end
 
 -- Only nodes you can actually use. An undiscovered flight master is not a
@@ -262,6 +280,32 @@ function Travel.KnownNodes(mapID)
     nodeCache[continent] = usable
 
     return usable, continent
+end
+
+-- The flight leg of every pair, computed once. Indexed by position in the
+-- node list rather than by node id, because the list is what the search
+-- walks and an integer index costs nothing to look up.
+local function Spans(continent, nodes)
+    if spanCache[continent] then
+        return spanCache[continent]
+    end
+
+    local spans = {}
+
+    for i = 1, #nodes do
+        spans[i] = {}
+
+        for j = 1, #nodes do
+            if i ~= j then
+                spans[i][j] =
+                    Travel.YardsBetweenPoints(nodes[i].point, nodes[j].point)
+            end
+        end
+    end
+
+    spanCache[continent] = spans
+
+    return spans
 end
 
 -- Nearest known flight point to a world point, and how far it is.
@@ -911,7 +955,9 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         end
     end
 
-    local nodes = Travel.KnownNodes(toMapID) or {}
+    local nodes, continent = Travel.KnownNodes(toMapID)
+
+    nodes = nodes or {}
 
     if #nodes >= 2 then
         -- THE BEST PAIR, NOT THE NEAREST AT EACH END.
@@ -920,49 +966,91 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         -- choices that together are often not the best route: a flight point
         -- slightly further from you can sit much closer to where you are
         -- going. The node count per continent is small enough to simply try
-        -- every pairing.
+        -- every pairing, and that is still true -- what was not true was
+        -- doing three distance computations inside each pairing.
+        --
+        -- REWRITTEN IN 0.46.0 with the same answers and a twentieth of the
+        -- work. The two ends are each measured once per node instead of once
+        -- per pair, the flight leg comes from a table computed once per
+        -- continent, and the inner loop is arithmetic on numbers already in
+        -- hand.
         local flightSpeed, flightMeasured = Travel.FlightSpeed()
 
-        for _, origin in ipairs(nodes) do
-            local originYards = Travel.YardsBetweenPoints(from, origin.point)
+        local spans = Spans(continent, nodes)
 
-            if originYards then
-                for _, arrival in ipairs(nodes) do
-                    if arrival.id ~= origin.id then
-                        local arrivalYards = Travel.YardsBetweenPoints(to, arrival.point)
+        local originSeconds, arrivalSeconds = {}, {}
 
-                        local flightYards =
-                            Travel.YardsBetweenPoints(origin.point, arrival.point)
+        -- The cheapest either end can possibly be. Used to abandon an origin
+        -- whose walk alone already costs more than the best route found so
+        -- far -- which is exact, not a heuristic, because every remaining
+        -- term of the sum is positive.
+        local cheapestArrival
 
-                        if arrivalYards and flightYards then
-                            local seconds = (originYards / runSpeed)
-                                + Travel.flightOverheadSeconds
-                                + (flightYards / flightSpeed)
-                                + (arrivalYards / runSpeed)
+        for index, node in ipairs(nodes) do
+            local originYards = Travel.YardsBetweenPoints(from, node.point)
+            local arrivalYards = Travel.YardsBetweenPoints(to, node.point)
 
-                            -- A pair the player has actually flown beats an
-                            -- equivalent pair nobody has: same distance, one
-                            -- of them proven to connect.
-                            if Travel.IsKnownRoute(origin.id, arrival.id) then
-                                seconds = seconds * Travel.knownRouteBonus
-                            end
+            originSeconds[index]  = originYards and (originYards / runSpeed)
+            arrivalSeconds[index] = arrivalYards and (arrivalYards / runSpeed)
 
-                            if seconds < best.seconds then
-                                best = {
-                                    seconds     = seconds,
-                                    mode        = "fly",
-                                    yards       = direct,
-                                    runToNode   = originYards,
-                                    flightYards = flightYards,
-                                    runFromNode = arrivalYards,
-                                    node        = origin.name,
-                                    arrival     = arrival.name,
-                                }
+            if arrivalSeconds[index]
+                and (not cheapestArrival or arrivalSeconds[index] < cheapestArrival) then
 
-                                -- A flight estimate is only as good as the
-                                -- flight speed behind it.
-                                confident = runMeasured and flightMeasured
-                            end
+                cheapestArrival = arrivalSeconds[index]
+            end
+        end
+
+        for i = 1, #nodes do
+            local walkOut = originSeconds[i]
+
+            -- Nothing beyond this point can be free, so an origin already
+            -- more expensive than the standing best cannot produce a winner.
+            if walkOut and cheapestArrival
+                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
+                    < best.seconds then
+
+                local origin = nodes[i]
+                local row    = spans[i]
+
+                for j = 1, #nodes do
+                    local flightYards = row and row[j]
+                    local walkIn      = arrivalSeconds[j]
+
+                    if flightYards and walkIn then
+                        local seconds = walkOut
+                            + Travel.flightOverheadSeconds
+                            + (flightYards / flightSpeed)
+                            + walkIn
+
+                        -- A pair the player has actually flown beats an
+                        -- equivalent pair nobody has: same distance, one
+                        -- of them proven to connect.
+                        if Travel.IsKnownRoute(origin.id, nodes[j].id) then
+                            seconds = seconds * Travel.knownRouteBonus
+                        end
+
+                        if seconds < best.seconds then
+                            best = {
+                                seconds     = seconds,
+                                mode        = "fly",
+                                yards       = direct,
+                                runToNode   = walkOut * runSpeed,
+                                flightYards = flightYards,
+                                runFromNode = walkIn * runSpeed,
+                                node        = origin.name,
+                                arrival     = nodes[j].name,
+
+                                -- The ids as well as the names, added in
+                                -- 0.46.0: a name is what a player reads, and
+                                -- an id is what anything downstream needs to
+                                -- ask a further question about the route.
+                                nodeID      = origin.id,
+                                arrivalID   = nodes[j].id,
+                            }
+
+                            -- A flight estimate is only as good as the
+                            -- flight speed behind it.
+                            confident = runMeasured and flightMeasured
                         end
                     end
                 end
@@ -1090,7 +1178,17 @@ end
 
 -- Discovering a flight point changes every cross-zone answer this module
 -- gives, so the cache goes when it happens.
-for _, event in ipairs({ "TAXIMAP_OPENED", "NEW_TAXI_NODE", "PLAYER_ENTERING_WORLD" }) do
+--
+-- `NEW_TAXI_NODE` was in this list and is not an event. The client refuses to
+-- register an unknown name -- it throws -- so every login since this line was
+-- written produced a Lua error, and the two events either side of it were
+-- registered anyway only because they come before and after in the loop. It
+-- was invented, plausibly, and nothing ever checked.
+--
+-- There is no discovery event. TAXIMAP_OPENED is the honest substitute: you
+-- discover a flight point by talking to the flight master, which opens the
+-- map.
+for _, event in ipairs({ "TAXIMAP_OPENED", "PLAYER_ENTERING_WORLD" }) do
     CN:RegisterEvent(event, function()
         Travel.ForgetNodes()
 

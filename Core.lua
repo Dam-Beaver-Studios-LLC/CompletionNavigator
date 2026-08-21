@@ -18,7 +18,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.45.0"
+CN.version     = "0.46.0"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -149,8 +149,43 @@ function CN:RegisterEvent(event, handler)
     -- Events.lua may not have created the frame yet; if it has, register
     -- with the client immediately.
     if CN.eventFrame then
-        CN.eventFrame:RegisterEvent(event)
+        CN.RegisterWithClient(event)
     end
+end
+
+-- ONE BAD EVENT NAME MUST NOT BE A LUA ERROR ON EVERY LOGIN.
+--
+-- The client throws on an unknown event rather than ignoring it, and this
+-- addon registers around forty of them across thirty files. A single typo --
+-- or an invented name that reads plausibly, which is what happened with
+-- `NEW_TAXI_NODE` -- produced an error box at load for every player.
+--
+-- Refusing to register is the correct outcome; erroring is not. The name is
+-- kept so `/cn errors` can name it, because an event silently doing nothing
+-- is its own kind of invisible.
+CN.rejectedEvents = CN.rejectedEvents or {}
+
+function CN.RegisterWithClient(event)
+    if not CN.eventFrame or not CN.eventFrame.RegisterEvent then
+        return false
+    end
+
+    local ok, err = pcall(CN.eventFrame.RegisterEvent, CN.eventFrame, event)
+
+    if not ok then
+        CN.rejectedEvents[event] = tostring(err)
+
+        local errors = CN.modules and CN.modules.Errors
+
+        if errors and errors.Record then
+            pcall(errors.Record, "RegisterEvent",
+                "the client does not have an event called " .. tostring(event))
+        end
+
+        return false
+    end
+
+    return true
 end
 
 ------------------------------------------------------------

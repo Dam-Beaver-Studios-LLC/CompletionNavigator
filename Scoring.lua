@@ -925,6 +925,55 @@ function CN.ExplainScore(objective)
 end
 
 CN:RegisterCommand{
+    name    = "urgency",
+    order   = 18,
+    help    = "How much a deadline is worth, at every distance from it.",
+    handler = function()
+        -- THE CURVE HAS NEVER BEEN LOOKED AT, ONLY REASONED ABOUT.
+        --
+        -- It has two ramps, four constants, and an exponent, and the only way
+        -- to know what it does at four hours was to work it out on paper. A
+        -- shape nobody can see is a shape nobody can question -- and this one
+        -- decides the order of the list.
+        local points = {
+            { label = "1 minute",  seconds = 60 },
+            { label = "10 minutes", seconds = 600 },
+            { label = "30 minutes", seconds = 1800 },
+            { label = "1 hour",    seconds = 3600 },
+            { label = "2 hours",   seconds = 7200 },
+            { label = "6 hours",   seconds = 21600 },
+            { label = "1 day",     seconds = 86400 },
+            { label = "3 days",    seconds = 3 * 86400 },
+            { label = "6 days",    seconds = 6 * 86400 },
+            { label = "8 days",    seconds = 8 * 86400 },
+        }
+
+        CN.Print("What a deadline is worth, by how far away it is:")
+
+        local width = 30
+
+        for _, point in ipairs(points) do
+            local value = CN.UrgencyBonus(point.seconds)
+
+            local scaled = math.floor((value / (1 + CN.urgencyLongShare))
+                * width + 0.5)
+
+            CN.Print(string.format("  %-11s |cff5dd2fb%s|r|cff444444%s|r %.2f",
+                point.label,
+                string.rep("=", scaled),
+                string.rep("-", width - scaled),
+                value))
+        end
+
+        CN.Print("|cff999999Multiplied by " .. CN.urgencyWeight
+            .. " and added to the score. The steep ramp starts at "
+            .. math.floor(CN.urgencyHorizonSeconds / 3600)
+            .. " hours; the shallow one at "
+            .. math.floor(CN.urgencyLongHorizonSeconds / 86400) .. " days.|r")
+    end,
+}
+
+CN:RegisterCommand{
     name    = "order",
     aliases = { "ranking" },
     args    = "[how many]",

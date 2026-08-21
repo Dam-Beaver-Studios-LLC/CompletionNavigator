@@ -53,7 +53,28 @@ end
 
 -- Every item in a set of containers, as { itemID, count, link, quality, bag,
 -- slot, questItem, questID, isUsable }.
+-- CACHED FOR THE BAGS, WHICH IS WHERE IT IS ASKED FOR REPEATEDLY.
+--
+-- The candidate provider calls QuestStarters, NearlyDone and
+-- UncollectedItems, and every one of them rescanned all five bags -- three
+-- full walks of a hundred and eighty slots per rebuild, each slot costing two
+-- client calls.
+--
+-- Bags announce their own changes, so the cache lives until they do. Only the
+-- default container set is cached: a bank scan is a deliberate one-off and
+-- caching it would risk answering about a bank the player has walked away
+-- from.
+local bagCache = nil
+
+function Inventory.Forget()
+    bagCache = nil
+end
+
 function Inventory.Scan(containers)
+    if not containers and bagCache then
+        return bagCache
+    end
+
     local items = {}
 
     if not Inventory.IsAvailable() then
@@ -81,6 +102,10 @@ function Inventory.Scan(containers)
                 end
             end
         end
+    end
+
+    if not containers then
+        bagCache = items
     end
 
     return items
@@ -323,6 +348,10 @@ function Inventory.InBank(itemID)
 
     return Inventory.BankStore()[itemID] or 0
 end
+
+CN:RegisterEvent("BAG_UPDATE_DELAYED", function()
+    Inventory.Forget()
+end)
 
 CN:RegisterEvent("BANKFRAME_OPENED", function()
     local counted = Inventory.ScanBank()

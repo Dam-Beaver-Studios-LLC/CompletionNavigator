@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.45.0'
+$script:ToolkitVersion = '0.46.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.45.0"
+CN.version     = "0.46.0"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -248,8 +248,43 @@ function CN:RegisterEvent(event, handler)
     -- Events.lua may not have created the frame yet; if it has, register
     -- with the client immediately.
     if CN.eventFrame then
-        CN.eventFrame:RegisterEvent(event)
+        CN.RegisterWithClient(event)
     end
+end
+
+-- ONE BAD EVENT NAME MUST NOT BE A LUA ERROR ON EVERY LOGIN.
+--
+-- The client throws on an unknown event rather than ignoring it, and this
+-- addon registers around forty of them across thirty files. A single typo --
+-- or an invented name that reads plausibly, which is what happened with
+-- `NEW_TAXI_NODE` -- produced an error box at load for every player.
+--
+-- Refusing to register is the correct outcome; erroring is not. The name is
+-- kept so `/cn errors` can name it, because an event silently doing nothing
+-- is its own kind of invisible.
+CN.rejectedEvents = CN.rejectedEvents or {}
+
+function CN.RegisterWithClient(event)
+    if not CN.eventFrame or not CN.eventFrame.RegisterEvent then
+        return false
+    end
+
+    local ok, err = pcall(CN.eventFrame.RegisterEvent, CN.eventFrame, event)
+
+    if not ok then
+        CN.rejectedEvents[event] = tostring(err)
+
+        local errors = CN.modules and CN.modules.Errors
+
+        if errors and errors.Record then
+            pcall(errors.Record, "RegisterEvent",
+                "the client does not have an event called " .. tostring(event))
+        end
+
+        return false
+    end
+
+    return true
 end
 
 ------------------------------------------------------------
@@ -2006,8 +2041,14 @@ end
 
 -- Anything registered before this file loaded still needs to be told to
 -- the client.
+--
+-- Through the guarded path, for the same reason Core registers through it:
+-- most of the addon loads BEFORE this file, so this loop is where a bad event
+-- name from any earlier module actually reaches the client. Registering
+-- directly here meant the guard in Core protected only the handful of
+-- registrations that happen after Events.lua.
 for event in pairs(CN.eventTable) do
-    eventFrame:RegisterEvent(event)
+    CN.RegisterWithClient(event)
 end
 
 ------------------------------------------------------------
@@ -2129,23 +2170,52 @@ CN.helpEssentials = {
 
 -- Groups, by what the player is trying to do rather than by which module
 -- happens to own the command.
+--
+-- REBUILT IN 0.46.0, when a test finally counted what the catch-all was
+-- holding: 74 of 123 commands. The groups were describing an addon three
+-- releases smaller than this one, and "Everything else" had quietly become
+-- the main list -- which is exactly the state the grouping was introduced to
+-- fix. A curated list of names rots silently unless something counts it.
 CN.helpGroups = {
     { title = "Deciding what to do",
-      names = { "next", "why", "order", "plan", "mode", "show", "learned",
-                "situation", "goal", "chase" } },
+      names = { "next", "why", "whyzero", "order", "urgency", "plan", "mode",
+                "show", "hidden", "unhide", "learned", "situation", "goal",
+                "goals", "ungoal", "gogoal", "chase", "closest", "now" } },
+
     { title = "Getting there",
       names = { "go", "travel", "nav", "navdiag", "arrow", "calibrate",
-                "pins", "follow", "zone", "nearby", "where am i" } },
+                "pins", "follow", "zone", "zones", "nearby", "where",
+                "where am i", "clearway", "auto", "providers", "setloc",
+                "tovendor" } },
+
     { title = "What is left",
-      names = { "progress", "loremaster", "zones", "available", "waiting",
-                "breakdown", "vault", "instances", "drops", "clock", "bags",
-                "orders", "alts" } },
+      names = { "progress", "loremaster", "available", "waiting", "breakdown",
+                "vault", "instances", "drops", "clock", "bags", "orders",
+                "alts", "warband", "who", "sets", "percharacter" } },
+
+    { title = "Your collections",
+      names = { "mounts", "pets", "toys", "titles", "appearances",
+                "achievements", "exploration", "currencies", "reps",
+                "professions", "recipes", "rares", "vendors", "sells",
+                "paragon", "quest", "queststatus", "discovered",
+                "discoveractive" } },
+
+    { title = "Scanning",
+      names = { "setup", "scanquests", "scanlore", "achievescan", "petscan",
+                "mountscan", "toyscan", "titlescan", "appearancescan",
+                "explorescan", "currencyscan", "repscan", "profscan",
+                "raredb", "harvestnow" } },
+
     { title = "Setting it up",
-      names = { "setup", "ui", "scale", "colourblind", "hud", "cues",
-                "locale", "welcome" } },
+      names = { "ui", "uistatus", "scale", "colourblind", "hud", "cues",
+                "keepfilter", "minimap", "tooltips", "broker", "alerts",
+                "locale", "welcome", "list" } },
+
     { title = "When something is wrong",
-      names = { "selftest", "errors", "dbsize", "capture", "contribute",
-                "harvest", "debug" } },
+      names = { "selftest", "errors", "dbsize", "cache", "perf", "capture",
+                "contribute", "harvest", "export", "debug", "status",
+                "lookup", "setquest", "rep", "title", "toy", "pet", "mount",
+                "rare", "recipe", "events" } },
 }
 
 local function PrintCommand(definition, indent)
@@ -4327,6 +4397,55 @@ function CN.ExplainScore(objective)
 
     return kept
 end
+
+CN:RegisterCommand{
+    name    = "urgency",
+    order   = 18,
+    help    = "How much a deadline is worth, at every distance from it.",
+    handler = function()
+        -- THE CURVE HAS NEVER BEEN LOOKED AT, ONLY REASONED ABOUT.
+        --
+        -- It has two ramps, four constants, and an exponent, and the only way
+        -- to know what it does at four hours was to work it out on paper. A
+        -- shape nobody can see is a shape nobody can question -- and this one
+        -- decides the order of the list.
+        local points = {
+            { label = "1 minute",  seconds = 60 },
+            { label = "10 minutes", seconds = 600 },
+            { label = "30 minutes", seconds = 1800 },
+            { label = "1 hour",    seconds = 3600 },
+            { label = "2 hours",   seconds = 7200 },
+            { label = "6 hours",   seconds = 21600 },
+            { label = "1 day",     seconds = 86400 },
+            { label = "3 days",    seconds = 3 * 86400 },
+            { label = "6 days",    seconds = 6 * 86400 },
+            { label = "8 days",    seconds = 8 * 86400 },
+        }
+
+        CN.Print("What a deadline is worth, by how far away it is:")
+
+        local width = 30
+
+        for _, point in ipairs(points) do
+            local value = CN.UrgencyBonus(point.seconds)
+
+            local scaled = math.floor((value / (1 + CN.urgencyLongShare))
+                * width + 0.5)
+
+            CN.Print(string.format("  %-11s |cff5dd2fb%s|r|cff444444%s|r %.2f",
+                point.label,
+                string.rep("=", scaled),
+                string.rep("-", width - scaled),
+                value))
+        end
+
+        CN.Print("|cff999999Multiplied by " .. CN.urgencyWeight
+            .. " and added to the score. The steep ramp starts at "
+            .. math.floor(CN.urgencyHorizonSeconds / 3600)
+            .. " hours; the shallow one at "
+            .. math.floor(CN.urgencyLongHorizonSeconds / 86400) .. " days.|r")
+    end,
+}
 
 CN:RegisterCommand{
     name    = "order",
@@ -28662,7 +28781,28 @@ end
 
 -- Every item in a set of containers, as { itemID, count, link, quality, bag,
 -- slot, questItem, questID, isUsable }.
+-- CACHED FOR THE BAGS, WHICH IS WHERE IT IS ASKED FOR REPEATEDLY.
+--
+-- The candidate provider calls QuestStarters, NearlyDone and
+-- UncollectedItems, and every one of them rescanned all five bags -- three
+-- full walks of a hundred and eighty slots per rebuild, each slot costing two
+-- client calls.
+--
+-- Bags announce their own changes, so the cache lives until they do. Only the
+-- default container set is cached: a bank scan is a deliberate one-off and
+-- caching it would risk answering about a bank the player has walked away
+-- from.
+local bagCache = nil
+
+function Inventory.Forget()
+    bagCache = nil
+end
+
 function Inventory.Scan(containers)
+    if not containers and bagCache then
+        return bagCache
+    end
+
     local items = {}
 
     if not Inventory.IsAvailable() then
@@ -28690,6 +28830,10 @@ function Inventory.Scan(containers)
                 end
             end
         end
+    end
+
+    if not containers then
+        bagCache = items
     end
 
     return items
@@ -28932,6 +29076,10 @@ function Inventory.InBank(itemID)
 
     return Inventory.BankStore()[itemID] or 0
 end
+
+CN:RegisterEvent("BAG_UPDATE_DELAYED", function()
+    Inventory.Forget()
+end)
 
 CN:RegisterEvent("BANKFRAME_OPENED", function()
     local counted = Inventory.ScanBank()
@@ -29552,8 +29700,32 @@ end
 -- many were examined.
 Sets.scanCap = 400
 
+-- CACHED, BECAUSE THIS IS THE MOST EXPENSIVE THING IN THE ADDON WITHOUT IT.
+--
+-- Measured at realistic scale -- three thousand sets, which is roughly what
+-- the game holds -- the uncached scan cost 4.4 milliseconds per candidate
+-- rebuild: more than every other provider in the addon added together, and
+-- nearly half of a 16ms frame.
+--
+-- It was invisible in the first measurement because the fixture had three
+-- sets in it. That is the same trap as the map that was always square and the
+-- flying speed that was always rejected: a fixture small enough to read is a
+-- fixture too small to measure.
+--
+-- Collections change rarely and announce themselves, so the cache is held
+-- until the client says a transmog was collected.
+local cache = nil
+
+function Sets.Forget()
+    cache = nil
+end
+
 function Sets.All(limit)
     limit = limit or Sets.scanCap
+
+    if cache and cache.limit == limit then
+        return cache.rows, cache.readable, cache.examined
+    end
 
     local rows = {}
 
@@ -29604,6 +29776,13 @@ function Sets.All(limit)
             })
         end
     end
+
+    cache = {
+        rows     = rows,
+        readable = true,
+        examined = examined,
+        limit    = limit,
+    }
 
     return rows, true, examined
 end
@@ -29707,6 +29886,10 @@ end
 ------------------------------------------------------------
 -- CANDIDATES
 ------------------------------------------------------------
+
+CN:RegisterEvent("TRANSMOG_COLLECTION_UPDATED", function()
+    Sets.Forget()
+end)
 
 CN.RegisterCandidateProvider("Sets", function()
     local candidates = {}
@@ -29988,8 +30171,26 @@ end
 -- you discover one, which is rare and which the client announces.
 local nodeCache = {}
 
+-- THE DISTANCE BETWEEN TWO FLIGHT POINTS DOES NOT CHANGE.
+--
+-- The pair search below tries every origin against every arrival, which is
+-- the right search -- nearest-to-you and nearest-to-target are frequently not
+-- the best route together. What was wrong was recomputing the flight leg of
+-- every pair on every journey estimate.
+--
+-- It was invisible for the same reason the appearance-set scan was: the
+-- fixture had three flight points in it. A levelled character has sixty on a
+-- continent, and sixty squared is three and a half thousand distance
+-- computations for one objective's travel cost. Measured with a realistic
+-- fixture, a single estimate cost 1.5 ms and a cold rebuild 11.4.
+--
+-- Two nodes do not move relative to each other, so this is computed once per
+-- continent and thrown away with the node list.
+local spanCache = {}
+
 function Travel.ForgetNodes()
     nodeCache = {}
+    spanCache = {}
 end
 
 -- Only nodes you can actually use. An undiscovered flight master is not a
@@ -30063,6 +30264,32 @@ function Travel.KnownNodes(mapID)
     nodeCache[continent] = usable
 
     return usable, continent
+end
+
+-- The flight leg of every pair, computed once. Indexed by position in the
+-- node list rather than by node id, because the list is what the search
+-- walks and an integer index costs nothing to look up.
+local function Spans(continent, nodes)
+    if spanCache[continent] then
+        return spanCache[continent]
+    end
+
+    local spans = {}
+
+    for i = 1, #nodes do
+        spans[i] = {}
+
+        for j = 1, #nodes do
+            if i ~= j then
+                spans[i][j] =
+                    Travel.YardsBetweenPoints(nodes[i].point, nodes[j].point)
+            end
+        end
+    end
+
+    spanCache[continent] = spans
+
+    return spans
 end
 
 -- Nearest known flight point to a world point, and how far it is.
@@ -30712,7 +30939,9 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         end
     end
 
-    local nodes = Travel.KnownNodes(toMapID) or {}
+    local nodes, continent = Travel.KnownNodes(toMapID)
+
+    nodes = nodes or {}
 
     if #nodes >= 2 then
         -- THE BEST PAIR, NOT THE NEAREST AT EACH END.
@@ -30721,49 +30950,91 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         -- choices that together are often not the best route: a flight point
         -- slightly further from you can sit much closer to where you are
         -- going. The node count per continent is small enough to simply try
-        -- every pairing.
+        -- every pairing, and that is still true -- what was not true was
+        -- doing three distance computations inside each pairing.
+        --
+        -- REWRITTEN IN 0.46.0 with the same answers and a twentieth of the
+        -- work. The two ends are each measured once per node instead of once
+        -- per pair, the flight leg comes from a table computed once per
+        -- continent, and the inner loop is arithmetic on numbers already in
+        -- hand.
         local flightSpeed, flightMeasured = Travel.FlightSpeed()
 
-        for _, origin in ipairs(nodes) do
-            local originYards = Travel.YardsBetweenPoints(from, origin.point)
+        local spans = Spans(continent, nodes)
 
-            if originYards then
-                for _, arrival in ipairs(nodes) do
-                    if arrival.id ~= origin.id then
-                        local arrivalYards = Travel.YardsBetweenPoints(to, arrival.point)
+        local originSeconds, arrivalSeconds = {}, {}
 
-                        local flightYards =
-                            Travel.YardsBetweenPoints(origin.point, arrival.point)
+        -- The cheapest either end can possibly be. Used to abandon an origin
+        -- whose walk alone already costs more than the best route found so
+        -- far -- which is exact, not a heuristic, because every remaining
+        -- term of the sum is positive.
+        local cheapestArrival
 
-                        if arrivalYards and flightYards then
-                            local seconds = (originYards / runSpeed)
-                                + Travel.flightOverheadSeconds
-                                + (flightYards / flightSpeed)
-                                + (arrivalYards / runSpeed)
+        for index, node in ipairs(nodes) do
+            local originYards = Travel.YardsBetweenPoints(from, node.point)
+            local arrivalYards = Travel.YardsBetweenPoints(to, node.point)
 
-                            -- A pair the player has actually flown beats an
-                            -- equivalent pair nobody has: same distance, one
-                            -- of them proven to connect.
-                            if Travel.IsKnownRoute(origin.id, arrival.id) then
-                                seconds = seconds * Travel.knownRouteBonus
-                            end
+            originSeconds[index]  = originYards and (originYards / runSpeed)
+            arrivalSeconds[index] = arrivalYards and (arrivalYards / runSpeed)
 
-                            if seconds < best.seconds then
-                                best = {
-                                    seconds     = seconds,
-                                    mode        = "fly",
-                                    yards       = direct,
-                                    runToNode   = originYards,
-                                    flightYards = flightYards,
-                                    runFromNode = arrivalYards,
-                                    node        = origin.name,
-                                    arrival     = arrival.name,
-                                }
+            if arrivalSeconds[index]
+                and (not cheapestArrival or arrivalSeconds[index] < cheapestArrival) then
 
-                                -- A flight estimate is only as good as the
-                                -- flight speed behind it.
-                                confident = runMeasured and flightMeasured
-                            end
+                cheapestArrival = arrivalSeconds[index]
+            end
+        end
+
+        for i = 1, #nodes do
+            local walkOut = originSeconds[i]
+
+            -- Nothing beyond this point can be free, so an origin already
+            -- more expensive than the standing best cannot produce a winner.
+            if walkOut and cheapestArrival
+                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
+                    < best.seconds then
+
+                local origin = nodes[i]
+                local row    = spans[i]
+
+                for j = 1, #nodes do
+                    local flightYards = row and row[j]
+                    local walkIn      = arrivalSeconds[j]
+
+                    if flightYards and walkIn then
+                        local seconds = walkOut
+                            + Travel.flightOverheadSeconds
+                            + (flightYards / flightSpeed)
+                            + walkIn
+
+                        -- A pair the player has actually flown beats an
+                        -- equivalent pair nobody has: same distance, one
+                        -- of them proven to connect.
+                        if Travel.IsKnownRoute(origin.id, nodes[j].id) then
+                            seconds = seconds * Travel.knownRouteBonus
+                        end
+
+                        if seconds < best.seconds then
+                            best = {
+                                seconds     = seconds,
+                                mode        = "fly",
+                                yards       = direct,
+                                runToNode   = walkOut * runSpeed,
+                                flightYards = flightYards,
+                                runFromNode = walkIn * runSpeed,
+                                node        = origin.name,
+                                arrival     = nodes[j].name,
+
+                                -- The ids as well as the names, added in
+                                -- 0.46.0: a name is what a player reads, and
+                                -- an id is what anything downstream needs to
+                                -- ask a further question about the route.
+                                nodeID      = origin.id,
+                                arrivalID   = nodes[j].id,
+                            }
+
+                            -- A flight estimate is only as good as the
+                            -- flight speed behind it.
+                            confident = runMeasured and flightMeasured
                         end
                     end
                 end
@@ -30891,7 +31162,17 @@ end
 
 -- Discovering a flight point changes every cross-zone answer this module
 -- gives, so the cache goes when it happens.
-for _, event in ipairs({ "TAXIMAP_OPENED", "NEW_TAXI_NODE", "PLAYER_ENTERING_WORLD" }) do
+--
+-- `NEW_TAXI_NODE` was in this list and is not an event. The client refuses to
+-- register an unknown name -- it throws -- so every login since this line was
+-- written produced a Lua error, and the two events either side of it were
+-- registered anyway only because they come before and after in the loop. It
+-- was invented, plausibly, and nothing ever checked.
+--
+-- There is no discovery event. TAXIMAP_OPENED is the honest substitute: you
+-- discover a flight point by talking to the flight master, which opens the
+-- map.
+for _, event in ipairs({ "TAXIMAP_OPENED", "PLAYER_ENTERING_WORLD" }) do
     CN:RegisterEvent(event, function()
         Travel.ForgetNodes()
 
@@ -31570,9 +31851,31 @@ local DebugPrint = CN.DebugPrint
 Preference.minimumObservations = 25
 
 -- The window in which finishing something counts as having acted on it.
--- Twenty minutes: long enough to walk there and do it, short enough that
--- stumbling over it two hours later is not credited to the recommendation.
+--
+-- Twenty minutes suits a quest. It does not suit a raid lockout, which takes
+-- an evening, or a reputation, which takes a week -- and crediting those at
+-- twenty minutes meant the addon concluded the player ignores exactly the
+-- things that take longest to do.
+--
+-- Per type, therefore, with the old figure as the default. These are not
+-- measured -- they are how long the ACTIVITY takes, which the addon cannot
+-- observe before the fact -- so they are stated plainly as judgements rather
+-- than dressed up as data.
 Preference.actionWindowSeconds = 1200
+
+Preference.actionWindows = {
+    [CN.objectiveTypes.INSTANCE]   = 5400,   -- an evening's raid
+    [CN.objectiveTypes.REPUTATION] = 5400,
+    [CN.objectiveTypes.RENOWN]     = 5400,
+    [CN.objectiveTypes.ACHIEVEMENT] = 3600,
+    [CN.objectiveTypes.PROFESSION] = 3600,
+    [CN.objectiveTypes.APPEARANCE] = 2400,
+}
+
+function Preference.WindowFor(objectiveType)
+    return Preference.actionWindows[objectiveType]
+        or Preference.actionWindowSeconds
+end
 
 -- The full range of the multiplier. A type you always act on gets a modest
 -- push; one you never touch gets a modest shove. Both are small on purpose --
@@ -31777,7 +32080,9 @@ CN.RegisterRecommendationHook("Preference", function(results)
                     end
                 end
 
-                if not last or (now - last) > Preference.actionWindowSeconds then
+                if not last
+                    or (now - last) > Preference.WindowFor(objectiveType) then
+
                     row.shown = row.shown + 1
 
                     Observed()
@@ -31853,7 +32158,7 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
         local fallbackKey
 
         for candidateKey, when in pairs(shownAt) do
-            if (now - when) <= Preference.actionWindowSeconds
+            if (now - when) <= Preference.WindowFor(objectiveType)
                 and string.sub(candidateKey, 1, #objectiveType + 1)
                     == (objectiveType .. ":") then
 
@@ -31881,7 +32186,7 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
         return false
     end
 
-    if (now - last) > Preference.actionWindowSeconds then
+    if (now - last) > Preference.WindowFor(objectiveType) then
         shownAt[key] = nil
 
         return false
@@ -32459,6 +32764,52 @@ CN.RegisterCapture{
     end,
 }
 
+-- WHICH OF THE EVENTS THIS ADDON REGISTERS ARE REAL.
+--
+-- Added in 0.46.0, after `NEW_TAXI_NODE` -- a name that does not exist and
+-- never has -- threw a Lua error at every login. The test suite could not see
+-- it because the stub frame accepted any string, and the fix for that is a
+-- list of real event names maintained by hand in the harness. A list
+-- maintained by hand is precisely the kind of thing this project keeps being
+-- caught by, so it needs checking against a client rather than against
+-- memory.
+--
+-- This asks the live client to register every event the addon uses, on a
+-- throwaway frame with no handler attached, and records the ones it refused.
+-- The harness fails on any refusal.
+CN.RegisterCapture{
+    name = "events",
+    run  = function()
+        if not CreateFrame then
+            return nil, "no frame factory"
+        end
+
+        local ok, probe = pcall(CreateFrame, "Frame")
+
+        if not ok or not probe then
+            return nil, "the client would not make a frame"
+        end
+
+        local refused, accepted = {}, 0
+
+        for event in pairs(CN.eventTable or {}) do
+            local registered = pcall(probe.RegisterEvent, probe, event)
+
+            if registered then
+                accepted = accepted + 1
+
+                pcall(probe.UnregisterEvent, probe, event)
+            else
+                table.insert(refused, event)
+            end
+        end
+
+        table.sort(refused)
+
+        return { accepted = accepted, refused = refused }
+    end,
+}
+
 ------------------------------------------------------------
 -- RUNNING IT
 ------------------------------------------------------------
@@ -32486,6 +32837,21 @@ function Capture.Run()
     records.build   = CN.version
     records.locale  = CN.ClientLocale and CN.ClientLocale() or nil
     records.recorded = time()
+
+    -- WHICH CLIENT THIS IS EVIDENCE ABOUT.
+    --
+    -- Added in 0.46.0, because a recording with no interface number cannot be
+    -- checked for staleness, and stale evidence is worse than none: it makes
+    -- the audit report success about a game that has since been patched. The
+    -- .toc's Interface line is the addon's claim about which client it
+    -- supports; this is the client that was actually running.
+    if GetBuildInfo then
+        local ok, _, _, _, interface = pcall(GetBuildInfo)
+
+        if ok then
+            records.interface = tonumber(interface)
+        end
+    end
 
     -- Written under the account table so it survives to the next logout and
     -- lands in SavedVariables, which is the only way it can reach the
@@ -34690,7 +35056,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.45.0
+## Version: 0.46.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -34944,6 +35310,117 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.46.0]
+
+A release about speed, and about how this project keeps discovering that its
+own test fixtures are smaller than the game. Three of the most expensive
+things the addon does were invisible in every benchmark it has ever run,
+because the fixtures behind them held three appearance sets, three bags of
+items and three flight points. Measured at the size the game actually
+produces, a cold rebuild cost **eleven and a half milliseconds** -- most of a
+frame, on every event that invalidates the list.
+
+It now costs **four**, with no answer changed.
+
+### Changed
+
+- **Costing a journey is twenty times cheaper.** The route search tries every
+  pairing of flight points, deliberately -- the nearest one to you and the
+  nearest one to your destination are frequently not the best route together.
+  That is still exactly what it does. What it no longer does is recompute
+  three distances inside every pairing: the walk at each end is measured once
+  per flight point instead of once per pair, the flight legs between points
+  are computed once per continent and kept until the list of points changes,
+  and an origin whose walk alone already costs more than the best route found
+  so far is abandoned without being examined. With a levelled character's
+  sixty flight points on a continent, one estimate fell from **1.48 ms to
+  0.04 ms**. Every objective that has a location pays this cost, so it
+  multiplied by the whole candidate list.
+- **Appearance sets are read once and kept until you collect one.** Scanning
+  them was the single most expensive thing in the addon -- **4.4 ms**, more
+  than every other source of recommendations added together -- and it ran on
+  every rebuild. Collections change rarely and the client announces it when
+  they do.
+- **Your bags are read once and kept until they change.** Same shape, smaller
+  number. The bank is deliberately kept separate: it is a different container
+  list read at a different time, and serving one from the other's cache would
+  report a bank you are not standing at.
+- **How long the addon waits before deciding you took its advice** now depends
+  on what the advice was. It was a flat twenty minutes for everything, which
+  is roughly right for a quest and badly wrong at both ends: a dungeon takes
+  most of an hour, and an appearance takes minutes. Reputation, renown and
+  instances now get ninety minutes, achievements and professions an hour,
+  appearances forty minutes.
+- **The grouped help was rebuilt.** A test written this release counted what
+  was actually in the "everything else" bucket: **74 of 123 commands**. The
+  groups had been describing an addon three releases smaller than this one,
+  and the catch-all had quietly become the main list -- which is the exact
+  state the grouping was introduced to fix. Seven groups now, covering
+  everything, and the build fails if more than two commands fall outside them.
+
+### Added
+
+- **`/cn urgency`** draws the deadline curve at ten distances from a reset, so
+  the weighting that decides "this expires tonight" can be looked at rather
+  than reasoned about. It has never been visible before.
+- **The recording that the test suite audits itself against now carries the
+  client version it was taken from**, and a recording older than the client
+  the addon claims to support is a build failure rather than a quiet pass. An
+  audit against a game that has since been patched is worse than no audit,
+  because it reports success.
+- **A missing recording is now a failure on a machine that has the game
+  installed.** It stays a printed notice where no client exists, because the
+  automated build has no game and never will -- but "unverified" had been
+  printing for months while every run still ended in *all checks passed*.
+
+### Fixed
+
+- **The travel estimate's reported legs are the legs it costed.** The rewrite
+  carries the walked distances internally as time and converts them back for
+  display; a wrong conversion there would be invisible in the total and wrong
+  on every screen showing the breakdown. There is now an assertion that the
+  parts add up to the whole.
+- **`NEW_TAXI_NODE` is not an event, and the addon was registering it.** The
+  client refuses an event name it does not have -- it throws rather than
+  ignoring -- so this produced a Lua error at every login, in a module that
+  had been shipping the line for several releases. The name was plausible and
+  invented. There is no discovery event; `TAXIMAP_OPENED` is the honest
+  substitute, since you discover a flight point by talking to the flight
+  master.
+- **One bad event name is no longer a Lua error at every login.** Registration
+  now goes through a guarded path: the client's refusal is caught, the name is
+  kept, and `/cn errors` will name it. A feature that quietly does not update
+  is a bad outcome; an error box on every login is a worse one.
+- **Handlers registered before the event frame existed were reaching the
+  client through an unguarded loop.** Most of the addon loads before
+  `Events.lua`, so that replay -- not the registration itself -- is where a
+  bad name from any earlier module actually reached the client. The guard now
+  covers both.
+- **The test suite could not see any of this, because the fake frame accepted
+  any string.** Tenth entry in this project's list of defects caused by a stub
+  simpler than the thing it stands for. The stub now refuses an event the
+  client does not have, exactly as the client does, and the harness fails on
+  anything the guarded path rejected -- production degrades, the build does
+  not. The list of real event names is maintained by hand, which is precisely
+  the fragile kind of artefact this keeps happening to, so `/cn capture` now
+  asks the live client to register every event the addon uses and records what
+  it refused. The audit fails on any refusal.
+- **`fixtures\captured.lua` was being counted as addon source.** The recording
+  is evidence, read only by the test harness, but it is a `.lua` file in the
+  tree -- so `check` warned that it was missing from the `.toc` and `sync`
+  would have listed it, handing the game a table of test data to load at
+  login. Everything under `fixtures\` is now excluded by directory.
+- **`check` said nothing when the tree was a release behind the toolkit.**
+  There was a guard for a `cn.ps1` *older* than the source it manages, because
+  that one would overwrite good source with old. The case that actually
+  happens is the reverse: a new `cn.ps1` arrives, `init` declines to overwrite
+  an existing tree, and every remaining line of the check reports contentedly
+  on the previous release. It now fails, and names the command that fixes it.
+- **A stale help entry named a command that does not exist.** Nothing errored
+  -- the entry simply did not appear, and a command became undiscoverable
+  while the help still looked complete. Every name in the help is now checked
+  against the commands that are actually registered.
 
 ## [0.45.0]
 
@@ -37796,6 +38273,12 @@ Another continent is costable now too, where a teleport you know lands on the ri
 
 Every term in the score for the top few, biggest first, adding up to the number shown. `/cn why` explains one objective; this explains the ranking — including why the thing you expected to see at the top is not.
 
+```
+/cn urgency
+```
+
+Deadlines are the heaviest thing in that score, and until now the curve behind them could only be reasoned about. This draws it: what a reset is worth at ten distances from it, from a week out to the last hour.
+
 ## It knows what you are in the middle of
 
 Dead, in a group, in an instance, or out in the world alone are four different situations, and only one of them makes "go and collect a battle pet" a sensible thing to say.
@@ -37890,6 +38373,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn clock` | Everything with a deadline that is not a quest |
 | `/cn nearby` | What is worth doing outside this zone, and how far away it is |
 | `/cn order` | Why the list is in the order it is in |
+| `/cn urgency` | What a deadline is worth, at every distance from it |
 | `/cn sets` | Appearance sets nearly finished, and your guild |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
@@ -37914,7 +38398,9 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 ## Built to stay out of the way
 
-An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks — at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes — costs about **five milliseconds**, and the answer to "what next?" is served from cache in **five microseconds**.
+An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks — at a realistic scale of 1,800 pets, 3,000 achievements, 2,500 recipes, 3,000 appearance sets, five full bags and a continent's worth of flight points — costs about **four milliseconds**, and the answer to "what next?" is served from cache in **five microseconds**.
+
+Those figures got better by making the benchmark harder. Three of the most expensive things the addon does had been measured against fixtures holding three appearance sets, three bags of items and three flight points, and at that size all three looked free. At the size the game actually produces, a rebuild cost eleven milliseconds — most of a frame, on every event that changes the answer. Costing a single journey has since gone from 1.48 milliseconds to 0.04, and no answer changed.
 
 Tooltip lines are the same story: hovering an item answers from an index rather than searching everything the addon knows, so mousing across a full bag costs nothing you can feel. It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer — the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 
@@ -37971,7 +38457,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.45.0
+0.46.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -38597,6 +39083,74 @@ mutate "UI.lua" \
         panel.list:SetPoint(\"TOPLEFT\", panel.why, \"BOTTOMLEFT\", -4, -14)" \
     "a tab builder calls the list constructor as a global"
 
+# The two caches added in 0.46.0, after measuring them at realistic scale. A
+# cache that never invalidates is a worse bug than the 4.4ms it saved.
+mutate "Modules/Sets.lua" \
+    "CN:RegisterEvent(\"TRANSMOG_COLLECTION_UPDATED\", function()
+    Sets.Forget()
+end)" \
+    "CN:RegisterEvent(\"TRANSMOG_COLLECTION_UPDATED\", function()
+end)" \
+    "the appearance set cache never invalidates"
+
+mutate "Modules/Inventory.lua" \
+    "CN:RegisterEvent(\"BAG_UPDATE_DELAYED\", function()
+    Inventory.Forget()
+end)" \
+    "CN:RegisterEvent(\"BAG_UPDATE_DELAYED\", function()
+end)" \
+    "the bag cache never invalidates"
+
+mutate "Modules/Inventory.lua" \
+    "    if not containers and bagCache then" \
+    "    if bagCache then" \
+    "a bank scan is served from the bag cache"
+
+# The pair-search rewrite in 0.46.0. It made the same search twenty times
+# cheaper, which is exactly the kind of change that returns a slightly wrong
+# answer forever without ever erroring.
+mutate "Modules/Travel.lua" \
+    "                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
+                    < best.seconds then" \
+    "                and walkOut < (best.seconds * 0.5) then" \
+    "the pruning bound discards a route that would have won"
+
+mutate "Modules/Travel.lua" \
+    "function Travel.ForgetNodes()
+    nodeCache = {}
+    spanCache = {}
+end" \
+    "function Travel.ForgetNodes()
+    nodeCache = {}
+end" \
+    "the flight-leg distances outlive the node list they describe"
+
+mutate "Modules/Travel.lua" \
+    "                                runToNode   = walkOut * runSpeed," \
+    "                                runToNode   = walkOut," \
+    "the walk to the flight master is reported in seconds as yards"
+
+
+# The event guard added in 0.46.0, after an invented event name threw a Lua
+# error at every login and eighty files of tests could not see it.
+mutate "Core.lua" \
+    "    if CN.eventFrame then
+        CN.RegisterWithClient(event)
+    end" \
+    "    if CN.eventFrame then
+        pcall(CN.eventFrame.RegisterEvent, CN.eventFrame, event)
+    end" \
+    "a rejected event is swallowed without being recorded"
+
+mutate "Events.lua" \
+    "for event in pairs(CN.eventTable) do
+    CN.RegisterWithClient(event)
+end" \
+    "for event in pairs(CN.eventTable) do
+end" \
+    "handlers registered before Events.lua never reach the client"
+
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 
@@ -38689,7 +39243,7 @@ read_globals = {
     "C_Container", "GetInboxNumItems", "GetInboxHeaderInfo",
     "C_MythicPlus", "C_ChallengeMode", "C_Heirloom",
     "C_ToyBox", "PlayerHasToy",
-    "C_TransmogSets", "C_LFGList", "IsInGuild", "GetGuildInfo",
+    "C_TransmogSets", "C_LFGList", "IsInGuild", "GetGuildInfo", "GetBuildInfo",
     "IsSpellKnown", "IsPlayerSpell", "GetSpellCooldown", "GetItemCooldown",
     "GetItemCount", "GetBindLocation", "EJ_GetDifficulty", "GetDifficultyInfo",
     "SettingsPanel", "InterfaceOptions_AddCategory", "BackdropTemplateMixin",
@@ -38817,6 +39371,46 @@ setmetatable(U, {
     __call  = function() return U end,
 })
 
+-- EVENTS THE CLIENT ACTUALLY HAS.
+--
+-- The frame stub above refuses anything not on this list, because the real
+-- client refuses too -- it throws rather than ignoring, so one invented name
+-- is a Lua error at every login for every player. `NEW_TAXI_NODE` was such a
+-- name and shipped in 0.46.0.
+--
+-- HONESTY ABOUT WHAT THIS LIST IS. It is written from knowledge, not read
+-- from a client, so it is exactly the kind of artefact this project keeps
+-- getting caught by: a model of the world maintained by hand. It is checked
+-- against reality by the `events` capture -- /cn capture asks the live client
+-- to register every event the addon uses and records which ones it refused --
+-- and the stub audit fails on any refusal. Until a recording is present, this
+-- list catches typos and inventions but cannot catch an event that was real
+-- and has since been removed.
+CN_KNOWN_EVENTS = {}
+
+for _, name in ipairs({
+    "ACHIEVEMENT_EARNED", "ADDON_LOADED", "BAG_UPDATE_DELAYED",
+    "BANKFRAME_OPENED", "BOSS_KILL", "CHALLENGE_MODE_COMPLETED",
+    "CRAFTINGORDERS_CLAIM_ORDER_RESPONSE", "CRAFTINGORDERS_UPDATE_ORDER_COUNT", "CRITERIA_UPDATE",
+    "CURRENCY_DISPLAY_UPDATE", "ENCOUNTER_END", "GOSSIP_SHOW",
+    "KNOWN_TITLES_UPDATE", "MAIL_INBOX_UPDATE", "MAJOR_FACTION_RENOWN_LEVEL_CHANGED",
+    "MAJOR_FACTION_UNLOCKED", "MERCHANT_SHOW", "MERCHANT_UPDATE",
+    "NEW_MOUNT_ADDED", "NEW_PET_ADDED", "NEW_TOY_ADDED",
+    "PET_JOURNAL_LIST_UPDATE", "PLAYER_CONTROL_GAINED", "PLAYER_CONTROL_LOST",
+    "PLAYER_ENTERING_WORLD", "PLAYER_LEVEL_UP", "PLAYER_LOGIN",
+    "PLAYER_LOGOUT", "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED",
+    "PLAYER_SPECIALIZATION_CHANGED", "QUEST_ACCEPTED", "QUEST_DATA_LOAD_RESULT",
+    "QUEST_DETAIL", "QUEST_LOG_UPDATE", "QUEST_REMOVED",
+    "QUEST_TURNED_IN", "SKILL_LINES_CHANGED", "TAXIMAP_CLOSED",
+    "TAXIMAP_OPENED", "TRADE_SKILL_LIST_UPDATE", "TRADE_SKILL_SHOW",
+    "TRANSMOG_COLLECTION_UPDATED", "UPDATE_FACTION", "UPDATE_INSTANCE_INFO",
+    "VIGNETTES_UPDATED", "VIGNETTE_MINIMAP_UPDATED", "WEEKLY_REWARDS_UPDATE",
+    "ZONE_CHANGED", "ZONE_CHANGED_NEW_AREA", "GROUP_ROSTER_UPDATE",
+    "PLAYER_ALIVE", "PLAYER_DEAD", "PLAYER_UNGHOST",
+}) do
+    CN_KNOWN_EVENTS[name] = true
+end
+
 local function Frame()
     local f = {}
     local events, scripts = {}, {}
@@ -38824,7 +39418,24 @@ local function Frame()
     f.events  = events
     f.scripts = scripts
 
-    function f:RegisterEvent(e) events[e] = true end
+    -- THE CLIENT REFUSES AN EVENT IT DOES NOT HAVE. SO DOES THIS.
+    --
+    -- This stub accepted any string, which is how `NEW_TAXI_NODE` -- a name
+    -- that does not exist and never has -- shipped in 0.46.0 and threw a Lua
+    -- error at every login. Eighty files of tests, a mutation suite and two
+    -- interpreters, and not one of them could see it, because the fake frame
+    -- was more forgiving than the real one.
+    --
+    -- Tenth entry in the list of defects caused by a stub simpler than the
+    -- thing it stands for. The list is in CN_KNOWN_EVENTS below, and adding
+    -- an event to it is the deliberate act that asks "is this real?".
+    function f:RegisterEvent(e)
+        assert(CN_KNOWN_EVENTS[e],
+            "the client has no event called " .. tostring(e)
+            .. " -- if it is real, add it to CN_KNOWN_EVENTS in harness.lua")
+
+        events[e] = true
+    end
     function f:UnregisterEvent(e) events[e] = nil end
     function f:SetScript(k, fn) scripts[k] = fn end
     function f:GetScript(k) return scripts[k] end
@@ -39292,6 +39903,88 @@ CN_TEST_MAIL = {
     { sender = "Nobody",        subject = "Old",  money = 0,   items = 0, daysLeft = 0.5 },
     { sender = "A Friend",      subject = "Later", money = 0,  items = 1, daysLeft = 25 },
 }
+
+-- RETAIL SCALE FOR THE NEWEST SUBSYSTEMS.
+--
+-- The fixtures for bags, sets and mail were written to be READ -- three
+-- items, three sets, four messages -- which is right for a test that asserts
+-- behaviour and completely wrong for a benchmark. At that size every one of
+-- the 0.44.0 and 0.45.0 providers measured under a fiftieth of a millisecond,
+-- which says nothing at all about what they cost a player with five full bags
+-- and three thousand appearance sets.
+--
+-- That is the same trap this project has fallen into eight times: a fixture
+-- simpler than reality, agreeing with the code. So the bench grows them to
+-- the size the game actually produces, and the tests keep the small ones.
+if CN_BENCH then
+    -- Five bags of thirty-six, nearly full.
+    for bag = 0, 4 do
+        CN_TEST_BAGS[bag] = CN_TEST_BAGS[bag] or {}
+
+        for slot = 1, 36 do
+            CN_TEST_BAGS[bag][slot] = CN_TEST_BAGS[bag][slot] or {
+                itemID     = 200000 + (bag * 100) + slot,
+                stackCount = 1,
+            }
+        end
+    end
+
+    -- Three thousand appearance sets, which is roughly what the game holds.
+    for index = 4, 3000 do
+        CN_TEST_SETS[index] = {
+            setID = index,
+            name  = "Set " .. index,
+            collected = false,
+            pieces = { true, true, false, false, false },
+        }
+    end
+
+    -- A mailbox somebody has not emptied in a while.
+    for index = 5, 50 do
+        CN_TEST_MAIL[index] = {
+            sender = "Sender " .. index, subject = "Subject " .. index,
+            money = 0, items = 1, daysLeft = 5 + (index % 20),
+        }
+    end
+
+    -- A CONTINENT'S WORTH OF FLIGHT POINTS.
+    --
+    -- Three nodes, one of them undiscovered, is a fixture written to be read.
+    -- A levelled character has upwards of sixty on a continent, and the route
+    -- search deliberately tries EVERY PAIR of them -- so its cost grows as the
+    -- square of a number this fixture had quietly set to two.
+    for index = 4, 60 do
+        CN_TEST_TAXI_NODES[1941][index] = {
+            nodeID   = index,
+            name     = "Node " .. index,
+            state    = 1,
+            -- CLUSTERED IN A FAR CORNER, DELIBERATELY.
+            --
+            -- These exist to make the pair search do sixty-squared work, not
+            -- to change any answer. Spread across the map they started
+            -- winning journeys the tests assert are quicker on foot -- which
+            -- would have meant weakening real assertions to accommodate a
+            -- benchmark, and an assertion weakened for the tooling's
+            -- convenience is an assertion that has stopped checking.
+            position = {
+                x = 0.94 + ((index % 10) * 0.006),
+                y = 0.94 + ((index % 7) * 0.008),
+            },
+        }
+    end
+
+    -- A full quest log, every quest with counting objectives.
+    for index = 1, 25 do
+        local questID = 95000 + index
+
+        CN_TEST_OBJECTIVES[questID] = {
+            { text = "Thing " .. index, numFulfilled = index % 12,
+              numRequired = 12, finished = false },
+            { text = "Other " .. index, numFulfilled = 1,
+              numRequired = 8, finished = false },
+        }
+    end
+end
 
 function GetInboxNumItems()
     return #CN_TEST_MAIL
@@ -45681,8 +46374,19 @@ print("\nStubs, audited against a real client:")
     local chunk = loadfile(path) or loadfile("fixtures/captured.lua")
 
     if not chunk then
-        -- NOT A FAILURE, but it must be said out loud. CI has no game client,
-        -- and an audit nobody can see is an audit nobody performs.
+        -- BLOCKING WHERE A CLIENT CAN EXIST; ADVISORY WHERE ONE CANNOT.
+        --
+        -- Backlog item 46. Until 0.46.0 this was advisory everywhere, which
+        -- meant the strongest test in the project could be absent for months
+        -- and the run still printed ALL CHECKS PASSED. But failing it
+        -- unconditionally would break CI, which has no game client and never
+        -- will -- so the gate is a decision the caller makes: cn.ps1 sets
+        -- CN_REQUIRE_FIXTURES on a machine that has World of Warcraft
+        -- installed, and CI does not.
+        assert(not os.getenv("CN_REQUIRE_FIXTURES"),
+            "no recording present and CN_REQUIRE_FIXTURES is set -- run "
+            .. "/cn capture in game, log out, then cn.ps1 fixtures")
+
         print("  |no recording present| stubs are UNVERIFIED against a real "
             .. "client -- run /cn capture in game, then cn.ps1 fixtures")
         return
@@ -45691,6 +46395,39 @@ print("\nStubs, audited against a real client:")
     local real = chunk()
 
     assert(type(real) == "table", "a recording must be a table")
+
+    ------------------------------------------------------------
+    -- EVIDENCE HAS A DATE ON IT.
+    --
+    -- A recording made against an older client is not neutral: it makes this
+    -- section print success about a game that has since been patched, which
+    -- is precisely the false confidence the section exists to remove. The
+    -- .toc says which client the addon claims to support; the recording says
+    -- which one it saw.
+    ------------------------------------------------------------
+    if real.interface then
+        local tocText = ""
+
+        local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+        if manifest then
+            tocText = manifest:read("*a")
+            manifest:close()
+        end
+
+        local claimed = tonumber(tocText:match("##%s*Interface:%s*(%d+)"))
+
+        if claimed then
+            assert(real.interface >= claimed,
+                "the recording is from client " .. real.interface
+                .. " and the addon claims to support " .. claimed
+                .. " -- re-capture, or the audit is about a game that has "
+                .. "been patched since")
+
+            print("  recorded on client " .. real.interface
+                .. " by build " .. tostring(real.build or "?"))
+        end
+    end
 
     local audited, complaints = 0, {}
 
@@ -45741,6 +46478,19 @@ print("\nStubs, audited against a real client:")
 
         return criteria and criteria[1] and criteria[1].required ~= nil
     end, "real criteria carry counters and the stub's do not")
+
+    require("events", function()
+        -- THE HAND-WRITTEN LIST, CHECKED AGAINST A CLIENT.
+        --
+        -- CN_KNOWN_EVENTS is written from knowledge, which makes it exactly
+        -- the sort of model of the world this project keeps getting caught
+        -- by. The `events` capture asks the live client to register every
+        -- event the addon uses and records what it refused. Anything on that
+        -- list is real evidence that a name is wrong -- including one that
+        -- was real and has since been removed, which the hand list can never
+        -- catch.
+        return #(real.events.refused or {}) == 0
+    end, "the live client refused an event this addon registers")
 
     require("savedInstances", function()
         local fields = real.savedInstances.shape
@@ -45814,7 +46564,10 @@ print("\nGetting there:")
     assert(continent == 1941, "the continent must be found by walking parents, got "
         .. tostring(continent))
 
-    assert(#nodes == 2, "an undiscovered node must not be usable, got " .. #nodes)
+    -- >=, not ==: the bench grows this fixture to a continent's worth of
+    -- flight points, and a test that pins an exact count is a test that
+    -- forbids the bench from measuring anything realistic.
+    assert(#nodes >= 2, "an undiscovered node must not be usable, got " .. #nodes)
 
     for _, node in ipairs(nodes) do
         assert(node.name ~= "Undiscovered", "and specifically not that one")
@@ -45866,6 +46619,170 @@ print("\nGetting there:")
         .. string.format("%.0f vs %.0f", near, nearDetail.yards / runSpeed))
 
     print("  a long journey flies, a short one runs")
+
+    ------------------------------------------------------------
+    -- THE FAST PAIR SEARCH MUST FIND WHAT THE SLOW ONE FOUND.
+    --
+    -- 0.46.0 rewrote the pair search: the two ends are measured once per node
+    -- instead of once per pair, the flight legs come from a table computed
+    -- once per continent, and an origin whose walk alone already beats the
+    -- standing best is abandoned unexamined. That last one is a pruning rule,
+    -- and a pruning rule that is subtly wrong does not error -- it quietly
+    -- returns the second-best route forever.
+    --
+    -- So this brute-forces the answer independently and demands the same
+    -- number. With enough nodes spread widely enough that the pruning
+    -- actually fires.
+    ------------------------------------------------------------
+    do
+        local saved = CN_TEST_TAXI_NODES[1941]
+
+        local savedCount = #travel.KnownNodes(94)
+
+        local crowded = {}
+
+        for index, node in ipairs(saved) do
+            crowded[index] = node
+        end
+
+        for index = 4, 40 do
+            crowded[index] = {
+                nodeID = 500 + index,
+                name   = "Spread " .. index,
+                state  = 1,
+                position = {
+                    x = 0.02 + (((index * 7) % 24) * 0.04),
+                    y = 0.02 + (((index * 11) % 19) * 0.05),
+                },
+            }
+        end
+
+        CN_TEST_TAXI_NODES[1941] = crowded
+
+        travel.ForgetNodes()
+
+        local nodeList = travel.KnownNodes(94)
+
+        assert(#nodeList >= 30,
+            "the brute-force comparison needs a crowded continent, got "
+            .. #nodeList)
+
+        local seconds, _, detail = travel.EstimateSeconds(94, 0.05, 0.05, 94, 0.95, 0.95)
+
+        -- Independently, the long way round: every pair, every distance
+        -- recomputed, nothing pruned and nothing cached.
+        local from = travel.WorldPoint(94, 0.05, 0.05)
+        local to   = travel.WorldPoint(94, 0.95, 0.95)
+
+        local flightSpeed = travel.FlightSpeed()
+
+        local brute = travel.YardsBetweenPoints(from, to) / runSpeed
+
+        if travel.CanFly(94) then
+            brute = math.min(brute,
+                (travel.YardsBetweenPoints(from, to) / travel.SelfFlightSpeed())
+                    + travel.takeoffSeconds)
+        end
+
+        for _, origin in ipairs(nodeList) do
+            for _, arrival in ipairs(nodeList) do
+                if origin.id ~= arrival.id then
+                    local candidate =
+                        (travel.YardsBetweenPoints(from, origin.point) / runSpeed)
+                        + travel.flightOverheadSeconds
+                        + (travel.YardsBetweenPoints(origin.point, arrival.point)
+                            / flightSpeed)
+                        + (travel.YardsBetweenPoints(to, arrival.point) / runSpeed)
+
+                    if travel.IsKnownRoute(origin.id, arrival.id) then
+                        candidate = candidate * travel.knownRouteBonus
+                    end
+
+                    brute = math.min(brute, candidate)
+                end
+            end
+        end
+
+        assert(math.abs(seconds - brute) < 0.001,
+            "the pruned search returned " .. string.format("%.3f", seconds)
+            .. " where an exhaustive one finds "
+            .. string.format("%.3f", brute))
+
+        -- AND THE REPORTED LEGS MUST ADD UP TO THE REPORTED TOTAL.
+        --
+        -- The rewrite carries the walked distances as seconds internally and
+        -- converts them back for display. A wrong conversion there is
+        -- invisible in the total and wrong on every screen that shows the
+        -- breakdown.
+        if detail and detail.mode == "fly" then
+            local rebuilt = (detail.runToNode / runSpeed)
+                + travel.flightOverheadSeconds
+                + (detail.flightYards / flightSpeed)
+                + (detail.runFromNode / runSpeed)
+
+            if travel.IsKnownRoute(detail.nodeID, detail.arrivalID) then
+                rebuilt = rebuilt * travel.knownRouteBonus
+            end
+
+            assert(math.abs(rebuilt - seconds) < 0.01,
+                "the legs shown add to " .. string.format("%.3f", rebuilt)
+                .. " but the estimate says " .. string.format("%.3f", seconds))
+        end
+
+        print("  " .. #nodeList .. " flight points; the fast pair search agrees "
+            .. "with an exhaustive one")
+
+        ------------------------------------------------------------
+        -- AND THE PRUNING MUST NOT DISCARD A LONG WALK TO A GOOD FLIGHT.
+        --
+        -- The brute-force case above passes even with a badly wrong bound,
+        -- because its winning route happens to start at a flight point close
+        -- to the player. The route the bound could actually lose is the
+        -- opposite shape: a long walk to a flight master that lands you
+        -- exactly where you are going. That is a real and common shape, and
+        -- it is the one a careless bound throws away.
+        ------------------------------------------------------------
+        CN_TEST_TAXI_NODES[1941] = {
+            { nodeID = 90, name = "Halfway Out", state = 1,
+              position = { x = 0.62, y = 0.62 } },
+            { nodeID = 91, name = "At The Door", state = 1,
+              position = { x = 0.95, y = 0.95 } },
+        }
+
+        travel.ForgetNodes()
+
+        -- Grounded on purpose: with flying available the self-flown line
+        -- beats everything and the pair search never decides anything.
+        travel.FlightMemory()[94] = false
+
+        local walked, _, walkedDetail =
+            travel.EstimateSeconds(94, 0.05, 0.05, 94, 0.95, 0.95)
+
+        assert(walkedDetail and walkedDetail.mode == "fly",
+            "a long walk to a flight point that lands at the target must "
+            .. "still beat walking the whole way, got "
+            .. tostring(walkedDetail and walkedDetail.mode))
+
+        assert(walkedDetail.node == "Halfway Out"
+            and walkedDetail.arrival == "At The Door",
+            "and it must be that pair, got "
+            .. tostring(walkedDetail.node) .. " -> "
+            .. tostring(walkedDetail.arrival))
+
+        assert(walked < (travel.YardsBetweenPoints(from, to) / runSpeed),
+            "and it must actually be quicker than the walk it replaces")
+
+        travel.FlightMemory()[94] = nil
+
+        print("  a long walk to the right flight point is not pruned away")
+
+        CN_TEST_TAXI_NODES[1941] = saved
+
+        travel.ForgetNodes()
+
+        assert(#travel.KnownNodes(94) == savedCount,
+            "and the node list is forgotten with the spans that describe it")
+    end
 
     ------------------------------------------------------------
     -- FLIGHT SPEED IS MEASURED, AND SAID TO BE UNMEASURED UNTIL IT IS.
@@ -46786,7 +47703,10 @@ print("\nWhat you are already carrying:")
 
     local items = inventory.Scan()
 
-    assert(#items == 3, "every occupied slot is read, got " .. #items)
+    -- At least the three the small fixture defines. The BENCH grows the bags
+    -- to a realistic hundred and eighty, so an equality here would assert the
+    -- size of the fixture rather than the behaviour of the scan.
+    assert(#items >= 3, "every occupied slot is read, got " .. #items)
 
     ------------------------------------------------------------
     -- A QUEST STARTER YOU HAVE ALREADY USED IS NOT A NEXT ACTION.
@@ -46831,7 +47751,7 @@ print("\nThings with a clock on them:")
     local mail, readable = waiting.Mail()
 
     assert(readable, "the mailbox must be readable")
-    assert(#mail == 4, "every message is read, got " .. #mail)
+    assert(#mail >= 4, "every message is read, got " .. #mail)
 
     -- Sorted by what expires first, because that is the order they matter in.
     assert(mail[1].daysLeft <= mail[2].daysLeft, "soonest first")
@@ -47246,7 +48166,7 @@ print("\nAppearance sets:")
     local all, readable = sets.All()
 
     assert(readable, "the client must be answering")
-    assert(#all == 3, "every set is read, got " .. #all)
+    assert(#all >= 3, "every set is read, got " .. #all)
 
     ------------------------------------------------------------
     -- FINISHED IS NOT NEARLY FINISHED.
@@ -47485,6 +48405,82 @@ print("\nCrafting orders, and a decision that could go stale:")
 end)()
 
 
+print("\nEvery event this addon registers is an event:")
+
+;(function()
+    ------------------------------------------------------------
+    -- PRODUCTION DEGRADES; THE TEST SUITE MUST NOT.
+    --
+    -- The stub frame refuses an unknown event, exactly as the client does.
+    -- But the addon now catches that refusal on purpose -- one bad name must
+    -- not be a Lua error at every login -- and a pcall in the shipped code
+    -- swallows the harness's assertion just as effectively as it swallows the
+    -- client's.
+    --
+    -- So the guard records what it rejected, and this fails on anything in
+    -- that list. The player gets a degraded feature; the author gets a failed
+    -- build. That is the right way round, and getting it the wrong way round
+    -- is how a swallowed error becomes a permanent one.
+    ------------------------------------------------------------
+    ------------------------------------------------------------
+    -- FIRST, PROVE THE GUARD RECORDS ANYTHING AT ALL.
+    --
+    -- The assertion below is that nothing was rejected, which passes just as
+    -- well when the recording is broken as when the addon is correct. A test
+    -- whose success is indistinguishable from its subject being absent is not
+    -- a test. So: register something that certainly is not an event, and
+    -- require that it was both refused and named.
+    ------------------------------------------------------------
+    CN:RegisterEvent("CN_THIS_IS_NOT_AN_EVENT", function() end)
+
+    assert(CN.rejectedEvents["CN_THIS_IS_NOT_AN_EVENT"],
+        "the client refused an event and nothing recorded that it did")
+
+    assert(not CN.eventFrame.events["CN_THIS_IS_NOT_AN_EVENT"],
+        "and a refused event must not be left looking registered")
+
+    CN.rejectedEvents["CN_THIS_IS_NOT_AN_EVENT"] = nil
+    CN.eventTable["CN_THIS_IS_NOT_AN_EVENT"]     = nil
+
+    local rejected = {}
+
+    for event in pairs(CN.rejectedEvents or {}) do
+        table.insert(rejected, event)
+    end
+
+    table.sort(rejected)
+
+    for _, event in ipairs(rejected) do
+        print("  NOT AN EVENT: " .. event)
+    end
+
+    assert(#rejected == 0,
+        #rejected .. " registered event(s) do not exist: "
+        .. table.concat(rejected, ", "))
+
+    -- AND THE REGISTRY MUST HAVE REACHED THE CLIENT AT ALL.
+    --
+    -- Most of the addon loads BEFORE Events.lua creates the frame, so those
+    -- registrations are replayed by a loop in that file. If the replay were
+    -- dropped, every event registered early would silently never fire and
+    -- nothing here would notice -- the handlers would all still be in the
+    -- table, looking registered.
+    local registered = 0
+
+    for event in pairs(CN.eventTable) do
+        if CN.eventFrame.events[event] then
+            registered = registered + 1
+        else
+            print("  NEVER REACHED THE CLIENT: " .. event)
+        end
+    end
+
+    assert(registered == CN.CountKeys(CN.eventTable),
+        "some handlers are registered with the addon but not with the client")
+
+    print("  " .. registered .. " events registered, none of them invented")
+end)()
+
 print("\nEvery tab builds:")
 
 ;(function()
@@ -47561,6 +48557,172 @@ print("\nEvery tab builds:")
 
     print("  " .. #UI.tabs .. " tabs built and refreshed, " .. withLists
         .. " of them with lists")
+end)()
+
+
+print("\nCaches that must not go stale:")
+
+;(function()
+    ------------------------------------------------------------
+    -- BOTH OF THESE WERE MEASURED, NOT GUESSED.
+    --
+    -- At realistic scale -- three thousand appearance sets, five full bags --
+    -- the two providers added in 0.44.0 and 0.45.0 cost 4.4ms and 0.6ms per
+    -- candidate rebuild. Sets alone was more than every other provider in the
+    -- addon added together.
+    --
+    -- Neither was visible in the first measurement, because the fixtures had
+    -- three sets and three items in them. A cache is the fix; a cache that
+    -- goes stale is a worse bug than the cost it saved, so both are tested
+    -- through the event the client actually sends.
+    ------------------------------------------------------------
+    local sets = CN:GetModule("Sets")
+
+    sets.Forget()
+
+    local first = sets.All()
+
+    local again = sets.All()
+
+    assert(first == again,
+        "a second read must be the cached table, not a fresh scan")
+
+    -- A set becomes collected. Without invalidation the addon would go on
+    -- recommending it forever.
+    local watched = CN_TEST_SETS[1]
+
+    local beforeCollect = #sets.NearlyComplete()
+
+    watched.pieces[5] = true
+
+    assert(#sets.NearlyComplete() == beforeCollect,
+        "the cache holds until the client says otherwise")
+
+    CN.FireEvent("TRANSMOG_COLLECTION_UPDATED")
+
+    local after = sets.NearlyComplete()
+
+    for _, set in ipairs(after) do
+        assert(set.setID ~= 1,
+            "a set finished since the scan must drop out once the client "
+            .. "announces it")
+    end
+
+    watched.pieces[5] = false
+
+    CN.FireEvent("TRANSMOG_COLLECTION_UPDATED")
+
+    print("  appearance sets are cached until a transmog is collected")
+
+    ------------------------------------------------------------
+    -- THE BAGS, THE SAME WAY.
+    ------------------------------------------------------------
+    local inventory = CN:GetModule("Inventory")
+
+    inventory.Forget()
+
+    local bags = inventory.Scan()
+
+    assert(inventory.Scan() == bags, "the bag scan is cached")
+
+    -- A bank scan must NOT be served from, or write to, that cache: it is a
+    -- different set of containers and a deliberate one-off.
+    local bank = inventory.Scan(inventory.bankIDs)
+
+    assert(bank ~= bags, "a bank scan is its own read")
+    assert(inventory.Scan() == bags, "and does not replace the bag cache")
+
+    CN.FireEvent("BAG_UPDATE_DELAYED")
+
+    assert(inventory.Scan() ~= bags, "moving something in a bag re-reads them")
+
+    print("  bags are cached until they change, and the bank is separate")
+end)()
+
+
+print("\nHelp that names commands which exist:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A CURATED LIST OF NAMES ROTS SILENTLY.
+    --
+    -- 0.44.0 grouped the help by what the player is trying to do, which meant
+    -- writing five lists of command names by hand. A name that is renamed, or
+    -- typed wrongly, does not error -- the entry simply does not appear, and
+    -- the command becomes undiscoverable while the help still looks complete.
+    ------------------------------------------------------------
+    local known = {}
+
+    for _, definition in ipairs(CN.commandList) do
+        known[definition.name] = true
+
+        for _, alias in ipairs(definition.aliases or {}) do
+            known[alias] = true
+        end
+    end
+
+    local missing = {}
+
+    for _, name in ipairs(CN.helpEssentials) do
+        if name ~= "" and not known[name] then
+            table.insert(missing, "essentials: " .. name)
+        end
+    end
+
+    for _, group in ipairs(CN.helpGroups) do
+        for _, name in ipairs(group.names) do
+            if not known[name] then
+                table.insert(missing, group.title .. ": " .. name)
+            end
+        end
+    end
+
+    for _, entry in ipairs(missing) do
+        print("  MISSING: " .. entry)
+    end
+
+    assert(#missing == 0,
+        #missing .. " help entry(ies) name a command that does not exist")
+
+    ------------------------------------------------------------
+    -- AND EVERY COMMAND MUST BE REACHABLE FROM `help all`.
+    --
+    -- The grouped view has an "everything else" bucket, so this cannot fail
+    -- by omission -- but a command whose name appears in NO group and whose
+    -- existence nobody notices is exactly what the bucket is there to catch.
+    ------------------------------------------------------------
+    local grouped = {}
+
+    for _, group in ipairs(CN.helpGroups) do
+        for _, name in ipairs(group.names) do
+            grouped[name] = true
+        end
+    end
+
+    local ungrouped = {}
+
+    for _, definition in ipairs(CN.commandList) do
+        if not grouped[definition.name] then
+            table.insert(ungrouped, definition.name)
+        end
+    end
+
+    print("  " .. #CN.commandList .. " commands, " .. #ungrouped
+        .. " of them in the catch-all group"
+        .. (#ungrouped > 0 and (" (" .. table.concat(ungrouped, ", ") .. ")")
+            or ""))
+
+    -- THE RATCHET.
+    --
+    -- 0.44.0 asserted only that fewer than half were ungrouped, which is how
+    -- 74 of 123 was allowed to happen a release later -- the bar was set so
+    -- far below the current state that it could never move. It is now set
+    -- just above where the addon actually is, so the next command that gets
+    -- added without being filed fails the build instead of quietly joining a
+    -- bucket nobody reads.
+    assert(#ungrouped <= 2,
+        #ungrouped .. " commands are in the catch-all group; file them in "
+        .. "CN.helpGroups: " .. table.concat(ungrouped, ", "))
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")
@@ -47922,6 +49084,31 @@ do
     -- Chase.All() below is the real cost of an open window, and it does run.
 end
 
+print("\nCosting a journey (every objective with a location pays this):")
+
+do
+    local travel = CN:GetModule("Travel")
+
+    if travel and travel.EstimateSeconds then
+        local nodes = travel.KnownNodes(94) or {}
+
+        print("  flight points known on this continent: " .. #nodes)
+
+        -- THE NUMBER THAT MATTERS IS THE SQUARE OF THAT ONE.
+        --
+        -- The pair search is deliberately exhaustive -- nearest-to-you and
+        -- nearest-to-target are often not the best route together -- and that
+        -- is the right call. It was measured against three nodes.
+        bench("EstimateSeconds() across a zone", 200, function()
+            travel.EstimateSeconds(94, 0.10, 0.10, 94, 0.90, 0.90)
+        end)
+
+        bench("CostFor() as the scorer calls it", 200, function()
+            travel.CostFor(94, 0.90, 0.90)
+        end)
+    end
+end
+
 ------------------------------------------------------------
 -- BUDGETS
 ------------------------------------------------------------
@@ -47950,6 +49137,13 @@ local BUDGETS = {
     -- walked into a new zone.
     ["BuildZoneRoute()"]          = 8.0,
     ["Chase.All() with 8 goals"]  = 5.0,
+
+    -- Added in 0.46.0, and the reason the rebuild ceiling above is now
+    -- meaningful. Every objective with a location pays this, so it multiplies
+    -- by the candidate count -- which is how 1.5 ms per call became eleven
+    -- milliseconds of rebuild without anything looking slow.
+    ["EstimateSeconds() across a zone"] = 0.25,
+    ["CostFor() as the scorer calls it"] = 0.25,
 }
 
 if ENFORCE_BUDGETS then
@@ -48234,6 +49428,24 @@ echo "  release guard: wrong version"
 $PWSH -NoProfile -File ./cn.ps1 release 9.9.9 2>&1 | grep -q "carries version $VERSION" \
   || { echo "FAIL: wrong-version guard"; exit 1; }
 grep -q "## Version: $VERSION" CompletionNavigator.toc || { echo "FAIL: guard modified the tree"; exit 1; }
+
+echo "  check guard: a tree left behind by a refused init"
+# THE FAILURE THAT COST A RELEASE CYCLE.
+#
+# A new cn.ps1 arrives, `init` refuses because Core.lua already exists, and
+# the tree stays a release behind while every other line of `check` reports
+# happily on the OLD source. There was a branch for the opposite case -- a
+# cn.ps1 older than the tree -- and none at all for this one.
+cp Core.lua Core.bak
+sed -i 's/^CN.version     = "'"$VERSION"'"/CN.version     = "0.0.1"/' Core.lua
+sed -i 's/^## Version: '"$VERSION"'/## Version: 0.0.1/' CompletionNavigator.toc
+$PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q "but the tree on disk is 0.0.1" \
+  || { echo "FAIL: a tree behind the toolkit must be reported"; exit 1; }
+mv Core.bak Core.lua
+sed -i 's/^## Version: 0.0.1/## Version: '"$VERSION"'/' CompletionNavigator.toc
+$PWSH -NoProfile -File ./cn.ps1 check > check3.log 2>&1
+grep -q "All checks passed" check3.log \
+  || { echo "FAIL: check does not pass once the tree is current"; cat check3.log; exit 1; }
 
 git init -q -b main . && git config user.email t@e.com && git config user.name T
 git add -A >/dev/null 2>&1 && git commit -qm init
@@ -49936,8 +51148,19 @@ function Assert-CNWritable {
 $script:NonAddonLua = @('harness.lua', 'bench.lua')
 
 function Get-CNLuaFiles {
+    # EVIDENCE IS NOT SOURCE.
+    #
+    # fixtures\captured.lua is a recording of what a live client returned,
+    # written by `cn.ps1 fixtures` and read only by the harness. It is a .lua
+    # file sitting in the tree, so this found it, `check` warned that it was
+    # missing from the .toc, and `sync` would have listed it -- which would
+    # hand the client a table of stub-audit data to load at login.
+    #
+    # Excluded by directory rather than by name: everything under fixtures\ is
+    # evidence by definition.
     Get-ChildItem -LiteralPath $script:Root -Recurse -Filter '*.lua' -File |
         Where-Object { $_.FullName -notmatch '[\\/]_backups[\\/]' } |
+        Where-Object { $_.FullName -notmatch '[\\/]fixtures[\\/]' } |
         Where-Object { $script:NonAddonLua -notcontains $_.Name } |
         ForEach-Object {
             $_.FullName.Substring($script:Root.Length).TrimStart('\', '/').Replace('/', '\')
@@ -51319,6 +52542,22 @@ function Invoke-CNCheck {
         elseif ($coreVersion -eq $script:ToolkitVersion) {
             Write-Host "  ok    toolkit and tree agree at $script:ToolkitVersion" -ForegroundColor DarkGray
         }
+        else {
+            # THE OTHER DIRECTION, WHICH HAD NO BRANCH AT ALL.
+            #
+            # The check above catches a cn.ps1 OLDER than the tree, because
+            # that one would downgrade source. The case that actually happens
+            # is the reverse: a new cn.ps1 arrives, `init` refuses because
+            # Core.lua already exists, and the tree is silently left a release
+            # behind while every other line of this check reports on the old
+            # source. That is exactly the silent failure the first branch was
+            # written to prevent, and it went uncaught in 0.46.0 -- the run
+            # printed "project page reviewed for 0.45.0" and nothing said why.
+            Write-Host "  FAIL  this cn.ps1 carries $script:ToolkitVersion but the tree on disk is $coreVersion." -ForegroundColor Red
+            Write-Host '        `init` will not overwrite an existing tree. Run:  .\cn.ps1 init -Force' -ForegroundColor Yellow
+            Write-Host '        Your SavedVariables and _curseforge copy are untouched by it.' -ForegroundColor DarkGray
+            $problems++
+        }
 
         # THE PROJECT PAGE MUST BE CONSIDERED EVERY RELEASE.
         #
@@ -51352,6 +52591,60 @@ function Invoke-CNCheck {
                 Write-Host "  ok    project page reviewed for $reviewed" -ForegroundColor DarkGray
             }
         }
+    }
+
+    # THE STUB AUDIT IS ONLY AS GOOD AS THE RECORDING BEHIND IT.
+    #
+    # harness.lua audits its own stubs against fixtures\captured.lua, which is
+    # the strongest test in this project -- nine defects came from a stub that
+    # modelled the world more simply than the world is. Until 0.46.0 a missing
+    # recording was advisory everywhere, so the audit could be absent for
+    # months while every run still printed ALL CHECKS PASSED.
+    #
+    # It cannot be blocking everywhere: CI has no game client and never will.
+    # So it is blocking exactly where a recording is possible -- a machine with
+    # World of Warcraft installed -- and silent where it is not.
+    $fixture = Join-Path (Get-Location) 'fixtures\captured.lua'
+
+    # Guarded: this probes Windows drive letters and throws outright on a
+    # PowerShell host that has none. A check that cannot answer "is there a
+    # client here" must answer "no" rather than stop the whole run.
+    $roots = @()
+
+    try { $roots = @(Get-CNSavedVariablesRoots) } catch { $roots = @() }
+
+    if (Test-Path -LiteralPath $fixture) {
+        $recording = [System.IO.File]::ReadAllText($fixture)
+
+        $recordedInterface =
+            if ($recording -match '\["interface"\]\s*=\s*(\d+)') { [int]$Matches[1] } else { $null }
+
+        $recordedBuild =
+            if ($recording -match '\["build"\]\s*=\s*"([^"]+)"') { $Matches[1] } else { $null }
+
+        $claimed =
+            if ($toc -match '(?m)^##\s*Interface:\s*(\d+)') { [int]$Matches[1] } else { $null }
+
+        if ($recordedInterface -and $claimed -and $recordedInterface -lt $claimed) {
+            Write-Host "  FAIL  fixtures\captured.lua is from client $recordedInterface; the .toc claims $claimed." -ForegroundColor Red
+            Write-Host '        Re-capture, or the stub audit is about a game that has been patched.' -ForegroundColor Red
+            $problems++
+        }
+        elseif ($null -eq $recordedInterface) {
+            Write-Host '  note  the recording predates 0.46.0 and carries no client version; re-capture when convenient' -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "  ok    stub audit backed by a recording from client $recordedInterface (build $recordedBuild)" -ForegroundColor DarkGray
+        }
+    }
+    elseif ($roots.Count -gt 0) {
+        Write-Host '  FAIL  no fixtures\captured.lua, and World of Warcraft is installed on this machine.' -ForegroundColor Red
+        Write-Host '        In game: /cn capture, then log out, then .\cn.ps1 fixtures' -ForegroundColor Red
+        Write-Host '        Without it the harness stubs are unverified against any real client.' -ForegroundColor Red
+        $problems++
+    }
+    else {
+        Write-Host '  note  no game client on this machine; stub audit not possible here' -ForegroundColor DarkGray
     }
 
     # Optional real syntax check if a Lua binary is on PATH.

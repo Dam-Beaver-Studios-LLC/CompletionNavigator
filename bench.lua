@@ -352,6 +352,31 @@ do
     -- Chase.All() below is the real cost of an open window, and it does run.
 end
 
+print("\nCosting a journey (every objective with a location pays this):")
+
+do
+    local travel = CN:GetModule("Travel")
+
+    if travel and travel.EstimateSeconds then
+        local nodes = travel.KnownNodes(94) or {}
+
+        print("  flight points known on this continent: " .. #nodes)
+
+        -- THE NUMBER THAT MATTERS IS THE SQUARE OF THAT ONE.
+        --
+        -- The pair search is deliberately exhaustive -- nearest-to-you and
+        -- nearest-to-target are often not the best route together -- and that
+        -- is the right call. It was measured against three nodes.
+        bench("EstimateSeconds() across a zone", 200, function()
+            travel.EstimateSeconds(94, 0.10, 0.10, 94, 0.90, 0.90)
+        end)
+
+        bench("CostFor() as the scorer calls it", 200, function()
+            travel.CostFor(94, 0.90, 0.90)
+        end)
+    end
+end
+
 ------------------------------------------------------------
 -- BUDGETS
 ------------------------------------------------------------
@@ -380,6 +405,13 @@ local BUDGETS = {
     -- walked into a new zone.
     ["BuildZoneRoute()"]          = 8.0,
     ["Chase.All() with 8 goals"]  = 5.0,
+
+    -- Added in 0.46.0, and the reason the rebuild ceiling above is now
+    -- meaningful. Every objective with a location pays this, so it multiplies
+    -- by the candidate count -- which is how 1.5 ms per call became eleven
+    -- milliseconds of rebuild without anything looking slow.
+    ["EstimateSeconds() across a zone"] = 0.25,
+    ["CostFor() as the scorer calls it"] = 0.25,
 }
 
 if ENFORCE_BUDGETS then
