@@ -230,6 +230,17 @@ end
 
 Chase.builders = builders
 
+-- Which goals are worth asking the Adventure Guide about. A reputation does
+-- not drop from a boss, and searching for one costs a journal round-trip to
+-- learn nothing.
+Chase.instanceSourceTypes = {
+    [CN.objectiveTypes.MOUNT]      = true,
+    [CN.objectiveTypes.PET]        = true,
+    [CN.objectiveTypes.TOY]        = true,
+    [CN.objectiveTypes.APPEARANCE] = true,
+    [CN.objectiveTypes.TITLE]      = true,
+}
+
 ------------------------------------------------------------
 -- THE CHAIN
 ------------------------------------------------------------
@@ -278,6 +289,57 @@ function Chase.Chain(goal)
         if ok and type(steps) == "table" then
             chain.steps    = steps
             chain.progress = progress
+        end
+    end
+
+    -- IF IT DROPS FROM A BOSS, SAY WHICH BOSS.
+    --
+    -- Before this, a raid mount produced a chain whose only content was the
+    -- mount journal's source line -- prose, no boss, no instance, and no idea
+    -- whether the player was already locked out of the thing this week. That
+    -- is the one failure this feature exists to prevent: a goal with no path
+    -- to it.
+    --
+    -- Deliberately additive. The step is appended to whatever the builder
+    -- produced rather than replacing it, because the journal's answer is a
+    -- location and the builder's answer is the requirement, and a player
+    -- needs both.
+    local instances = CN:GetModule("Instances")
+
+    if instances and chain.name and Chase.instanceSourceTypes[goal.type] then
+        local ok, description, first = pcall(instances.DescribeSource, chain.name)
+
+        if ok and description and first then
+            local lockout = first.instance and instances.LockoutFor(first.instance)
+
+            if lockout and lockout.complete then
+                table.insert(chain.steps, NewStep(Chase.states.BLOCKED,
+                    "Drops from " .. description,
+                    {
+                        note = "you are saved to " .. first.instance
+                            .. " and it is cleared -- resets in "
+                            .. instances.FormatReset(lockout.resetsIn),
+                    }))
+            else
+                local state = Chase.states.TODO
+
+                -- Only claim the immediate move if nothing else has.
+                if not Chase.NextStep(chain) then
+                    state = Chase.states.NEXT
+                end
+
+                local step = NewStep(state, "Kill " .. description, {
+                    encounterID = first.encounterID,
+                    instanceID  = first.instanceID,
+                })
+
+                if lockout then
+                    step.note = lockout.remaining .. " of " .. lockout.encounters
+                        .. " left on your lockout"
+                end
+
+                table.insert(chain.steps, step)
+            end
         end
     end
 

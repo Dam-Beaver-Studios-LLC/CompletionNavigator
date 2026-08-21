@@ -186,6 +186,7 @@ function Filters.TypeOrder()
         types.EXPLORATION,
         types.TITLE,
         types.CURRENCY,
+        types.INSTANCE,
     }
 end
 
@@ -206,6 +207,7 @@ Filters.typeLabels = {
     EXPLORATION = "Exploration",
     TITLE       = "Titles",
     CURRENCY    = "Currencies",
+    INSTANCE    = "Dungeons & raids",
 }
 
 function Filters.TypeLabel(objectiveType)

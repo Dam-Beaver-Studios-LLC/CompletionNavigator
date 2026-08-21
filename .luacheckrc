@@ -38,6 +38,15 @@ read_globals = {
     "UnitSex", "PlaySound", "PlaySoundFile", "GetTime", "UnitPosition",
     "GetPlayerFacing", "InCombatLockdown", "IsInInstance", "GetBindingKey",
     "GetLocale",
+
+    -- Saved instances and the Adventure Guide (Encounter Journal). The EJ
+    -- functions are globals rather than a namespaced table, which is why
+    -- there are so many of them.
+    "GetNumSavedInstances", "GetSavedInstanceInfo",
+    "EncounterJournal", "EJ_SelectInstance", "EJ_GetCurrentInstance",
+    "EJ_GetInstanceInfo", "EJ_GetEncounterInfoByIndex", "EJ_GetEncounterInfo",
+    "EJ_SetSearch", "EJ_ClearSearch", "EJ_GetNumSearchResults",
+    "EJ_GetSearchResult",
     "GetQuestID", "GetTitleText", "GetCategoryInfo",
 
     -- Globals the client defines that are not functions.

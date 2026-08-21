@@ -30,6 +30,10 @@ CN.objectiveTypes = {
     CURRENCY    = "CURRENCY",
     VENDOR      = "VENDOR",
     COLLECTIBLE = "COLLECTIBLE",
+
+    -- A dungeon or raid lockout you are part-way through. Not a place; a
+    -- deadline with progress already spent on it.
+    INSTANCE    = "INSTANCE",
 }
 
 ------------------------------------------------------------

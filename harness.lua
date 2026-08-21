@@ -319,6 +319,153 @@ C_Map = {
     end,
 }
 
+-- SAVED INSTANCES.
+--
+-- Thirteen return values in a fixed order, which is exactly the kind of API
+-- shape a hand-written stub gets subtly wrong. /cn capture records the real
+-- one and the fixture audit at the end of this file compares them.
+CN_TEST_SAVED_INSTANCES = {
+    -- name, id, reset, difficultyID, locked, extended, _, isRaid, _,
+    -- difficultyName, defeated, encounters
+    { "Nerub-ar Palace", 1273, 3 * 86400, 14, true, false, false, true,
+      false, "Normal", 6, 8 },
+    { "Ara-Kara, City of Echoes", 1274, 86400, 23, true, false, false, false,
+      false, "Mythic", 4, 4 },
+    -- Saved to it, but nothing killed in it yet. The client lists these, and
+    -- they are NOT a next action: an untouched lockout is a decision about
+    -- the evening, not spent effort that expires.
+    -- Deliberately SMALL, so that it clears every other filter the provider
+    -- applies and the only thing excluding it is the rule under test. A
+    -- fixture that fails a different check first proves nothing about this
+    -- one -- the first version of this row had eight bosses and was being
+    -- dropped for being too long, so the rule could have been deleted
+    -- entirely and the suite would have agreed.
+    { "Liberation of Undermine", 1296, 5 * 86400, 14, true, false, false, true,
+      false, "Normal", 0, 3 },
+}
+
+function GetNumSavedInstances()
+    return #CN_TEST_SAVED_INSTANCES
+end
+
+function GetSavedInstanceInfo(index)
+    local row = CN_TEST_SAVED_INSTANCES[index]
+
+    if not row then
+        return nil
+    end
+
+    return row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8],
+        row[9], row[10], row[11], row[12]
+end
+
+-- THE ADVENTURE GUIDE, INCLUDING THE PART THAT MAKES IT DANGEROUS.
+--
+-- EJ_SelectInstance is not a query: it changes what the journal is showing,
+-- which is what the player is looking at if the window is open. The stub
+-- models that state so the suite can prove the addon puts it back and refuses
+-- to touch it while the window is up. A stub that treated selection as a
+-- no-op would agree with an addon that yanked the player's view around.
+CN_TEST_EJ_SELECTED = nil
+CN_TEST_EJ_OPEN     = false
+CN_TEST_EJ_SEARCH   = nil
+
+CN_TEST_EJ_INSTANCES = {
+    [1273] = {
+        name = "Nerub-ar Palace",
+        encounters = {
+            { name = "Ulgrax the Devourer", id = 2607 },
+            { name = "The Bloodbound Horror", id = 2611 },
+            { name = "Sikran", id = 2599 },
+            { name = "Rasha'nan", id = 2609 },
+            { name = "Broodtwister Ovi'nax", id = 2612 },
+            { name = "Nexus-Princess Ky'veza", id = 2601 },
+            { name = "The Silken Court", id = 2608 },
+            { name = "Queen Ansurek", id = 2602 },
+        },
+    },
+    [1274] = {
+        name = "Ara-Kara, City of Echoes",
+        encounters = {
+            { name = "Avanoxx", id = 2926 },
+            { name = "Anub'zekt", id = 2906 },
+            { name = "Ki'katal the Harvester", id = 2925 },
+        },
+    },
+}
+
+-- What the journal's search would return, keyed by the text searched for.
+CN_TEST_EJ_SEARCH_RESULTS = {
+    ["Ansurek's Web Wrap"] = {
+        { id = 2602, stype = 1, instanceID = 1273 },
+    },
+}
+
+EncounterJournal = {
+    IsShown = function() return CN_TEST_EJ_OPEN end,
+}
+
+function EJ_SelectInstance(instanceID)
+    CN_TEST_EJ_SELECTED = instanceID
+end
+
+function EJ_GetCurrentInstance()
+    return CN_TEST_EJ_SELECTED
+end
+
+function EJ_GetInstanceInfo(instanceID)
+    local entry = CN_TEST_EJ_INSTANCES[instanceID or CN_TEST_EJ_SELECTED]
+
+    return entry and entry.name or nil
+end
+
+function EJ_GetEncounterInfoByIndex(index, instanceID)
+    local entry = CN_TEST_EJ_INSTANCES[instanceID or CN_TEST_EJ_SELECTED]
+
+    local encounter = entry and entry.encounters[index]
+
+    if not encounter then
+        return nil
+    end
+
+    return encounter.name, "description", encounter.id
+end
+
+function EJ_GetEncounterInfo(encounterID)
+    for _, entry in pairs(CN_TEST_EJ_INSTANCES) do
+        for _, encounter in ipairs(entry.encounters) do
+            if encounter.id == encounterID then
+                return encounter.name
+            end
+        end
+    end
+
+    return nil
+end
+
+function EJ_SetSearch(text)
+    CN_TEST_EJ_SEARCH = CN_TEST_EJ_SEARCH_RESULTS[text] or {}
+end
+
+function EJ_ClearSearch()
+    CN_TEST_EJ_SEARCH = nil
+end
+
+function EJ_GetNumSearchResults()
+    return CN_TEST_EJ_SEARCH and #CN_TEST_EJ_SEARCH or 0
+end
+
+function EJ_GetSearchResult(index)
+    local result = CN_TEST_EJ_SEARCH and CN_TEST_EJ_SEARCH[index]
+
+    if not result then
+        return nil
+    end
+
+    -- id, type, _, _, _, instanceID
+    return result.id, result.stype, nil, nil, nil, result.instanceID
+end
+
 local superTracked = nil
 
 C_SuperTrack = {
@@ -2013,7 +2160,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 16, "every candidate provider must register, got "
+assert(firstState.providers == 17, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -3081,13 +3228,34 @@ for index, objective in ipairs(ranked) do
     if objective.type == "TITLE" and objective.id == 2 then goalRank = index end
 end
 
-assert(goalRank and goalRank <= 3,
-    "a pinned goal must rank in the top three, got " .. tostring(goalRank))
+-- NOT "top three". That was a magic number that meant "above everything
+-- except the three expiring things this fixture happened to contain", and it
+-- broke the moment a provider was added -- for a reason that had nothing to
+-- do with goals. The property actually being claimed is that a pinned goal
+-- outranks everything that is NOT on a deadline: this addon puts expiring
+-- content first deliberately, and a pin cannot outrank a reset.
+assert(goalRank, "a pinned goal must appear in the ranked list at all")
+
+for index = 1, goalRank - 1 do
+    local above = ranked[index]
+
+    local timed = (above.expiresIn ~= nil)
+        or ((above.limitedTimeBonus or 0) > 0)
+
+    assert(timed, "only time-limited work may outrank a pinned goal, but "
+        .. tostring(above.name) .. " is not on a deadline")
+end
 
 -- With the expiring content gone, the goal must be first.
 local vaultProvider = CN.candidateProviders["Vault"]
 
-CN.candidateProviders["Vault"] = nil
+-- Both the deadline providers, not just the Vault: a lockout expires at the
+-- weekly reset in exactly the same way, and "nothing expiring" has to mean
+-- nothing expiring.
+local instanceProvider = CN.candidateProviders["Instances"]
+
+CN.candidateProviders["Vault"]     = nil
+CN.candidateProviders["Instances"] = nil
 CN.InvalidateCandidates()
 
 local top = CN.Recommend(1)[1]
@@ -3098,7 +3266,8 @@ print("  top with nothing expiring = " .. tostring(top.name) .. " ("
 assert(top.type == "TITLE" and top.id == 2,
     "with nothing expiring, a pinned goal must rank first, got " .. tostring(top.name))
 
-CN.candidateProviders["Vault"] = vaultProvider
+CN.candidateProviders["Vault"]     = vaultProvider
+CN.candidateProviders["Instances"] = instanceProvider
 CN.InvalidateCandidates()
 
 -- Removing it must put things back.
@@ -5908,6 +6077,560 @@ print("\nAngles on a map that is not square:")
 
     CN_TEST_MAP_SPAN = savedSpan
     navigation.ForgetMapScales()
+end)()
+
+
+print("\nDungeons and raids:")
+
+;(function()
+    local instances = CN:GetModule("Instances")
+
+    assert(instances, "the Instances module must load")
+
+    local lockouts = instances.Lockouts()
+
+    assert(#lockouts == 3, "every lockout must be read, got " .. #lockouts)
+
+    -- UNFINISHED FIRST, and among those, most nearly finished first: that is
+    -- the order they are worth doing, because the kills already spent expire
+    -- at the reset. A cleared lockout has nothing left to be worth anything,
+    -- so "remaining = 0" belongs at the BOTTOM rather than the top -- which
+    -- is what the first version of this assertion got backwards.
+    local seenComplete = false
+
+    for index, lockout in ipairs(lockouts) do
+        if lockout.complete then
+            seenComplete = true
+        else
+            assert(not seenComplete,
+                "an unfinished lockout must not rank below a cleared one (#"
+                .. index .. ")")
+        end
+    end
+
+    local palace
+
+    for _, lockout in ipairs(lockouts) do
+        if lockout.name == "Nerub-ar Palace" then palace = lockout end
+    end
+
+    assert(palace, "the raid lockout must be present")
+    assert(palace.defeated == 6 and palace.encounters == 8,
+        "the client's own counts must survive the read")
+    assert(palace.remaining == 2, "and remaining must be derived from them")
+    assert(palace.raid == true, "a raid must be marked as one")
+    assert(palace.complete == false, "6 of 8 is not cleared")
+
+    print("  " .. #lockouts .. " lockouts read, "
+        .. palace.remaining .. " bosses left in the raid")
+
+    ------------------------------------------------------------
+    -- A CLEARED LOCKOUT IS NOT AN OBJECTIVE.
+    ------------------------------------------------------------
+    local instanceCandidates = CN.candidateProviders["Instances"].fn()
+
+    local names = {}
+
+    for _, candidate in ipairs(instanceCandidates) do
+        names[candidate.id] = candidate
+    end
+
+    assert(names["Nerub-ar Palace"],
+        "a part-finished lockout is the cheapest progress in the game and "
+        .. "must be recommended")
+    assert(not names["Ara-Kara, City of Echoes"],
+        "a cleared lockout must not be recommended at all")
+    assert(not names["Liberation of Undermine"],
+        "and neither must one nothing has been killed in -- there is no spent "
+        .. "effort in it to expire, so it is a plan rather than a next action")
+
+    local raid = names["Nerub-ar Palace"]
+
+    assert(raid.expiresIn == 3 * 86400,
+        "the reset must be carried as a real deadline, not a bonus")
+    assert(raid.type == CN.objectiveTypes.INSTANCE,
+        "instances need their own type so they can be hidden like anything else")
+
+    local mentioned = false
+
+    for _, reason in ipairs(raid.reasons or {}) do
+        if reason:find("6 of 8") then mentioned = true end
+    end
+
+    assert(mentioned, "the reason must say what is already spent")
+
+    print("  a cleared lockout is not recommended; a part-finished one is")
+
+    ------------------------------------------------------------
+    -- READING THE ADVENTURE GUIDE MUST NOT MOVE THE PLAYER'S VIEW.
+    --
+    -- EJ_SelectInstance is not a query. It changes what the journal window is
+    -- displaying, and the player may be reading it.
+    ------------------------------------------------------------
+    CN_TEST_EJ_SELECTED = 1274
+    CN_TEST_EJ_OPEN     = false
+
+    local bosses = instances.RemainingBosses({
+        id = 1273, name = "Nerub-ar Palace", defeated = 0,
+        encounters = 8, remaining = 8,
+    })
+
+    assert(#bosses == 8, "every boss must be named when none are dead, got " .. #bosses)
+    assert(bosses[1].name == "Ulgrax the Devourer", "in journal order")
+
+    assert(CN_TEST_EJ_SELECTED == 1274,
+        "the journal's selection must be put back exactly as it was found")
+
+    -- Part-way through, the client says HOW MANY are left, not WHICH.
+    -- Naming them would be inventing information.
+    local partial, note = instances.RemainingBosses(palace)
+
+    assert(#partial == 0, "which bosses are dead is not knowable; nothing may be named")
+    assert(note and note:find("2 of 8"), "but the count must be reported: " .. tostring(note))
+
+    print("  the journal's selection is restored, and unknown bosses are not invented")
+
+    ------------------------------------------------------------
+    -- AND IT REFUSES ENTIRELY WHILE THE WINDOW IS OPEN.
+    ------------------------------------------------------------
+    CN_TEST_EJ_OPEN     = true
+    CN_TEST_EJ_SELECTED = 1274
+
+    instances.ForgetDrops()
+
+    local blocked = instances.WhereDoesItDrop("Ansurek's Web Wrap")
+
+    assert(#blocked == 0,
+        "nothing may be read while the player is looking at the journal")
+    assert(CN_TEST_EJ_SELECTED == 1274, "and nothing may be changed either")
+
+    CN_TEST_EJ_OPEN = false
+
+    instances.ForgetDrops()
+
+    local found = instances.WhereDoesItDrop("Ansurek's Web Wrap")
+
+    assert(#found == 1, "with the window closed it answers, got " .. #found)
+    assert(found[1].encounter == "Queen Ansurek", "with the boss named")
+    assert(found[1].instance == "Nerub-ar Palace", "and the instance")
+
+    print("  it refuses while the Adventure Guide is open, and answers when it is not")
+
+    ------------------------------------------------------------
+    -- A CHASE FOR AN INSTANCE DROP MUST NAME THE BOSS.
+    --
+    -- This is the failure the whole module exists to fix: before it, a raid
+    -- mount produced a goal with no path to it.
+    ------------------------------------------------------------
+    local chase = CN:GetModule("Chase")
+
+    local chain = chase.Chain({
+        type = CN.objectiveTypes.MOUNT,
+        id   = 9999,
+        name = "Ansurek's Web Wrap",
+    })
+
+    local step
+
+    for _, candidate in ipairs(chain.steps) do
+        if candidate.text and candidate.text:find("Queen Ansurek") then
+            step = candidate
+        end
+    end
+
+    assert(step, "the chain must name the boss the thing drops from")
+    assert(step.state == chase.states.TODO or step.state == chase.states.NEXT,
+        "and it must be actionable, not a note")
+    assert(step.note and step.note:find("2 of 8"),
+        "and it must say where the player's lockout stands: " .. tostring(step.note))
+
+    -- CLEARED MEANS BLOCKED, NOT "GO AND DO IT".
+    CN_TEST_SAVED_INSTANCES[1][11] = 8
+
+    local cleared = chase.Chain({
+        type = CN.objectiveTypes.MOUNT,
+        id   = 9999,
+        name = "Ansurek's Web Wrap",
+    })
+
+    local blockedStep
+
+    for _, candidate in ipairs(cleared.steps) do
+        if candidate.state == chase.states.BLOCKED then blockedStep = candidate end
+    end
+
+    assert(blockedStep, "a cleared lockout must block the step, not offer it")
+    assert(blockedStep.note and blockedStep.note:find("resets in"),
+        "and must say when it opens again")
+
+    CN_TEST_SAVED_INSTANCES[1][11] = 6
+
+    print("  a chase for a raid drop names the boss, and says when it is locked")
+end)()
+
+print("\nLearning what you actually do:")
+
+;(function()
+    local preference = CN:GetModule("Preference")
+
+    assert(preference, "the Preference module must load")
+
+    local character = CN.character
+
+    character.preference = nil
+
+    local QUEST = CN.objectiveTypes.QUEST
+
+    ------------------------------------------------------------
+    -- NOTHING HAPPENS UNTIL THERE IS ENOUGH TO GO ON.
+    --
+    -- The cost of learning too early is a ranking that lurches around in the
+    -- player's first evening, which reads as unreliable rather than adaptive.
+    ------------------------------------------------------------
+    assert(preference.Multiplier(QUEST) == 1,
+        "an unobserved type must not be adjusted at all")
+
+    local store = preference.Store()
+
+    -- The ARITHMETIC is tested through Compute rather than Multiplier,
+    -- because Multiplier is memoised and these lines edit the store directly,
+    -- which is not a path the addon itself ever takes. Testing the cached
+    -- entry point here would be testing the fixture's own staleness. The
+    -- cache gets its own test below, driven the way the game drives it.
+    store[QUEST] = { shown = preference.minimumObservations - 1, acted = 0 }
+
+    assert(preference.Compute(QUEST) == 1,
+        "one observation short of the threshold is still no adjustment")
+
+    store[QUEST].shown = preference.minimumObservations
+
+    local ignored = preference.Compute(QUEST)
+
+    assert(ignored < 1, "a type never acted on must be pushed down")
+    assert(ignored >= preference.minMultiplier,
+        "but never below the floor -- silencing a type is the player's call")
+
+    store[QUEST] = { shown = 100, acted = 100 }
+
+    local loved, reason = preference.Compute(QUEST)
+
+    assert(loved > 1 and loved <= preference.maxMultiplier,
+        "a type always acted on is pushed up, within the cap")
+    assert(reason, "and the reason must be stated")
+
+    print("  clamped to " .. string.format("%.2f-%.2f",
+        preference.minMultiplier, preference.maxMultiplier)
+        .. ", and silent below " .. preference.minimumObservations .. " sightings")
+
+    ------------------------------------------------------------
+    -- AN OPEN WINDOW MUST NOT TEACH IT ANYTHING.
+    --
+    -- The window redraws on a great many events. Counting each redraw as a
+    -- sighting would mean leaving the window open taught the addon that you
+    -- ignore everything, several times a second.
+    ------------------------------------------------------------
+    character.preference = nil
+
+    local hook = CN.recommendationHooks["Preference"]
+
+    local shown = { { type = QUEST, id = 4242 } }
+
+    for _ = 1, 50 do
+        hook(shown)
+    end
+
+    assert(preference.Store()[QUEST].shown == 1,
+        "fifty redraws of the same line is one sighting, got "
+        .. preference.Store()[QUEST].shown)
+
+    print("  fifty redraws of one line count once")
+
+    ------------------------------------------------------------
+    -- THE MEMOISED ANSWER MUST NOT OUTLIVE THE OBSERVATION.
+    --
+    -- Ranking asks for this on every candidate, so it is cached. A cache that
+    -- never noticed the counters moving would freeze the addon's opinion at
+    -- whatever it thought during the first list it ever built.
+    ------------------------------------------------------------
+    local ACHIEVEMENT = CN.objectiveTypes.ACHIEVEMENT
+
+    preference.Store()[ACHIEVEMENT] = { shown = 100, acted = 0 }
+
+    local beforeLearning = preference.Multiplier(ACHIEVEMENT)
+
+    -- Drive it the way the game does: a real sighting, then a real
+    -- completion of the thing that was recommended.
+    hook({ { type = ACHIEVEMENT, id = 31337 } })
+
+    for _ = 1, 60 do
+        preference.NoteCompleted(ACHIEVEMENT, 31337)
+        hook({ { type = ACHIEVEMENT, id = 31337 } })
+    end
+
+    local after = preference.Multiplier(ACHIEVEMENT)
+
+    assert(after > beforeLearning,
+        "the cached multiplier must follow the counters, "
+        .. string.format("%.3f then %.3f", beforeLearning, after))
+
+    print("  and the cached opinion follows them")
+
+    ------------------------------------------------------------
+    -- CREDIT ONLY WHAT WAS ACTUALLY RECOMMENDED.
+    ------------------------------------------------------------
+    assert(preference.NoteCompleted(QUEST, 4242) == true,
+        "finishing something the addon suggested counts")
+
+    assert(preference.Store()[QUEST].acted == 1, "exactly once")
+
+    assert(preference.NoteCompleted(QUEST, 777) == false,
+        "finishing something it never suggested must NOT count -- otherwise "
+        .. "it learns that its own advice is always taken")
+
+    -- The event path, which is what the game actually drives.
+    hook({ { type = QUEST, id = 555 } })
+
+    CN.FireEvent("QUEST_TURNED_IN", 555)
+
+    assert(preference.Store()[QUEST].acted == 2,
+        "the completion event must feed the same counter")
+
+    print("  only recommendations that were followed are credited")
+
+    ------------------------------------------------------------
+    -- THE ID THE EVENT CARRIES IS NOT ALWAYS THE ID THAT WAS SHOWN.
+    ------------------------------------------------------------
+    local PET = CN.objectiveTypes.PET
+
+    hook({ { type = PET, id = 1234 } })
+
+    -- NEW_PET_ADDED reports the pet you now own, not the species recommended.
+    assert(preference.NoteCompleted(PET, "BattlePet-0-000011112222") == true,
+        "a completion whose id cannot match must still credit the type")
+
+    print("  a completion the client ids differently still counts")
+
+    ------------------------------------------------------------
+    -- IT MUST BE VISIBLE, REVERSIBLE, AND OPTIONAL.
+    ------------------------------------------------------------
+    CN.HandleSlashCommand("learned")
+
+    local objective = { type = QUEST, id = 1, reasons = {} }
+
+    character.preference[QUEST] = { shown = 100, acted = 100 }
+
+    CN.InvalidateRanking()
+
+    local base = CN.ScoreObjective({ type = "NOTHING", id = 1,
+        completionValue = 10 })
+
+    CN.ScoreObjective(objective)
+
+    local explained = false
+
+    for _, entry in ipairs(objective.reasons) do
+        if entry:find("act on") then explained = true end
+    end
+
+    assert(explained, "an adjusted line must say it was adjusted")
+
+    preference.SetEnabled(false)
+
+    assert(preference.Multiplier(QUEST) == 1,
+        "switched off means switched off")
+
+    preference.SetEnabled(true)
+
+    CN.HandleSlashCommand("learned reset")
+
+    assert(CN.character.preference == nil, "and it can all be thrown away")
+
+    assert(base > 0, "the control score must be a real number")
+
+    print("  explained on the line, switchable, and resettable")
+end)()
+
+print("\nRecording what the client actually returns:")
+
+;(function()
+    local capture = CN:GetModule("Capture")
+
+    assert(capture, "the Capture module must load")
+
+    local records, captured, skipped = capture.Run()
+
+    assert(captured > 0, "something must be recordable in the harness")
+    assert(records.build == CN.version, "the build must be stamped on it")
+
+    -- SHAPE, NOT CONTENT. This is written to disk and read back on every
+    -- login until it is cleared, so it must not grow with the player's data.
+    local shape = capture.Shape({
+        x = 1, y = 2,
+        GetXY = function() end,
+        nested = { deep = { deeper = { deepest = true } } },
+    })
+
+    assert(shape.type == "table", "a table is described as one")
+    assert(shape.fields.GetXY.type == "function",
+        "METHODS MATTER: the 0.19.0 bug was a vector whose GetXY the stub lacked")
+    assert(shape.fields.nested.fields.deep.truncated
+        or shape.fields.nested.fields.deep.fields,
+        "depth must be bounded rather than followed forever")
+
+    local wide = {}
+
+    for index = 1, 500 do
+        wide["key" .. index] = index
+    end
+
+    local wideShape = capture.Shape(wide)
+
+    assert(wideShape.count == 500, "the count is recorded")
+
+    local kept = 0
+
+    for _ in pairs(wideShape.fields) do kept = kept + 1 end
+
+    assert(kept <= 12, "but the fields are bounded, got " .. kept)
+
+    -- NOTHING IDENTIFYING THE PLAYER.
+    local serialized = ""
+
+    local function walk(value)
+        if type(value) == "table" then
+            for key, entry in pairs(value) do
+                serialized = serialized .. tostring(key) .. " "
+                walk(entry)
+            end
+        else
+            serialized = serialized .. tostring(value) .. " "
+        end
+    end
+
+    walk(records)
+
+    local name  = UnitName("player")
+    local realm = GetRealmName()
+
+    assert(not serialized:find(name, 1, true),
+        "the recording must not contain the character's name")
+    assert(not serialized:find(realm, 1, true),
+        "nor the realm")
+
+    print("  " .. captured .. " observations recorded, " .. skipped
+        .. " skipped, nothing identifying the player")
+
+    assert(capture.Clear() == true, "and it can be removed again")
+    assert(CN.Account().capture == nil, "completely")
+
+    print("  and it can be cleared")
+end)()
+
+print("\nStubs, audited against a real client:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE POINT OF THIS SECTION.
+    --
+    -- Nine defects in this addon came from a stub that modelled the world
+    -- more simply than the world is. Writing better stubs does not fix that,
+    -- because the author does not know what he simplified. So: when a
+    -- recording from a live client is present, check the stubs against it,
+    -- and fail when reality had a field the stub does not.
+    ------------------------------------------------------------
+    local path = ROOT .. "/../fixtures/captured.lua"
+
+    local chunk = loadfile(path) or loadfile("fixtures/captured.lua")
+
+    if not chunk then
+        -- NOT A FAILURE, but it must be said out loud. CI has no game client,
+        -- and an audit nobody can see is an audit nobody performs.
+        print("  |no recording present| stubs are UNVERIFIED against a real "
+            .. "client -- run /cn capture in game, then cn.ps1 fixtures")
+        return
+    end
+
+    local real = chunk()
+
+    assert(type(real) == "table", "a recording must be a table")
+
+    local audited, complaints = 0, {}
+
+    local function require(field, condition, complaint)
+        if real[field] == nil or (type(real[field]) == "table" and real[field].skipped) then
+            return
+        end
+
+        audited = audited + 1
+
+        if not condition() then
+            table.insert(complaints, complaint)
+        end
+    end
+
+    require("mapSpanYards", function()
+        -- If the real client reported a non-square map, the stub must be able
+        -- to model one. It could not, for eight releases, and that hid an
+        -- angle error in every zone in the game.
+        return CN_TEST_MAP_SPAN ~= nil
+    end, "the real client reports map spans, and the stub cannot model them")
+
+    require("worldPosition", function()
+        return real.worldPosition.hasGetXY == false
+            or (CreateVector2D(0, 0).GetXY ~= nil)
+    end, "the real client's world position exposes GetXY and the stub's does not")
+
+    require("questPOI", function()
+        if (real.questPOI.questStarts or 0) == 0 then
+            return true
+        end
+
+        for _, poi in ipairs(CN.Blizzard.GetQuestPOIsOnMap(94)) do
+            if poi.isQuestStart ~= nil then
+                return true
+            end
+        end
+
+        return false
+    end, "the real client reports quest starts and the stub does not")
+
+    require("achievementCriteria", function()
+        if not real.achievementCriteria.counted then
+            return true
+        end
+
+        local criteria = CN.Blizzard.GetAchievementCriteriaList(1001, 4)
+
+        return criteria and criteria[1] and criteria[1].required ~= nil
+    end, "real criteria carry counters and the stub's do not")
+
+    require("savedInstances", function()
+        local fields = real.savedInstances.shape
+            and real.savedInstances.shape.fields or {}
+
+        local stub = CN.Blizzard.GetSavedInstances()[1]
+
+        if not stub then
+            return false
+        end
+
+        for field in pairs(fields) do
+            if stub[field] == nil then
+                return false
+            end
+        end
+
+        return true
+    end, "the real client returns saved-instance fields the stub does not")
+
+    for _, complaint in ipairs(complaints) do
+        print("  MISMATCH: " .. complaint)
+    end
+
+    assert(#complaints == 0,
+        #complaints .. " stub(s) are simpler than the client they stand in for")
+
+    print("  " .. audited .. " stubs match what the client actually returned")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

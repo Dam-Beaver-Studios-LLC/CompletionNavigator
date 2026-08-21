@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.40.0'
+$script:ToolkitVersion = '0.41.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.40.0"
+CN.version     = "0.41.0"
 CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -1044,6 +1044,10 @@ CN.objectiveTypes = {
     CURRENCY    = "CURRENCY",
     VENDOR      = "VENDOR",
     COLLECTIBLE = "COLLECTIBLE",
+
+    -- A dungeon or raid lockout you are part-way through. Not a place; a
+    -- deadline with progress already spent on it.
+    INSTANCE    = "INSTANCE",
 }
 
 ------------------------------------------------------------
@@ -2841,6 +2845,35 @@ CN.modes = {
 -- SCORING
 ------------------------------------------------------------
 
+-- Modules that want a say in the final score without this file knowing about
+-- them. Ordered by registration, so the result does not depend on table
+-- iteration order -- two players with the same data must get the same list.
+CN.scoreAdjusters     = CN.scoreAdjusters or {}
+CN.scoreAdjusterOrder = CN.scoreAdjusterOrder or {}
+
+function CN.RegisterScoreAdjuster(name, adjuster)
+    if type(name) ~= "string" or type(adjuster) ~= "function" then
+        return false
+    end
+
+    if not CN.scoreAdjusters[name] then
+        table.insert(CN.scoreAdjusterOrder, name)
+    end
+
+    CN.scoreAdjusters[name] = adjuster
+
+    return true
+end
+
+-- Bumped when something that changes the ORDER changes, without any candidate
+-- having changed. Rebuilding every provider to reorder a list nobody's data
+-- moved in would cost milliseconds to achieve nothing.
+CN.rankingGeneration = CN.rankingGeneration or 0
+
+function CN.InvalidateRanking()
+    CN.rankingGeneration = (CN.rankingGeneration or 0) + 1
+end
+
 function CN.ScoreObjective(objective)
     if type(objective) ~= "table" then
         return 0
@@ -2897,6 +2930,27 @@ function CN.ScoreObjective(objective)
 
     if profile.types and objective.type and profile.types[objective.type] then
         score = score * profile.types[objective.type]
+    end
+
+    -- LAST, AND DELIBERATELY AFTER THE PROFILE.
+    --
+    -- Adjusters are how a module changes the ranking without this file having
+    -- to know it exists. They run after the profile's own type weighting so
+    -- that a focus the player CHOSE always outranks a habit something merely
+    -- inferred -- "I am levelling tonight" must not be argued with by a
+    -- counter.
+    for index = 1, #CN.scoreAdjusterOrder do
+        local adjuster = CN.scoreAdjusters[CN.scoreAdjusterOrder[index]]
+
+        if adjuster then
+            local adjusted = adjuster(objective, score)
+
+            -- An adjuster that returns nothing, or something that is not a
+            -- number, is ignored rather than allowed to zero the score.
+            if type(adjusted) == "number" then
+                score = adjusted
+            end
+        end
     end
 
     -- Normalize -0.0, which formats as "-0.0" and reads like a bug.
@@ -3325,7 +3379,8 @@ local function Ranked()
     if ranked.list
         and ranked.generation == aggregate.generation
         and ranked.mode == mode
-        and ranked.filter == filterGeneration then
+        and ranked.filter == filterGeneration
+        and ranked.ranking == (CN.rankingGeneration or 0) then
 
         return ranked.list
     end
@@ -3367,6 +3422,7 @@ local function Ranked()
     ranked.generation = aggregate.generation
     ranked.mode       = mode
     ranked.filter     = filterGeneration
+    ranked.ranking    = CN.rankingGeneration or 0
 
     return list
 end
@@ -8895,6 +8951,231 @@ function Blizzard.GetItemName(itemID)
     end
 
     return nil
+end
+
+------------------------------------------------------------
+-- SAVED INSTANCES
+------------------------------------------------------------
+
+-- What you are locked to this week, straight from the client.
+--
+-- NEVER PERSISTED. A lockout is a fact with an expiry on it, the client
+-- always knows it, and a stale copy on disk would be worse than no copy at
+-- all: "you have 6 of 8 bosses down in there" is actively harmful advice
+-- after the reset it did not know about.
+--
+-- Returns an array of:
+--   { name, id, reset, difficultyID, difficulty, defeated, encounters,
+--     locked, extended, raid }
+function Blizzard.GetSavedInstances()
+    local results = {}
+
+    if not GetNumSavedInstances or not GetSavedInstanceInfo then
+        return results
+    end
+
+    local ok, count = pcall(GetNumSavedInstances)
+
+    if not ok or not count then
+        return results
+    end
+
+    for index = 1, count do
+        local gotInfo, name, id, reset, difficultyID, locked, extended,
+            _, isRaid, _, difficultyName, defeated, encounters =
+                pcall(GetSavedInstanceInfo, index)
+
+        if gotInfo and name then
+            table.insert(results, {
+                name         = name,
+                id           = id,
+                reset        = reset,
+                difficultyID = difficultyID,
+                difficulty   = difficultyName,
+                locked       = locked and true or false,
+                extended     = extended and true or false,
+                raid         = isRaid and true or false,
+                defeated     = defeated or 0,
+                encounters   = encounters or 0,
+            })
+        end
+    end
+
+    return results
+end
+
+------------------------------------------------------------
+-- THE ENCOUNTER JOURNAL
+------------------------------------------------------------
+
+-- READING THIS API CHANGES WHAT THE PLAYER IS LOOKING AT.
+--
+-- EJ_SelectInstance and EJ_SelectEncounter are not queries. They set the
+-- journal's current selection, which is the same selection the Adventure
+-- Guide window is displaying. Scanning it while that window is open would
+-- move the player's view out from under them -- an addon reaching into the
+-- interface and changing what somebody is reading, which is exactly the kind
+-- of thing this addon does not do.
+--
+-- So: refuse while the journal is visible, and put the selection back
+-- afterwards when it is not.
+function Blizzard.HasEncounterJournal()
+    return EJ_SelectInstance ~= nil
+        and EJ_GetEncounterInfoByIndex ~= nil
+        and EJ_GetInstanceInfo ~= nil
+end
+
+function Blizzard.IsEncounterJournalOpen()
+    return EncounterJournal ~= nil
+        and EncounterJournal.IsShown ~= nil
+        and EncounterJournal:IsShown() and true or false
+end
+
+local function WithJournal(work)
+    if not Blizzard.HasEncounterJournal() then
+        return nil, "the Adventure Guide is not available"
+    end
+
+    if Blizzard.IsEncounterJournalOpen() then
+        return nil, "the Adventure Guide is open -- close it and try again"
+    end
+
+    local restoreInstance
+
+    if EJ_GetCurrentInstance then
+        local gotCurrent, current = pcall(EJ_GetCurrentInstance)
+
+        if gotCurrent then
+            restoreInstance = current
+        end
+    end
+
+    local ok, result = pcall(work)
+
+    -- Put it back even when the work threw, or the player's next visit to
+    -- the Adventure Guide opens on whatever this addon was reading last.
+    if restoreInstance and EJ_SelectInstance then
+        pcall(EJ_SelectInstance, restoreInstance)
+    end
+
+    if not ok then
+        return nil, tostring(result)
+    end
+
+    return result
+end
+
+Blizzard.WithEncounterJournal = WithJournal
+
+-- Bosses in an instance, in the order the journal lists them:
+--   { encounterID, name, order }
+function Blizzard.GetInstanceEncounters(instanceID)
+    if not instanceID then
+        return {}
+    end
+
+    local encounters = WithJournal(function()
+        EJ_SelectInstance(instanceID)
+
+        local list = {}
+
+        local index = 1
+
+        while true do
+            local name, _, encounterID = EJ_GetEncounterInfoByIndex(index, instanceID)
+
+            if not name then
+                break
+            end
+
+            table.insert(list, {
+                encounterID = encounterID,
+                name        = name,
+                order       = index,
+            })
+
+            index = index + 1
+
+            -- No instance in the game has anything like this many bosses.
+            -- The guard is against an API that returns a name forever.
+            if index > 40 then
+                break
+            end
+        end
+
+        return list
+    end)
+
+    return encounters or {}
+end
+
+-- Where does this drop?
+--
+-- Uses the journal's own search rather than building a reverse index of every
+-- item in the game. An index would be tens of thousands of rows to answer a
+-- question the player asks a handful of times a session, and it would be
+-- stale the day a patch changed a loot table. The search is what the
+-- Adventure Guide itself uses.
+--
+-- Returns an array of { instanceID, instance, encounterID, encounter }.
+function Blizzard.SearchEncounterJournal(text, limit)
+    if not text or text == "" then
+        return {}
+    end
+
+    if not EJ_SetSearch or not EJ_GetSearchResult or not EJ_GetNumSearchResults then
+        return {}
+    end
+
+    limit = limit or 8
+
+    local results = WithJournal(function()
+        EJ_SetSearch(text)
+
+        local found = {}
+
+        local total = EJ_GetNumSearchResults() or 0
+
+        for index = 1, math.min(total, limit) do
+            local id, stype, _, _, _, instanceID = EJ_GetSearchResult(index)
+
+            -- Type 1 is an encounter in every build that has exposed this.
+            if stype == 1 and id then
+                local instanceName
+
+                if instanceID and EJ_GetInstanceInfo then
+                    instanceName = EJ_GetInstanceInfo(instanceID)
+                end
+
+                local encounterName = EJ_GetEncounterInfo and EJ_GetEncounterInfo(id)
+
+                table.insert(found, {
+                    encounterID = id,
+                    encounter   = encounterName,
+                    instanceID  = instanceID,
+                    instance    = instanceName,
+                })
+            end
+        end
+
+        if EJ_ClearSearch then
+            EJ_ClearSearch()
+        end
+
+        return found
+    end)
+
+    return results or {}
+end
+
+function Blizzard.GetInstanceName(instanceID)
+    if not instanceID or not EJ_GetInstanceInfo then
+        return nil
+    end
+
+    local ok, name = pcall(EJ_GetInstanceInfo, instanceID)
+
+    return ok and name or nil
 end
 '@
 
@@ -17004,6 +17285,7 @@ function Filters.TypeOrder()
         types.EXPLORATION,
         types.TITLE,
         types.CURRENCY,
+        types.INSTANCE,
     }
 end
 
@@ -17024,6 +17306,7 @@ Filters.typeLabels = {
     EXPLORATION = "Exploration",
     TITLE       = "Titles",
     CURRENCY    = "Currencies",
+    INSTANCE    = "Dungeons & raids",
 }
 
 function Filters.TypeLabel(objectiveType)
@@ -19782,6 +20065,17 @@ end
 
 Chase.builders = builders
 
+-- Which goals are worth asking the Adventure Guide about. A reputation does
+-- not drop from a boss, and searching for one costs a journal round-trip to
+-- learn nothing.
+Chase.instanceSourceTypes = {
+    [CN.objectiveTypes.MOUNT]      = true,
+    [CN.objectiveTypes.PET]        = true,
+    [CN.objectiveTypes.TOY]        = true,
+    [CN.objectiveTypes.APPEARANCE] = true,
+    [CN.objectiveTypes.TITLE]      = true,
+}
+
 ------------------------------------------------------------
 -- THE CHAIN
 ------------------------------------------------------------
@@ -19830,6 +20124,57 @@ function Chase.Chain(goal)
         if ok and type(steps) == "table" then
             chain.steps    = steps
             chain.progress = progress
+        end
+    end
+
+    -- IF IT DROPS FROM A BOSS, SAY WHICH BOSS.
+    --
+    -- Before this, a raid mount produced a chain whose only content was the
+    -- mount journal's source line -- prose, no boss, no instance, and no idea
+    -- whether the player was already locked out of the thing this week. That
+    -- is the one failure this feature exists to prevent: a goal with no path
+    -- to it.
+    --
+    -- Deliberately additive. The step is appended to whatever the builder
+    -- produced rather than replacing it, because the journal's answer is a
+    -- location and the builder's answer is the requirement, and a player
+    -- needs both.
+    local instances = CN:GetModule("Instances")
+
+    if instances and chain.name and Chase.instanceSourceTypes[goal.type] then
+        local ok, description, first = pcall(instances.DescribeSource, chain.name)
+
+        if ok and description and first then
+            local lockout = first.instance and instances.LockoutFor(first.instance)
+
+            if lockout and lockout.complete then
+                table.insert(chain.steps, NewStep(Chase.states.BLOCKED,
+                    "Drops from " .. description,
+                    {
+                        note = "you are saved to " .. first.instance
+                            .. " and it is cleared -- resets in "
+                            .. instances.FormatReset(lockout.resetsIn),
+                    }))
+            else
+                local state = Chase.states.TODO
+
+                -- Only claim the immediate move if nothing else has.
+                if not Chase.NextStep(chain) then
+                    state = Chase.states.NEXT
+                end
+
+                local step = NewStep(state, "Kill " .. description, {
+                    encounterID = first.encounterID,
+                    instanceID  = first.instanceID,
+                })
+
+                if lockout then
+                    step.note = lockout.remaining .. " of " .. lockout.encounters
+                        .. " left on your lockout"
+                end
+
+                table.insert(chain.steps, step)
+            end
         end
     end
 
@@ -25356,6 +25701,1461 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Instances.lua'] = @'
+-- Modules/Instances.lua
+-- Completion Navigator :: dungeons and raids, which the addon could not see.
+--
+-- WHAT WAS MISSING.
+--
+-- Until now this addon knew everything about the open world and nothing about
+-- the inside of a dungeon. A mount that drops from a raid boss was a line of
+-- free text out of the mount journal: no boss, no instance, no difficulty, no
+-- idea whether you had already killed the thing this week. `/cn chase` on such
+-- a mount produced a goal with no path to it, which is the one thing this
+-- addon is supposed to never do.
+--
+-- Worse, lockouts are the strongest deadline in the game -- stronger than a
+-- daily, because a missed raid week is gone for a week rather than a day --
+-- and the ranking could not see them at all, so a world quest expiring in an
+-- hour outranked a raid you were six bosses into with two days left on it.
+--
+-- WHAT THIS DOES NOT DO.
+--
+-- It does not queue for anything, invite anyone, or set foot in an instance.
+-- It reads three things and reports them: what you are locked to, which
+-- bosses in that lockout are still alive, and where a given drop comes from.
+--
+-- AND WHAT IT REFUSES TO STORE.
+--
+-- Nothing. A lockout expires, the client always knows it, and a stale copy is
+-- worse than none: "6 of 8 down in there" is actively wrong advice the moment
+-- the reset it never heard about happens. The same goes for loot tables,
+-- which change with patches. Everything here is read live and cached in
+-- memory for the session at most.
+
+local ADDON_NAME, CN = ...
+
+local Instances = CN:RegisterModule("Instances")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+------------------------------------------------------------
+-- LOCKOUTS
+------------------------------------------------------------
+
+-- An unfinished lockout is the cheapest progress in the game: the bosses you
+-- already killed stay dead, so the remaining ones cost a fraction of a fresh
+-- clear. A finished one is worth nothing until it resets. That difference is
+-- the entire reason this module scores anything.
+function Instances.Lockouts()
+    local raw = Blizzard.GetSavedInstances()
+
+    local lockouts = {}
+
+    for _, saved in ipairs(raw) do
+        -- An expired lockout is still listed for a while. Anything with no
+        -- time left on it is not a lockout, it is a memory.
+        if not saved.reset or saved.reset > 0 then
+            local encounters = saved.encounters or 0
+            local defeated   = saved.defeated or 0
+
+            table.insert(lockouts, {
+                name         = saved.name,
+                id           = saved.id,
+                difficulty   = saved.difficulty,
+                difficultyID = saved.difficultyID,
+                raid         = saved.raid,
+                defeated     = defeated,
+                encounters   = encounters,
+                remaining    = math.max(0, encounters - defeated),
+                resetsIn     = saved.reset,
+                extended     = saved.extended,
+                complete     = encounters > 0 and defeated >= encounters,
+            })
+        end
+    end
+
+    table.sort(lockouts, function(a, b)
+        -- Most nearly finished first: that is the order they are worth doing.
+        if a.complete ~= b.complete then
+            return b.complete
+        end
+
+        if a.remaining ~= b.remaining then
+            return a.remaining < b.remaining
+        end
+
+        return (a.resetsIn or math.huge) < (b.resetsIn or math.huge)
+    end)
+
+    return lockouts
+end
+
+function Instances.Summary()
+    local lockouts = Instances.Lockouts()
+
+    local summary = {
+        total      = #lockouts,
+        unfinished = 0,
+        soonest    = nil,
+        bosses     = 0,
+    }
+
+    for _, lockout in ipairs(lockouts) do
+        if not lockout.complete then
+            summary.unfinished = summary.unfinished + 1
+            summary.bosses     = summary.bosses + lockout.remaining
+
+            if not summary.soonest
+                or (lockout.resetsIn or math.huge) < (summary.soonest.resetsIn or math.huge) then
+                summary.soonest = lockout
+            end
+        end
+    end
+
+    return summary
+end
+
+-- WHICH bosses are still alive in a lockout the player is part-way through.
+--
+-- The client reports a count, not a list, so the names come from the
+-- Adventure Guide and the state comes from the count. Where the two cannot be
+-- reconciled -- a boss killed out of order, which is normal -- this says how
+-- many are left rather than inventing which ones. An invented name is worse
+-- than a number.
+function Instances.RemainingBosses(lockout)
+    if not lockout or lockout.remaining <= 0 then
+        return {}, nil
+    end
+
+    if not lockout.id then
+        return {}, "the client did not name this instance"
+    end
+
+    local encounters = Blizzard.GetInstanceEncounters(lockout.id)
+
+    if #encounters == 0 then
+        return {}, "the Adventure Guide has no boss list for this instance"
+    end
+
+    -- Only when nothing has been killed can each boss be named with
+    -- confidence. Past that, the client tells us how many, not which.
+    if lockout.defeated == 0 then
+        return encounters, nil
+    end
+
+    return {}, lockout.remaining .. " of " .. lockout.encounters
+        .. " still up (the client does not say which)"
+end
+
+------------------------------------------------------------
+-- WHERE DOES IT DROP
+------------------------------------------------------------
+
+-- Answers for a name rather than an ID, because that is what the collection
+-- journals hand us, and because the Adventure Guide's own search works that
+-- way. Cached for the session: the answer does not change until a patch does,
+-- and the search is not free.
+local dropCache = {}
+
+function Instances.ForgetDrops()
+    dropCache = {}
+end
+
+function Instances.WhereDoesItDrop(name)
+    if type(name) ~= "string" or name == "" then
+        return {}
+    end
+
+    local cached = dropCache[name]
+
+    if cached then
+        return cached
+    end
+
+    local results = Blizzard.SearchEncounterJournal(name, 6)
+
+    dropCache[name] = results
+
+    return results
+end
+
+-- The one-line version, for a tooltip or a chase step.
+function Instances.DescribeSource(name)
+    local results = Instances.WhereDoesItDrop(name)
+
+    if #results == 0 then
+        return nil
+    end
+
+    local first = results[1]
+
+    local text = tostring(first.encounter or "a boss")
+
+    if first.instance then
+        text = text .. " in " .. first.instance
+    end
+
+    if #results > 1 then
+        text = text .. " (and " .. (#results - 1) .. " other "
+            .. (#results == 2 and "encounter" or "encounters") .. ")"
+    end
+
+    return text, first
+end
+
+-- Is the player locked to the instance a drop comes from? This is the
+-- difference between "go and kill it" and "not until Tuesday".
+function Instances.LockoutFor(instanceName)
+    if not instanceName then
+        return nil
+    end
+
+    for _, lockout in ipairs(Instances.Lockouts()) do
+        if lockout.name == instanceName then
+            return lockout
+        end
+    end
+
+    return nil
+end
+
+------------------------------------------------------------
+-- FORMATTING
+------------------------------------------------------------
+
+function Instances.FormatReset(seconds)
+    local vault = CN:GetModule("Vault")
+
+    if vault and vault.FormatReset then
+        return vault.FormatReset(seconds)
+    end
+
+    if not seconds then
+        return "unknown"
+    end
+
+    return math.max(1, math.floor(seconds / 3600)) .. "h"
+end
+
+function Instances.Describe(lockout)
+    local text = lockout.name
+
+    if lockout.difficulty then
+        text = text .. " |cff999999(" .. lockout.difficulty .. ")|r"
+    end
+
+    if lockout.encounters > 0 then
+        text = text .. ": " .. lockout.defeated .. " of " .. lockout.encounters
+    end
+
+    if lockout.complete then
+        return text .. " |cff00ff00cleared|r"
+    end
+
+    return text .. " |cffffff00" .. lockout.remaining .. " left|r"
+        .. " |cff999999resets in " .. Instances.FormatReset(lockout.resetsIn) .. "|r"
+end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- How near the reset the lockout has to be, and how few bosses have to be
+-- left, before an unfinished lockout is a next action rather than a plan for
+-- the week. Same shape as the Vault's rule, and for the same reason.
+Instances.maxRemaining = 6
+
+local function Urgency(remaining, resetsIn, defeated)
+    local value = 0
+
+    -- Already started is the whole point: those kills are spent effort that
+    -- expires. Nothing started is just "a dungeon exists".
+    if defeated and defeated > 0 then
+        value = value + 2
+    end
+
+    if remaining then
+        if remaining <= 1 then
+            value = value + 3
+        elseif remaining <= 3 then
+            value = value + 2
+        else
+            value = value + 1
+        end
+    end
+
+    if resetsIn then
+        local days = resetsIn / 86400
+
+        if days <= 1 then
+            value = value + 3
+        elseif days <= 2 then
+            value = value + 2
+        elseif days <= 4 then
+            value = value + 1
+        end
+    end
+
+    return value
+end
+
+Instances.Urgency = Urgency
+
+CN.RegisterCandidateProvider("Instances", function()
+    local candidates = {}
+
+    for _, lockout in ipairs(Instances.Lockouts()) do
+        -- A cleared lockout is not an objective, and a lockout nobody has
+        -- started is a decision about the evening rather than a next action.
+        if not lockout.complete
+            and lockout.defeated > 0
+            and lockout.remaining > 0
+            and lockout.remaining <= Instances.maxRemaining
+            and not CN.IsIgnored(CN.objectiveTypes.INSTANCE, lockout.name)
+            and not CN.IsDeferred(CN.objectiveTypes.INSTANCE, lockout.name) then
+
+            local reasons = {
+                lockout.defeated .. " of " .. lockout.encounters
+                    .. " already defeated -- those kills expire at the reset",
+                lockout.remaining .. " "
+                    .. (lockout.remaining == 1 and "boss" or "bosses") .. " left",
+            }
+
+            if lockout.resetsIn then
+                table.insert(reasons, "resets in " .. Instances.FormatReset(lockout.resetsIn))
+            end
+
+            if lockout.extended then
+                table.insert(reasons, "you extended this lockout deliberately")
+            end
+
+            table.insert(candidates, CN.NewObjective({
+                id               = lockout.name,
+                type             = CN.objectiveTypes.INSTANCE,
+                name             = lockout.name
+                    .. (lockout.difficulty and (" (" .. lockout.difficulty .. ")") or ""),
+                accountWide      = false,
+                completionValue  = lockout.raid and 6 or 4,
+                limitedTimeBonus = Urgency(lockout.remaining, lockout.resetsIn, lockout.defeated),
+                -- No map coordinate, but not "location unknown" either: the
+                -- group finder is one click. Same figure the Vault uses.
+                travelCost       = 3,
+                expiresIn        = lockout.resetsIn,
+                reasons          = reasons,
+            }))
+        end
+    end
+
+    return candidates
+end, {
+    -- A lockout changes when a boss dies or when the reset happens, and
+    -- nothing else. UPDATE_INSTANCE_INFO is the client saying so.
+    events   = { "UPDATE_INSTANCE_INFO", "BOSS_KILL", "ENCOUNTER_END" },
+    volatile = true,
+    cooldown = 30,
+})
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "instances",
+    aliases = { "lockouts", "saved" },
+    order   = 24,
+    help    = "What you are saved to, and how much of it is left.",
+    handler = function()
+        local lockouts = Instances.Lockouts()
+
+        if #lockouts == 0 then
+            Print("You are not saved to anything.")
+            Print("|cff999999Lockouts appear here as soon as you kill a boss "
+                .. "in a dungeon or raid that saves you.|r")
+            return
+        end
+
+        Print("Saved to " .. #lockouts
+            .. (#lockouts == 1 and " instance:" or " instances:"))
+
+        for _, lockout in ipairs(lockouts) do
+            Print("  " .. Instances.Describe(lockout))
+
+            local bosses, note = Instances.RemainingBosses(lockout)
+
+            for _, boss in ipairs(bosses) do
+                Print("      |cff999999" .. boss.name .. "|r")
+            end
+
+            if note then
+                Print("      |cff999999" .. note .. "|r")
+            end
+        end
+
+        local summary = Instances.Summary()
+
+        if summary.unfinished > 0 then
+            Print(summary.bosses .. " "
+                .. (summary.bosses == 1 and "boss" or "bosses")
+                .. " still available across "
+                .. summary.unfinished
+                .. (summary.unfinished == 1 and " lockout." or " lockouts."))
+        else
+            Print("|cff999999Everything you are saved to is cleared.|r")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "drops",
+    args    = "<name>",
+    order   = 25,
+    help    = "Which boss drops something, and whether you are locked to it.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        if args == "" then
+            Print("Usage: /cn drops <name of a mount, pet or item>")
+            return
+        end
+
+        if not Blizzard.HasEncounterJournal() then
+            Print("The Adventure Guide is not available in this client.")
+            return
+        end
+
+        if Blizzard.IsEncounterJournalOpen() then
+            -- Reading the journal moves its selection, which is what the
+            -- player is looking at. Refuse rather than reach into it.
+            Print("Close the Adventure Guide first -- reading it would change "
+                .. "what you are looking at.")
+            return
+        end
+
+        local results = Instances.WhereDoesItDrop(args)
+
+        if #results == 0 then
+            Print("Nothing in the Adventure Guide matches \"" .. args .. "\".")
+            Print("|cff999999Not everything drops from a boss; try the exact "
+                .. "name the journal uses.|r")
+            return
+        end
+
+        Print("\"" .. args .. "\" -- " .. #results
+            .. (#results == 1 and " encounter:" or " encounters:"))
+
+        for _, result in ipairs(results) do
+            local line = "  " .. tostring(result.encounter or "?")
+
+            if result.instance then
+                line = line .. " |cff999999in " .. result.instance .. "|r"
+            end
+
+            local lockout = result.instance and Instances.LockoutFor(result.instance)
+
+            if lockout then
+                if lockout.complete then
+                    line = line .. " |cfff56b61locked until "
+                        .. Instances.FormatReset(lockout.resetsIn) .. "|r"
+                else
+                    line = line .. " |cffffff00" .. lockout.remaining
+                        .. " left on your lockout|r"
+                end
+            end
+
+            Print(line)
+        end
+    end,
+}
+
+return Instances
+'@
+
+$Embedded['Modules\Preference.lua'] = @'
+-- Modules/Preference.lua
+-- Completion Navigator :: learning what you actually do.
+--
+-- THE PROBLEM.
+--
+-- The ranking has always been the addon's opinion. It is a good opinion --
+-- deadlines first, batching second, travel cost third -- but it is the same
+-- opinion for everybody, and people do not play the same way. Somebody who
+-- has never once gone out of their way for a battle pet gets pets in their
+-- list forever, and the addon never notices.
+--
+-- Hiding the type is the blunt fix and it already exists. This is the fine
+-- one: notice what you take up, notice what you scroll past, and lean.
+--
+-- WHAT IS MEASURED.
+--
+--   shown   -- the objective was actually put in front of you, via the
+--              recommendation hook, which fires on the handful that were
+--              displayed rather than the two hundred that were considered.
+--   acted   -- it was completed, or its type was, within the window below.
+--
+-- A ratio of those two, per objective TYPE, on this character.
+--
+-- WHY TYPE AND NOT THE OBJECTIVE ITSELF.
+--
+-- Because an individual objective is shown a handful of times before it is
+-- either done or gone, which is far too little to learn anything from. A type
+-- accumulates hundreds of observations in a week of play. Learning per
+-- objective would be learning noise, and dressing it up as personalisation.
+--
+-- THE GUARDRAILS, WHICH MATTER MORE THAN THE LEARNING.
+--
+--   * Nothing happens below `minimumObservations`. Until then the multiplier
+--     is exactly 1 and the addon behaves as it always did.
+--   * The adjustment is CLAMPED, hard. A type you ignore is quieter, never
+--     silent -- silencing a type is a decision for you to make in /cn show,
+--     not one for a counter to make on your behalf.
+--   * It is EXPLAINED. Every adjusted line carries a reason saying so. A
+--     ranking that changed for reasons the player cannot see is a ranking
+--     they cannot trust.
+--   * It DECAYS. Somebody who spent a month on transmog and has now moved on
+--     should not be arguing with a month-old opinion forever.
+--   * `/cn learned` shows the whole table, and `/cn learned reset` throws it
+--     away. Nothing here is permanent and nothing here is hidden.
+
+local ADDON_NAME, CN = ...
+
+local Preference = CN:RegisterModule("Preference")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+------------------------------------------------------------
+-- TUNING
+------------------------------------------------------------
+
+-- How many times a type has to have been shown before its ratio is allowed
+-- to move anything at all. Deliberately high: the cost of learning too early
+-- is a ranking that lurches around in the player's first evening, which reads
+-- as the addon being unreliable rather than adaptive.
+Preference.minimumObservations = 25
+
+-- The window in which finishing something counts as having acted on it.
+-- Twenty minutes: long enough to walk there and do it, short enough that
+-- stumbling over it two hours later is not credited to the recommendation.
+Preference.actionWindowSeconds = 1200
+
+-- The full range of the multiplier. A type you always act on gets a modest
+-- push; one you never touch gets a modest shove. Both are small on purpose --
+-- this is a thumb on the scale, not a second scoring system.
+Preference.minMultiplier = 0.80
+Preference.maxMultiplier = 1.25
+
+-- Above this ratio the type is "one you act on", below it "one you skip".
+-- Not 0.5: most recommendations are not acted on immediately by anybody,
+-- because the list is longer than the evening.
+Preference.actedThreshold = 0.25
+
+-- Counters are halved when either passes this, so the table reflects how you
+-- play now rather than how you played in June.
+Preference.decayAt = 400
+
+------------------------------------------------------------
+-- THE STORE
+------------------------------------------------------------
+
+-- Per character, because how you play a levelling alt is not how you play the
+-- character you raid on. Two integers per type: about as cheap as a store in
+-- this addon gets, and nothing here cannot be thrown away.
+local function Store()
+    local character = CN.character
+
+    if not character then
+        return nil
+    end
+
+    character.preference = character.preference or {}
+
+    return character.preference
+end
+
+Preference.Store = Store
+
+local function Row(objectiveType)
+    local store = Store()
+
+    if not store or not objectiveType then
+        return nil
+    end
+
+    store[objectiveType] = store[objectiveType] or { shown = 0, acted = 0 }
+
+    return store[objectiveType]
+end
+
+function Preference.IsEnabled()
+    local settings = CN.Settings()
+
+    -- On by default, but a real setting: someone who wants the addon's
+    -- opinion and only the addon's opinion is entitled to have it.
+    return not settings or settings.learnPreferences ~= false
+end
+
+function Preference.SetEnabled(enabled)
+    local settings = CN.Settings()
+
+    if settings then
+        -- Store false to turn it OFF and nil to turn it back on: the default
+        -- is on, so "nil" and "off" must not be the same stored value.
+        --
+        -- Written as an if rather than as `x and false or nil`, which is how
+        -- it was written first: in Lua that expression can never produce
+        -- false, because `and false` is falsy and falls straight through to
+        -- the `or`. It read correctly and did nothing.
+        if enabled then
+            settings.learnPreferences = nil
+        else
+            settings.learnPreferences = false
+        end
+    end
+
+    CN.InvalidateRanking()
+end
+
+------------------------------------------------------------
+-- MEMOISATION
+------------------------------------------------------------
+
+-- MEMOISED, because this runs on every candidate in the list.
+--
+-- Ranking scores a few thousand objectives, and without this each one of them
+-- resolved the settings proxy, found the character table and did the
+-- arithmetic again for an answer that changes a few times an hour. Measured,
+-- the uncached version doubled the cost of Recommend(25).
+--
+-- The key is both generations: the ranking one, bumped when something the
+-- player did changes the order, and the observation one, bumped whenever a
+-- counter moves. Between them nothing can go stale.
+local multiplierCache   = {}
+local multiplierKey     = nil
+
+Preference.observationGeneration = 0
+
+local function Observed()
+    Preference.observationGeneration = Preference.observationGeneration + 1
+end
+
+local function CacheKey()
+    return tostring(CN.rankingGeneration or 0) .. ":"
+        .. tostring(Preference.observationGeneration)
+end
+
+function Preference.ForgetMultipliers()
+    multiplierCache = {}
+    multiplierKey   = nil
+end
+
+------------------------------------------------------------
+-- OBSERVING
+------------------------------------------------------------
+
+-- What was shown, and when. In memory only: this is a question about the last
+-- twenty minutes, and twenty minutes does not survive a logout in any useful
+-- form.
+local shownAt = {}
+
+local function Now()
+    return (GetTime and GetTime()) or (time and time()) or 0
+end
+
+Preference.Now = Now
+
+-- Hung on the recommendation hook rather than a decorator, deliberately.
+-- Duration learning made exactly this mistake in 0.28.0 and timed all two
+-- hundred candidates on every rebuild, including the hundred and seventy
+-- nobody ever saw.
+CN.RegisterRecommendationHook("Preference", function(results)
+    if not Preference.IsEnabled() then
+        return
+    end
+
+    local now = Now()
+
+    local store = Store()
+
+    if not store then
+        return
+    end
+
+    for _, objective in ipairs(results or {}) do
+        local objectiveType = objective and objective.type
+
+        if objectiveType then
+            local row = store[objectiveType]
+
+            if not row then
+                row = { shown = 0, acted = 0 }
+
+                store[objectiveType] = row
+            end
+
+            if row then
+                -- ONE OBSERVATION PER APPEARANCE, NOT PER REDRAW.
+                --
+                -- The window redraws on a great many events, and the same
+                -- three lines are "shown" on every one of them. Counting
+                -- those would mean an open window taught the addon that you
+                -- ignore everything, at a rate of several observations a
+                -- second, purely for leaving it open.
+                -- Built once and kept on the objective. This runs on
+                -- every redraw of an open window, and the concatenation was
+                -- the most expensive thing in it -- for a string that cannot
+                -- change while the objective exists.
+                local key = objective.preferenceKey
+
+                if not key then
+                    key = objectiveType .. ":" .. tostring(objective.id)
+
+                    objective.preferenceKey = key
+                end
+
+                local last = shownAt[key]
+
+                if not last or (now - last) > Preference.actionWindowSeconds then
+                    row.shown = row.shown + 1
+
+                    Observed()
+
+                    -- Only when a counter actually moved. Decaying on every
+                    -- call meant walking the whole table on every redraw of
+                    -- the window to discover, almost always, that nothing had
+                    -- reached the threshold -- the same shape of waste the
+                    -- 0.28.0 duration bug was.
+                    Preference.Decay()
+                end
+
+                shownAt[key] = now
+            end
+        end
+    end
+end)
+
+-- Types whose completion event carries the same id the recommendation did.
+-- For these an inexact match is not evidence of anything.
+Preference.exactIdEvents = {
+    [CN.objectiveTypes.QUEST]       = true,
+    [CN.objectiveTypes.ACHIEVEMENT] = true,
+}
+
+-- Called when something is genuinely finished. Credited only if the addon had
+-- recommended it recently -- otherwise every quest anybody turns in would
+-- count as the addon's advice being taken, which would teach it that its
+-- opinion is always right.
+function Preference.NoteCompleted(objectiveType, objectiveID)
+    if not Preference.IsEnabled() or not objectiveType then
+        return false
+    end
+
+    local now = Now()
+
+    local key = objectiveType .. ":" .. tostring(objectiveID)
+
+    local last = shownAt[key]
+
+    -- THE ID THE EVENT CARRIES IS NOT ALWAYS THE ID THAT WAS RECOMMENDED.
+    --
+    -- NEW_PET_ADDED reports the unique pet you now own; the recommendation was
+    -- about the species. NEW_MOUNT_ADDED and the transmog events have the same
+    -- shape of mismatch. For those, fall back to "was anything of this type
+    -- recommended in the window", since what is being learned is per type
+    -- anyway.
+    --
+    -- NOT for quests and achievements. Those events carry exactly the id that
+    -- was recommended, so a fallback there would credit the addon for every
+    -- quest anybody turns in merely because it had mentioned some other quest
+    -- in the last twenty minutes -- and on a levelling character it has always
+    -- mentioned some other quest in the last twenty minutes. That is not
+    -- learning, it is a counter that only goes up.
+    if not last and not Preference.exactIdEvents[objectiveType] then
+        local fallbackKey
+
+        for candidateKey, when in pairs(shownAt) do
+            if (now - when) <= Preference.actionWindowSeconds
+                and string.sub(candidateKey, 1, #objectiveType + 1)
+                    == (objectiveType .. ":") then
+
+                -- The most recently shown one, so a stale sighting from
+                -- nineteen minutes ago does not get the credit.
+                if not fallbackKey or when > shownAt[fallbackKey] then
+                    fallbackKey = candidateKey
+                end
+            end
+        end
+
+        if not fallbackKey then
+            return false
+        end
+
+        key  = fallbackKey
+        last = shownAt[fallbackKey]
+    end
+
+    -- Still nothing: this was never recommended, so it teaches us nothing.
+    -- Reaching the arithmetic below with a nil here threw inside a
+    -- QUEST_TURNED_IN handler -- a learning feature breaking quest turn-ins
+    -- would be a spectacularly bad trade.
+    if not last then
+        return false
+    end
+
+    if (now - last) > Preference.actionWindowSeconds then
+        shownAt[key] = nil
+
+        return false
+    end
+
+    local row = Row(objectiveType)
+
+    if not row then
+        return false
+    end
+
+    row.acted = row.acted + 1
+
+    Observed()
+
+    shownAt[key] = nil
+
+    CN.InvalidateRanking()
+
+    DebugPrint("Acted on a " .. objectiveType .. " that was recommended.")
+
+    return true
+end
+
+-- Halve everything once the counts get large, so the table tracks how you
+-- play now. Halving keeps the RATIO and forgets the certainty, which is
+-- exactly the right thing to forget.
+function Preference.Decay()
+    local store = Store()
+
+    if not store then
+        return false
+    end
+
+    local decayed = false
+
+    for _, row in pairs(store) do
+        if row.shown >= Preference.decayAt then
+            row.shown = math.floor(row.shown / 2)
+            row.acted = math.floor(row.acted / 2)
+
+            Observed()
+
+            decayed = true
+        end
+    end
+
+    return decayed
+end
+
+------------------------------------------------------------
+-- THE ADJUSTMENT
+------------------------------------------------------------
+
+-- Returns the multiplier and, when it is not 1, a sentence saying why.
+function Preference.Multiplier(objectiveType)
+    if not objectiveType then
+        return 1, nil
+    end
+
+    local key = CacheKey()
+
+    if key ~= multiplierKey then
+        multiplierCache = {}
+        multiplierKey   = key
+    end
+
+    local cached = multiplierCache[objectiveType]
+
+    if cached then
+        return cached[1], cached[2]
+    end
+
+    local multiplier, reason = Preference.Compute(objectiveType)
+
+    multiplierCache[objectiveType] = { multiplier, reason }
+
+    return multiplier, reason
+end
+
+function Preference.Compute(objectiveType)
+    if not Preference.IsEnabled() then
+        return 1, nil
+    end
+
+    local store = Store()
+
+    local row = store and store[objectiveType]
+
+    if not row or row.shown < Preference.minimumObservations then
+        return 1, nil
+    end
+
+    local ratio = row.acted / row.shown
+
+    if ratio >= Preference.actedThreshold then
+        -- Scale across the range above the threshold rather than jumping to
+        -- the cap the moment it is crossed.
+        local above = math.min(1, (ratio - Preference.actedThreshold)
+            / (1 - Preference.actedThreshold))
+
+        local multiplier = 1 + (Preference.maxMultiplier - 1) * above
+
+        return multiplier, "you usually act on these"
+    end
+
+    local below = 1 - (ratio / Preference.actedThreshold)
+
+    local multiplier = 1 - (1 - Preference.minMultiplier) * below
+
+    return multiplier, "you rarely act on these"
+end
+
+-- Applied in scoring, after the profile's own type weighting, so a focus you
+-- chose deliberately always outranks a habit the addon inferred.
+CN.RegisterScoreAdjuster("Preference", function(objective, score)
+    local multiplier, reason = Preference.Multiplier(objective and objective.type)
+
+    if multiplier == 1 then
+        return score
+    end
+
+    -- SAY SO. A list that quietly reordered itself is a list nobody can
+    -- argue with, and this addon's whole contract is that every line has a
+    -- stated reason.
+    if reason and objective.reasons then
+        table.insert(objective.reasons, reason)
+    end
+
+    return score * multiplier
+end)
+
+------------------------------------------------------------
+-- WHAT COUNTS AS HAVING ACTED
+------------------------------------------------------------
+
+-- Only completions the game announces. Nothing here infers that you did
+-- something because you walked near it.
+local completionEvents = {
+    { event = "QUEST_TURNED_IN",   type = CN.objectiveTypes.QUEST },
+    { event = "ACHIEVEMENT_EARNED", type = CN.objectiveTypes.ACHIEVEMENT },
+    { event = "NEW_PET_ADDED",     type = CN.objectiveTypes.PET },
+    { event = "NEW_MOUNT_ADDED",   type = CN.objectiveTypes.MOUNT },
+    { event = "NEW_TOY_ADDED",     type = CN.objectiveTypes.TOY },
+}
+
+for _, entry in ipairs(completionEvents) do
+    CN:RegisterEvent(entry.event, function(_, id)
+        Preference.NoteCompleted(entry.type, id)
+    end)
+end
+
+Preference.completionEvents = completionEvents
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "learned",
+    args    = "[reset or off or on]",
+    order   = 34,
+    help    = "What the addon has worked out about how you play.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        if args == "reset" then
+            local character = CN.character
+
+            if character then
+                character.preference = nil
+            end
+
+            CN.InvalidateRanking()
+
+            Print("Forgotten. The ranking is back to its defaults.")
+            return
+        end
+
+        if args == "off" or args == "on" then
+            Preference.SetEnabled(args == "on")
+
+            Print("Learning from what you do: "
+                .. CN.YesNo(Preference.IsEnabled()))
+            return
+        end
+
+        local store = Store()
+
+        if not store or next(store) == nil then
+            Print("Nothing learned yet.")
+            Print("|cff999999The addon watches which kinds of thing you "
+                .. "actually go and do, and needs "
+                .. Preference.minimumObservations
+                .. " sightings of a kind before it acts on anything.|r")
+            return
+        end
+
+        if not Preference.IsEnabled() then
+            Print("|cff999999Learning is switched off; the figures below are "
+                .. "not affecting your ranking. |cffffff00/cn learned on|r "
+                .. "re-enables it.|r")
+        end
+
+        local filters = CN:GetModule("Filters")
+
+        local rows = {}
+
+        for objectiveType, row in pairs(store) do
+            table.insert(rows, { type = objectiveType, row = row })
+        end
+
+        table.sort(rows, function(a, b)
+            return (a.row.shown or 0) > (b.row.shown or 0)
+        end)
+
+        Print("What this character actually does:")
+
+        for _, entry in ipairs(rows) do
+            local label = filters and filters.TypeLabel(entry.type) or entry.type
+
+            local multiplier, reason = Preference.Multiplier(entry.type)
+
+            local line = string.format("  %-16s %d of %d acted on",
+                label, entry.row.acted, entry.row.shown)
+
+            if multiplier == 1 then
+                local short = Preference.minimumObservations - entry.row.shown
+
+                line = line .. " |cff999999(no effect"
+                    .. (short > 0 and (" -- " .. short .. " more sightings needed")
+                        or "")
+                    .. ")|r"
+            else
+                line = line .. string.format(" |cffffff00x%.2f|r |cff999999%s|r",
+                    multiplier, reason or "")
+            end
+
+            Print(line)
+        end
+
+        Print("|cff999999" .. "/cn learned reset" .. " forgets all of it. "
+            .. "Hiding a type outright is |cffffff00/cn show|r.|r")
+    end,
+}
+
+return Preference
+'@
+
+$Embedded['Modules\Capture.lua'] = @'
+-- Modules/Capture.lua
+-- Completion Navigator :: recording what the client actually returns.
+--
+-- THE PROBLEM THIS EXISTS TO END.
+--
+-- Nine defects in this addon's history came from the same place: the offline
+-- test harness modelled the world more simply than the world is, the tests
+-- agreed with the model, and the bug shipped. A map point modelled as a flat
+-- table when the client wants a vector. A quest list containing no quest
+-- starts. An achievement criterion with no counter. Every map modelled as a
+-- perfect square, for eight releases, which hid an angle error in every zone
+-- in the game.
+--
+-- `/cn selftest` catches these in play, which is a great deal better than a
+-- player catching them, but it is still after the fact. It cannot stop the
+-- NEXT optimistic stub from being written, because the author of a stub does
+-- not know which part of reality he is simplifying -- that is what makes it a
+-- simplification rather than a decision.
+--
+-- The only thing that ends it is testing against real data. So: record what
+-- the client actually returned, on a real character, and let the offline
+-- suite check its own stubs against that recording. A stub that is missing a
+-- field reality had becomes a test failure instead of a future bug report.
+--
+-- WHAT IS RECORDED.
+--
+-- Shapes and small samples, never the player's collections wholesale. The
+-- suite needs to know that GetSavedInstanceInfo returns thirteen values in a
+-- particular order and that map spans are not square; it does not need
+-- eighteen hundred pets.
+--
+-- WHAT IS NOT RECORDED.
+--
+-- Character names, realm, guild, anything that identifies the player, and
+-- nothing at all unless the command is run deliberately. The file is written
+-- into your own SavedVariables and goes nowhere on its own -- this addon has
+-- no network access of any kind and never will.
+
+local ADDON_NAME, CN = ...
+
+local Capture = CN:RegisterModule("Capture")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+------------------------------------------------------------
+-- REGISTRY
+------------------------------------------------------------
+
+CN.captures = CN.captures or {}
+
+-- definition = {
+--     name = "GetSavedInstanceInfo",
+--     run  = function() return <plain data>, note end,
+-- }
+function CN.RegisterCapture(definition)
+    if type(definition) ~= "table" or type(definition.run) ~= "function" then
+        return false
+    end
+
+    table.insert(CN.captures, definition)
+
+    return true
+end
+
+------------------------------------------------------------
+-- SHAPE, NOT CONTENT
+------------------------------------------------------------
+
+-- Reduces a value to what a test needs to know about it: its type, and for a
+-- table, the shape of its keys. Numbers survive because a range matters --
+-- a map span of 4,000 by 2,700 is the whole point of one of these captures --
+-- but a list of three thousand achievement IDs collapses to "3000 numbers".
+--
+-- Bounded by depth and by width, because this is written to disk and read
+-- back on every login until it is cleared.
+function Capture.Shape(value, depth, width)
+    depth = depth or 3
+    width = width or 12
+
+    local kind = type(value)
+
+    if kind ~= "table" then
+        if kind == "string" and #value > 64 then
+            return { type = "string", length = #value }
+        end
+
+        return { type = kind, value = (kind == "function" and "function" or value) }
+    end
+
+    if depth <= 0 then
+        return { type = "table", truncated = true }
+    end
+
+    local shape = { type = "table", fields = {}, count = 0, array = 0 }
+
+    -- Methods matter as much as fields: the 0.19.0 bug was a Vector2D whose
+    -- GetXY the stub did not have.
+    for key, entry in pairs(value) do
+        shape.count = shape.count + 1
+
+        if type(key) == "number" then
+            shape.array = shape.array + 1
+        elseif type(key) == "string" and shape.count <= width then
+            shape.fields[key] = Capture.Shape(entry, depth - 1, width)
+        end
+    end
+
+    if getmetatable(value) then
+        shape.metatable = true
+    end
+
+    return shape
+end
+
+------------------------------------------------------------
+-- WHAT GETS CAPTURED
+------------------------------------------------------------
+
+CN.RegisterCapture{
+    name = "position",
+    run  = function()
+        local mapID, x, y = CN.GetPlayerPosition()
+
+        if not mapID then
+            return nil, "no map"
+        end
+
+        return { mapID = mapID, x = x, y = y }
+    end,
+}
+
+-- THE ONE THAT WOULD HAVE CAUGHT 0.40.0's ANGLE BUG EIGHT RELEASES EARLIER.
+CN.RegisterCapture{
+    name = "mapSpanYards",
+    run  = function()
+        local mapID = CN.GetPlayerPosition()
+
+        local nav = CN:GetModule("Navigation")
+
+        if not mapID or not nav then
+            return nil, "no map"
+        end
+
+        local scaleX, scaleY = nav.MapScale(mapID)
+
+        return {
+            mapID  = mapID,
+            xYards = scaleX,
+            yYards = scaleY,
+            square = math.abs(scaleX - scaleY) < 1,
+        }
+    end,
+}
+
+CN.RegisterCapture{
+    name = "worldPosition",
+    run  = function()
+        local mapID, x, y = CN.GetPlayerPosition()
+
+        if not mapID or not C_Map or not C_Map.GetWorldPosFromMapPos then
+            return nil, "no map"
+        end
+
+        local ok, continentID, position =
+            pcall(C_Map.GetWorldPosFromMapPos, mapID, CreateVector2D(x, y))
+
+        if not ok or not position then
+            return nil, "the client would not convert"
+        end
+
+        return {
+            continentID = continentID,
+            shape       = Capture.Shape(position),
+            hasGetXY    = position.GetXY ~= nil,
+        }
+    end,
+}
+
+CN.RegisterCapture{
+    name = "mapInfo",
+    run  = function()
+        local mapID = CN.GetPlayerPosition()
+
+        if not mapID then
+            return nil, "no map"
+        end
+
+        return Capture.Shape(Blizzard.GetMapInfo(mapID))
+    end,
+}
+
+CN.RegisterCapture{
+    name = "questPOI",
+    run  = function()
+        local mapID = CN.GetPlayerPosition()
+
+        if not mapID then
+            return nil, "no map"
+        end
+
+        local pois = Blizzard.GetQuestPOIsOnMap(mapID)
+
+        if #pois == 0 then
+            return nil, "no quest pins here"
+        end
+
+        local starts = 0
+
+        for _, poi in ipairs(pois) do
+            if poi.isQuestStart then
+                starts = starts + 1
+            end
+        end
+
+        return {
+            count       = #pois,
+            questStarts = starts,
+            shape       = Capture.Shape(pois[1]),
+        }
+    end,
+}
+
+CN.RegisterCapture{
+    name = "achievementCriteria",
+    run  = function()
+        local achievements = CN:GetModule("Achievements")
+
+        if not achievements then
+            return nil, "achievements module not loaded"
+        end
+
+        for achievementID in pairs(achievements.Store()) do
+            local criteria = Blizzard.GetAchievementCriteriaList(achievementID, 4)
+
+            if criteria and criteria[1] then
+                return {
+                    shape    = Capture.Shape(criteria[1]),
+                    counted  = criteria[1].required ~= nil,
+                }
+            end
+        end
+
+        return nil, "nothing scanned yet"
+    end,
+}
+
+CN.RegisterCapture{
+    name = "savedInstances",
+    run  = function()
+        local saved = Blizzard.GetSavedInstances()
+
+        if #saved == 0 then
+            return nil, "not saved to anything"
+        end
+
+        return { count = #saved, shape = Capture.Shape(saved[1]) }
+    end,
+}
+
+CN.RegisterCapture{
+    name = "encounterJournal",
+    run  = function()
+        if not Blizzard.HasEncounterJournal() then
+            return nil, "no Adventure Guide in this client"
+        end
+
+        if Blizzard.IsEncounterJournalOpen() then
+            return nil, "the Adventure Guide is open"
+        end
+
+        return { available = true }
+    end,
+}
+
+CN.RegisterCapture{
+    name = "completedQuests",
+    run  = function()
+        local progress = CN:GetModule("Progress")
+
+        local total = progress and progress.LifetimeCompleted()
+
+        if not total then
+            return nil, "the client will not report a lifetime total"
+        end
+
+        -- The COUNT is the interesting number: a stub that returns eight
+        -- entries where the client returns twelve thousand is a stub that
+        -- makes an expensive call look free.
+        return { count = total }
+    end,
+}
+
+CN.RegisterCapture{
+    name = "weeklyReset",
+    run  = function()
+        local seconds = Blizzard.GetSecondsUntilWeeklyReset()
+
+        if not seconds then
+            return nil, "the client will not say"
+        end
+
+        return { seconds = seconds }
+    end,
+}
+
+------------------------------------------------------------
+-- RUNNING IT
+------------------------------------------------------------
+
+function Capture.Run()
+    local records = {}
+
+    local captured, skipped = 0, 0
+
+    for _, definition in ipairs(CN.captures) do
+        local ok, value, note = pcall(definition.run)
+
+        if not ok then
+            records[definition.name] = { skipped = "errored: " .. tostring(value) }
+            skipped = skipped + 1
+        elseif value == nil then
+            records[definition.name] = { skipped = note or "nothing to record" }
+            skipped = skipped + 1
+        else
+            records[definition.name] = value
+            captured = captured + 1
+        end
+    end
+
+    records.build   = CN.version
+    records.locale  = CN.ClientLocale and CN.ClientLocale() or nil
+    records.recorded = time()
+
+    -- Written under the account table so it survives to the next logout and
+    -- lands in SavedVariables, which is the only way it can reach the
+    -- repository. Explicitly NOT merged into anything the addon reads: this
+    -- is evidence, not data.
+    local account = CN.Account()
+
+    account.capture = records
+
+    return records, captured, skipped
+end
+
+function Capture.Clear()
+    local account = CN.Account()
+
+    local had = account.capture ~= nil
+
+    account.capture = nil
+
+    return had
+end
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "capture",
+    args    = "[clear]",
+    order   = 35,
+    help    = "Record what your client returns, so the tests can check "
+        .. "themselves against reality.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        if args == "clear" then
+            Print(Capture.Clear()
+                and "Capture cleared. It will be gone from your saved data "
+                    .. "at the next logout."
+                or "There was nothing recorded.")
+            return
+        end
+
+        local records, captured, skipped = Capture.Run()
+
+        Print("Recorded " .. captured .. " of " .. (captured + skipped)
+            .. " observations.")
+
+        for name, value in pairs(records) do
+            if type(value) == "table" and value.skipped then
+                Print("  |cff999999" .. name .. " -- " .. value.skipped .. "|r")
+            end
+        end
+
+        Print("|cff999999Nothing identifying you is recorded, and nothing "
+            .. "leaves your machine -- this addon has no network access. "
+            .. "It is written to your SavedVariables at logout.|r")
+        Print("To send it: log out, then find "
+            .. "|cffffff00WTF\\Account\\<account>\\SavedVariables\\"
+            .. "CompletionNavigatorDB.lua|r.")
+        Print("|cffffff00/cn capture clear|r removes it again.")
+    end,
+}
+
+return Capture
+'@
+
 $Embedded['Modules\SelfTest.lua'] = @'
 -- Modules/SelfTest.lua
 -- Completion Navigator :: assertions that run where reality is.
@@ -25887,6 +27687,59 @@ CN.RegisterSelfTest{
     end,
 }
 
+-- 14. LOCKOUTS. The client reports these directly, and a lockout the addon
+--     cannot read is a deadline it cannot rank.
+CN.RegisterSelfTest{
+    area = "instances",
+    name = "your dungeon and raid lockouts are readable",
+    run  = function()
+        local instances = CN:GetModule("Instances")
+
+        if not instances then
+            return SKIP, "instances module not loaded"
+        end
+
+        local lockouts = instances.Lockouts()
+
+        if #lockouts == 0 then
+            return SKIP, "you are not saved to anything right now"
+        end
+
+        local summary = instances.Summary()
+
+        return PASS, string.format("%d saved, %d unfinished, %d bosses left",
+            summary.total, summary.unfinished, summary.bosses)
+    end,
+}
+
+-- 15. THE ADVENTURE GUIDE, which is how a drop gets a boss's name attached to
+--     it. Open, it must refuse -- reading it moves what the player is looking
+--     at, and that refusal is the behaviour worth checking.
+CN.RegisterSelfTest{
+    area = "instances",
+    name = "the Adventure Guide can be read without disturbing you",
+    run  = function()
+        if not Blizzard.HasEncounterJournal() then
+            return SKIP, "this client has no Adventure Guide"
+        end
+
+        if Blizzard.IsEncounterJournalOpen() then
+            return SKIP, "the Adventure Guide is open, so nothing was read -- "
+                .. "which is the intended behaviour, not a fault"
+        end
+
+        local encounters = Blizzard.GetInstanceEncounters(1273)
+
+        if #encounters == 0 then
+            return SKIP, "the journal returned no bosses for the sample "
+                .. "instance; loot lookups may be unavailable"
+        end
+
+        return PASS, #encounters .. " bosses read, and the journal's own "
+            .. "selection restored"
+    end,
+}
+
 ------------------------------------------------------------
 -- COMMAND
 ------------------------------------------------------------
@@ -25958,7 +27811,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.40.0
+## Version: 0.41.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -26005,6 +27858,9 @@ Modules\Alts.lua
 Modules\Appearances.lua
 Modules\Breakdown.lua
 Modules\Broker.lua
+Modules\Instances.lua
+Modules\Preference.lua
+Modules\Capture.lua
 Modules\SelfTest.lua
 Modules\Chase.lua
 Modules\Currencies.lua
@@ -26191,6 +28047,80 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.41.0]
+
+The addon can see inside a dungeon, it learns what you actually do, and its
+tests can finally check themselves against a real client.
+
+### Added
+
+- **Dungeons and raids.** Until now this addon knew everything about the open
+  world and nothing about the inside of an instance: a mount that drops from a
+  raid boss was a line of free text with no boss, no instance, and no idea
+  whether you had already killed the thing this week. Now:
+  - **`/cn instances`** -- what you are saved to, how much of each is left, and
+    when it resets. Where nothing has been killed yet, every boss is named;
+    part-way through, the client reports how many are left rather than which,
+    and so does this, because inventing the names would be inventing
+    information.
+  - **`/cn drops <name>`** -- which boss drops something, in which instance,
+    and whether your own lockout is in the way.
+  - **`/cn chase` on an instance drop now names the boss** instead of
+    dead-ending in prose, and marks the step blocked with a reset time when
+    you are already saved and cleared.
+  - **A part-finished lockout now competes for "what next".** Those kills are
+    spent effort with an expiry on them, which makes them some of the cheapest
+    progress in the game -- and the ranking could not see them at all.
+    A lockout you have not started is deliberately *not* recommended: that is
+    a decision about your evening, not a next action.
+  - Reading the Adventure Guide **changes what it is displaying**, so the addon
+    refuses to read it at all while you have it open, and puts its selection
+    back exactly as it found it when you do not.
+- **It learns which kinds of thing you actually go and do.** `/cn learned`
+  shows the whole table. The guardrails matter more than the learning: nothing
+  moves until a type has been shown 25 times, the adjustment is clamped to a
+  narrow band so a type you ignore gets quieter but never silent, every
+  adjusted line says on the line that it was adjusted, the counters decay so
+  the addon tracks how you play now, `/cn learned reset` throws it all away,
+  and `/cn learned off` switches it off entirely. A focus you chose with
+  `/cn mode` always outranks a habit the addon inferred.
+- **`/cn capture` and `cn.ps1 fixtures`.** Nine defects in this addon's history
+  came from the offline test suite modelling the world more simply than the
+  world is -- most recently by treating every map in the game as a perfect
+  square, which hid an angle error in every zone for eight releases. Writing
+  more careful stubs does not fix that, because the author of a stub does not
+  know which part of reality he simplified. So the addon can now record what
+  your client actually returned, and the test suite audits its own stubs
+  against that recording: a stub missing a field reality had is a test failure
+  rather than a future bug report. Shapes and counts only -- nothing that
+  identifies you, and nothing leaves your machine.
+
+### Fixed
+
+- **Switching a setting off wrote nothing.** `x and false or nil` cannot
+  produce false in Lua -- `and false` is falsy, so it falls through to the
+  `or` every time. The line read correctly and did nothing. Caught by a test
+  that asserted the switch worked rather than that it had been called.
+- **A completion the client identifies differently was never credited.**
+  `NEW_PET_ADDED` reports the pet you now own, not the species that was
+  recommended. Those now match by type; quests and achievements, whose events
+  carry exactly the id that was recommended, deliberately do not, because a
+  loose match there would credit the addon for every quest anybody turns in.
+
+### Notes
+
+- `/cn selftest` is now fifteen checks: the two new ones read your lockouts
+  and confirm the Adventure Guide can be read without disturbing what you are
+  looking at. With it open, that check SKIPs and says the refusal was the
+  intended behaviour rather than a fault.
+- One assertion in the suite asserted "a pinned goal ranks in the top three",
+  which was a magic number meaning "above the three expiring things this
+  fixture happens to contain". It broke when a provider was added, for a
+  reason that had nothing to do with goals. It now asserts the property that
+  was actually meant: only time-limited work may outrank a pinned goal.
+- The multiplier the learning applies is memoised. Uncached, it resolved the
+  settings proxy once per candidate and doubled the cost of building the list.
 
 ## [0.40.0]
 
@@ -28314,7 +30244,7 @@ ignore:
 '@
 
 $Embedded['_curseforge\SUMMARY.txt'] = @'
-Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, batches nearby work into stops, draws the route on your map, and shows exactly what stands between you and the thing you are chasing.
+Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, including the lockouts you are part-way through, batches nearby work into stops, routes it on your map, and shows what is between you and what you want.
 '@
 
 $Embedded['_curseforge\DESCRIPTION.md'] = @'
@@ -28450,6 +30380,8 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **Rares & treasures** | Live vignettes on the minimap and where you last saw each one |
 | **Vendors** | Recorded when you open a merchant, so recipes and items become findable later |
 | **The Great Vault** | All three rows, what is unlocked, and what is still one step away |
+| **Dungeon & raid lockouts** | What you are saved to, how many bosses are left in it, and when it resets |
+| **Boss loot** | The game's own Adventure Guide, so a drop can name the boss it comes from |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
 
 Where the game does not supply a trustworthy total, it reports **counts rather than a percentage**. That is a deliberate rule, not a gap — an invented denominator is a number that looks like a fact.
@@ -28468,6 +30400,33 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | **Chases** | The full path to a goal, step by step, with the next move marked |
 | **Follows** | Hands-free: the current stop on screen, advancing as you clear it |
 | **Learns** | Quest prerequisites inferred from your own play, never guessed from a single sighting |
+| **Adapts** | Which kinds of objective you actually go and do, within clamped limits, and it says so on the line |
+
+## Dungeons and raids
+
+```
+/cn instances
+```
+
+What you are saved to, how much of each is left, and when it resets. A lockout you are part-way through is some of the cheapest progress in the game — those kills are spent effort with an expiry on them — so an unfinished one competes for *what next*. One you have not started is deliberately left alone: that is a decision about your evening, not a next action.
+
+```
+/cn drops Ashes of Al'ar
+```
+
+Which boss drops it, in which instance, and whether your own lockout is in the way. Chasing an instance drop now names the boss instead of handing you a sentence, and says *blocked, resets in two days* when you are already saved and cleared.
+
+Reading the game's Adventure Guide changes what it is displaying, so the addon will not read it while you have it open, and puts its selection back exactly as it found it when you do not.
+
+## It learns which things you actually do
+
+```
+/cn learned
+```
+
+The addon notices which kinds of objective you go and do, and leans that way. The guardrails matter more than the learning: nothing moves until a type has been shown 25 times, the adjustment is clamped so a type you skip gets quieter but never silent, and every adjusted line **says on the line** that it was adjusted. The counters decay, so it tracks how you play now rather than how you played in June. A focus you set with `/cn mode` always beats a habit it inferred.
+
+`/cn learned reset` forgets it. `/cn learned off` switches it off. Hiding a type outright is still `/cn show`.
 
 ## Ask it whether it is working
 
@@ -28475,7 +30434,7 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 /cn selftest
 ```
 
-Thirteen checks that run against your own client and report what they actually found — whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+Fifteen checks that run against your own client and report what they actually found — whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
 
 Every check exists because the thing it covers was once broken in a release, and was found by somebody playing rather than by a test. Checks report the value they saw rather than the word "failed", so a bug report is a copy and paste. A check the client cannot answer says so and skips — it does not quietly pass.
 
@@ -28502,6 +30461,9 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn zones` | Which zone to work on next, and why |
 | `/cn navdiag` | Exactly what the arrow is doing, and why |
 | `/cn selftest` | Check the addon against your live client and report what it finds |
+| `/cn instances` | What you are saved to, and how much of it is left |
+| `/cn drops <name>` | Which boss drops it, and whether you are locked to it |
+| `/cn learned` | What the addon has worked out about how you play |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |
@@ -28525,7 +30487,7 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 ## Built to stay out of the way
 
-An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks — at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes — costs about **five milliseconds**, and the answer to "what next?" is served from cache in **three microseconds**.
+An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks — at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes — costs about **five milliseconds**, and the answer to "what next?" is served from cache in **five microseconds**.
 
 Tooltip lines are the same story: hovering an item answers from an index rather than searching everything the addon knows, so mousing across a full bag costs nothing you can feel. It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer — the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 
@@ -28582,7 +30544,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.40.0
+0.41.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -28865,6 +30827,15 @@ read_globals = {
     "UnitSex", "PlaySound", "PlaySoundFile", "GetTime", "UnitPosition",
     "GetPlayerFacing", "InCombatLockdown", "IsInInstance", "GetBindingKey",
     "GetLocale",
+
+    -- Saved instances and the Adventure Guide (Encounter Journal). The EJ
+    -- functions are globals rather than a namespaced table, which is why
+    -- there are so many of them.
+    "GetNumSavedInstances", "GetSavedInstanceInfo",
+    "EncounterJournal", "EJ_SelectInstance", "EJ_GetCurrentInstance",
+    "EJ_GetInstanceInfo", "EJ_GetEncounterInfoByIndex", "EJ_GetEncounterInfo",
+    "EJ_SetSearch", "EJ_ClearSearch", "EJ_GetNumSearchResults",
+    "EJ_GetSearchResult",
     "GetQuestID", "GetTitleText", "GetCategoryInfo",
 
     -- Globals the client defines that are not functions.
@@ -29275,6 +31246,153 @@ C_Map = {
         return 1, CreateVector2D(point.x * span[1], point.y * span[2])
     end,
 }
+
+-- SAVED INSTANCES.
+--
+-- Thirteen return values in a fixed order, which is exactly the kind of API
+-- shape a hand-written stub gets subtly wrong. /cn capture records the real
+-- one and the fixture audit at the end of this file compares them.
+CN_TEST_SAVED_INSTANCES = {
+    -- name, id, reset, difficultyID, locked, extended, _, isRaid, _,
+    -- difficultyName, defeated, encounters
+    { "Nerub-ar Palace", 1273, 3 * 86400, 14, true, false, false, true,
+      false, "Normal", 6, 8 },
+    { "Ara-Kara, City of Echoes", 1274, 86400, 23, true, false, false, false,
+      false, "Mythic", 4, 4 },
+    -- Saved to it, but nothing killed in it yet. The client lists these, and
+    -- they are NOT a next action: an untouched lockout is a decision about
+    -- the evening, not spent effort that expires.
+    -- Deliberately SMALL, so that it clears every other filter the provider
+    -- applies and the only thing excluding it is the rule under test. A
+    -- fixture that fails a different check first proves nothing about this
+    -- one -- the first version of this row had eight bosses and was being
+    -- dropped for being too long, so the rule could have been deleted
+    -- entirely and the suite would have agreed.
+    { "Liberation of Undermine", 1296, 5 * 86400, 14, true, false, false, true,
+      false, "Normal", 0, 3 },
+}
+
+function GetNumSavedInstances()
+    return #CN_TEST_SAVED_INSTANCES
+end
+
+function GetSavedInstanceInfo(index)
+    local row = CN_TEST_SAVED_INSTANCES[index]
+
+    if not row then
+        return nil
+    end
+
+    return row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8],
+        row[9], row[10], row[11], row[12]
+end
+
+-- THE ADVENTURE GUIDE, INCLUDING THE PART THAT MAKES IT DANGEROUS.
+--
+-- EJ_SelectInstance is not a query: it changes what the journal is showing,
+-- which is what the player is looking at if the window is open. The stub
+-- models that state so the suite can prove the addon puts it back and refuses
+-- to touch it while the window is up. A stub that treated selection as a
+-- no-op would agree with an addon that yanked the player's view around.
+CN_TEST_EJ_SELECTED = nil
+CN_TEST_EJ_OPEN     = false
+CN_TEST_EJ_SEARCH   = nil
+
+CN_TEST_EJ_INSTANCES = {
+    [1273] = {
+        name = "Nerub-ar Palace",
+        encounters = {
+            { name = "Ulgrax the Devourer", id = 2607 },
+            { name = "The Bloodbound Horror", id = 2611 },
+            { name = "Sikran", id = 2599 },
+            { name = "Rasha'nan", id = 2609 },
+            { name = "Broodtwister Ovi'nax", id = 2612 },
+            { name = "Nexus-Princess Ky'veza", id = 2601 },
+            { name = "The Silken Court", id = 2608 },
+            { name = "Queen Ansurek", id = 2602 },
+        },
+    },
+    [1274] = {
+        name = "Ara-Kara, City of Echoes",
+        encounters = {
+            { name = "Avanoxx", id = 2926 },
+            { name = "Anub'zekt", id = 2906 },
+            { name = "Ki'katal the Harvester", id = 2925 },
+        },
+    },
+}
+
+-- What the journal's search would return, keyed by the text searched for.
+CN_TEST_EJ_SEARCH_RESULTS = {
+    ["Ansurek's Web Wrap"] = {
+        { id = 2602, stype = 1, instanceID = 1273 },
+    },
+}
+
+EncounterJournal = {
+    IsShown = function() return CN_TEST_EJ_OPEN end,
+}
+
+function EJ_SelectInstance(instanceID)
+    CN_TEST_EJ_SELECTED = instanceID
+end
+
+function EJ_GetCurrentInstance()
+    return CN_TEST_EJ_SELECTED
+end
+
+function EJ_GetInstanceInfo(instanceID)
+    local entry = CN_TEST_EJ_INSTANCES[instanceID or CN_TEST_EJ_SELECTED]
+
+    return entry and entry.name or nil
+end
+
+function EJ_GetEncounterInfoByIndex(index, instanceID)
+    local entry = CN_TEST_EJ_INSTANCES[instanceID or CN_TEST_EJ_SELECTED]
+
+    local encounter = entry and entry.encounters[index]
+
+    if not encounter then
+        return nil
+    end
+
+    return encounter.name, "description", encounter.id
+end
+
+function EJ_GetEncounterInfo(encounterID)
+    for _, entry in pairs(CN_TEST_EJ_INSTANCES) do
+        for _, encounter in ipairs(entry.encounters) do
+            if encounter.id == encounterID then
+                return encounter.name
+            end
+        end
+    end
+
+    return nil
+end
+
+function EJ_SetSearch(text)
+    CN_TEST_EJ_SEARCH = CN_TEST_EJ_SEARCH_RESULTS[text] or {}
+end
+
+function EJ_ClearSearch()
+    CN_TEST_EJ_SEARCH = nil
+end
+
+function EJ_GetNumSearchResults()
+    return CN_TEST_EJ_SEARCH and #CN_TEST_EJ_SEARCH or 0
+end
+
+function EJ_GetSearchResult(index)
+    local result = CN_TEST_EJ_SEARCH and CN_TEST_EJ_SEARCH[index]
+
+    if not result then
+        return nil
+    end
+
+    -- id, type, _, _, _, instanceID
+    return result.id, result.stype, nil, nil, nil, result.instanceID
+end
 
 local superTracked = nil
 
@@ -30970,7 +33088,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 16, "every candidate provider must register, got "
+assert(firstState.providers == 17, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -32038,13 +34156,34 @@ for index, objective in ipairs(ranked) do
     if objective.type == "TITLE" and objective.id == 2 then goalRank = index end
 end
 
-assert(goalRank and goalRank <= 3,
-    "a pinned goal must rank in the top three, got " .. tostring(goalRank))
+-- NOT "top three". That was a magic number that meant "above everything
+-- except the three expiring things this fixture happened to contain", and it
+-- broke the moment a provider was added -- for a reason that had nothing to
+-- do with goals. The property actually being claimed is that a pinned goal
+-- outranks everything that is NOT on a deadline: this addon puts expiring
+-- content first deliberately, and a pin cannot outrank a reset.
+assert(goalRank, "a pinned goal must appear in the ranked list at all")
+
+for index = 1, goalRank - 1 do
+    local above = ranked[index]
+
+    local timed = (above.expiresIn ~= nil)
+        or ((above.limitedTimeBonus or 0) > 0)
+
+    assert(timed, "only time-limited work may outrank a pinned goal, but "
+        .. tostring(above.name) .. " is not on a deadline")
+end
 
 -- With the expiring content gone, the goal must be first.
 local vaultProvider = CN.candidateProviders["Vault"]
 
-CN.candidateProviders["Vault"] = nil
+-- Both the deadline providers, not just the Vault: a lockout expires at the
+-- weekly reset in exactly the same way, and "nothing expiring" has to mean
+-- nothing expiring.
+local instanceProvider = CN.candidateProviders["Instances"]
+
+CN.candidateProviders["Vault"]     = nil
+CN.candidateProviders["Instances"] = nil
 CN.InvalidateCandidates()
 
 local top = CN.Recommend(1)[1]
@@ -32055,7 +34194,8 @@ print("  top with nothing expiring = " .. tostring(top.name) .. " ("
 assert(top.type == "TITLE" and top.id == 2,
     "with nothing expiring, a pinned goal must rank first, got " .. tostring(top.name))
 
-CN.candidateProviders["Vault"] = vaultProvider
+CN.candidateProviders["Vault"]     = vaultProvider
+CN.candidateProviders["Instances"] = instanceProvider
 CN.InvalidateCandidates()
 
 -- Removing it must put things back.
@@ -34865,6 +37005,560 @@ print("\nAngles on a map that is not square:")
 
     CN_TEST_MAP_SPAN = savedSpan
     navigation.ForgetMapScales()
+end)()
+
+
+print("\nDungeons and raids:")
+
+;(function()
+    local instances = CN:GetModule("Instances")
+
+    assert(instances, "the Instances module must load")
+
+    local lockouts = instances.Lockouts()
+
+    assert(#lockouts == 3, "every lockout must be read, got " .. #lockouts)
+
+    -- UNFINISHED FIRST, and among those, most nearly finished first: that is
+    -- the order they are worth doing, because the kills already spent expire
+    -- at the reset. A cleared lockout has nothing left to be worth anything,
+    -- so "remaining = 0" belongs at the BOTTOM rather than the top -- which
+    -- is what the first version of this assertion got backwards.
+    local seenComplete = false
+
+    for index, lockout in ipairs(lockouts) do
+        if lockout.complete then
+            seenComplete = true
+        else
+            assert(not seenComplete,
+                "an unfinished lockout must not rank below a cleared one (#"
+                .. index .. ")")
+        end
+    end
+
+    local palace
+
+    for _, lockout in ipairs(lockouts) do
+        if lockout.name == "Nerub-ar Palace" then palace = lockout end
+    end
+
+    assert(palace, "the raid lockout must be present")
+    assert(palace.defeated == 6 and palace.encounters == 8,
+        "the client's own counts must survive the read")
+    assert(palace.remaining == 2, "and remaining must be derived from them")
+    assert(palace.raid == true, "a raid must be marked as one")
+    assert(palace.complete == false, "6 of 8 is not cleared")
+
+    print("  " .. #lockouts .. " lockouts read, "
+        .. palace.remaining .. " bosses left in the raid")
+
+    ------------------------------------------------------------
+    -- A CLEARED LOCKOUT IS NOT AN OBJECTIVE.
+    ------------------------------------------------------------
+    local instanceCandidates = CN.candidateProviders["Instances"].fn()
+
+    local names = {}
+
+    for _, candidate in ipairs(instanceCandidates) do
+        names[candidate.id] = candidate
+    end
+
+    assert(names["Nerub-ar Palace"],
+        "a part-finished lockout is the cheapest progress in the game and "
+        .. "must be recommended")
+    assert(not names["Ara-Kara, City of Echoes"],
+        "a cleared lockout must not be recommended at all")
+    assert(not names["Liberation of Undermine"],
+        "and neither must one nothing has been killed in -- there is no spent "
+        .. "effort in it to expire, so it is a plan rather than a next action")
+
+    local raid = names["Nerub-ar Palace"]
+
+    assert(raid.expiresIn == 3 * 86400,
+        "the reset must be carried as a real deadline, not a bonus")
+    assert(raid.type == CN.objectiveTypes.INSTANCE,
+        "instances need their own type so they can be hidden like anything else")
+
+    local mentioned = false
+
+    for _, reason in ipairs(raid.reasons or {}) do
+        if reason:find("6 of 8") then mentioned = true end
+    end
+
+    assert(mentioned, "the reason must say what is already spent")
+
+    print("  a cleared lockout is not recommended; a part-finished one is")
+
+    ------------------------------------------------------------
+    -- READING THE ADVENTURE GUIDE MUST NOT MOVE THE PLAYER'S VIEW.
+    --
+    -- EJ_SelectInstance is not a query. It changes what the journal window is
+    -- displaying, and the player may be reading it.
+    ------------------------------------------------------------
+    CN_TEST_EJ_SELECTED = 1274
+    CN_TEST_EJ_OPEN     = false
+
+    local bosses = instances.RemainingBosses({
+        id = 1273, name = "Nerub-ar Palace", defeated = 0,
+        encounters = 8, remaining = 8,
+    })
+
+    assert(#bosses == 8, "every boss must be named when none are dead, got " .. #bosses)
+    assert(bosses[1].name == "Ulgrax the Devourer", "in journal order")
+
+    assert(CN_TEST_EJ_SELECTED == 1274,
+        "the journal's selection must be put back exactly as it was found")
+
+    -- Part-way through, the client says HOW MANY are left, not WHICH.
+    -- Naming them would be inventing information.
+    local partial, note = instances.RemainingBosses(palace)
+
+    assert(#partial == 0, "which bosses are dead is not knowable; nothing may be named")
+    assert(note and note:find("2 of 8"), "but the count must be reported: " .. tostring(note))
+
+    print("  the journal's selection is restored, and unknown bosses are not invented")
+
+    ------------------------------------------------------------
+    -- AND IT REFUSES ENTIRELY WHILE THE WINDOW IS OPEN.
+    ------------------------------------------------------------
+    CN_TEST_EJ_OPEN     = true
+    CN_TEST_EJ_SELECTED = 1274
+
+    instances.ForgetDrops()
+
+    local blocked = instances.WhereDoesItDrop("Ansurek's Web Wrap")
+
+    assert(#blocked == 0,
+        "nothing may be read while the player is looking at the journal")
+    assert(CN_TEST_EJ_SELECTED == 1274, "and nothing may be changed either")
+
+    CN_TEST_EJ_OPEN = false
+
+    instances.ForgetDrops()
+
+    local found = instances.WhereDoesItDrop("Ansurek's Web Wrap")
+
+    assert(#found == 1, "with the window closed it answers, got " .. #found)
+    assert(found[1].encounter == "Queen Ansurek", "with the boss named")
+    assert(found[1].instance == "Nerub-ar Palace", "and the instance")
+
+    print("  it refuses while the Adventure Guide is open, and answers when it is not")
+
+    ------------------------------------------------------------
+    -- A CHASE FOR AN INSTANCE DROP MUST NAME THE BOSS.
+    --
+    -- This is the failure the whole module exists to fix: before it, a raid
+    -- mount produced a goal with no path to it.
+    ------------------------------------------------------------
+    local chase = CN:GetModule("Chase")
+
+    local chain = chase.Chain({
+        type = CN.objectiveTypes.MOUNT,
+        id   = 9999,
+        name = "Ansurek's Web Wrap",
+    })
+
+    local step
+
+    for _, candidate in ipairs(chain.steps) do
+        if candidate.text and candidate.text:find("Queen Ansurek") then
+            step = candidate
+        end
+    end
+
+    assert(step, "the chain must name the boss the thing drops from")
+    assert(step.state == chase.states.TODO or step.state == chase.states.NEXT,
+        "and it must be actionable, not a note")
+    assert(step.note and step.note:find("2 of 8"),
+        "and it must say where the player's lockout stands: " .. tostring(step.note))
+
+    -- CLEARED MEANS BLOCKED, NOT "GO AND DO IT".
+    CN_TEST_SAVED_INSTANCES[1][11] = 8
+
+    local cleared = chase.Chain({
+        type = CN.objectiveTypes.MOUNT,
+        id   = 9999,
+        name = "Ansurek's Web Wrap",
+    })
+
+    local blockedStep
+
+    for _, candidate in ipairs(cleared.steps) do
+        if candidate.state == chase.states.BLOCKED then blockedStep = candidate end
+    end
+
+    assert(blockedStep, "a cleared lockout must block the step, not offer it")
+    assert(blockedStep.note and blockedStep.note:find("resets in"),
+        "and must say when it opens again")
+
+    CN_TEST_SAVED_INSTANCES[1][11] = 6
+
+    print("  a chase for a raid drop names the boss, and says when it is locked")
+end)()
+
+print("\nLearning what you actually do:")
+
+;(function()
+    local preference = CN:GetModule("Preference")
+
+    assert(preference, "the Preference module must load")
+
+    local character = CN.character
+
+    character.preference = nil
+
+    local QUEST = CN.objectiveTypes.QUEST
+
+    ------------------------------------------------------------
+    -- NOTHING HAPPENS UNTIL THERE IS ENOUGH TO GO ON.
+    --
+    -- The cost of learning too early is a ranking that lurches around in the
+    -- player's first evening, which reads as unreliable rather than adaptive.
+    ------------------------------------------------------------
+    assert(preference.Multiplier(QUEST) == 1,
+        "an unobserved type must not be adjusted at all")
+
+    local store = preference.Store()
+
+    -- The ARITHMETIC is tested through Compute rather than Multiplier,
+    -- because Multiplier is memoised and these lines edit the store directly,
+    -- which is not a path the addon itself ever takes. Testing the cached
+    -- entry point here would be testing the fixture's own staleness. The
+    -- cache gets its own test below, driven the way the game drives it.
+    store[QUEST] = { shown = preference.minimumObservations - 1, acted = 0 }
+
+    assert(preference.Compute(QUEST) == 1,
+        "one observation short of the threshold is still no adjustment")
+
+    store[QUEST].shown = preference.minimumObservations
+
+    local ignored = preference.Compute(QUEST)
+
+    assert(ignored < 1, "a type never acted on must be pushed down")
+    assert(ignored >= preference.minMultiplier,
+        "but never below the floor -- silencing a type is the player's call")
+
+    store[QUEST] = { shown = 100, acted = 100 }
+
+    local loved, reason = preference.Compute(QUEST)
+
+    assert(loved > 1 and loved <= preference.maxMultiplier,
+        "a type always acted on is pushed up, within the cap")
+    assert(reason, "and the reason must be stated")
+
+    print("  clamped to " .. string.format("%.2f-%.2f",
+        preference.minMultiplier, preference.maxMultiplier)
+        .. ", and silent below " .. preference.minimumObservations .. " sightings")
+
+    ------------------------------------------------------------
+    -- AN OPEN WINDOW MUST NOT TEACH IT ANYTHING.
+    --
+    -- The window redraws on a great many events. Counting each redraw as a
+    -- sighting would mean leaving the window open taught the addon that you
+    -- ignore everything, several times a second.
+    ------------------------------------------------------------
+    character.preference = nil
+
+    local hook = CN.recommendationHooks["Preference"]
+
+    local shown = { { type = QUEST, id = 4242 } }
+
+    for _ = 1, 50 do
+        hook(shown)
+    end
+
+    assert(preference.Store()[QUEST].shown == 1,
+        "fifty redraws of the same line is one sighting, got "
+        .. preference.Store()[QUEST].shown)
+
+    print("  fifty redraws of one line count once")
+
+    ------------------------------------------------------------
+    -- THE MEMOISED ANSWER MUST NOT OUTLIVE THE OBSERVATION.
+    --
+    -- Ranking asks for this on every candidate, so it is cached. A cache that
+    -- never noticed the counters moving would freeze the addon's opinion at
+    -- whatever it thought during the first list it ever built.
+    ------------------------------------------------------------
+    local ACHIEVEMENT = CN.objectiveTypes.ACHIEVEMENT
+
+    preference.Store()[ACHIEVEMENT] = { shown = 100, acted = 0 }
+
+    local beforeLearning = preference.Multiplier(ACHIEVEMENT)
+
+    -- Drive it the way the game does: a real sighting, then a real
+    -- completion of the thing that was recommended.
+    hook({ { type = ACHIEVEMENT, id = 31337 } })
+
+    for _ = 1, 60 do
+        preference.NoteCompleted(ACHIEVEMENT, 31337)
+        hook({ { type = ACHIEVEMENT, id = 31337 } })
+    end
+
+    local after = preference.Multiplier(ACHIEVEMENT)
+
+    assert(after > beforeLearning,
+        "the cached multiplier must follow the counters, "
+        .. string.format("%.3f then %.3f", beforeLearning, after))
+
+    print("  and the cached opinion follows them")
+
+    ------------------------------------------------------------
+    -- CREDIT ONLY WHAT WAS ACTUALLY RECOMMENDED.
+    ------------------------------------------------------------
+    assert(preference.NoteCompleted(QUEST, 4242) == true,
+        "finishing something the addon suggested counts")
+
+    assert(preference.Store()[QUEST].acted == 1, "exactly once")
+
+    assert(preference.NoteCompleted(QUEST, 777) == false,
+        "finishing something it never suggested must NOT count -- otherwise "
+        .. "it learns that its own advice is always taken")
+
+    -- The event path, which is what the game actually drives.
+    hook({ { type = QUEST, id = 555 } })
+
+    CN.FireEvent("QUEST_TURNED_IN", 555)
+
+    assert(preference.Store()[QUEST].acted == 2,
+        "the completion event must feed the same counter")
+
+    print("  only recommendations that were followed are credited")
+
+    ------------------------------------------------------------
+    -- THE ID THE EVENT CARRIES IS NOT ALWAYS THE ID THAT WAS SHOWN.
+    ------------------------------------------------------------
+    local PET = CN.objectiveTypes.PET
+
+    hook({ { type = PET, id = 1234 } })
+
+    -- NEW_PET_ADDED reports the pet you now own, not the species recommended.
+    assert(preference.NoteCompleted(PET, "BattlePet-0-000011112222") == true,
+        "a completion whose id cannot match must still credit the type")
+
+    print("  a completion the client ids differently still counts")
+
+    ------------------------------------------------------------
+    -- IT MUST BE VISIBLE, REVERSIBLE, AND OPTIONAL.
+    ------------------------------------------------------------
+    CN.HandleSlashCommand("learned")
+
+    local objective = { type = QUEST, id = 1, reasons = {} }
+
+    character.preference[QUEST] = { shown = 100, acted = 100 }
+
+    CN.InvalidateRanking()
+
+    local base = CN.ScoreObjective({ type = "NOTHING", id = 1,
+        completionValue = 10 })
+
+    CN.ScoreObjective(objective)
+
+    local explained = false
+
+    for _, entry in ipairs(objective.reasons) do
+        if entry:find("act on") then explained = true end
+    end
+
+    assert(explained, "an adjusted line must say it was adjusted")
+
+    preference.SetEnabled(false)
+
+    assert(preference.Multiplier(QUEST) == 1,
+        "switched off means switched off")
+
+    preference.SetEnabled(true)
+
+    CN.HandleSlashCommand("learned reset")
+
+    assert(CN.character.preference == nil, "and it can all be thrown away")
+
+    assert(base > 0, "the control score must be a real number")
+
+    print("  explained on the line, switchable, and resettable")
+end)()
+
+print("\nRecording what the client actually returns:")
+
+;(function()
+    local capture = CN:GetModule("Capture")
+
+    assert(capture, "the Capture module must load")
+
+    local records, captured, skipped = capture.Run()
+
+    assert(captured > 0, "something must be recordable in the harness")
+    assert(records.build == CN.version, "the build must be stamped on it")
+
+    -- SHAPE, NOT CONTENT. This is written to disk and read back on every
+    -- login until it is cleared, so it must not grow with the player's data.
+    local shape = capture.Shape({
+        x = 1, y = 2,
+        GetXY = function() end,
+        nested = { deep = { deeper = { deepest = true } } },
+    })
+
+    assert(shape.type == "table", "a table is described as one")
+    assert(shape.fields.GetXY.type == "function",
+        "METHODS MATTER: the 0.19.0 bug was a vector whose GetXY the stub lacked")
+    assert(shape.fields.nested.fields.deep.truncated
+        or shape.fields.nested.fields.deep.fields,
+        "depth must be bounded rather than followed forever")
+
+    local wide = {}
+
+    for index = 1, 500 do
+        wide["key" .. index] = index
+    end
+
+    local wideShape = capture.Shape(wide)
+
+    assert(wideShape.count == 500, "the count is recorded")
+
+    local kept = 0
+
+    for _ in pairs(wideShape.fields) do kept = kept + 1 end
+
+    assert(kept <= 12, "but the fields are bounded, got " .. kept)
+
+    -- NOTHING IDENTIFYING THE PLAYER.
+    local serialized = ""
+
+    local function walk(value)
+        if type(value) == "table" then
+            for key, entry in pairs(value) do
+                serialized = serialized .. tostring(key) .. " "
+                walk(entry)
+            end
+        else
+            serialized = serialized .. tostring(value) .. " "
+        end
+    end
+
+    walk(records)
+
+    local name  = UnitName("player")
+    local realm = GetRealmName()
+
+    assert(not serialized:find(name, 1, true),
+        "the recording must not contain the character's name")
+    assert(not serialized:find(realm, 1, true),
+        "nor the realm")
+
+    print("  " .. captured .. " observations recorded, " .. skipped
+        .. " skipped, nothing identifying the player")
+
+    assert(capture.Clear() == true, "and it can be removed again")
+    assert(CN.Account().capture == nil, "completely")
+
+    print("  and it can be cleared")
+end)()
+
+print("\nStubs, audited against a real client:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE POINT OF THIS SECTION.
+    --
+    -- Nine defects in this addon came from a stub that modelled the world
+    -- more simply than the world is. Writing better stubs does not fix that,
+    -- because the author does not know what he simplified. So: when a
+    -- recording from a live client is present, check the stubs against it,
+    -- and fail when reality had a field the stub does not.
+    ------------------------------------------------------------
+    local path = ROOT .. "/../fixtures/captured.lua"
+
+    local chunk = loadfile(path) or loadfile("fixtures/captured.lua")
+
+    if not chunk then
+        -- NOT A FAILURE, but it must be said out loud. CI has no game client,
+        -- and an audit nobody can see is an audit nobody performs.
+        print("  |no recording present| stubs are UNVERIFIED against a real "
+            .. "client -- run /cn capture in game, then cn.ps1 fixtures")
+        return
+    end
+
+    local real = chunk()
+
+    assert(type(real) == "table", "a recording must be a table")
+
+    local audited, complaints = 0, {}
+
+    local function require(field, condition, complaint)
+        if real[field] == nil or (type(real[field]) == "table" and real[field].skipped) then
+            return
+        end
+
+        audited = audited + 1
+
+        if not condition() then
+            table.insert(complaints, complaint)
+        end
+    end
+
+    require("mapSpanYards", function()
+        -- If the real client reported a non-square map, the stub must be able
+        -- to model one. It could not, for eight releases, and that hid an
+        -- angle error in every zone in the game.
+        return CN_TEST_MAP_SPAN ~= nil
+    end, "the real client reports map spans, and the stub cannot model them")
+
+    require("worldPosition", function()
+        return real.worldPosition.hasGetXY == false
+            or (CreateVector2D(0, 0).GetXY ~= nil)
+    end, "the real client's world position exposes GetXY and the stub's does not")
+
+    require("questPOI", function()
+        if (real.questPOI.questStarts or 0) == 0 then
+            return true
+        end
+
+        for _, poi in ipairs(CN.Blizzard.GetQuestPOIsOnMap(94)) do
+            if poi.isQuestStart ~= nil then
+                return true
+            end
+        end
+
+        return false
+    end, "the real client reports quest starts and the stub does not")
+
+    require("achievementCriteria", function()
+        if not real.achievementCriteria.counted then
+            return true
+        end
+
+        local criteria = CN.Blizzard.GetAchievementCriteriaList(1001, 4)
+
+        return criteria and criteria[1] and criteria[1].required ~= nil
+    end, "real criteria carry counters and the stub's do not")
+
+    require("savedInstances", function()
+        local fields = real.savedInstances.shape
+            and real.savedInstances.shape.fields or {}
+
+        local stub = CN.Blizzard.GetSavedInstances()[1]
+
+        if not stub then
+            return false
+        end
+
+        for field in pairs(fields) do
+            if stub[field] == nil then
+                return false
+            end
+        end
+
+        return true
+    end, "the real client returns saved-instance fields the stub does not")
+
+    for _, complaint in ipairs(complaints) do
+        print("  MISMATCH: " .. complaint)
+    end
+
+    assert(#complaints == 0,
+        #complaints .. " stub(s) are simpler than the client they stand in for")
+
+    print("  " .. audited .. " stubs match what the client actually returned")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")
@@ -38602,6 +41296,95 @@ function Sort-CNVersionTag {
     } } -Descending)
 }
 
+function Invoke-CNFixtures {
+    # THE POINT OF THIS COMMAND.
+    #
+    # Nine defects in this addon came from a test stub that modelled the world
+    # more simply than the world is. No amount of writing better stubs fixes
+    # that, because the author of a stub does not know which part of reality he
+    # simplified. The only cure is real data: /cn capture records what the live
+    # client actually returned, and this lifts that recording out of
+    # SavedVariables into fixtures\captured.lua, where the harness audits its
+    # own stubs against it.
+    #
+    # ONLY the capture table is copied. SavedVariables also holds character
+    # names, realms and play history, none of which belongs in a repository.
+    Assert-CNWritable
+
+    $saved = $null
+
+    if ($Target) {
+        if (-not (Test-Path -LiteralPath $Target)) {
+            Write-Host "Not found: $Target" -ForegroundColor Yellow
+            return
+        }
+
+        $saved = Get-Item -LiteralPath $Target
+    }
+    else {
+        foreach ($root in @(Get-CNSavedVariablesRoots)) {
+            $found = Get-ChildItem -LiteralPath $root -Recurse -Filter 'CompletionNavigator.lua' -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending |
+                Select-Object -First 1
+
+            if ($found) { $saved = $found; break }
+        }
+
+        if (-not $saved) {
+            Write-Host 'No SavedVariables found.' -ForegroundColor Yellow
+            Write-Host '  Log in, run /cn capture, log out, then try again.' -ForegroundColor DarkGray
+            Write-Host '  Or point at the file:  .\cn.ps1 fixtures <path>' -ForegroundColor DarkGray
+            return
+        }
+    }
+
+    Write-Host "Reading $($saved.FullName)" -ForegroundColor DarkGray
+
+    $text = [System.IO.File]::ReadAllText($saved.FullName)
+
+    $marker = [regex]::Match($text, '\["capture"\]\s*=\s*\{')
+
+    if (-not $marker.Success) {
+        Write-Host 'No capture in SavedVariables.' -ForegroundColor Yellow
+        Write-Host '  In game: /cn capture, then log out so the file is written.' -ForegroundColor DarkGray
+        return
+    }
+
+    $block = Get-CNLuaBlock -Text $text -StartIndex $marker.Index
+
+    if (-not $block) {
+        Write-Host 'The capture table is malformed; nothing was written.' -ForegroundColor Red
+        return
+    }
+
+    $target = Join-Path (Get-Location) 'fixtures'
+
+    if (-not (Test-Path -LiteralPath $target)) {
+        New-Item -ItemType Directory -Path $target | Out-Null
+    }
+
+    $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm')
+
+    $lines = @(
+        '-- fixtures/captured.lua',
+        '-- Recorded from a live World of Warcraft client by /cn capture and',
+        "-- lifted out of SavedVariables by cn.ps1 fixtures on $stamp.",
+        '--',
+        '-- DO NOT EDIT. This is evidence, not source. The harness audits its own',
+        '-- stubs against it: a stub missing a field that reality had is a test',
+        '-- failure here rather than a bug report later.',
+        '',
+        ('return ' + $block.Body)
+    )
+
+    $file = Join-Path $target 'captured.lua'
+
+    [System.IO.File]::WriteAllText($file, ($lines -join "`n") + "`n")
+
+    Write-Host "  wrote  fixtures\captured.lua ($($block.Body.Length) bytes)" -ForegroundColor Green
+    Write-Host '  The harness picks it up automatically the next time it runs.' -ForegroundColor DarkGray
+}
+
 function Invoke-CNRelease {
     Assert-CNWritable
 
@@ -39079,6 +41862,7 @@ function Show-CNHelp {
     Write-Host '  ci [-Watch]                    GitHub Actions status; -Watch follows a run to the end.'
     Write-Host '  doctor                         Report the whole release chain state.'
     Write-Host '  harvest [path]                 Fold harvested quests from SavedVariables into Data.'
+    Write-Host '  fixtures [path]                Lift a /cn capture recording out of SavedVariables for the tests.'
     Write-Host '  relocate <path>                Copy the source out of Program Files.'
     Write-Host '  icon [path.png]                Convert a PNG into Media\Logo.tga for in-game use.'
     Write-Host '  gitinit                         Initialize git with a sane .gitignore.'
@@ -39115,6 +41899,7 @@ switch ($Command.ToLower()) {
     'savedvars' { Invoke-CNSavedVars }
     'sv'        { Invoke-CNSavedVars }
     'harvest'   { Invoke-CNHarvest }
+    'fixtures'  { Invoke-CNFixtures }
     'release'   { Invoke-CNRelease }
     'ci'        { Invoke-CNCI }
     'actions'   { Invoke-CNCI }

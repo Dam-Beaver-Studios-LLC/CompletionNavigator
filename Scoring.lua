@@ -149,6 +149,35 @@ CN.modes = {
 -- SCORING
 ------------------------------------------------------------
 
+-- Modules that want a say in the final score without this file knowing about
+-- them. Ordered by registration, so the result does not depend on table
+-- iteration order -- two players with the same data must get the same list.
+CN.scoreAdjusters     = CN.scoreAdjusters or {}
+CN.scoreAdjusterOrder = CN.scoreAdjusterOrder or {}
+
+function CN.RegisterScoreAdjuster(name, adjuster)
+    if type(name) ~= "string" or type(adjuster) ~= "function" then
+        return false
+    end
+
+    if not CN.scoreAdjusters[name] then
+        table.insert(CN.scoreAdjusterOrder, name)
+    end
+
+    CN.scoreAdjusters[name] = adjuster
+
+    return true
+end
+
+-- Bumped when something that changes the ORDER changes, without any candidate
+-- having changed. Rebuilding every provider to reorder a list nobody's data
+-- moved in would cost milliseconds to achieve nothing.
+CN.rankingGeneration = CN.rankingGeneration or 0
+
+function CN.InvalidateRanking()
+    CN.rankingGeneration = (CN.rankingGeneration or 0) + 1
+end
+
 function CN.ScoreObjective(objective)
     if type(objective) ~= "table" then
         return 0
@@ -205,6 +234,27 @@ function CN.ScoreObjective(objective)
 
     if profile.types and objective.type and profile.types[objective.type] then
         score = score * profile.types[objective.type]
+    end
+
+    -- LAST, AND DELIBERATELY AFTER THE PROFILE.
+    --
+    -- Adjusters are how a module changes the ranking without this file having
+    -- to know it exists. They run after the profile's own type weighting so
+    -- that a focus the player CHOSE always outranks a habit something merely
+    -- inferred -- "I am levelling tonight" must not be argued with by a
+    -- counter.
+    for index = 1, #CN.scoreAdjusterOrder do
+        local adjuster = CN.scoreAdjusters[CN.scoreAdjusterOrder[index]]
+
+        if adjuster then
+            local adjusted = adjuster(objective, score)
+
+            -- An adjuster that returns nothing, or something that is not a
+            -- number, is ignored rather than allowed to zero the score.
+            if type(adjusted) == "number" then
+                score = adjusted
+            end
+        end
     end
 
     -- Normalize -0.0, which formats as "-0.0" and reads like a bug.
@@ -633,7 +683,8 @@ local function Ranked()
     if ranked.list
         and ranked.generation == aggregate.generation
         and ranked.mode == mode
-        and ranked.filter == filterGeneration then
+        and ranked.filter == filterGeneration
+        and ranked.ranking == (CN.rankingGeneration or 0) then
 
         return ranked.list
     end
@@ -675,6 +726,7 @@ local function Ranked()
     ranked.generation = aggregate.generation
     ranked.mode       = mode
     ranked.filter     = filterGeneration
+    ranked.ranking    = CN.rankingGeneration or 0
 
     return list
 end

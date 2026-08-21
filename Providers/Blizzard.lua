@@ -1962,3 +1962,228 @@ function Blizzard.GetItemName(itemID)
 
     return nil
 end
+
+------------------------------------------------------------
+-- SAVED INSTANCES
+------------------------------------------------------------
+
+-- What you are locked to this week, straight from the client.
+--
+-- NEVER PERSISTED. A lockout is a fact with an expiry on it, the client
+-- always knows it, and a stale copy on disk would be worse than no copy at
+-- all: "you have 6 of 8 bosses down in there" is actively harmful advice
+-- after the reset it did not know about.
+--
+-- Returns an array of:
+--   { name, id, reset, difficultyID, difficulty, defeated, encounters,
+--     locked, extended, raid }
+function Blizzard.GetSavedInstances()
+    local results = {}
+
+    if not GetNumSavedInstances or not GetSavedInstanceInfo then
+        return results
+    end
+
+    local ok, count = pcall(GetNumSavedInstances)
+
+    if not ok or not count then
+        return results
+    end
+
+    for index = 1, count do
+        local gotInfo, name, id, reset, difficultyID, locked, extended,
+            _, isRaid, _, difficultyName, defeated, encounters =
+                pcall(GetSavedInstanceInfo, index)
+
+        if gotInfo and name then
+            table.insert(results, {
+                name         = name,
+                id           = id,
+                reset        = reset,
+                difficultyID = difficultyID,
+                difficulty   = difficultyName,
+                locked       = locked and true or false,
+                extended     = extended and true or false,
+                raid         = isRaid and true or false,
+                defeated     = defeated or 0,
+                encounters   = encounters or 0,
+            })
+        end
+    end
+
+    return results
+end
+
+------------------------------------------------------------
+-- THE ENCOUNTER JOURNAL
+------------------------------------------------------------
+
+-- READING THIS API CHANGES WHAT THE PLAYER IS LOOKING AT.
+--
+-- EJ_SelectInstance and EJ_SelectEncounter are not queries. They set the
+-- journal's current selection, which is the same selection the Adventure
+-- Guide window is displaying. Scanning it while that window is open would
+-- move the player's view out from under them -- an addon reaching into the
+-- interface and changing what somebody is reading, which is exactly the kind
+-- of thing this addon does not do.
+--
+-- So: refuse while the journal is visible, and put the selection back
+-- afterwards when it is not.
+function Blizzard.HasEncounterJournal()
+    return EJ_SelectInstance ~= nil
+        and EJ_GetEncounterInfoByIndex ~= nil
+        and EJ_GetInstanceInfo ~= nil
+end
+
+function Blizzard.IsEncounterJournalOpen()
+    return EncounterJournal ~= nil
+        and EncounterJournal.IsShown ~= nil
+        and EncounterJournal:IsShown() and true or false
+end
+
+local function WithJournal(work)
+    if not Blizzard.HasEncounterJournal() then
+        return nil, "the Adventure Guide is not available"
+    end
+
+    if Blizzard.IsEncounterJournalOpen() then
+        return nil, "the Adventure Guide is open -- close it and try again"
+    end
+
+    local restoreInstance
+
+    if EJ_GetCurrentInstance then
+        local gotCurrent, current = pcall(EJ_GetCurrentInstance)
+
+        if gotCurrent then
+            restoreInstance = current
+        end
+    end
+
+    local ok, result = pcall(work)
+
+    -- Put it back even when the work threw, or the player's next visit to
+    -- the Adventure Guide opens on whatever this addon was reading last.
+    if restoreInstance and EJ_SelectInstance then
+        pcall(EJ_SelectInstance, restoreInstance)
+    end
+
+    if not ok then
+        return nil, tostring(result)
+    end
+
+    return result
+end
+
+Blizzard.WithEncounterJournal = WithJournal
+
+-- Bosses in an instance, in the order the journal lists them:
+--   { encounterID, name, order }
+function Blizzard.GetInstanceEncounters(instanceID)
+    if not instanceID then
+        return {}
+    end
+
+    local encounters = WithJournal(function()
+        EJ_SelectInstance(instanceID)
+
+        local list = {}
+
+        local index = 1
+
+        while true do
+            local name, _, encounterID = EJ_GetEncounterInfoByIndex(index, instanceID)
+
+            if not name then
+                break
+            end
+
+            table.insert(list, {
+                encounterID = encounterID,
+                name        = name,
+                order       = index,
+            })
+
+            index = index + 1
+
+            -- No instance in the game has anything like this many bosses.
+            -- The guard is against an API that returns a name forever.
+            if index > 40 then
+                break
+            end
+        end
+
+        return list
+    end)
+
+    return encounters or {}
+end
+
+-- Where does this drop?
+--
+-- Uses the journal's own search rather than building a reverse index of every
+-- item in the game. An index would be tens of thousands of rows to answer a
+-- question the player asks a handful of times a session, and it would be
+-- stale the day a patch changed a loot table. The search is what the
+-- Adventure Guide itself uses.
+--
+-- Returns an array of { instanceID, instance, encounterID, encounter }.
+function Blizzard.SearchEncounterJournal(text, limit)
+    if not text or text == "" then
+        return {}
+    end
+
+    if not EJ_SetSearch or not EJ_GetSearchResult or not EJ_GetNumSearchResults then
+        return {}
+    end
+
+    limit = limit or 8
+
+    local results = WithJournal(function()
+        EJ_SetSearch(text)
+
+        local found = {}
+
+        local total = EJ_GetNumSearchResults() or 0
+
+        for index = 1, math.min(total, limit) do
+            local id, stype, _, _, _, instanceID = EJ_GetSearchResult(index)
+
+            -- Type 1 is an encounter in every build that has exposed this.
+            if stype == 1 and id then
+                local instanceName
+
+                if instanceID and EJ_GetInstanceInfo then
+                    instanceName = EJ_GetInstanceInfo(instanceID)
+                end
+
+                local encounterName = EJ_GetEncounterInfo and EJ_GetEncounterInfo(id)
+
+                table.insert(found, {
+                    encounterID = id,
+                    encounter   = encounterName,
+                    instanceID  = instanceID,
+                    instance    = instanceName,
+                })
+            end
+        end
+
+        if EJ_ClearSearch then
+            EJ_ClearSearch()
+        end
+
+        return found
+    end)
+
+    return results or {}
+end
+
+function Blizzard.GetInstanceName(instanceID)
+    if not instanceID or not EJ_GetInstanceInfo then
+        return nil
+    end
+
+    local ok, name = pcall(EJ_GetInstanceInfo, instanceID)
+
+    return ok and name or nil
+end

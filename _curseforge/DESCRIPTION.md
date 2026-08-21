@@ -130,6 +130,8 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **Rares & treasures** | Live vignettes on the minimap and where you last saw each one |
 | **Vendors** | Recorded when you open a merchant, so recipes and items become findable later |
 | **The Great Vault** | All three rows, what is unlocked, and what is still one step away |
+| **Dungeon & raid lockouts** | What you are saved to, how many bosses are left in it, and when it resets |
+| **Boss loot** | The game's own Adventure Guide, so a drop can name the boss it comes from |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
 
 Where the game does not supply a trustworthy total, it reports **counts rather than a percentage**. That is a deliberate rule, not a gap â€” an invented denominator is a number that looks like a fact.
@@ -148,6 +150,33 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | **Chases** | The full path to a goal, step by step, with the next move marked |
 | **Follows** | Hands-free: the current stop on screen, advancing as you clear it |
 | **Learns** | Quest prerequisites inferred from your own play, never guessed from a single sighting |
+| **Adapts** | Which kinds of objective you actually go and do, within clamped limits, and it says so on the line |
+
+## Dungeons and raids
+
+```
+/cn instances
+```
+
+What you are saved to, how much of each is left, and when it resets. A lockout you are part-way through is some of the cheapest progress in the game â€” those kills are spent effort with an expiry on them â€” so an unfinished one competes for *what next*. One you have not started is deliberately left alone: that is a decision about your evening, not a next action.
+
+```
+/cn drops Ashes of Al'ar
+```
+
+Which boss drops it, in which instance, and whether your own lockout is in the way. Chasing an instance drop now names the boss instead of handing you a sentence, and says *blocked, resets in two days* when you are already saved and cleared.
+
+Reading the game's Adventure Guide changes what it is displaying, so the addon will not read it while you have it open, and puts its selection back exactly as it found it when you do not.
+
+## It learns which things you actually do
+
+```
+/cn learned
+```
+
+The addon notices which kinds of objective you go and do, and leans that way. The guardrails matter more than the learning: nothing moves until a type has been shown 25 times, the adjustment is clamped so a type you skip gets quieter but never silent, and every adjusted line **says on the line** that it was adjusted. The counters decay, so it tracks how you play now rather than how you played in June. A focus you set with `/cn mode` always beats a habit it inferred.
+
+`/cn learned reset` forgets it. `/cn learned off` switches it off. Hiding a type outright is still `/cn show`.
 
 ## Ask it whether it is working
 
@@ -155,7 +184,7 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 /cn selftest
 ```
 
-Thirteen checks that run against your own client and report what they actually found â€” whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+Fifteen checks that run against your own client and report what they actually found â€” whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
 
 Every check exists because the thing it covers was once broken in a release, and was found by somebody playing rather than by a test. Checks report the value they saw rather than the word "failed", so a bug report is a copy and paste. A check the client cannot answer says so and skips â€” it does not quietly pass.
 
@@ -182,6 +211,9 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn zones` | Which zone to work on next, and why |
 | `/cn navdiag` | Exactly what the arrow is doing, and why |
 | `/cn selftest` | Check the addon against your live client and report what it finds |
+| `/cn instances` | What you are saved to, and how much of it is left |
+| `/cn drops <name>` | Which boss drops it, and whether you are locked to it |
+| `/cn learned` | What the addon has worked out about how you play |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |
@@ -205,7 +237,7 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 ## Built to stay out of the way
 
-An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks â€” at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes â€” costs about **five milliseconds**, and the answer to "what next?" is served from cache in **three microseconds**.
+An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks â€” at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes â€” costs about **five milliseconds**, and the answer to "what next?" is served from cache in **five microseconds**.
 
 Tooltip lines are the same story: hovering an item answers from an index rather than searching everything the addon knows, so mousing across a full bag costs nothing you can feel. It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer â€” the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 

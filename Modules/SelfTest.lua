@@ -528,6 +528,59 @@ CN.RegisterSelfTest{
     end,
 }
 
+-- 14. LOCKOUTS. The client reports these directly, and a lockout the addon
+--     cannot read is a deadline it cannot rank.
+CN.RegisterSelfTest{
+    area = "instances",
+    name = "your dungeon and raid lockouts are readable",
+    run  = function()
+        local instances = CN:GetModule("Instances")
+
+        if not instances then
+            return SKIP, "instances module not loaded"
+        end
+
+        local lockouts = instances.Lockouts()
+
+        if #lockouts == 0 then
+            return SKIP, "you are not saved to anything right now"
+        end
+
+        local summary = instances.Summary()
+
+        return PASS, string.format("%d saved, %d unfinished, %d bosses left",
+            summary.total, summary.unfinished, summary.bosses)
+    end,
+}
+
+-- 15. THE ADVENTURE GUIDE, which is how a drop gets a boss's name attached to
+--     it. Open, it must refuse -- reading it moves what the player is looking
+--     at, and that refusal is the behaviour worth checking.
+CN.RegisterSelfTest{
+    area = "instances",
+    name = "the Adventure Guide can be read without disturbing you",
+    run  = function()
+        if not Blizzard.HasEncounterJournal() then
+            return SKIP, "this client has no Adventure Guide"
+        end
+
+        if Blizzard.IsEncounterJournalOpen() then
+            return SKIP, "the Adventure Guide is open, so nothing was read -- "
+                .. "which is the intended behaviour, not a fault"
+        end
+
+        local encounters = Blizzard.GetInstanceEncounters(1273)
+
+        if #encounters == 0 then
+            return SKIP, "the journal returned no bosses for the sample "
+                .. "instance; loot lookups may be unavailable"
+        end
+
+        return PASS, #encounters .. " bosses read, and the journal's own "
+            .. "selection restored"
+    end,
+}
+
 ------------------------------------------------------------
 -- COMMAND
 ------------------------------------------------------------

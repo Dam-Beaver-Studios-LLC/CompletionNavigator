@@ -7,6 +7,80 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.41.0]
+
+The addon can see inside a dungeon, it learns what you actually do, and its
+tests can finally check themselves against a real client.
+
+### Added
+
+- **Dungeons and raids.** Until now this addon knew everything about the open
+  world and nothing about the inside of an instance: a mount that drops from a
+  raid boss was a line of free text with no boss, no instance, and no idea
+  whether you had already killed the thing this week. Now:
+  - **`/cn instances`** -- what you are saved to, how much of each is left, and
+    when it resets. Where nothing has been killed yet, every boss is named;
+    part-way through, the client reports how many are left rather than which,
+    and so does this, because inventing the names would be inventing
+    information.
+  - **`/cn drops <name>`** -- which boss drops something, in which instance,
+    and whether your own lockout is in the way.
+  - **`/cn chase` on an instance drop now names the boss** instead of
+    dead-ending in prose, and marks the step blocked with a reset time when
+    you are already saved and cleared.
+  - **A part-finished lockout now competes for "what next".** Those kills are
+    spent effort with an expiry on them, which makes them some of the cheapest
+    progress in the game -- and the ranking could not see them at all.
+    A lockout you have not started is deliberately *not* recommended: that is
+    a decision about your evening, not a next action.
+  - Reading the Adventure Guide **changes what it is displaying**, so the addon
+    refuses to read it at all while you have it open, and puts its selection
+    back exactly as it found it when you do not.
+- **It learns which kinds of thing you actually go and do.** `/cn learned`
+  shows the whole table. The guardrails matter more than the learning: nothing
+  moves until a type has been shown 25 times, the adjustment is clamped to a
+  narrow band so a type you ignore gets quieter but never silent, every
+  adjusted line says on the line that it was adjusted, the counters decay so
+  the addon tracks how you play now, `/cn learned reset` throws it all away,
+  and `/cn learned off` switches it off entirely. A focus you chose with
+  `/cn mode` always outranks a habit the addon inferred.
+- **`/cn capture` and `cn.ps1 fixtures`.** Nine defects in this addon's history
+  came from the offline test suite modelling the world more simply than the
+  world is -- most recently by treating every map in the game as a perfect
+  square, which hid an angle error in every zone for eight releases. Writing
+  more careful stubs does not fix that, because the author of a stub does not
+  know which part of reality he simplified. So the addon can now record what
+  your client actually returned, and the test suite audits its own stubs
+  against that recording: a stub missing a field reality had is a test failure
+  rather than a future bug report. Shapes and counts only -- nothing that
+  identifies you, and nothing leaves your machine.
+
+### Fixed
+
+- **Switching a setting off wrote nothing.** `x and false or nil` cannot
+  produce false in Lua -- `and false` is falsy, so it falls through to the
+  `or` every time. The line read correctly and did nothing. Caught by a test
+  that asserted the switch worked rather than that it had been called.
+- **A completion the client identifies differently was never credited.**
+  `NEW_PET_ADDED` reports the pet you now own, not the species that was
+  recommended. Those now match by type; quests and achievements, whose events
+  carry exactly the id that was recommended, deliberately do not, because a
+  loose match there would credit the addon for every quest anybody turns in.
+
+### Notes
+
+- `/cn selftest` is now fifteen checks: the two new ones read your lockouts
+  and confirm the Adventure Guide can be read without disturbing what you are
+  looking at. With it open, that check SKIPs and says the refusal was the
+  intended behaviour rather than a fault.
+- One assertion in the suite asserted "a pinned goal ranks in the top three",
+  which was a magic number meaning "above the three expiring things this
+  fixture happens to contain". It broke when a provider was added, for a
+  reason that had nothing to do with goals. It now asserts the property that
+  was actually meant: only time-limited work may outrank a pinned goal.
+- The multiplier the learning applies is memoised. Uncached, it resolved the
+  settings proxy once per candidate and doubled the cost of building the list.
+
 ## [0.40.0]
 
 Two things the arrow was doing wrong in every zone, and the addon finally
