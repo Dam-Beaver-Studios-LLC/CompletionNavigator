@@ -5347,4 +5347,92 @@ print("\nThe list does not churn or grow without bound:")
     print("  handlers bound once, pool capped at " .. list.maxRows)
 end)()
 
+print("\nTooltips answer without scanning:")
+
+;(function()
+    local professions = CN:GetModule("Professions")
+    local tipModule   = CN:GetModule("Tooltips")
+
+    professions.CaptureOpenProfession()
+
+    local names = CN.Account("recipeNames")
+
+    local knownID, knownName
+
+    for id, name in pairs(names) do
+        if type(name) == "string" and name ~= "" then
+            knownID, knownName = id, name
+            break
+        end
+    end
+
+    if not knownID then
+        print("  no recipe fixtures; skipped")
+        return
+    end
+
+    -- THE THREE WAYS AN ITEM CAN BE A RECIPE.
+    --
+    -- The item is the recipe itself.
+    assert(professions.RecipeForItem(knownID) == knownID,
+        "an item that IS a recipe resolves to itself")
+
+    -- The item's name is exactly the recipe's name.
+    assert(professions.RecipeForItem(999999, knownName) == knownID,
+        "an exact name match resolves, got "
+        .. tostring(professions.RecipeForItem(999999, knownName)))
+
+    -- The item teaches it: "Recipe: <name>".
+    assert(professions.RecipeForItem(999999, "Recipe: " .. knownName) == knownID,
+        "a teaching item resolves to what it teaches")
+
+    assert(professions.RecipeForItem(999999, "PATTERN: " .. knownName) == knownID,
+        "and the match is case-insensitive")
+
+    -- Something unrelated must NOT match. The old scan used a substring
+    -- search, which could match far more loosely than intended.
+    assert(professions.RecipeForItem(999999, "A Completely Unrelated Sword") == nil,
+        "an unrelated item is not a recipe")
+
+    assert(professions.RecipeForItem(nil, nil) == nil,
+        "nothing in, nothing out")
+
+    -- THE INDEX MUST NOT GO STALE.
+    local firstIndex = professions.NameIndex()
+
+    local again = professions.NameIndex()
+
+    assert(firstIndex == again,
+        "an unchanged recipe list must reuse the index rather than rebuild it")
+
+    -- Driven through the SCANNER, not by bumping the revision by hand.
+    --
+    -- The first version of this did the latter, which proved the index
+    -- respects a revision but said nothing about whether anything ever
+    -- changes it. Deleting the scanner's bump left that test passing while
+    -- the tooltip answered from a stale index forever.
+    professions.CaptureOpenProfession()
+
+    assert(professions.NameIndex() ~= firstIndex,
+        "scanning recipes must invalidate the name index, or the tooltip "
+        .. "answers from stale data for the rest of the session")
+
+    -- The tooltip itself still produces the recipe lines.
+    local lines = tipModule.ItemLines(knownID, knownName)
+
+    local sawRecipe = false
+
+    for _, line in ipairs(lines) do
+        if type(line.text) == "string" and line.text:find("Recipe") then
+            sawRecipe = true
+        end
+    end
+
+    assert(sawRecipe,
+        "the tooltip must still say something about a recipe it recognises")
+
+    print("  resolved by index, exact and teaching names both")
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")

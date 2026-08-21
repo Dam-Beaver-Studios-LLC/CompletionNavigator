@@ -7,6 +7,46 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.38.0]
+
+The hottest path in the addon was the slowest thing in it.
+
+### Fixed
+
+- **Every item tooltip scanned every recipe you know.** To answer "is this
+  item a recipe?", the tooltip walked the entire recipe list -- lowercasing
+  each name and searching it -- because the item that *teaches* a recipe is
+  named after the recipe rather than sharing its ID.
+  At retail scale that is twenty-five hundred iterations and five thousand
+  string allocations, to answer a question about one item. **Measured at
+  0.536ms per tooltip** -- three per cent of a frame for hovering one thing,
+  and sweeping a bag or an auction house list fires dozens of them a second.
+  A lowercased name index, built once and rebuilt only when recipes are
+  scanned, answers the same question with two hash lookups. **0.536ms to
+  0.004ms**, a hundred and thirty-fold.
+- The old match used a substring search, which could recognise an item as a
+  recipe far more loosely than intended -- any item whose name happened to
+  contain a recipe's name anywhere. The replacement matches the name exactly,
+  or the name with a known teaching prefix removed (`Recipe:`, `Pattern:`,
+  `Plans:` and the rest). More correct as well as faster, and there is a test
+  asserting an unrelated item is not mistaken for a recipe.
+
+### Notes
+
+- Two tests in this release had to be rewritten before they could fail.
+  The invalidation test bumped the index's revision by hand, which proved the
+  index respects a revision but said nothing about whether anything ever
+  changes one -- deleting the scanner's bump left it passing while the tooltip
+  would have answered from a stale index for the rest of the session. It now
+  drives a real scan.
+  This keeps happening in the same shape: a test that exercises the mechanism
+  instead of the caller. Worth naming as its own rule alongside the one about
+  stubs -- **assert through the path the game actually takes, not the seam you
+  built to make it testable.**
+- **The navigation arrow is untouched for the fourth release running.** Two
+  fixes to it are shipped and unverified; `/cn navdiag` settles it in one
+  command when there is time.
+
 ## [0.37.0]
 
 The window itself. Two defects that only show up while you are looking at it.

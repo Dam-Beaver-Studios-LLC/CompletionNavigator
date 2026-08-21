@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.37.0'
+$script:ToolkitVersion = '0.38.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.37.0"
+CN.version     = "0.38.0"
 CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -13084,6 +13084,9 @@ function Professions.CaptureOpenProfession()
 
             if info.name and info.name ~= "" then
                 names[recipeID] = info.name
+
+                -- The name index is now stale.
+                Professions.nameRevision = (Professions.nameRevision or 0) + 1
             end
 
             if info.learned then
@@ -13439,6 +13442,83 @@ CN:RegisterCommand{
         end
     end,
 }
+
+------------------------------------------------------------
+-- NAME LOOKUP
+------------------------------------------------------------
+
+-- Lowercased recipe name -> recipeID.
+--
+-- WHY THIS EXISTS. The item tooltip needed to answer "is this item a recipe
+-- I know?", and the only way it could was to walk every recipe name looking
+-- for a match -- two string allocations and a substring search per entry,
+-- twenty-five hundred of them, on EVERY mouseover. Measured at 0.54ms per
+-- tooltip, which is three per cent of a frame for hovering one item, and
+-- sweeping a bag or an auction list fires dozens in a second.
+--
+-- Built once against a revision the scanner bumps, and consulted with two
+-- hash lookups.
+Professions.nameRevision = Professions.nameRevision or 0
+
+function Professions.NameIndex()
+    return CN.Shortlist("RecipeNames", Professions.nameRevision, function()
+        local index = {}
+
+        for recipeID, name in pairs(RecipeNames()) do
+            if type(name) == "string" and name ~= "" then
+                index[string.lower(name)] = recipeID
+            end
+        end
+
+        return index
+    end)
+end
+
+-- The words the game puts in front of a recipe's name on the item that
+-- teaches it. "Recipe: Flask of Testing" teaches "Flask of Testing".
+Professions.teachingPrefixes = {
+    "recipe: ", "pattern: ", "plans: ", "formula: ", "schematic: ",
+    "design: ", "technique: ", "manuscript: ", "method: ", "glyph: ",
+}
+
+-- The recipe an item teaches, or nil. O(1) rather than O(every recipe).
+function Professions.RecipeForItem(itemID, itemName)
+    local names = RecipeNames()
+
+    -- The item IS the recipe, which is the cheapest case and worth checking
+    -- before building anything.
+    if itemID and names[itemID] then
+        return itemID, false
+    end
+
+    if type(itemName) ~= "string" or itemName == "" then
+        return nil
+    end
+
+    local index = Professions.NameIndex()
+
+    local needle = string.lower(itemName)
+
+    local direct = index[needle]
+
+    if direct then
+        return direct, true
+    end
+
+    -- Strip a teaching prefix and try again. This replaces a scan over every
+    -- recipe with one lookup per known prefix.
+    for _, prefix in ipairs(Professions.teachingPrefixes) do
+        if string.sub(needle, 1, #prefix) == prefix then
+            local taught = index[string.sub(needle, #prefix + 1)]
+
+            if taught then
+                return taught, true
+            end
+        end
+    end
+
+    return nil
+end
 '@
 
 $Embedded['Modules\Harvest.lua'] = @'
@@ -17585,29 +17665,18 @@ local function RecipeLines(lines, itemID, itemName)
         return false
     end
 
-    local names = professions.RecipeNames() or {}
-    local mine  = professions.CharacterRecipes() or {}
+    local mine = professions.CharacterRecipes() or {}
 
-    local recipeID, matchedOnName
-
-    if names[itemID] then
-        recipeID = itemID
-    elseif itemName and itemName ~= "" then
-        -- "Recipe: Flask of Testing" teaches "Flask of Testing".
-        local needle = string.lower(itemName)
-
-        for id, name in pairs(names) do
-            if name and name ~= "" then
-                local candidate = string.lower(name)
-
-                if candidate == needle or string.find(needle, candidate, 1, true) then
-                    recipeID      = id
-                    matchedOnName = true
-                    break
-                end
-            end
-        end
-    end
+    -- ONE INDEXED LOOKUP, NOT A SCAN.
+    --
+    -- This used to walk every recipe name the addon knew -- lowercasing each
+    -- one and searching it -- on every single item tooltip. At retail scale
+    -- that is twenty-five hundred iterations and five thousand string
+    -- allocations to answer a question about one item, measured at 0.54ms:
+    -- three per cent of a frame, per mouseover, and a bag sweep fires dozens
+    -- a second.
+    local recipeID, matchedOnName =
+        professions.RecipeForItem(itemID, itemName)
 
     if not recipeID then
         return false
@@ -24371,7 +24440,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.37.0
+## Version: 0.38.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -24591,6 +24660,46 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.38.0]
+
+The hottest path in the addon was the slowest thing in it.
+
+### Fixed
+
+- **Every item tooltip scanned every recipe you know.** To answer "is this
+  item a recipe?", the tooltip walked the entire recipe list -- lowercasing
+  each name and searching it -- because the item that *teaches* a recipe is
+  named after the recipe rather than sharing its ID.
+  At retail scale that is twenty-five hundred iterations and five thousand
+  string allocations, to answer a question about one item. **Measured at
+  0.536ms per tooltip** -- three per cent of a frame for hovering one thing,
+  and sweeping a bag or an auction house list fires dozens of them a second.
+  A lowercased name index, built once and rebuilt only when recipes are
+  scanned, answers the same question with two hash lookups. **0.536ms to
+  0.004ms**, a hundred and thirty-fold.
+- The old match used a substring search, which could recognise an item as a
+  recipe far more loosely than intended -- any item whose name happened to
+  contain a recipe's name anywhere. The replacement matches the name exactly,
+  or the name with a known teaching prefix removed (`Recipe:`, `Pattern:`,
+  `Plans:` and the rest). More correct as well as faster, and there is a test
+  asserting an unrelated item is not mistaken for a recipe.
+
+### Notes
+
+- Two tests in this release had to be rewritten before they could fail.
+  The invalidation test bumped the index's revision by hand, which proved the
+  index respects a revision but said nothing about whether anything ever
+  changes one -- deleting the scanner's bump left it passing while the tooltip
+  would have answered from a stale index for the rest of the session. It now
+  drives a real scan.
+  This keeps happening in the same shape: a test that exercises the mechanism
+  instead of the caller. Worth naming as its own rule alongside the one about
+  stubs -- **assert through the path the game actually takes, not the seam you
+  built to make it testable.**
+- **The navigation arrow is untouched for the fourth release running.** Two
+  fixes to it are shipped and unverified; `/cn navdiag` settles it in one
+  command when there is time.
 
 ## [0.37.0]
 
@@ -26763,7 +26872,7 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks — at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes — costs about **five milliseconds**, and the answer to "what next?" is served from cache in **three microseconds**.
 
-It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer — the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
+Tooltip lines are the same story: hovering an item answers from an index rather than searching everything the addon knows, so mousing across a full bag costs nothing you can feel. It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer — the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 
 It is careful about disk, too — about a third less than it used to write, after two releases spent measuring it. The game rewrites an addon's saved data in full every time you log out and reads it back every time you log in, so this one stores only what the game cannot tell it instantly — your history, what your other characters have done, and your own choices. It does not keep a second copy of things the client already knows. `/cn dbsize` will show you exactly what it is holding.
 
@@ -26817,7 +26926,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.37.0
+0.38.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -32538,6 +32647,94 @@ print("\nThe list does not churn or grow without bound:")
     print("  handlers bound once, pool capped at " .. list.maxRows)
 end)()
 
+print("\nTooltips answer without scanning:")
+
+;(function()
+    local professions = CN:GetModule("Professions")
+    local tipModule   = CN:GetModule("Tooltips")
+
+    professions.CaptureOpenProfession()
+
+    local names = CN.Account("recipeNames")
+
+    local knownID, knownName
+
+    for id, name in pairs(names) do
+        if type(name) == "string" and name ~= "" then
+            knownID, knownName = id, name
+            break
+        end
+    end
+
+    if not knownID then
+        print("  no recipe fixtures; skipped")
+        return
+    end
+
+    -- THE THREE WAYS AN ITEM CAN BE A RECIPE.
+    --
+    -- The item is the recipe itself.
+    assert(professions.RecipeForItem(knownID) == knownID,
+        "an item that IS a recipe resolves to itself")
+
+    -- The item's name is exactly the recipe's name.
+    assert(professions.RecipeForItem(999999, knownName) == knownID,
+        "an exact name match resolves, got "
+        .. tostring(professions.RecipeForItem(999999, knownName)))
+
+    -- The item teaches it: "Recipe: <name>".
+    assert(professions.RecipeForItem(999999, "Recipe: " .. knownName) == knownID,
+        "a teaching item resolves to what it teaches")
+
+    assert(professions.RecipeForItem(999999, "PATTERN: " .. knownName) == knownID,
+        "and the match is case-insensitive")
+
+    -- Something unrelated must NOT match. The old scan used a substring
+    -- search, which could match far more loosely than intended.
+    assert(professions.RecipeForItem(999999, "A Completely Unrelated Sword") == nil,
+        "an unrelated item is not a recipe")
+
+    assert(professions.RecipeForItem(nil, nil) == nil,
+        "nothing in, nothing out")
+
+    -- THE INDEX MUST NOT GO STALE.
+    local firstIndex = professions.NameIndex()
+
+    local again = professions.NameIndex()
+
+    assert(firstIndex == again,
+        "an unchanged recipe list must reuse the index rather than rebuild it")
+
+    -- Driven through the SCANNER, not by bumping the revision by hand.
+    --
+    -- The first version of this did the latter, which proved the index
+    -- respects a revision but said nothing about whether anything ever
+    -- changes it. Deleting the scanner's bump left that test passing while
+    -- the tooltip answered from a stale index forever.
+    professions.CaptureOpenProfession()
+
+    assert(professions.NameIndex() ~= firstIndex,
+        "scanning recipes must invalidate the name index, or the tooltip "
+        .. "answers from stale data for the rest of the session")
+
+    -- The tooltip itself still produces the recipe lines.
+    local lines = tipModule.ItemLines(knownID, knownName)
+
+    local sawRecipe = false
+
+    for _, line in ipairs(lines) do
+        if type(line.text) == "string" and line.text:find("Recipe") then
+            sawRecipe = true
+        end
+    end
+
+    assert(sawRecipe,
+        "the tooltip must still say something about a recipe it recognises")
+
+    print("  resolved by index, exact and teaching names both")
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -32823,6 +33020,31 @@ print(string.format("  TOTAL %s", string.format("%.1f KB", total / 1024)))
 for _, row in ipairs(sections) do
     print(string.format("  %-22s %8.1f KB  (%d rows)",
         row.name, row.bytes / 1024, row.count))
+end
+
+------------------------------------------------------------
+-- TOOLTIPS
+------------------------------------------------------------
+--
+-- The hottest path in the addon: every mouseover in the game, in bags, in the
+-- auction house, on a vendor's entire inventory. Never measured until now.
+
+print("\nTooltip cost (runs on every mouseover):")
+
+do
+    local tooltips = CN:GetModule("Tooltips")
+
+    if tooltips then
+        -- An ordinary item: not a toy, not a mount, not a recipe. The common
+        -- case, and the one that falls through every check.
+        bench("ItemLines on an ordinary item", 200, function()
+            tooltips.ItemLines(123456, "Some Ordinary Item")
+        end)
+
+        bench("ItemLines with no name supplied", 200, function()
+            tooltips.ItemLines(123457)
+        end)
+    end
 end
 '@
 

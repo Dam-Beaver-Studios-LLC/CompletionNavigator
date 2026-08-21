@@ -279,3 +279,28 @@ for _, row in ipairs(sections) do
     print(string.format("  %-22s %8.1f KB  (%d rows)",
         row.name, row.bytes / 1024, row.count))
 end
+
+------------------------------------------------------------
+-- TOOLTIPS
+------------------------------------------------------------
+--
+-- The hottest path in the addon: every mouseover in the game, in bags, in the
+-- auction house, on a vendor's entire inventory. Never measured until now.
+
+print("\nTooltip cost (runs on every mouseover):")
+
+do
+    local tooltips = CN:GetModule("Tooltips")
+
+    if tooltips then
+        -- An ordinary item: not a toy, not a mount, not a recipe. The common
+        -- case, and the one that falls through every check.
+        bench("ItemLines on an ordinary item", 200, function()
+            tooltips.ItemLines(123456, "Some Ordinary Item")
+        end)
+
+        bench("ItemLines with no name supplied", 200, function()
+            tooltips.ItemLines(123457)
+        end)
+    end
+end

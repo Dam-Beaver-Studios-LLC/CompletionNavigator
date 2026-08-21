@@ -129,6 +129,9 @@ function Professions.CaptureOpenProfession()
 
             if info.name and info.name ~= "" then
                 names[recipeID] = info.name
+
+                -- The name index is now stale.
+                Professions.nameRevision = (Professions.nameRevision or 0) + 1
             end
 
             if info.learned then
@@ -484,3 +487,80 @@ CN:RegisterCommand{
         end
     end,
 }
+
+------------------------------------------------------------
+-- NAME LOOKUP
+------------------------------------------------------------
+
+-- Lowercased recipe name -> recipeID.
+--
+-- WHY THIS EXISTS. The item tooltip needed to answer "is this item a recipe
+-- I know?", and the only way it could was to walk every recipe name looking
+-- for a match -- two string allocations and a substring search per entry,
+-- twenty-five hundred of them, on EVERY mouseover. Measured at 0.54ms per
+-- tooltip, which is three per cent of a frame for hovering one item, and
+-- sweeping a bag or an auction list fires dozens in a second.
+--
+-- Built once against a revision the scanner bumps, and consulted with two
+-- hash lookups.
+Professions.nameRevision = Professions.nameRevision or 0
+
+function Professions.NameIndex()
+    return CN.Shortlist("RecipeNames", Professions.nameRevision, function()
+        local index = {}
+
+        for recipeID, name in pairs(RecipeNames()) do
+            if type(name) == "string" and name ~= "" then
+                index[string.lower(name)] = recipeID
+            end
+        end
+
+        return index
+    end)
+end
+
+-- The words the game puts in front of a recipe's name on the item that
+-- teaches it. "Recipe: Flask of Testing" teaches "Flask of Testing".
+Professions.teachingPrefixes = {
+    "recipe: ", "pattern: ", "plans: ", "formula: ", "schematic: ",
+    "design: ", "technique: ", "manuscript: ", "method: ", "glyph: ",
+}
+
+-- The recipe an item teaches, or nil. O(1) rather than O(every recipe).
+function Professions.RecipeForItem(itemID, itemName)
+    local names = RecipeNames()
+
+    -- The item IS the recipe, which is the cheapest case and worth checking
+    -- before building anything.
+    if itemID and names[itemID] then
+        return itemID, false
+    end
+
+    if type(itemName) ~= "string" or itemName == "" then
+        return nil
+    end
+
+    local index = Professions.NameIndex()
+
+    local needle = string.lower(itemName)
+
+    local direct = index[needle]
+
+    if direct then
+        return direct, true
+    end
+
+    -- Strip a teaching prefix and try again. This replaces a scan over every
+    -- recipe with one lookup per known prefix.
+    for _, prefix in ipairs(Professions.teachingPrefixes) do
+        if string.sub(needle, 1, #prefix) == prefix then
+            local taught = index[string.sub(needle, #prefix + 1)]
+
+            if taught then
+                return taught, true
+            end
+        end
+    end
+
+    return nil
+end
