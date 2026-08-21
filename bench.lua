@@ -74,7 +74,10 @@ local vendorStore = CN.Account('vendors')
 for v = 1, 20 do
     local items = {}
     for i = 1, N_VENDOR_ITEMS do
-        items[40000 + ((v * 100 + i) % N_RECIPES)] = { name = "Recipe item", price = 1 }
+        -- A NUMBER, matching what the addon actually writes: the price, not
+        -- a table holding it. Keeping the fixture in step with the real shape
+        -- is the whole point of measuring.
+        items[40000 + ((v * 100 + i) % N_RECIPES)] = 1
     end
     vendorStore[60000 + v] = {
         npcID = 60000 + v, name = "Vendor " .. v, items = items,
@@ -219,4 +222,60 @@ do
             progress.Summary()
         end)
     end
+end
+
+------------------------------------------------------------
+-- SAVEDVARIABLES SIZE
+------------------------------------------------------------
+--
+-- The client rewrites this entire file on every logout. Nobody had ever
+-- measured how big this addon makes it.
+
+print("\nSavedVariables (rewritten in full on every logout):")
+
+local function measure(value, seen)
+    seen = seen or {}
+
+    if type(value) == "table" then
+        if seen[value] then return 0 end
+        seen[value] = true
+
+        local bytes = 8
+
+        for k, v in pairs(value) do
+            bytes = bytes + measure(k, seen) + measure(v, seen) + 4
+        end
+
+        return bytes
+    end
+
+    if type(value) == "string" then return #value + 2 end
+    if type(value) == "number" then return 8 end
+
+    return 4
+end
+
+local total = measure(CompletionNavigatorDB)
+
+local sections = {}
+
+for section, contents in pairs(CompletionNavigatorDB.account or {}) do
+    local bytes = measure(contents)
+
+    if bytes > 200 then
+        table.insert(sections, {
+            name  = section,
+            bytes = bytes,
+            count = CN.CountKeys(contents),
+        })
+    end
+end
+
+table.sort(sections, function(a, b) return a.bytes > b.bytes end)
+
+print(string.format("  TOTAL %s", string.format("%.1f KB", total / 1024)))
+
+for _, row in ipairs(sections) do
+    print(string.format("  %-22s %8.1f KB  (%d rows)",
+        row.name, row.bytes / 1024, row.count))
 end

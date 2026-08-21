@@ -69,15 +69,44 @@ function Vendors.CaptureOpenMerchant()
         record.zone  = Blizzard.GetMapName(mapID)
     end
 
+    -- WHAT NOT TO WRITE TO DISK.
+    --
+    -- This used to store every item's NAME alongside its ID. The client
+    -- already knows every item name and hands it back from its own cache in
+    -- microseconds; storing them again made this the largest thing the addon
+    -- wrote, at roughly twenty-four kilobytes per vendor. The whole
+    -- SavedVariables file is rewritten on every logout and re-parsed on every
+    -- login, so that is a cost paid twice per session for data the client was
+    -- always going to give us for free.
+    --
+    -- The rule this establishes, and the reason it is worth writing down:
+    -- persist only what the client CANNOT tell us. Names, collected states
+    -- and completion flags are all re-derivable instantly. Cross-character
+    -- knowledge, observations gathered over time and the player's own choices
+    -- are not, and those are what this database is actually for.
     record.items = {}
+
+    -- A NUMBER, NOT A TABLE.
+    --
+    -- Each item used to get a table of its own to hold two fields. A table
+    -- per item costs far more in a saved-variables file than the value it
+    -- carries, and a large vendor sells hundreds of items. Prices are stored
+    -- directly; the handful bought with an extended cost -- tokens, currency
+    -- -- are listed separately, because they are the exception.
+    --
+    -- Price is kept at all because the client only reports it while the
+    -- merchant window is open, so unlike the item's name it genuinely cannot
+    -- be recovered later.
+    record.extendedCost = nil
 
     for _, item in ipairs(items) do
         if item.itemID then
-            record.items[item.itemID] = {
-                name         = item.name,
-                price        = item.price,
-                extendedCost = item.extendedCost,
-            }
+            record.items[item.itemID] = item.price or 0
+
+            if item.extendedCost then
+                record.extendedCost = record.extendedCost or {}
+                record.extendedCost[item.itemID] = true
+            end
         end
     end
 
@@ -142,6 +171,23 @@ function Vendors.FirstLocatedSeller(itemID)
     return nil
 end
 
+-- What a vendor charges for an item, in the shape callers expect, whichever
+-- shape the store happens to be in. Old databases keep working until the
+-- next merchant visit rewrites the row.
+function Vendors.PriceOf(record, itemID)
+    local stored = record and record.items and record.items[itemID]
+
+    if stored == nil then
+        return nil
+    end
+
+    if type(stored) == "table" then
+        return stored.price, stored.extendedCost and true or false
+    end
+
+    return stored, (record.extendedCost and record.extendedCost[itemID]) or false
+end
+
 function Vendors.WhoSells(itemID)
     if not itemID then
         return {}
@@ -162,7 +208,7 @@ function Vendors.WhoSells(itemID)
                 mapID = record.mapID,
                 x     = record.x,
                 y     = record.y,
-                item  = record.items and record.items[itemID],
+                price = Vendors.PriceOf(record, itemID),
             })
         end
     end
@@ -187,9 +233,14 @@ function Vendors.FindItem(text)
     local matches = {}
 
     for npcID, record in pairs(Store()) do
-        for id, item in pairs(record.items or {}) do
-            if item.name and string.find(string.lower(item.name), needle, 1, true) then
-                matches[id] = item.name
+        for id in pairs(record.items or {}) do
+            -- Resolved from the client's item cache rather than from a copy
+            -- of it kept on disk. Unknown names are skipped rather than
+            -- guessed; the client fills its cache as items are seen.
+            local name = Blizzard.GetItemName(id)
+
+            if name and string.find(string.lower(name), needle, 1, true) then
+                matches[id] = name
             end
         end
     end

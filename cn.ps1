@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.34.0'
+$script:ToolkitVersion = '0.35.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,8 +117,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.34.0"
-CN.dbVersion   = 4
+CN.version     = "0.35.0"
+CN.dbVersion   = 5
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -561,6 +561,45 @@ CN.migrations = {
             end
         end
     end,
+
+    -- 4 -> 5: stop carrying a copy of the client's item cache.
+    --
+    -- Vendor rows stored every item's NAME as well as its ID. The client
+    -- knows every item name already, so this was a duplicate of its cache
+    -- written to disk, rewritten on every logout and re-parsed on every
+    -- login -- and at retail scale it was the single largest thing this addon
+    -- saved.
+    --
+    -- Dropped in place rather than waiting for a rescan, so the saving
+    -- arrives on the next login rather than the next time the player happens
+    -- to reopen every merchant they have ever visited.
+    [4] = function(db)
+        db.account = db.account or {}
+
+        local vendors = db.account.vendors
+
+        if type(vendors) ~= "table" then
+            return
+        end
+
+        local dropped = 0
+
+        for _, record in pairs(vendors) do
+            if type(record) == "table" and type(record.items) == "table" then
+                for _, item in pairs(record.items) do
+                    if type(item) == "table" and item.name then
+                        item.name = nil
+                        dropped = dropped + 1
+                    end
+                end
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " cached item names the client already knows.")
+        end
+    end,
 }
 
 local function Migrate(db)
@@ -697,6 +736,100 @@ end
 -- overridden. That means a new default added in a later release reaches every
 -- character, instead of being frozen at whatever the value was when the
 -- override was created.
+-- HOW BIG IS THIS?
+--
+-- The client rewrites the entire saved-variables file on every logout and
+-- parses it again on every login. Nobody had ever measured what this addon
+-- contributes to that, and the answer was over a megabyte at retail scale --
+-- a third of which was a copy of the client's own item cache.
+--
+-- Measured rather than guessed, and reportable, so it cannot quietly grow
+-- back.
+function CN.MeasureDatabase(value, seen)
+    seen = seen or {}
+
+    if type(value) == "table" then
+        if seen[value] then
+            return 0
+        end
+
+        seen[value] = true
+
+        local bytes = 8
+
+        for key, entry in pairs(value) do
+            bytes = bytes + CN.MeasureDatabase(key, seen)
+                + CN.MeasureDatabase(entry, seen) + 4
+        end
+
+        return bytes
+    end
+
+    if type(value) == "string" then
+        return #value + 2
+    end
+
+    if type(value) == "number" then
+        return 8
+    end
+
+    return 4
+end
+
+function CN.DatabaseSizes()
+    local rows = {}
+
+    local function section(label, contents)
+        if type(contents) ~= "table" then
+            return
+        end
+
+        table.insert(rows, {
+            name  = label,
+            bytes = CN.MeasureDatabase(contents),
+            count = CN.CountKeys(contents),
+        })
+    end
+
+    for name, contents in pairs((CN.db and CN.db.account) or {}) do
+        section(name, contents)
+    end
+
+    section("characters", CN.db and CN.db.characters)
+
+    table.sort(rows, function(a, b) return a.bytes > b.bytes end)
+
+    return rows, CN.MeasureDatabase(CN.db)
+end
+
+CN:RegisterCommand{
+    name    = "dbsize",
+    aliases = { "storage" },
+    order   = 31,
+    help    = "How much this addon writes to disk, and where it goes.",
+    handler = function()
+        local rows, total = CN.DatabaseSizes()
+
+        Print(string.format("Saved data: |cffffd100%.0f KB|r", total / 1024))
+        Print("|cff999999Rewritten in full every time you log out.|r")
+
+        local shown = 0
+
+        for _, row in ipairs(rows) do
+            if row.bytes > 4096 and shown < 12 then
+                Print(string.format("  %-20s %6.0f KB  |cff999999%d rows|r",
+                    row.name, row.bytes / 1024, row.count))
+
+                shown = shown + 1
+            end
+        end
+
+        if shown == 0 then
+            Print("|cff999999Nothing large enough to itemise.|r")
+        end
+    end,
+}
+
 CN.characterOverridable = {
     priorityMode = true,
     autoWaypoint = true,
@@ -16736,15 +16869,44 @@ function Vendors.CaptureOpenMerchant()
         record.zone  = Blizzard.GetMapName(mapID)
     end
 
+    -- WHAT NOT TO WRITE TO DISK.
+    --
+    -- This used to store every item's NAME alongside its ID. The client
+    -- already knows every item name and hands it back from its own cache in
+    -- microseconds; storing them again made this the largest thing the addon
+    -- wrote, at roughly twenty-four kilobytes per vendor. The whole
+    -- SavedVariables file is rewritten on every logout and re-parsed on every
+    -- login, so that is a cost paid twice per session for data the client was
+    -- always going to give us for free.
+    --
+    -- The rule this establishes, and the reason it is worth writing down:
+    -- persist only what the client CANNOT tell us. Names, collected states
+    -- and completion flags are all re-derivable instantly. Cross-character
+    -- knowledge, observations gathered over time and the player's own choices
+    -- are not, and those are what this database is actually for.
     record.items = {}
+
+    -- A NUMBER, NOT A TABLE.
+    --
+    -- Each item used to get a table of its own to hold two fields. A table
+    -- per item costs far more in a saved-variables file than the value it
+    -- carries, and a large vendor sells hundreds of items. Prices are stored
+    -- directly; the handful bought with an extended cost -- tokens, currency
+    -- -- are listed separately, because they are the exception.
+    --
+    -- Price is kept at all because the client only reports it while the
+    -- merchant window is open, so unlike the item's name it genuinely cannot
+    -- be recovered later.
+    record.extendedCost = nil
 
     for _, item in ipairs(items) do
         if item.itemID then
-            record.items[item.itemID] = {
-                name         = item.name,
-                price        = item.price,
-                extendedCost = item.extendedCost,
-            }
+            record.items[item.itemID] = item.price or 0
+
+            if item.extendedCost then
+                record.extendedCost = record.extendedCost or {}
+                record.extendedCost[item.itemID] = true
+            end
         end
     end
 
@@ -16809,6 +16971,23 @@ function Vendors.FirstLocatedSeller(itemID)
     return nil
 end
 
+-- What a vendor charges for an item, in the shape callers expect, whichever
+-- shape the store happens to be in. Old databases keep working until the
+-- next merchant visit rewrites the row.
+function Vendors.PriceOf(record, itemID)
+    local stored = record and record.items and record.items[itemID]
+
+    if stored == nil then
+        return nil
+    end
+
+    if type(stored) == "table" then
+        return stored.price, stored.extendedCost and true or false
+    end
+
+    return stored, (record.extendedCost and record.extendedCost[itemID]) or false
+end
+
 function Vendors.WhoSells(itemID)
     if not itemID then
         return {}
@@ -16829,7 +17008,7 @@ function Vendors.WhoSells(itemID)
                 mapID = record.mapID,
                 x     = record.x,
                 y     = record.y,
-                item  = record.items and record.items[itemID],
+                price = Vendors.PriceOf(record, itemID),
             })
         end
     end
@@ -16854,9 +17033,14 @@ function Vendors.FindItem(text)
     local matches = {}
 
     for npcID, record in pairs(Store()) do
-        for id, item in pairs(record.items or {}) do
-            if item.name and string.find(string.lower(item.name), needle, 1, true) then
-                matches[id] = item.name
+        for id in pairs(record.items or {}) do
+            -- Resolved from the client's item cache rather than from a copy
+            -- of it kept on disk. Unknown names are skipped rather than
+            -- guessed; the client fills its cache as items are seen.
+            local name = Blizzard.GetItemName(id)
+
+            if name and string.find(string.lower(name), needle, 1, true) then
+                matches[id] = name
             end
         end
     end
@@ -24028,7 +24212,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.34.0
+## Version: 0.35.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -24248,6 +24432,50 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.35.0]
+
+A third of what this addon saved to disk was a copy of something the game
+already had.
+
+### Changed
+
+- **Saved data: 1,275 KB down to 947 KB**, measured at retail scale. The
+  client rewrites this file in full on every logout and parses it again on
+  every login, so it is a cost paid twice a session, and nobody had ever
+  measured it.
+  The largest contributor was **vendors, at 488 KB for twenty of them** --
+  roughly twenty-four kilobytes each. Every vendor stored the *name* of every
+  item it sold, which is a duplicate of the client's own item cache, plus a
+  table per item to hold two fields. Names are gone and prices are stored as
+  bare numbers; a three-hundred-item merchant now costs 6 KB instead of over
+  twenty. Prices are still kept, because the client only reports them while
+  the merchant window is open and they genuinely cannot be recovered later.
+- **A migration reclaims it on the next login** rather than waiting for you to
+  reopen every merchant you have ever visited.
+
+### Added
+
+- **`/cn dbsize`** -- how much the addon writes to disk and where it goes, so
+  this cannot quietly grow back.
+- The test suite asserts a three-hundred-item vendor stays in single-figure
+  kilobytes, and that the migration actually drops names already on disk.
+
+### Notes
+
+- The rule this establishes, worth stating because it will apply again:
+  **persist only what the client cannot tell us.** Names, collected states and
+  completion flags come back instantly from the game. Cross-character
+  knowledge, observations gathered over time, and the player's own choices do
+  not -- and those are what this database is actually for.
+- Two further stores fit the same argument: achievements at 394 KB and pets at
+  274 KB, both carrying names the client can re-supply. Pets were deliberately
+  left alone here -- the name has six consumers including a search, and a
+  six-site refactor rushed at the end of a release is how a saving becomes a
+  regression. Both are written up in the roadmap with their measurements.
+- **Nothing was changed in the navigation arrow this release.** Two fixes to
+  it are shipped and unverified, and stacking a third speculative change on
+  top of them would make the next report harder to interpret, not easier.
 
 ## [0.34.0]
 
@@ -25993,6 +26221,21 @@ Deliberately after the above. Polish on top of thin features is lipstick.
 
 **Effort:** moderate. **Risk:** low.
 
+### 2.8 Stop persisting what the client already knows — **started in 0.35.0**
+
+The saved-variables file is rewritten in full on every logout and parsed on every login. Measured at retail scale it was **1,275 KB**, and the largest single contributor was a copy of the client's own item cache: every vendor stored the *name* of every item it sold.
+
+Vendors are done — 488 KB to 160 KB, and the total to 947 KB. The same argument applies to two more stores, and the measurement is in `bench.lua` so the next attempt starts from a number rather than a hunch:
+
+| Store | Size | What is re-derivable |
+| --- | --- | --- |
+| `achievements` | 394 KB | `name`, `points` — both from `GetAchievementInfo` |
+| `pets` | 274 KB | `name` — from `GetPetInfoBySpeciesID` |
+
+Pets were deliberately left alone in 0.35.0: the name has six consumers including a name search, and a six-site refactor rushed at the end of a release is how a saving becomes a regression. `/cn dbsize` reports the current figure so this cannot quietly grow back.
+
+**Effort:** small each. **Risk:** low for achievements, medium for pets.
+
 ---
 
 ## Tier 4 — Infrastructure
@@ -26256,6 +26499,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn alts` | Which character should be doing what |
 | `/cn zones` | Which zone to work on next, and why |
 | `/cn navdiag` | Exactly what the arrow is doing, and why |
+| `/cn dbsize` | How much the addon is storing, and where |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |
@@ -26279,6 +26523,8 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks — at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes — costs about **five milliseconds**, and the answer to "what next?" is served from cache in **three microseconds**.
 
 It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer — the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
+
+It is careful about disk, too. The game rewrites an addon's saved data in full every time you log out and reads it back every time you log in, so this one stores only what the game cannot tell it instantly — your history, what your other characters have done, and your own choices. It does not keep a second copy of things the client already knows. `/cn dbsize` will show you exactly what it is holding.
 
 There is a benchmark in the repository, and the numbers above come out of it rather than out of a marketing meeting.
 
@@ -26330,7 +26576,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.34.0
+0.35.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -28436,8 +28682,30 @@ local vendor = vendors[55501]
 assert(vendor, "the vendor must be keyed by its creature ID from the GUID")
 assert(vendor.itemCount == 4, "every merchant item should be recorded, got "
     .. tostring(vendor.itemCount))
-assert(vendor.items[700] and vendor.items[700].name == "Flask of Testing",
+assert(vendor.items[700],
     "item IDs must be parsed out of the merchant item link")
+
+-- WHAT A VENDOR ROW MAY CONTAIN.
+--
+-- Names are not stored: the client caches every item name and keeping a copy
+-- made this the largest thing the addon wrote to disk. Nor does each item get
+-- a table of its own -- a table per item costs more in the saved file than
+-- the price it carries, and a large vendor sells hundreds.
+assert(type(vendor.items[700]) == "number",
+    "an item must be stored as its price, not as a table, got "
+    .. type(vendor.items[700]))
+
+assert(CN.Blizzard.GetItemName(700) == "Flask of Testing",
+    "the name must still be resolvable from the client on demand")
+
+local vendorsModule = CN:GetModule("Vendors")
+
+assert(vendorsModule.PriceOf(vendor, 700) ~= nil,
+    "the price must still be readable")
+
+-- An old database keeps working until the next merchant visit rewrites it.
+assert(vendorsModule.PriceOf({ items = { [900] = { price = 42 } } }, 900) == 42,
+    "rows saved in the previous shape must still be readable")
 assert(vendor.mapID and vendor.x, "the vendor location must be recorded")
 
 local sellers = CN:GetModule("Vendors").WhoSells(700)
@@ -29865,7 +30133,7 @@ CN.SetIgnored("PET", 12345, false)
 print("  ignore fast path preserves real lookups")
 end
 
-print("\nMigration 1 -> 4:")
+print("\nMigration 1 -> " .. CN.dbVersion .. ":")
 
 -- A database as an older build would have left it: schema version 1, the
 -- collection tables absent, and the minimap setting stored flat.
@@ -29895,7 +30163,7 @@ print("  minimap.angle     = " .. tostring(migrated.settings.minimap.angle))
 print("  discoveredQuests  = " .. count(migrated.account.discoveredQuests))
 print("  characters        = " .. count(migrated.characters))
 
-assert(migrated.version == 4, "the ladder must advance to the current schema version, got "
+assert(migrated.version == CN.dbVersion, "the ladder must advance to the current schema version, got "
     .. tostring(migrated.version))
 assert(type(migrated.settings.minimap) == "table",
     "the flat minimap boolean must become a table")
@@ -29929,7 +30197,7 @@ print("  per-character settings table created, empty, non-destructive")
 
 -- Running it again must be a no-op, not a second migration.
 CN.InitializeDatabase()
-assert(CompletionNavigatorDB.version == 4, "migration must be idempotent")
+assert(CompletionNavigatorDB.version == CN.dbVersion, "migration must be idempotent")
 
 print("  re-run is idempotent")
 
@@ -31754,6 +32022,90 @@ print("\nArrow diagnosis:")
 end)()
 
 
+print("\nWhat gets written to disk:")
+
+;(function()
+    -- The client rewrites this entire file on every logout and parses it on
+    -- every login. Over a megabyte at retail scale, a third of which was a
+    -- copy of the client's own item cache.
+    local merchants = CN:GetModule("Vendors")
+
+    local store = CN.Account("vendors")
+
+    -- A vendor with a realistic inventory.
+    local items = {}
+
+    for index = 1, 300 do
+        table.insert(items, {
+            itemID = 700000 + index,
+            name   = "An Item With A Reasonably Long Name " .. index,
+            price  = 1000 + index,
+        })
+    end
+
+    local realNPC   = CN.Blizzard.GetInteractingNPC
+    local realItems = CN.Blizzard.GetMerchantItems
+
+    CN.Blizzard.GetInteractingNPC  = function() return 88888, "Big Merchant" end
+    CN.Blizzard.GetMerchantItems   = function() return items end
+
+    merchants.CaptureOpenMerchant()
+
+    CN.Blizzard.GetInteractingNPC = realNPC
+    CN.Blizzard.GetMerchantItems  = realItems
+
+    local record = store[88888]
+
+    assert(record, "the vendor was recorded")
+
+    local bytes = CN.MeasureDatabase(record)
+
+    -- Three hundred items stored as bare prices is a few kilobytes. Stored as
+    -- a table each, with a name in every one, it was over twenty.
+    assert(bytes < 12000,
+        "a 300-item vendor must cost a few kilobytes, not tens: "
+        .. math.floor(bytes / 1024) .. " KB")
+
+    for _, value in pairs(record.items) do
+        assert(type(value) == "number",
+            "each item is stored as its price, not as a table")
+    end
+
+    -- And the name is still available, from the client rather than from disk.
+    assert(merchants.PriceOf(record, 700001) == 1001,
+        "the price survives the compaction")
+
+    -- THE MIGRATION must reclaim the space for people who already have the
+    -- old shape, rather than waiting for them to revisit every merchant they
+    -- have ever opened.
+    local legacy = {
+        version = 4,
+        account = {
+            vendors = {
+                [1] = { items = { [55] = { name = "Old Name", price = 7 } } },
+            },
+        },
+    }
+
+    CN.migrations[4](legacy)
+
+    assert(legacy.account.vendors[1].items[55].name == nil,
+        "the migration must drop names already on disk")
+    assert(legacy.account.vendors[1].items[55].price == 7,
+        "without losing the price, which the client cannot re-supply")
+
+    local rows, total = CN.DatabaseSizes()
+
+    assert(total > 0 and #rows > 0, "the size is reportable")
+
+    CN.HandleSlashCommand("dbsize")
+
+    store[88888] = nil
+
+    print(string.format("  a 300-item vendor costs %.1f KB", bytes / 1024))
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -31835,7 +32187,10 @@ local vendorStore = CN.Account('vendors')
 for v = 1, 20 do
     local items = {}
     for i = 1, N_VENDOR_ITEMS do
-        items[40000 + ((v * 100 + i) % N_RECIPES)] = { name = "Recipe item", price = 1 }
+        -- A NUMBER, matching what the addon actually writes: the price, not
+        -- a table holding it. Keeping the fixture in step with the real shape
+        -- is the whole point of measuring.
+        items[40000 + ((v * 100 + i) % N_RECIPES)] = 1
     end
     vendorStore[60000 + v] = {
         npcID = 60000 + v, name = "Vendor " .. v, items = items,
@@ -31980,6 +32335,62 @@ do
             progress.Summary()
         end)
     end
+end
+
+------------------------------------------------------------
+-- SAVEDVARIABLES SIZE
+------------------------------------------------------------
+--
+-- The client rewrites this entire file on every logout. Nobody had ever
+-- measured how big this addon makes it.
+
+print("\nSavedVariables (rewritten in full on every logout):")
+
+local function measure(value, seen)
+    seen = seen or {}
+
+    if type(value) == "table" then
+        if seen[value] then return 0 end
+        seen[value] = true
+
+        local bytes = 8
+
+        for k, v in pairs(value) do
+            bytes = bytes + measure(k, seen) + measure(v, seen) + 4
+        end
+
+        return bytes
+    end
+
+    if type(value) == "string" then return #value + 2 end
+    if type(value) == "number" then return 8 end
+
+    return 4
+end
+
+local total = measure(CompletionNavigatorDB)
+
+local sections = {}
+
+for section, contents in pairs(CompletionNavigatorDB.account or {}) do
+    local bytes = measure(contents)
+
+    if bytes > 200 then
+        table.insert(sections, {
+            name  = section,
+            bytes = bytes,
+            count = CN.CountKeys(contents),
+        })
+    end
+end
+
+table.sort(sections, function(a, b) return a.bytes > b.bytes end)
+
+print(string.format("  TOTAL %s", string.format("%.1f KB", total / 1024)))
+
+for _, row in ipairs(sections) do
+    print(string.format("  %-22s %8.1f KB  (%d rows)",
+        row.name, row.bytes / 1024, row.count))
 end
 '@
 

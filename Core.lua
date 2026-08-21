@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.34.0"
-CN.dbVersion   = 4
+CN.version     = "0.35.0"
+CN.dbVersion   = 5
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.

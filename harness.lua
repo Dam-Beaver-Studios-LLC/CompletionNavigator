@@ -1732,8 +1732,30 @@ local vendor = vendors[55501]
 assert(vendor, "the vendor must be keyed by its creature ID from the GUID")
 assert(vendor.itemCount == 4, "every merchant item should be recorded, got "
     .. tostring(vendor.itemCount))
-assert(vendor.items[700] and vendor.items[700].name == "Flask of Testing",
+assert(vendor.items[700],
     "item IDs must be parsed out of the merchant item link")
+
+-- WHAT A VENDOR ROW MAY CONTAIN.
+--
+-- Names are not stored: the client caches every item name and keeping a copy
+-- made this the largest thing the addon wrote to disk. Nor does each item get
+-- a table of its own -- a table per item costs more in the saved file than
+-- the price it carries, and a large vendor sells hundreds.
+assert(type(vendor.items[700]) == "number",
+    "an item must be stored as its price, not as a table, got "
+    .. type(vendor.items[700]))
+
+assert(CN.Blizzard.GetItemName(700) == "Flask of Testing",
+    "the name must still be resolvable from the client on demand")
+
+local vendorsModule = CN:GetModule("Vendors")
+
+assert(vendorsModule.PriceOf(vendor, 700) ~= nil,
+    "the price must still be readable")
+
+-- An old database keeps working until the next merchant visit rewrites it.
+assert(vendorsModule.PriceOf({ items = { [900] = { price = 42 } } }, 900) == 42,
+    "rows saved in the previous shape must still be readable")
 assert(vendor.mapID and vendor.x, "the vendor location must be recorded")
 
 local sellers = CN:GetModule("Vendors").WhoSells(700)
@@ -3161,7 +3183,7 @@ CN.SetIgnored("PET", 12345, false)
 print("  ignore fast path preserves real lookups")
 end
 
-print("\nMigration 1 -> 4:")
+print("\nMigration 1 -> " .. CN.dbVersion .. ":")
 
 -- A database as an older build would have left it: schema version 1, the
 -- collection tables absent, and the minimap setting stored flat.
@@ -3191,7 +3213,7 @@ print("  minimap.angle     = " .. tostring(migrated.settings.minimap.angle))
 print("  discoveredQuests  = " .. count(migrated.account.discoveredQuests))
 print("  characters        = " .. count(migrated.characters))
 
-assert(migrated.version == 4, "the ladder must advance to the current schema version, got "
+assert(migrated.version == CN.dbVersion, "the ladder must advance to the current schema version, got "
     .. tostring(migrated.version))
 assert(type(migrated.settings.minimap) == "table",
     "the flat minimap boolean must become a table")
@@ -3225,7 +3247,7 @@ print("  per-character settings table created, empty, non-destructive")
 
 -- Running it again must be a no-op, not a second migration.
 CN.InitializeDatabase()
-assert(CompletionNavigatorDB.version == 4, "migration must be idempotent")
+assert(CompletionNavigatorDB.version == CN.dbVersion, "migration must be idempotent")
 
 print("  re-run is idempotent")
 
@@ -5047,6 +5069,90 @@ print("\nArrow diagnosis:")
     CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
 
     print("  every value the arrow uses is reportable")
+end)()
+
+
+print("\nWhat gets written to disk:")
+
+;(function()
+    -- The client rewrites this entire file on every logout and parses it on
+    -- every login. Over a megabyte at retail scale, a third of which was a
+    -- copy of the client's own item cache.
+    local merchants = CN:GetModule("Vendors")
+
+    local store = CN.Account("vendors")
+
+    -- A vendor with a realistic inventory.
+    local items = {}
+
+    for index = 1, 300 do
+        table.insert(items, {
+            itemID = 700000 + index,
+            name   = "An Item With A Reasonably Long Name " .. index,
+            price  = 1000 + index,
+        })
+    end
+
+    local realNPC   = CN.Blizzard.GetInteractingNPC
+    local realItems = CN.Blizzard.GetMerchantItems
+
+    CN.Blizzard.GetInteractingNPC  = function() return 88888, "Big Merchant" end
+    CN.Blizzard.GetMerchantItems   = function() return items end
+
+    merchants.CaptureOpenMerchant()
+
+    CN.Blizzard.GetInteractingNPC = realNPC
+    CN.Blizzard.GetMerchantItems  = realItems
+
+    local record = store[88888]
+
+    assert(record, "the vendor was recorded")
+
+    local bytes = CN.MeasureDatabase(record)
+
+    -- Three hundred items stored as bare prices is a few kilobytes. Stored as
+    -- a table each, with a name in every one, it was over twenty.
+    assert(bytes < 12000,
+        "a 300-item vendor must cost a few kilobytes, not tens: "
+        .. math.floor(bytes / 1024) .. " KB")
+
+    for _, value in pairs(record.items) do
+        assert(type(value) == "number",
+            "each item is stored as its price, not as a table")
+    end
+
+    -- And the name is still available, from the client rather than from disk.
+    assert(merchants.PriceOf(record, 700001) == 1001,
+        "the price survives the compaction")
+
+    -- THE MIGRATION must reclaim the space for people who already have the
+    -- old shape, rather than waiting for them to revisit every merchant they
+    -- have ever opened.
+    local legacy = {
+        version = 4,
+        account = {
+            vendors = {
+                [1] = { items = { [55] = { name = "Old Name", price = 7 } } },
+            },
+        },
+    }
+
+    CN.migrations[4](legacy)
+
+    assert(legacy.account.vendors[1].items[55].name == nil,
+        "the migration must drop names already on disk")
+    assert(legacy.account.vendors[1].items[55].price == 7,
+        "without losing the price, which the client cannot re-supply")
+
+    local rows, total = CN.DatabaseSizes()
+
+    assert(total > 0 and #rows > 0, "the size is reportable")
+
+    CN.HandleSlashCommand("dbsize")
+
+    store[88888] = nil
+
+    print(string.format("  a 300-item vendor costs %.1f KB", bytes / 1024))
 end)()
 
 

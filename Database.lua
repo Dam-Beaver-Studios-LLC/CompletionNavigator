@@ -167,6 +167,45 @@ CN.migrations = {
             end
         end
     end,
+
+    -- 4 -> 5: stop carrying a copy of the client's item cache.
+    --
+    -- Vendor rows stored every item's NAME as well as its ID. The client
+    -- knows every item name already, so this was a duplicate of its cache
+    -- written to disk, rewritten on every logout and re-parsed on every
+    -- login -- and at retail scale it was the single largest thing this addon
+    -- saved.
+    --
+    -- Dropped in place rather than waiting for a rescan, so the saving
+    -- arrives on the next login rather than the next time the player happens
+    -- to reopen every merchant they have ever visited.
+    [4] = function(db)
+        db.account = db.account or {}
+
+        local vendors = db.account.vendors
+
+        if type(vendors) ~= "table" then
+            return
+        end
+
+        local dropped = 0
+
+        for _, record in pairs(vendors) do
+            if type(record) == "table" and type(record.items) == "table" then
+                for _, item in pairs(record.items) do
+                    if type(item) == "table" and item.name then
+                        item.name = nil
+                        dropped = dropped + 1
+                    end
+                end
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " cached item names the client already knows.")
+        end
+    end,
 }
 
 local function Migrate(db)
@@ -303,6 +342,100 @@ end
 -- overridden. That means a new default added in a later release reaches every
 -- character, instead of being frozen at whatever the value was when the
 -- override was created.
+-- HOW BIG IS THIS?
+--
+-- The client rewrites the entire saved-variables file on every logout and
+-- parses it again on every login. Nobody had ever measured what this addon
+-- contributes to that, and the answer was over a megabyte at retail scale --
+-- a third of which was a copy of the client's own item cache.
+--
+-- Measured rather than guessed, and reportable, so it cannot quietly grow
+-- back.
+function CN.MeasureDatabase(value, seen)
+    seen = seen or {}
+
+    if type(value) == "table" then
+        if seen[value] then
+            return 0
+        end
+
+        seen[value] = true
+
+        local bytes = 8
+
+        for key, entry in pairs(value) do
+            bytes = bytes + CN.MeasureDatabase(key, seen)
+                + CN.MeasureDatabase(entry, seen) + 4
+        end
+
+        return bytes
+    end
+
+    if type(value) == "string" then
+        return #value + 2
+    end
+
+    if type(value) == "number" then
+        return 8
+    end
+
+    return 4
+end
+
+function CN.DatabaseSizes()
+    local rows = {}
+
+    local function section(label, contents)
+        if type(contents) ~= "table" then
+            return
+        end
+
+        table.insert(rows, {
+            name  = label,
+            bytes = CN.MeasureDatabase(contents),
+            count = CN.CountKeys(contents),
+        })
+    end
+
+    for name, contents in pairs((CN.db and CN.db.account) or {}) do
+        section(name, contents)
+    end
+
+    section("characters", CN.db and CN.db.characters)
+
+    table.sort(rows, function(a, b) return a.bytes > b.bytes end)
+
+    return rows, CN.MeasureDatabase(CN.db)
+end
+
+CN:RegisterCommand{
+    name    = "dbsize",
+    aliases = { "storage" },
+    order   = 31,
+    help    = "How much this addon writes to disk, and where it goes.",
+    handler = function()
+        local rows, total = CN.DatabaseSizes()
+
+        Print(string.format("Saved data: |cffffd100%.0f KB|r", total / 1024))
+        Print("|cff999999Rewritten in full every time you log out.|r")
+
+        local shown = 0
+
+        for _, row in ipairs(rows) do
+            if row.bytes > 4096 and shown < 12 then
+                Print(string.format("  %-20s %6.0f KB  |cff999999%d rows|r",
+                    row.name, row.bytes / 1024, row.count))
+
+                shown = shown + 1
+            end
+        end
+
+        if shown == 0 then
+            Print("|cff999999Nothing large enough to itemise.|r")
+        end
+    end,
+}
+
 CN.characterOverridable = {
     priorityMode = true,
     autoWaypoint = true,

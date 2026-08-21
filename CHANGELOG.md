@@ -7,6 +7,50 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.35.0]
+
+A third of what this addon saved to disk was a copy of something the game
+already had.
+
+### Changed
+
+- **Saved data: 1,275 KB down to 947 KB**, measured at retail scale. The
+  client rewrites this file in full on every logout and parses it again on
+  every login, so it is a cost paid twice a session, and nobody had ever
+  measured it.
+  The largest contributor was **vendors, at 488 KB for twenty of them** --
+  roughly twenty-four kilobytes each. Every vendor stored the *name* of every
+  item it sold, which is a duplicate of the client's own item cache, plus a
+  table per item to hold two fields. Names are gone and prices are stored as
+  bare numbers; a three-hundred-item merchant now costs 6 KB instead of over
+  twenty. Prices are still kept, because the client only reports them while
+  the merchant window is open and they genuinely cannot be recovered later.
+- **A migration reclaims it on the next login** rather than waiting for you to
+  reopen every merchant you have ever visited.
+
+### Added
+
+- **`/cn dbsize`** -- how much the addon writes to disk and where it goes, so
+  this cannot quietly grow back.
+- The test suite asserts a three-hundred-item vendor stays in single-figure
+  kilobytes, and that the migration actually drops names already on disk.
+
+### Notes
+
+- The rule this establishes, worth stating because it will apply again:
+  **persist only what the client cannot tell us.** Names, collected states and
+  completion flags come back instantly from the game. Cross-character
+  knowledge, observations gathered over time, and the player's own choices do
+  not -- and those are what this database is actually for.
+- Two further stores fit the same argument: achievements at 394 KB and pets at
+  274 KB, both carrying names the client can re-supply. Pets were deliberately
+  left alone here -- the name has six consumers including a search, and a
+  six-site refactor rushed at the end of a release is how a saving becomes a
+  regression. Both are written up in the roadmap with their measurements.
+- **Nothing was changed in the navigation arrow this release.** Two fixes to
+  it are shipped and unverified, and stacking a third speculative change on
+  top of them would make the next report harder to interpret, not easier.
+
 ## [0.34.0]
 
 The arrow stopped working indoors, and now it can explain itself.

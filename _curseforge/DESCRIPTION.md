@@ -163,6 +163,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn alts` | Which character should be doing what |
 | `/cn zones` | Which zone to work on next, and why |
 | `/cn navdiag` | Exactly what the arrow is doing, and why |
+| `/cn dbsize` | How much the addon is storing, and where |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |
@@ -186,6 +187,8 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks â€” at a realistic scale of 1,800 pets, 3,000 achievements and 2,500 recipes â€” costs about **five milliseconds**, and the answer to "what next?" is served from cache in **three microseconds**.
 
 It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer â€” the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
+
+It is careful about disk, too. The game rewrites an addon's saved data in full every time you log out and reads it back every time you log in, so this one stores only what the game cannot tell it instantly â€” your history, what your other characters have done, and your own choices. It does not keep a second copy of things the client already knows. `/cn dbsize` will show you exactly what it is holding.
 
 There is a benchmark in the repository, and the numbers above come out of it rather than out of a marketing meeting.
 

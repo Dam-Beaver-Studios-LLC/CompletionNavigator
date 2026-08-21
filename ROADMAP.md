@@ -203,6 +203,21 @@ Deliberately after the above. Polish on top of thin features is lipstick.
 
 **Effort:** moderate. **Risk:** low.
 
+### 2.8 Stop persisting what the client already knows â€” **started in 0.35.0**
+
+The saved-variables file is rewritten in full on every logout and parsed on every login. Measured at retail scale it was **1,275 KB**, and the largest single contributor was a copy of the client's own item cache: every vendor stored the *name* of every item it sold.
+
+Vendors are done â€” 488 KB to 160 KB, and the total to 947 KB. The same argument applies to two more stores, and the measurement is in `bench.lua` so the next attempt starts from a number rather than a hunch:
+
+| Store | Size | What is re-derivable |
+| --- | --- | --- |
+| `achievements` | 394 KB | `name`, `points` â€” both from `GetAchievementInfo` |
+| `pets` | 274 KB | `name` â€” from `GetPetInfoBySpeciesID` |
+
+Pets were deliberately left alone in 0.35.0: the name has six consumers including a name search, and a six-site refactor rushed at the end of a release is how a saving becomes a regression. `/cn dbsize` reports the current figure so this cannot quietly grow back.
+
+**Effort:** small each. **Risk:** low for achievements, medium for pets.
+
 ---
 
 ## Tier 4 â€” Infrastructure
