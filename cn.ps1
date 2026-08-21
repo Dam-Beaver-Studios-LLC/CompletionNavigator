@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.43.0'
+$script:ToolkitVersion = '0.43.1'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.43.0"
+CN.version     = "0.43.1"
 CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -372,6 +372,38 @@ end
 function CN.ConfidenceFor(measured)
     return measured and CN.confidence.MEASURED or CN.confidence.ESTIMATED
 end
+
+-- THE SINGLE MOST IMPORTANT FUNCTION IN THIS FILE.
+--
+-- World of Warcraft runs Lua 5.1. The offline test suite runs Lua 5.4. In 5.3
+-- and later, `math.atan(y, x)` is the two-argument arctangent; in 5.1 it is
+-- the one-argument one and the SECOND ARGUMENT IS SILENTLY IGNORED.
+--
+--     Lua 5.4:  math.atan(1, 0) == 1.5707963  (90 degrees -- correct)
+--     Lua 5.1:  math.atan(1, 0) == 0.7853981  (45 degrees -- atan(1))
+--
+-- No error. No warning. A number that looks entirely reasonable.
+--
+-- Every bearing this addon computed IN GAME from 0.19.0 to 0.43.0 was
+-- therefore atan(dx), with the north-south component of the direction thrown
+-- away -- which is why the arrow never pointed behind the player, and why
+-- "it does not turn around when I walk past the destination" was reported
+-- three times and "fixed" three times against a test suite where the code was
+-- genuinely correct.
+--
+-- This is the eighth instance in this project of the same class of defect:
+-- the test environment modelling the world more simply, or differently, than
+-- the world. It is the worst one, because the difference was not in a stub I
+-- wrote -- it was in the language itself.
+--
+-- Use CN.Atan2 for every bearing. Never math.atan with two arguments.
+--
+-- Assigned rather than wrapped: a wrapper would contain the two-argument call
+-- itself, and the suite's rule against that expression is worth more than the
+-- one function call it costs. Where math.atan2 exists -- the game, and every
+-- Lua before 5.4 -- it is used. Where it does not, math.atan IS the
+-- two-argument form, so passing both through is correct.
+CN.Atan2 = math.atan2 or math.atan
 
 -- THE SELF-TEST REGISTRY LIVES HERE, NOT IN THE MODULE THAT USES IT.
 --
@@ -1064,22 +1096,40 @@ local function BuildProxy()
             end
         end,
 
-        -- pairs() over settings must see the merged view, or anything that
-        -- iterates them silently misses overrides.
+        -- __pairs IS NOT HONOURED BY THE GAME.
+        --
+        -- It arrived in Lua 5.2. World of Warcraft runs 5.1, so `pairs()` on
+        -- this proxy iterates the empty backing table and yields NOTHING --
+        -- silently, in game, while the offline suite on 5.4 walked a
+        -- correctly merged view and agreed the code was fine.
+        --
+        -- Kept, because it is right where it is honoured and costs nothing
+        -- where it is not. But nothing may DEPEND on it: use CN.AllSettings()
+        -- below, which works everywhere.
         __pairs = function()
-            local merged = {}
-
-            for key, value in pairs(AccountSettings() or {}) do
-                merged[key] = value
-            end
-
-            for key, value in pairs(Overrides() or {}) do
-                merged[key] = value
-            end
-
-            return next, merged, nil
+            return next, CN.AllSettings(), nil
         end,
     })
+end
+
+-- The merged settings as a plain table: account values with this character's
+-- overrides on top.
+--
+-- A real function rather than a metamethod, because the game's Lua does not
+-- support the metamethod and a facility that works in testing and not in
+-- production is worse than no facility at all.
+function CN.AllSettings()
+    local merged = {}
+
+    for key, value in pairs(AccountSettings() or {}) do
+        merged[key] = value
+    end
+
+    for key, value in pairs(Overrides() or {}) do
+        merged[key] = value
+    end
+
+    return merged
 end
 
 function CN.Settings()
@@ -7156,7 +7206,7 @@ local function BuildMinimapButton()
 
             px, py = px / scale, py / scale
 
-            CN.Settings().minimap.angle = math.deg(math.atan(py - my, px - mx))
+            CN.Settings().minimap.angle = math.deg(CN.Atan2(py - my, px - mx))
 
             UpdateMinimapPosition()
         end)
@@ -8301,6 +8351,26 @@ function Blizzard.GetAchievementInCategory(categoryID, index)
         icon          = icon,
         flags         = flags,
     }
+end
+
+-- Points for one achievement, live from the client.
+--
+-- The addon stopped storing points in 0.36.0 because the client answers
+-- instantly and a copy on disk was dead weight. That was right, and it left
+-- one caller reading a field that no longer exists -- so this is the
+-- replacement it should have had at the time.
+function Blizzard.GetAchievementPoints(achievementID)
+    if not GetAchievementInfo or not achievementID then
+        return nil
+    end
+
+    local ok, _, _, points = pcall(GetAchievementInfo, achievementID)
+
+    if not ok then
+        return nil
+    end
+
+    return points
 end
 
 -- Returns completedCriteria, totalCriteria for one achievement.
@@ -13241,9 +13311,25 @@ CN:RegisterCommand{
         end
 
         for index, record in ipairs(closest) do
-            Print(index .. ". " .. NameOf(record.achievementID or 0, record) .. " |cff999999("
-                .. record.done .. "/" .. record.criteria .. ", "
-                .. record.points .. " points)|r")
+            -- `points` HAS BEEN NIL SINCE 0.36.0.
+            --
+            -- That release stopped storing it, correctly -- the client
+            -- returns it instantly and a copy on disk was dead weight. Two
+            -- other places were updated to read it live or to tolerate its
+            -- absence with `or 0`; this one was missed, so the command threw
+            -- for anybody whose database had been migrated. It was invisible
+            -- because the error is caught by the command dispatcher, printed
+            -- once, and looks like a client hiccup.
+            --
+            -- Read live, and say nothing about points when the client will
+            -- not say either.
+            local points = record.points
+                or Blizzard.GetAchievementPoints(record.achievementID)
+
+            Print(index .. ". " .. NameOf(record.achievementID or 0, record)
+                .. " |cff999999(" .. record.done .. "/" .. record.criteria
+                .. (points and (", " .. points .. " points") or "")
+                .. ")|r")
         end
     end,
 }
@@ -24996,7 +25082,7 @@ function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing, 
     end
 
     -- -dy because map y grows southward.
-    local bearing = math.atan(dx, -dy)
+    local bearing = CN.Atan2(dx, -dy)
 
     local relative = bearing - (facing * (sign or Navigation.FacingSign()))
 
@@ -25520,7 +25606,7 @@ function Navigation.NoteMotion()
         return nil
     end
 
-    local moved = math.atan(dx, -dy)
+    local moved = CN.Atan2(dx, -dy)
 
     local supported = Navigation.SignFromMotion(moved, facing)
 
@@ -31967,7 +32053,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.43.0
+## Version: 0.43.1
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -32215,6 +32301,62 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.43.1]
+
+One defect, found by evaluating the addon against the language the game
+actually runs rather than the one its tests run on. It is the arrow bug that
+has been reported three times.
+
+### Fixed
+
+- **Every bearing computed in game since 0.19.0 was wrong.** World of Warcraft
+  runs Lua 5.1, in which `math.atan(y, x)` is the ONE-argument arctangent and
+  the second argument is silently discarded. The offline test suite runs Lua
+  5.4, where the same call is the two-argument form and is correct.
+
+  ```
+  Lua 5.4:  math.atan(1, 0) == 1.5707963   (90 degrees -- correct)
+  Lua 5.1:  math.atan(1, 0) == 0.7853981   (45 degrees -- atan(1))
+  ```
+
+  No error, no warning, a plausible number. In game the arrow's bearing was
+  `atan(dx)` with the north-south component of the direction thrown away,
+  which is why it could never point behind the player -- reported three times
+  as "it does not turn around when I walk past the destination", and "fixed"
+  three times against a suite in which the code was genuinely correct.
+
+  The same expression was also behind the motion-based facing calibration
+  added in 0.40.0 and the minimap button's drag angle.
+
+- **Overrides were invisible to anything that iterated settings.** The
+  settings proxy exposed its merged view through the `__pairs` metamethod,
+  which arrived in Lua 5.2. In 5.1 `pairs()` ignores it and yields nothing at
+  all. `CN.AllSettings()` returns the merged table and works in both.
+
+- **`/cn closest` threw for anybody whose database had been migrated.** 0.36.0
+  stopped storing achievement points -- correctly, the client answers
+  instantly -- and one of the three readers was missed. Points are read live
+  now, and omitted rather than faked when the client will not say.
+
+### Tooling
+
+- **The test suite runs twice, on both languages**, locally and in CI, with
+  Lua 5.1 first because it is the one that ships. This is the only mechanism
+  that could have caught any of the three defects above.
+- **A rule against the expression itself.** The suite walks every shipped file
+  and fails if two-argument `math.atan` reappears. The fix is one function;
+  the rule is what stops the next one.
+- **The geometry tests run a second time under simulated 5.1 semantics**, so a
+  reintroduction fails on the mathematics as well as on the grep.
+
+### Notes
+
+- This is the eighth defect in this project traced to the test environment
+  differing from the real one, and the first where the difference was the
+  language rather than something I stubbed. `/cn selftest` was built for
+  exactly this class and could not catch it either: the check ran in game,
+  where both the code and the check were using the same wrong function.
 
 ## [0.43.0]
 
@@ -34948,7 +35090,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.43.0
+0.43.1
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -35112,6 +35254,26 @@ jobs:
       #
       # This used to run only on the author's machine, which meant a release
       # could ship with it failing and nothing would say so.
+      # THE SUITE RUNS TWICE, ON TWO LANGUAGES.
+      #
+      # World of Warcraft runs Lua 5.1. This suite normally runs 5.4. They are
+      # not the same language, and the difference hid the worst defect this
+      # project has shipped: `math.atan(y, x)` is the two-argument arctangent
+      # in 5.3+, and in 5.1 it silently discards the second argument. Every
+      # bearing the addon computed in game for twenty-four releases was wrong,
+      # and the suite agreed it was right because the suite ran on 5.4.
+      #
+      # 5.1 first, because it is the one that matters.
+      - name: Run the offline harness on Lua 5.1 (the game's version)
+        timeout-minutes: 5
+        run: |
+          if command -v lua5.1 >/dev/null 2>&1; then
+            lua5.1 harness.lua .
+          else
+            echo "::warning::lua5.1 is not on this runner; the game's own"
+            echo "language went unverified for this build."
+          fi
+
       - name: Run the offline harness
         timeout-minutes: 5
         run: |
@@ -35798,6 +35960,12 @@ CN_TEST_WORLD_MAP_HOOKS = worldMapHooks
 -- island is what let "0 available" ship while a quest giver was in view.
 -- One table, not six locals: the main chunk is at Lua's 200-local ceiling,
 -- and a fixture that cannot compile is not a fixture.
+-- WoW runs Lua 5.1, where unpack is a global and table.unpack does not exist.
+-- This suite normally runs 5.4, where the reverse is true. Running it under
+-- BOTH is how the two-argument math.atan defect was finally caught, so the
+-- harness itself has to work in both.
+local UNPACK = rawget(table, "unpack") or unpack
+
 local F = {}
 
 F.mapTree = {
@@ -36991,7 +37159,7 @@ function strsplit(sep, str)
         table.insert(out, part)
     end
 
-    return table.unpack(out)
+    return UNPACK(out)
 end
 
 ------------------------------------------------------------
@@ -38844,14 +39012,34 @@ assert(refused == false, "an unknown setting must not be overridable")
 -- overrides entirely.
 CN.SetOverride("arrow", false)
 
-local sawArrow = nil
+-- THROUGH CN.AllSettings, NOT pairs().
+--
+-- The first version of this iterated the proxy with pairs() and passed on
+-- Lua 5.4, which honours the __pairs metamethod. The game runs 5.1, which
+-- does not -- so in game the same loop yielded nothing at all and every
+-- override was invisible to anything that iterated. The test agreed with the
+-- bug because it ran on a newer language than the one that ships.
+local merged = CN.AllSettings()
+
+assert(merged.arrow == false,
+    "the merged settings must include overrides, got "
+    .. tostring(merged.arrow))
+
+assert(merged.priorityMode ~= nil,
+    "and the account values underneath them")
+
+local sawArrowViaPairs = nil
 
 for key, value in pairs(liveSettings) do
-    if key == "arrow" then sawArrow = value end
+    if key == "arrow" then sawArrowViaPairs = value end
 end
 
-assert(sawArrow == false,
-    "iterating settings must see overrides, got " .. tostring(sawArrow))
+-- Only assert the metamethod path where the language actually has it.
+if _VERSION ~= "Lua 5.1" then
+    assert(sawArrowViaPairs == false,
+        "where __pairs is honoured it must agree, got "
+        .. tostring(sawArrowViaPairs))
+end
 
 CN.ClearOverride("arrow")
 
@@ -41831,7 +42019,11 @@ print("\nAngles on a map that is not square:")
 
     local degrees = math.deg(relative)
 
-    local expected = math.deg(math.atan(2000 * 0.1, -(1000 * 0.1)))
+    -- CN.Atan2, not math.atan: this expectation is arithmetic the test does
+    -- itself, and under the game's Lua the two-argument form silently drops
+    -- its second argument -- so computing the expected answer that way made
+    -- the test fail against correct code the moment it ran on 5.1.
+    local expected = math.deg(CN.Atan2(2000 * 0.1, -(1000 * 0.1)))
 
     assert(math.abs(degrees - expected) < 0.5,
         "the bearing must be taken in yards, not in map units: expected "
@@ -43174,6 +43366,125 @@ print("\nEvery command runs without throwing:")
     print("  and a refused setting was not stored")
 end)()
 
+
+print("\nThe language the game actually runs:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE WORST DEFECT THIS PROJECT HAS SHIPPED, AND HOW IT HID.
+    --
+    -- World of Warcraft runs Lua 5.1. This suite runs Lua 5.4. In 5.3+,
+    -- math.atan(y, x) is the two-argument arctangent. In 5.1 it is the
+    -- one-argument one and the second argument is silently discarded --
+    -- no error, and a plausible-looking number.
+    --
+    -- So every bearing computed in game from 0.19.0 to 0.43.0 was atan(dx)
+    -- with the north-south component thrown away. The arrow could not point
+    -- behind the player. It was reported three times and "fixed" three times
+    -- against a suite in which the code was genuinely correct.
+    --
+    -- This test simulates the game's semantics, which is the only way an
+    -- offline suite running a different interpreter can ever catch this.
+    ------------------------------------------------------------
+    local navigation = CN:GetModule("Navigation")
+
+    local realAtan  = math.atan
+    local realAtan2 = math.atan2
+
+    -- Exactly what the game provides: a one-argument atan that ignores
+    -- anything else it is handed, and a real atan2 alongside it.
+    math.atan = function(y)
+        return realAtan(y)
+    end
+
+    math.atan2 = math.atan2 or function(y, x)
+        return realAtan(y, x)
+    end
+
+    local savedSpan = CN_TEST_MAP_SPAN
+
+    CN_TEST_SetMapSpan({ 1000, 1000 })
+
+    local cases = {
+        { name = "north", x = 0.5, y = 0.4, expected =   0 },
+        { name = "east",  x = 0.6, y = 0.5, expected =  90 },
+        { name = "south", x = 0.5, y = 0.6, expected = 180 },
+        { name = "west",  x = 0.4, y = 0.5, expected = -90 },
+    }
+
+    for _, case in ipairs(cases) do
+        local relative = navigation.RelativeBearing(0.5, 0.5, case.x, case.y, 0, 1)
+
+        local off = math.abs(math.deg(
+            navigation.NormalizeAngle(relative - math.rad(case.expected))))
+
+        assert(off < 1, string.format(
+            "under the GAME's Lua, a target due %s reads as %.0f degrees, "
+            .. "not %d -- the addon is using two-argument math.atan somewhere",
+            case.name, math.deg(relative), case.expected))
+    end
+
+    -- And prove the test would have caught the original bug: the raw
+    -- expression the addon used to contain must now be visibly wrong.
+    local naive = math.atan(1, 0)
+
+    assert(math.abs(naive - (math.pi / 2)) > 0.5,
+        "the simulation must actually reproduce 5.1 behaviour, or this test "
+        .. "proves nothing")
+
+    math.atan  = realAtan
+    math.atan2 = realAtan2
+
+    CN_TEST_SetMapSpan(savedSpan)
+
+    print("  bearings are correct under Lua 5.1 semantics, not only 5.4's")
+
+    ------------------------------------------------------------
+    -- AND NO SOURCE FILE MAY USE THE TWO-ARGUMENT FORM AGAIN.
+    --
+    -- The fix above is one function. The rule is what stops the next one:
+    -- this walks the shipped tree and fails on any reintroduction, which no
+    -- amount of remembering can be relied on to do.
+    ------------------------------------------------------------
+    local offenders = {}
+
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    if manifest then
+        for line in manifest:lines() do
+            local relative = line:match("^([%w\\/_%.]+%.lua)%s*$")
+
+            if relative then
+                local path = ROOT .. "/" .. relative:gsub("\\", "/")
+
+                local source = io.open(path, "r")
+
+                if source then
+                    local body = source:read("*a")
+
+                    source:close()
+
+                    -- Strip comments before searching, or this file's own
+                    -- explanation of the bug counts as an instance of it.
+                    body = body:gsub("%-%-[^\n]*", "")
+
+                    if body:find("math%.atan%s*%([^)]-,") then
+                        table.insert(offenders, relative)
+                    end
+                end
+            end
+        end
+
+        manifest:close()
+    end
+
+    assert(#offenders == 0,
+        "two-argument math.atan is silently wrong in the game's Lua; use "
+        .. "CN.Atan2. Found in: " .. table.concat(offenders, ", "))
+
+    print("  and no shipped file uses the two-argument form")
+end)()
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -43890,6 +44201,23 @@ grep -q "ALL HARNESS CHECKS PASSED" "$WORK/ciharness.log" || {
   echo "FAIL: harness did not report success"; tail -20 "$WORK/ciharness.log"; exit 1; }
 echo "    passed from the repository root"
 
+# AND ON THE LANGUAGE THE GAME ACTUALLY RUNS.
+#
+# WoW runs Lua 5.1; this suite normally runs 5.4. They are not the same
+# language, and the difference concealed the worst defect this project has
+# shipped -- two-argument math.atan, silently wrong in game for twenty-four
+# releases while the suite agreed the code was correct.
+if command -v lua5.1 >/dev/null 2>&1; then
+  (cd "$WORK" && lua5.1 harness.lua . > ciharness51.log 2>&1) || {
+    echo "FAIL: the harness does not pass on Lua 5.1, which is what the game runs"
+    tail -20 "$WORK/ciharness51.log"; exit 1; }
+  grep -q "ALL HARNESS CHECKS PASSED" "$WORK/ciharness51.log" || {
+    echo "FAIL: the 5.1 harness did not report success"; exit 1; }
+  echo "    passed on Lua 5.1, the game's own version"
+else
+  echo "    lua5.1 not installed; the game's own language went unverified"
+fi
+
 echo "  luacheck runs exactly as CI runs it"
 if command -v luacheck >/dev/null 2>&1; then
   (cd "$WORK" && luacheck . --no-color > cilint.log 2>&1) || {
@@ -44151,6 +44479,7 @@ blocking_allowed = {
     "Install LuaRocks", "Install Lua tooling",
     "Syntax check every Lua file", "Verify the .toc lists every Lua file",
     "Lint", "Run the offline harness",
+    "Run the offline harness on Lua 5.1 (the game's version)",
     # Budgets block, and should: a performance regression is a defect, two
     # have shipped in this project, and both were visible in output nobody
     # was comparing against anything.

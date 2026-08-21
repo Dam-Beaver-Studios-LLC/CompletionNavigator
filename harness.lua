@@ -146,6 +146,12 @@ CN_TEST_WORLD_MAP_HOOKS = worldMapHooks
 -- island is what let "0 available" ship while a quest giver was in view.
 -- One table, not six locals: the main chunk is at Lua's 200-local ceiling,
 -- and a fixture that cannot compile is not a fixture.
+-- WoW runs Lua 5.1, where unpack is a global and table.unpack does not exist.
+-- This suite normally runs 5.4, where the reverse is true. Running it under
+-- BOTH is how the two-argument math.atan defect was finally caught, so the
+-- harness itself has to work in both.
+local UNPACK = rawget(table, "unpack") or unpack
+
 local F = {}
 
 F.mapTree = {
@@ -1339,7 +1345,7 @@ function strsplit(sep, str)
         table.insert(out, part)
     end
 
-    return table.unpack(out)
+    return UNPACK(out)
 end
 
 ------------------------------------------------------------
@@ -3192,14 +3198,34 @@ assert(refused == false, "an unknown setting must not be overridable")
 -- overrides entirely.
 CN.SetOverride("arrow", false)
 
-local sawArrow = nil
+-- THROUGH CN.AllSettings, NOT pairs().
+--
+-- The first version of this iterated the proxy with pairs() and passed on
+-- Lua 5.4, which honours the __pairs metamethod. The game runs 5.1, which
+-- does not -- so in game the same loop yielded nothing at all and every
+-- override was invisible to anything that iterated. The test agreed with the
+-- bug because it ran on a newer language than the one that ships.
+local merged = CN.AllSettings()
+
+assert(merged.arrow == false,
+    "the merged settings must include overrides, got "
+    .. tostring(merged.arrow))
+
+assert(merged.priorityMode ~= nil,
+    "and the account values underneath them")
+
+local sawArrowViaPairs = nil
 
 for key, value in pairs(liveSettings) do
-    if key == "arrow" then sawArrow = value end
+    if key == "arrow" then sawArrowViaPairs = value end
 end
 
-assert(sawArrow == false,
-    "iterating settings must see overrides, got " .. tostring(sawArrow))
+-- Only assert the metamethod path where the language actually has it.
+if _VERSION ~= "Lua 5.1" then
+    assert(sawArrowViaPairs == false,
+        "where __pairs is honoured it must agree, got "
+        .. tostring(sawArrowViaPairs))
+end
 
 CN.ClearOverride("arrow")
 
@@ -6179,7 +6205,11 @@ print("\nAngles on a map that is not square:")
 
     local degrees = math.deg(relative)
 
-    local expected = math.deg(math.atan(2000 * 0.1, -(1000 * 0.1)))
+    -- CN.Atan2, not math.atan: this expectation is arithmetic the test does
+    -- itself, and under the game's Lua the two-argument form silently drops
+    -- its second argument -- so computing the expected answer that way made
+    -- the test fail against correct code the moment it ran on 5.1.
+    local expected = math.deg(CN.Atan2(2000 * 0.1, -(1000 * 0.1)))
 
     assert(math.abs(degrees - expected) < 0.5,
         "the bearing must be taken in yards, not in map units: expected "
@@ -7520,6 +7550,125 @@ print("\nEvery command runs without throwing:")
         "a refused scale must not be stored, got " .. hud.Scale())
 
     print("  and a refused setting was not stored")
+end)()
+
+
+print("\nThe language the game actually runs:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE WORST DEFECT THIS PROJECT HAS SHIPPED, AND HOW IT HID.
+    --
+    -- World of Warcraft runs Lua 5.1. This suite runs Lua 5.4. In 5.3+,
+    -- math.atan(y, x) is the two-argument arctangent. In 5.1 it is the
+    -- one-argument one and the second argument is silently discarded --
+    -- no error, and a plausible-looking number.
+    --
+    -- So every bearing computed in game from 0.19.0 to 0.43.0 was atan(dx)
+    -- with the north-south component thrown away. The arrow could not point
+    -- behind the player. It was reported three times and "fixed" three times
+    -- against a suite in which the code was genuinely correct.
+    --
+    -- This test simulates the game's semantics, which is the only way an
+    -- offline suite running a different interpreter can ever catch this.
+    ------------------------------------------------------------
+    local navigation = CN:GetModule("Navigation")
+
+    local realAtan  = math.atan
+    local realAtan2 = math.atan2
+
+    -- Exactly what the game provides: a one-argument atan that ignores
+    -- anything else it is handed, and a real atan2 alongside it.
+    math.atan = function(y)
+        return realAtan(y)
+    end
+
+    math.atan2 = math.atan2 or function(y, x)
+        return realAtan(y, x)
+    end
+
+    local savedSpan = CN_TEST_MAP_SPAN
+
+    CN_TEST_SetMapSpan({ 1000, 1000 })
+
+    local cases = {
+        { name = "north", x = 0.5, y = 0.4, expected =   0 },
+        { name = "east",  x = 0.6, y = 0.5, expected =  90 },
+        { name = "south", x = 0.5, y = 0.6, expected = 180 },
+        { name = "west",  x = 0.4, y = 0.5, expected = -90 },
+    }
+
+    for _, case in ipairs(cases) do
+        local relative = navigation.RelativeBearing(0.5, 0.5, case.x, case.y, 0, 1)
+
+        local off = math.abs(math.deg(
+            navigation.NormalizeAngle(relative - math.rad(case.expected))))
+
+        assert(off < 1, string.format(
+            "under the GAME's Lua, a target due %s reads as %.0f degrees, "
+            .. "not %d -- the addon is using two-argument math.atan somewhere",
+            case.name, math.deg(relative), case.expected))
+    end
+
+    -- And prove the test would have caught the original bug: the raw
+    -- expression the addon used to contain must now be visibly wrong.
+    local naive = math.atan(1, 0)
+
+    assert(math.abs(naive - (math.pi / 2)) > 0.5,
+        "the simulation must actually reproduce 5.1 behaviour, or this test "
+        .. "proves nothing")
+
+    math.atan  = realAtan
+    math.atan2 = realAtan2
+
+    CN_TEST_SetMapSpan(savedSpan)
+
+    print("  bearings are correct under Lua 5.1 semantics, not only 5.4's")
+
+    ------------------------------------------------------------
+    -- AND NO SOURCE FILE MAY USE THE TWO-ARGUMENT FORM AGAIN.
+    --
+    -- The fix above is one function. The rule is what stops the next one:
+    -- this walks the shipped tree and fails on any reintroduction, which no
+    -- amount of remembering can be relied on to do.
+    ------------------------------------------------------------
+    local offenders = {}
+
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    if manifest then
+        for line in manifest:lines() do
+            local relative = line:match("^([%w\\/_%.]+%.lua)%s*$")
+
+            if relative then
+                local path = ROOT .. "/" .. relative:gsub("\\", "/")
+
+                local source = io.open(path, "r")
+
+                if source then
+                    local body = source:read("*a")
+
+                    source:close()
+
+                    -- Strip comments before searching, or this file's own
+                    -- explanation of the bug counts as an instance of it.
+                    body = body:gsub("%-%-[^\n]*", "")
+
+                    if body:find("math%.atan%s*%([^)]-,") then
+                        table.insert(offenders, relative)
+                    end
+                end
+            end
+        end
+
+        manifest:close()
+    end
+
+    assert(#offenders == 0,
+        "two-argument math.atan is silently wrong in the game's Lua; use "
+        .. "CN.Atan2. Found in: " .. table.concat(offenders, ", "))
+
+    print("  and no shipped file uses the two-argument form")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

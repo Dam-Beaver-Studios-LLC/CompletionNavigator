@@ -211,6 +211,23 @@ grep -q "ALL HARNESS CHECKS PASSED" "$WORK/ciharness.log" || {
   echo "FAIL: harness did not report success"; tail -20 "$WORK/ciharness.log"; exit 1; }
 echo "    passed from the repository root"
 
+# AND ON THE LANGUAGE THE GAME ACTUALLY RUNS.
+#
+# WoW runs Lua 5.1; this suite normally runs 5.4. They are not the same
+# language, and the difference concealed the worst defect this project has
+# shipped -- two-argument math.atan, silently wrong in game for twenty-four
+# releases while the suite agreed the code was correct.
+if command -v lua5.1 >/dev/null 2>&1; then
+  (cd "$WORK" && lua5.1 harness.lua . > ciharness51.log 2>&1) || {
+    echo "FAIL: the harness does not pass on Lua 5.1, which is what the game runs"
+    tail -20 "$WORK/ciharness51.log"; exit 1; }
+  grep -q "ALL HARNESS CHECKS PASSED" "$WORK/ciharness51.log" || {
+    echo "FAIL: the 5.1 harness did not report success"; exit 1; }
+  echo "    passed on Lua 5.1, the game's own version"
+else
+  echo "    lua5.1 not installed; the game's own language went unverified"
+fi
+
 echo "  luacheck runs exactly as CI runs it"
 if command -v luacheck >/dev/null 2>&1; then
   (cd "$WORK" && luacheck . --no-color > cilint.log 2>&1) || {
@@ -472,6 +489,7 @@ blocking_allowed = {
     "Install LuaRocks", "Install Lua tooling",
     "Syntax check every Lua file", "Verify the .toc lists every Lua file",
     "Lint", "Run the offline harness",
+    "Run the offline harness on Lua 5.1 (the game's version)",
     # Budgets block, and should: a performance regression is a defect, two
     # have shipped in this project, and both were visible in output nobody
     # was comparing against anything.

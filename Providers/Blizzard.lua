@@ -833,6 +833,26 @@ function Blizzard.GetAchievementInCategory(categoryID, index)
     }
 end
 
+-- Points for one achievement, live from the client.
+--
+-- The addon stopped storing points in 0.36.0 because the client answers
+-- instantly and a copy on disk was dead weight. That was right, and it left
+-- one caller reading a field that no longer exists -- so this is the
+-- replacement it should have had at the time.
+function Blizzard.GetAchievementPoints(achievementID)
+    if not GetAchievementInfo or not achievementID then
+        return nil
+    end
+
+    local ok, _, _, points = pcall(GetAchievementInfo, achievementID)
+
+    if not ok then
+        return nil
+    end
+
+    return points
+end
+
 -- Returns completedCriteria, totalCriteria for one achievement.
 -- The achievement's name, straight from the client.
 --

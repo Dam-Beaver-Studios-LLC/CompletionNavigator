@@ -7,6 +7,62 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.43.1]
+
+One defect, found by evaluating the addon against the language the game
+actually runs rather than the one its tests run on. It is the arrow bug that
+has been reported three times.
+
+### Fixed
+
+- **Every bearing computed in game since 0.19.0 was wrong.** World of Warcraft
+  runs Lua 5.1, in which `math.atan(y, x)` is the ONE-argument arctangent and
+  the second argument is silently discarded. The offline test suite runs Lua
+  5.4, where the same call is the two-argument form and is correct.
+
+  ```
+  Lua 5.4:  math.atan(1, 0) == 1.5707963   (90 degrees -- correct)
+  Lua 5.1:  math.atan(1, 0) == 0.7853981   (45 degrees -- atan(1))
+  ```
+
+  No error, no warning, a plausible number. In game the arrow's bearing was
+  `atan(dx)` with the north-south component of the direction thrown away,
+  which is why it could never point behind the player -- reported three times
+  as "it does not turn around when I walk past the destination", and "fixed"
+  three times against a suite in which the code was genuinely correct.
+
+  The same expression was also behind the motion-based facing calibration
+  added in 0.40.0 and the minimap button's drag angle.
+
+- **Overrides were invisible to anything that iterated settings.** The
+  settings proxy exposed its merged view through the `__pairs` metamethod,
+  which arrived in Lua 5.2. In 5.1 `pairs()` ignores it and yields nothing at
+  all. `CN.AllSettings()` returns the merged table and works in both.
+
+- **`/cn closest` threw for anybody whose database had been migrated.** 0.36.0
+  stopped storing achievement points -- correctly, the client answers
+  instantly -- and one of the three readers was missed. Points are read live
+  now, and omitted rather than faked when the client will not say.
+
+### Tooling
+
+- **The test suite runs twice, on both languages**, locally and in CI, with
+  Lua 5.1 first because it is the one that ships. This is the only mechanism
+  that could have caught any of the three defects above.
+- **A rule against the expression itself.** The suite walks every shipped file
+  and fails if two-argument `math.atan` reappears. The fix is one function;
+  the rule is what stops the next one.
+- **The geometry tests run a second time under simulated 5.1 semantics**, so a
+  reintroduction fails on the mathematics as well as on the grep.
+
+### Notes
+
+- This is the eighth defect in this project traced to the test environment
+  differing from the real one, and the first where the difference was the
+  language rather than something I stubbed. `/cn selftest` was built for
+  exactly this class and could not catch it either: the check ran in game,
+  where both the code and the check were using the same wrong function.
+
 ## [0.43.0]
 
 The largest release this addon has had. Fifty-three items, and the short

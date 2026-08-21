@@ -18,7 +18,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.43.0"
+CN.version     = "0.43.1"
 CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -273,6 +273,38 @@ end
 function CN.ConfidenceFor(measured)
     return measured and CN.confidence.MEASURED or CN.confidence.ESTIMATED
 end
+
+-- THE SINGLE MOST IMPORTANT FUNCTION IN THIS FILE.
+--
+-- World of Warcraft runs Lua 5.1. The offline test suite runs Lua 5.4. In 5.3
+-- and later, `math.atan(y, x)` is the two-argument arctangent; in 5.1 it is
+-- the one-argument one and the SECOND ARGUMENT IS SILENTLY IGNORED.
+--
+--     Lua 5.4:  math.atan(1, 0) == 1.5707963  (90 degrees -- correct)
+--     Lua 5.1:  math.atan(1, 0) == 0.7853981  (45 degrees -- atan(1))
+--
+-- No error. No warning. A number that looks entirely reasonable.
+--
+-- Every bearing this addon computed IN GAME from 0.19.0 to 0.43.0 was
+-- therefore atan(dx), with the north-south component of the direction thrown
+-- away -- which is why the arrow never pointed behind the player, and why
+-- "it does not turn around when I walk past the destination" was reported
+-- three times and "fixed" three times against a test suite where the code was
+-- genuinely correct.
+--
+-- This is the eighth instance in this project of the same class of defect:
+-- the test environment modelling the world more simply, or differently, than
+-- the world. It is the worst one, because the difference was not in a stub I
+-- wrote -- it was in the language itself.
+--
+-- Use CN.Atan2 for every bearing. Never math.atan with two arguments.
+--
+-- Assigned rather than wrapped: a wrapper would contain the two-argument call
+-- itself, and the suite's rule against that expression is worth more than the
+-- one function call it costs. Where math.atan2 exists -- the game, and every
+-- Lua before 5.4 -- it is used. Where it does not, math.atan IS the
+-- two-argument form, so passing both through is correct.
+CN.Atan2 = math.atan2 or math.atan
 
 -- THE SELF-TEST REGISTRY LIVES HERE, NOT IN THE MODULE THAT USES IT.
 --

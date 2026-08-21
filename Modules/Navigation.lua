@@ -173,7 +173,7 @@ function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing, 
     end
 
     -- -dy because map y grows southward.
-    local bearing = math.atan(dx, -dy)
+    local bearing = CN.Atan2(dx, -dy)
 
     local relative = bearing - (facing * (sign or Navigation.FacingSign()))
 
@@ -697,7 +697,7 @@ function Navigation.NoteMotion()
         return nil
     end
 
-    local moved = math.atan(dx, -dy)
+    local moved = CN.Atan2(dx, -dy)
 
     local supported = Navigation.SignFromMotion(moved, facing)
 

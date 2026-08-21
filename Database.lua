@@ -608,22 +608,40 @@ local function BuildProxy()
             end
         end,
 
-        -- pairs() over settings must see the merged view, or anything that
-        -- iterates them silently misses overrides.
+        -- __pairs IS NOT HONOURED BY THE GAME.
+        --
+        -- It arrived in Lua 5.2. World of Warcraft runs 5.1, so `pairs()` on
+        -- this proxy iterates the empty backing table and yields NOTHING --
+        -- silently, in game, while the offline suite on 5.4 walked a
+        -- correctly merged view and agreed the code was fine.
+        --
+        -- Kept, because it is right where it is honoured and costs nothing
+        -- where it is not. But nothing may DEPEND on it: use CN.AllSettings()
+        -- below, which works everywhere.
         __pairs = function()
-            local merged = {}
-
-            for key, value in pairs(AccountSettings() or {}) do
-                merged[key] = value
-            end
-
-            for key, value in pairs(Overrides() or {}) do
-                merged[key] = value
-            end
-
-            return next, merged, nil
+            return next, CN.AllSettings(), nil
         end,
     })
+end
+
+-- The merged settings as a plain table: account values with this character's
+-- overrides on top.
+--
+-- A real function rather than a metamethod, because the game's Lua does not
+-- support the metamethod and a facility that works in testing and not in
+-- production is worse than no facility at all.
+function CN.AllSettings()
+    local merged = {}
+
+    for key, value in pairs(AccountSettings() or {}) do
+        merged[key] = value
+    end
+
+    for key, value in pairs(Overrides() or {}) do
+        merged[key] = value
+    end
+
+    return merged
 end
 
 function CN.Settings()

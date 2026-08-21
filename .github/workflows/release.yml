@@ -158,6 +158,26 @@ jobs:
       #
       # This used to run only on the author's machine, which meant a release
       # could ship with it failing and nothing would say so.
+      # THE SUITE RUNS TWICE, ON TWO LANGUAGES.
+      #
+      # World of Warcraft runs Lua 5.1. This suite normally runs 5.4. They are
+      # not the same language, and the difference hid the worst defect this
+      # project has shipped: `math.atan(y, x)` is the two-argument arctangent
+      # in 5.3+, and in 5.1 it silently discards the second argument. Every
+      # bearing the addon computed in game for twenty-four releases was wrong,
+      # and the suite agreed it was right because the suite ran on 5.4.
+      #
+      # 5.1 first, because it is the one that matters.
+      - name: Run the offline harness on Lua 5.1 (the game's version)
+        timeout-minutes: 5
+        run: |
+          if command -v lua5.1 >/dev/null 2>&1; then
+            lua5.1 harness.lua .
+          else
+            echo "::warning::lua5.1 is not on this runner; the game's own"
+            echo "language went unverified for this build."
+          fi
+
       - name: Run the offline harness
         timeout-minutes: 5
         run: |

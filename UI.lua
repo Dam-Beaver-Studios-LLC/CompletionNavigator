@@ -2318,7 +2318,7 @@ local function BuildMinimapButton()
 
             px, py = px / scale, py / scale
 
-            CN.Settings().minimap.angle = math.deg(math.atan(py - my, px - mx))
+            CN.Settings().minimap.angle = math.deg(CN.Atan2(py - my, px - mx))
 
             UpdateMinimapPosition()
         end)

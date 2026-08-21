@@ -443,9 +443,25 @@ CN:RegisterCommand{
         end
 
         for index, record in ipairs(closest) do
-            Print(index .. ". " .. NameOf(record.achievementID or 0, record) .. " |cff999999("
-                .. record.done .. "/" .. record.criteria .. ", "
-                .. record.points .. " points)|r")
+            -- `points` HAS BEEN NIL SINCE 0.36.0.
+            --
+            -- That release stopped storing it, correctly -- the client
+            -- returns it instantly and a copy on disk was dead weight. Two
+            -- other places were updated to read it live or to tolerate its
+            -- absence with `or 0`; this one was missed, so the command threw
+            -- for anybody whose database had been migrated. It was invisible
+            -- because the error is caught by the command dispatcher, printed
+            -- once, and looks like a client hiccup.
+            --
+            -- Read live, and say nothing about points when the client will
+            -- not say either.
+            local points = record.points
+                or Blizzard.GetAchievementPoints(record.achievementID)
+
+            Print(index .. ". " .. NameOf(record.achievementID or 0, record)
+                .. " |cff999999(" .. record.done .. "/" .. record.criteria
+                .. (points and (", " .. points .. " points") or "")
+                .. ")|r")
         end
     end,
 }
