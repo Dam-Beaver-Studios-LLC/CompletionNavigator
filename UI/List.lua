@@ -135,6 +135,27 @@ local function CreateList(parent)
     -- it instead.
     local filterText = nil
 
+    -- THE SAME TRAP, TWO FIELDS ALONG.
+    --
+    -- `lastEntries` was kept on the frame while `filterText` was moved off it
+    -- for exactly the reason above, which is the shape of a fix applied to
+    -- the instance that was noticed rather than to the class. Reading an
+    -- unset field on a frame is not guaranteed to give nil -- a mixin's
+    -- __index can answer every key -- and here that turns `if
+    -- self.lastEntries then` into an infinite ipairs over a table that
+    -- answers every index.
+    --
+    -- Found in 0.47.0 when a new test made the first call to SetFilter
+    -- happen before anything had set entries. It hung the suite outright.
+    local lastEntries = nil
+
+    -- Readable, because a filter nobody can read is a filter nobody can test,
+    -- and the one defect this widget has shipped was a filter that was set
+    -- and never applied.
+    function list:GetFilter()
+        return filterText
+    end
+
     function list:SetFilter(text)
         -- A stub EditBox, or a template whose GetText returns something
         -- surprising, must not be able to poison the filter with a value that
@@ -148,8 +169,8 @@ local function CreateList(parent)
 
         filterText = (text ~= "") and string.lower(text) or nil
 
-        if self.lastEntries then
-            self:SetEntries(self.lastEntries)
+        if lastEntries then
+            self:SetEntries(lastEntries)
         end
     end
 
@@ -172,8 +193,8 @@ local function CreateList(parent)
     function list:CycleSort()
         self.sortIndex = (self.sortIndex % #self.sortModes) + 1
 
-        if self.lastEntries then
-            self:SetEntries(self.lastEntries)
+        if lastEntries then
+            self:SetEntries(lastEntries)
         end
 
         return self:SortMode()
@@ -223,7 +244,7 @@ local function CreateList(parent)
 
     -- entries = { { text = , onClick = , tooltip = }, ... }
     function list:SetEntries(entries)
-        self.lastEntries = entries
+        lastEntries = entries
 
         if filterText then
             local kept = {}

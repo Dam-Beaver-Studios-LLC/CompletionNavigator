@@ -2,7 +2,7 @@
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.46.0
+## Version: 0.47.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -38,6 +38,7 @@ Providers\BtWQuests.lua
 Providers\HandyNotes.lua
 Providers\StaticData.lua
 Providers\TomTom.lua
+Data\ApiSurface.lua
 Data\Community.lua
 Data\Quests.lua
 Modules\Achievements.lua

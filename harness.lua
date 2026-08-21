@@ -444,7 +444,9 @@ C_TaxiMap = {
 CN_TEST_BAGS = {
     [0] = {
         { itemID = 60001, stackCount = 1, quest = { questID = 44001, isActive = false } },
-        { itemID = 60002, stackCount = 20 },
+        -- Worthless to a vendor and not a quest item: the two facts the addon
+        -- confused for each other.
+        { itemID = 60002, stackCount = 20, hasNoValue = true },
         -- Already accepted: the client still flags it, and offering it again
         -- would send the player to right-click something they have used.
         { itemID = 60003, stackCount = 1, quest = { questID = 44002, isActive = true } },
@@ -470,6 +472,12 @@ C_Container = {
             stackCount = item.stackCount,
             hyperlink  = "|cffffffff|Hitem:" .. item.itemID .. "|h[Item]|h|r",
             quality    = 1,
+
+            -- WHAT THE VENDOR WILL PAY, WHICH IS NOT WHETHER IT IS A QUEST
+            -- ITEM. The addon read this field as the latter for two
+            -- releases; the stub did not set it at all, so both branches
+            -- produced the same value and no test could tell them apart.
+            hasNoValue = item.hasNoValue and true or false,
         }
     end,
 
@@ -675,12 +683,16 @@ function IsInInstance()
     return true, CN_TEST_INSTANCE
 end
 
+CN_TEST_FLYING = false
+
 function IsFlying()
-    return false
+    return CN_TEST_FLYING
 end
 
+CN_TEST_FLYABLE = true
+
 function IsFlyableArea()
-    return true
+    return CN_TEST_FLYABLE
 end
 
 CN_TEST_ON_TAXI = false
@@ -7135,6 +7147,18 @@ print("\nStubs, audited against a real client:")
         return #(real.events.refused or {}) == 0
     end, "the live client refused an event this addon registers")
 
+    require("apiSurface", function()
+        -- THE HALF THAT ANNOUNCES NOTHING.
+        --
+        -- A misspelled event throws. A misspelled function name is caught by
+        -- the guard at its own call site and produces a permanently dead
+        -- feature that looks exactly like a client which does not support it.
+        -- This is the only way to tell those two apart, and it needs a real
+        -- client: the stub cannot help, because the stub defines whatever the
+        -- addon happens to call.
+        return #(real.apiSurface.missing or {}) == 0
+    end, "the live client does not have every API this addon calls")
+
     require("savedInstances", function()
         local fields = real.savedInstances.shape
             and real.savedInstances.shape.fields or {}
@@ -7156,6 +7180,20 @@ print("\nStubs, audited against a real client:")
 
     for _, complaint in ipairs(complaints) do
         print("  MISMATCH: " .. complaint)
+    end
+
+    -- A complaint that says "an API is missing" without saying WHICH costs an
+    -- hour to act on.
+    if real.apiSurface then
+        for _, name in ipairs(real.apiSurface.missing or {}) do
+            print("    the client has no " .. name)
+        end
+    end
+
+    if real.events then
+        for _, name in ipairs(real.events.refused or {}) do
+            print("    the client refused the event " .. name)
+        end
     end
 
     assert(#complaints == 0,
@@ -7310,6 +7348,19 @@ print("\nGetting there:")
             "the brute-force comparison needs a crowded continent, got "
             .. #nodeList)
 
+        -- ROUTES THE PLAYER HAS ACTUALLY FLOWN, BEFORE THE COMPARISON RUNS.
+        --
+        -- The first version of this test noted none, so `knownRouteBonus` --
+        -- the one multiplicative term in the whole calculation -- was never
+        -- applied while the exhaustive check ran. It therefore agreed with a
+        -- pruning bound that ignored the discount entirely, and passed. A
+        -- brute-force comparison is only as honest as the state it runs
+        -- against.
+        for index = 1, #nodeList - 1 do
+            travel.NoteRoute(nodeList[index].id, nodeList[index + 1].id)
+            travel.NoteRoute(nodeList[#nodeList].id, nodeList[index].id)
+        end
+
         local seconds, _, detail = travel.EstimateSeconds(94, 0.05, 0.05, 94, 0.95, 0.95)
 
         -- Independently, the long way round: every pair, every distance
@@ -7418,6 +7469,102 @@ print("\nGetting there:")
         travel.FlightMemory()[94] = nil
 
         print("  a long walk to the right flight point is not pruned away")
+
+        ------------------------------------------------------------
+        -- THE WHOLE PROPERTY, SWEPT, WITH THE DISCOUNT LIVE.
+        --
+        -- The single hand-placed case above tests one geometry, and the
+        -- brute-force case tests one more. Neither caught the bound ignoring
+        -- knownRouteBonus, because whether that error changes an answer
+        -- depends on the relationship between the zone's size, the flight
+        -- overhead and where the flight points happen to sit -- three numbers
+        -- a hand-written case fixes at one value each.
+        --
+        -- So sweep them. The property is simple and should hold everywhere:
+        -- what the fast search returns is what an exhaustive one finds.
+        ------------------------------------------------------------
+        local sweepSpan = CN_TEST_MAP_SPAN
+
+        local checked, ground = 0, 0
+
+        for _, span in ipairs({ 200, 340, 600, 1000, 2400 }) do
+            CN_TEST_SetMapSpan({ span, span })
+
+            for _, fraction in ipairs({ 0.3, 0.5, 0.7, 0.85 }) do
+                CN_TEST_TAXI_NODES[1941] = {
+                    { nodeID = 80, name = "Out", state = 1,
+                      position = { x = 0.05 + (0.90 * fraction),
+                                   y = 0.05 + (0.90 * fraction) } },
+                    { nodeID = 81, name = "In", state = 1,
+                      position = { x = 0.95, y = 0.95 } },
+                    { nodeID = 82, name = "Aside", state = 1,
+                      position = { x = 0.95, y = 0.20 } },
+                }
+
+                travel.ForgetNodes()
+
+                -- Every pair flown, so the discount is live on all of them.
+                for _, pair in ipairs({ {80,81}, {81,80}, {80,82}, {82,81} }) do
+                    travel.NoteRoute(pair[1], pair[2])
+                end
+
+                -- Grounded, so the pair search is what decides.
+                travel.FlightMemory()[94] = false
+
+                local list = travel.KnownNodes(94)
+
+                local start  = travel.WorldPoint(94, 0.05, 0.05)
+                local finish = travel.WorldPoint(94, 0.95, 0.95)
+
+                local speed = travel.FlightSpeed()
+
+                local expect = travel.YardsBetweenPoints(start, finish) / runSpeed
+
+                for _, origin in ipairs(list) do
+                    for _, arrival in ipairs(list) do
+                        if origin.id ~= arrival.id then
+                            local total =
+                                (travel.YardsBetweenPoints(start, origin.point) / runSpeed)
+                                + travel.flightOverheadSeconds
+                                + (travel.YardsBetweenPoints(origin.point, arrival.point)
+                                    / speed)
+                                + (travel.YardsBetweenPoints(finish, arrival.point) / runSpeed)
+
+                            if travel.IsKnownRoute(origin.id, arrival.id) then
+                                total = total * travel.knownRouteBonus
+                            end
+
+                            expect = math.min(expect, total)
+                        end
+                    end
+                end
+
+                local got, _, gotDetail = travel.EstimateSeconds(94, 0.05, 0.05, 94, 0.95, 0.95)
+
+                assert(math.abs(got - expect) < 0.001,
+                    "span " .. span .. ", flight point at " .. fraction
+                    .. " of the way: the search returned "
+                    .. string.format("%.3f", got) .. " where an exhaustive "
+                    .. "one finds " .. string.format("%.3f", expect))
+
+                checked = checked + 1
+
+                if gotDetail and gotDetail.mode == "fly" then
+                    ground = ground + 1
+                end
+
+                travel.FlightMemory()[94] = nil
+            end
+        end
+
+        assert(ground >= 4,
+            "the sweep must actually choose flight routes, or it is only "
+            .. "checking that running is running; it chose " .. ground)
+
+        CN_TEST_SetMapSpan(sweepSpan)
+
+        print("  " .. checked .. " geometries swept, " .. ground
+            .. " of them decided by the pair search")
 
         CN_TEST_TAXI_NODES[1941] = saved
 
@@ -8486,6 +8633,51 @@ print("\nFlight, where flight is allowed:")
 
     session.LoadSamples()
 
+    ------------------------------------------------------------
+    -- AND SOMETHING MUST ACTUALLY OBSERVE IT.
+    --
+    -- The two assertions above wrote the memory directly. That is how a
+    -- producer nobody calls looked healthy for four releases: `NoteFlyable`
+    -- was written, commented at length, and never wired to an event -- so the
+    -- store the addon consults was populated in every test and empty in every
+    -- game.
+    --
+    -- A store is only as real as the thing that fills it, so this fills it
+    -- the way the game does: by arriving somewhere.
+    ------------------------------------------------------------
+    CN_TEST_FLYABLE = false
+
+    fire("ZONE_CHANGED_NEW_AREA")
+
+    local here = CN.GetPlayerPosition()
+
+    assert(memory[here] == false,
+        "arriving in a zone where flight is disabled must be remembered, got "
+        .. tostring(memory[here]))
+
+    CN_TEST_FLYABLE = true
+
+    fire("ZONE_CHANGED_NEW_AREA")
+
+    assert(memory[here] == true,
+        "and arriving somewhere it is allowed must be remembered too")
+
+    -- Demonstrably flying outranks anything the client says about the area.
+    memory[here] = false
+
+    CN_TEST_FLYING = true
+
+    fire("PLAYER_CONTROL_GAINED")
+
+    assert(memory[here] == true,
+        "you cannot be flying in a zone where flying is impossible")
+
+    CN_TEST_FLYING = false
+
+    for key in pairs(memory) do
+        memory[key] = nil
+    end
+
     print("  what was observed about a zone beats what is true where you stand")
 end)()
 
@@ -9048,6 +9240,179 @@ print("\nCrafting orders, and a decision that could go stale:")
 end)()
 
 
+print("\nA filter that follows you between tabs actually filters:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A FEATURE THAT PRODUCED THE STATE IT EXISTS TO PREVENT.
+    --
+    -- `/cn keepfilter on` carries the search term to the next tab. Its own
+    -- help text warns that "a filter that persists invisibly is how a list
+    -- looks empty when it is not" -- and what it actually did was put the
+    -- term in the box and apply it to nothing, which is the same failure with
+    -- the sign flipped: the list looks full when it is filtered.
+    --
+    -- The cause is ordering. Setting the box fires OnTextChanged, which reads
+    -- the current tab's panel -- and on a tab's first visit the panel does
+    -- not exist yet. `UI.RestoreFilter` was written to do it afterwards and
+    -- was never called by anything.
+    ------------------------------------------------------------
+    local UI = CN.UI
+
+    CN.Settings().keepFilter = true
+
+    UI.persistedFilter = "aardvark"
+
+    for _, tab in ipairs(UI.tabs) do
+        tab.panel = nil
+    end
+
+    UI.SelectTab(2)
+
+    local panel = UI.tabs[2].panel
+
+    assert(panel and panel.list, "the tab must have built a list")
+
+    assert(panel.list:GetFilter() == "aardvark",
+        "a persisted filter must reach the list on a tab's FIRST visit, "
+        .. "not only on the second; the list has "
+        .. tostring(panel.list:GetFilter()))
+
+    -- And off means off: the box is cleared and nothing is filtered.
+    CN.Settings().keepFilter = nil
+
+    for _, tab in ipairs(UI.tabs) do
+        tab.panel = nil
+    end
+
+    UI.SelectTab(3)
+
+    assert(UI.tabs[3].panel.list:GetFilter() == nil,
+        "with keepFilter off the new tab must not be filtered")
+
+    UI.persistedFilter = nil
+
+    print("  a carried filter reaches the list on the first visit to a tab")
+end)()
+
+print("\nEvery client function this addon calls, checked against the client:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SILENT HALF.
+    --
+    -- 0.46.0 shipped an event that does not exist, and the client threw at
+    -- every login -- loud, and therefore fixed within a day. The addon also
+    -- names nearly two hundred client FUNCTIONS, and those fail silently:
+    -- every call site guards on the name, so a renamed or misspelled one is
+    -- indistinguishable from a client that lacks the feature. The guard goes
+    -- false and the branch is dead for as long as nobody notices.
+    --
+    -- Data/ApiSurface.lua is GENERATED from the source at build time, so it
+    -- cannot drift from what the addon actually calls. What this checks is
+    -- that the list is real and the checker is honest -- proving the names
+    -- exist needs a live client, which is what the apiSurface capture and the
+    -- fixture audit are for.
+    ------------------------------------------------------------
+    assert(type(CN.apiSurface) == "table" and #CN.apiSurface > 100,
+        "the generated API surface should list the client names this addon "
+        .. "calls; it has " .. tostring(CN.apiSurface and #CN.apiSurface))
+
+    local absent = {}
+
+    for _, path in ipairs(CN.apiSurface) do
+        local namespace, method = string.match(path, "^([^.]+)%.(.+)$")
+
+        local value
+
+        if namespace then
+            local container = _G[namespace]
+
+            value = type(container) == "table" and container[method] or nil
+        else
+            value = _G[path]
+        end
+
+        if value == nil then
+            table.insert(absent, path)
+        end
+    end
+
+    -- The stub deliberately omits some of these -- "a client that offers
+    -- neither" is a case the suite tests on purpose -- so the count is not
+    -- the assertion. What is asserted is that the checker agrees with
+    -- reality in both directions.
+    local report
+
+    for _, check in ipairs(CN:GetModule("SelfTest").Run().checks) do
+        if check.area == "client" then
+            report = check
+        end
+    end
+
+    assert(report, "the self-test must include the API check")
+
+    if #absent == 0 then
+        assert(report.status == "PASS",
+            "with every name present the check must pass")
+    else
+        assert(report.status == "FAIL",
+            "with " .. #absent .. " names absent the check must fail, not "
+            .. tostring(report.status))
+
+        -- AND IT MUST NOTICE ONE COMING BACK.
+        --
+        -- A checker that always says "some are missing" is as useless as one
+        -- that always says "all present". Define one of the absent names and
+        -- require the count to drop by exactly one.
+        local restored = absent[1]
+
+        local namespace, method = string.match(restored, "^([^.]+)%.(.+)$")
+
+        local missingBefore = #absent
+
+        if namespace then
+            _G[namespace] = _G[namespace] or {}
+            _G[namespace][method] = function() end
+        else
+            _G[restored] = function() end
+        end
+
+        local after = 0
+
+        for _, path in ipairs(CN.apiSurface) do
+            local ns, m = string.match(path, "^([^.]+)%.(.+)$")
+
+            local value
+
+            if ns then
+                local container = _G[ns]
+
+                value = type(container) == "table" and container[m] or nil
+            else
+                value = _G[path]
+            end
+
+            if value == nil then
+                after = after + 1
+            end
+        end
+
+        assert(after == missingBefore - 1,
+            "restoring one client function must reduce the missing count by "
+            .. "exactly one, went from " .. missingBefore .. " to " .. after)
+
+        if namespace then
+            _G[namespace][method] = nil
+        else
+            _G[restored] = nil
+        end
+    end
+
+    print("  " .. #CN.apiSurface .. " client functions listed; the checker "
+        .. "agrees with the client in both directions")
+end)()
+
 print("\nEvery event this addon registers is an event:")
 
 ;(function()
@@ -9278,6 +9643,31 @@ print("\nCaches that must not go stale:")
     CN.FireEvent("BAG_UPDATE_DELAYED")
 
     assert(inventory.Scan() ~= bags, "moving something in a bag re-reads them")
+
+    ------------------------------------------------------------
+    -- A QUEST ITEM IS NOT AN ITEM THE VENDOR WILL NOT BUY.
+    --
+    -- `questItem` was read from `hasNoValue`, which means "has no sell
+    -- price". Every grey, every soulbound token and every worthless trinket
+    -- in the bag was therefore flagged a quest item. Nothing caught it
+    -- because the stub never set the field, so the true and false branches
+    -- produced the same answer.
+    ------------------------------------------------------------
+    inventory.Forget()
+
+    local byItem = {}
+
+    for _, row in ipairs(inventory.Scan()) do
+        byItem[row.itemID] = row
+    end
+
+    assert(byItem[60002] and byItem[60002].questItem == false,
+        "an item with no vendor value is not thereby a quest item")
+
+    assert(byItem[60001] and byItem[60001].questItem == true,
+        "and one the client calls a quest item is")
+
+    print("  a quest item is read from the quest API, not from its sell price")
 
     print("  bags are cached until they change, and the bank is separate")
 end)()

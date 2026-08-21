@@ -107,11 +107,13 @@ function Errors.Guard(context, fn, ...)
         Errors.Record(context, results[2])
     end
 
-    -- unpack lives at the top level in the game's Lua 5.1, and on table in
-    -- 5.4 where the offline suite runs. Both, so this file works in both.
-    local unpackFn = rawget(table, "unpack") or unpack
-
-    return unpackFn(results)
+    -- CN.Unpack, not a second copy of it. Core.lua states the rule -- "if a
+    -- construct means two things, the addon uses neither directly; it uses
+    -- one of these" -- and this file quietly kept its own identical shim
+    -- outside the one file that gets audited for exactly this class of
+    -- mistake. Equivalent today; the point is that there is one place to fix
+    -- it when it is not.
+    return CN.Unpack(results)
 end
 
 CN.Guard = Errors.Guard

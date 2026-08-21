@@ -18,7 +18,7 @@ self = false
 
 read_globals = {
     -- Namespaced client API.
-    "C_AchievementInfo", "C_Calendar", "C_CurrencyInfo", "C_DateAndTime",
+    "C_Calendar", "C_CurrencyInfo", "C_DateAndTime",
     "C_CampaignInfo", "C_GossipInfo", "C_Item", "C_MajorFactions", "C_Map",
     "C_MerchantFrame",
     "C_MountJournal", "C_PetJournal", "C_QuestLog", "C_Reputation",
@@ -35,8 +35,8 @@ read_globals = {
     "GetRealmName", "GetSpecialization", "GetSpecializationInfo", "GetTitleName",
     "GetZoneText", "IsTitleKnown", "PlayerHasToy", "UnitClass", "UnitExists",
     "UnitFactionGroup", "UnitGUID", "UnitLevel", "UnitName", "UnitRace",
-    "UnitSex", "PlaySound", "PlaySoundFile", "GetTime", "UnitPosition",
-    "GetPlayerFacing", "InCombatLockdown", "IsInInstance", "GetBindingKey",
+    "UnitSex", "PlaySound", "GetTime",
+    "GetPlayerFacing", "InCombatLockdown", "IsInInstance",
     "GetLocale",
 
     -- Saved instances and the Adventure Guide (Encounter Journal). The EJ
@@ -51,7 +51,7 @@ read_globals = {
     "SOUNDKIT", "PlaySound", "UIFrameFlash",
     "UnitIsDeadOrGhost", "UnitIsGhost", "GetNumGroupMembers",
     "IsInRaid", "IsInInstance", "IsFlying", "IsFlyableArea",
-    "C_CraftingOrders", "C_DelvesUI", "C_Bank", "C_Spell",
+    "C_CraftingOrders", "C_DelvesUI", "C_Spell",
 
     -- Bags, mail, keystones, heirlooms and challenge modes: five systems the
     -- addon began reading in 0.44.0.
@@ -72,13 +72,17 @@ read_globals = {
     "Enum", "GameTooltip", "Minimap", "UIParent", "UISpecialFrames",
     "UiMapPoint", "CreateVector2D", "DEFAULT_CHAT_FRAME", "TooltipDataProcessor",
     "TooltipUtil", "LE_PET_JOURNAL_FILTER_COLLECTED",
-    "LE_PET_JOURNAL_FILTER_NOT_COLLECTED", "NORMAL_FONT_COLOR",
+    "LE_PET_JOURNAL_FILTER_NOT_COLLECTED",
 
     -- Lua functions the client exposes globally.
-    "date", "time", "strsplit", "strtrim", "debugprofilestop", "wipe",
+    "date", "time", "strsplit", "debugprofilestop", "wipe",
 
-    -- Optional third-party addons. Probed, never required.
-    "TomTom", "AllTheThings", "BtWQuests", "HandyNotes", "LibStub",
+    -- Optional third-party addons. Probed, never required. The three addon
+    -- tables themselves are reached through _G and so are not listed: an
+    -- entry here for a name the source never mentions weakens the guarantee
+    -- in this file's own header, that an undeclared global is a typo or a
+    -- leak. Eleven such entries were pruned in 0.47.0.
+    "LibStub",
 }
 
 globals = {

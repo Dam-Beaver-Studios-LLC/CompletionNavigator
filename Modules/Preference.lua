@@ -285,7 +285,15 @@ CN.RegisterRecommendationHook("Preference", function(results)
                         store[refined] = refinedRow
                     end
 
-                    if not last or (now - last) > Preference.actionWindowSeconds then
+                    -- The SAME window as the counter twelve lines below, and
+                    -- for the same reason. This one kept the flat default
+                    -- that 0.46.0 replaced with per-type windows, so the
+                    -- moment a quest window is added to Preference.
+                    -- actionWindows the two counters silently disagree and
+                    -- the refined buckets over-count what was shown.
+                    if not last
+                        or (now - last) > Preference.WindowFor(objectiveType) then
+
                         refinedRow.shown = refinedRow.shown + 1
                     end
                 end

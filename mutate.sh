@@ -235,7 +235,8 @@ mutate "Modules/Inventory.lua" \
 # cheaper, which is exactly the kind of change that returns a slightly wrong
 # answer forever without ever erroring.
 mutate "Modules/Travel.lua" \
-    "                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
+    "                and (bestPossibleDiscount
+                    * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
                     < best.seconds then" \
     "                and walkOut < (best.seconds * 0.5) then" \
     "the pruning bound discards a route that would have won"
@@ -274,6 +275,42 @@ end" \
     "for event in pairs(CN.eventTable) do
 end" \
     "handlers registered before Events.lua never reach the client"
+
+
+# The 0.47.0 fixes. Each of these was a real defect found by an end-to-end
+# audit, and each was invisible to the suite that existed at the time.
+mutate "Modules/Travel.lua" \
+    "                and (bestPossibleDiscount
+                    * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
+                    < best.seconds then" \
+    "                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
+                    < best.seconds then" \
+    "the pruning bound ignores the known-route discount"
+
+mutate "Modules/Travel.lua" \
+    "for _, event in ipairs({ \"ZONE_CHANGED_NEW_AREA\", \"PLAYER_ENTERING_WORLD\" }) do
+    CN:RegisterEvent(event, NoteWhereWeAre)
+end" \
+    "for _, event in ipairs({}) do
+    CN:RegisterEvent(event, NoteWhereWeAre)
+end" \
+    "nothing ever observes whether a zone allows flying"
+
+mutate "Modules/Inventory.lua" \
+    "                        questItem = QuestItem(bag, slot)," \
+    "                        questItem = info.hasNoValue and true or false," \
+    "a quest item is read from its vendor sell price"
+
+mutate "UI.lua" \
+    "    -- Now that the panel exists, the filter has something to apply to.
+    UI.RestoreFilter()" \
+    "    -- Now that the panel exists, the filter has something to apply to." \
+    "a carried filter is shown but never applied"
+
+mutate "Data/ApiSurface.lua" \
+    "CN.apiSurface = {" \
+    "CN.apiSurface = {} local ignored = {" \
+    "the generated API surface is empty"
 
 
 echo

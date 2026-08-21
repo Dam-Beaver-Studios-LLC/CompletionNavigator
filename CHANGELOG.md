@@ -7,6 +7,76 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.47.0]
+
+An end-to-end audit of the whole addon, run the way the last release taught:
+assume the test suite is more forgiving than the game. Six defects, every one
+of them invisible to a suite that otherwise passes eighty files, two
+interpreters and thirty-seven mutations.
+
+### Added
+
+- **The addon now knows which client functions it calls, and can tell you
+  which of them are gone.** 0.46.0 shipped an event name that does not exist;
+  the client throws on those, so it announced itself. Client *functions* fail
+  silently instead: every call site is guarded with `if C_Thing and
+  C_Thing.Method`, which is correct, and which makes a renamed or misspelled
+  name indistinguishable from a client that lacks the feature -- the guard
+  goes false, the branch never runs, and the feature is dead for as long as
+  nobody notices. The list of the 198 names this addon uses is now **generated
+  from the source** at build time, `/cn selftest` reports any the client no
+  longer has, and `/cn capture` records them for the offline suite to fail on.
+  A hand-written list of what the code calls is a second copy of the code, so
+  nobody writes this one.
+
+### Fixed
+
+- **The route search could return the second-best route.** The bound that lets
+  it skip hopeless flight points was documented as exact "because every
+  remaining term of the sum is positive". Every term is -- but the sum is then
+  *multiplied* by a discount for a flight path you have actually flown, and a
+  discount is not a term. A route up to a tenth cheaper than the bound
+  predicted could be discarded unexamined. The test written to catch exactly
+  this brute-forced the answer honestly and still missed it, because no flown
+  routes had been recorded at that point in the run: the discount was never
+  live while the comparison ran. It would have affected every player who has
+  ever taken a flight path, and no fixture.
+- **Nothing ever recorded whether a zone allows flying.** The store was
+  written, commented at length -- *"remembering the answer per zone turns that
+  guess into evidence"* -- and never filled, for four releases. So the check
+  fell through to asking the client about **where you are standing**, which is
+  precisely the guess the design replaced, and every self-flown estimate to
+  another zone rested on it. It is now recorded on arrival, and flying
+  somewhere is taken as proof that flying is allowed there.
+- **A filter that follows you between tabs did not filter.** `/cn keepfilter`
+  put the search term in the box and applied it to nothing on a tab's first
+  visit, because the box was set before the tab's list existed. Its own help
+  text warns that a filter you cannot see is how a list looks empty when it is
+  not; what it produced was the same fault inverted -- a list that looks full
+  when it is filtered. The function written to do this properly had never been
+  called from anywhere.
+- **A quest item is not an item the vendor will not buy.** The bag scan read
+  `hasNoValue` -- "has no sell price" -- as though it meant "is a quest item",
+  so every grey and every worthless token in your bags was flagged as one. The
+  correct call was already being used forty lines away in the same file.
+- **The refined preference counter kept the flat twenty-minute window** that
+  0.46.0 replaced with per-type windows, so the two counters would have
+  silently disagreed the moment a quest window was added.
+- **One unguarded client call** in the provider file set whose entire purpose
+  is that every client call goes through it, so that a patch break is a
+  contained fix.
+- **A second copy of a compatibility shim** was living outside the one file
+  that gets audited for that class of mistake. There is one `CN.Unpack` again.
+- **Eleven names in the static-analysis allowlist that the source no longer
+  mentions.** An allowlist entry for something nothing calls weakens the only
+  guarantee that file makes: that an undeclared global is a typo or a leak.
+- **An infinite loop in the list widget, found by a new test.** It kept one
+  piece of state on the frame while its neighbour had been moved off for the
+  documented reason that reading an unset field on a frame is not guaranteed
+  to give you nil. That is a fix applied to the instance somebody noticed
+  rather than to the class, and the leftover hung the suite outright the first
+  time a filter was set before any rows were.
+
 ## [0.46.0]
 
 A release about speed, and about how this project keeps discovering that its

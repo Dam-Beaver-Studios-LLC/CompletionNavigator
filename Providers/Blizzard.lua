@@ -88,10 +88,15 @@ function Blizzard.GetQuestLogEntries()
 
     local count = C_QuestLog.GetNumQuestLogEntries()
 
+    -- pcall'd like every other call in this file set. This one was neither
+    -- existence-checked nor protected, in a file whose header promises that
+    -- "every call into the client goes through this FILE SET" precisely so a
+    -- patch break is a contained fix rather than a broken quest log.
     for index = 1, count do
-        local info = C_QuestLog.GetInfo(index)
+        local gotInfo, info = pcall(C_QuestLog.GetInfo, index)
 
-        if info and not info.isHeader and info.questID and info.questID > 0 then
+        if gotInfo and info and not info.isHeader
+            and info.questID and info.questID > 0 then
             table.insert(entries, info)
         end
     end

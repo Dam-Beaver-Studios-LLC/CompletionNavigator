@@ -441,16 +441,20 @@ function UI.SelectTab(index)
     UI.selectedTab = index
 
     -- The filter belongs to the tab being left. Clear the box unless the
-    -- player has asked for it to follow them, in which case put it back on
-    -- the new tab rather than leaving a filtered list with an empty box.
-    if window.search then
-        local settings = CN.Settings()
-
-        if settings and settings.keepFilter and UI.persistedFilter then
-            window.search:SetText(UI.persistedFilter)
-        else
-            window.search:SetText("")
-        end
+    -- player has asked for it to follow them, in which case it is put back
+    -- AFTER the new panel exists -- see the end of this function.
+    --
+    -- Setting the text here was the whole of it until 0.47.0, and it did not
+    -- work: the box's OnTextChanged calls UI.SetFilter, which reads
+    -- `tab.panel`, and on a tab's first visit the panel is not built until
+    -- forty lines below. So the term appeared in the box and the list ignored
+    -- it -- the exact state `keepFilter` warns about in its own help text,
+    -- produced by the feature meant to prevent it.
+    --
+    -- UI.RestoreFilter was written to do this properly and was never called
+    -- from anywhere.
+    if window.search and not (CN.Settings() and CN.Settings().keepFilter) then
+        window.search:SetText("")
     end
 
     for buttonIndex, button in ipairs(window.tabButtons) do
@@ -487,6 +491,9 @@ function UI.SelectTab(index)
     end
 
     tab.panel:Show()
+
+    -- Now that the panel exists, the filter has something to apply to.
+    UI.RestoreFilter()
 
     UI.Refresh()
 end

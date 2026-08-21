@@ -301,7 +301,9 @@ Nothing is uploaded. The addon *cannot* upload; addons have no network access at
 /cn selftest
 ```
 
-Fifteen checks that run against your own client and report what they actually found â€” whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+Eighteen checks that run against your own client and report what they actually found â€” whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+
+One of them is new and worth knowing about after a patch: **whether every client function this addon calls still exists**. An addon reads the game through a couple of hundred named functions, and every expansion renames or removes some. Each call is guarded, which is the right way to write it and also the reason a removed function makes no noise at all â€” the guard simply goes false and that feature stops working, silently, possibly for months. The list of names is generated from the source rather than written by hand, so it cannot fall out of step with what the addon actually calls, and the check will tell you exactly which ones your client no longer has.
 
 Every check exists because the thing it covers was once broken in a release, and was found by somebody playing rather than by a test. Checks report the value they saw rather than the word "failed", so a bug report is a copy and paste. A check the client cannot answer says so and skips â€” it does not quietly pass.
 

@@ -51,8 +51,31 @@ function Inventory.IsAvailable()
         and C_Container.GetContainerItemInfo ~= nil
 end
 
+-- Whether the client considers this slot a quest item. Guarded separately
+-- from the rest: GetContainerItemQuestInfo is a different call with its own
+-- availability, and a client that lacks it should report "not a quest item"
+-- rather than erroring on every slot in the bag.
+local function QuestItem(bag, slot)
+    if not C_Container or not C_Container.GetContainerItemQuestInfo then
+        return false
+    end
+
+    local ok, info = pcall(C_Container.GetContainerItemQuestInfo, bag, slot)
+
+    if not ok or type(info) ~= "table" then
+        return false
+    end
+
+    return (info.isQuestItem or info.questID) and true or false
+end
+
 -- Every item in a set of containers, as { itemID, count, link, quality, bag,
--- slot, questItem, questID, isUsable }.
+-- slot, questItem }.
+--
+-- The shape above used to claim `questID` and `isUsable` as well. Neither was
+-- ever set on these rows. A comment that describes a richer row than the code
+-- builds is worse than no comment: the next reader writes `row.questID` and
+-- gets nil forever, with nothing anywhere to say why.
 -- CACHED FOR THE BAGS, WHICH IS WHERE IT IS ASKED FOR REPEATEDLY.
 --
 -- The candidate provider calls QuestStarters, NearlyDone and
@@ -97,7 +120,13 @@ function Inventory.Scan(containers)
                         quality  = info.quality,
                         bag      = bag,
                         slot     = slot,
-                        questItem = info.hasNoValue and true or false,
+                        -- `hasNoValue` means the vendor will not buy it. It
+                        -- has nothing to do with quest items, and reading it
+                        -- as one made `questItem` true for every grey and
+                        -- every soulbound token in the bag. The real question
+                        -- has its own API, which this same file already asks
+                        -- correctly forty lines below.
+                        questItem = QuestItem(bag, slot),
                     })
                 end
             end

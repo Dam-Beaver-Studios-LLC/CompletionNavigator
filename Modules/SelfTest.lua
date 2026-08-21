@@ -115,6 +115,64 @@ local FAIL = SelfTest.results.FAIL
 local SKIP = SelfTest.results.SKIP
 
 -- 1. Can the client say where we are at all? Everything else depends on it.
+-- WHAT THE GAME PATCHED OUT FROM UNDER US.
+--
+-- Added in 0.47.0. Every expansion renames or removes client functions, and
+-- this addon names nearly two hundred of them. Each call site guards on the
+-- name existing -- which is right, and which is also why a removed function
+-- produces silence rather than an error: the guard goes false and the feature
+-- is dead with nothing to say so.
+--
+-- Data/ApiSurface.lua is generated from the source at build time, so this
+-- cannot fall out of step with what the addon actually calls. Reported here
+-- because the player is the one holding a client the author has not seen.
+CN.RegisterSelfTest{
+    area  = "client",
+    order = 0,
+    name  = "every client function this addon calls still exists",
+    run   = function()
+        if type(CN.apiSurface) ~= "table" or #CN.apiSurface == 0 then
+            return SKIP, "this build carries no generated API list"
+        end
+
+        local missing = {}
+
+        for _, path in ipairs(CN.apiSurface) do
+            local namespace, method = string.match(path, "^([^.]+)%.(.+)$")
+
+            local value
+
+            if namespace then
+                local container = _G and _G[namespace]
+
+                value = type(container) == "table" and container[method] or nil
+            else
+                value = _G and _G[path]
+            end
+
+            if value == nil then
+                table.insert(missing, path)
+            end
+        end
+
+        if #missing == 0 then
+            return PASS, #CN.apiSurface .. " client functions, all present"
+        end
+
+        -- Named, and bounded: a patch that removes a whole namespace would
+        -- otherwise print forty lines into the chat frame.
+        local named = {}
+
+        for index = 1, math.min(6, #missing) do
+            table.insert(named, missing[index])
+        end
+
+        return FAIL, #missing .. " of " .. #CN.apiSurface
+            .. " are gone from this client: " .. table.concat(named, ", ")
+            .. (#missing > 6 and (" and " .. (#missing - 6) .. " more") or "")
+    end,
+}
+
 CN.RegisterSelfTest{
     area = "position",
     name = "the client reports your position",

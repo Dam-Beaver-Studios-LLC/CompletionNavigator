@@ -351,6 +351,52 @@ CN.RegisterCapture{
     end,
 }
 
+-- WHICH OF THE CLIENT FUNCTIONS THIS ADDON CALLS STILL EXIST.
+--
+-- The sibling of the `events` capture, and the more insidious half. An
+-- unknown EVENT name throws, so it announces itself. An unknown FUNCTION name
+-- announces nothing: every call site in this addon is guarded with
+-- `if C_Thing and C_Thing.Method`, which is correct, and which makes a
+-- misspelled or renamed name indistinguishable from a client that does not
+-- support the feature. The guard is false, the branch never runs, and the
+-- feature is quietly dead for as long as nobody notices.
+--
+-- Data/ApiSurface.lua is generated from the source at build time -- a
+-- hand-written list of what the code calls is a second copy of the code, and
+-- would drift within a release.
+CN.RegisterCapture{
+    name = "apiSurface",
+    run  = function()
+        if type(CN.apiSurface) ~= "table" or #CN.apiSurface == 0 then
+            return nil, "no generated surface in this build"
+        end
+
+        local missing, present = {}, 0
+
+        for _, path in ipairs(CN.apiSurface) do
+            local namespace, method = string.match(path, "^([^.]+)%.(.+)$")
+
+            local value
+
+            if namespace then
+                local container = _G and _G[namespace]
+
+                value = type(container) == "table" and container[method] or nil
+            else
+                value = _G and _G[path]
+            end
+
+            if value ~= nil then
+                present = present + 1
+            else
+                table.insert(missing, path)
+            end
+        end
+
+        return { examined = #CN.apiSurface, present = present, missing = missing }
+    end,
+}
+
 ------------------------------------------------------------
 -- RUNNING IT
 ------------------------------------------------------------

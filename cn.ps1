@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.46.0'
+$script:ToolkitVersion = '0.47.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.46.0"
+CN.version     = "0.47.0"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -6118,16 +6118,20 @@ function UI.SelectTab(index)
     UI.selectedTab = index
 
     -- The filter belongs to the tab being left. Clear the box unless the
-    -- player has asked for it to follow them, in which case put it back on
-    -- the new tab rather than leaving a filtered list with an empty box.
-    if window.search then
-        local settings = CN.Settings()
-
-        if settings and settings.keepFilter and UI.persistedFilter then
-            window.search:SetText(UI.persistedFilter)
-        else
-            window.search:SetText("")
-        end
+    -- player has asked for it to follow them, in which case it is put back
+    -- AFTER the new panel exists -- see the end of this function.
+    --
+    -- Setting the text here was the whole of it until 0.47.0, and it did not
+    -- work: the box's OnTextChanged calls UI.SetFilter, which reads
+    -- `tab.panel`, and on a tab's first visit the panel is not built until
+    -- forty lines below. So the term appeared in the box and the list ignored
+    -- it -- the exact state `keepFilter` warns about in its own help text,
+    -- produced by the feature meant to prevent it.
+    --
+    -- UI.RestoreFilter was written to do this properly and was never called
+    -- from anywhere.
+    if window.search and not (CN.Settings() and CN.Settings().keepFilter) then
+        window.search:SetText("")
     end
 
     for buttonIndex, button in ipairs(window.tabButtons) do
@@ -6164,6 +6168,9 @@ function UI.SelectTab(index)
     end
 
     tab.panel:Show()
+
+    -- Now that the panel exists, the filter has something to apply to.
+    UI.RestoreFilter()
 
     UI.Refresh()
 end
@@ -8231,6 +8238,27 @@ local function CreateList(parent)
     -- it instead.
     local filterText = nil
 
+    -- THE SAME TRAP, TWO FIELDS ALONG.
+    --
+    -- `lastEntries` was kept on the frame while `filterText` was moved off it
+    -- for exactly the reason above, which is the shape of a fix applied to
+    -- the instance that was noticed rather than to the class. Reading an
+    -- unset field on a frame is not guaranteed to give nil -- a mixin's
+    -- __index can answer every key -- and here that turns `if
+    -- self.lastEntries then` into an infinite ipairs over a table that
+    -- answers every index.
+    --
+    -- Found in 0.47.0 when a new test made the first call to SetFilter
+    -- happen before anything had set entries. It hung the suite outright.
+    local lastEntries = nil
+
+    -- Readable, because a filter nobody can read is a filter nobody can test,
+    -- and the one defect this widget has shipped was a filter that was set
+    -- and never applied.
+    function list:GetFilter()
+        return filterText
+    end
+
     function list:SetFilter(text)
         -- A stub EditBox, or a template whose GetText returns something
         -- surprising, must not be able to poison the filter with a value that
@@ -8244,8 +8272,8 @@ local function CreateList(parent)
 
         filterText = (text ~= "") and string.lower(text) or nil
 
-        if self.lastEntries then
-            self:SetEntries(self.lastEntries)
+        if lastEntries then
+            self:SetEntries(lastEntries)
         end
     end
 
@@ -8268,8 +8296,8 @@ local function CreateList(parent)
     function list:CycleSort()
         self.sortIndex = (self.sortIndex % #self.sortModes) + 1
 
-        if self.lastEntries then
-            self:SetEntries(self.lastEntries)
+        if lastEntries then
+            self:SetEntries(lastEntries)
         end
 
         return self:SortMode()
@@ -8319,7 +8347,7 @@ local function CreateList(parent)
 
     -- entries = { { text = , onClick = , tooltip = }, ... }
     function list:SetEntries(entries)
-        self.lastEntries = entries
+        lastEntries = entries
 
         if filterText then
             local kept = {}
@@ -8466,6 +8494,223 @@ CN.Static.RegisterCommunity({
 })
 '@
 
+$Embedded['Data\ApiSurface.lua'] = @'
+-- Data/ApiSurface.lua
+-- GENERATED. Do not edit; gen.py rewrites this file from the source.
+--
+-- Every client API name the addon actually references. Each call site
+-- guards on the name existing, which is right -- and which also means a
+-- misspelled or renamed one is indistinguishable from a feature the
+-- client does not support: the guard is false and the branch is dead
+-- forever, silently.
+--
+-- /cn capture asks the live client which of these exist. The offline
+-- suite fails on any it refused, and /cn selftest reports them in game.
+
+local ADDON_NAME, CN = ...
+
+CN.apiSurface = {
+    "C_Calendar.GetDayEvent",
+    "C_Calendar.GetNumDayEvents",
+    "C_Calendar.OpenCalendar",
+    "C_CampaignInfo.GetCampaignID",
+    "C_CampaignInfo.GetCampaignInfo",
+    "C_CampaignInfo.GetChapterIDs",
+    "C_ChallengeMode.GetMapUIInfo",
+    "C_Container.GetContainerItemInfo",
+    "C_Container.GetContainerItemQuestInfo",
+    "C_Container.GetContainerNumSlots",
+    "C_CraftingOrders.GetClaimedOrder",
+    "C_CraftingOrders.GetMyOrders",
+    "C_CurrencyInfo.GetCurrencyInfo",
+    "C_CurrencyInfo.GetCurrencyListInfo",
+    "C_CurrencyInfo.GetCurrencyListSize",
+    "C_DateAndTime.GetCurrentCalendarTime",
+    "C_DateAndTime.GetSecondsUntilWeeklyReset",
+    "C_GossipInfo.GetAvailableQuests",
+    "C_GossipInfo.GetFriendshipReputation",
+    "C_Heirloom.GetHeirloomItemIDFromIndex",
+    "C_Heirloom.GetNumHeirlooms",
+    "C_Heirloom.PlayerHasHeirloom",
+    "C_Item.GetItemCooldown",
+    "C_Item.GetItemCount",
+    "C_Item.GetItemInfoInstant",
+    "C_Item.GetItemNameByID",
+    "C_LFGList.GetActivityInfoTable",
+    "C_LFGList.GetAvailableActivities",
+    "C_MajorFactions.GetMajorFactionData",
+    "C_MajorFactions.HasMaximumRenown",
+    "C_Map.ClearUserWaypoint",
+    "C_Map.GetBestMapForUnit",
+    "C_Map.GetMapChildrenInfo",
+    "C_Map.GetMapInfo",
+    "C_Map.GetPlayerMapPosition",
+    "C_Map.GetWorldPosFromMapPos",
+    "C_Map.SetUserWaypoint",
+    "C_MerchantFrame.GetItemInfo",
+    "C_MountJournal.GetMountFromItem",
+    "C_MountJournal.GetMountIDs",
+    "C_MountJournal.GetMountInfoByID",
+    "C_MountJournal.GetMountInfoExtraByID",
+    "C_MythicPlus.GetOwnedKeystoneChallengeMapID",
+    "C_MythicPlus.GetOwnedKeystoneLevel",
+    "C_PetJournal.GetNumCollectedInfo",
+    "C_PetJournal.GetNumPets",
+    "C_PetJournal.GetPetInfoByIndex",
+    "C_PetJournal.GetPetInfoByItemID",
+    "C_PetJournal.GetPetInfoBySpeciesID",
+    "C_PetJournal.GetSearchFilter",
+    "C_PetJournal.SetAllPetSourcesChecked",
+    "C_PetJournal.SetAllPetTypesChecked",
+    "C_PetJournal.SetFilterChecked",
+    "C_PetJournal.SetSearchFilter",
+    "C_QuestLog.GetAllCompletedQuestIDs",
+    "C_QuestLog.GetInfo",
+    "C_QuestLog.GetLogIndexForQuestID",
+    "C_QuestLog.GetNextWaypoint",
+    "C_QuestLog.GetNextWaypointForMap",
+    "C_QuestLog.GetNumQuestLogEntries",
+    "C_QuestLog.GetQuestAdditionalHighlights",
+    "C_QuestLog.GetQuestObjectives",
+    "C_QuestLog.GetQuestTagInfo",
+    "C_QuestLog.GetQuestsOnMap",
+    "C_QuestLog.GetTitleForQuestID",
+    "C_QuestLog.IsComplete",
+    "C_QuestLog.IsQuestFlaggedCompleted",
+    "C_QuestLog.IsQuestFlaggedCompletedOnAccount",
+    "C_QuestLog.IsWorldQuest",
+    "C_QuestLog.ReadyForTurnIn",
+    "C_QuestLog.RequestLoadQuestByID",
+    "C_Reputation.CollapseFactionHeader",
+    "C_Reputation.ExpandAllFactionHeaders",
+    "C_Reputation.GetFactionDataByID",
+    "C_Reputation.GetFactionDataByIndex",
+    "C_Reputation.GetFactionParagonInfo",
+    "C_Reputation.GetNumFactions",
+    "C_Reputation.IsAccountWideReputation",
+    "C_Reputation.IsFactionParagon",
+    "C_Reputation.IsMajorFaction",
+    "C_Spell.GetSpellCooldown",
+    "C_SuperTrack.GetSuperTrackedQuestID",
+    "C_SuperTrack.SetSuperTrackedQuestID",
+    "C_SuperTrack.SetSuperTrackedUserWaypoint",
+    "C_TaskQuest.GetQuestInfoByQuestID",
+    "C_TaskQuest.GetQuestLocation",
+    "C_TaskQuest.GetQuestTimeLeftMinutes",
+    "C_TaskQuest.GetQuestTimeLeftSeconds",
+    "C_TaskQuest.GetQuestZoneID",
+    "C_TaskQuest.GetQuestsForPlayerByMapID",
+    "C_TaxiMap.GetAllTaxiNodes",
+    "C_Thing.Method",
+    "C_Timer.After",
+    "C_Timer.NewTicker",
+    "C_ToyBox.GetNumFilteredToys",
+    "C_ToyBox.GetNumToys",
+    "C_ToyBox.GetToyFromIndex",
+    "C_ToyBox.GetToyInfo",
+    "C_ToyBox.SetAllSourceTypeFilters",
+    "C_ToyBox.SetCollectedShown",
+    "C_ToyBox.SetFilterString",
+    "C_ToyBox.SetUncollectedShown",
+    "C_TradeSkillUI.GetAllRecipeIDs",
+    "C_TradeSkillUI.GetBaseProfessionInfo",
+    "C_TradeSkillUI.GetRecipeInfo",
+    "C_TradeSkillUI.GetTradeSkillLine",
+    "C_TradeSkillUI.IsTradeSkillReady",
+    "C_TransmogCollection.GetAppearanceSources",
+    "C_TransmogCollection.GetCategoryCollectedCount",
+    "C_TransmogCollection.GetCategoryInfo",
+    "C_TransmogCollection.GetCategoryTotal",
+    "C_TransmogCollection.GetItemInfo",
+    "C_TransmogCollection.PlayerHasTransmogByItemInfo",
+    "C_TransmogSets.GetAllSets",
+    "C_TransmogSets.GetSetPrimaryAppearances",
+    "C_VignetteInfo.GetVignetteInfo",
+    "C_VignetteInfo.GetVignettePosition",
+    "C_VignetteInfo.GetVignettes",
+    "C_WeeklyRewards.GetActivities",
+    "C_WeeklyRewards.HasAvailableRewards",
+    "CreateFrame",
+    "CreateVector2D",
+    "EJ_ClearSearch",
+    "EJ_GetCurrentInstance",
+    "EJ_GetDifficulty",
+    "EJ_GetEncounterInfo",
+    "EJ_GetEncounterInfoByIndex",
+    "EJ_GetInstanceInfo",
+    "EJ_GetNumSearchResults",
+    "EJ_GetSearchResult",
+    "EJ_SelectInstance",
+    "EJ_SetSearch",
+    "GetAchievementCriteriaInfo",
+    "GetAchievementInfo",
+    "GetAchievementNumCriteria",
+    "GetAddOnMemoryUsage",
+    "GetBindLocation",
+    "GetBuildInfo",
+    "GetCategoryInfo",
+    "GetCategoryList",
+    "GetCategoryNumAchievements",
+    "GetCursorPosition",
+    "GetDifficultyInfo",
+    "GetGuildInfo",
+    "GetInboxHeaderInfo",
+    "GetInboxNumItems",
+    "GetItemCooldown",
+    "GetItemCount",
+    "GetItemInfo",
+    "GetLocale",
+    "GetMerchantItemInfo",
+    "GetMerchantItemLink",
+    "GetMerchantNumItems",
+    "GetNumCompletedAchievements",
+    "GetNumGroupMembers",
+    "GetNumSavedInstances",
+    "GetNumTitles",
+    "GetPlayerFacing",
+    "GetProfessionInfo",
+    "GetProfessions",
+    "GetQuestID",
+    "GetQuestResetTime",
+    "GetRealmName",
+    "GetSavedInstanceInfo",
+    "GetSpecialization",
+    "GetSpecializationInfo",
+    "GetSpellCooldown",
+    "GetTime",
+    "GetTitleName",
+    "GetTitleText",
+    "GetZoneText",
+    "InCombatLockdown",
+    "InterfaceOptions_AddCategory",
+    "IsFlyableArea",
+    "IsFlying",
+    "IsInGuild",
+    "IsInInstance",
+    "IsInRaid",
+    "IsMounted",
+    "IsPlayerSpell",
+    "IsSpellKnown",
+    "IsTitleKnown",
+    "PlaySound",
+    "PlayerHasToy",
+    "UIFrameFlash",
+    "UiMapPoint",
+    "UnitClass",
+    "UnitExists",
+    "UnitFactionGroup",
+    "UnitGUID",
+    "UnitIsDeadOrGhost",
+    "UnitIsGhost",
+    "UnitLevel",
+    "UnitName",
+    "UnitOnTaxi",
+    "UnitRace",
+    "UnitSex",
+    "UpdateAddOnMemoryUsage",
+}
+'@
+
 $Embedded['Providers\Blizzard.lua'] = @'
 -- Providers/Blizzard.lua
 -- Completion Navigator :: thin, defensive wrappers over Blizzard APIs.
@@ -8557,10 +8802,15 @@ function Blizzard.GetQuestLogEntries()
 
     local count = C_QuestLog.GetNumQuestLogEntries()
 
+    -- pcall'd like every other call in this file set. This one was neither
+    -- existence-checked nor protected, in a file whose header promises that
+    -- "every call into the client goes through this FILE SET" precisely so a
+    -- patch break is a contained fix rather than a broken quest log.
     for index = 1, count do
-        local info = C_QuestLog.GetInfo(index)
+        local gotInfo, info = pcall(C_QuestLog.GetInfo, index)
 
-        if info and not info.isHeader and info.questID and info.questID > 0 then
+        if gotInfo and info and not info.isHeader
+            and info.questID and info.questID > 0 then
             table.insert(entries, info)
         end
     end
@@ -28779,8 +29029,31 @@ function Inventory.IsAvailable()
         and C_Container.GetContainerItemInfo ~= nil
 end
 
+-- Whether the client considers this slot a quest item. Guarded separately
+-- from the rest: GetContainerItemQuestInfo is a different call with its own
+-- availability, and a client that lacks it should report "not a quest item"
+-- rather than erroring on every slot in the bag.
+local function QuestItem(bag, slot)
+    if not C_Container or not C_Container.GetContainerItemQuestInfo then
+        return false
+    end
+
+    local ok, info = pcall(C_Container.GetContainerItemQuestInfo, bag, slot)
+
+    if not ok or type(info) ~= "table" then
+        return false
+    end
+
+    return (info.isQuestItem or info.questID) and true or false
+end
+
 -- Every item in a set of containers, as { itemID, count, link, quality, bag,
--- slot, questItem, questID, isUsable }.
+-- slot, questItem }.
+--
+-- The shape above used to claim `questID` and `isUsable` as well. Neither was
+-- ever set on these rows. A comment that describes a richer row than the code
+-- builds is worse than no comment: the next reader writes `row.questID` and
+-- gets nil forever, with nothing anywhere to say why.
 -- CACHED FOR THE BAGS, WHICH IS WHERE IT IS ASKED FOR REPEATEDLY.
 --
 -- The candidate provider calls QuestStarters, NearlyDone and
@@ -28825,7 +29098,13 @@ function Inventory.Scan(containers)
                         quality  = info.quality,
                         bag      = bag,
                         slot     = slot,
-                        questItem = info.hasNoValue and true or false,
+                        -- `hasNoValue` means the vendor will not buy it. It
+                        -- has nothing to do with quest items, and reading it
+                        -- as one made `questItem` true for every grey and
+                        -- every soulbound token in the bag. The real question
+                        -- has its own API, which this same file already asks
+                        -- correctly forty lines below.
+                        questItem = QuestItem(bag, slot),
                     })
                 end
             end
@@ -30966,9 +31245,25 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
 
         -- The cheapest either end can possibly be. Used to abandon an origin
         -- whose walk alone already costs more than the best route found so
-        -- far -- which is exact, not a heuristic, because every remaining
-        -- term of the sum is positive.
+        -- far.
         local cheapestArrival
+
+        -- AND THE MOST THE REST OF THE SUM CAN BE DISCOUNTED.
+        --
+        -- 0.46.0 wrote this bound and called it exact "because every remaining
+        -- term of the sum is positive". Every term is -- but the sum is then
+        -- MULTIPLIED by knownRouteBonus when the pair is a route the player
+        -- has actually flown, and a discount is not a term. A bound that
+        -- ignores it prunes origins whose true cost is up to a tenth below
+        -- what the bound predicted, and the addon silently reports the
+        -- second-best route.
+        --
+        -- The test that was supposed to catch this brute-forced the answer
+        -- honestly and still missed it: no routes had been noted at that point
+        -- in the run, so the discount branch was never live while the
+        -- comparison ran. It would have bitten only players who had flown
+        -- somewhere -- which is all of them, and none of the fixtures.
+        local bestPossibleDiscount = math.min(1, Travel.knownRouteBonus or 1)
 
         for index, node in ipairs(nodes) do
             local originYards = Travel.YardsBetweenPoints(from, node.point)
@@ -30987,10 +31282,12 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         for i = 1, #nodes do
             local walkOut = originSeconds[i]
 
-            -- Nothing beyond this point can be free, so an origin already
-            -- more expensive than the standing best cannot produce a winner.
+            -- Nothing beyond this point can be free, and nothing can be
+            -- discounted further than a known route discounts it, so an
+            -- origin whose best conceivable total already loses cannot win.
             if walkOut and cheapestArrival
-                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
+                and (bestPossibleDiscount
+                    * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
                     < best.seconds then
 
                 local origin = nodes[i]
@@ -31179,6 +31476,51 @@ for _, event in ipairs({ "TAXIMAP_OPENED", "PLAYER_ENTERING_WORLD" }) do
         CN.InvalidateCandidates()
     end)
 end
+
+-- WHERE THE FLYABILITY MEMORY IS ACTUALLY WRITTEN.
+--
+-- `Travel.NoteFlyable` was written in 0.43.0 with a block comment explaining
+-- that remembering the answer per zone "turns that guess into evidence", and
+-- then nothing ever called it. The store stayed empty for four releases, so
+-- `Travel.CanFly` always fell through to `IsFlyableArea()` -- which answers
+-- for where the player is STANDING -- and that is precisely the guess the
+-- comment claims was replaced. Every self-flown route estimate to another
+-- zone rested on it.
+--
+-- The test suite could not see it because the harness wrote the store
+-- directly, bypassing the producer: populated in test, permanently empty in
+-- game.
+--
+-- Observed on arrival, which is the only moment the client will answer
+-- honestly about a zone.
+local function NoteWhereWeAre()
+    local mapID = CN.GetPlayerPosition()
+
+    if mapID then
+        pcall(Travel.NoteFlyable, mapID)
+    end
+end
+
+for _, event in ipairs({ "ZONE_CHANGED_NEW_AREA", "PLAYER_ENTERING_WORLD" }) do
+    CN:RegisterEvent(event, NoteWhereWeAre)
+end
+
+-- And whenever the player is demonstrably flying, which is evidence that
+-- outranks anything the client says about the area: you cannot be flying
+-- somewhere flight is disabled.
+CN:RegisterEvent("PLAYER_CONTROL_GAINED", function()
+    if IsFlying and select(1, pcall(IsFlying)) then
+        local flying = select(2, pcall(IsFlying))
+
+        if flying then
+            local mapID = CN.GetPlayerPosition()
+
+            if mapID then
+                FlightMemory()[mapID] = true
+            end
+        end
+    end
+end)
 
 -- Sampling the flight only while there is a flight to sample.
 local ticker
@@ -32075,7 +32417,15 @@ CN.RegisterRecommendationHook("Preference", function(results)
                         store[refined] = refinedRow
                     end
 
-                    if not last or (now - last) > Preference.actionWindowSeconds then
+                    -- The SAME window as the counter twelve lines below, and
+                    -- for the same reason. This one kept the flat default
+                    -- that 0.46.0 replaced with per-type windows, so the
+                    -- moment a quest window is added to Preference.
+                    -- actionWindows the two counters silently disagree and
+                    -- the refined buckets over-count what was shown.
+                    if not last
+                        or (now - last) > Preference.WindowFor(objectiveType) then
+
                         refinedRow.shown = refinedRow.shown + 1
                     end
                 end
@@ -32810,6 +33160,52 @@ CN.RegisterCapture{
     end,
 }
 
+-- WHICH OF THE CLIENT FUNCTIONS THIS ADDON CALLS STILL EXIST.
+--
+-- The sibling of the `events` capture, and the more insidious half. An
+-- unknown EVENT name throws, so it announces itself. An unknown FUNCTION name
+-- announces nothing: every call site in this addon is guarded with
+-- `if C_Thing and C_Thing.Method`, which is correct, and which makes a
+-- misspelled or renamed name indistinguishable from a client that does not
+-- support the feature. The guard is false, the branch never runs, and the
+-- feature is quietly dead for as long as nobody notices.
+--
+-- Data/ApiSurface.lua is generated from the source at build time -- a
+-- hand-written list of what the code calls is a second copy of the code, and
+-- would drift within a release.
+CN.RegisterCapture{
+    name = "apiSurface",
+    run  = function()
+        if type(CN.apiSurface) ~= "table" or #CN.apiSurface == 0 then
+            return nil, "no generated surface in this build"
+        end
+
+        local missing, present = {}, 0
+
+        for _, path in ipairs(CN.apiSurface) do
+            local namespace, method = string.match(path, "^([^.]+)%.(.+)$")
+
+            local value
+
+            if namespace then
+                local container = _G and _G[namespace]
+
+                value = type(container) == "table" and container[method] or nil
+            else
+                value = _G and _G[path]
+            end
+
+            if value ~= nil then
+                present = present + 1
+            else
+                table.insert(missing, path)
+            end
+        end
+
+        return { examined = #CN.apiSurface, present = present, missing = missing }
+    end,
+}
+
 ------------------------------------------------------------
 -- RUNNING IT
 ------------------------------------------------------------
@@ -33037,6 +33433,64 @@ local FAIL = SelfTest.results.FAIL
 local SKIP = SelfTest.results.SKIP
 
 -- 1. Can the client say where we are at all? Everything else depends on it.
+-- WHAT THE GAME PATCHED OUT FROM UNDER US.
+--
+-- Added in 0.47.0. Every expansion renames or removes client functions, and
+-- this addon names nearly two hundred of them. Each call site guards on the
+-- name existing -- which is right, and which is also why a removed function
+-- produces silence rather than an error: the guard goes false and the feature
+-- is dead with nothing to say so.
+--
+-- Data/ApiSurface.lua is generated from the source at build time, so this
+-- cannot fall out of step with what the addon actually calls. Reported here
+-- because the player is the one holding a client the author has not seen.
+CN.RegisterSelfTest{
+    area  = "client",
+    order = 0,
+    name  = "every client function this addon calls still exists",
+    run   = function()
+        if type(CN.apiSurface) ~= "table" or #CN.apiSurface == 0 then
+            return SKIP, "this build carries no generated API list"
+        end
+
+        local missing = {}
+
+        for _, path in ipairs(CN.apiSurface) do
+            local namespace, method = string.match(path, "^([^.]+)%.(.+)$")
+
+            local value
+
+            if namespace then
+                local container = _G and _G[namespace]
+
+                value = type(container) == "table" and container[method] or nil
+            else
+                value = _G and _G[path]
+            end
+
+            if value == nil then
+                table.insert(missing, path)
+            end
+        end
+
+        if #missing == 0 then
+            return PASS, #CN.apiSurface .. " client functions, all present"
+        end
+
+        -- Named, and bounded: a patch that removes a whole namespace would
+        -- otherwise print forty lines into the chat frame.
+        local named = {}
+
+        for index = 1, math.min(6, #missing) do
+            table.insert(named, missing[index])
+        end
+
+        return FAIL, #missing .. " of " .. #CN.apiSurface
+            .. " are gone from this client: " .. table.concat(named, ", ")
+            .. (#missing > 6 and (" and " .. (#missing - 6) .. " more") or "")
+    end,
+}
+
 CN.RegisterSelfTest{
     area = "position",
     name = "the client reports your position",
@@ -34903,11 +35357,13 @@ function Errors.Guard(context, fn, ...)
         Errors.Record(context, results[2])
     end
 
-    -- unpack lives at the top level in the game's Lua 5.1, and on table in
-    -- 5.4 where the offline suite runs. Both, so this file works in both.
-    local unpackFn = rawget(table, "unpack") or unpack
-
-    return unpackFn(results)
+    -- CN.Unpack, not a second copy of it. Core.lua states the rule -- "if a
+    -- construct means two things, the addon uses neither directly; it uses
+    -- one of these" -- and this file quietly kept its own identical shim
+    -- outside the one file that gets audited for exactly this class of
+    -- mistake. Equivalent today; the point is that there is one place to fix
+    -- it when it is not.
+    return CN.Unpack(results)
 end
 
 CN.Guard = Errors.Guard
@@ -35056,7 +35512,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.46.0
+## Version: 0.47.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -35106,6 +35562,7 @@ Providers\StaticData.lua
 Providers\TomTom.lua
 Data\Quests.lua
 Data\Community.lua
+Data\ApiSurface.lua
 Modules\Achievements.lua
 Modules\Alts.lua
 Modules\Appearances.lua
@@ -35310,6 +35767,76 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.47.0]
+
+An end-to-end audit of the whole addon, run the way the last release taught:
+assume the test suite is more forgiving than the game. Six defects, every one
+of them invisible to a suite that otherwise passes eighty files, two
+interpreters and thirty-seven mutations.
+
+### Added
+
+- **The addon now knows which client functions it calls, and can tell you
+  which of them are gone.** 0.46.0 shipped an event name that does not exist;
+  the client throws on those, so it announced itself. Client *functions* fail
+  silently instead: every call site is guarded with `if C_Thing and
+  C_Thing.Method`, which is correct, and which makes a renamed or misspelled
+  name indistinguishable from a client that lacks the feature -- the guard
+  goes false, the branch never runs, and the feature is dead for as long as
+  nobody notices. The list of the 198 names this addon uses is now **generated
+  from the source** at build time, `/cn selftest` reports any the client no
+  longer has, and `/cn capture` records them for the offline suite to fail on.
+  A hand-written list of what the code calls is a second copy of the code, so
+  nobody writes this one.
+
+### Fixed
+
+- **The route search could return the second-best route.** The bound that lets
+  it skip hopeless flight points was documented as exact "because every
+  remaining term of the sum is positive". Every term is -- but the sum is then
+  *multiplied* by a discount for a flight path you have actually flown, and a
+  discount is not a term. A route up to a tenth cheaper than the bound
+  predicted could be discarded unexamined. The test written to catch exactly
+  this brute-forced the answer honestly and still missed it, because no flown
+  routes had been recorded at that point in the run: the discount was never
+  live while the comparison ran. It would have affected every player who has
+  ever taken a flight path, and no fixture.
+- **Nothing ever recorded whether a zone allows flying.** The store was
+  written, commented at length -- *"remembering the answer per zone turns that
+  guess into evidence"* -- and never filled, for four releases. So the check
+  fell through to asking the client about **where you are standing**, which is
+  precisely the guess the design replaced, and every self-flown estimate to
+  another zone rested on it. It is now recorded on arrival, and flying
+  somewhere is taken as proof that flying is allowed there.
+- **A filter that follows you between tabs did not filter.** `/cn keepfilter`
+  put the search term in the box and applied it to nothing on a tab's first
+  visit, because the box was set before the tab's list existed. Its own help
+  text warns that a filter you cannot see is how a list looks empty when it is
+  not; what it produced was the same fault inverted -- a list that looks full
+  when it is filtered. The function written to do this properly had never been
+  called from anywhere.
+- **A quest item is not an item the vendor will not buy.** The bag scan read
+  `hasNoValue` -- "has no sell price" -- as though it meant "is a quest item",
+  so every grey and every worthless token in your bags was flagged as one. The
+  correct call was already being used forty lines away in the same file.
+- **The refined preference counter kept the flat twenty-minute window** that
+  0.46.0 replaced with per-type windows, so the two counters would have
+  silently disagreed the moment a quest window was added.
+- **One unguarded client call** in the provider file set whose entire purpose
+  is that every client call goes through it, so that a patch break is a
+  contained fix.
+- **A second copy of a compatibility shim** was living outside the one file
+  that gets audited for that class of mistake. There is one `CN.Unpack` again.
+- **Eleven names in the static-analysis allowlist that the source no longer
+  mentions.** An allowlist entry for something nothing calls weakens the only
+  guarantee that file makes: that an undeclared global is a typo or a leak.
+- **An infinite loop in the list widget, found by a new test.** It kept one
+  piece of state on the frame while its neighbour had been moved off for the
+  documented reason that reading an unset field on a frame is not guaranteed
+  to give you nil. That is a fix applied to the instance somebody noticed
+  rather than to the class, and the leftover hung the suite outright the first
+  time a filter was set before any rows were.
 
 ## [0.46.0]
 
@@ -38332,7 +38859,9 @@ Nothing is uploaded. The addon *cannot* upload; addons have no network access at
 /cn selftest
 ```
 
-Fifteen checks that run against your own client and report what they actually found — whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+Eighteen checks that run against your own client and report what they actually found — whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+
+One of them is new and worth knowing about after a patch: **whether every client function this addon calls still exists**. An addon reads the game through a couple of hundred named functions, and every expansion renames or removes some. Each call is guarded, which is the right way to write it and also the reason a removed function makes no noise at all — the guard simply goes false and that feature stops working, silently, possibly for months. The list of names is generated from the source rather than written by hand, so it cannot fall out of step with what the addon actually calls, and the check will tell you exactly which ones your client no longer has.
 
 Every check exists because the thing it covers was once broken in a release, and was found by somebody playing rather than by a test. Checks report the value they saw rather than the word "failed", so a bug report is a copy and paste. A check the client cannot answer says so and skips — it does not quietly pass.
 
@@ -38457,7 +38986,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.46.0
+0.47.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -39110,7 +39639,8 @@ mutate "Modules/Inventory.lua" \
 # cheaper, which is exactly the kind of change that returns a slightly wrong
 # answer forever without ever erroring.
 mutate "Modules/Travel.lua" \
-    "                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
+    "                and (bestPossibleDiscount
+                    * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
                     < best.seconds then" \
     "                and walkOut < (best.seconds * 0.5) then" \
     "the pruning bound discards a route that would have won"
@@ -39149,6 +39679,42 @@ end" \
     "for event in pairs(CN.eventTable) do
 end" \
     "handlers registered before Events.lua never reach the client"
+
+
+# The 0.47.0 fixes. Each of these was a real defect found by an end-to-end
+# audit, and each was invisible to the suite that existed at the time.
+mutate "Modules/Travel.lua" \
+    "                and (bestPossibleDiscount
+                    * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
+                    < best.seconds then" \
+    "                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
+                    < best.seconds then" \
+    "the pruning bound ignores the known-route discount"
+
+mutate "Modules/Travel.lua" \
+    "for _, event in ipairs({ \"ZONE_CHANGED_NEW_AREA\", \"PLAYER_ENTERING_WORLD\" }) do
+    CN:RegisterEvent(event, NoteWhereWeAre)
+end" \
+    "for _, event in ipairs({}) do
+    CN:RegisterEvent(event, NoteWhereWeAre)
+end" \
+    "nothing ever observes whether a zone allows flying"
+
+mutate "Modules/Inventory.lua" \
+    "                        questItem = QuestItem(bag, slot)," \
+    "                        questItem = info.hasNoValue and true or false," \
+    "a quest item is read from its vendor sell price"
+
+mutate "UI.lua" \
+    "    -- Now that the panel exists, the filter has something to apply to.
+    UI.RestoreFilter()" \
+    "    -- Now that the panel exists, the filter has something to apply to." \
+    "a carried filter is shown but never applied"
+
+mutate "Data/ApiSurface.lua" \
+    "CN.apiSurface = {" \
+    "CN.apiSurface = {} local ignored = {" \
+    "the generated API surface is empty"
 
 
 echo
@@ -39203,7 +39769,7 @@ self = false
 
 read_globals = {
     -- Namespaced client API.
-    "C_AchievementInfo", "C_Calendar", "C_CurrencyInfo", "C_DateAndTime",
+    "C_Calendar", "C_CurrencyInfo", "C_DateAndTime",
     "C_CampaignInfo", "C_GossipInfo", "C_Item", "C_MajorFactions", "C_Map",
     "C_MerchantFrame",
     "C_MountJournal", "C_PetJournal", "C_QuestLog", "C_Reputation",
@@ -39220,8 +39786,8 @@ read_globals = {
     "GetRealmName", "GetSpecialization", "GetSpecializationInfo", "GetTitleName",
     "GetZoneText", "IsTitleKnown", "PlayerHasToy", "UnitClass", "UnitExists",
     "UnitFactionGroup", "UnitGUID", "UnitLevel", "UnitName", "UnitRace",
-    "UnitSex", "PlaySound", "PlaySoundFile", "GetTime", "UnitPosition",
-    "GetPlayerFacing", "InCombatLockdown", "IsInInstance", "GetBindingKey",
+    "UnitSex", "PlaySound", "GetTime",
+    "GetPlayerFacing", "InCombatLockdown", "IsInInstance",
     "GetLocale",
 
     -- Saved instances and the Adventure Guide (Encounter Journal). The EJ
@@ -39236,7 +39802,7 @@ read_globals = {
     "SOUNDKIT", "PlaySound", "UIFrameFlash",
     "UnitIsDeadOrGhost", "UnitIsGhost", "GetNumGroupMembers",
     "IsInRaid", "IsInInstance", "IsFlying", "IsFlyableArea",
-    "C_CraftingOrders", "C_DelvesUI", "C_Bank", "C_Spell",
+    "C_CraftingOrders", "C_DelvesUI", "C_Spell",
 
     -- Bags, mail, keystones, heirlooms and challenge modes: five systems the
     -- addon began reading in 0.44.0.
@@ -39257,13 +39823,17 @@ read_globals = {
     "Enum", "GameTooltip", "Minimap", "UIParent", "UISpecialFrames",
     "UiMapPoint", "CreateVector2D", "DEFAULT_CHAT_FRAME", "TooltipDataProcessor",
     "TooltipUtil", "LE_PET_JOURNAL_FILTER_COLLECTED",
-    "LE_PET_JOURNAL_FILTER_NOT_COLLECTED", "NORMAL_FONT_COLOR",
+    "LE_PET_JOURNAL_FILTER_NOT_COLLECTED",
 
     -- Lua functions the client exposes globally.
-    "date", "time", "strsplit", "strtrim", "debugprofilestop", "wipe",
+    "date", "time", "strsplit", "debugprofilestop", "wipe",
 
-    -- Optional third-party addons. Probed, never required.
-    "TomTom", "AllTheThings", "BtWQuests", "HandyNotes", "LibStub",
+    -- Optional third-party addons. Probed, never required. The three addon
+    -- tables themselves are reached through _G and so are not listed: an
+    -- entry here for a name the source never mentions weakens the guarantee
+    -- in this file's own header, that an undeclared global is a typo or a
+    -- leak. Eleven such entries were pruned in 0.47.0.
+    "LibStub",
 }
 
 globals = {
@@ -39801,7 +40371,9 @@ C_TaxiMap = {
 CN_TEST_BAGS = {
     [0] = {
         { itemID = 60001, stackCount = 1, quest = { questID = 44001, isActive = false } },
-        { itemID = 60002, stackCount = 20 },
+        -- Worthless to a vendor and not a quest item: the two facts the addon
+        -- confused for each other.
+        { itemID = 60002, stackCount = 20, hasNoValue = true },
         -- Already accepted: the client still flags it, and offering it again
         -- would send the player to right-click something they have used.
         { itemID = 60003, stackCount = 1, quest = { questID = 44002, isActive = true } },
@@ -39827,6 +40399,12 @@ C_Container = {
             stackCount = item.stackCount,
             hyperlink  = "|cffffffff|Hitem:" .. item.itemID .. "|h[Item]|h|r",
             quality    = 1,
+
+            -- WHAT THE VENDOR WILL PAY, WHICH IS NOT WHETHER IT IS A QUEST
+            -- ITEM. The addon read this field as the latter for two
+            -- releases; the stub did not set it at all, so both branches
+            -- produced the same value and no test could tell them apart.
+            hasNoValue = item.hasNoValue and true or false,
         }
     end,
 
@@ -40032,12 +40610,16 @@ function IsInInstance()
     return true, CN_TEST_INSTANCE
 end
 
+CN_TEST_FLYING = false
+
 function IsFlying()
-    return false
+    return CN_TEST_FLYING
 end
 
+CN_TEST_FLYABLE = true
+
 function IsFlyableArea()
-    return true
+    return CN_TEST_FLYABLE
 end
 
 CN_TEST_ON_TAXI = false
@@ -46492,6 +47074,18 @@ print("\nStubs, audited against a real client:")
         return #(real.events.refused or {}) == 0
     end, "the live client refused an event this addon registers")
 
+    require("apiSurface", function()
+        -- THE HALF THAT ANNOUNCES NOTHING.
+        --
+        -- A misspelled event throws. A misspelled function name is caught by
+        -- the guard at its own call site and produces a permanently dead
+        -- feature that looks exactly like a client which does not support it.
+        -- This is the only way to tell those two apart, and it needs a real
+        -- client: the stub cannot help, because the stub defines whatever the
+        -- addon happens to call.
+        return #(real.apiSurface.missing or {}) == 0
+    end, "the live client does not have every API this addon calls")
+
     require("savedInstances", function()
         local fields = real.savedInstances.shape
             and real.savedInstances.shape.fields or {}
@@ -46513,6 +47107,20 @@ print("\nStubs, audited against a real client:")
 
     for _, complaint in ipairs(complaints) do
         print("  MISMATCH: " .. complaint)
+    end
+
+    -- A complaint that says "an API is missing" without saying WHICH costs an
+    -- hour to act on.
+    if real.apiSurface then
+        for _, name in ipairs(real.apiSurface.missing or {}) do
+            print("    the client has no " .. name)
+        end
+    end
+
+    if real.events then
+        for _, name in ipairs(real.events.refused or {}) do
+            print("    the client refused the event " .. name)
+        end
     end
 
     assert(#complaints == 0,
@@ -46667,6 +47275,19 @@ print("\nGetting there:")
             "the brute-force comparison needs a crowded continent, got "
             .. #nodeList)
 
+        -- ROUTES THE PLAYER HAS ACTUALLY FLOWN, BEFORE THE COMPARISON RUNS.
+        --
+        -- The first version of this test noted none, so `knownRouteBonus` --
+        -- the one multiplicative term in the whole calculation -- was never
+        -- applied while the exhaustive check ran. It therefore agreed with a
+        -- pruning bound that ignored the discount entirely, and passed. A
+        -- brute-force comparison is only as honest as the state it runs
+        -- against.
+        for index = 1, #nodeList - 1 do
+            travel.NoteRoute(nodeList[index].id, nodeList[index + 1].id)
+            travel.NoteRoute(nodeList[#nodeList].id, nodeList[index].id)
+        end
+
         local seconds, _, detail = travel.EstimateSeconds(94, 0.05, 0.05, 94, 0.95, 0.95)
 
         -- Independently, the long way round: every pair, every distance
@@ -46775,6 +47396,102 @@ print("\nGetting there:")
         travel.FlightMemory()[94] = nil
 
         print("  a long walk to the right flight point is not pruned away")
+
+        ------------------------------------------------------------
+        -- THE WHOLE PROPERTY, SWEPT, WITH THE DISCOUNT LIVE.
+        --
+        -- The single hand-placed case above tests one geometry, and the
+        -- brute-force case tests one more. Neither caught the bound ignoring
+        -- knownRouteBonus, because whether that error changes an answer
+        -- depends on the relationship between the zone's size, the flight
+        -- overhead and where the flight points happen to sit -- three numbers
+        -- a hand-written case fixes at one value each.
+        --
+        -- So sweep them. The property is simple and should hold everywhere:
+        -- what the fast search returns is what an exhaustive one finds.
+        ------------------------------------------------------------
+        local sweepSpan = CN_TEST_MAP_SPAN
+
+        local checked, ground = 0, 0
+
+        for _, span in ipairs({ 200, 340, 600, 1000, 2400 }) do
+            CN_TEST_SetMapSpan({ span, span })
+
+            for _, fraction in ipairs({ 0.3, 0.5, 0.7, 0.85 }) do
+                CN_TEST_TAXI_NODES[1941] = {
+                    { nodeID = 80, name = "Out", state = 1,
+                      position = { x = 0.05 + (0.90 * fraction),
+                                   y = 0.05 + (0.90 * fraction) } },
+                    { nodeID = 81, name = "In", state = 1,
+                      position = { x = 0.95, y = 0.95 } },
+                    { nodeID = 82, name = "Aside", state = 1,
+                      position = { x = 0.95, y = 0.20 } },
+                }
+
+                travel.ForgetNodes()
+
+                -- Every pair flown, so the discount is live on all of them.
+                for _, pair in ipairs({ {80,81}, {81,80}, {80,82}, {82,81} }) do
+                    travel.NoteRoute(pair[1], pair[2])
+                end
+
+                -- Grounded, so the pair search is what decides.
+                travel.FlightMemory()[94] = false
+
+                local list = travel.KnownNodes(94)
+
+                local start  = travel.WorldPoint(94, 0.05, 0.05)
+                local finish = travel.WorldPoint(94, 0.95, 0.95)
+
+                local speed = travel.FlightSpeed()
+
+                local expect = travel.YardsBetweenPoints(start, finish) / runSpeed
+
+                for _, origin in ipairs(list) do
+                    for _, arrival in ipairs(list) do
+                        if origin.id ~= arrival.id then
+                            local total =
+                                (travel.YardsBetweenPoints(start, origin.point) / runSpeed)
+                                + travel.flightOverheadSeconds
+                                + (travel.YardsBetweenPoints(origin.point, arrival.point)
+                                    / speed)
+                                + (travel.YardsBetweenPoints(finish, arrival.point) / runSpeed)
+
+                            if travel.IsKnownRoute(origin.id, arrival.id) then
+                                total = total * travel.knownRouteBonus
+                            end
+
+                            expect = math.min(expect, total)
+                        end
+                    end
+                end
+
+                local got, _, gotDetail = travel.EstimateSeconds(94, 0.05, 0.05, 94, 0.95, 0.95)
+
+                assert(math.abs(got - expect) < 0.001,
+                    "span " .. span .. ", flight point at " .. fraction
+                    .. " of the way: the search returned "
+                    .. string.format("%.3f", got) .. " where an exhaustive "
+                    .. "one finds " .. string.format("%.3f", expect))
+
+                checked = checked + 1
+
+                if gotDetail and gotDetail.mode == "fly" then
+                    ground = ground + 1
+                end
+
+                travel.FlightMemory()[94] = nil
+            end
+        end
+
+        assert(ground >= 4,
+            "the sweep must actually choose flight routes, or it is only "
+            .. "checking that running is running; it chose " .. ground)
+
+        CN_TEST_SetMapSpan(sweepSpan)
+
+        print("  " .. checked .. " geometries swept, " .. ground
+            .. " of them decided by the pair search")
 
         CN_TEST_TAXI_NODES[1941] = saved
 
@@ -47843,6 +48560,51 @@ print("\nFlight, where flight is allowed:")
 
     session.LoadSamples()
 
+    ------------------------------------------------------------
+    -- AND SOMETHING MUST ACTUALLY OBSERVE IT.
+    --
+    -- The two assertions above wrote the memory directly. That is how a
+    -- producer nobody calls looked healthy for four releases: `NoteFlyable`
+    -- was written, commented at length, and never wired to an event -- so the
+    -- store the addon consults was populated in every test and empty in every
+    -- game.
+    --
+    -- A store is only as real as the thing that fills it, so this fills it
+    -- the way the game does: by arriving somewhere.
+    ------------------------------------------------------------
+    CN_TEST_FLYABLE = false
+
+    fire("ZONE_CHANGED_NEW_AREA")
+
+    local here = CN.GetPlayerPosition()
+
+    assert(memory[here] == false,
+        "arriving in a zone where flight is disabled must be remembered, got "
+        .. tostring(memory[here]))
+
+    CN_TEST_FLYABLE = true
+
+    fire("ZONE_CHANGED_NEW_AREA")
+
+    assert(memory[here] == true,
+        "and arriving somewhere it is allowed must be remembered too")
+
+    -- Demonstrably flying outranks anything the client says about the area.
+    memory[here] = false
+
+    CN_TEST_FLYING = true
+
+    fire("PLAYER_CONTROL_GAINED")
+
+    assert(memory[here] == true,
+        "you cannot be flying in a zone where flying is impossible")
+
+    CN_TEST_FLYING = false
+
+    for key in pairs(memory) do
+        memory[key] = nil
+    end
+
     print("  what was observed about a zone beats what is true where you stand")
 end)()
 
@@ -48405,6 +49167,179 @@ print("\nCrafting orders, and a decision that could go stale:")
 end)()
 
 
+print("\nA filter that follows you between tabs actually filters:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A FEATURE THAT PRODUCED THE STATE IT EXISTS TO PREVENT.
+    --
+    -- `/cn keepfilter on` carries the search term to the next tab. Its own
+    -- help text warns that "a filter that persists invisibly is how a list
+    -- looks empty when it is not" -- and what it actually did was put the
+    -- term in the box and apply it to nothing, which is the same failure with
+    -- the sign flipped: the list looks full when it is filtered.
+    --
+    -- The cause is ordering. Setting the box fires OnTextChanged, which reads
+    -- the current tab's panel -- and on a tab's first visit the panel does
+    -- not exist yet. `UI.RestoreFilter` was written to do it afterwards and
+    -- was never called by anything.
+    ------------------------------------------------------------
+    local UI = CN.UI
+
+    CN.Settings().keepFilter = true
+
+    UI.persistedFilter = "aardvark"
+
+    for _, tab in ipairs(UI.tabs) do
+        tab.panel = nil
+    end
+
+    UI.SelectTab(2)
+
+    local panel = UI.tabs[2].panel
+
+    assert(panel and panel.list, "the tab must have built a list")
+
+    assert(panel.list:GetFilter() == "aardvark",
+        "a persisted filter must reach the list on a tab's FIRST visit, "
+        .. "not only on the second; the list has "
+        .. tostring(panel.list:GetFilter()))
+
+    -- And off means off: the box is cleared and nothing is filtered.
+    CN.Settings().keepFilter = nil
+
+    for _, tab in ipairs(UI.tabs) do
+        tab.panel = nil
+    end
+
+    UI.SelectTab(3)
+
+    assert(UI.tabs[3].panel.list:GetFilter() == nil,
+        "with keepFilter off the new tab must not be filtered")
+
+    UI.persistedFilter = nil
+
+    print("  a carried filter reaches the list on the first visit to a tab")
+end)()
+
+print("\nEvery client function this addon calls, checked against the client:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SILENT HALF.
+    --
+    -- 0.46.0 shipped an event that does not exist, and the client threw at
+    -- every login -- loud, and therefore fixed within a day. The addon also
+    -- names nearly two hundred client FUNCTIONS, and those fail silently:
+    -- every call site guards on the name, so a renamed or misspelled one is
+    -- indistinguishable from a client that lacks the feature. The guard goes
+    -- false and the branch is dead for as long as nobody notices.
+    --
+    -- Data/ApiSurface.lua is GENERATED from the source at build time, so it
+    -- cannot drift from what the addon actually calls. What this checks is
+    -- that the list is real and the checker is honest -- proving the names
+    -- exist needs a live client, which is what the apiSurface capture and the
+    -- fixture audit are for.
+    ------------------------------------------------------------
+    assert(type(CN.apiSurface) == "table" and #CN.apiSurface > 100,
+        "the generated API surface should list the client names this addon "
+        .. "calls; it has " .. tostring(CN.apiSurface and #CN.apiSurface))
+
+    local absent = {}
+
+    for _, path in ipairs(CN.apiSurface) do
+        local namespace, method = string.match(path, "^([^.]+)%.(.+)$")
+
+        local value
+
+        if namespace then
+            local container = _G[namespace]
+
+            value = type(container) == "table" and container[method] or nil
+        else
+            value = _G[path]
+        end
+
+        if value == nil then
+            table.insert(absent, path)
+        end
+    end
+
+    -- The stub deliberately omits some of these -- "a client that offers
+    -- neither" is a case the suite tests on purpose -- so the count is not
+    -- the assertion. What is asserted is that the checker agrees with
+    -- reality in both directions.
+    local report
+
+    for _, check in ipairs(CN:GetModule("SelfTest").Run().checks) do
+        if check.area == "client" then
+            report = check
+        end
+    end
+
+    assert(report, "the self-test must include the API check")
+
+    if #absent == 0 then
+        assert(report.status == "PASS",
+            "with every name present the check must pass")
+    else
+        assert(report.status == "FAIL",
+            "with " .. #absent .. " names absent the check must fail, not "
+            .. tostring(report.status))
+
+        -- AND IT MUST NOTICE ONE COMING BACK.
+        --
+        -- A checker that always says "some are missing" is as useless as one
+        -- that always says "all present". Define one of the absent names and
+        -- require the count to drop by exactly one.
+        local restored = absent[1]
+
+        local namespace, method = string.match(restored, "^([^.]+)%.(.+)$")
+
+        local missingBefore = #absent
+
+        if namespace then
+            _G[namespace] = _G[namespace] or {}
+            _G[namespace][method] = function() end
+        else
+            _G[restored] = function() end
+        end
+
+        local after = 0
+
+        for _, path in ipairs(CN.apiSurface) do
+            local ns, m = string.match(path, "^([^.]+)%.(.+)$")
+
+            local value
+
+            if ns then
+                local container = _G[ns]
+
+                value = type(container) == "table" and container[m] or nil
+            else
+                value = _G[path]
+            end
+
+            if value == nil then
+                after = after + 1
+            end
+        end
+
+        assert(after == missingBefore - 1,
+            "restoring one client function must reduce the missing count by "
+            .. "exactly one, went from " .. missingBefore .. " to " .. after)
+
+        if namespace then
+            _G[namespace][method] = nil
+        else
+            _G[restored] = nil
+        end
+    end
+
+    print("  " .. #CN.apiSurface .. " client functions listed; the checker "
+        .. "agrees with the client in both directions")
+end)()
+
 print("\nEvery event this addon registers is an event:")
 
 ;(function()
@@ -48635,6 +49570,31 @@ print("\nCaches that must not go stale:")
     CN.FireEvent("BAG_UPDATE_DELAYED")
 
     assert(inventory.Scan() ~= bags, "moving something in a bag re-reads them")
+
+    ------------------------------------------------------------
+    -- A QUEST ITEM IS NOT AN ITEM THE VENDOR WILL NOT BUY.
+    --
+    -- `questItem` was read from `hasNoValue`, which means "has no sell
+    -- price". Every grey, every soulbound token and every worthless trinket
+    -- in the bag was therefore flagged a quest item. Nothing caught it
+    -- because the stub never set the field, so the true and false branches
+    -- produced the same answer.
+    ------------------------------------------------------------
+    inventory.Forget()
+
+    local byItem = {}
+
+    for _, row in ipairs(inventory.Scan()) do
+        byItem[row.itemID] = row
+    end
+
+    assert(byItem[60002] and byItem[60002].questItem == false,
+        "an item with no vendor value is not thereby a quest item")
+
+    assert(byItem[60001] and byItem[60001].questItem == true,
+        "and one the client calls a quest item is")
+
+    print("  a quest item is read from the quest API, not from its sell price")
 
     print("  bags are cached until they change, and the bank is separate")
 end)()

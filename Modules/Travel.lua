@@ -982,9 +982,25 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
 
         -- The cheapest either end can possibly be. Used to abandon an origin
         -- whose walk alone already costs more than the best route found so
-        -- far -- which is exact, not a heuristic, because every remaining
-        -- term of the sum is positive.
+        -- far.
         local cheapestArrival
+
+        -- AND THE MOST THE REST OF THE SUM CAN BE DISCOUNTED.
+        --
+        -- 0.46.0 wrote this bound and called it exact "because every remaining
+        -- term of the sum is positive". Every term is -- but the sum is then
+        -- MULTIPLIED by knownRouteBonus when the pair is a route the player
+        -- has actually flown, and a discount is not a term. A bound that
+        -- ignores it prunes origins whose true cost is up to a tenth below
+        -- what the bound predicted, and the addon silently reports the
+        -- second-best route.
+        --
+        -- The test that was supposed to catch this brute-forced the answer
+        -- honestly and still missed it: no routes had been noted at that point
+        -- in the run, so the discount branch was never live while the
+        -- comparison ran. It would have bitten only players who had flown
+        -- somewhere -- which is all of them, and none of the fixtures.
+        local bestPossibleDiscount = math.min(1, Travel.knownRouteBonus or 1)
 
         for index, node in ipairs(nodes) do
             local originYards = Travel.YardsBetweenPoints(from, node.point)
@@ -1003,10 +1019,12 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         for i = 1, #nodes do
             local walkOut = originSeconds[i]
 
-            -- Nothing beyond this point can be free, so an origin already
-            -- more expensive than the standing best cannot produce a winner.
+            -- Nothing beyond this point can be free, and nothing can be
+            -- discounted further than a known route discounts it, so an
+            -- origin whose best conceivable total already loses cannot win.
             if walkOut and cheapestArrival
-                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
+                and (bestPossibleDiscount
+                    * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
                     < best.seconds then
 
                 local origin = nodes[i]
@@ -1195,6 +1213,51 @@ for _, event in ipairs({ "TAXIMAP_OPENED", "PLAYER_ENTERING_WORLD" }) do
         CN.InvalidateCandidates()
     end)
 end
+
+-- WHERE THE FLYABILITY MEMORY IS ACTUALLY WRITTEN.
+--
+-- `Travel.NoteFlyable` was written in 0.43.0 with a block comment explaining
+-- that remembering the answer per zone "turns that guess into evidence", and
+-- then nothing ever called it. The store stayed empty for four releases, so
+-- `Travel.CanFly` always fell through to `IsFlyableArea()` -- which answers
+-- for where the player is STANDING -- and that is precisely the guess the
+-- comment claims was replaced. Every self-flown route estimate to another
+-- zone rested on it.
+--
+-- The test suite could not see it because the harness wrote the store
+-- directly, bypassing the producer: populated in test, permanently empty in
+-- game.
+--
+-- Observed on arrival, which is the only moment the client will answer
+-- honestly about a zone.
+local function NoteWhereWeAre()
+    local mapID = CN.GetPlayerPosition()
+
+    if mapID then
+        pcall(Travel.NoteFlyable, mapID)
+    end
+end
+
+for _, event in ipairs({ "ZONE_CHANGED_NEW_AREA", "PLAYER_ENTERING_WORLD" }) do
+    CN:RegisterEvent(event, NoteWhereWeAre)
+end
+
+-- And whenever the player is demonstrably flying, which is evidence that
+-- outranks anything the client says about the area: you cannot be flying
+-- somewhere flight is disabled.
+CN:RegisterEvent("PLAYER_CONTROL_GAINED", function()
+    if IsFlying and select(1, pcall(IsFlying)) then
+        local flying = select(2, pcall(IsFlying))
+
+        if flying then
+            local mapID = CN.GetPlayerPosition()
+
+            if mapID then
+                FlightMemory()[mapID] = true
+            end
+        end
+    end
+end)
 
 -- Sampling the flight only while there is a flight to sample.
 local ticker
