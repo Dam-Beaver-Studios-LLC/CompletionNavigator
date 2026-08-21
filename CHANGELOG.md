@@ -7,6 +7,45 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.37.0]
+
+The window itself. Two defects that only show up while you are looking at it.
+
+### Fixed
+
+- **Every list redraw allocated three closures per row.** The click and hover
+  handlers were built inside the redraw, so a hundred-row list threw away and
+  rebuilt three hundred functions every time the window refreshed -- each one
+  capturing a table it did not need to capture.
+  In this game that is not an abstract cost. Allocation churn is what garbage
+  collection pauses are made of, and a pause is a stutter. The handlers are
+  now bound once when a row is created and read the row's current entry, so a
+  redraw allocates nothing at all.
+- **The row pool had no ceiling.** Frames cannot be destroyed in this game,
+  only hidden and reused, so a list that renders one frame per entry grows to
+  the size of the largest list it has ever shown and keeps it for the rest of
+  the session. A thousand entries meant a thousand permanent frames.
+  Capped, and when the cap bites the list says **"... and N more not shown"**
+  rather than simply ending. A truncated list that looks complete is worse
+  than a long one.
+
+### Notes
+
+- Binding a handler once is only correct if it reads the row's *current*
+  entry rather than the one that was there when it was bound -- otherwise
+  clicking the first row would forever run the first list's action. That is
+  asserted directly: the list is refilled with different actions and the
+  handler must run the new one.
+- The first version of the row-cap test compared both sides of the assertion
+  to the setting it was meant to constrain, so raising the cap moved the
+  goalposts and the test passed against a list that created a thousand
+  frames. It now asserts an absolute number. A ceiling defined by the thing it
+  constrains is not a ceiling -- and this is the same shape of mistake as the
+  fixture that was ordered like the bug in 0.31.0.
+- **The navigation arrow is untouched for the third release running**, for the
+  same reason: two fixes to it are shipped and unverified, and `/cn navdiag`
+  will settle it in one command.
+
 ## [0.36.0]
 
 Finishing what 0.35.0 measured.

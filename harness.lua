@@ -5251,4 +5251,100 @@ print("\nNames come from the client, not from disk:")
 end)()
 
 
+print("\nThe list does not churn or grow without bound:")
+
+;(function()
+    local list = CN.UI.CreateList(CreateFrame("Frame"))
+
+    local entries = {}
+
+    for index = 1, 100 do
+        entries[index] = {
+            text    = "Row " .. index,
+            tooltip = "Tip " .. index,
+            onClick = function() end,
+        }
+    end
+
+    list:SetEntries(entries)
+
+    -- NO CLOSURE CHURN.
+    --
+    -- The handlers used to be created inside SetEntries: three fresh closures
+    -- per row on every redraw, three hundred for this list, each capturing a
+    -- table it did not need. Allocation churn is what garbage-collection
+    -- pauses are made of, and a pause is a stutter.
+    local firstClick = list.rows[1].scripts["OnClick"]
+    local firstEnter = list.rows[1].scripts["OnEnter"]
+
+    list:SetEntries(entries)
+
+    assert(list.rows[1].scripts["OnClick"] == firstClick,
+        "a redraw must not replace the click handler -- binding it once is "
+        .. "the whole point")
+    assert(list.rows[1].scripts["OnEnter"] == firstEnter,
+        "nor the hover handler")
+
+    -- The handlers must still WORK, reading the current entry rather than a
+    -- captured one -- otherwise binding once would mean clicking row one
+    -- always runs the first list's action.
+    local clicked = nil
+
+    local replacement = {}
+
+    for index = 1, 3 do
+        replacement[index] = {
+            text    = "Replaced " .. index,
+            onClick = function() clicked = index end,
+        }
+    end
+
+    list:SetEntries(replacement)
+
+    list.rows[1].scripts["OnClick"](list.rows[1])
+
+    assert(clicked == 1,
+        "the bound handler must act on the CURRENT entry, not the one that "
+        .. "was there when it was bound; got " .. tostring(clicked))
+
+    -- Rows beyond the new list must be hidden, not left showing stale text.
+    assert(list.rows[50]:IsShown() == false,
+        "rows from a longer list must be hidden when a shorter one replaces it")
+
+    -- A BOUNDED FRAME POOL.
+    --
+    -- Frames cannot be destroyed in this game, only hidden and reused, so an
+    -- uncapped list grows its pool to the largest list ever shown and keeps
+    -- it for the session.
+    local huge = {}
+
+    for index = 1, 1000 do
+        huge[index] = { text = "Entry " .. index }
+    end
+
+    local used = list:SetEntries(huge)
+
+    -- Asserted against an ABSOLUTE number, not against list.maxRows.
+    --
+    -- The first version compared both sides to the same setting, so raising
+    -- the cap moved the goalposts and the test passed against a list that
+    -- created a thousand frames. A ceiling that is defined by the thing it
+    -- is meant to constrain is not a ceiling.
+    assert(used < 500,
+        "a thousand entries must not produce a thousand rows, used "
+        .. tostring(used))
+    assert(#list.rows < 500,
+        "and no more frames than that may ever be created, have "
+        .. #list.rows)
+
+    -- Truncation must be visible. A shortened list that looks complete is
+    -- worse than a long one.
+    local last = list.rows[used]
+
+    assert(last.label.text and last.label.text:find("more not shown"),
+        "the list must say when it stopped, got " .. tostring(last.label.text))
+
+    print("  handlers bound once, pool capped at " .. list.maxRows)
+end)()
+
 print("\nALL HARNESS CHECKS PASSED")

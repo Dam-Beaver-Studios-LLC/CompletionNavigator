@@ -162,50 +162,111 @@ local function CreateList(parent)
         row.label:SetPoint("RIGHT", -4, 0)
         row.label:SetJustifyH("LEFT")
 
+        -- HANDLERS ARE BOUND ONCE, HERE.
+        --
+        -- They used to be created inside SetEntries, which meant three fresh
+        -- closures per row on every redraw -- three hundred of them for a
+        -- hundred-row list, every time the window refreshed, each one
+        -- capturing a table it did not need to capture. In this game that is
+        -- not an abstract cost: allocation churn is what garbage collection
+        -- pauses are made of, and a pause is a stutter.
+        --
+        -- Bound once and reading `row.entry`, which SetEntries already sets,
+        -- a redraw now allocates nothing at all.
+        row:SetScript("OnClick", function(clicked)
+            local entry = clicked.entry
+
+            if entry and entry.onClick then
+                entry.onClick()
+            end
+        end)
+
+        row:SetScript("OnEnter", function(hovered)
+            local entry = hovered.entry
+
+            if not entry or not entry.tooltip or not GameTooltip then
+                return
+            end
+
+            GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
+            GameTooltip:SetText(entry.tooltip, nil, nil, nil, nil, true)
+            GameTooltip:Show()
+        end)
+
+        row:SetScript("OnLeave", function()
+            if GameTooltip then
+                GameTooltip:Hide()
+            end
+        end)
+
         self.rows[index] = row
 
         return row
     end
 
+    -- A CEILING ON ROWS.
+    --
+    -- Every row is a frame, and frames cannot be destroyed in this game --
+    -- only hidden and reused. A list that renders one entry per row therefore
+    -- grows its frame pool to the size of the largest list it has ever been
+    -- shown, permanently, for the rest of the session. Nothing capped that.
+    --
+    -- Two hundred rows is far more than anyone reads before scrolling and
+    -- more than any tab currently produces; the point is that the number
+    -- exists at all. When it bites, the list says so rather than silently
+    -- ending -- a truncated list that looks complete is worse than a long one.
+    list.maxRows = 200
+
     -- entries = { { text = , onClick = , tooltip = }, ... }
     function list:SetEntries(entries)
         local width = scroll:GetWidth() or (WINDOW_WIDTH - 60)
 
-        content:SetSize(width, math.max(1, #entries * ROW_HEIGHT))
+        local shown = math.min(#entries, self.maxRows)
 
-        for index, entry in ipairs(entries) do
+        local truncated = #entries - shown
+
+        if truncated > 0 then
+            -- Room for the line that explains the truncation.
+            shown = shown - 1
+            truncated = truncated + 1
+        end
+
+        content:SetSize(width, math.max(1, (shown + (truncated > 0 and 1 or 0)) * ROW_HEIGHT))
+
+        for index = 1, shown do
+            local entry = entries[index]
+
             local row = self:GetRow(index)
 
             row.label:SetText(entry.text or "")
+
+            -- The only thing a redraw changes. The handlers were bound when
+            -- the row was created and read this.
             row.entry = entry
-
-            row:SetScript("OnClick", function()
-                if entry.onClick then
-                    entry.onClick()
-                end
-            end)
-
-            if entry.tooltip then
-                row:SetScript("OnEnter", function(hovered)
-                    GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
-                    GameTooltip:SetText(entry.tooltip, nil, nil, nil, nil, true)
-                    GameTooltip:Show()
-                end)
-
-                row:SetScript("OnLeave", function()
-                    GameTooltip:Hide()
-                end)
-            else
-                row:SetScript("OnEnter", nil)
-                row:SetScript("OnLeave", nil)
-            end
 
             row:Show()
         end
 
-        for index = #entries + 1, #self.rows do
+        local used = shown
+
+        if truncated > 0 then
+            used = shown + 1
+
+            local row = self:GetRow(used)
+
+            row.label:SetText("|cff999999... and " .. truncated
+                .. " more not shown|r")
+
+            row.entry = nil
+
+            row:Show()
+        end
+
+        for index = used + 1, #self.rows do
             self.rows[index]:Hide()
         end
+
+        return used
     end
 
     return list

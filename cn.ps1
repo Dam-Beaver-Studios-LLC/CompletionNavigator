@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.36.0'
+$script:ToolkitVersion = '0.37.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.36.0"
+CN.version     = "0.37.0"
 CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -4083,50 +4083,111 @@ local function CreateList(parent)
         row.label:SetPoint("RIGHT", -4, 0)
         row.label:SetJustifyH("LEFT")
 
+        -- HANDLERS ARE BOUND ONCE, HERE.
+        --
+        -- They used to be created inside SetEntries, which meant three fresh
+        -- closures per row on every redraw -- three hundred of them for a
+        -- hundred-row list, every time the window refreshed, each one
+        -- capturing a table it did not need to capture. In this game that is
+        -- not an abstract cost: allocation churn is what garbage collection
+        -- pauses are made of, and a pause is a stutter.
+        --
+        -- Bound once and reading `row.entry`, which SetEntries already sets,
+        -- a redraw now allocates nothing at all.
+        row:SetScript("OnClick", function(clicked)
+            local entry = clicked.entry
+
+            if entry and entry.onClick then
+                entry.onClick()
+            end
+        end)
+
+        row:SetScript("OnEnter", function(hovered)
+            local entry = hovered.entry
+
+            if not entry or not entry.tooltip or not GameTooltip then
+                return
+            end
+
+            GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
+            GameTooltip:SetText(entry.tooltip, nil, nil, nil, nil, true)
+            GameTooltip:Show()
+        end)
+
+        row:SetScript("OnLeave", function()
+            if GameTooltip then
+                GameTooltip:Hide()
+            end
+        end)
+
         self.rows[index] = row
 
         return row
     end
 
+    -- A CEILING ON ROWS.
+    --
+    -- Every row is a frame, and frames cannot be destroyed in this game --
+    -- only hidden and reused. A list that renders one entry per row therefore
+    -- grows its frame pool to the size of the largest list it has ever been
+    -- shown, permanently, for the rest of the session. Nothing capped that.
+    --
+    -- Two hundred rows is far more than anyone reads before scrolling and
+    -- more than any tab currently produces; the point is that the number
+    -- exists at all. When it bites, the list says so rather than silently
+    -- ending -- a truncated list that looks complete is worse than a long one.
+    list.maxRows = 200
+
     -- entries = { { text = , onClick = , tooltip = }, ... }
     function list:SetEntries(entries)
         local width = scroll:GetWidth() or (WINDOW_WIDTH - 60)
 
-        content:SetSize(width, math.max(1, #entries * ROW_HEIGHT))
+        local shown = math.min(#entries, self.maxRows)
 
-        for index, entry in ipairs(entries) do
+        local truncated = #entries - shown
+
+        if truncated > 0 then
+            -- Room for the line that explains the truncation.
+            shown = shown - 1
+            truncated = truncated + 1
+        end
+
+        content:SetSize(width, math.max(1, (shown + (truncated > 0 and 1 or 0)) * ROW_HEIGHT))
+
+        for index = 1, shown do
+            local entry = entries[index]
+
             local row = self:GetRow(index)
 
             row.label:SetText(entry.text or "")
+
+            -- The only thing a redraw changes. The handlers were bound when
+            -- the row was created and read this.
             row.entry = entry
-
-            row:SetScript("OnClick", function()
-                if entry.onClick then
-                    entry.onClick()
-                end
-            end)
-
-            if entry.tooltip then
-                row:SetScript("OnEnter", function(hovered)
-                    GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
-                    GameTooltip:SetText(entry.tooltip, nil, nil, nil, nil, true)
-                    GameTooltip:Show()
-                end)
-
-                row:SetScript("OnLeave", function()
-                    GameTooltip:Hide()
-                end)
-            else
-                row:SetScript("OnEnter", nil)
-                row:SetScript("OnLeave", nil)
-            end
 
             row:Show()
         end
 
-        for index = #entries + 1, #self.rows do
+        local used = shown
+
+        if truncated > 0 then
+            used = shown + 1
+
+            local row = self:GetRow(used)
+
+            row.label:SetText("|cff999999... and " .. truncated
+                .. " more not shown|r")
+
+            row.entry = nil
+
+            row:Show()
+        end
+
+        for index = used + 1, #self.rows do
             self.rows[index]:Hide()
         end
+
+        return used
     end
 
     return list
@@ -24310,7 +24371,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.36.0
+## Version: 0.37.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -24530,6 +24591,45 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.37.0]
+
+The window itself. Two defects that only show up while you are looking at it.
+
+### Fixed
+
+- **Every list redraw allocated three closures per row.** The click and hover
+  handlers were built inside the redraw, so a hundred-row list threw away and
+  rebuilt three hundred functions every time the window refreshed -- each one
+  capturing a table it did not need to capture.
+  In this game that is not an abstract cost. Allocation churn is what garbage
+  collection pauses are made of, and a pause is a stutter. The handlers are
+  now bound once when a row is created and read the row's current entry, so a
+  redraw allocates nothing at all.
+- **The row pool had no ceiling.** Frames cannot be destroyed in this game,
+  only hidden and reused, so a list that renders one frame per entry grows to
+  the size of the largest list it has ever shown and keeps it for the rest of
+  the session. A thousand entries meant a thousand permanent frames.
+  Capped, and when the cap bites the list says **"... and N more not shown"**
+  rather than simply ending. A truncated list that looks complete is worse
+  than a long one.
+
+### Notes
+
+- Binding a handler once is only correct if it reads the row's *current*
+  entry rather than the one that was there when it was bound -- otherwise
+  clicking the first row would forever run the first list's action. That is
+  asserted directly: the list is refilled with different actions and the
+  handler must run the new one.
+- The first version of the row-cap test compared both sides of the assertion
+  to the setting it was meant to constrain, so raising the cap moved the
+  goalposts and the test passed against a list that created a thousand
+  frames. It now asserts an absolute number. A ceiling defined by the thing it
+  constrains is not a ceiling -- and this is the same shape of mistake as the
+  fixture that was ordered like the bug in 0.31.0.
+- **The navigation arrow is untouched for the third release running**, for the
+  same reason: two fixes to it are shipped and unverified, and `/cn navdiag`
+  will settle it in one command.
 
 ## [0.36.0]
 
@@ -26717,7 +26817,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.36.0
+0.37.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -32341,6 +32441,102 @@ print("\nNames come from the client, not from disk:")
     print("  names resolve live; write-only fields are gone")
 end)()
 
+
+print("\nThe list does not churn or grow without bound:")
+
+;(function()
+    local list = CN.UI.CreateList(CreateFrame("Frame"))
+
+    local entries = {}
+
+    for index = 1, 100 do
+        entries[index] = {
+            text    = "Row " .. index,
+            tooltip = "Tip " .. index,
+            onClick = function() end,
+        }
+    end
+
+    list:SetEntries(entries)
+
+    -- NO CLOSURE CHURN.
+    --
+    -- The handlers used to be created inside SetEntries: three fresh closures
+    -- per row on every redraw, three hundred for this list, each capturing a
+    -- table it did not need. Allocation churn is what garbage-collection
+    -- pauses are made of, and a pause is a stutter.
+    local firstClick = list.rows[1].scripts["OnClick"]
+    local firstEnter = list.rows[1].scripts["OnEnter"]
+
+    list:SetEntries(entries)
+
+    assert(list.rows[1].scripts["OnClick"] == firstClick,
+        "a redraw must not replace the click handler -- binding it once is "
+        .. "the whole point")
+    assert(list.rows[1].scripts["OnEnter"] == firstEnter,
+        "nor the hover handler")
+
+    -- The handlers must still WORK, reading the current entry rather than a
+    -- captured one -- otherwise binding once would mean clicking row one
+    -- always runs the first list's action.
+    local clicked = nil
+
+    local replacement = {}
+
+    for index = 1, 3 do
+        replacement[index] = {
+            text    = "Replaced " .. index,
+            onClick = function() clicked = index end,
+        }
+    end
+
+    list:SetEntries(replacement)
+
+    list.rows[1].scripts["OnClick"](list.rows[1])
+
+    assert(clicked == 1,
+        "the bound handler must act on the CURRENT entry, not the one that "
+        .. "was there when it was bound; got " .. tostring(clicked))
+
+    -- Rows beyond the new list must be hidden, not left showing stale text.
+    assert(list.rows[50]:IsShown() == false,
+        "rows from a longer list must be hidden when a shorter one replaces it")
+
+    -- A BOUNDED FRAME POOL.
+    --
+    -- Frames cannot be destroyed in this game, only hidden and reused, so an
+    -- uncapped list grows its pool to the largest list ever shown and keeps
+    -- it for the session.
+    local huge = {}
+
+    for index = 1, 1000 do
+        huge[index] = { text = "Entry " .. index }
+    end
+
+    local used = list:SetEntries(huge)
+
+    -- Asserted against an ABSOLUTE number, not against list.maxRows.
+    --
+    -- The first version compared both sides to the same setting, so raising
+    -- the cap moved the goalposts and the test passed against a list that
+    -- created a thousand frames. A ceiling that is defined by the thing it
+    -- is meant to constrain is not a ceiling.
+    assert(used < 500,
+        "a thousand entries must not produce a thousand rows, used "
+        .. tostring(used))
+    assert(#list.rows < 500,
+        "and no more frames than that may ever be created, have "
+        .. #list.rows)
+
+    -- Truncation must be visible. A shortened list that looks complete is
+    -- worse than a long one.
+    local last = list.rows[used]
+
+    assert(last.label.text and last.label.text:find("more not shown"),
+        "the list must say when it stopped, got " .. tostring(last.label.text))
+
+    print("  handlers bound once, pool capped at " .. list.maxRows)
+end)()
 
 print("\nALL HARNESS CHECKS PASSED")
 
