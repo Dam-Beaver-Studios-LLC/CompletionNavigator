@@ -19,6 +19,19 @@ local ADDON_NAME, CN = ...
 -- WEIGHTS
 ------------------------------------------------------------
 
+-- A WEIGHT WITH NO PRODUCER IS A LIE IN THE FORMULA.
+--
+-- `difficultyCost` and `dependencyCost` were declared here, summed in
+-- ScoreObjective, listed in this file's header formula and printed by
+-- `/cn order` -- and nothing in the addon has ever set either field on an
+-- objective. They contributed exactly zero to every score ever computed,
+-- while making the documented formula longer and the explanation of the
+-- ranking less true. Removed in 0.48.0.
+--
+-- `estimatedTime` was in the same state, but with a difference: `/cn mode
+-- fastest` advertises it as one of its two levers, so leaving it inert made
+-- the mode half a feature. It now has a producer -- see the decorator below
+-- -- and stays.
 CN.scoreWeights = {
     completionValue     = 1.0,
     unlockValue         = 1.5,
@@ -28,8 +41,6 @@ CN.scoreWeights = {
     characterSuitability = 1.0,
     travelCost          = -1.0,
     estimatedTime       = -0.5,
-    difficultyCost      = -0.5,
-    dependencyCost      = -1.0,
 }
 
 -- An objective with no known coordinates costs nothing to travel to, which
@@ -117,7 +128,6 @@ CN.priorityProfiles = {
     professions  = { types = { PROFESSION = 2.0, RECIPE = 1.5 } },
     recipes      = { types = { RECIPE = 2.0 } },
     collections  = { types = { PET = 1.5, MOUNT = 1.5, TOY = 1.5, APPEARANCE = 1.5 } },
-    legacy       = {},
 }
 
 -- MODES.
@@ -246,7 +256,10 @@ function CN.ScoreObjective(objective)
     if objective.expiresIn then
         score = score + CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight
     end
-    score = score + (objective.nearbyBonus          or 0) * w.nearbyBonus
+    -- `objective.nearbyBonus` used to be summed here as a term of its own.
+    -- Nothing ever set it. The WEIGHT is live -- it scales the batch bonus
+    -- just below -- but the field was a third dead input alongside
+    -- difficultyCost and dependencyCost.
 
     -- Everything else at the same place makes this stop worth more.
     if objective.hubSize and objective.hubSize > 1 then
@@ -257,8 +270,6 @@ function CN.ScoreObjective(objective)
     score = score + (objective.characterSuitability or 0) * w.characterSuitability
     score = score + travel                                * w.travelCost
     score = score + (objective.estimatedTime        or 0) * w.estimatedTime
-    score = score + (objective.difficultyCost       or 0) * w.difficultyCost
-    score = score + (objective.dependencyCost       or 0) * w.dependencyCost
 
     if profile.types and objective.type and profile.types[objective.type] then
         score = score * profile.types[objective.type]
@@ -444,6 +455,14 @@ CN.providerTimings = CN.providerTimings or {}
 -- /cn perf, because a cap nobody can see reads as "that is everything".
 CN.providerTruncation = CN.providerTruncation or {}
 
+-- Readable from outside, because "did this event actually invalidate the
+-- provider that asked for it" is the property that matters and nothing could
+-- ask it. Nine declared-but-unwired events survived four releases behind that
+-- gap.
+function CN.ProviderState(name)
+    return providerCache[name]
+end
+
 local function Entry(name)
     local entry = providerCache[name]
 
@@ -506,31 +525,71 @@ function CN.InvalidateProvider(name, urgent)
     end
 end
 
--- Anything that can change what is actionable. Which providers each event
--- reaches is declared by the providers themselves.
-for _, event in ipairs({
-    "QUEST_ACCEPTED",
-    "QUEST_TURNED_IN",
-    "QUEST_REMOVED",
-    "QUEST_LOG_UPDATE",
-    "ACHIEVEMENT_EARNED",
-    "CRITERIA_UPDATE",
-    "UPDATE_FACTION",
-    "NEW_PET_ADDED",
-    "NEW_MOUNT_ADDED",
-    "NEW_TOY_ADDED",
-    "CURRENCY_DISPLAY_UPDATE",
-    "VIGNETTE_MINIMAP_UPDATED",
-    "VIGNETTES_UPDATED",
+-- Anything that can change what is actionable.
+--
+-- SUBSCRIBED FROM WHAT THE PROVIDERS DECLARE, NOT FROM A LIST HERE.
+--
+-- This was a hand-written list of seventeen event names, and providers
+-- registered with `events = { ... }` telling the invalidator which of them
+-- they cared about. Two separate lists, one of which nobody was checking
+-- against the other -- so five providers ended up declaring nine events that
+-- nothing ever dispatched.
+--
+-- That is worse than declaring none at all: InvalidateCandidates skips a
+-- provider that HAS an events table and was not named, so Orders and
+-- Inventory, both non-volatile, never refreshed after login at all. A quest
+-- item looted into your bags did not become a candidate. A crafting order you
+-- collected stayed on the list until you reloaded.
+--
+-- The provider's declaration is now the only list. This file no longer has an
+-- opinion about which events matter -- it asks.
+--
+-- Deferred to ADDON_LOADED because Scoring.lua loads long before the modules
+-- that register providers; at the point this file executes, the registry is
+-- empty.
+CN.baseInvalidationEvents = {
+    -- Events that must invalidate EVERYTHING regardless of who declared
+    -- what: the world changed under all of them.
+    "PLAYER_LEVEL_UP",
     "ZONE_CHANGED_NEW_AREA",
-    "MERCHANT_SHOW",
-    "TRADE_SKILL_LIST_UPDATE",
-    "TRANSMOG_COLLECTION_UPDATED",
-}) do
-    CN:RegisterEvent(event, function()
-        CN.InvalidateCandidates(event)
-    end)
+}
+
+function CN.SubscribeToInvalidationEvents()
+    local wanted = {}
+
+    for _, event in ipairs(CN.baseInvalidationEvents) do
+        wanted[event] = true
+    end
+
+    for _, provider in pairs(CN.candidateProviders) do
+        for event in pairs(provider.events or {}) do
+            wanted[event] = true
+        end
+    end
+
+    local subscribed = {}
+
+    for event in pairs(wanted) do
+        table.insert(subscribed, event)
+    end
+
+    -- Sorted so the registration order is the same on every login, which
+    -- matters only for making a bug report reproducible -- but that is
+    -- exactly when it matters.
+    table.sort(subscribed)
+
+    for _, event in ipairs(subscribed) do
+        CN:RegisterEvent(event, function()
+            CN.InvalidateCandidates(event)
+        end)
+    end
+
+    return subscribed
 end
+
+CN:OnInitialize(function()
+    CN.SubscribeToInvalidationEvents()
+end)
 
 -- A different character means different Warband suitability, different
 -- character-scoped reputations and a different recipe book.
@@ -878,8 +937,6 @@ function CN.ExplainScore(objective)
           value = (objective.unlockValue or 0) * w.unlockValue },
         { label = "limited time",
           value = (objective.limitedTimeBonus or 0) * w.limitedTimeBonus },
-        { label = "nearby",
-          value = (objective.nearbyBonus or 0) * w.nearbyBonus },
         { label = "your stated preference",
           value = (objective.userPreference or 0) * w.userPreference },
         { label = "suits this character",
@@ -888,10 +945,6 @@ function CN.ExplainScore(objective)
           value = travel * w.travelCost },
         { label = "how long it takes",
           value = (objective.estimatedTime or 0) * w.estimatedTime },
-        { label = "difficulty",
-          value = (objective.difficultyCost or 0) * w.difficultyCost },
-        { label = "prerequisites",
-          value = (objective.dependencyCost or 0) * w.dependencyCost },
     }
 
     if objective.expiresIn then
@@ -907,6 +960,60 @@ function CN.ExplainScore(objective)
             value = math.min(CN.batchBonusCap,
                 (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus,
         })
+    end
+
+    -- THE TWO STEPS THIS USED TO LEAVE OUT.
+    --
+    -- The comment above this function promises "the same arithmetic
+    -- ScoreObjective does; if the two ever disagree, this is wrong". They
+    -- disagreed. ScoreObjective multiplies the running total by the profile's
+    -- type weighting and then hands it to every registered adjuster; neither
+    -- appeared here. So `/cn mode quests` printed a headline of 6.0 above a
+    -- list of terms summing to 3.0, and any release where the Group or
+    -- Preference adjuster fired did the same in balanced mode.
+    --
+    -- Both are multiplicative on the whole score rather than additive terms,
+    -- so they are shown as what they are: a line saying what the running
+    -- total was multiplied by, and by how much it moved the number.
+    local subtotal = 0
+
+    for _, term in ipairs(terms) do
+        subtotal = subtotal + term.value
+    end
+
+    if profile.types and objective.type and profile.types[objective.type] then
+        local factor = profile.types[objective.type]
+
+        local after = subtotal * factor
+
+        table.insert(terms, {
+            label = string.format("%s focus (everything above x%.2f)",
+                mode, factor),
+            value = after - subtotal,
+        })
+
+        subtotal = after
+    end
+
+    for index = 1, #CN.scoreAdjusterOrder do
+        local name = CN.scoreAdjusterOrder[index]
+
+        local adjuster = CN.scoreAdjusters[name]
+
+        if adjuster then
+            local adjusted = adjuster(objective, subtotal)
+
+            if type(adjusted) == "number" then
+                if math.abs(adjusted - subtotal) > 0.0005 then
+                    table.insert(terms, {
+                        label = name .. " adjustment",
+                        value = adjusted - subtotal,
+                    })
+                end
+
+                subtotal = adjusted
+            end
+        end
     end
 
     local kept = {}

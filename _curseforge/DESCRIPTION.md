@@ -53,6 +53,8 @@ A journey it cannot model â€” another continent, reached by a portal â€�
 
 Levelling, collecting, reputation, achievements, professions, everything. A focus sets the weighting **and** what is shown together, because "I'm levelling tonight" means both *prefer quests* and *stop showing me pets*.
 
+`/cn mode fastest` is the one that is not about a subject: it weights travel and **how long the thing itself usually takes you**, measured from your own play. A kind of objective it has never timed still contributes nothing rather than a guessed duration.
+
 `/cn mode off` restores exactly what you had before â€” including anything you had hidden yourself.
 
 ## Track the long campaign
@@ -72,6 +74,7 @@ A quest is not one place. It is a **pick up**, a **do**, and a **turn in** â€
 
 - Objectives within about seventy yards collapse into a single **stop**.
 - The route is solved stop to stop, then improved with a second pass to cut out doubling back.
+- Distances are measured in **yards**, using the zone's real dimensions. A map's coordinates run 0 to 1 on both axes however the zone is actually shaped, so in a zone twice as wide as it is tall, ordering stops by raw coordinates puts them in the wrong order â€” and then optimises the wrong order confidently.
 - Within a stop, things are ordered the way you would do them: collect the quests, do the work, hand them back.
 - Work that batches with other work **scores higher**, so the recommendation agrees with the route instead of sending you across the zone for one quest.
 
@@ -240,7 +243,7 @@ Another continent is costable now too, where a teleport you know lands on the ri
 /cn order
 ```
 
-Every term in the score for the top few, biggest first, adding up to the number shown. `/cn why` explains one objective; this explains the ranking â€” including why the thing you expected to see at the top is not.
+Every term in the score for the top few, biggest first, adding up to the number shown â€” including the focus you set and any adjustment the addon made for itself, which are multipliers on the whole rather than terms of their own and are shown as what they did to the total. `/cn why` explains one objective; this explains the ranking â€” including why the thing you expected to see at the top is not.
 
 ```
 /cn urgency

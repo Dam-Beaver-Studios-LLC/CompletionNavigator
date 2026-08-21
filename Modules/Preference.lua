@@ -192,11 +192,6 @@ local function CacheKey()
         .. tostring(Preference.observationGeneration)
 end
 
-function Preference.ForgetMultipliers()
-    multiplierCache = {}
-    multiplierKey   = nil
-end
-
 ------------------------------------------------------------
 -- OBSERVING
 ------------------------------------------------------------

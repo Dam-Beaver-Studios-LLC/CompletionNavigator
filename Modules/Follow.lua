@@ -75,6 +75,26 @@ Follow.recheckSeconds = 3
 local liveIndex = { generation = -1, keys = nil }
 
 local function LiveKeys()
+    -- COLLECT FIRST, THEN MEMOISE ON WHAT COLLECTING PRODUCED.
+    --
+    -- This read the generation, compared it to the memo, and returned early
+    -- before calling CollectCandidates -- while stamping the memo with the
+    -- generation from BEFORE the collect that followed it. Two things then
+    -- went wrong together.
+    --
+    -- Marking a provider dirty deliberately does not advance the generation:
+    -- only an actual rebuild does, and only CollectCandidates rebuilds. So
+    -- once the stamp converged, this function stopped calling
+    -- CollectCandidates, which meant nothing here ever rebuilt, which meant
+    -- the generation could never advance, which meant the memo stayed valid
+    -- forever. Follow mode stopped noticing that a stop was finished and sat
+    -- on it -- unstuck only if something unrelated happened to collect, such
+    -- as the heads-up display's timer, which is off by default.
+    --
+    -- Collecting when nothing is stale costs about two microseconds. Guarding
+    -- it was never worth this.
+    local candidates = CN.CollectCandidates() or {}
+
     local generation = 0
 
     if CN.GetCandidateCacheState then
@@ -91,7 +111,7 @@ local function LiveKeys()
 
     local keys = {}
 
-    for _, candidate in ipairs(CN.CollectCandidates() or {}) do
+    for _, candidate in ipairs(candidates) do
         keys[tostring(candidate.type) .. ":" .. tostring(candidate.id)] = true
     end
 

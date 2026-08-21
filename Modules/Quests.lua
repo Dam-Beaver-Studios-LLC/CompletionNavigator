@@ -916,10 +916,6 @@ function Quests.SetLocation(questID, mapID, x, y)
     return true
 end
 
-function Quests.ClearLocation(questID)
-    Overrides()[questID] = nil
-end
-
 -- Live client data first, then the player's own override, then curated
 -- static data. Live wins because it tracks the quest's *current* step.
 function Quests.GetLocation(questID)

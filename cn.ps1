@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.47.0'
+$script:ToolkitVersion = '0.48.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.47.0"
+CN.version     = "0.48.0"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -1350,7 +1350,6 @@ CN.priorityModes = {
     "professions",
     "recipes",
     "collections",
-    "legacy",
 }
 
 ------------------------------------------------------------
@@ -3493,6 +3492,19 @@ local ADDON_NAME, CN = ...
 -- WEIGHTS
 ------------------------------------------------------------
 
+-- A WEIGHT WITH NO PRODUCER IS A LIE IN THE FORMULA.
+--
+-- `difficultyCost` and `dependencyCost` were declared here, summed in
+-- ScoreObjective, listed in this file's header formula and printed by
+-- `/cn order` -- and nothing in the addon has ever set either field on an
+-- objective. They contributed exactly zero to every score ever computed,
+-- while making the documented formula longer and the explanation of the
+-- ranking less true. Removed in 0.48.0.
+--
+-- `estimatedTime` was in the same state, but with a difference: `/cn mode
+-- fastest` advertises it as one of its two levers, so leaving it inert made
+-- the mode half a feature. It now has a producer -- see the decorator below
+-- -- and stays.
 CN.scoreWeights = {
     completionValue     = 1.0,
     unlockValue         = 1.5,
@@ -3502,8 +3514,6 @@ CN.scoreWeights = {
     characterSuitability = 1.0,
     travelCost          = -1.0,
     estimatedTime       = -0.5,
-    difficultyCost      = -0.5,
-    dependencyCost      = -1.0,
 }
 
 -- An objective with no known coordinates costs nothing to travel to, which
@@ -3591,7 +3601,6 @@ CN.priorityProfiles = {
     professions  = { types = { PROFESSION = 2.0, RECIPE = 1.5 } },
     recipes      = { types = { RECIPE = 2.0 } },
     collections  = { types = { PET = 1.5, MOUNT = 1.5, TOY = 1.5, APPEARANCE = 1.5 } },
-    legacy       = {},
 }
 
 -- MODES.
@@ -3720,7 +3729,10 @@ function CN.ScoreObjective(objective)
     if objective.expiresIn then
         score = score + CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight
     end
-    score = score + (objective.nearbyBonus          or 0) * w.nearbyBonus
+    -- `objective.nearbyBonus` used to be summed here as a term of its own.
+    -- Nothing ever set it. The WEIGHT is live -- it scales the batch bonus
+    -- just below -- but the field was a third dead input alongside
+    -- difficultyCost and dependencyCost.
 
     -- Everything else at the same place makes this stop worth more.
     if objective.hubSize and objective.hubSize > 1 then
@@ -3731,8 +3743,6 @@ function CN.ScoreObjective(objective)
     score = score + (objective.characterSuitability or 0) * w.characterSuitability
     score = score + travel                                * w.travelCost
     score = score + (objective.estimatedTime        or 0) * w.estimatedTime
-    score = score + (objective.difficultyCost       or 0) * w.difficultyCost
-    score = score + (objective.dependencyCost       or 0) * w.dependencyCost
 
     if profile.types and objective.type and profile.types[objective.type] then
         score = score * profile.types[objective.type]
@@ -3918,6 +3928,14 @@ CN.providerTimings = CN.providerTimings or {}
 -- /cn perf, because a cap nobody can see reads as "that is everything".
 CN.providerTruncation = CN.providerTruncation or {}
 
+-- Readable from outside, because "did this event actually invalidate the
+-- provider that asked for it" is the property that matters and nothing could
+-- ask it. Nine declared-but-unwired events survived four releases behind that
+-- gap.
+function CN.ProviderState(name)
+    return providerCache[name]
+end
+
 local function Entry(name)
     local entry = providerCache[name]
 
@@ -3980,31 +3998,71 @@ function CN.InvalidateProvider(name, urgent)
     end
 end
 
--- Anything that can change what is actionable. Which providers each event
--- reaches is declared by the providers themselves.
-for _, event in ipairs({
-    "QUEST_ACCEPTED",
-    "QUEST_TURNED_IN",
-    "QUEST_REMOVED",
-    "QUEST_LOG_UPDATE",
-    "ACHIEVEMENT_EARNED",
-    "CRITERIA_UPDATE",
-    "UPDATE_FACTION",
-    "NEW_PET_ADDED",
-    "NEW_MOUNT_ADDED",
-    "NEW_TOY_ADDED",
-    "CURRENCY_DISPLAY_UPDATE",
-    "VIGNETTE_MINIMAP_UPDATED",
-    "VIGNETTES_UPDATED",
+-- Anything that can change what is actionable.
+--
+-- SUBSCRIBED FROM WHAT THE PROVIDERS DECLARE, NOT FROM A LIST HERE.
+--
+-- This was a hand-written list of seventeen event names, and providers
+-- registered with `events = { ... }` telling the invalidator which of them
+-- they cared about. Two separate lists, one of which nobody was checking
+-- against the other -- so five providers ended up declaring nine events that
+-- nothing ever dispatched.
+--
+-- That is worse than declaring none at all: InvalidateCandidates skips a
+-- provider that HAS an events table and was not named, so Orders and
+-- Inventory, both non-volatile, never refreshed after login at all. A quest
+-- item looted into your bags did not become a candidate. A crafting order you
+-- collected stayed on the list until you reloaded.
+--
+-- The provider's declaration is now the only list. This file no longer has an
+-- opinion about which events matter -- it asks.
+--
+-- Deferred to ADDON_LOADED because Scoring.lua loads long before the modules
+-- that register providers; at the point this file executes, the registry is
+-- empty.
+CN.baseInvalidationEvents = {
+    -- Events that must invalidate EVERYTHING regardless of who declared
+    -- what: the world changed under all of them.
+    "PLAYER_LEVEL_UP",
     "ZONE_CHANGED_NEW_AREA",
-    "MERCHANT_SHOW",
-    "TRADE_SKILL_LIST_UPDATE",
-    "TRANSMOG_COLLECTION_UPDATED",
-}) do
-    CN:RegisterEvent(event, function()
-        CN.InvalidateCandidates(event)
-    end)
+}
+
+function CN.SubscribeToInvalidationEvents()
+    local wanted = {}
+
+    for _, event in ipairs(CN.baseInvalidationEvents) do
+        wanted[event] = true
+    end
+
+    for _, provider in pairs(CN.candidateProviders) do
+        for event in pairs(provider.events or {}) do
+            wanted[event] = true
+        end
+    end
+
+    local subscribed = {}
+
+    for event in pairs(wanted) do
+        table.insert(subscribed, event)
+    end
+
+    -- Sorted so the registration order is the same on every login, which
+    -- matters only for making a bug report reproducible -- but that is
+    -- exactly when it matters.
+    table.sort(subscribed)
+
+    for _, event in ipairs(subscribed) do
+        CN:RegisterEvent(event, function()
+            CN.InvalidateCandidates(event)
+        end)
+    end
+
+    return subscribed
 end
+
+CN:OnInitialize(function()
+    CN.SubscribeToInvalidationEvents()
+end)
 
 -- A different character means different Warband suitability, different
 -- character-scoped reputations and a different recipe book.
@@ -4352,8 +4410,6 @@ function CN.ExplainScore(objective)
           value = (objective.unlockValue or 0) * w.unlockValue },
         { label = "limited time",
           value = (objective.limitedTimeBonus or 0) * w.limitedTimeBonus },
-        { label = "nearby",
-          value = (objective.nearbyBonus or 0) * w.nearbyBonus },
         { label = "your stated preference",
           value = (objective.userPreference or 0) * w.userPreference },
         { label = "suits this character",
@@ -4362,10 +4418,6 @@ function CN.ExplainScore(objective)
           value = travel * w.travelCost },
         { label = "how long it takes",
           value = (objective.estimatedTime or 0) * w.estimatedTime },
-        { label = "difficulty",
-          value = (objective.difficultyCost or 0) * w.difficultyCost },
-        { label = "prerequisites",
-          value = (objective.dependencyCost or 0) * w.dependencyCost },
     }
 
     if objective.expiresIn then
@@ -4381,6 +4433,60 @@ function CN.ExplainScore(objective)
             value = math.min(CN.batchBonusCap,
                 (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus,
         })
+    end
+
+    -- THE TWO STEPS THIS USED TO LEAVE OUT.
+    --
+    -- The comment above this function promises "the same arithmetic
+    -- ScoreObjective does; if the two ever disagree, this is wrong". They
+    -- disagreed. ScoreObjective multiplies the running total by the profile's
+    -- type weighting and then hands it to every registered adjuster; neither
+    -- appeared here. So `/cn mode quests` printed a headline of 6.0 above a
+    -- list of terms summing to 3.0, and any release where the Group or
+    -- Preference adjuster fired did the same in balanced mode.
+    --
+    -- Both are multiplicative on the whole score rather than additive terms,
+    -- so they are shown as what they are: a line saying what the running
+    -- total was multiplied by, and by how much it moved the number.
+    local subtotal = 0
+
+    for _, term in ipairs(terms) do
+        subtotal = subtotal + term.value
+    end
+
+    if profile.types and objective.type and profile.types[objective.type] then
+        local factor = profile.types[objective.type]
+
+        local after = subtotal * factor
+
+        table.insert(terms, {
+            label = string.format("%s focus (everything above x%.2f)",
+                mode, factor),
+            value = after - subtotal,
+        })
+
+        subtotal = after
+    end
+
+    for index = 1, #CN.scoreAdjusterOrder do
+        local name = CN.scoreAdjusterOrder[index]
+
+        local adjuster = CN.scoreAdjusters[name]
+
+        if adjuster then
+            local adjusted = adjuster(objective, subtotal)
+
+            if type(adjusted) == "number" then
+                if math.abs(adjusted - subtotal) > 0.0005 then
+                    table.insert(terms, {
+                        label = name .. " adjustment",
+                        value = adjusted - subtotal,
+                    })
+                end
+
+                subtotal = adjusted
+            end
+        end
     end
 
     local kept = {}
@@ -4967,14 +5073,56 @@ end
 -- Nearest-neighbour ordering from a starting point. Good enough for a
 -- zone sweep; a proper route solver can replace this later.
 -- Squared distance is enough for comparisons and avoids a sqrt per pair.
+--
+-- IN YARDS, NOT IN MAP UNITS.
+--
+-- Map coordinates run 0 to 1 on both axes whatever the zone's real shape, and
+-- zones are not square -- 3000 by 1500 yards is ordinary. Every routing
+-- decision in this file was made on the raw normalized numbers, so a stop
+-- 0.10 east (300 yards away in such a zone) compared as further off than one
+-- 0.11 north (165 yards away), and the route visited them in the wrong order.
+-- The 2-opt pass then optimised against the same distorted metric, so it
+-- confidently improved a distance that was not the distance.
+--
+-- This is the SAME defect as the bearing bug of 0.40.0, in the same addon,
+-- eight releases later: the assumption that a map is square. Navigation
+-- measures the real spans and this file was the last place still ignoring
+-- them -- while, forty lines above, CN.ObjectiveDistanceYards in this very
+-- file converts properly. Clustering and routing disagreed with each other.
+--
+-- The scale is resolved once per route rather than per comparison: it is a
+-- property of the map being routed, and asking the client per pair would be
+-- thousands of calls for one answer.
+local routeScaleX, routeScaleY = 1, 1
+
+local function UseMapScale(mapID)
+    routeScaleX, routeScaleY = 1, 1
+
+    local navigation = CN:GetModule("Navigation")
+
+    if mapID and navigation and navigation.MapScale then
+        local ok, scaleX, scaleY = pcall(navigation.MapScale, mapID)
+
+        if ok and type(scaleX) == "number" and type(scaleY) == "number"
+            and scaleX > 0 and scaleY > 0 then
+
+            routeScaleX, routeScaleY = scaleX, scaleY
+        end
+    end
+
+    return routeScaleX, routeScaleY
+end
+
+CN.UseRouteMapScale = UseMapScale
+
 local function Distance2(ax, ay, bx, by)
-    local dx = (ax or 0.5) - (bx or 0.5)
-    local dy = (ay or 0.5) - (by or 0.5)
+    local dx = ((ax or 0.5) - (bx or 0.5)) * routeScaleX
+    local dy = ((ay or 0.5) - (by or 0.5)) * routeScaleY
 
     return (dx * dx) + (dy * dy)
 end
 
--- Total length of a route starting from the player.
+-- Total length of a route starting from the player, in yards.
 local function RouteLength(route, startX, startY)
     local total = 0
 
@@ -5062,9 +5210,13 @@ function CN.OrderByProximity(objectives, startX, startY)
         local bestIndex, bestDistance
 
         for index, objective in ipairs(remaining) do
-            local dx = (objective.x or 0.5) - currentX
-            local dy = (objective.y or 0.5) - currentY
-            local distance = (dx * dx) + (dy * dy)
+            -- Through Distance2, which applies the map's real shape. This
+            -- loop had its own inlined copy of the same arithmetic, so
+            -- correcting the shared helper would have left the nearest-
+            -- neighbour ordering -- the thing that actually picks the order
+            -- -- still comparing raw map units.
+            local distance = Distance2(objective.x, objective.y,
+                currentX, currentY)
 
             if not bestDistance or distance < bestDistance then
                 bestDistance = distance
@@ -5092,6 +5244,22 @@ end
 -- zone conceptually but have no coordinates to route to.
 function CN.BuildZoneRoute(mapID, startX, startY)
     local candidates = CN.CollectCandidates()
+
+    -- LAST ZONE'S BATCHING IS NOT THIS ZONE'S.
+    --
+    -- `hub` and `hubSize` are stamped onto live candidate objects at the end
+    -- of this function and were never cleared, so an objective routed once
+    -- carried its batch bonus for the rest of the session -- including while
+    -- a different zone was being routed, and including in the ranked list,
+    -- which is not about zones at all.
+    for _, objective in ipairs(candidates) do
+        objective.hub     = nil
+        objective.hubSize = nil
+    end
+
+    -- Every distance below is now in yards, which means knowing how many
+    -- yards a map unit is worth in THIS zone.
+    UseMapScale(mapID)
 
     local located, skipped = {}, {}
 
@@ -5149,6 +5317,20 @@ function CN.BuildZoneRoute(mapID, startX, startY)
 
     CN.currentRoute = route
     CN.currentHubs  = orderedHubs
+
+    -- ROUTING CHANGES THE SCORES, SO THE RANKING MUST BE REBUILT.
+    --
+    -- `hubSize` is written onto live candidate objects here, and the scorer
+    -- turns it into a batch bonus -- but this ran AFTER the ranked list had
+    -- already been built and cached, and bumped nothing. So `/cn next` went
+    -- on serving pre-bonus scores while `/cn zone` showed the hubs that were
+    -- supposed to have produced them: two commands, contradicting each other,
+    -- about the same objectives.
+    --
+    -- Worse in the other direction: routing one zone left every objective in
+    -- it carrying a hubSize forever, so routing a second zone scored the
+    -- first zone's objectives as though they were still batched.
+    CN.InvalidateRanking()
 
     return route, skipped, orderedHubs
 end
@@ -12866,10 +13048,6 @@ function Quests.SetLocation(questID, mapID, x, y)
     return true
 end
 
-function Quests.ClearLocation(questID)
-    Overrides()[questID] = nil
-end
-
 -- Live client data first, then the player's own override, then curated
 -- static data. Live wins because it tracks the quest's *current* step.
 function Quests.GetLocation(questID)
@@ -16954,7 +17132,15 @@ function Harvest.Summary()
         if record.name then counts.named = counts.named + 1 end
         if record.x and record.y then counts.located = counts.located + 1 end
         if record.requires then counts.withRequires = counts.withRequires + 1 end
-        if record.maybeRequires then counts.withGuesses = counts.withGuesses + 1 end
+        -- `record.observed`, not `record.maybeRequires`. The old field was
+        -- deleted by database migration 3 and nothing has written it since,
+        -- so this counter reported zero guesses on every database in
+        -- existence -- including every database that was full of them. The
+        -- reader outlived the field by four schema versions because nothing
+        -- ever asserted on the number it produced.
+        if record.observed and next(record.observed) then
+            counts.withGuesses = counts.withGuesses + 1
+        end
     end
 
     return counts
@@ -18082,22 +18268,6 @@ function Rares.Record(vignette)
     store[vignette.vignetteID] = record
 
     return existing == nil
-end
-
-function Rares.Sweep()
-    local mapID = select(1, CN.GetPlayerPosition())
-
-    local seen, new = 0, 0
-
-    for _, vignette in ipairs(Rares.GetActive(mapID)) do
-        if Rares.Record(vignette) then
-            new = new + 1
-        end
-
-        seen = seen + 1
-    end
-
-    return seen, new
 end
 
 ------------------------------------------------------------
@@ -19465,29 +19635,6 @@ Filters.durations = {
     { key = "reset",   label = "Until reset",   seconds = nil },  -- computed
     { key = "forever", label = "Until I undo it", seconds = math.huge },
 }
-
-function Filters.SecondsFor(key)
-    for _, duration in ipairs(Filters.durations) do
-        if duration.key == key then
-            if duration.key == "reset" then
-                local opportunities = CN:GetModule("Opportunities")
-
-                if opportunities then
-                    local resets = opportunities.GetResets()
-
-                    -- Weekly if it is sooner than a week away, else daily.
-                    return resets.weekly or resets.daily or DAY
-                end
-
-                return DAY
-            end
-
-            return duration.seconds
-        end
-    end
-
-    return nil
-end
 
 ------------------------------------------------------------
 -- TYPE FILTERING
@@ -22654,8 +22801,18 @@ function Chase.Fraction(chain)
     return fraction
 end
 
--- Every goal, chained, with the least-finished first: the thing you are
--- furthest from is the thing most in need of a plan.
+-- Every goal, chained, with the NEAREST-FINISHED first.
+--
+-- The header used to say the opposite -- "least-finished first: the thing you
+-- are furthest from is the thing most in need of a plan" -- while the
+-- comparator eight lines below, and its own inline comment, did and described
+-- the reverse. Two comments in one function, disagreeing.
+--
+-- The code is right and the header was wrong. Everything else in this addon
+-- ranks the nearly-finished thing above the barely-begun one: a set two
+-- pieces short, a quest three kills from done, a lockout part-way through.
+-- A goal you are eighty percent through is the one worth an evening; one you
+-- have not started is a decision, not a next action.
 function Chase.All()
     local goals = CN:GetModule("Goals")
 
@@ -22742,8 +22899,10 @@ end
 --
 -- RULES, WHICH ARE THE SAME RULES AS EVERYWHERE ELSE IN THIS ADDON.
 --
---   * A step whose type has never been timed contributes nothing and is
---     COUNTED as unknown. It is not filled in with an average of other types.
+--   * A step whose type has never been timed is COUNTED as unknown, reported
+--     as such, and charged at the average of the steps that have been timed
+--     -- because it still has to happen, and pretending it is free would
+--     understate the chain rather than widen the range.
 --   * The result is a RANGE, not a figure. Anybody who has played knows that
 --     "four hours" is a claim nobody can make; "three to six hours" is one
 --     the data actually supports.
@@ -22877,6 +23036,13 @@ function Chase.Estimate(chain)
     -- Steps that have never been timed still have to happen. Charging them at
     -- the average of the ones that have is the least-wrong option available,
     -- and it widens the range rather than hiding in it.
+    --
+    -- The RULES block at the top of this section used to say the opposite --
+    -- that an untimed step "contributes nothing" -- which would have meant
+    -- quoting four hours for a chain whose second half the addon has simply
+    -- never watched. The guard that makes this honest is the one above: no
+    -- estimate at all is offered unless more steps are timed than are not,
+    -- and the count of untimed ones is reported alongside the number.
     local perStep = seconds / timed
 
     local total = seconds + (unknown * perStep) + travelSeconds
@@ -24108,6 +24274,26 @@ Follow.recheckSeconds = 3
 local liveIndex = { generation = -1, keys = nil }
 
 local function LiveKeys()
+    -- COLLECT FIRST, THEN MEMOISE ON WHAT COLLECTING PRODUCED.
+    --
+    -- This read the generation, compared it to the memo, and returned early
+    -- before calling CollectCandidates -- while stamping the memo with the
+    -- generation from BEFORE the collect that followed it. Two things then
+    -- went wrong together.
+    --
+    -- Marking a provider dirty deliberately does not advance the generation:
+    -- only an actual rebuild does, and only CollectCandidates rebuilds. So
+    -- once the stamp converged, this function stopped calling
+    -- CollectCandidates, which meant nothing here ever rebuilt, which meant
+    -- the generation could never advance, which meant the memo stayed valid
+    -- forever. Follow mode stopped noticing that a stop was finished and sat
+    -- on it -- unstuck only if something unrelated happened to collect, such
+    -- as the heads-up display's timer, which is off by default.
+    --
+    -- Collecting when nothing is stale costs about two microseconds. Guarding
+    -- it was never worth this.
+    local candidates = CN.CollectCandidates() or {}
+
     local generation = 0
 
     if CN.GetCandidateCacheState then
@@ -24124,7 +24310,7 @@ local function LiveKeys()
 
     local keys = {}
 
-    for _, candidate in ipairs(CN.CollectCandidates() or {}) do
+    for _, candidate in ipairs(candidates) do
         keys[tostring(candidate.type) .. ":" .. tostring(candidate.id)] = true
     end
 
@@ -24866,7 +25052,19 @@ function Session.SaveSamples()
         return false
     end
 
-    for _, bucket in ipairs({ "mounted", "onFoot" }) do
+    -- ALL THREE BUCKETS, INCLUDING THE ONE THAT WAS MISSING.
+    --
+    -- `flying` was left out of this list while Persisted() creates it and
+    -- LoadSamples reads it, so measured flight speed survived until logout
+    -- and then vanished. Travel.HasFlying needs five flying samples before it
+    -- will consider a self-flown route at all, so after any reload the addon
+    -- silently went back to costing every journey on the ground -- the
+    -- feature 0.43.0 was built around, off, permanently, for everyone.
+    --
+    -- The suite tested disk-to-memory for all three and memory-to-disk for
+    -- two. A round trip is not tested by testing each half against a
+    -- different fixture.
+    for _, bucket in ipairs({ "mounted", "onFoot", "flying" }) do
         stored[bucket] = {}
 
         for _, value in ipairs(speed.samples[bucket]) do
@@ -25076,7 +25274,45 @@ function Session.Speed(mounted)
         end
     end
 
-    return Session.defaultSpeed, false
+    ------------------------------------------------------------
+-- HOW LONG A THING TAKES, AS A SCORING TERM
+------------------------------------------------------------
+
+-- THE LEVER `/cn mode fastest` HAS ALWAYS ADVERTISED AND NEVER HAD.
+--
+-- `estimatedTime` is a declared scoring weight, summed on every objective,
+-- printed by `/cn order`, and overridden by the `fastest` profile to -1.5 --
+-- and nothing in the addon has ever set the field. So the mode's second lever
+-- did nothing: `/cn mode fastest` was a travel-cost change wearing the name
+-- of something broader.
+--
+-- The data to fill it has been collected since 0.41.0. This is the wiring.
+--
+-- SCALED, NOT RAW. A raw duration in seconds would swamp every other term --
+-- a twenty-minute dungeon would arrive at 1200 against a completion value of
+-- 5. The term is the duration in units of the typical objective, so 1 means
+-- "about as long as things usually take", 3 means "three times as long", and
+-- an objective the addon has never timed contributes nothing rather than a
+-- guess. The addon does not invent a duration it has not watched.
+Session.timeScaleSeconds = 300
+
+function Session.TimeCost(objectiveType)
+    local typical = Session.TypicalSeconds(objectiveType)
+
+    if not typical or typical <= 0 then
+        return nil
+    end
+
+    return typical / Session.timeScaleSeconds
+end
+
+CN.RegisterCandidateDecorator("Session", function(candidates)
+    for _, objective in ipairs(candidates or {}) do
+        objective.estimatedTime = Session.TimeCost(objective.type)
+    end
+end)
+
+return Session.defaultSpeed, false
 end
 
 function Session.SpeedSampleCount(mounted)
@@ -25094,6 +25330,14 @@ function Session.SpeedSampleCount(mounted)
     end
 
     return #(speed.samples[mounted] or {})
+end
+
+-- The in-memory samples themselves. Exposed so that a round trip through
+-- disk can be tested as a round trip -- testing each half against a fixture
+-- the other half never produced is how a bucket that was loaded but never
+-- saved stayed broken for four releases.
+function Session.Samples()
+    return speed.samples
 end
 
 function Session.SpeedBuckets()
@@ -25483,8 +25727,23 @@ function Session.Plan(minutes)
         local seconds, confident, travel, work =
             Session.EstimateHub(hub, currentX, currentY)
 
+        -- STOP AT THE FIRST STOP THAT DOES NOT FIT.
+        --
+        -- This used to `continue` past an overrunning hub and keep testing
+        -- later ones, which is exactly the cherry-picking the comment above
+        -- this function forbids -- and it forbids it for a good reason: the
+        -- route is ordered to minimise walking, so skipping the middle of it
+        -- and taking the far end makes you cross the zone twice to save a
+        -- number on a screen.
+        --
+        -- It was also arithmetically wrong even on its own terms: the skipped
+        -- hub's position was not advanced past, so every later hub's travel
+        -- leg was costed from wherever the last ACCEPTED stop was, which is
+        -- not where the player would be.
         if plan.seconds + seconds > budget and #plan.stops > 0 then
             plan.skipped = plan.skipped + 1
+
+            break
         else
             table.insert(plan.stops, {
                 hub       = hub,
@@ -25503,6 +25762,14 @@ function Session.Plan(minutes)
 
             currentX, currentY = hub.x or currentX, hub.y or currentY
         end
+    end
+
+    -- `skipped` counts the stop that did not fit plus everything behind it,
+    -- because that is what the player is not doing tonight. Counting only the
+    -- one that overran would report "1 skipped" for a route with nine stops
+    -- left in it.
+    if plan.skipped > 0 then
+        plan.skipped = #hubs - #plan.stops
     end
 
     return plan
@@ -29348,14 +29615,6 @@ function Inventory.ScanBank()
     return #items
 end
 
-function Inventory.InBank(itemID)
-    if not itemID then
-        return 0
-    end
-
-    return Inventory.BankStore()[itemID] or 0
-end
-
 CN:RegisterEvent("BAG_UPDATE_DELAYED", function()
     Inventory.Forget()
 end)
@@ -32322,11 +32581,6 @@ end
 local function CacheKey()
     return tostring(CN.rankingGeneration or 0) .. ":"
         .. tostring(Preference.observationGeneration)
-end
-
-function Preference.ForgetMultipliers()
-    multiplierCache = {}
-    multiplierKey   = nil
 end
 
 ------------------------------------------------------------
@@ -35512,7 +35766,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.47.0
+## Version: 0.48.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -35767,6 +36021,93 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.48.0]
+
+A second end-to-end audit, aimed at the parts 0.47.0 did not reach: the
+scorer, the router, the planner and the caches. Twelve findings. Four of them
+were features that had been silently off -- in one case since the release that
+introduced them.
+
+### Fixed
+
+- **Measured flight speed never survived a reload.** The save routine wrote
+  two of the three speed buckets and left out `flying`, while the load routine
+  read all three. Since the travel model requires five flying samples before
+  it will consider a self-flown route at all, every logout turned self-flying
+  back off -- the feature 0.43.0 was built around, off for everyone, for five
+  releases. The suite tested disk-to-memory for all three buckets and
+  memory-to-disk for two, each against a fixture the other half never
+  produced. Testing each half separately is not testing the round trip.
+- **Five providers were subscribed to events nothing dispatched.** Providers
+  declare which events invalidate them; the scorer held a separate
+  hand-written list of the events it actually listened for. Nine declared
+  events were on no such list -- and declaring an unwired event is *worse*
+  than declaring none, because a provider that names events is skipped by any
+  event it did not name. Orders and Inventory therefore never refreshed after
+  login: **a quest-starting item you looted did not become a recommendation,
+  and a crafting order you collected stayed on the list until you reloaded.**
+  The scorer now subscribes to whatever the providers declare. There is one
+  list.
+- **Follow mode could stall on a finished stop.** Its cache of what is still
+  actionable was keyed on a counter that only a rebuild advances -- and the
+  cache returned early *before* triggering the rebuild. Once the two
+  converged, nothing on that path ever rebuilt again, so the counter could
+  never move and the cache never expired. It came unstuck only if some other
+  part of the addon happened to rebuild. The guard was saving about two
+  microseconds.
+- **Routes were ordered as though every zone were square.** Ordering, the
+  2-opt improvement pass and the reported route length all worked on raw map
+  coordinates, which run 0 to 1 on both axes whatever the zone's real shape.
+  In an ordinary 3000-by-1500-yard zone a stop 300 yards east compared as
+  further away than one 165 yards north, and the optimiser then confidently
+  improved a distance that was not the distance. **This is the same
+  square-map assumption as the bearing defect of 0.40.0**, eight releases
+  later, in the last file still making it -- while another function in that
+  very file converted properly, so clustering and routing disagreed with each
+  other.
+- **Routing one zone left every objective in it scored as batched, forever.**
+  The batch bonus is written onto live objectives at the end of a zone route
+  and was never cleared, so it followed them into the ranked list and into
+  every later zone. The ranking cache was not invalidated either, so
+  `/cn next` served scores from before the batching that `/cn zone` was
+  showing: two commands contradicting each other about the same objectives.
+- **`/cn order` did not print the arithmetic `/cn next` had done.** It left
+  out the focus multiplier and every registered adjustment, having promised in
+  its own comment that "if the two ever disagree, this is wrong". In
+  `/cn mode quests` it printed a headline of 6.0 above terms summing to 3.0.
+  The test that was supposed to catch this checked one synthetic objective in
+  the one mode where both omissions happen to be no-ops.
+- **The session planner cherry-picked stops** out of a route ordered to
+  minimise walking -- the thing the comment above it explains at length that
+  it must not do -- and costed the stops after a skipped one from the wrong
+  position. It now stops at the first stop that does not fit, and reports how
+  much of the route is left rather than how many stops overran.
+- **`/cn mode fastest` had only one of its two advertised levers.** The scoring
+  term for how long something takes was declared, summed, printed and
+  overridden by that mode -- and nothing had ever set it. The addon has been
+  measuring how long each kind of objective takes you since 0.41.0; that is
+  now wired to the term, scaled so a value of 1 means "about as long as things
+  usually take", and an objective the addon has never timed still contributes
+  nothing rather than a guess.
+- **Three more scoring inputs that nothing produced** -- difficulty,
+  prerequisites, and a second nearby term -- have been removed. Each was
+  summed on every objective, listed in the documented formula and printed by
+  `/cn order`, and contributed exactly zero to every score the addon has ever
+  computed.
+- **`/cn mode legacy` did nothing.** It was an empty profile, offered in the
+  mode list and accepted by the command, behaviourally identical to balanced.
+- **The harvest summary counted a field that a database migration deletes.**
+  It reported zero inferred prerequisites on every database in existence,
+  including databases full of them -- a reader that outlived its field by four
+  schema versions.
+- **Two contradictory comments in one function**, and a rules block that
+  described the opposite of what the code below it did. In both cases the code
+  was right; the prose has been corrected rather than the behaviour.
+- **Five functions that nothing called** have been deleted, and the count of
+  the rest is now printed and capped, so the number cannot quietly grow. Dead
+  code in this addon has twice turned out to be a missing wire rather than
+  untidiness.
 
 ## [0.47.0]
 
@@ -38611,6 +38952,8 @@ A journey it cannot model — another continent, reached by a portal — still r
 
 Levelling, collecting, reputation, achievements, professions, everything. A focus sets the weighting **and** what is shown together, because "I'm levelling tonight" means both *prefer quests* and *stop showing me pets*.
 
+`/cn mode fastest` is the one that is not about a subject: it weights travel and **how long the thing itself usually takes you**, measured from your own play. A kind of objective it has never timed still contributes nothing rather than a guessed duration.
+
 `/cn mode off` restores exactly what you had before — including anything you had hidden yourself.
 
 ## Track the long campaign
@@ -38630,6 +38973,7 @@ A quest is not one place. It is a **pick up**, a **do**, and a **turn in** — a
 
 - Objectives within about seventy yards collapse into a single **stop**.
 - The route is solved stop to stop, then improved with a second pass to cut out doubling back.
+- Distances are measured in **yards**, using the zone's real dimensions. A map's coordinates run 0 to 1 on both axes however the zone is actually shaped, so in a zone twice as wide as it is tall, ordering stops by raw coordinates puts them in the wrong order — and then optimises the wrong order confidently.
 - Within a stop, things are ordered the way you would do them: collect the quests, do the work, hand them back.
 - Work that batches with other work **scores higher**, so the recommendation agrees with the route instead of sending you across the zone for one quest.
 
@@ -38798,7 +39142,7 @@ Another continent is costable now too, where a teleport you know lands on the ri
 /cn order
 ```
 
-Every term in the score for the top few, biggest first, adding up to the number shown. `/cn why` explains one objective; this explains the ranking — including why the thing you expected to see at the top is not.
+Every term in the score for the top few, biggest first, adding up to the number shown — including the focus you set and any adjustment the addon made for itself, which are multipliers on the whole rather than terms of their own and are shown as what they did to the total. `/cn why` explains one objective; this explains the ranking — including why the thing you expected to see at the top is not.
 
 ```
 /cn urgency
@@ -38986,7 +39330,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.47.0
+0.48.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -39715,6 +40059,59 @@ mutate "Data/ApiSurface.lua" \
     "CN.apiSurface = {" \
     "CN.apiSurface = {} local ignored = {" \
     "the generated API surface is empty"
+
+
+# The 0.48.0 audit. Every one of these was live in a shipped release.
+mutate "Modules/Session.lua" \
+    "    for _, bucket in ipairs({ \"mounted\", \"onFoot\", \"flying\" }) do
+        stored[bucket] = {}" \
+    "    for _, bucket in ipairs({ \"mounted\", \"onFoot\" }) do
+        stored[bucket] = {}" \
+    "measured flying speed is never written to disk"
+
+mutate "Scoring.lua" \
+    "    for _, provider in pairs(CN.candidateProviders) do
+        for event in pairs(provider.events or {}) do
+            wanted[event] = true
+        end
+    end" \
+    "    for _, provider in pairs(CN.candidateProviders) do
+    end" \
+    "providers subscribe to nothing they asked for"
+
+mutate "Modules/Follow.lua" \
+    "    local candidates = CN.CollectCandidates() or {}
+
+    local generation = 0" \
+    "    local candidates = nil
+
+    local generation = 0" \
+    "follow stops collecting and its memo never expires"
+
+mutate "Routing.lua" \
+    "    local dx = ((ax or 0.5) - (bx or 0.5)) * routeScaleX
+    local dy = ((ay or 0.5) - (by or 0.5)) * routeScaleY" \
+    "    local dx = ((ax or 0.5) - (bx or 0.5))
+    local dy = ((ay or 0.5) - (by or 0.5))" \
+    "routing assumes every map is square"
+
+mutate "Routing.lua" \
+    "    for _, objective in ipairs(candidates) do
+        objective.hub     = nil
+        objective.hubSize = nil
+    end" \
+    "    for _, objective in ipairs(candidates) do
+    end" \
+    "last zone's batching survives into this one"
+
+mutate "Modules/Harvest.lua" \
+    "        if record.observed and next(record.observed) then
+            counts.withGuesses = counts.withGuesses + 1
+        end" \
+    "        if record.maybeRequires then
+            counts.withGuesses = counts.withGuesses + 1
+        end" \
+    "the harvest summary counts a field nothing writes"
 
 
 echo
@@ -43283,6 +43680,26 @@ assert(blockedReason == CN.blockReasons.LIKELY_PREREQUISITE,
 assert(tostring(blockedDetail):find("3 characters", 1, true),
     "the explanation must say how many characters showed it, got " .. tostring(blockedDetail))
 
+-- AND THE SUMMARY MUST COUNT WHAT IS ACTUALLY THERE.
+--
+-- `Harvest.Summary` counted `record.maybeRequires`, a field that database
+-- migration 3 deletes and nothing has written since. So `withGuesses`
+-- reported zero on every database in existence, including databases full of
+-- guesses -- a reader that outlived its field by four schema versions,
+-- because nothing ever asserted on the number it produced.
+do
+    local summary = harvestModule.Summary()
+
+    assert(summary.withGuesses >= 1,
+        "a record with three observed orderings on it must count as a guess; "
+        .. "the summary says " .. tostring(summary.withGuesses))
+
+    assert(summary.total >= 1, "and it must be counted at all")
+
+    print("  the summary counts " .. summary.withGuesses
+        .. " record(s) carrying observations")
+end
+
 CN.characterKey = nil
 harvestStore[42002] = nil
 CN.dependencies[CN.ObjectiveKey("QUEST", 42002)] = nil
@@ -44817,33 +45234,97 @@ print("\nFollow, cheaply:")
     -- PERFORMANCE REGRESSION FIXED: a redraw asks three separate questions
     -- and each one used to walk the whole candidate list and build a fresh
     -- set of several thousand keys.
-    local collections = 0
+    --
+    -- COUNTING THE RIGHT THING. This counted calls to CN.CollectCandidates,
+    -- which is itself cached and answers in about two microseconds when
+    -- nothing is stale. Passing it therefore required Follow to avoid CALLING
+    -- a cheap cached function -- and the memo written to satisfy it converged
+    -- on a generation that only collecting could advance, so Follow stopped
+    -- collecting, so the generation never moved, so the memo never expired
+    -- and follow mode sat on a finished stop forever.
+    --
+    -- A test that measures a proxy for work instead of the work is a test
+    -- that can be satisfied by breaking the thing it guards. What matters is
+    -- that the PROVIDERS are not re-walked.
+    local walks = 0
 
-    local realCollect = CN.CollectCandidates
+    local watched = CN.candidateProviders["Goals"]
+        or select(2, next(CN.candidateProviders))
 
-    CN.CollectCandidates = function(...)
-        collections = collections + 1
-        return realCollect(...)
+    assert(watched and watched.fn, "a provider to watch")
+
+    local realFn = watched.fn
+
+    watched.fn = function(...)
+        walks = walks + 1
+        return realFn(...)
     end
 
     follow.Start()
 
-    collections = 0
+    CN.CollectCandidates(true)
+
+    walks = 0
 
     follow.Lines()
     follow.HeaderText()
     follow.IsStopComplete()
     follow.Lines()
 
-    CN.CollectCandidates = realCollect
+    watched.fn = realFn
 
-    assert(collections <= 1,
-        "four questions about the same unchanged state must cost at most one "
-        .. "candidate walk, cost " .. collections)
+    assert(walks == 0,
+        "four questions about the same unchanged state must not re-walk a "
+        .. "single provider, walked " .. walks .. " time(s)")
 
     follow.Stop()
 
-    print("  four redraw queries, " .. collections .. " candidate walk(s)")
+    print("  four redraw queries, " .. walks .. " provider walk(s)")
+
+    ------------------------------------------------------------
+    -- AND THE MEMO MUST EXPIRE WHEN THE WORLD CHANGES.
+    --
+    -- The other half of the same defect, and the half that actually hurt:
+    -- marking a provider dirty deliberately does NOT advance the generation
+    -- -- only a rebuild does. So a memo keyed on the generation, in a
+    -- function that had stopped triggering rebuilds, was valid forever.
+    ------------------------------------------------------------
+    CN.CollectCandidates(true)
+
+    local liveNow = follow.LiveKeys()
+
+    local seen = 0
+
+    for _ in pairs(liveNow) do
+        seen = seen + 1
+    end
+
+    assert(seen > 0, "the live key set must have something in it")
+
+    CN.RegisterCandidateProvider("FollowMemoProbe", function()
+        return {
+            CN.NewObjective({
+                id              = 987654,
+                type            = CN.objectiveTypes.QUEST,
+                name            = "Appeared After The Memo",
+                completionValue = 1,
+            }),
+        }
+    end, { events = { "QUEST_ACCEPTED" } })
+
+    CN.SubscribeToInvalidationEvents()
+
+    fire("QUEST_ACCEPTED")
+
+    assert(follow.LiveKeys()["QUEST:987654"],
+        "something that became actionable must appear in the live key set "
+        .. "without waiting for an unrelated part of the addon to rebuild")
+
+    CN.candidateProviders["FollowMemoProbe"] = nil
+
+    CN.CollectCandidates(true)
+
+    print("  and the memo expires when something new becomes actionable")
 end)()
 
 
@@ -45185,6 +45666,62 @@ print("\nMeasurements survive a reload:")
     assert(safeRate > 0.5 and safeRate < 60,
         "a corrupt sample must not produce an absurd speed, got "
         .. tostring(safeRate))
+
+    ------------------------------------------------------------
+    -- A ROUND TRIP, FOR EVERY BUCKET, THROUGH BOTH HALVES.
+    --
+    -- The two assertions above test disk-to-memory. Another block elsewhere
+    -- tests memory-to-disk. Neither noticed that SaveSamples wrote only two
+    -- of the three buckets, because each half was checked against a fixture
+    -- the other half never produced -- so measured FLIGHT speed survived
+    -- until logout and then vanished, and Travel.HasFlying (which needs five
+    -- flying samples) turned self-flown routing off permanently after any
+    -- reload.
+    --
+    -- Testing each half separately is not testing the round trip.
+    ------------------------------------------------------------
+    local written = {
+        onFoot  = { 6.6, 6.8, 7.0, 7.2, 7.4 },
+        mounted = { 13, 14, 15, 16, 17 },
+        flying  = { 60, 62, 64, 66, 68 },
+    }
+
+    for bucket, values in pairs(written) do
+        session.Samples()[bucket] = {}
+
+        for _, value in ipairs(values) do
+            table.insert(session.Samples()[bucket], value)
+        end
+    end
+
+    session.SaveSamples()
+
+    -- Wipe memory entirely: this is what a reload does.
+    for bucket in pairs(written) do
+        session.Samples()[bucket] = {}
+    end
+
+    session.LoadSamples()
+
+    for bucket, values in pairs(written) do
+        assert(#session.Samples()[bucket] == #values,
+            "the " .. bucket .. " bucket must survive a save and a reload; "
+            .. #session.Samples()[bucket] .. " of " .. #values .. " came back")
+    end
+
+    assert(CN:GetModule("Travel").HasFlying(),
+        "and five measured flying samples must still mean the character "
+        .. "flies after a reload -- which is the whole point of persisting "
+        .. "them")
+
+    for bucket in pairs(written) do
+        session.Samples()[bucket] = {}
+        session.Persisted()[bucket] = {}
+    end
+
+    session.SaveSamples()
+
+    print("  every speed bucket survives a save and a reload")
 
     print("  samples reload and survive corruption")
 end)()
@@ -48654,7 +49191,82 @@ print("\nWhy the list is in this order:")
         string.format("the terms must sum to the score: %.2f vs %.2f",
             total, scored))
 
+    ------------------------------------------------------------
+    -- IN EVERY MODE, AND WITH AN ADJUSTER LIVE.
+    --
+    -- The assertion above ran one synthetic quest in balanced mode, where the
+    -- profile has no type weighting and both registered adjusters happen to
+    -- be no-ops. Under those conditions the explanation summed to the score
+    -- while omitting BOTH multiplicative steps -- so `/cn mode quests`
+    -- printed a headline of 6.0 above terms totalling 3.0, and said in its
+    -- own comment that if the two ever disagreed the explanation was wrong.
+    --
+    -- One case, chosen because it was easy, agreeing with the code for a
+    -- reason that had nothing to do with the property being tested.
+    ------------------------------------------------------------
+    local saved = CN.Settings().priorityMode
+
+    CN.RegisterScoreAdjuster("ExplainProbe", function(candidate, score)
+        if candidate.id == 1 then
+            return score - 0.75
+        end
+
+        return score
+    end)
+
+    local modes = {}
+
+    for name in pairs(CN.priorityProfiles) do
+        table.insert(modes, name)
+    end
+
+    table.sort(modes)
+
+    for _, name in ipairs(modes) do
+        CN.Settings().priorityMode = name
+
+        for _, kind in ipairs({ CN.objectiveTypes.QUEST,
+                                CN.objectiveTypes.PET,
+                                CN.objectiveTypes.REPUTATION }) do
+
+            local probe = CN.NewObjective({
+                id              = 1,
+                type            = kind,
+                name            = "Probe",
+                completionValue = 4,
+                travelCost      = 1,
+                expiresIn       = 3600,
+            })
+
+            local sum = 0
+
+            for _, term in ipairs(CN.ExplainScore(probe)) do
+                sum = sum + term.value
+            end
+
+            local actual = CN.ScoreObjective(probe)
+
+            assert(math.abs(sum - actual) < 0.01,
+                string.format("mode %s, %s: the explanation sums to %.3f "
+                    .. "but the score is %.3f", name, kind, sum, actual))
+        end
+    end
+
+    CN.scoreAdjusters["ExplainProbe"] = nil
+
+    for index, name in ipairs(CN.scoreAdjusterOrder) do
+        if name == "ExplainProbe" then
+            table.remove(CN.scoreAdjusterOrder, index)
+            break
+        end
+    end
+
+    CN.Settings().priorityMode = saved
+
     print("  " .. #terms .. " terms, ordered by weight, summing to the score")
+
+    print("  and they still sum to it in all " .. #modes
+        .. " modes, with an adjuster live")
 end)()
 
 print("\nA plan you can actually start:")
@@ -49338,6 +49950,465 @@ print("\nEvery client function this addon calls, checked against the client:")
 
     print("  " .. #CN.apiSurface .. " client functions listed; the checker "
         .. "agrees with the client in both directions")
+end)()
+
+print("\nCode that nothing calls:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A RATCHET, NOT A PURGE.
+    --
+    -- Every audit of this addon turns up functions that are defined,
+    -- commented, and called by nothing -- `Travel.NoteFlyable` and
+    -- `UI.RestoreFilter` were both in that state, and both were not merely
+    -- untidy but load-bearing: the feature they implemented was simply off.
+    -- Dead code here is a reliable predictor of a missing wire.
+    --
+    -- Some unreferenced functions are legitimate: a registry hook exists to
+    -- be called from outside. So this is not a ban. It counts, names, and
+    -- refuses to let the number grow -- the same shape as the help-group
+    -- check, and for the same reason: a list nobody counts rots.
+    ------------------------------------------------------------
+    local defined, referenced = {}, {}
+
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the .toc must be readable")
+
+    local listed = manifest:read("*a")
+
+    manifest:close()
+
+    local sources = {}
+
+    for line in string.gmatch(listed, "[^\r\n]+") do
+        if string.match(line, "%.lua%s*$") and not string.match(line, "^%s*#") then
+            local relative = CN.Trim(string.gsub(line, "\\", "/"))
+
+            local file = io.open(ROOT .. "/" .. relative, "r")
+
+            if file then
+                sources[relative] = file:read("*a")
+
+                file:close()
+            end
+        end
+    end
+
+    for relative, text in pairs(sources) do
+        for owner, name in string.gmatch(text,
+            "function%s+([A-Za-z_][A-Za-z0-9_]*)%.([A-Za-z_][A-Za-z0-9_]*)") do
+
+            -- CN.* is the addon's published surface: registries, hooks and
+            -- the things commands call by name. Module-local helpers are
+            -- what this is about.
+            if owner ~= "CN" then
+                defined[owner .. "." .. name] = relative
+            end
+        end
+    end
+
+    -- MATCHED ON THE METHOD NAME, NOT ON THE OWNER.
+    --
+    -- Nearly every cross-file call in this addon goes through a local handle
+    -- -- `local errors = CN:GetModule("Errors")` and then `errors.Count()` --
+    -- so matching `Errors.Count` finds only the definition and reports a
+    -- function the UI calls twice as dead. Deliberately conservative in the
+    -- direction of NOT crying wolf: a name-only match can miss a dead
+    -- function that shares a name with a live one, and that is the right
+    -- error to make for a gate that blocks a release.
+    local byName = {}
+
+    for key in pairs(defined) do
+        local name = string.match(key, "%.([A-Za-z0-9_]+)$")
+
+        byName[name] = byName[name] or {}
+
+        table.insert(byName[name], key)
+    end
+
+    for _, text in pairs(sources) do
+        -- `,` and `)` as well as `(` and `=`: this addon passes functions to
+        -- pcall by reference constantly -- `pcall(Travel.NoteBoarding)` -- and
+        -- a pattern that only recognised a call site with a paren after it
+        -- reported those as dead.
+        for name in string.gmatch(text, "[%.:]([A-Za-z_][A-Za-z0-9_]*)%s*[%(=,%)]") do
+            for _, key in ipairs(byName[name] or {}) do
+                referenced[key] = (referenced[key] or 0) + 1
+            end
+        end
+    end
+
+    local orphans = {}
+
+    for key in pairs(defined) do
+        if (referenced[key] or 0) <= 1 then
+            table.insert(orphans, key)
+        end
+    end
+
+    table.sort(orphans)
+
+    for _, key in ipairs(orphans) do
+        print("  never called: " .. key .. "  (" .. defined[key] .. ")")
+    end
+
+    -- The ceiling is where the addon actually is, not where it should be.
+    -- Lower it when something is deleted or wired; the build fails if it
+    -- rises, which is the only property that matters.
+    local CEILING = 20
+
+    assert(#orphans <= CEILING,
+        #orphans .. " module functions are called by nothing, above the "
+        .. "ceiling of " .. CEILING .. ". Wire it or delete it.")
+
+    print("  " .. #orphans .. " of " .. CN.CountKeys(defined)
+        .. " module functions are uncalled, ceiling " .. CEILING)
+end)()
+
+print("\nEvery scoring weight has something that sets it:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A WEIGHT NOBODY PRODUCES IS A LIE IN THE FORMULA.
+    --
+    -- `difficultyCost` and `dependencyCost` were declared, summed on every
+    -- objective, listed in the file header's formula and printed by
+    -- `/cn order` -- and nothing had ever set either field. They contributed
+    -- zero to every score the addon has ever computed while making the
+    -- documented arithmetic longer and less true. `estimatedTime` was in the
+    -- same state, except that `/cn mode fastest` advertises it as one of its
+    -- two levers, so the mode was half a feature.
+    --
+    -- Declaring a weight is a claim that something fills it. This checks the
+    -- claim.
+    ------------------------------------------------------------
+    -- STATICALLY, ACROSS THE SHIPPED SOURCE.
+    --
+    -- Not "does the current fixture happen to set it": several of these are
+    -- filled only when the player has goals pinned, or a Warband, or enough
+    -- measured durations, and a fixture-shaped check would fail for every one
+    -- of them while missing the actual defect. The property is that SOMETHING
+    -- IN THE ADDON assigns the field at all.
+    -- The fields ScoreObjective actually reads off an objective. Kept here
+    -- rather than derived, because deriving it from the source would be a
+    -- second parser to get wrong -- and the assertion below requires every
+    -- one of these names to still appear in Scoring.lua, so the list cannot
+    -- rot silently.
+    local CONSUMED = {
+        "completionValue", "unlockValue", "limitedTimeBonus",
+        "hubSize", "userPreference", "characterSuitability", "travelCost",
+        "estimatedTime", "expiresIn",
+    }
+
+    local produced = {}
+
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the .toc must be readable to scan the source")
+
+    local listed = manifest:read("*a")
+
+    manifest:close()
+
+    local scanned = 0
+
+    for line in string.gmatch(listed, "[^\r\n]+") do
+        if string.match(line, "%.lua%s*$") and not string.match(line, "^%s*#") then
+            local relative = string.gsub(line, "\\", "/")
+
+            local file = io.open(ROOT .. "/" .. CN.Trim(relative), "r")
+
+            if file then
+                local text = file:read("*a")
+
+                file:close()
+
+                scanned = scanned + 1
+
+                -- Scoring.lua CONSUMES these fields and declares the
+                -- weights; it never produces an objective. Counting its own
+                -- weight table as a producer would make every weight look
+                -- filled, which is the failure this check exists to catch.
+                if not string.find(relative, "Scoring%.lua") then
+                    for _, field in ipairs(CONSUMED) do
+                        if string.find(text, "[^%w_]" .. field .. "%s*=") then
+                            produced[field] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    assert(scanned > 50, "the source scan found only " .. scanned .. " files")
+
+    local orphans = {}
+
+    for _, field in ipairs(CONSUMED) do
+        if not produced[field] then
+            table.insert(orphans, field)
+        end
+    end
+
+    table.sort(orphans)
+
+    assert(#orphans == 0,
+        "objective field(s) the scorer reads that nothing in " .. scanned
+        .. " source files ever sets: " .. table.concat(orphans, ", "))
+
+    -- AND THE OTHER DIRECTION: a declared weight that multiplies nothing.
+    local scoring = io.open(ROOT .. "/Scoring.lua", "r")
+
+    assert(scoring, "Scoring.lua must be readable")
+
+    local scoringText = scoring:read("*a")
+
+    scoring:close()
+
+    local unused = {}
+
+    for weight in pairs(CN.scoreWeights) do
+        if not string.find(scoringText, "w%." .. weight) then
+            table.insert(unused, weight)
+        end
+    end
+
+    table.sort(unused)
+
+    assert(#unused == 0,
+        "declared weight(s) the scorer never applies: "
+        .. table.concat(unused, ", "))
+
+    for _, field in ipairs(CONSUMED) do
+        assert(string.find(scoringText, "objective%." .. field),
+            "the consumed-field list names " .. field
+            .. ", which the scorer no longer reads")
+    end
+
+    ------------------------------------------------------------
+    -- AND `fastest` MUST ACTUALLY PREFER THE FASTER THING.
+    ------------------------------------------------------------
+    local session = CN:GetModule("Session")
+
+    assert(session.TimeCost, "the time-cost producer must exist")
+
+    local saved = CN.Settings().priorityMode
+
+    CN.Settings().priorityMode = "fastest"
+
+    local quick = CN.NewObjective({
+        id = 1, type = CN.objectiveTypes.QUEST, name = "Quick",
+        completionValue = 5, travelCost = 1, estimatedTime = 0.5,
+    })
+
+    local slow = CN.NewObjective({
+        id = 2, type = CN.objectiveTypes.QUEST, name = "Slow",
+        completionValue = 5, travelCost = 1, estimatedTime = 6,
+    })
+
+    assert(CN.ScoreObjective(quick) > CN.ScoreObjective(slow),
+        "in fastest mode a quicker objective must outrank an identical "
+        .. "slower one, or the mode's second lever does nothing")
+
+    CN.Settings().priorityMode = saved
+
+    print("  " .. CN.CountKeys(CN.scoreWeights)
+        .. " weights, every one of them produced, and fastest prefers fast")
+end)()
+
+print("\nA route ordered on a map that is not square:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SQUARE-MAP ASSUMPTION, EIGHT RELEASES AFTER THE LAST ONE.
+    --
+    -- 0.40.0 found that every bearing in the game was wrong because the code
+    -- assumed a map is square. Routing.lua was still assuming it: ordering,
+    -- 2-opt and route length all worked on raw 0-to-1 coordinates, so in a
+    -- 3000-by-1500 zone a stop 300 yards east compared as further away than
+    -- one 165 yards north, and the optimiser then improved a distance that
+    -- was not the distance.
+    --
+    -- The route tests that existed used square synthetic coordinates and
+    -- asserted only that the route got shorter under the same distorted
+    -- measure -- which it always does.
+    ------------------------------------------------------------
+    local savedSpan = CN_TEST_MAP_SPAN
+
+    -- Twice as wide as it is tall, which is an ordinary zone.
+    CN_TEST_SetMapSpan({ 3000, 1500 })
+
+    CN.UseRouteMapScale(94)
+
+    -- East 0.10 of the map is 300 yards. North 0.11 is 165. The nearer stop
+    -- in yards is the one that is further away in map units.
+    local east  = { x = 0.60, y = 0.50, name = "east" }
+    local north = { x = 0.50, y = 0.39, name = "north" }
+
+    local ordered = CN.OrderByProximity({ east, north }, 0.50, 0.50)
+
+    assert(ordered[1].name == "north",
+        "the nearer stop in YARDS must be visited first; the route went to "
+        .. tostring(ordered[1].name) .. " first")
+
+    -- And the reported length must be yards, not map units: two stops at
+    -- 165 and then a leg across to the east one.
+    local length = CN.RouteLength(ordered, 0.50, 0.50)
+
+    assert(length > 100,
+        "a route length in yards across a 3000-yard zone cannot be "
+        .. string.format("%.3f", length) .. " -- that is map units")
+
+    CN.UseRouteMapScale(nil)
+
+    CN_TEST_SetMapSpan(savedSpan)
+
+    print(string.format("  ordered by real distance, %.0f yards of walking",
+        length))
+end)()
+
+print("\nRouting one zone does not score another one as batched:")
+
+;(function()
+    ------------------------------------------------------------
+    -- HUB STATE IS WRITTEN ONTO LIVE CANDIDATES AND WAS NEVER CLEARED.
+    --
+    -- `hub` and `hubSize` are stamped onto candidate objects at the end of
+    -- BuildZoneRoute, and the scorer turns hubSize into a batch bonus. Two
+    -- things followed: an objective routed once carried its bonus for the
+    -- rest of the session, including while a different zone was routed and
+    -- including in the ranked list -- which is not about zones at all; and
+    -- the ranking cache was not invalidated, so `/cn next` served pre-bonus
+    -- scores while `/cn zone` showed the hubs that produced them.
+    ------------------------------------------------------------
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    -- Two things at the same spot, which is what a hub is.
+    CN.RegisterCandidateProvider("HubProbe", function()
+        local rows = {}
+
+        for index = 1, 2 do
+            table.insert(rows, CN.NewObjective({
+                id              = 555000 + index,
+                type            = CN.objectiveTypes.RARE,
+                name            = "Together " .. index,
+                completionValue = 3,
+                mapID           = mapID,
+                x               = 0.35,
+                y               = 0.60,
+            }))
+        end
+
+        return rows
+    end)
+
+    CN.CollectCandidates(true)
+
+    CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+
+    local batched = 0
+
+    for _, objective in ipairs(CN.CollectCandidates()) do
+        if objective.hubSize and objective.hubSize > 1 then
+            batched = batched + 1
+        end
+    end
+
+    assert(batched > 0,
+        "the fixture must produce at least one hub with company in it, or "
+        .. "this proves nothing")
+
+    -- A different map. Nothing in THIS zone may still look batched.
+    CN.BuildZoneRoute(99999, 0.5, 0.5)
+
+    for _, objective in ipairs(CN.CollectCandidates()) do
+        assert(objective.hubSize == nil,
+            "routing a different zone must clear the last one's batching; "
+            .. tostring(objective.name) .. " still carries hubSize "
+            .. tostring(objective.hubSize))
+    end
+
+    CN.candidateProviders["HubProbe"] = nil
+
+    CN.CollectCandidates(true)
+
+    print("  " .. batched .. " batched stop(s), and none of them survive "
+        .. "routing elsewhere")
+end)()
+
+print("\nEvery event a provider asks for is an event something dispatches:")
+
+;(function()
+    ------------------------------------------------------------
+    -- TWO LISTS, ONE OF WHICH NOBODY CHECKED AGAINST THE OTHER.
+    --
+    -- Providers declare `events = { ... }` to say what invalidates them, and
+    -- Scoring.lua held a separate hand-written list of the events it actually
+    -- subscribed to. Nine declared events appeared on no such list, and
+    -- because InvalidateCandidates SKIPS a provider that has an events table
+    -- and was not named, declaring an unwired event was strictly worse than
+    -- declaring nothing: Orders and Inventory never refreshed after login.
+    --
+    -- Scoring now subscribes to whatever the providers declare, so the two
+    -- lists cannot disagree. This asserts that they do not.
+    ------------------------------------------------------------
+    local declared = {}
+
+    for name, provider in pairs(CN.candidateProviders) do
+        for event in pairs(provider.events or {}) do
+            declared[event] = declared[event] or name
+        end
+    end
+
+    local orphaned = {}
+
+    for event, provider in pairs(declared) do
+        if not CN.eventTable[event] then
+            table.insert(orphaned, event .. " (" .. provider .. ")")
+        end
+    end
+
+    table.sort(orphaned)
+
+    for _, entry in ipairs(orphaned) do
+        print("  NOBODY DISPATCHES: " .. entry)
+    end
+
+    assert(#orphaned == 0,
+        #orphaned .. " provider event(s) are declared and never dispatched: "
+        .. table.concat(orphaned, ", "))
+
+    local declaredCount = 0
+
+    for _ in pairs(declared) do
+        declaredCount = declaredCount + 1
+    end
+
+    ------------------------------------------------------------
+    -- AND EVERY ONE OF THEM MUST ACTUALLY MARK ITS PROVIDER DIRTY.
+    --
+    -- Subscribing is not the property that matters; invalidating is. A
+    -- handler registered against the wrong function would satisfy the check
+    -- above and change nothing.
+    ------------------------------------------------------------
+    for event, name in pairs(declared) do
+        CN.CollectCandidates(true)
+
+        local state = CN.ProviderState(name)
+
+        assert(state and state.dirty ~= true,
+            "a forced rebuild must leave " .. name .. " clean")
+
+        fire(event)
+
+        assert(CN.ProviderState(name).dirty == true,
+            event .. " must invalidate " .. name .. ", the provider that "
+            .. "declared it")
+    end
+
+    print("  " .. declaredCount .. " declared events, every one of them dispatched "
+        .. "and every one marking its provider dirty")
 end)()
 
 print("\nEvery event this addon registers is an event:")

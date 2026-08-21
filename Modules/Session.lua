@@ -179,7 +179,19 @@ function Session.SaveSamples()
         return false
     end
 
-    for _, bucket in ipairs({ "mounted", "onFoot" }) do
+    -- ALL THREE BUCKETS, INCLUDING THE ONE THAT WAS MISSING.
+    --
+    -- `flying` was left out of this list while Persisted() creates it and
+    -- LoadSamples reads it, so measured flight speed survived until logout
+    -- and then vanished. Travel.HasFlying needs five flying samples before it
+    -- will consider a self-flown route at all, so after any reload the addon
+    -- silently went back to costing every journey on the ground -- the
+    -- feature 0.43.0 was built around, off, permanently, for everyone.
+    --
+    -- The suite tested disk-to-memory for all three and memory-to-disk for
+    -- two. A round trip is not tested by testing each half against a
+    -- different fixture.
+    for _, bucket in ipairs({ "mounted", "onFoot", "flying" }) do
         stored[bucket] = {}
 
         for _, value in ipairs(speed.samples[bucket]) do
@@ -389,7 +401,45 @@ function Session.Speed(mounted)
         end
     end
 
-    return Session.defaultSpeed, false
+    ------------------------------------------------------------
+-- HOW LONG A THING TAKES, AS A SCORING TERM
+------------------------------------------------------------
+
+-- THE LEVER `/cn mode fastest` HAS ALWAYS ADVERTISED AND NEVER HAD.
+--
+-- `estimatedTime` is a declared scoring weight, summed on every objective,
+-- printed by `/cn order`, and overridden by the `fastest` profile to -1.5 --
+-- and nothing in the addon has ever set the field. So the mode's second lever
+-- did nothing: `/cn mode fastest` was a travel-cost change wearing the name
+-- of something broader.
+--
+-- The data to fill it has been collected since 0.41.0. This is the wiring.
+--
+-- SCALED, NOT RAW. A raw duration in seconds would swamp every other term --
+-- a twenty-minute dungeon would arrive at 1200 against a completion value of
+-- 5. The term is the duration in units of the typical objective, so 1 means
+-- "about as long as things usually take", 3 means "three times as long", and
+-- an objective the addon has never timed contributes nothing rather than a
+-- guess. The addon does not invent a duration it has not watched.
+Session.timeScaleSeconds = 300
+
+function Session.TimeCost(objectiveType)
+    local typical = Session.TypicalSeconds(objectiveType)
+
+    if not typical or typical <= 0 then
+        return nil
+    end
+
+    return typical / Session.timeScaleSeconds
+end
+
+CN.RegisterCandidateDecorator("Session", function(candidates)
+    for _, objective in ipairs(candidates or {}) do
+        objective.estimatedTime = Session.TimeCost(objective.type)
+    end
+end)
+
+return Session.defaultSpeed, false
 end
 
 function Session.SpeedSampleCount(mounted)
@@ -407,6 +457,14 @@ function Session.SpeedSampleCount(mounted)
     end
 
     return #(speed.samples[mounted] or {})
+end
+
+-- The in-memory samples themselves. Exposed so that a round trip through
+-- disk can be tested as a round trip -- testing each half against a fixture
+-- the other half never produced is how a bucket that was loaded but never
+-- saved stayed broken for four releases.
+function Session.Samples()
+    return speed.samples
 end
 
 function Session.SpeedBuckets()
@@ -796,8 +854,23 @@ function Session.Plan(minutes)
         local seconds, confident, travel, work =
             Session.EstimateHub(hub, currentX, currentY)
 
+        -- STOP AT THE FIRST STOP THAT DOES NOT FIT.
+        --
+        -- This used to `continue` past an overrunning hub and keep testing
+        -- later ones, which is exactly the cherry-picking the comment above
+        -- this function forbids -- and it forbids it for a good reason: the
+        -- route is ordered to minimise walking, so skipping the middle of it
+        -- and taking the far end makes you cross the zone twice to save a
+        -- number on a screen.
+        --
+        -- It was also arithmetically wrong even on its own terms: the skipped
+        -- hub's position was not advanced past, so every later hub's travel
+        -- leg was costed from wherever the last ACCEPTED stop was, which is
+        -- not where the player would be.
         if plan.seconds + seconds > budget and #plan.stops > 0 then
             plan.skipped = plan.skipped + 1
+
+            break
         else
             table.insert(plan.stops, {
                 hub       = hub,
@@ -816,6 +889,14 @@ function Session.Plan(minutes)
 
             currentX, currentY = hub.x or currentX, hub.y or currentY
         end
+    end
+
+    -- `skipped` counts the stop that did not fit plus everything behind it,
+    -- because that is what the player is not doing tonight. Counting only the
+    -- one that overran would report "1 skipped" for a route with nine stops
+    -- left in it.
+    if plan.skipped > 0 then
+        plan.skipped = #hubs - #plan.stops
     end
 
     return plan

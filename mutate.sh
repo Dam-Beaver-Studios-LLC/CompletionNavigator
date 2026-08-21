@@ -313,6 +313,59 @@ mutate "Data/ApiSurface.lua" \
     "the generated API surface is empty"
 
 
+# The 0.48.0 audit. Every one of these was live in a shipped release.
+mutate "Modules/Session.lua" \
+    "    for _, bucket in ipairs({ \"mounted\", \"onFoot\", \"flying\" }) do
+        stored[bucket] = {}" \
+    "    for _, bucket in ipairs({ \"mounted\", \"onFoot\" }) do
+        stored[bucket] = {}" \
+    "measured flying speed is never written to disk"
+
+mutate "Scoring.lua" \
+    "    for _, provider in pairs(CN.candidateProviders) do
+        for event in pairs(provider.events or {}) do
+            wanted[event] = true
+        end
+    end" \
+    "    for _, provider in pairs(CN.candidateProviders) do
+    end" \
+    "providers subscribe to nothing they asked for"
+
+mutate "Modules/Follow.lua" \
+    "    local candidates = CN.CollectCandidates() or {}
+
+    local generation = 0" \
+    "    local candidates = nil
+
+    local generation = 0" \
+    "follow stops collecting and its memo never expires"
+
+mutate "Routing.lua" \
+    "    local dx = ((ax or 0.5) - (bx or 0.5)) * routeScaleX
+    local dy = ((ay or 0.5) - (by or 0.5)) * routeScaleY" \
+    "    local dx = ((ax or 0.5) - (bx or 0.5))
+    local dy = ((ay or 0.5) - (by or 0.5))" \
+    "routing assumes every map is square"
+
+mutate "Routing.lua" \
+    "    for _, objective in ipairs(candidates) do
+        objective.hub     = nil
+        objective.hubSize = nil
+    end" \
+    "    for _, objective in ipairs(candidates) do
+    end" \
+    "last zone's batching survives into this one"
+
+mutate "Modules/Harvest.lua" \
+    "        if record.observed and next(record.observed) then
+            counts.withGuesses = counts.withGuesses + 1
+        end" \
+    "        if record.maybeRequires then
+            counts.withGuesses = counts.withGuesses + 1
+        end" \
+    "the harvest summary counts a field nothing writes"
+
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

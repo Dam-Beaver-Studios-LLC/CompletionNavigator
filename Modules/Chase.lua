@@ -433,8 +433,18 @@ function Chase.Fraction(chain)
     return fraction
 end
 
--- Every goal, chained, with the least-finished first: the thing you are
--- furthest from is the thing most in need of a plan.
+-- Every goal, chained, with the NEAREST-FINISHED first.
+--
+-- The header used to say the opposite -- "least-finished first: the thing you
+-- are furthest from is the thing most in need of a plan" -- while the
+-- comparator eight lines below, and its own inline comment, did and described
+-- the reverse. Two comments in one function, disagreeing.
+--
+-- The code is right and the header was wrong. Everything else in this addon
+-- ranks the nearly-finished thing above the barely-begun one: a set two
+-- pieces short, a quest three kills from done, a lockout part-way through.
+-- A goal you are eighty percent through is the one worth an evening; one you
+-- have not started is a decision, not a next action.
 function Chase.All()
     local goals = CN:GetModule("Goals")
 
@@ -521,8 +531,10 @@ end
 --
 -- RULES, WHICH ARE THE SAME RULES AS EVERYWHERE ELSE IN THIS ADDON.
 --
---   * A step whose type has never been timed contributes nothing and is
---     COUNTED as unknown. It is not filled in with an average of other types.
+--   * A step whose type has never been timed is COUNTED as unknown, reported
+--     as such, and charged at the average of the steps that have been timed
+--     -- because it still has to happen, and pretending it is free would
+--     understate the chain rather than widen the range.
 --   * The result is a RANGE, not a figure. Anybody who has played knows that
 --     "four hours" is a claim nobody can make; "three to six hours" is one
 --     the data actually supports.
@@ -656,6 +668,13 @@ function Chase.Estimate(chain)
     -- Steps that have never been timed still have to happen. Charging them at
     -- the average of the ones that have is the least-wrong option available,
     -- and it widens the range rather than hiding in it.
+    --
+    -- The RULES block at the top of this section used to say the opposite --
+    -- that an untimed step "contributes nothing" -- which would have meant
+    -- quoting four hours for a chain whose second half the addon has simply
+    -- never watched. The guard that makes this honest is the one above: no
+    -- estimate at all is offered unless more steps are timed than are not,
+    -- and the count of untimed ones is reported alongside the number.
     local perStep = seconds / timed
 
     local total = seconds + (unknown * perStep) + travelSeconds

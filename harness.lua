@@ -3356,6 +3356,26 @@ assert(blockedReason == CN.blockReasons.LIKELY_PREREQUISITE,
 assert(tostring(blockedDetail):find("3 characters", 1, true),
     "the explanation must say how many characters showed it, got " .. tostring(blockedDetail))
 
+-- AND THE SUMMARY MUST COUNT WHAT IS ACTUALLY THERE.
+--
+-- `Harvest.Summary` counted `record.maybeRequires`, a field that database
+-- migration 3 deletes and nothing has written since. So `withGuesses`
+-- reported zero on every database in existence, including databases full of
+-- guesses -- a reader that outlived its field by four schema versions,
+-- because nothing ever asserted on the number it produced.
+do
+    local summary = harvestModule.Summary()
+
+    assert(summary.withGuesses >= 1,
+        "a record with three observed orderings on it must count as a guess; "
+        .. "the summary says " .. tostring(summary.withGuesses))
+
+    assert(summary.total >= 1, "and it must be counted at all")
+
+    print("  the summary counts " .. summary.withGuesses
+        .. " record(s) carrying observations")
+end
+
 CN.characterKey = nil
 harvestStore[42002] = nil
 CN.dependencies[CN.ObjectiveKey("QUEST", 42002)] = nil
@@ -4890,33 +4910,97 @@ print("\nFollow, cheaply:")
     -- PERFORMANCE REGRESSION FIXED: a redraw asks three separate questions
     -- and each one used to walk the whole candidate list and build a fresh
     -- set of several thousand keys.
-    local collections = 0
+    --
+    -- COUNTING THE RIGHT THING. This counted calls to CN.CollectCandidates,
+    -- which is itself cached and answers in about two microseconds when
+    -- nothing is stale. Passing it therefore required Follow to avoid CALLING
+    -- a cheap cached function -- and the memo written to satisfy it converged
+    -- on a generation that only collecting could advance, so Follow stopped
+    -- collecting, so the generation never moved, so the memo never expired
+    -- and follow mode sat on a finished stop forever.
+    --
+    -- A test that measures a proxy for work instead of the work is a test
+    -- that can be satisfied by breaking the thing it guards. What matters is
+    -- that the PROVIDERS are not re-walked.
+    local walks = 0
 
-    local realCollect = CN.CollectCandidates
+    local watched = CN.candidateProviders["Goals"]
+        or select(2, next(CN.candidateProviders))
 
-    CN.CollectCandidates = function(...)
-        collections = collections + 1
-        return realCollect(...)
+    assert(watched and watched.fn, "a provider to watch")
+
+    local realFn = watched.fn
+
+    watched.fn = function(...)
+        walks = walks + 1
+        return realFn(...)
     end
 
     follow.Start()
 
-    collections = 0
+    CN.CollectCandidates(true)
+
+    walks = 0
 
     follow.Lines()
     follow.HeaderText()
     follow.IsStopComplete()
     follow.Lines()
 
-    CN.CollectCandidates = realCollect
+    watched.fn = realFn
 
-    assert(collections <= 1,
-        "four questions about the same unchanged state must cost at most one "
-        .. "candidate walk, cost " .. collections)
+    assert(walks == 0,
+        "four questions about the same unchanged state must not re-walk a "
+        .. "single provider, walked " .. walks .. " time(s)")
 
     follow.Stop()
 
-    print("  four redraw queries, " .. collections .. " candidate walk(s)")
+    print("  four redraw queries, " .. walks .. " provider walk(s)")
+
+    ------------------------------------------------------------
+    -- AND THE MEMO MUST EXPIRE WHEN THE WORLD CHANGES.
+    --
+    -- The other half of the same defect, and the half that actually hurt:
+    -- marking a provider dirty deliberately does NOT advance the generation
+    -- -- only a rebuild does. So a memo keyed on the generation, in a
+    -- function that had stopped triggering rebuilds, was valid forever.
+    ------------------------------------------------------------
+    CN.CollectCandidates(true)
+
+    local liveNow = follow.LiveKeys()
+
+    local seen = 0
+
+    for _ in pairs(liveNow) do
+        seen = seen + 1
+    end
+
+    assert(seen > 0, "the live key set must have something in it")
+
+    CN.RegisterCandidateProvider("FollowMemoProbe", function()
+        return {
+            CN.NewObjective({
+                id              = 987654,
+                type            = CN.objectiveTypes.QUEST,
+                name            = "Appeared After The Memo",
+                completionValue = 1,
+            }),
+        }
+    end, { events = { "QUEST_ACCEPTED" } })
+
+    CN.SubscribeToInvalidationEvents()
+
+    fire("QUEST_ACCEPTED")
+
+    assert(follow.LiveKeys()["QUEST:987654"],
+        "something that became actionable must appear in the live key set "
+        .. "without waiting for an unrelated part of the addon to rebuild")
+
+    CN.candidateProviders["FollowMemoProbe"] = nil
+
+    CN.CollectCandidates(true)
+
+    print("  and the memo expires when something new becomes actionable")
 end)()
 
 
@@ -5258,6 +5342,62 @@ print("\nMeasurements survive a reload:")
     assert(safeRate > 0.5 and safeRate < 60,
         "a corrupt sample must not produce an absurd speed, got "
         .. tostring(safeRate))
+
+    ------------------------------------------------------------
+    -- A ROUND TRIP, FOR EVERY BUCKET, THROUGH BOTH HALVES.
+    --
+    -- The two assertions above test disk-to-memory. Another block elsewhere
+    -- tests memory-to-disk. Neither noticed that SaveSamples wrote only two
+    -- of the three buckets, because each half was checked against a fixture
+    -- the other half never produced -- so measured FLIGHT speed survived
+    -- until logout and then vanished, and Travel.HasFlying (which needs five
+    -- flying samples) turned self-flown routing off permanently after any
+    -- reload.
+    --
+    -- Testing each half separately is not testing the round trip.
+    ------------------------------------------------------------
+    local written = {
+        onFoot  = { 6.6, 6.8, 7.0, 7.2, 7.4 },
+        mounted = { 13, 14, 15, 16, 17 },
+        flying  = { 60, 62, 64, 66, 68 },
+    }
+
+    for bucket, values in pairs(written) do
+        session.Samples()[bucket] = {}
+
+        for _, value in ipairs(values) do
+            table.insert(session.Samples()[bucket], value)
+        end
+    end
+
+    session.SaveSamples()
+
+    -- Wipe memory entirely: this is what a reload does.
+    for bucket in pairs(written) do
+        session.Samples()[bucket] = {}
+    end
+
+    session.LoadSamples()
+
+    for bucket, values in pairs(written) do
+        assert(#session.Samples()[bucket] == #values,
+            "the " .. bucket .. " bucket must survive a save and a reload; "
+            .. #session.Samples()[bucket] .. " of " .. #values .. " came back")
+    end
+
+    assert(CN:GetModule("Travel").HasFlying(),
+        "and five measured flying samples must still mean the character "
+        .. "flies after a reload -- which is the whole point of persisting "
+        .. "them")
+
+    for bucket in pairs(written) do
+        session.Samples()[bucket] = {}
+        session.Persisted()[bucket] = {}
+    end
+
+    session.SaveSamples()
+
+    print("  every speed bucket survives a save and a reload")
 
     print("  samples reload and survive corruption")
 end)()
@@ -8727,7 +8867,82 @@ print("\nWhy the list is in this order:")
         string.format("the terms must sum to the score: %.2f vs %.2f",
             total, scored))
 
+    ------------------------------------------------------------
+    -- IN EVERY MODE, AND WITH AN ADJUSTER LIVE.
+    --
+    -- The assertion above ran one synthetic quest in balanced mode, where the
+    -- profile has no type weighting and both registered adjusters happen to
+    -- be no-ops. Under those conditions the explanation summed to the score
+    -- while omitting BOTH multiplicative steps -- so `/cn mode quests`
+    -- printed a headline of 6.0 above terms totalling 3.0, and said in its
+    -- own comment that if the two ever disagreed the explanation was wrong.
+    --
+    -- One case, chosen because it was easy, agreeing with the code for a
+    -- reason that had nothing to do with the property being tested.
+    ------------------------------------------------------------
+    local saved = CN.Settings().priorityMode
+
+    CN.RegisterScoreAdjuster("ExplainProbe", function(candidate, score)
+        if candidate.id == 1 then
+            return score - 0.75
+        end
+
+        return score
+    end)
+
+    local modes = {}
+
+    for name in pairs(CN.priorityProfiles) do
+        table.insert(modes, name)
+    end
+
+    table.sort(modes)
+
+    for _, name in ipairs(modes) do
+        CN.Settings().priorityMode = name
+
+        for _, kind in ipairs({ CN.objectiveTypes.QUEST,
+                                CN.objectiveTypes.PET,
+                                CN.objectiveTypes.REPUTATION }) do
+
+            local probe = CN.NewObjective({
+                id              = 1,
+                type            = kind,
+                name            = "Probe",
+                completionValue = 4,
+                travelCost      = 1,
+                expiresIn       = 3600,
+            })
+
+            local sum = 0
+
+            for _, term in ipairs(CN.ExplainScore(probe)) do
+                sum = sum + term.value
+            end
+
+            local actual = CN.ScoreObjective(probe)
+
+            assert(math.abs(sum - actual) < 0.01,
+                string.format("mode %s, %s: the explanation sums to %.3f "
+                    .. "but the score is %.3f", name, kind, sum, actual))
+        end
+    end
+
+    CN.scoreAdjusters["ExplainProbe"] = nil
+
+    for index, name in ipairs(CN.scoreAdjusterOrder) do
+        if name == "ExplainProbe" then
+            table.remove(CN.scoreAdjusterOrder, index)
+            break
+        end
+    end
+
+    CN.Settings().priorityMode = saved
+
     print("  " .. #terms .. " terms, ordered by weight, summing to the score")
+
+    print("  and they still sum to it in all " .. #modes
+        .. " modes, with an adjuster live")
 end)()
 
 print("\nA plan you can actually start:")
@@ -9411,6 +9626,465 @@ print("\nEvery client function this addon calls, checked against the client:")
 
     print("  " .. #CN.apiSurface .. " client functions listed; the checker "
         .. "agrees with the client in both directions")
+end)()
+
+print("\nCode that nothing calls:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A RATCHET, NOT A PURGE.
+    --
+    -- Every audit of this addon turns up functions that are defined,
+    -- commented, and called by nothing -- `Travel.NoteFlyable` and
+    -- `UI.RestoreFilter` were both in that state, and both were not merely
+    -- untidy but load-bearing: the feature they implemented was simply off.
+    -- Dead code here is a reliable predictor of a missing wire.
+    --
+    -- Some unreferenced functions are legitimate: a registry hook exists to
+    -- be called from outside. So this is not a ban. It counts, names, and
+    -- refuses to let the number grow -- the same shape as the help-group
+    -- check, and for the same reason: a list nobody counts rots.
+    ------------------------------------------------------------
+    local defined, referenced = {}, {}
+
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the .toc must be readable")
+
+    local listed = manifest:read("*a")
+
+    manifest:close()
+
+    local sources = {}
+
+    for line in string.gmatch(listed, "[^\r\n]+") do
+        if string.match(line, "%.lua%s*$") and not string.match(line, "^%s*#") then
+            local relative = CN.Trim(string.gsub(line, "\\", "/"))
+
+            local file = io.open(ROOT .. "/" .. relative, "r")
+
+            if file then
+                sources[relative] = file:read("*a")
+
+                file:close()
+            end
+        end
+    end
+
+    for relative, text in pairs(sources) do
+        for owner, name in string.gmatch(text,
+            "function%s+([A-Za-z_][A-Za-z0-9_]*)%.([A-Za-z_][A-Za-z0-9_]*)") do
+
+            -- CN.* is the addon's published surface: registries, hooks and
+            -- the things commands call by name. Module-local helpers are
+            -- what this is about.
+            if owner ~= "CN" then
+                defined[owner .. "." .. name] = relative
+            end
+        end
+    end
+
+    -- MATCHED ON THE METHOD NAME, NOT ON THE OWNER.
+    --
+    -- Nearly every cross-file call in this addon goes through a local handle
+    -- -- `local errors = CN:GetModule("Errors")` and then `errors.Count()` --
+    -- so matching `Errors.Count` finds only the definition and reports a
+    -- function the UI calls twice as dead. Deliberately conservative in the
+    -- direction of NOT crying wolf: a name-only match can miss a dead
+    -- function that shares a name with a live one, and that is the right
+    -- error to make for a gate that blocks a release.
+    local byName = {}
+
+    for key in pairs(defined) do
+        local name = string.match(key, "%.([A-Za-z0-9_]+)$")
+
+        byName[name] = byName[name] or {}
+
+        table.insert(byName[name], key)
+    end
+
+    for _, text in pairs(sources) do
+        -- `,` and `)` as well as `(` and `=`: this addon passes functions to
+        -- pcall by reference constantly -- `pcall(Travel.NoteBoarding)` -- and
+        -- a pattern that only recognised a call site with a paren after it
+        -- reported those as dead.
+        for name in string.gmatch(text, "[%.:]([A-Za-z_][A-Za-z0-9_]*)%s*[%(=,%)]") do
+            for _, key in ipairs(byName[name] or {}) do
+                referenced[key] = (referenced[key] or 0) + 1
+            end
+        end
+    end
+
+    local orphans = {}
+
+    for key in pairs(defined) do
+        if (referenced[key] or 0) <= 1 then
+            table.insert(orphans, key)
+        end
+    end
+
+    table.sort(orphans)
+
+    for _, key in ipairs(orphans) do
+        print("  never called: " .. key .. "  (" .. defined[key] .. ")")
+    end
+
+    -- The ceiling is where the addon actually is, not where it should be.
+    -- Lower it when something is deleted or wired; the build fails if it
+    -- rises, which is the only property that matters.
+    local CEILING = 20
+
+    assert(#orphans <= CEILING,
+        #orphans .. " module functions are called by nothing, above the "
+        .. "ceiling of " .. CEILING .. ". Wire it or delete it.")
+
+    print("  " .. #orphans .. " of " .. CN.CountKeys(defined)
+        .. " module functions are uncalled, ceiling " .. CEILING)
+end)()
+
+print("\nEvery scoring weight has something that sets it:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A WEIGHT NOBODY PRODUCES IS A LIE IN THE FORMULA.
+    --
+    -- `difficultyCost` and `dependencyCost` were declared, summed on every
+    -- objective, listed in the file header's formula and printed by
+    -- `/cn order` -- and nothing had ever set either field. They contributed
+    -- zero to every score the addon has ever computed while making the
+    -- documented arithmetic longer and less true. `estimatedTime` was in the
+    -- same state, except that `/cn mode fastest` advertises it as one of its
+    -- two levers, so the mode was half a feature.
+    --
+    -- Declaring a weight is a claim that something fills it. This checks the
+    -- claim.
+    ------------------------------------------------------------
+    -- STATICALLY, ACROSS THE SHIPPED SOURCE.
+    --
+    -- Not "does the current fixture happen to set it": several of these are
+    -- filled only when the player has goals pinned, or a Warband, or enough
+    -- measured durations, and a fixture-shaped check would fail for every one
+    -- of them while missing the actual defect. The property is that SOMETHING
+    -- IN THE ADDON assigns the field at all.
+    -- The fields ScoreObjective actually reads off an objective. Kept here
+    -- rather than derived, because deriving it from the source would be a
+    -- second parser to get wrong -- and the assertion below requires every
+    -- one of these names to still appear in Scoring.lua, so the list cannot
+    -- rot silently.
+    local CONSUMED = {
+        "completionValue", "unlockValue", "limitedTimeBonus",
+        "hubSize", "userPreference", "characterSuitability", "travelCost",
+        "estimatedTime", "expiresIn",
+    }
+
+    local produced = {}
+
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the .toc must be readable to scan the source")
+
+    local listed = manifest:read("*a")
+
+    manifest:close()
+
+    local scanned = 0
+
+    for line in string.gmatch(listed, "[^\r\n]+") do
+        if string.match(line, "%.lua%s*$") and not string.match(line, "^%s*#") then
+            local relative = string.gsub(line, "\\", "/")
+
+            local file = io.open(ROOT .. "/" .. CN.Trim(relative), "r")
+
+            if file then
+                local text = file:read("*a")
+
+                file:close()
+
+                scanned = scanned + 1
+
+                -- Scoring.lua CONSUMES these fields and declares the
+                -- weights; it never produces an objective. Counting its own
+                -- weight table as a producer would make every weight look
+                -- filled, which is the failure this check exists to catch.
+                if not string.find(relative, "Scoring%.lua") then
+                    for _, field in ipairs(CONSUMED) do
+                        if string.find(text, "[^%w_]" .. field .. "%s*=") then
+                            produced[field] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    assert(scanned > 50, "the source scan found only " .. scanned .. " files")
+
+    local orphans = {}
+
+    for _, field in ipairs(CONSUMED) do
+        if not produced[field] then
+            table.insert(orphans, field)
+        end
+    end
+
+    table.sort(orphans)
+
+    assert(#orphans == 0,
+        "objective field(s) the scorer reads that nothing in " .. scanned
+        .. " source files ever sets: " .. table.concat(orphans, ", "))
+
+    -- AND THE OTHER DIRECTION: a declared weight that multiplies nothing.
+    local scoring = io.open(ROOT .. "/Scoring.lua", "r")
+
+    assert(scoring, "Scoring.lua must be readable")
+
+    local scoringText = scoring:read("*a")
+
+    scoring:close()
+
+    local unused = {}
+
+    for weight in pairs(CN.scoreWeights) do
+        if not string.find(scoringText, "w%." .. weight) then
+            table.insert(unused, weight)
+        end
+    end
+
+    table.sort(unused)
+
+    assert(#unused == 0,
+        "declared weight(s) the scorer never applies: "
+        .. table.concat(unused, ", "))
+
+    for _, field in ipairs(CONSUMED) do
+        assert(string.find(scoringText, "objective%." .. field),
+            "the consumed-field list names " .. field
+            .. ", which the scorer no longer reads")
+    end
+
+    ------------------------------------------------------------
+    -- AND `fastest` MUST ACTUALLY PREFER THE FASTER THING.
+    ------------------------------------------------------------
+    local session = CN:GetModule("Session")
+
+    assert(session.TimeCost, "the time-cost producer must exist")
+
+    local saved = CN.Settings().priorityMode
+
+    CN.Settings().priorityMode = "fastest"
+
+    local quick = CN.NewObjective({
+        id = 1, type = CN.objectiveTypes.QUEST, name = "Quick",
+        completionValue = 5, travelCost = 1, estimatedTime = 0.5,
+    })
+
+    local slow = CN.NewObjective({
+        id = 2, type = CN.objectiveTypes.QUEST, name = "Slow",
+        completionValue = 5, travelCost = 1, estimatedTime = 6,
+    })
+
+    assert(CN.ScoreObjective(quick) > CN.ScoreObjective(slow),
+        "in fastest mode a quicker objective must outrank an identical "
+        .. "slower one, or the mode's second lever does nothing")
+
+    CN.Settings().priorityMode = saved
+
+    print("  " .. CN.CountKeys(CN.scoreWeights)
+        .. " weights, every one of them produced, and fastest prefers fast")
+end)()
+
+print("\nA route ordered on a map that is not square:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SQUARE-MAP ASSUMPTION, EIGHT RELEASES AFTER THE LAST ONE.
+    --
+    -- 0.40.0 found that every bearing in the game was wrong because the code
+    -- assumed a map is square. Routing.lua was still assuming it: ordering,
+    -- 2-opt and route length all worked on raw 0-to-1 coordinates, so in a
+    -- 3000-by-1500 zone a stop 300 yards east compared as further away than
+    -- one 165 yards north, and the optimiser then improved a distance that
+    -- was not the distance.
+    --
+    -- The route tests that existed used square synthetic coordinates and
+    -- asserted only that the route got shorter under the same distorted
+    -- measure -- which it always does.
+    ------------------------------------------------------------
+    local savedSpan = CN_TEST_MAP_SPAN
+
+    -- Twice as wide as it is tall, which is an ordinary zone.
+    CN_TEST_SetMapSpan({ 3000, 1500 })
+
+    CN.UseRouteMapScale(94)
+
+    -- East 0.10 of the map is 300 yards. North 0.11 is 165. The nearer stop
+    -- in yards is the one that is further away in map units.
+    local east  = { x = 0.60, y = 0.50, name = "east" }
+    local north = { x = 0.50, y = 0.39, name = "north" }
+
+    local ordered = CN.OrderByProximity({ east, north }, 0.50, 0.50)
+
+    assert(ordered[1].name == "north",
+        "the nearer stop in YARDS must be visited first; the route went to "
+        .. tostring(ordered[1].name) .. " first")
+
+    -- And the reported length must be yards, not map units: two stops at
+    -- 165 and then a leg across to the east one.
+    local length = CN.RouteLength(ordered, 0.50, 0.50)
+
+    assert(length > 100,
+        "a route length in yards across a 3000-yard zone cannot be "
+        .. string.format("%.3f", length) .. " -- that is map units")
+
+    CN.UseRouteMapScale(nil)
+
+    CN_TEST_SetMapSpan(savedSpan)
+
+    print(string.format("  ordered by real distance, %.0f yards of walking",
+        length))
+end)()
+
+print("\nRouting one zone does not score another one as batched:")
+
+;(function()
+    ------------------------------------------------------------
+    -- HUB STATE IS WRITTEN ONTO LIVE CANDIDATES AND WAS NEVER CLEARED.
+    --
+    -- `hub` and `hubSize` are stamped onto candidate objects at the end of
+    -- BuildZoneRoute, and the scorer turns hubSize into a batch bonus. Two
+    -- things followed: an objective routed once carried its bonus for the
+    -- rest of the session, including while a different zone was routed and
+    -- including in the ranked list -- which is not about zones at all; and
+    -- the ranking cache was not invalidated, so `/cn next` served pre-bonus
+    -- scores while `/cn zone` showed the hubs that produced them.
+    ------------------------------------------------------------
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    -- Two things at the same spot, which is what a hub is.
+    CN.RegisterCandidateProvider("HubProbe", function()
+        local rows = {}
+
+        for index = 1, 2 do
+            table.insert(rows, CN.NewObjective({
+                id              = 555000 + index,
+                type            = CN.objectiveTypes.RARE,
+                name            = "Together " .. index,
+                completionValue = 3,
+                mapID           = mapID,
+                x               = 0.35,
+                y               = 0.60,
+            }))
+        end
+
+        return rows
+    end)
+
+    CN.CollectCandidates(true)
+
+    CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+
+    local batched = 0
+
+    for _, objective in ipairs(CN.CollectCandidates()) do
+        if objective.hubSize and objective.hubSize > 1 then
+            batched = batched + 1
+        end
+    end
+
+    assert(batched > 0,
+        "the fixture must produce at least one hub with company in it, or "
+        .. "this proves nothing")
+
+    -- A different map. Nothing in THIS zone may still look batched.
+    CN.BuildZoneRoute(99999, 0.5, 0.5)
+
+    for _, objective in ipairs(CN.CollectCandidates()) do
+        assert(objective.hubSize == nil,
+            "routing a different zone must clear the last one's batching; "
+            .. tostring(objective.name) .. " still carries hubSize "
+            .. tostring(objective.hubSize))
+    end
+
+    CN.candidateProviders["HubProbe"] = nil
+
+    CN.CollectCandidates(true)
+
+    print("  " .. batched .. " batched stop(s), and none of them survive "
+        .. "routing elsewhere")
+end)()
+
+print("\nEvery event a provider asks for is an event something dispatches:")
+
+;(function()
+    ------------------------------------------------------------
+    -- TWO LISTS, ONE OF WHICH NOBODY CHECKED AGAINST THE OTHER.
+    --
+    -- Providers declare `events = { ... }` to say what invalidates them, and
+    -- Scoring.lua held a separate hand-written list of the events it actually
+    -- subscribed to. Nine declared events appeared on no such list, and
+    -- because InvalidateCandidates SKIPS a provider that has an events table
+    -- and was not named, declaring an unwired event was strictly worse than
+    -- declaring nothing: Orders and Inventory never refreshed after login.
+    --
+    -- Scoring now subscribes to whatever the providers declare, so the two
+    -- lists cannot disagree. This asserts that they do not.
+    ------------------------------------------------------------
+    local declared = {}
+
+    for name, provider in pairs(CN.candidateProviders) do
+        for event in pairs(provider.events or {}) do
+            declared[event] = declared[event] or name
+        end
+    end
+
+    local orphaned = {}
+
+    for event, provider in pairs(declared) do
+        if not CN.eventTable[event] then
+            table.insert(orphaned, event .. " (" .. provider .. ")")
+        end
+    end
+
+    table.sort(orphaned)
+
+    for _, entry in ipairs(orphaned) do
+        print("  NOBODY DISPATCHES: " .. entry)
+    end
+
+    assert(#orphaned == 0,
+        #orphaned .. " provider event(s) are declared and never dispatched: "
+        .. table.concat(orphaned, ", "))
+
+    local declaredCount = 0
+
+    for _ in pairs(declared) do
+        declaredCount = declaredCount + 1
+    end
+
+    ------------------------------------------------------------
+    -- AND EVERY ONE OF THEM MUST ACTUALLY MARK ITS PROVIDER DIRTY.
+    --
+    -- Subscribing is not the property that matters; invalidating is. A
+    -- handler registered against the wrong function would satisfy the check
+    -- above and change nothing.
+    ------------------------------------------------------------
+    for event, name in pairs(declared) do
+        CN.CollectCandidates(true)
+
+        local state = CN.ProviderState(name)
+
+        assert(state and state.dirty ~= true,
+            "a forced rebuild must leave " .. name .. " clean")
+
+        fire(event)
+
+        assert(CN.ProviderState(name).dirty == true,
+            event .. " must invalidate " .. name .. ", the provider that "
+            .. "declared it")
+    end
+
+    print("  " .. declaredCount .. " declared events, every one of them dispatched "
+        .. "and every one marking its provider dirty")
 end)()
 
 print("\nEvery event this addon registers is an event:")

@@ -7,6 +7,93 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.48.0]
+
+A second end-to-end audit, aimed at the parts 0.47.0 did not reach: the
+scorer, the router, the planner and the caches. Twelve findings. Four of them
+were features that had been silently off -- in one case since the release that
+introduced them.
+
+### Fixed
+
+- **Measured flight speed never survived a reload.** The save routine wrote
+  two of the three speed buckets and left out `flying`, while the load routine
+  read all three. Since the travel model requires five flying samples before
+  it will consider a self-flown route at all, every logout turned self-flying
+  back off -- the feature 0.43.0 was built around, off for everyone, for five
+  releases. The suite tested disk-to-memory for all three buckets and
+  memory-to-disk for two, each against a fixture the other half never
+  produced. Testing each half separately is not testing the round trip.
+- **Five providers were subscribed to events nothing dispatched.** Providers
+  declare which events invalidate them; the scorer held a separate
+  hand-written list of the events it actually listened for. Nine declared
+  events were on no such list -- and declaring an unwired event is *worse*
+  than declaring none, because a provider that names events is skipped by any
+  event it did not name. Orders and Inventory therefore never refreshed after
+  login: **a quest-starting item you looted did not become a recommendation,
+  and a crafting order you collected stayed on the list until you reloaded.**
+  The scorer now subscribes to whatever the providers declare. There is one
+  list.
+- **Follow mode could stall on a finished stop.** Its cache of what is still
+  actionable was keyed on a counter that only a rebuild advances -- and the
+  cache returned early *before* triggering the rebuild. Once the two
+  converged, nothing on that path ever rebuilt again, so the counter could
+  never move and the cache never expired. It came unstuck only if some other
+  part of the addon happened to rebuild. The guard was saving about two
+  microseconds.
+- **Routes were ordered as though every zone were square.** Ordering, the
+  2-opt improvement pass and the reported route length all worked on raw map
+  coordinates, which run 0 to 1 on both axes whatever the zone's real shape.
+  In an ordinary 3000-by-1500-yard zone a stop 300 yards east compared as
+  further away than one 165 yards north, and the optimiser then confidently
+  improved a distance that was not the distance. **This is the same
+  square-map assumption as the bearing defect of 0.40.0**, eight releases
+  later, in the last file still making it -- while another function in that
+  very file converted properly, so clustering and routing disagreed with each
+  other.
+- **Routing one zone left every objective in it scored as batched, forever.**
+  The batch bonus is written onto live objectives at the end of a zone route
+  and was never cleared, so it followed them into the ranked list and into
+  every later zone. The ranking cache was not invalidated either, so
+  `/cn next` served scores from before the batching that `/cn zone` was
+  showing: two commands contradicting each other about the same objectives.
+- **`/cn order` did not print the arithmetic `/cn next` had done.** It left
+  out the focus multiplier and every registered adjustment, having promised in
+  its own comment that "if the two ever disagree, this is wrong". In
+  `/cn mode quests` it printed a headline of 6.0 above terms summing to 3.0.
+  The test that was supposed to catch this checked one synthetic objective in
+  the one mode where both omissions happen to be no-ops.
+- **The session planner cherry-picked stops** out of a route ordered to
+  minimise walking -- the thing the comment above it explains at length that
+  it must not do -- and costed the stops after a skipped one from the wrong
+  position. It now stops at the first stop that does not fit, and reports how
+  much of the route is left rather than how many stops overran.
+- **`/cn mode fastest` had only one of its two advertised levers.** The scoring
+  term for how long something takes was declared, summed, printed and
+  overridden by that mode -- and nothing had ever set it. The addon has been
+  measuring how long each kind of objective takes you since 0.41.0; that is
+  now wired to the term, scaled so a value of 1 means "about as long as things
+  usually take", and an objective the addon has never timed still contributes
+  nothing rather than a guess.
+- **Three more scoring inputs that nothing produced** -- difficulty,
+  prerequisites, and a second nearby term -- have been removed. Each was
+  summed on every objective, listed in the documented formula and printed by
+  `/cn order`, and contributed exactly zero to every score the addon has ever
+  computed.
+- **`/cn mode legacy` did nothing.** It was an empty profile, offered in the
+  mode list and accepted by the command, behaviourally identical to balanced.
+- **The harvest summary counted a field that a database migration deletes.**
+  It reported zero inferred prerequisites on every database in existence,
+  including databases full of them -- a reader that outlived its field by four
+  schema versions.
+- **Two contradictory comments in one function**, and a rules block that
+  described the opposite of what the code below it did. In both cases the code
+  was right; the prose has been corrected rather than the behaviour.
+- **Five functions that nothing called** have been deleted, and the count of
+  the rest is now printed and capped, so the number cannot quietly grow. Dead
+  code in this addon has twice turned out to be a missing wire rather than
+  untidiness.
+
 ## [0.47.0]
 
 An end-to-end audit of the whole addon, run the way the last release taught:

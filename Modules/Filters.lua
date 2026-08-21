@@ -34,29 +34,6 @@ Filters.durations = {
     { key = "forever", label = "Until I undo it", seconds = math.huge },
 }
 
-function Filters.SecondsFor(key)
-    for _, duration in ipairs(Filters.durations) do
-        if duration.key == key then
-            if duration.key == "reset" then
-                local opportunities = CN:GetModule("Opportunities")
-
-                if opportunities then
-                    local resets = opportunities.GetResets()
-
-                    -- Weekly if it is sooner than a week away, else daily.
-                    return resets.weekly or resets.daily or DAY
-                end
-
-                return DAY
-            end
-
-            return duration.seconds
-        end
-    end
-
-    return nil
-end
-
 ------------------------------------------------------------
 -- TYPE FILTERING
 ------------------------------------------------------------

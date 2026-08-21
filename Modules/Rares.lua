@@ -126,22 +126,6 @@ function Rares.Record(vignette)
     return existing == nil
 end
 
-function Rares.Sweep()
-    local mapID = select(1, CN.GetPlayerPosition())
-
-    local seen, new = 0, 0
-
-    for _, vignette in ipairs(Rares.GetActive(mapID)) do
-        if Rares.Record(vignette) then
-            new = new + 1
-        end
-
-        seen = seen + 1
-    end
-
-    return seen, new
-end
-
 ------------------------------------------------------------
 -- KILL TRACKING
 ------------------------------------------------------------

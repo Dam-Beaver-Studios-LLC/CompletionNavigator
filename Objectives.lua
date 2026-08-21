@@ -94,7 +94,6 @@ CN.priorityModes = {
     "professions",
     "recipes",
     "collections",
-    "legacy",
 }
 
 ------------------------------------------------------------

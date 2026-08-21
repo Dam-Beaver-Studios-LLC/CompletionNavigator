@@ -331,14 +331,56 @@ end
 -- Nearest-neighbour ordering from a starting point. Good enough for a
 -- zone sweep; a proper route solver can replace this later.
 -- Squared distance is enough for comparisons and avoids a sqrt per pair.
+--
+-- IN YARDS, NOT IN MAP UNITS.
+--
+-- Map coordinates run 0 to 1 on both axes whatever the zone's real shape, and
+-- zones are not square -- 3000 by 1500 yards is ordinary. Every routing
+-- decision in this file was made on the raw normalized numbers, so a stop
+-- 0.10 east (300 yards away in such a zone) compared as further off than one
+-- 0.11 north (165 yards away), and the route visited them in the wrong order.
+-- The 2-opt pass then optimised against the same distorted metric, so it
+-- confidently improved a distance that was not the distance.
+--
+-- This is the SAME defect as the bearing bug of 0.40.0, in the same addon,
+-- eight releases later: the assumption that a map is square. Navigation
+-- measures the real spans and this file was the last place still ignoring
+-- them -- while, forty lines above, CN.ObjectiveDistanceYards in this very
+-- file converts properly. Clustering and routing disagreed with each other.
+--
+-- The scale is resolved once per route rather than per comparison: it is a
+-- property of the map being routed, and asking the client per pair would be
+-- thousands of calls for one answer.
+local routeScaleX, routeScaleY = 1, 1
+
+local function UseMapScale(mapID)
+    routeScaleX, routeScaleY = 1, 1
+
+    local navigation = CN:GetModule("Navigation")
+
+    if mapID and navigation and navigation.MapScale then
+        local ok, scaleX, scaleY = pcall(navigation.MapScale, mapID)
+
+        if ok and type(scaleX) == "number" and type(scaleY) == "number"
+            and scaleX > 0 and scaleY > 0 then
+
+            routeScaleX, routeScaleY = scaleX, scaleY
+        end
+    end
+
+    return routeScaleX, routeScaleY
+end
+
+CN.UseRouteMapScale = UseMapScale
+
 local function Distance2(ax, ay, bx, by)
-    local dx = (ax or 0.5) - (bx or 0.5)
-    local dy = (ay or 0.5) - (by or 0.5)
+    local dx = ((ax or 0.5) - (bx or 0.5)) * routeScaleX
+    local dy = ((ay or 0.5) - (by or 0.5)) * routeScaleY
 
     return (dx * dx) + (dy * dy)
 end
 
--- Total length of a route starting from the player.
+-- Total length of a route starting from the player, in yards.
 local function RouteLength(route, startX, startY)
     local total = 0
 
@@ -426,9 +468,13 @@ function CN.OrderByProximity(objectives, startX, startY)
         local bestIndex, bestDistance
 
         for index, objective in ipairs(remaining) do
-            local dx = (objective.x or 0.5) - currentX
-            local dy = (objective.y or 0.5) - currentY
-            local distance = (dx * dx) + (dy * dy)
+            -- Through Distance2, which applies the map's real shape. This
+            -- loop had its own inlined copy of the same arithmetic, so
+            -- correcting the shared helper would have left the nearest-
+            -- neighbour ordering -- the thing that actually picks the order
+            -- -- still comparing raw map units.
+            local distance = Distance2(objective.x, objective.y,
+                currentX, currentY)
 
             if not bestDistance or distance < bestDistance then
                 bestDistance = distance
@@ -456,6 +502,22 @@ end
 -- zone conceptually but have no coordinates to route to.
 function CN.BuildZoneRoute(mapID, startX, startY)
     local candidates = CN.CollectCandidates()
+
+    -- LAST ZONE'S BATCHING IS NOT THIS ZONE'S.
+    --
+    -- `hub` and `hubSize` are stamped onto live candidate objects at the end
+    -- of this function and were never cleared, so an objective routed once
+    -- carried its batch bonus for the rest of the session -- including while
+    -- a different zone was being routed, and including in the ranked list,
+    -- which is not about zones at all.
+    for _, objective in ipairs(candidates) do
+        objective.hub     = nil
+        objective.hubSize = nil
+    end
+
+    -- Every distance below is now in yards, which means knowing how many
+    -- yards a map unit is worth in THIS zone.
+    UseMapScale(mapID)
 
     local located, skipped = {}, {}
 
@@ -513,6 +575,20 @@ function CN.BuildZoneRoute(mapID, startX, startY)
 
     CN.currentRoute = route
     CN.currentHubs  = orderedHubs
+
+    -- ROUTING CHANGES THE SCORES, SO THE RANKING MUST BE REBUILT.
+    --
+    -- `hubSize` is written onto live candidate objects here, and the scorer
+    -- turns it into a batch bonus -- but this ran AFTER the ranked list had
+    -- already been built and cached, and bumped nothing. So `/cn next` went
+    -- on serving pre-bonus scores while `/cn zone` showed the hubs that were
+    -- supposed to have produced them: two commands, contradicting each other,
+    -- about the same objectives.
+    --
+    -- Worse in the other direction: routing one zone left every objective in
+    -- it carrying a hubSize forever, so routing a second zone scored the
+    -- first zone's objectives as though they were still batched.
+    CN.InvalidateRanking()
 
     return route, skipped, orderedHubs
 end

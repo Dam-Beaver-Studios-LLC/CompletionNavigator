@@ -370,14 +370,6 @@ function Inventory.ScanBank()
     return #items
 end
 
-function Inventory.InBank(itemID)
-    if not itemID then
-        return 0
-    end
-
-    return Inventory.BankStore()[itemID] or 0
-end
-
 CN:RegisterEvent("BAG_UPDATE_DELAYED", function()
     Inventory.Forget()
 end)

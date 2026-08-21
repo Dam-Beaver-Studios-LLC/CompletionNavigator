@@ -323,7 +323,15 @@ function Harvest.Summary()
         if record.name then counts.named = counts.named + 1 end
         if record.x and record.y then counts.located = counts.located + 1 end
         if record.requires then counts.withRequires = counts.withRequires + 1 end
-        if record.maybeRequires then counts.withGuesses = counts.withGuesses + 1 end
+        -- `record.observed`, not `record.maybeRequires`. The old field was
+        -- deleted by database migration 3 and nothing has written it since,
+        -- so this counter reported zero guesses on every database in
+        -- existence -- including every database that was full of them. The
+        -- reader outlived the field by four schema versions because nothing
+        -- ever asserted on the number it produced.
+        if record.observed and next(record.observed) then
+            counts.withGuesses = counts.withGuesses + 1
+        end
     end
 
     return counts
