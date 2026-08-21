@@ -46,6 +46,61 @@ echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
 grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
+echo "  three lists of what counts as addon source, agreeing"
+# THE FAILURE THAT COST THREE RELEASES.
+#
+# `cn.ps1 fixtures` writes fixtures/captured.lua -- a recording of a live
+# client, read only by the harness. Three separate things decide which .lua
+# files are addon source: Get-CNLuaFiles in this toolkit, the find expression
+# in the CI workflow, and .pkgmeta's ignore list. 0.47.0 taught the first one
+# about fixtures/ and left the other two alone, so every build from that point
+# failed at "Verify the .toc lists every Lua file" -- before the packager --
+# while `release` printed that it had uploaded to CurseForge.
+mkdir -p fixtures
+printf 'return { interface = 120100 }\n' > fixtures/captured.lua
+
+$PWSH -NoProfile -File ./cn.ps1 check > fixcheck.log 2>&1
+grep -q "All checks passed" fixcheck.log \
+  || { echo "FAIL: a captured fixture must not fail check"; cat fixcheck.log; exit 1; }
+
+# THE WORKFLOW'S OWN RULE, NOT A COPY OF IT.
+#
+# The behavioural check below runs a find expression written out here, which
+# is a second copy of the very list this test exists to keep in agreement --
+# it would pass while the workflow on the runner still rejected the tree. So
+# assert against the workflow file itself first.
+fixtureExclusions=$(grep -c "not -path './fixtures/\*'" .github/workflows/release.yml || true)
+[ "$fixtureExclusions" -ge 2 ] \
+  || { echo "FAIL: the CI workflow does not exclude fixtures/ from both Lua searches (found $fixtureExclusions)"; exit 1; }
+
+# The CI step, run exactly as the workflow runs it -- against an LF copy of
+# the .toc, because .gitattributes normalizes it on the way into the
+# repository and the runner checks out LF. The scaffold on this disk is CRLF,
+# and comparing against that reports every file in the addon as missing.
+status=0
+toc=$(mktemp)
+tr -d '\r' < CompletionNavigator.toc > "$toc"
+while IFS= read -r file; do
+  rel="${file#./}"
+  win="${rel//\//\\}"
+  if ! grep -qxF "$win" "$toc" && ! grep -qxF "$rel" "$toc"; then
+    echo "  NOT IN TOC: $rel"
+    status=1
+  fi
+done < <(find . -type f -name '*.lua' -not -path './.*' \
+           -not -name 'harness.lua' -not -name 'bench.lua' \
+           -not -path './fixtures/*')
+rm -f "$toc"
+[ "$status" -eq 0 ] \
+  || { echo "FAIL: CI would reject the tree over a file the toolkit ignores"; exit 1; }
+
+# And the packager must not ship the recording to players.
+tr -d '\r' < .pkgmeta | grep -q '^  - fixtures$' \
+  || { echo "FAIL: .pkgmeta does not ignore fixtures/"; exit 1; }
+
+rm -rf fixtures
+echo "    toolkit, CI and .pkgmeta all ignore a captured fixture"
+
 echo "  release guard: the project page must be reviewed"
 # A release with no user-visible change legitimately needs no new copy -- but
 # that has to be a decision somebody made. It was not; it was an omission, and

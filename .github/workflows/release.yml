@@ -118,7 +118,8 @@ jobs:
               echo "SYNTAX ERROR: $file"
               status=1
             fi
-          done < <(find . -type f -name '*.lua' -not -path './.*')
+          done < <(find . -type f -name '*.lua' -not -path './.*' \
+                     -not -path './fixtures/*')
           echo "checked $count file(s)"
 
           # A find that silently matches nothing would pass this step while
@@ -130,6 +131,16 @@ jobs:
 
           exit $status
 
+      # fixtures/captured.lua is EVIDENCE, not source: a recording of what a
+      # live client returned, written by `cn.ps1 fixtures` and read only by
+      # the test harness. It is a .lua file sitting in the repository, so this
+      # step reported it as missing from the .toc and failed the build --
+      # blocking the packager, so three tagged releases were pushed, reported
+      # as pushed, and never reached CurseForge.
+      #
+      # 0.47.0 taught the PowerShell file scanner to ignore fixtures/ and did
+      # not touch this, which does the same job on the runner. A fix applied
+      # to the instance somebody noticed rather than to the class.
       - name: Verify the .toc lists every Lua file
         run: |
           status=0
@@ -142,7 +153,8 @@ jobs:
               status=1
             fi
           done < <(find . -type f -name '*.lua' -not -path './.*' \
-                     -not -name 'harness.lua' -not -name 'bench.lua')
+                     -not -name 'harness.lua' -not -name 'bench.lua' \
+                     -not -path './fixtures/*')
           exit $status
 
       # Static analysis. Catches globals-by-typo, shadowing and dead locals --

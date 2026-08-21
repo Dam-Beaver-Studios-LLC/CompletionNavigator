@@ -7,6 +7,38 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.48.1]
+
+**0.46.0, 0.47.0 and 0.48.0 were tagged, pushed, and never published.** The
+build failed at a step before the packager on all three, and the release
+command reported success anyway. No addon code changed in this release; the
+release pipeline did.
+
+### Fixed
+
+- **A captured client recording failed the build.** `cn.ps1 fixtures` writes
+  `fixtures/captured.lua` -- evidence read only by the test harness, and the
+  thing that makes the stub audit possible at all. It is a `.lua` file sitting
+  in the repository, so the build step that verifies every Lua file is listed
+  in the `.toc` reported it as missing and exited non-zero, before the
+  packager ran. The failure began the moment the first recording was committed
+  and repeated on every release after it.
+- **Three separate lists decide what counts as addon source** -- the toolkit's
+  file scanner, the build workflow's search, and the packager's ignore list --
+  and 0.47.0 taught only the first one about `fixtures/`. That is a fix
+  applied to the instance somebody noticed instead of to the class, which is
+  the same mistake this project's comments have described twice already. All
+  three now agree, and a test scaffolds a tree with a recording in it and
+  fails if any of them disagrees.
+- **The recording would have shipped inside the addon.** The packager's ignore
+  list did not mention `fixtures`, so a copy of one machine's client evidence
+  was going into every player's AddOns folder. `mutate.sh` was going with it.
+- **`cn.ps1 release` claimed an upload it cannot see.** It printed "Pushed
+  vX. GitHub Actions packages and uploads to CurseForge" in green -- a
+  statement about the future, formatted as an outcome. That line is why three
+  failed releases were reported as live. It now says what it actually did:
+  the push happened, nothing is published, and the build has to pass first.
+
 ## [0.48.0]
 
 A second end-to-end audit, aimed at the parts 0.47.0 did not reach: the

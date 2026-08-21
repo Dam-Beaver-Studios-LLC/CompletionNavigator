@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.48.0'
+$script:ToolkitVersion = '0.48.1'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.48.0"
+CN.version     = "0.48.1"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -35766,7 +35766,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.48.0
+## Version: 0.48.1
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -36021,6 +36021,38 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.48.1]
+
+**0.46.0, 0.47.0 and 0.48.0 were tagged, pushed, and never published.** The
+build failed at a step before the packager on all three, and the release
+command reported success anyway. No addon code changed in this release; the
+release pipeline did.
+
+### Fixed
+
+- **A captured client recording failed the build.** `cn.ps1 fixtures` writes
+  `fixtures/captured.lua` -- evidence read only by the test harness, and the
+  thing that makes the stub audit possible at all. It is a `.lua` file sitting
+  in the repository, so the build step that verifies every Lua file is listed
+  in the `.toc` reported it as missing and exited non-zero, before the
+  packager ran. The failure began the moment the first recording was committed
+  and repeated on every release after it.
+- **Three separate lists decide what counts as addon source** -- the toolkit's
+  file scanner, the build workflow's search, and the packager's ignore list --
+  and 0.47.0 taught only the first one about `fixtures/`. That is a fix
+  applied to the instance somebody noticed instead of to the class, which is
+  the same mistake this project's comments have described twice already. All
+  three now agree, and a test scaffolds a tree with a recording in it and
+  fails if any of them disagrees.
+- **The recording would have shipped inside the addon.** The packager's ignore
+  list did not mention `fixtures`, so a copy of one machine's client evidence
+  was going into every player's AddOns folder. `mutate.sh` was going with it.
+- **`cn.ps1 release` claimed an upload it cannot see.** It printed "Pushed
+  vX. GitHub Actions packages and uploads to CurseForge" in green -- a
+  statement about the future, formatted as an outcome. That line is why three
+  failed releases were reported as live. It now says what it actually did:
+  the push happened, nothing is published, and the build has to pass first.
 
 ## [0.48.0]
 
@@ -38890,6 +38922,10 @@ ignore:
   - bench.lua
   - pstest.sh
   - coverage.sh
+  - mutate.sh
+  # Recordings of a live client, read only by the harness. Shipping a player
+  # a copy of somebody else's client evidence is pure weight.
+  - fixtures
 '@
 
 $Embedded['_curseforge\SUMMARY.txt'] = @'
@@ -39330,7 +39366,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.48.0
+0.48.1
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -39454,7 +39490,8 @@ jobs:
               echo "SYNTAX ERROR: $file"
               status=1
             fi
-          done < <(find . -type f -name '*.lua' -not -path './.*')
+          done < <(find . -type f -name '*.lua' -not -path './.*' \
+                     -not -path './fixtures/*')
           echo "checked $count file(s)"
 
           # A find that silently matches nothing would pass this step while
@@ -39466,6 +39503,16 @@ jobs:
 
           exit $status
 
+      # fixtures/captured.lua is EVIDENCE, not source: a recording of what a
+      # live client returned, written by `cn.ps1 fixtures` and read only by
+      # the test harness. It is a .lua file sitting in the repository, so this
+      # step reported it as missing from the .toc and failed the build --
+      # blocking the packager, so three tagged releases were pushed, reported
+      # as pushed, and never reached CurseForge.
+      #
+      # 0.47.0 taught the PowerShell file scanner to ignore fixtures/ and did
+      # not touch this, which does the same job on the runner. A fix applied
+      # to the instance somebody noticed rather than to the class.
       - name: Verify the .toc lists every Lua file
         run: |
           status=0
@@ -39478,7 +39525,8 @@ jobs:
               status=1
             fi
           done < <(find . -type f -name '*.lua' -not -path './.*' \
-                     -not -name 'harness.lua' -not -name 'bench.lua')
+                     -not -name 'harness.lua' -not -name 'bench.lua' \
+                     -not -path './fixtures/*')
           exit $status
 
       # Static analysis. Catches globals-by-typo, shadowing and dead locals --
@@ -51442,6 +51490,61 @@ echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
 grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
+echo "  three lists of what counts as addon source, agreeing"
+# THE FAILURE THAT COST THREE RELEASES.
+#
+# `cn.ps1 fixtures` writes fixtures/captured.lua -- a recording of a live
+# client, read only by the harness. Three separate things decide which .lua
+# files are addon source: Get-CNLuaFiles in this toolkit, the find expression
+# in the CI workflow, and .pkgmeta's ignore list. 0.47.0 taught the first one
+# about fixtures/ and left the other two alone, so every build from that point
+# failed at "Verify the .toc lists every Lua file" -- before the packager --
+# while `release` printed that it had uploaded to CurseForge.
+mkdir -p fixtures
+printf 'return { interface = 120100 }\n' > fixtures/captured.lua
+
+$PWSH -NoProfile -File ./cn.ps1 check > fixcheck.log 2>&1
+grep -q "All checks passed" fixcheck.log \
+  || { echo "FAIL: a captured fixture must not fail check"; cat fixcheck.log; exit 1; }
+
+# THE WORKFLOW'S OWN RULE, NOT A COPY OF IT.
+#
+# The behavioural check below runs a find expression written out here, which
+# is a second copy of the very list this test exists to keep in agreement --
+# it would pass while the workflow on the runner still rejected the tree. So
+# assert against the workflow file itself first.
+fixtureExclusions=$(grep -c "not -path './fixtures/\*'" .github/workflows/release.yml || true)
+[ "$fixtureExclusions" -ge 2 ] \
+  || { echo "FAIL: the CI workflow does not exclude fixtures/ from both Lua searches (found $fixtureExclusions)"; exit 1; }
+
+# The CI step, run exactly as the workflow runs it -- against an LF copy of
+# the .toc, because .gitattributes normalizes it on the way into the
+# repository and the runner checks out LF. The scaffold on this disk is CRLF,
+# and comparing against that reports every file in the addon as missing.
+status=0
+toc=$(mktemp)
+tr -d '\r' < CompletionNavigator.toc > "$toc"
+while IFS= read -r file; do
+  rel="${file#./}"
+  win="${rel//\//\\}"
+  if ! grep -qxF "$win" "$toc" && ! grep -qxF "$rel" "$toc"; then
+    echo "  NOT IN TOC: $rel"
+    status=1
+  fi
+done < <(find . -type f -name '*.lua' -not -path './.*' \
+           -not -name 'harness.lua' -not -name 'bench.lua' \
+           -not -path './fixtures/*')
+rm -f "$toc"
+[ "$status" -eq 0 ] \
+  || { echo "FAIL: CI would reject the tree over a file the toolkit ignores"; exit 1; }
+
+# And the packager must not ship the recording to players.
+tr -d '\r' < .pkgmeta | grep -q '^  - fixtures$' \
+  || { echo "FAIL: .pkgmeta does not ignore fixtures/"; exit 1; }
+
+rm -rf fixtures
+echo "    toolkit, CI and .pkgmeta all ignore a captured fixture"
+
 echo "  release guard: the project page must be reviewed"
 # A release with no user-visible change legitimately needs no new copy -- but
 # that has to be a decision somebody made. It was not; it was an omission, and
@@ -55503,12 +55606,27 @@ function Invoke-CNRelease {
             return
         }
 
+        # PUSHED IS NOT PUBLISHED, AND THIS USED TO SAY IT WAS.
+        #
+        # The old line was "Pushed vX. GitHub Actions packages and uploads to
+        # CurseForge." -- a statement about the future, in green, reading as an
+        # outcome. It was wrong for three consecutive releases: the build was
+        # failing at a step before the packager, so nothing was uploaded, and
+        # the author reported all three as live because the tool said so.
+        #
+        # A release command may only report what it did. Everything after the
+        # push belongs to a machine this command cannot see.
         Write-Host ''
-        Write-Host "Pushed v$new. GitHub Actions packages and uploads to CurseForge." -ForegroundColor Green
-        Write-Host '  Watch it:  .\cn.ps1 ci -Watch' -ForegroundColor DarkGray
-        Write-Host '             (one command, follows the run to the end -- do not' -ForegroundColor DarkGray
-        Write-Host '              re-run ci in a loop; that is how the API budget goes)' -ForegroundColor DarkGray
-        Write-Host '  Confirm:   .\cn.ps1 doctor' -ForegroundColor DarkGray
+        Write-Host "Pushed v$new. Nothing is published yet." -ForegroundColor Green
+        Write-Host '  The build has to pass before CurseForge sees anything, and it' -ForegroundColor DarkGray
+        Write-Host '  can fail after this command has succeeded. Watch it finish:' -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host '    .\cn.ps1 ci -Watch' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host '  (one command, follows the run to the end -- do not re-run ci' -ForegroundColor DarkGray
+        Write-Host '   in a loop; that is how the API budget goes)' -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host '  Then confirm the file actually exists:  .\cn.ps1 doctor' -ForegroundColor DarkGray
     }
     finally {
         Pop-Location
