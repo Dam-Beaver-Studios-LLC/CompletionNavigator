@@ -5435,4 +5435,75 @@ print("\nTooltips answer without scanning:")
 end)()
 
 
+print("\nA reminder that stops when the thing is done:")
+
+;(function()
+    local firstRun = CN:GetModule("Setup")
+
+    local record = CN.Account("setup")
+
+    record.completedAt = nil
+    record.prompts     = 0
+
+    -- UNTIL IT IS DONE, EVERY LOGIN.
+    --
+    -- This used to be recorded as "prompted" the first time and never spoken
+    -- again. A player who missed one line in a busy login had an addon that
+    -- silently knew nothing about their collections for the rest of its
+    -- installed life, with no way to find out why it seemed thin.
+    assert(firstRun.RemindIfNeeded() == true, "an unscanned addon says so")
+    assert(firstRun.RemindIfNeeded() == true,
+        "and says so again next login -- a required first step is worth "
+        .. "repeating until it has been done")
+
+    assert(record.prompts == 2, "each prompt is counted")
+
+    -- ONCE DONE, NEVER AGAIN. That is what separates a reminder from nagging.
+    record.completedAt = time()
+
+    assert(firstRun.RemindIfNeeded() == false,
+        "a scanned addon must never mention it again")
+
+    ------------------------------------------------------------
+    -- WHAT IT STILL CANNOT SEE
+    ------------------------------------------------------------
+    record.outstandingRemindedAt = nil
+
+    local outstanding = firstRun.Outstanding()
+
+    if #outstanding > 0 then
+        assert(firstRun.RemindOutstanding() == true,
+            "things the addon cannot read on its own are worth saying")
+
+        -- But not on every login. The fix is "open a window some time".
+        assert(firstRun.RemindOutstanding() == false,
+            "and must not be repeated the very next login")
+
+        -- After the interval, it may speak again.
+        record.outstandingRemindedAt =
+            time() - ((firstRun.outstandingIntervalDays + 1) * 86400)
+
+        assert(firstRun.RemindOutstanding() == true,
+            "but it is worth saying again eventually")
+    end
+
+    -- Asking must not trigger a scan. "What can you not see?" and "go and
+    -- look again" are different questions.
+    local scans = 0
+
+    local realRun = firstRun.Run
+
+    firstRun.Run = function() scans = scans + 1 end
+
+    CN.HandleSlashCommand("setup check")
+
+    firstRun.Run = realRun
+
+    assert(scans == 0,
+        "/cn setup check must report, not rescan; it rescanned " .. scans)
+
+    print("  repeats until scanned, then silent")
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")

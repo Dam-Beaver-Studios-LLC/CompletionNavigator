@@ -164,6 +164,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn zones` | Which zone to work on next, and why |
 | `/cn navdiag` | Exactly what the arrow is doing, and why |
 | `/cn dbsize` | How much the addon is storing, and where |
+| `/cn setup check` | What it still cannot see, without rescanning |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |
@@ -197,6 +198,7 @@ There is a benchmark in the repository, and the numbers above come out of it rat
 - Where the game does not provide a trustworthy denominator, this addon reports counts rather than inventing a completion percentage. That rule is why some things get a progress bar and others deliberately do not.
 - "Available to pick up nearby" counts what is genuinely within reach and reports anything further out separately, rather than calling a four-minute ride "here".
 - Follow mode never moves your waypoint during a fight. Whatever it was going to do happens when the fight ends.
+- On a fresh install it asks you to run one scan, and keeps asking until you have â€” an addon that knows nothing about your collections should say so rather than quietly looking thin. Once scanned, it never mentions it again.
 - Nothing is taken over without being asked. Auto-advancing the waypoint and rare alerts are off by default.
 - No external server, no account required, no data leaves your machine.
 

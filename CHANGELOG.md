@@ -7,6 +7,46 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.39.0]
+
+An addon that knows nothing should say so more than once.
+
+### Fixed
+
+- **The first-run prompt fired once, ever.** A fresh install has scanned
+  nothing, so it knows nothing about your collections and its
+  recommendations are correspondingly thin. It said so -- one line, eight
+  seconds after your first login, in the middle of the login chatter -- and
+  then recorded that it had spoken and never mentioned it again.
+  Miss that line, which most people would, and the addon underperforms
+  silently for the rest of its installed life with no way to find out why.
+  It now says so every login **until the scan has actually been run**, and
+  then never again. That is the difference between a reminder and nagging: a
+  reminder stops when the thing is finished.
+- **Two subsystems can only be read while their window is open**, so the addon
+  can be fully set up and still blind to a profession you levelled last week.
+  It knew that, and only said so immediately after a manual scan -- the one
+  moment you are least likely to need telling. It is now mentioned at login,
+  at most once a week, because the fix is "open a window some time" rather
+  than anything urgent.
+
+### Added
+
+- **`/cn setup check`** -- what the addon still cannot see, without
+  rescanning anything. "What can you not see?" and "go and look again" are
+  different questions, and answering the first by doing the second is why
+  people stop asking.
+
+### Notes
+
+- The existing behaviour was **prompt, never act** -- eleven scans run
+  uninvited on someone's login is the same discourtesy as seizing their
+  waypoint. That stance is unchanged and correct; the defect was that the
+  prompt gave up after one attempt at being heard.
+- **The navigation arrow is untouched for the fifth release running**, for the
+  same reason each time: two fixes to it are shipped and unverified, and
+  `/cn navdiag` will settle it in one command.
+
 ## [0.38.0]
 
 The hottest path in the addon was the slowest thing in it.

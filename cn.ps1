@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.38.0'
+$script:ToolkitVersion = '0.39.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.38.0"
+CN.version     = "0.39.0"
 CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -18176,27 +18176,90 @@ end
 
 -- Prompt, never act. Running eleven scans uninvited on someone's login is the
 -- same discourtesy as seizing their waypoint.
-CN:OnLogin(function()
+--
+-- BUT: the prompt used to fire once, ever. It was recorded as "prompted" the
+-- first time and never spoken again, so a player who missed that single line
+-- in a busy login -- which is most of them -- had an addon that quietly knew
+-- nothing about their collections for the rest of its installed life, and no
+-- way to find out why it seemed thin.
+--
+-- A required first step is worth saying every login until it has been done.
+-- Once done, it is never mentioned again. That is the difference between a
+-- reminder and nagging: a reminder stops when the thing is finished.
+Setup.remindSeconds = 8
+
+function Setup.RemindIfNeeded()
     if Setup.HasRun() then
-        return
+        return false
+    end
+
+    Print("Completion Navigator has not scanned your collections yet.")
+    Print("Type |cffffff00/cn setup|r once and it will know what you have.")
+
+    local account = CN.Account("setup")
+
+    account.prompts = (account.prompts or 0) + 1
+
+    return true
+end
+
+------------------------------------------------------------
+-- WHEN THE ADDON CANNOT SEE SOMETHING
+------------------------------------------------------------
+
+-- Two subsystems are readable only while their window is open, so the addon
+-- can be fully set up and still blind to a profession the player levelled
+-- last week. It knew that and only said so immediately after a manual scan,
+-- which is the one moment the player is least likely to need telling.
+--
+-- Said again periodically, and never more than this often, because the fix
+-- is "open a window some time" rather than anything urgent.
+Setup.outstandingIntervalDays = 7
+
+function Setup.RemindOutstanding()
+    if not Setup.HasRun() then
+        return false
+    end
+
+    local lines = Setup.Outstanding()
+
+    if #lines == 0 then
+        return false
     end
 
     local account = CN.Account("setup")
 
-    if account.prompted then
-        return
+    local last = account.outstandingRemindedAt or 0
+
+    if (time() - last) < (Setup.outstandingIntervalDays * 86400) then
+        return false
     end
 
-    account.prompted = time()
+    account.outstandingRemindedAt = time()
 
+    Print("Completion Navigator cannot see everything yet:")
+
+    for _, line in ipairs(lines) do
+        Print("  |cffffff00" .. line .. "|r")
+    end
+
+    return true
+end
+
+CN:OnLogin(function()
+    local function speak()
+        if Setup.RemindIfNeeded() then
+            return
+        end
+
+        Setup.RemindOutstanding()
+    end
+
+    -- Delayed, so it lands after the login chatter rather than inside it.
     if C_Timer and C_Timer.After then
-        C_Timer.After(8, function()
-            if not Setup.HasRun() then
-                Print("First run: type |cffffff00/cn setup|r to scan everything once.")
-            end
-        end)
+        C_Timer.After(Setup.remindSeconds, speak)
     else
-        Print("First run: type |cffffff00/cn setup|r to scan everything once.")
+        speak()
     end
 end)
 
@@ -18207,9 +18270,35 @@ end)
 CN:RegisterCommand{
     name    = "setup",
     aliases = { "scanall" },
+    args    = "[check]",
     order   = 5,
     help    = "Scan every subsystem once. Run this first.",
-    handler = function()
+    handler = function(args)
+        if string.lower(CN.Trim(args or "")) == "check" then
+            -- Report without scanning. "What can you not see?" is a
+            -- different question from "go and look again", and answering the
+            -- first by doing the second is why people stop asking.
+            if not Setup.HasRun() then
+                Print("Not scanned yet. Type |cffffff00/cn setup|r.")
+                return
+            end
+
+            local lines = Setup.Outstanding()
+
+            if #lines == 0 then
+                Print("Everything the addon can read on its own is scanned.")
+                return
+            end
+
+            Print("Still outside what the addon can read on its own:")
+
+            for _, line in ipairs(lines) do
+                Print("  |cffffff00" .. line .. "|r")
+            end
+
+            return
+        end
+
         Setup.Run()
     end,
 }
@@ -24440,7 +24529,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.38.0
+## Version: 0.39.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -24660,6 +24749,46 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.39.0]
+
+An addon that knows nothing should say so more than once.
+
+### Fixed
+
+- **The first-run prompt fired once, ever.** A fresh install has scanned
+  nothing, so it knows nothing about your collections and its
+  recommendations are correspondingly thin. It said so -- one line, eight
+  seconds after your first login, in the middle of the login chatter -- and
+  then recorded that it had spoken and never mentioned it again.
+  Miss that line, which most people would, and the addon underperforms
+  silently for the rest of its installed life with no way to find out why.
+  It now says so every login **until the scan has actually been run**, and
+  then never again. That is the difference between a reminder and nagging: a
+  reminder stops when the thing is finished.
+- **Two subsystems can only be read while their window is open**, so the addon
+  can be fully set up and still blind to a profession you levelled last week.
+  It knew that, and only said so immediately after a manual scan -- the one
+  moment you are least likely to need telling. It is now mentioned at login,
+  at most once a week, because the fix is "open a window some time" rather
+  than anything urgent.
+
+### Added
+
+- **`/cn setup check`** -- what the addon still cannot see, without
+  rescanning anything. "What can you not see?" and "go and look again" are
+  different questions, and answering the first by doing the second is why
+  people stop asking.
+
+### Notes
+
+- The existing behaviour was **prompt, never act** -- eleven scans run
+  uninvited on someone's login is the same discourtesy as seizing their
+  waypoint. That stance is unchanged and correct; the defect was that the
+  prompt gave up after one attempt at being heard.
+- **The navigation arrow is untouched for the fifth release running**, for the
+  same reason each time: two fixes to it are shipped and unverified, and
+  `/cn navdiag` will settle it in one command.
 
 ## [0.38.0]
 
@@ -26850,6 +26979,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn zones` | Which zone to work on next, and why |
 | `/cn navdiag` | Exactly what the arrow is doing, and why |
 | `/cn dbsize` | How much the addon is storing, and where |
+| `/cn setup check` | What it still cannot see, without rescanning |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |
@@ -26883,6 +27013,7 @@ There is a benchmark in the repository, and the numbers above come out of it rat
 - Where the game does not provide a trustworthy denominator, this addon reports counts rather than inventing a completion percentage. That rule is why some things get a progress bar and others deliberately do not.
 - "Available to pick up nearby" counts what is genuinely within reach and reports anything further out separately, rather than calling a four-minute ride "here".
 - Follow mode never moves your waypoint during a fight. Whatever it was going to do happens when the fight ends.
+- On a fresh install it asks you to run one scan, and keeps asking until you have — an addon that knows nothing about your collections should say so rather than quietly looking thin. Once scanned, it never mentions it again.
 - Nothing is taken over without being asked. Auto-advancing the waypoint and rare alerts are off by default.
 - No external server, no account required, no data leaves your machine.
 
@@ -26926,7 +27057,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.38.0
+0.39.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -32732,6 +32863,77 @@ print("\nTooltips answer without scanning:")
         "the tooltip must still say something about a recipe it recognises")
 
     print("  resolved by index, exact and teaching names both")
+end)()
+
+
+print("\nA reminder that stops when the thing is done:")
+
+;(function()
+    local firstRun = CN:GetModule("Setup")
+
+    local record = CN.Account("setup")
+
+    record.completedAt = nil
+    record.prompts     = 0
+
+    -- UNTIL IT IS DONE, EVERY LOGIN.
+    --
+    -- This used to be recorded as "prompted" the first time and never spoken
+    -- again. A player who missed one line in a busy login had an addon that
+    -- silently knew nothing about their collections for the rest of its
+    -- installed life, with no way to find out why it seemed thin.
+    assert(firstRun.RemindIfNeeded() == true, "an unscanned addon says so")
+    assert(firstRun.RemindIfNeeded() == true,
+        "and says so again next login -- a required first step is worth "
+        .. "repeating until it has been done")
+
+    assert(record.prompts == 2, "each prompt is counted")
+
+    -- ONCE DONE, NEVER AGAIN. That is what separates a reminder from nagging.
+    record.completedAt = time()
+
+    assert(firstRun.RemindIfNeeded() == false,
+        "a scanned addon must never mention it again")
+
+    ------------------------------------------------------------
+    -- WHAT IT STILL CANNOT SEE
+    ------------------------------------------------------------
+    record.outstandingRemindedAt = nil
+
+    local outstanding = firstRun.Outstanding()
+
+    if #outstanding > 0 then
+        assert(firstRun.RemindOutstanding() == true,
+            "things the addon cannot read on its own are worth saying")
+
+        -- But not on every login. The fix is "open a window some time".
+        assert(firstRun.RemindOutstanding() == false,
+            "and must not be repeated the very next login")
+
+        -- After the interval, it may speak again.
+        record.outstandingRemindedAt =
+            time() - ((firstRun.outstandingIntervalDays + 1) * 86400)
+
+        assert(firstRun.RemindOutstanding() == true,
+            "but it is worth saying again eventually")
+    end
+
+    -- Asking must not trigger a scan. "What can you not see?" and "go and
+    -- look again" are different questions.
+    local scans = 0
+
+    local realRun = firstRun.Run
+
+    firstRun.Run = function() scans = scans + 1 end
+
+    CN.HandleSlashCommand("setup check")
+
+    firstRun.Run = realRun
+
+    assert(scans == 0,
+        "/cn setup check must report, not rescan; it rescanned " .. scans)
+
+    print("  repeats until scanned, then silent")
 end)()
 
 

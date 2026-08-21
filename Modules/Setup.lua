@@ -195,27 +195,90 @@ end
 
 -- Prompt, never act. Running eleven scans uninvited on someone's login is the
 -- same discourtesy as seizing their waypoint.
-CN:OnLogin(function()
+--
+-- BUT: the prompt used to fire once, ever. It was recorded as "prompted" the
+-- first time and never spoken again, so a player who missed that single line
+-- in a busy login -- which is most of them -- had an addon that quietly knew
+-- nothing about their collections for the rest of its installed life, and no
+-- way to find out why it seemed thin.
+--
+-- A required first step is worth saying every login until it has been done.
+-- Once done, it is never mentioned again. That is the difference between a
+-- reminder and nagging: a reminder stops when the thing is finished.
+Setup.remindSeconds = 8
+
+function Setup.RemindIfNeeded()
     if Setup.HasRun() then
-        return
+        return false
+    end
+
+    Print("Completion Navigator has not scanned your collections yet.")
+    Print("Type |cffffff00/cn setup|r once and it will know what you have.")
+
+    local account = CN.Account("setup")
+
+    account.prompts = (account.prompts or 0) + 1
+
+    return true
+end
+
+------------------------------------------------------------
+-- WHEN THE ADDON CANNOT SEE SOMETHING
+------------------------------------------------------------
+
+-- Two subsystems are readable only while their window is open, so the addon
+-- can be fully set up and still blind to a profession the player levelled
+-- last week. It knew that and only said so immediately after a manual scan,
+-- which is the one moment the player is least likely to need telling.
+--
+-- Said again periodically, and never more than this often, because the fix
+-- is "open a window some time" rather than anything urgent.
+Setup.outstandingIntervalDays = 7
+
+function Setup.RemindOutstanding()
+    if not Setup.HasRun() then
+        return false
+    end
+
+    local lines = Setup.Outstanding()
+
+    if #lines == 0 then
+        return false
     end
 
     local account = CN.Account("setup")
 
-    if account.prompted then
-        return
+    local last = account.outstandingRemindedAt or 0
+
+    if (time() - last) < (Setup.outstandingIntervalDays * 86400) then
+        return false
     end
 
-    account.prompted = time()
+    account.outstandingRemindedAt = time()
 
+    Print("Completion Navigator cannot see everything yet:")
+
+    for _, line in ipairs(lines) do
+        Print("  |cffffff00" .. line .. "|r")
+    end
+
+    return true
+end
+
+CN:OnLogin(function()
+    local function speak()
+        if Setup.RemindIfNeeded() then
+            return
+        end
+
+        Setup.RemindOutstanding()
+    end
+
+    -- Delayed, so it lands after the login chatter rather than inside it.
     if C_Timer and C_Timer.After then
-        C_Timer.After(8, function()
-            if not Setup.HasRun() then
-                Print("First run: type |cffffff00/cn setup|r to scan everything once.")
-            end
-        end)
+        C_Timer.After(Setup.remindSeconds, speak)
     else
-        Print("First run: type |cffffff00/cn setup|r to scan everything once.")
+        speak()
     end
 end)
 
@@ -226,9 +289,35 @@ end)
 CN:RegisterCommand{
     name    = "setup",
     aliases = { "scanall" },
+    args    = "[check]",
     order   = 5,
     help    = "Scan every subsystem once. Run this first.",
-    handler = function()
+    handler = function(args)
+        if string.lower(CN.Trim(args or "")) == "check" then
+            -- Report without scanning. "What can you not see?" is a
+            -- different question from "go and look again", and answering the
+            -- first by doing the second is why people stop asking.
+            if not Setup.HasRun() then
+                Print("Not scanned yet. Type |cffffff00/cn setup|r.")
+                return
+            end
+
+            local lines = Setup.Outstanding()
+
+            if #lines == 0 then
+                Print("Everything the addon can read on its own is scanned.")
+                return
+            end
+
+            Print("Still outside what the addon can read on its own:")
+
+            for _, line in ipairs(lines) do
+                Print("  |cffffff00" .. line .. "|r")
+            end
+
+            return
+        end
+
         Setup.Run()
     end,
 }
