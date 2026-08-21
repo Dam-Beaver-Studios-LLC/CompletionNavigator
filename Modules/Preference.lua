@@ -241,6 +241,33 @@ CN.RegisterRecommendationHook("Preference", function(results)
 
                 local last = shownAt[key]
 
+                -- FINER THAN A TYPE, WHERE THE TYPE IS TOO COARSE.
+                --
+                -- "Quests" is one bucket containing two quite different
+                -- habits: people who follow the story, and people who clear
+                -- everything. Somebody who always does the campaign and never
+                -- touches side quests looks, at type resolution, like
+                -- somebody with no opinion at all -- the rate averages to the
+                -- middle and nothing moves.
+                --
+                -- Only quests get this. Every other type is one habit, and
+                -- six buckets that each learn nothing beat none at all.
+                local refined = Preference.Refine(objective)
+
+                if refined ~= objectiveType then
+                    local refinedRow = store[refined]
+
+                    if not refinedRow then
+                        refinedRow = { shown = 0, acted = 0 }
+
+                        store[refined] = refinedRow
+                    end
+
+                    if not last or (now - last) > Preference.actionWindowSeconds then
+                        refinedRow.shown = refinedRow.shown + 1
+                    end
+                end
+
                 if not last or (now - last) > Preference.actionWindowSeconds then
                     row.shown = row.shown + 1
 
@@ -271,6 +298,23 @@ Preference.exactIdEvents = {
 -- recommended it recently -- otherwise every quest anybody turns in would
 -- count as the addon's advice being taken, which would teach it that its
 -- opinion is always right.
+-- The sub-bucket an objective belongs in, or its plain type when it has none.
+function Preference.Refine(objective)
+    if not objective or objective.type ~= CN.objectiveTypes.QUEST then
+        return objective and objective.type
+    end
+
+    -- The game's own campaign data, which is what Loremaster already uses to
+    -- keep "the story" and "everything else" apart.
+    if CN.Blizzard and CN.Blizzard.IsQuestCampaign
+        and CN.Blizzard.IsQuestCampaign(objective.id) then
+
+        return "QUEST_CAMPAIGN"
+    end
+
+    return "QUEST_SIDE"
+end
+
 function Preference.NoteCompleted(objectiveType, objectiveID)
     if not Preference.IsEnabled() or not objectiveType then
         return false
@@ -445,7 +489,20 @@ end
 -- Applied in scoring, after the profile's own type weighting, so a focus you
 -- chose deliberately always outranks a habit the addon inferred.
 CN.RegisterScoreAdjuster("Preference", function(objective, score)
-    local multiplier, reason = Preference.Multiplier(objective and objective.type)
+    -- The finer bucket first, and only if it has earned an opinion of its
+    -- own. Falling back to the type means a player whose quest habits are
+    -- undifferentiated is treated exactly as before.
+    local refined = Preference.Refine(objective)
+
+    local multiplier, reason = 1, nil
+
+    if refined and refined ~= (objective and objective.type) then
+        multiplier, reason = Preference.Multiplier(refined)
+    end
+
+    if multiplier == 1 then
+        multiplier, reason = Preference.Multiplier(objective and objective.type)
+    end
 
     if multiplier == 1 then
         return score
@@ -548,7 +605,14 @@ CN:RegisterCommand{
         Print("What this character actually does:")
 
         for _, entry in ipairs(rows) do
-            local label = filters and filters.TypeLabel(entry.type) or entry.type
+            local labels = {
+                QUEST_CAMPAIGN = "Story quests",
+                QUEST_SIDE     = "Side quests",
+            }
+
+            local label = labels[entry.type]
+                or (filters and filters.TypeLabel(entry.type))
+                or entry.type
 
             local multiplier, reason = Preference.Multiplier(entry.type)
 

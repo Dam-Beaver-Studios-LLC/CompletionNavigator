@@ -255,6 +255,43 @@ function Tooltips.ItemLines(itemID, itemName)
 
     VendorLines(lines, itemID)
 
+    -- WHY IT MATTERS, not only that it is tracked (0.43.0).
+    --
+    -- Every line above answers "do I have this?". None of them answered the
+    -- question a player actually hovers an item to ask, which is "should I
+    -- care?" -- and the addon knows, because it has already ranked the thing
+    -- and written down its reasons.
+    --
+    -- One line, the top reason only. A tooltip that grows a paragraph is a
+    -- tooltip people turn off.
+    if collectible then
+        local goals = CN:GetModule("Goals")
+
+        local mountID = Blizzard.GetMountFromItem(itemID)
+        local speciesID = Blizzard.GetPetSpeciesFromItem(itemID)
+
+        local goalType = mountID and CN.objectiveTypes.MOUNT
+            or (speciesID and CN.objectiveTypes.PET)
+
+        local goalID = mountID or speciesID
+
+        if goals and goalType and goalID and goals.IsGoal
+            and goals.IsGoal(goalType, goalID) then
+
+            Add(lines, "You are chasing this.", { 0.365, 0.824, 0.984 })
+        else
+            local candidate = CN.FindCandidate and goalType
+                and CN.FindCandidate(goalType, goalID)
+
+            local reason = candidate and candidate.reasons
+                and candidate.reasons[1]
+
+            if reason then
+                Add(lines, reason, { 0.6, 0.6, 0.6 })
+            end
+        end
+    end
+
     return lines
 end
 

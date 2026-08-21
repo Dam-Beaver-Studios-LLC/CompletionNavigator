@@ -418,6 +418,206 @@ function Travel.ObserveFlight()
 end
 
 ------------------------------------------------------------
+-- FLYING YOURSELF
+------------------------------------------------------------
+
+-- Seconds spent mounting up and gaining height before any distance is
+-- covered. A constant, like the flight master's overhead, and for the same
+-- reason: it is an animation, not a measurement.
+Travel.takeoffSeconds = 6
+
+-- Whether the player can fly to the destination.
+--
+-- Two separate questions, and both have to be yes: does this character fly at
+-- all, and does the game allow it where they are going. `IsFlyableArea`
+-- answers for where the player IS, which is the honest approximation
+-- available -- the client will not answer for a zone the player is not in, so
+-- a cross-zone claim is checked at the near end and re-checked when they get
+-- there.
+function Travel.CanFly(mapID)
+    if not Travel.HasFlying() then
+        return false
+    end
+
+    if IsFlyableArea and not IsFlyableArea() then
+        return false
+    end
+
+    -- Same continent only; crossing one is handled above.
+    local continent = Travel.ContinentFor(mapID)
+
+    return continent ~= nil
+end
+
+-- Has this character ever actually flown? Measured, not assumed: the client
+-- exposes no reliable "can you fly here" for an arbitrary map, and skyriding
+-- availability changes with expansion, level and campaign progress. A
+-- character with flying samples has flown; one without has not, and the
+-- addon does not offer them a route they may not be able to take.
+function Travel.HasFlying()
+    local session = CN:GetModule("Session")
+
+    if not session or not session.SpeedSampleCount then
+        return false
+    end
+
+    return session.SpeedSampleCount("flying") >= (session.minSamples or 3)
+end
+
+-- Yards per second flying yourself, from the player's own measurements.
+function Travel.SelfFlightSpeed()
+    local session = CN:GetModule("Session")
+
+    if not session or not session.Speed then
+        return Travel.seededFlightSpeed, false
+    end
+
+    return session.Speed("flying")
+end
+
+------------------------------------------------------------
+-- HEARTHSTONES, PORTALS AND TELEPORTS
+------------------------------------------------------------
+
+-- WHAT THIS IS AND IS NOT.
+--
+-- It is a list of ways off this continent that the player DEMONSTRABLY has:
+-- an item in their bags, or a spell they know. Each one is reported with the
+-- cooldown the client gives, so "your hearthstone is ready" and "your
+-- hearthstone is on a 40 minute cooldown" are different answers.
+--
+-- It is NOT a routing model. The addon does not know where a hearthstone is
+-- bound in map terms -- `GetBindLocation` returns a name, and names do not
+-- convert to map ids -- so no duration is claimed and none is folded into any
+-- score. Naming the option is useful; costing it would be fiction.
+Travel.teleports = {
+    { kind = "item",  id = 6948,   label = "Hearthstone" },
+    { kind = "item",  id = 110560, label = "Garrison Hearthstone" },
+    { kind = "item",  id = 140192, label = "Dalaran Hearthstone" },
+    { kind = "item",  id = 141605, label = "Flight Master's Whistle" },
+    { kind = "spell", id = 556,    label = "Astral Recall" },
+    { kind = "spell", id = 3565,   label = "Teleport: Darnassus" },
+    { kind = "spell", id = 3562,   label = "Teleport: Ironforge" },
+    { kind = "spell", id = 3561,   label = "Teleport: Stormwind" },
+    { kind = "spell", id = 3567,   label = "Teleport: Orgrimmar" },
+    { kind = "spell", id = 3563,   label = "Teleport: Undercity" },
+    { kind = "spell", id = 3566,   label = "Teleport: Thunder Bluff" },
+    { kind = "spell", id = 18960,  label = "Teleport: Moonglade" },
+    { kind = "spell", id = 50977,  label = "Death Gate" },
+    { kind = "spell", id = 126892, label = "Zen Pilgrimage" },
+}
+
+local function ItemCooldown(itemID)
+    local count = 0
+
+    if C_Item and C_Item.GetItemCount then
+        count = C_Item.GetItemCount(itemID) or 0
+    elseif GetItemCount then
+        count = GetItemCount(itemID) or 0
+    end
+
+    if count <= 0 then
+        return nil
+    end
+
+    local start, duration
+
+    if C_Item and C_Item.GetItemCooldown then
+        start, duration = C_Item.GetItemCooldown(itemID)
+    elseif GetItemCooldown then
+        start, duration = GetItemCooldown(itemID)
+    end
+
+    if not start or not duration or duration == 0 then
+        return 0
+    end
+
+    local remaining = (start + duration) - ((GetTime and GetTime()) or 0)
+
+    return math.max(0, remaining)
+end
+
+local function SpellCooldown(spellID)
+    local known = false
+
+    if IsSpellKnown then
+        local ok, result = pcall(IsSpellKnown, spellID)
+
+        known = ok and result
+    end
+
+    if not known and IsPlayerSpell then
+        local ok, result = pcall(IsPlayerSpell, spellID)
+
+        known = ok and result
+    end
+
+    if not known then
+        return nil
+    end
+
+    local start, duration
+
+    if C_Spell and C_Spell.GetSpellCooldown then
+        local info = C_Spell.GetSpellCooldown(spellID)
+
+        if type(info) == "table" then
+            start, duration = info.startTime, info.duration
+        end
+    elseif GetSpellCooldown then
+        start, duration = GetSpellCooldown(spellID)
+    end
+
+    if not start or not duration or duration == 0 then
+        return 0
+    end
+
+    local remaining = (start + duration) - ((GetTime and GetTime()) or 0)
+
+    return math.max(0, remaining)
+end
+
+-- Every teleport this character has, with seconds of cooldown remaining.
+-- Ready ones first, because that is the order they are useful in.
+function Travel.ReadyTeleports()
+    local available = {}
+
+    for _, entry in ipairs(Travel.teleports) do
+        local remaining
+
+        if entry.kind == "item" then
+            remaining = ItemCooldown(entry.id)
+        else
+            remaining = SpellCooldown(entry.id)
+        end
+
+        if remaining then
+            table.insert(available, {
+                label     = entry.label,
+                kind      = entry.kind,
+                id        = entry.id,
+                remaining = remaining,
+                ready     = remaining <= 0,
+                -- Where a hearthstone actually goes. A name, because that is
+                -- all the client offers; deliberately not turned into a map.
+                bound     = (entry.id == 6948 and GetBindLocation)
+                    and GetBindLocation() or nil,
+            })
+        end
+    end
+
+    table.sort(available, function(a, b)
+        if a.ready ~= b.ready then
+            return a.ready
+        end
+
+        return a.remaining < b.remaining
+    end)
+
+    return available
+end
+
+------------------------------------------------------------
 -- THE ESTIMATE
 ------------------------------------------------------------
 
@@ -434,9 +634,17 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
     end
 
     if from.continent and to.continent and from.continent ~= to.continent then
-        -- Portals and boats exist and are not modelled. Saying nothing is
-        -- correct; inventing a duration is not.
-        return nil, false, { mode = "elsewhere" }
+        -- ANOTHER CONTINENT.
+        --
+        -- Still no duration: portal networks and boat schedules are not
+        -- modelled and a fabricated number would be worse than an admission.
+        -- But "I cannot cost this" and "there is no way to do it" are
+        -- different statements, and until 0.43.0 the addon made the first and
+        -- the player heard the second. So: say what is actually available.
+        return nil, false, {
+            mode      = "elsewhere",
+            teleports = Travel.ReadyTeleports(),
+        }
     end
 
     local session = CN:GetModule("Session")
@@ -463,38 +671,78 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
 
     local confident = runMeasured
 
+    -- SELF-FLYING (0.43.0).
+    --
+    -- In current content, flying yourself point to point usually beats both
+    -- running and the flight network: no walk to a flight master, no
+    -- overhead, and a straight line. Leaving it out meant the addon sent
+    -- people to a flight master for journeys they would simply fly.
+    --
+    -- Only offered where the player can actually fly: a zone with flying
+    -- disabled, or a character who has never flown, gets the ground answer.
+    if Travel.CanFly(toMapID) then
+        local flySpeed, flyMeasured = Travel.SelfFlightSpeed()
+
+        local seconds = (direct / flySpeed) + Travel.takeoffSeconds
+
+        if seconds < best.seconds then
+            best = {
+                seconds = seconds,
+                mode    = "self",
+                yards   = direct,
+            }
+
+            confident = flyMeasured
+        end
+    end
+
     local nodes = Travel.KnownNodes(toMapID) or {}
 
     if #nodes >= 2 then
-        local origin, originYards  = Travel.NearestNode(from, nodes)
-        local arrival, arrivalYards = Travel.NearestNode(to, nodes)
+        -- THE BEST PAIR, NOT THE NEAREST AT EACH END.
+        --
+        -- Nearest-to-you and nearest-to-target are two independently sensible
+        -- choices that together are often not the best route: a flight point
+        -- slightly further from you can sit much closer to where you are
+        -- going. The node count per continent is small enough to simply try
+        -- every pairing.
+        local flightSpeed, flightMeasured = Travel.FlightSpeed()
 
-        if origin and arrival and origin.id ~= arrival.id then
-            local flightYards = Travel.YardsBetweenPoints(origin.point, arrival.point)
+        for _, origin in ipairs(nodes) do
+            local originYards = Travel.YardsBetweenPoints(from, origin.point)
 
-            local flightSpeed, flightMeasured = Travel.FlightSpeed()
+            if originYards then
+                for _, arrival in ipairs(nodes) do
+                    if arrival.id ~= origin.id then
+                        local arrivalYards = Travel.YardsBetweenPoints(to, arrival.point)
 
-            if flightYards then
-                local seconds = (originYards / runSpeed)
-                    + Travel.flightOverheadSeconds
-                    + (flightYards / flightSpeed)
-                    + (arrivalYards / runSpeed)
+                        local flightYards =
+                            Travel.YardsBetweenPoints(origin.point, arrival.point)
 
-                if seconds < best.seconds then
-                    best = {
-                        seconds     = seconds,
-                        mode        = "fly",
-                        yards       = direct,
-                        runToNode   = originYards,
-                        flightYards = flightYards,
-                        runFromNode = arrivalYards,
-                        node        = origin.name,
-                        arrival     = arrival.name,
-                    }
+                        if arrivalYards and flightYards then
+                            local seconds = (originYards / runSpeed)
+                                + Travel.flightOverheadSeconds
+                                + (flightYards / flightSpeed)
+                                + (arrivalYards / runSpeed)
 
-                    -- A flight estimate is only as good as the flight speed
-                    -- behind it.
-                    confident = confident and flightMeasured
+                            if seconds < best.seconds then
+                                best = {
+                                    seconds     = seconds,
+                                    mode        = "fly",
+                                    yards       = direct,
+                                    runToNode   = originYards,
+                                    flightYards = flightYards,
+                                    runFromNode = arrivalYards,
+                                    node        = origin.name,
+                                    arrival     = arrival.name,
+                                }
+
+                                -- A flight estimate is only as good as the
+                                -- flight speed behind it.
+                                confident = runMeasured and flightMeasured
+                            end
+                        end
+                    end
                 end
             end
         end
@@ -556,6 +804,25 @@ end
 -- FORMATTING
 ------------------------------------------------------------
 
+-- Short "how long until it is usable" text. Minutes and seconds, because a
+-- cooldown the player is waiting on is measured in the units they are
+-- counting in.
+function Travel.FormatReset(seconds)
+    if not seconds or seconds <= 0 then
+        return "ready"
+    end
+
+    if seconds < 60 then
+        return math.floor(seconds) .. "s"
+    end
+
+    if seconds < 3600 then
+        return math.floor(seconds / 60) .. "m"
+    end
+
+    return string.format("%.1fh", seconds / 3600)
+end
+
 function Travel.Describe(detail, seconds, confident)
     if not seconds then
         return "travel time unknown"
@@ -567,6 +834,10 @@ function Travel.Describe(detail, seconds, confident)
         and session.FormatDuration(seconds)
         or (math.floor(seconds / 60) .. " min")
 
+    if detail and detail.mode == "self" then
+        text = text .. " |cff999999flying yourself|r"
+    end
+
     if detail and detail.mode == "fly" and detail.node then
         text = text .. " |cff999999via " .. tostring(detail.node)
         if detail.arrival then
@@ -575,11 +846,9 @@ function Travel.Describe(detail, seconds, confident)
         text = text .. "|r"
     end
 
-    if not confident then
-        text = text .. " |cff999999(estimated)|r"
-    end
-
-    return text
+    -- One convention, defined in Core, used by everything that prints a
+    -- number it is not certain of.
+    return CN.WithConfidence(text, CN.ConfidenceFor(confident))
 end
 
 ------------------------------------------------------------
@@ -673,9 +942,44 @@ CN:RegisterCommand{
                 session and session.FormatDuration
                     and session.FormatDuration(detail.yards / math.max(0.5, runSpeed))
                     or "unknown"))
+        elseif detail and detail.mode == "self" then
+            local flySpeed, flyMeasured = Travel.SelfFlightSpeed()
+
+            Print(string.format(
+                "  |cff999999%.0f yd direct at %.0f yd/s%s|r",
+                detail.yards, flySpeed,
+                flyMeasured and "" or " (estimated)"))
         elseif detail and detail.mode == "elsewhere" then
-            Print("|cff999999That is on another continent, and this addon does "
-                .. "not model portals -- so it will not guess.|r")
+            Print("|cff999999That is on another continent. Portals and boats "
+                .. "are not modelled, so no time is claimed -- but here is "
+                .. "what you have:|r")
+
+            local teleports = detail.teleports or {}
+
+            if #teleports == 0 then
+                Print("  |cff999999no hearthstone or teleport available|r")
+            end
+
+            for index, teleport in ipairs(teleports) do
+                if index > 5 then
+                    break
+                end
+
+                local line = "  " .. teleport.label
+
+                if teleport.bound then
+                    line = line .. " |cff999999to " .. teleport.bound .. "|r"
+                end
+
+                if teleport.ready then
+                    line = line .. " |cff73b873ready|r"
+                else
+                    line = line .. " |cfff56b61"
+                        .. Travel.FormatReset(teleport.remaining) .. "|r"
+                end
+
+                Print(line)
+            end
         end
     end,
 }

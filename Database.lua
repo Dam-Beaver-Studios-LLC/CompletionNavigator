@@ -461,6 +461,28 @@ CN:RegisterCommand{
         Print(string.format("Saved data: |cffffd100%.0f KB|r", total / 1024))
         Print("|cff999999Rewritten in full every time you log out.|r")
 
+        -- DISK IS NOT MEMORY, AND ONLY ONE OF THEM WAS BEING MEASURED.
+        --
+        -- This command has always reported what the addon writes. What it
+        -- costs while running -- the indexes, the caches, the frame pool --
+        -- was assumed rather than measured, which is precisely the habit the
+        -- rest of this project spends its time correcting.
+        if UpdateAddOnMemoryUsage and GetAddOnMemoryUsage then
+            local ok = pcall(UpdateAddOnMemoryUsage)
+
+            if ok then
+                local gotMemory, kilobytes =
+                    pcall(GetAddOnMemoryUsage, "CompletionNavigator")
+
+                if gotMemory and kilobytes then
+                    Print(string.format("In memory: |cffffd100%.0f KB|r",
+                        kilobytes))
+                    Print("|cff999999Indexes, caches and frames. Freed when "
+                        .. "you log out; not written anywhere.|r")
+                end
+            end
+        end
+
         local shown = 0
 
         for _, row in ipairs(rows) do

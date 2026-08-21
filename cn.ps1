@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.42.0'
+$script:ToolkitVersion = '0.43.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.42.0"
+CN.version     = "0.43.0"
 CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -335,6 +335,68 @@ end
 -- Reputation numbers are the one place this addon prints figures large
 -- enough to be misread, and "42000 to go" reads as a different order of
 -- magnitude than "42,000 to go" at a glance.
+-- ONE GRAMMAR FOR "MEASURED" VERSUS "ESTIMATED".
+--
+-- The addon prints a lot of numbers and, until 0.43.0, said how much it
+-- trusted each one in a slightly different way every time: "(estimated)"
+-- here, "time unknown" there, a grey parenthetical somewhere else. A reader
+-- cannot learn three conventions, so in practice they learn none and treat
+-- every number as equally solid -- which is the opposite of what all that
+-- careful hedging was for.
+--
+-- Three states, one shape, used everywhere:
+--
+--   measured  -- from this player's own data, printed plain
+--   estimated -- a real calculation on a seeded input, marked
+--   unknown   -- not knowable, and the number is not printed at all
+CN.confidence = {
+    MEASURED  = "measured",
+    ESTIMATED = "estimated",
+    UNKNOWN   = "unknown",
+}
+
+-- Wraps a value in the convention. Returns the text to print.
+function CN.WithConfidence(text, level)
+    if level == CN.confidence.UNKNOWN or text == nil then
+        return "|cff999999unknown|r"
+    end
+
+    if level == CN.confidence.ESTIMATED then
+        return text .. " |cff999999(estimated)|r"
+    end
+
+    return text
+end
+
+-- Convenience for the common case: a boolean "was this measured".
+function CN.ConfidenceFor(measured)
+    return measured and CN.confidence.MEASURED or CN.confidence.ESTIMATED
+end
+
+-- THE SELF-TEST REGISTRY LIVES HERE, NOT IN THE MODULE THAT USES IT.
+--
+-- It was in Modules/SelfTest.lua, which meant any module registering a check
+-- had to load after it -- an invisible constraint that held in the .toc I
+-- maintain by hand and broke the moment the toolkit scaffolded the tree in a
+-- different order. The failure was a runtime error on load, in a module that
+-- has nothing to do with self-tests.
+--
+-- A registry belongs where everything can see it. The checks stay where they
+-- make sense.
+CN.selfTests = CN.selfTests or {}
+
+function CN.RegisterSelfTest(definition)
+    if type(definition) ~= "table" or type(definition.run) ~= "function" then
+        return false
+    end
+
+    definition.order = definition.order or (#CN.selfTests + 1)
+
+    table.insert(CN.selfTests, definition)
+
+    return true
+end
+
 function CN.Comma(number)
     number = tonumber(number)
 
@@ -854,6 +916,28 @@ CN:RegisterCommand{
 
         Print(string.format("Saved data: |cffffd100%.0f KB|r", total / 1024))
         Print("|cff999999Rewritten in full every time you log out.|r")
+
+        -- DISK IS NOT MEMORY, AND ONLY ONE OF THEM WAS BEING MEASURED.
+        --
+        -- This command has always reported what the addon writes. What it
+        -- costs while running -- the indexes, the caches, the frame pool --
+        -- was assumed rather than measured, which is precisely the habit the
+        -- rest of this project spends its time correcting.
+        if UpdateAddOnMemoryUsage and GetAddOnMemoryUsage then
+            local ok = pcall(UpdateAddOnMemoryUsage)
+
+            if ok then
+                local gotMemory, kilobytes =
+                    pcall(GetAddOnMemoryUsage, "CompletionNavigator")
+
+                if gotMemory and kilobytes then
+                    Print(string.format("In memory: |cffffd100%.0f KB|r",
+                        kilobytes))
+                    Print("|cff999999Indexes, caches and frames. Freed when "
+                        .. "you log out; not written anywhere.|r")
+                end
+            end
+        end
 
         local shown = 0
 
@@ -1575,6 +1659,24 @@ function CN.GetPrerequisites(questID)
         add(harvest[questID].observedRequires)
     end
 
+    -- Chains other players contributed, shipped in Data/Community.lua or
+    -- imported by hand. Added LAST and never as curated data: they are the
+    -- weakest of the three sources and the ordering here is the order of
+    -- authority.
+    if CN.Static and CN.Static.GetCommunity then
+        local community = CN.Static.GetCommunity(questID)
+
+        if community then
+            add(community.requires)
+        end
+    end
+
+    local contributed = CN.Account and CN.Account("contributed")
+
+    if contributed and contributed[questID] then
+        add(contributed[questID])
+    end
+
     return ordered
 end
 
@@ -1801,6 +1903,14 @@ local function Dispatch(event, ...)
 
         if not ok then
             Print("Error in " .. event .. " handler: " .. tostring(err))
+
+            -- And keep it, so a bug report can carry the text rather than a
+            -- description of the text.
+            local errors = CN:GetModule("Errors")
+
+            if errors then
+                errors.Record(event .. " handler", err)
+            end
         end
     end
 end
@@ -2374,6 +2484,24 @@ CN.localeKeys = {
     "another zone",
     "Arrived: %s",
     "Now heading to: %s",
+
+    -- Added in 0.43.0. Chosen by where a player's eye actually lands: the
+    -- arrow, the heads-up line, and the words the route says as it advances.
+    "ahead",
+    "veer",
+    "turn",
+    "back",
+    "nothing actionable",
+    "Stop cleared",
+    "Stop %d of %d cleared",
+    "Route complete.",
+    "estimated",
+    "unknown",
+    "ready",
+    "solo",
+    "dead",
+    "grouped",
+    "instanced",
 }
 
 CN.RegisterLocale("enUS", {})
@@ -2408,6 +2536,20 @@ CN.RegisterLocale("deDE", {
     ["another zone"] = "andere Zone",
     ["Arrived: %s"] = "Angekommen: %s",
     ["Now heading to: %s"] = "Nächstes Ziel: %s",
+    ["ahead"] = "geradeaus",
+    ["veer"] = "abbiegen",
+    ["turn"] = "wenden",
+    ["back"] = "zurück",
+    ["nothing actionable"] = "nichts zu tun",
+    ["Stop cleared"] = "Station erledigt",
+    ["Route complete."] = "Route abgeschlossen.",
+    ["estimated"] = "geschätzt",
+    ["unknown"] = "unbekannt",
+    ["ready"] = "bereit",
+    ["solo"] = "allein",
+    ["dead"] = "tot",
+    ["grouped"] = "in einer Gruppe",
+    ["instanced"] = "in einer Instanz",
 })
 '@
 
@@ -2440,6 +2582,20 @@ CN.RegisterLocale("esES", {
     ["another zone"] = "otra zona",
     ["Arrived: %s"] = "Has llegado: %s",
     ["Now heading to: %s"] = "Ahora hacia: %s",
+    ["ahead"] = "recto",
+    ["veer"] = "desvía",
+    ["turn"] = "gira",
+    ["back"] = "date la vuelta",
+    ["nothing actionable"] = "nada que hacer",
+    ["Stop cleared"] = "Parada completada",
+    ["Route complete."] = "Ruta completada.",
+    ["estimated"] = "estimado",
+    ["unknown"] = "desconocido",
+    ["ready"] = "listo",
+    ["solo"] = "en solitario",
+    ["dead"] = "muerto",
+    ["grouped"] = "en grupo",
+    ["instanced"] = "en una instancia",
 })
 '@
 
@@ -2472,6 +2628,20 @@ CN.RegisterLocale("esMX", {
     ["another zone"] = "otra zona",
     ["Arrived: %s"] = "Has llegado: %s",
     ["Now heading to: %s"] = "Ahora hacia: %s",
+    ["ahead"] = "recto",
+    ["veer"] = "desvía",
+    ["turn"] = "gira",
+    ["back"] = "date la vuelta",
+    ["nothing actionable"] = "nada que hacer",
+    ["Stop cleared"] = "Parada completada",
+    ["Route complete."] = "Ruta completada.",
+    ["estimated"] = "estimado",
+    ["unknown"] = "desconocido",
+    ["ready"] = "listo",
+    ["solo"] = "en solitario",
+    ["dead"] = "muerto",
+    ["grouped"] = "en grupo",
+    ["instanced"] = "en una instancia",
 })
 '@
 
@@ -2504,6 +2674,20 @@ CN.RegisterLocale("frFR", {
     ["another zone"] = "autre zone",
     ["Arrived: %s"] = "Arrivé : %s",
     ["Now heading to: %s"] = "Nouvelle destination : %s",
+    ["ahead"] = "tout droit",
+    ["veer"] = "obliquez",
+    ["turn"] = "tournez",
+    ["back"] = "demi-tour",
+    ["nothing actionable"] = "rien à faire",
+    ["Stop cleared"] = "Étape terminée",
+    ["Route complete."] = "Itinéraire terminé.",
+    ["estimated"] = "estimé",
+    ["unknown"] = "inconnu",
+    ["ready"] = "prêt",
+    ["solo"] = "seul",
+    ["dead"] = "mort",
+    ["grouped"] = "en groupe",
+    ["instanced"] = "en instance",
 })
 '@
 
@@ -2536,6 +2720,20 @@ CN.RegisterLocale("itIT", {
     ["another zone"] = "un'altra zona",
     ["Arrived: %s"] = "Arrivato: %s",
     ["Now heading to: %s"] = "Ora verso: %s",
+    ["ahead"] = "dritto",
+    ["veer"] = "devia",
+    ["turn"] = "gira",
+    ["back"] = "torna indietro",
+    ["nothing actionable"] = "niente da fare",
+    ["Stop cleared"] = "Tappa completata",
+    ["Route complete."] = "Percorso completato.",
+    ["estimated"] = "stimato",
+    ["unknown"] = "sconosciuto",
+    ["ready"] = "pronto",
+    ["solo"] = "da solo",
+    ["dead"] = "morto",
+    ["grouped"] = "in gruppo",
+    ["instanced"] = "in istanza",
 })
 '@
 
@@ -2566,6 +2764,15 @@ CN.RegisterLocale("koKR", {
     ["another zone"] = "다른 지역",
     ["Arrived: %s"] = "도착: %s",
     ["Now heading to: %s"] = "다음 목적지: %s",
+    ["ahead"] = "직진",
+    ["turn"] = "방향 전환",
+    ["back"] = "뒤로",
+    ["nothing actionable"] = "할 일 없음",
+    ["estimated"] = "추정치",
+    ["unknown"] = "알 수 없음",
+    ["ready"] = "준비됨",
+    ["dead"] = "사망",
+    ["grouped"] = "파티 중",
 })
 '@
 
@@ -2598,6 +2805,20 @@ CN.RegisterLocale("ptBR", {
     ["another zone"] = "outra zona",
     ["Arrived: %s"] = "Chegou: %s",
     ["Now heading to: %s"] = "Agora rumo a: %s",
+    ["ahead"] = "em frente",
+    ["veer"] = "desvie",
+    ["turn"] = "vire",
+    ["back"] = "volte",
+    ["nothing actionable"] = "nada a fazer",
+    ["Stop cleared"] = "Parada concluída",
+    ["Route complete."] = "Rota concluída.",
+    ["estimated"] = "estimado",
+    ["unknown"] = "desconhecido",
+    ["ready"] = "pronto",
+    ["solo"] = "sozinho",
+    ["dead"] = "morto",
+    ["grouped"] = "em grupo",
+    ["instanced"] = "em uma instância",
 })
 '@
 
@@ -2628,6 +2849,15 @@ CN.RegisterLocale("ruRU", {
     ["another zone"] = "другая зона",
     ["Arrived: %s"] = "Прибытие: %s",
     ["Now heading to: %s"] = "Следующая цель: %s",
+    ["ahead"] = "прямо",
+    ["turn"] = "развернуться",
+    ["back"] = "назад",
+    ["nothing actionable"] = "нечего делать",
+    ["estimated"] = "оценка",
+    ["unknown"] = "неизвестно",
+    ["ready"] = "готово",
+    ["dead"] = "мертв",
+    ["grouped"] = "в группе",
 })
 '@
 
@@ -2660,6 +2890,20 @@ CN.RegisterLocale("zhCN", {
     ["another zone"] = "其他区域",
     ["Arrived: %s"] = "已到达：%s",
     ["Now heading to: %s"] = "现在前往：%s",
+    ["ahead"] = "直行",
+    ["veer"] = "偏转",
+    ["turn"] = "转向",
+    ["back"] = "折返",
+    ["nothing actionable"] = "暂无可做",
+    ["Stop cleared"] = "站点完成",
+    ["Route complete."] = "路线完成。",
+    ["estimated"] = "估算",
+    ["unknown"] = "未知",
+    ["ready"] = "就绪",
+    ["solo"] = "单人",
+    ["dead"] = "死亡",
+    ["grouped"] = "组队中",
+    ["instanced"] = "副本中",
 })
 '@
 
@@ -2690,6 +2934,15 @@ CN.RegisterLocale("zhTW", {
     ["another zone"] = "其他區域",
     ["Arrived: %s"] = "已抵達：%s",
     ["Now heading to: %s"] = "現在前往：%s",
+    ["ahead"] = "直行",
+    ["turn"] = "轉向",
+    ["back"] = "折返",
+    ["nothing actionable"] = "暫無可做",
+    ["estimated"] = "估算",
+    ["unknown"] = "未知",
+    ["ready"] = "就緒",
+    ["dead"] = "死亡",
+    ["grouped"] = "組隊中",
 })
 '@
 
@@ -2753,20 +3006,48 @@ CN.batchBonusCap          = 3
 CN.urgencyHorizonSeconds = 7200
 CN.urgencyWeight         = 4.0
 
+-- A SECOND HORIZON, ADDED IN 0.43.0.
+--
+-- Two hours was the right window when everything with a deadline was a world
+-- quest. It stopped being right when lockouts and the Great Vault arrived:
+-- both expire at the weekly reset, so both sat at exactly zero urgency for
+-- six and a half days and then jumped. A raid you are six bosses into, with
+-- eighteen hours left on it, is genuinely more urgent than the same raid on
+-- Wednesday -- and the curve could not say so.
+--
+-- So: a long ramp that starts a week out and carries a small amount of
+-- weight, and the original short ramp on top of it for the last two hours.
+-- The short one still dominates, which is the point -- a world quest with ten
+-- minutes on it should still beat a lockout with four days.
+CN.urgencyLongHorizonSeconds = 7 * 86400
+CN.urgencyLongShare          = 0.35
+
 function CN.UrgencyBonus(secondsLeft)
     if type(secondsLeft) ~= "number" or secondsLeft <= 0 then
         return 0
     end
 
-    if secondsLeft >= CN.urgencyHorizonSeconds then
-        return 0
+    local value = 0
+
+    if secondsLeft < CN.urgencyLongHorizonSeconds then
+        -- Linear across the week. Deliberately not squared: the point of this
+        -- term is to break ties between things that are all days away, and a
+        -- squared curve would leave them all at nearly zero, which is the
+        -- behaviour being fixed.
+        local remaining = 1 - (secondsLeft / CN.urgencyLongHorizonSeconds)
+
+        value = remaining * CN.urgencyLongShare
     end
 
-    -- Squared, so the last twenty minutes are worth much more than the first
-    -- hour of the window.
-    local remaining = 1 - (secondsLeft / CN.urgencyHorizonSeconds)
+    if secondsLeft < CN.urgencyHorizonSeconds then
+        -- Squared, so the last twenty minutes are worth much more than the
+        -- first hour of the window.
+        local remaining = 1 - (secondsLeft / CN.urgencyHorizonSeconds)
 
-    return remaining * remaining
+        value = value + (remaining * remaining)
+    end
+
+    return value
 end
 
 -- Priority profiles have two independent levers:
@@ -3520,6 +3801,20 @@ CN:RegisterCommand{
         local objective = results[1]
 
         CN.currentRecommendation = objective
+
+        -- SAY IT FIRST WHEN THE PLAYER CANNOT ACT ON THE ANSWER.
+        --
+        -- Recommending a battle pet to a corpse is the clearest possible
+        -- signal that the addon is not watching. The line goes above the
+        -- recommendation rather than below it, because it changes how to read
+        -- what follows.
+        local group = CN:GetModule("Group")
+
+        local notice = group and group.Notice()
+
+        if notice then
+            CN.Print("|cffffd100" .. notice .. "|r")
+        end
 
         CN.Print("Recommended next: " .. tostring(objective.name or objective.id)
             .. " |cff999999(" .. tostring(objective.type) .. ")|r")
@@ -4760,8 +5055,70 @@ local function CreateList(parent)
     -- ending -- a truncated list that looks complete is worse than a long one.
     list.maxRows = 200
 
+    -- A FILTER OVER WHATEVER IS BEING SHOWN.
+    --
+    -- Not a search across everything the addon knows -- that is what the
+    -- commands are for, and a search box that quietly queries a different
+    -- data set than the list under it is a lie about what you are looking at.
+    -- This narrows the rows already on screen, which is what people reach for
+    -- a box for.
+    -- STATE IN A LOCAL, NOT ON THE FRAME.
+    --
+    -- A frame is not a plain table: templates and mixins put a metatable on
+    -- it, and reading an unset field can return something other than nil.
+    -- The first version of this kept `list.filterText` on the frame and
+    -- relied on "unset means nil" -- which held in the game and did not hold
+    -- against the test harness's stub, whose __index answers every key. The
+    -- test caught it; a player with a different UI library might have found
+    -- it instead.
+    local filterText = nil
+
+    function list:SetFilter(text)
+        -- A stub EditBox, or a template whose GetText returns something
+        -- surprising, must not be able to poison the filter with a value that
+        -- string.find will throw on later -- three frames away from here,
+        -- where the cause is not obvious.
+        if type(text) ~= "string" then
+            text = ""
+        end
+
+        text = CN.Trim(text)
+
+        filterText = (text ~= "") and string.lower(text) or nil
+
+        if self.lastEntries then
+            self:SetEntries(self.lastEntries)
+        end
+    end
+
+    function list:Matches(entry)
+        if not filterText then
+            return true
+        end
+
+        local haystack = string.lower(tostring(entry.text or ""))
+
+        -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
+        -- name, not a regular expression, and a stray bracket must not throw.
+        return haystack:find(filterText, 1, true) ~= nil
+    end
+
     -- entries = { { text = , onClick = , tooltip = }, ... }
     function list:SetEntries(entries)
+        self.lastEntries = entries
+
+        if filterText then
+            local kept = {}
+
+            for _, entry in ipairs(entries) do
+                if self:Matches(entry) then
+                    table.insert(kept, entry)
+                end
+            end
+
+            entries = kept
+        end
+
         local width = scroll:GetWidth() or (WINDOW_WIDTH - 60)
 
         local shown = math.min(#entries, self.maxRows)
@@ -4948,6 +5305,34 @@ local function BuildWindow()
 
     window.tabButtons = {}
 
+    -- A FILTER BOX, ONE PER WINDOW.
+    --
+    -- Sits above the tabs so it plainly applies to whatever tab is showing,
+    -- rather than looking like part of one tab's contents. Empty by default
+    -- and cleared when the tab changes: a filter that persists invisibly
+    -- across tabs is how somebody concludes a list is empty when it is not.
+    local search = CreateFrame("EditBox", nil, window, "InputBoxTemplate")
+
+    search:SetSize(160, 20)
+    search:SetPoint("TOPRIGHT", -30, -26)
+    search:SetAutoFocus(false)
+    search:SetMaxLetters(40)
+
+    local searchLabel = window:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    searchLabel:SetPoint("RIGHT", search, "LEFT", -6, 0)
+    searchLabel:SetText("filter")
+
+    search:SetScript("OnTextChanged", function(self)
+        UI.SetFilter(self:GetText())
+    end)
+
+    search:SetScript("OnEscapePressed", function(self)
+        self:SetText("")
+        self:ClearFocus()
+    end)
+
+    window.search = search
+
     window.body = CreateFrame("Frame", nil, window)
     window.body:SetPoint("TOPLEFT", 10, -58)
     window.body:SetPoint("BOTTOMRIGHT", -10, 34)
@@ -5097,6 +5482,12 @@ function UI.SelectTab(index)
 
             if not ok then
                 Print("Error building the " .. tab.name .. " tab: " .. tostring(err))
+
+                local errors = CN:GetModule("Errors")
+
+                if errors then
+                    errors.Record("building the " .. tab.name .. " tab", err)
+                end
             end
         end
     end
@@ -5110,6 +5501,17 @@ end
 -- REFRESH
 ------------------------------------------------------------
 
+-- Applies the filter box to whichever list the current tab is showing.
+function UI.SetFilter(text)
+    local tab = UI.tabs[UI.selectedTab or 1]
+
+    local panel = tab and tab.panel
+
+    if panel and panel.list and panel.list.SetFilter then
+        panel.list:SetFilter(text)
+    end
+end
+
 function UI.Refresh()
     if not window or not window:IsShown() then
         return
@@ -5122,6 +5524,12 @@ function UI.Refresh()
 
         if not ok then
             Print("Error refreshing the " .. tab.name .. " tab: " .. tostring(err))
+
+            local errors = CN:GetModule("Errors")
+
+            if errors then
+                errors.Record("refreshing the " .. tab.name .. " tab", err)
+            end
         end
     end
 end
@@ -6842,10 +7250,39 @@ function CompletionNavigator_Navigate()
     end
 end
 
+-- One helper rather than three copies of the same four lines. The slash
+-- handler is the single entry point every command already goes through, so a
+-- binding is a keystroke that types for you.
+local function RunCommand(text)
+    local handler = SlashCmdList and SlashCmdList.COMPLETIONNAVIGATOR
+
+    if handler then
+        handler(text)
+    end
+end
+
+function CompletionNavigator_ToggleFollow()
+    RunCommand("follow")
+end
+
+function CompletionNavigator_Plan()
+    -- No argument: /cn plan now defaults to however long this character
+    -- usually plays, which is exactly the right behaviour for a key you press
+    -- without thinking about it.
+    RunCommand("plan")
+end
+
+function CompletionNavigator_ToggleHud()
+    RunCommand("hud")
+end
+
 BINDING_HEADER_COMPLETIONNAVIGATOR       = "Completion Navigator"
 BINDING_NAME_COMPLETIONNAVIGATOR_TOGGLE  = "Toggle window"
 BINDING_NAME_COMPLETIONNAVIGATOR_NEXT    = "Recommend next objective"
 BINDING_NAME_COMPLETIONNAVIGATOR_GO      = "Navigate to recommendation"
+BINDING_NAME_COMPLETIONNAVIGATOR_FOLLOW  = "Start or stop follow mode"
+BINDING_NAME_COMPLETIONNAVIGATOR_PLAN    = "Plan a session"
+BINDING_NAME_COMPLETIONNAVIGATOR_HUD     = "Toggle the heads-up line"
 
 ------------------------------------------------------------
 -- LIFECYCLE
@@ -6972,6 +7409,17 @@ $Embedded['Data\Quests.lua'] = @'
 --   breadcrumb (boolean) skippable and permanently missable
 --   obsolete   (boolean) no longer obtainable
 --
+-- Added in 0.43.0, all optional, all for saying WHY something is not
+-- available rather than leaving the player to work it out:
+--
+--   classes    (table)   class file names that can take it, e.g. { "DRUID" }
+--   races      (table)   race file names, e.g. { "NIGHTELF" }
+--   faction    (string)  "Alliance" or "Horde"
+--   minLevel   (number)  character level required
+--   turnInMapID(number)  where it is handed IN, when that differs from where
+--   turnInX,               it is picked up -- the client's own waypoint moves
+--   turnInY                as you progress, so it cannot answer this
+--
 -- Add rows with:  .\cn.ps1 data quest <id> -Name "<title>"
 
 local ADDON_NAME, CN = ...
@@ -6984,6 +7432,38 @@ CN.Static.RegisterQuests({
     },
 
     -- CN:DATA:QUESTS -- new rows are inserted above this marker.
+})
+'@
+
+$Embedded['Data\Community.lua'] = @'
+-- Data/Community.lua
+-- Completion Navigator :: quest chains contributed by players.
+--
+-- SEPARATE FROM Data/Quests.lua, DELIBERATELY.
+--
+-- Quests.lua is curated: somebody checked each row. This file is not. Rows
+-- here arrived as `/cn contribute` exports, were reviewed for shape rather
+-- than for truth, and are believed because several independent installs
+-- watched the same ordering hold.
+--
+-- Keeping the two apart is what lets /cn why say which kind of claim it is
+-- making. Merging them would be a one-line convenience that permanently
+-- destroyed the distinction between "this is known" and "this has been
+-- observed a lot", and there is no getting it back afterwards.
+--
+-- Rows are registered as OBSERVED prerequisites, so nothing in here can ever
+-- present itself as curated fact.
+
+local ADDON_NAME, CN = ...
+
+CN.Static.RegisterCommunity({
+
+    -- [questID] = { requires = { questID, ... }, sources = 3 },
+    --
+    -- `sources` is how many independent contributions agreed. Two is thin,
+    -- five is solid; below two a row does not belong in this file.
+
+    -- CN:DATA:COMMUNITY -- new rows are inserted above this marker.
 })
 '@
 
@@ -8231,12 +8711,42 @@ function Blizzard.GetTodaysEvents()
                 or event.sequenceType == "START"
                 or event.sequenceType == ""
 
+            -- WHEN IT ENDS, where the calendar says so.
+            --
+            -- Without this an active event is just a name, and the ranking
+            -- has nothing to weigh: "Timewalking is on" and "Timewalking ends
+            -- in four hours" are different pieces of advice. Some builds omit
+            -- the end time entirely, and nil is then the right answer rather
+            -- than a guessed week.
+            local endsIn
+
+            if type(event.endTime) == "table" and event.endTime.monthDay
+                and C_DateAndTime and C_DateAndTime.GetSecondsUntilWeeklyReset then
+
+                local finish = event.endTime
+
+                local nowStamp = time()
+
+                local okStamp, stamp = pcall(time, {
+                    year  = finish.year   or 0,
+                    month = finish.month  or 1,
+                    day   = finish.monthDay,
+                    hour  = finish.hour   or 0,
+                    min   = finish.minute or 0,
+                })
+
+                if okStamp and stamp and stamp > nowStamp then
+                    endsIn = stamp - nowStamp
+                end
+            end
+
             table.insert(events, {
                 title        = event.title,
                 eventType    = event.eventType,
                 calendarType = event.calendarType,
                 sequenceType = event.sequenceType,
                 ongoing      = ongoing,
+                endsIn       = endsIn,
             })
         end
     end
@@ -8364,6 +8874,12 @@ function Blizzard.GetCurrencyList()
                 maxWeeklyQuantity  = info.maxWeeklyQuantity or 0,
 
                 useTotalEarnedForMaxQty = info.useTotalEarnedForMaxQty and true or false,
+
+                -- Warband currencies. The client flags them and the addon
+                -- ignored the flag until 0.43.0, so one capped on your main
+                -- was recommended again on every alt.
+                accountWide = (info.isAccountWide
+                    or info.isAccountTransferable) and true or false,
             })
         end
     end
@@ -9149,11 +9665,29 @@ function Blizzard.SearchEncounterJournal(text, limit)
 
                 local encounterName = EJ_GetEncounterInfo and EJ_GetEncounterInfo(id)
 
+                -- The journal's current difficulty, where the build exposes
+                -- it. Reported rather than assumed: a nil here means the
+                -- client did not say, which is different from "any".
+                local difficulty
+
+                if EJ_GetDifficulty and GetDifficultyInfo then
+                    local gotDifficulty, difficultyID = pcall(EJ_GetDifficulty)
+
+                    if gotDifficulty and difficultyID then
+                        local gotName, name = pcall(GetDifficultyInfo, difficultyID)
+
+                        if gotName then
+                            difficulty = name
+                        end
+                    end
+                end
+
                 table.insert(found, {
                     encounterID = id,
                     encounter   = encounterName,
                     instanceID  = instanceID,
                     instance    = instanceName,
+                    difficulty  = difficulty,
                 })
             end
         end
@@ -9238,8 +9772,119 @@ end
 -- ACCESS
 ------------------------------------------------------------
 
+-- CONTRIBUTED CHAINS.
+--
+-- Held apart from the curated table so that the difference between "checked"
+-- and "widely observed" survives being written to disk, and so /cn why can
+-- say which one it is quoting.
+Static.community = Static.community or {}
+
+function Static.RegisterCommunity(records)
+    if type(records) ~= "table" then
+        return 0
+    end
+
+    local added = 0
+
+    for questID, record in pairs(records) do
+        if type(record) == "table" and type(record.requires) == "table" then
+            Static.community[questID] = record
+
+            added = added + 1
+        end
+    end
+
+    return added
+end
+
+function Static.GetCommunity(questID)
+    return Static.community[questID]
+end
+
+function Static.CommunityCount()
+    local count = 0
+
+    for _ in pairs(Static.community) do
+        count = count + 1
+    end
+
+    return count
+end
+
 function Static.GetQuest(questID)
     return Static.quests[questID]
+end
+
+-- ELIGIBILITY, from curated data.
+--
+-- The client only draws quest pins the character qualifies for, so gating is
+-- normally handled by simply not seeing it. That is fine while the player is
+-- standing there and useless the moment they ask "why can nobody in my
+-- Warband do this?" -- which is exactly what /cn why and /cn alts are for.
+--
+-- Returns eligible, reason. A record with no gating fields is eligible, and
+-- says so with a nil reason rather than an empty claim.
+function Static.QuestEligibility(questID, character)
+    local record = Static.quests[questID]
+
+    if not record then
+        return true, nil
+    end
+
+    character = character or CN.character or {}
+
+    if record.faction and character.faction
+        and record.faction ~= character.faction then
+
+        return false, record.faction .. " only"
+    end
+
+    if record.minLevel and character.level
+        and character.level < record.minLevel then
+
+        return false, "level " .. record.minLevel .. " required"
+    end
+
+    local function allowed(list, value, label)
+        if type(list) ~= "table" or #list == 0 or not value then
+            return true
+        end
+
+        for _, entry in ipairs(list) do
+            if entry == value then
+                return true
+            end
+        end
+
+        return false, label .. " only: " .. table.concat(list, ", ")
+    end
+
+    local okClass, classReason = allowed(record.classes, character.class, "class")
+
+    if not okClass then
+        return false, classReason
+    end
+
+    local okRace, raceReason = allowed(record.races, character.race, "race")
+
+    if not okRace then
+        return false, raceReason
+    end
+
+    return true, nil
+end
+
+-- Where a quest is HANDED IN, which is not where it is picked up and is not
+-- what the client's moving "next waypoint" reports once you are part-way
+-- through it.
+function Static.GetQuestTurnIn(questID)
+    local record = Static.quests[questID]
+
+    if not record or not record.turnInMapID then
+        return nil
+    end
+
+    return record.turnInMapID, record.turnInX, record.turnInY
 end
 
 function Static.GetQuestName(questID)
@@ -10180,6 +10825,8 @@ function Quests.AvailableOnMap(mapID)
         for _, poi in ipairs(Blizzard.GetQuestPOIsOnMap(relatedID)) do
             if poi.isQuestStart and not poi.inProgress then
                 consider(poi, "map")
+
+                Quests.RememberOffer(poi)
             end
         end
     end
@@ -10199,6 +10846,208 @@ function Quests.AvailableOnMap(mapID)
 
     return found
 end
+
+-- QUESTS THREE ZONES AWAY.
+--
+-- The client's POI list only answers for a map, and only for the map the
+-- player is looking at -- so "what is waiting for me in Azj-Kahet?" was
+-- structurally unanswerable and the addon said so in its own scope-limits
+-- note. It still cannot enumerate a zone it has never seen; what it can do
+-- is remember what it HAS seen.
+--
+-- Every quest start observed on any map is recorded, so a zone the player
+-- walked through last week can still be reported on. Bounded, and pruned
+-- when a quest is completed or picked up, because a remembered pin for a
+-- quest already in the log is worse than no pin.
+Quests.rememberedCap = 600
+
+local function Remembered()
+    return CN.Account("questPins")
+end
+
+Quests.Remembered = Remembered
+
+function Quests.RememberOffer(poi)
+    if not poi or not poi.questID or not poi.mapID then
+        return false
+    end
+
+    local store = Remembered()
+
+    -- Only what the client cannot re-derive instantly: no names, no
+    -- timestamps beyond the one that makes pruning possible.
+    store[poi.questID] = {
+        mapID = poi.mapID,
+        x     = poi.x and math.floor(poi.x * 1000 + 0.5) / 1000 or nil,
+        y     = poi.y and math.floor(poi.y * 1000 + 0.5) / 1000 or nil,
+    }
+
+    if CN.CountKeys(store) > Quests.rememberedCap then
+        Quests.PruneRemembered()
+    end
+
+    return true
+end
+
+-- Drops anything no longer worth remembering: completed, in the log, or --
+-- if still over the cap after that -- the lowest quest IDs, which are the
+-- oldest content and the least likely to be what the player is working on.
+function Quests.PruneRemembered()
+    local store = Remembered()
+
+    local dropped = 0
+
+    for questID in pairs(store) do
+        if Quests.IsCompletedByCharacter(questID)
+            or Blizzard.IsQuestInLog(questID) then
+
+            store[questID] = nil
+            dropped = dropped + 1
+        end
+    end
+
+    local remaining = CN.CountKeys(store)
+
+    if remaining > Quests.rememberedCap then
+        local ids = {}
+
+        for questID in pairs(store) do
+            table.insert(ids, questID)
+        end
+
+        table.sort(ids)
+
+        for index = 1, remaining - Quests.rememberedCap do
+            store[ids[index]] = nil
+            dropped = dropped + 1
+        end
+    end
+
+    return dropped
+end
+
+-- What is waiting in a zone the player is not standing in.
+function Quests.RememberedInZone(mapID)
+    local waiting = {}
+
+    if not mapID then
+        return waiting
+    end
+
+    for questID, record in pairs(Remembered()) do
+        if record.mapID == mapID
+            and not Quests.IsCompletedByCharacter(questID)
+            and not Blizzard.IsQuestInLog(questID) then
+
+            table.insert(waiting, {
+                questID = questID,
+                mapID   = record.mapID,
+                x       = record.x,
+                y       = record.y,
+            })
+        end
+    end
+
+    table.sort(waiting, function(a, b) return a.questID < b.questID end)
+
+    return waiting
+end
+
+-- Every zone with something remembered in it, most first.
+function Quests.RememberedZones()
+    local byZone = {}
+
+    for questID, record in pairs(Remembered()) do
+        if not Quests.IsCompletedByCharacter(questID)
+            and not Blizzard.IsQuestInLog(questID) then
+
+            byZone[record.mapID] = (byZone[record.mapID] or 0) + 1
+        end
+    end
+
+    local zones = {}
+
+    for zoneID, count in pairs(byZone) do
+        table.insert(zones, {
+            mapID = zoneID,
+            name  = Blizzard.GetMapName(zoneID),
+            count = count,
+        })
+    end
+
+    table.sort(zones, function(a, b)
+        if a.count ~= b.count then
+            return a.count > b.count
+        end
+
+        return (a.mapID or 0) < (b.mapID or 0)
+    end)
+
+    return zones
+end
+
+CN:RegisterEvent("QUEST_TURNED_IN", function()
+    Quests.PruneRemembered()
+end)
+
+CN:RegisterCommand{
+    name    = "waiting",
+    args    = "[zone name]",
+    order   = 23,
+    help    = "Quests you have walked past and never picked up, by zone.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        local zones = Quests.RememberedZones()
+
+        if #zones == 0 then
+            Print("Nothing remembered yet.")
+            Print("|cff999999The addon records quest starts as it sees them. "
+                .. "Walk through a zone once and it can tell you what you "
+                .. "left behind in it.|r")
+            return
+        end
+
+        if args ~= "" then
+            for _, zone in ipairs(zones) do
+                if zone.name and string.lower(zone.name):find(string.lower(args), 1, true) then
+                    Print(zone.name .. ": " .. zone.count .. " left behind")
+
+                    for index, entry in ipairs(Quests.RememberedInZone(zone.mapID)) do
+                        if index > 20 then
+                            Print("  |cff999999... and more|r")
+                            break
+                        end
+
+                        Print("  " .. (Quests.GetName(entry.questID)
+                            or ("quest " .. entry.questID)))
+                    end
+
+                    return
+                end
+            end
+
+            Print("Nothing remembered in a zone matching \"" .. args .. "\".")
+            return
+        end
+
+        Print("Quests you have seen and not taken:")
+
+        for index, zone in ipairs(zones) do
+            if index > 12 then
+                Print("  |cff999999... and " .. (#zones - 12) .. " more zones|r")
+                break
+            end
+
+            Print(string.format("  %-28s %d",
+                tostring(zone.name or zone.mapID), zone.count))
+        end
+
+        Print("|cff999999This is what the addon has actually seen, not every "
+            .. "quest in the game -- the client only lists pins for the map "
+            .. "you are looking at.|r")
+    end,
+}
 
 -- HOW FAR IS "HERE".
 --
@@ -10563,6 +11412,29 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
             and CN.character.faction ~= static.requiresFaction then
             return states.INELIGIBLE, CN.blockReasons.WRONG_FACTION, static.requiresFaction
         end
+    end
+
+    -- CURATED GATING (0.43.0).
+    --
+    -- Class, race, faction and level, from the static database. The client
+    -- handles this implicitly by not drawing a pin you do not qualify for,
+    -- which works while you are standing there and answers nothing when you
+    -- ask "could any of my characters do this?" -- which is precisely what
+    -- /cn alts is for.
+    local eligible, gateReason = CN.Static.QuestEligibility(questID)
+
+    if not eligible then
+        local reason = CN.blockReasons.WRONG_CLASS
+
+        if gateReason:find("^race") then
+            reason = CN.blockReasons.WRONG_RACE
+        elseif gateReason:find("^level") then
+            reason = CN.blockReasons.LEVEL_TOO_LOW
+        elseif gateReason:find("Alliance") or gateReason:find("Horde") then
+            reason = CN.blockReasons.WRONG_FACTION
+        end
+
+        return states.INELIGIBLE, reason, gateReason
     end
 
     -- Prerequisites nobody curated, inferred from repeated observation
@@ -15176,7 +16048,10 @@ end
 CN.RegisterCandidateProvider("Opportunities", function()
     local candidates = {}
 
-    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+    -- Only the map is needed now: travel cost is computed by CN.TravelCost,
+    -- which reads the player's position itself so every provider costs a
+    -- journey the same way.
+    local playerMap = CN.GetPlayerPosition()
 
     for _, worldQuest in ipairs(Opportunities.GetWorldQuests(playerMap)) do
         local reasons = {}
@@ -15194,19 +16069,14 @@ CN.RegisterCandidateProvider("Opportunities", function()
             table.insert(reasons, worldQuest.tagName)
         end
 
-        local travel = 0
+        -- Costed through the real travel model rather than a straight line
+        -- and a flat out-of-zone penalty, the same way quests have been
+        -- since 0.42.0. World quests are exactly where this matters: they
+        -- are scattered across a continent and they expire.
+        local travel = CN.TravelCost(worldQuest.mapID, worldQuest.x, worldQuest.y)
 
-        if worldQuest.x and worldQuest.y and playerX and playerY
-            and worldQuest.mapID == playerMap then
-
-            local dx = worldQuest.x - playerX
-            local dy = worldQuest.y - playerY
-
-            travel = math.sqrt((dx * dx) + (dy * dy)) * 10
-
+        if worldQuest.mapID == playerMap then
             table.insert(reasons, "in your current zone")
-        elseif worldQuest.mapID ~= playerMap then
-            travel = 25
         end
 
         table.insert(candidates, CN.NewObjective({
@@ -15223,6 +16093,41 @@ CN.RegisterCandidateProvider("Opportunities", function()
             expiresIn        = worldQuest.secondsLeft,
             reasons          = reasons,
         }))
+    end
+
+    -- ACTIVE EVENTS (0.43.0).
+    --
+    -- The calendar has been read since 0.20.0 and its answers went into
+    -- `/cn events` and nowhere else. A holiday or a Timewalking week is a
+    -- deadline in exactly the sense the ranking already understands -- it is
+    -- gone on a known date and it is not coming back for a year -- so it
+    -- belongs in the list rather than in a separate command.
+    for _, event in ipairs(Opportunities.GetActiveEvents()) do
+        if not CN.IsIgnored(CN.objectiveTypes.CURRENCY, event.title)
+            and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, event.title) then
+
+            local reasons = { "world event, on now" }
+
+            if event.endsIn then
+                table.insert(reasons, "ends in "
+                    .. Opportunities.FormatTimeLeft(event.endsIn))
+            end
+
+            -- Deliberately modest. The addon knows the event is running; it
+            -- does not know which of its quests you have done, so claiming
+            -- this is your most valuable next action would be a guess.
+            table.insert(candidates, CN.NewObjective({
+                id               = event.title,
+                type             = CN.objectiveTypes.CURRENCY,
+                name             = event.title,
+                completionValue  = 2,
+                limitedTimeBonus = event.endsIn
+                    and Opportunities.Urgency(event.endsIn) or 1,
+                travelCost       = CN.unknownLocationCost,
+                expiresIn        = event.endsIn,
+                reasons          = reasons,
+            }))
+        end
     end
 
     return candidates
@@ -16172,6 +17077,7 @@ function Currencies.Scan()
                 earnedThisWeek    = currency.earnedThisWeek,
                 maxWeeklyQuantity = currency.maxWeeklyQuantity,
                 capped            = capped,
+                accountWide       = currency.accountWide or nil,
                 weeklyRemaining   = weeklyLeft,
                 lastSeen          = time(),
             }
@@ -16289,11 +17195,20 @@ CN.RegisterCandidateProvider("Currencies", function()
         if not CN.IsIgnored(CN.objectiveTypes.CURRENCY, currency.currencyID)
             and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, currency.currencyID) then
 
+            -- ACCOUNT-WIDE CURRENCIES ARE ACCOUNT-WIDE (0.43.0).
+            --
+            -- The client flags these and the addon ignored the flag, so a
+            -- Warband currency capped on one character was recommended again
+            -- on every other one -- the exact mistake the Warband work exists
+            -- to prevent, in the one store that had not been told about it.
+            local shared = currency.accountWide
+
             table.insert(candidates, CN.NewObjective({
                 id               = currency.currencyID,
                 type             = CN.objectiveTypes.CURRENCY,
-                name             = "Spend " .. tostring(currency.name),
-                accountWide      = false,
+                name             = "Spend " .. tostring(currency.name)
+                    .. (shared and " (Warband)" or ""),
+                accountWide      = shared and true or false,
                 completionValue  = 2,
                 limitedTimeBonus = 1,
                 travelCost       = 0,
@@ -18650,6 +19565,43 @@ function Tooltips.ItemLines(itemID, itemName)
 
     VendorLines(lines, itemID)
 
+    -- WHY IT MATTERS, not only that it is tracked (0.43.0).
+    --
+    -- Every line above answers "do I have this?". None of them answered the
+    -- question a player actually hovers an item to ask, which is "should I
+    -- care?" -- and the addon knows, because it has already ranked the thing
+    -- and written down its reasons.
+    --
+    -- One line, the top reason only. A tooltip that grows a paragraph is a
+    -- tooltip people turn off.
+    if collectible then
+        local goals = CN:GetModule("Goals")
+
+        local mountID = Blizzard.GetMountFromItem(itemID)
+        local speciesID = Blizzard.GetPetSpeciesFromItem(itemID)
+
+        local goalType = mountID and CN.objectiveTypes.MOUNT
+            or (speciesID and CN.objectiveTypes.PET)
+
+        local goalID = mountID or speciesID
+
+        if goals and goalType and goalID and goals.IsGoal
+            and goals.IsGoal(goalType, goalID) then
+
+            Add(lines, "You are chasing this.", { 0.365, 0.824, 0.984 })
+        else
+            local candidate = CN.FindCandidate and goalType
+                and CN.FindCandidate(goalType, goalID)
+
+            local reason = candidate and candidate.reasons
+                and candidate.reasons[1]
+
+            if reason then
+                Add(lines, reason, { 0.6, 0.6, 0.6 })
+            end
+        end
+    end
+
     return lines
 end
 
@@ -20446,25 +21398,46 @@ function Chase.Estimate(chain)
         return nil
     end
 
-    -- Travel to the next step, once. Not to every step: the addon does not
-    -- know the order a chain will actually be walked, and adding a journey
-    -- per step would inflate the number by more than the work itself.
+    -- TRAVEL, LEG BY LEG (0.43.0).
+    --
+    -- The first version costed one journey -- player to the next step -- and
+    -- said so. That understated any chain whose steps are in different
+    -- places, which is most of them: a chain across three zones is three
+    -- journeys, and pretending it is one makes the estimate confidently short
+    -- in exactly the cases where the player most needs it to be right.
+    --
+    -- Walked in the order the steps are listed, which is the order the addon
+    -- would route them, starting from where the player actually is. Steps
+    -- with no location contribute no travel rather than a guessed hop.
     local travelSeconds = 0
 
     local travel = CN:GetModule("Travel")
 
-    local step = chain.next
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
 
-    if travel and step and (step.mapID or chain.mapID) then
-        local playerMap, playerX, playerY = CN.GetPlayerPosition()
+    if travel and playerMap then
+        local fromMap, fromX, fromY = playerMap, playerX, playerY
 
-        local estimated = playerMap and travel.EstimateSeconds(
-            playerMap, playerX, playerY,
-            step.mapID or chain.mapID,
-            step.x or chain.x,
-            step.y or chain.y)
+        for _, step in ipairs(chain.steps) do
+            if step.state ~= Chase.states.DONE
+                and step.state ~= Chase.states.NOTE then
 
-        travelSeconds = estimated or 0
+                local toMap = step.mapID or chain.mapID
+                local toX   = step.x or chain.x
+                local toY   = step.y or chain.y
+
+                if toMap and toX and toY and fromX and fromY then
+                    local leg = travel.EstimateSeconds(
+                        fromMap, fromX, fromY, toMap, toX, toY)
+
+                    if leg then
+                        travelSeconds = travelSeconds + leg
+
+                        fromMap, fromX, fromY = toMap, toX, toY
+                    end
+                end
+            end
+        end
     end
 
     if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then
@@ -21818,6 +22791,66 @@ end
 --
 -- `force` exists for the player asking out loud ("/cn follow next"), which is
 -- a different thing from the addon deciding on its own.
+-- PROGRESS THE PLAYER CAN SEE.
+--
+-- Follow mode has always advanced silently: the waypoint moved, and that was
+-- the only evidence anything had happened. Somebody walking a route for
+-- twenty minutes had no sense of getting anywhere, which is the difference
+-- between a tool that feels like it is working with you and one that feels
+-- like a timer.
+--
+-- Counted per run rather than persisted -- "how far through tonight's route
+-- am I" is a question about tonight.
+Follow.completed = 0
+Follow.startedWith = 0
+
+function Follow.NoteStopCleared()
+    Follow.completed = Follow.completed + 1
+
+    local total = Follow.startedWith
+
+    local text = "Stop cleared"
+
+    if total > 0 then
+        text = string.format("Stop %d of %d cleared", Follow.completed, total)
+    end
+
+    Print("|cff73b873" .. text .. "|r")
+
+    -- A COMPLETION MOMENT, when there is genuinely nothing left. The route
+    -- finishing is the only thing this addon does that is worth a small
+    -- flourish, and it happens rarely enough to stay one.
+    if total > 0 and Follow.completed >= total then
+        Print("|cff5dd2fbRoute complete.|r " .. total .. " stops, "
+            .. "everything on it done.")
+
+        Follow.Celebrate()
+    end
+
+    return Follow.completed
+end
+
+-- Sound and a flash, both OFF by default, because unsolicited noise is the
+-- most intrusive thing an addon can do and this addon's standing rule is that
+-- nothing is taken over without being asked.
+function Follow.Celebrate()
+    local settings = CN.Settings()
+
+    if not settings or not settings.cues then
+        return false
+    end
+
+    if PlaySound and SOUNDKIT and SOUNDKIT.UI_QUEST_ROLLING_FORWARD_01 then
+        pcall(PlaySound, SOUNDKIT.UI_QUEST_ROLLING_FORWARD_01)
+    end
+
+    if UIFrameFlash and frame then
+        pcall(UIFrameFlash, frame, 0.3, 0.3, 1.2, false, 0, 0)
+    end
+
+    return true
+end
+
 function Follow.Advance(force)
     if not Follow.active then
         return false
@@ -21863,6 +22896,12 @@ function Follow.Advance(force)
         current.objectives = remaining
 
         return false
+    end
+
+    -- Something was actually finished if we are moving on from a stop we
+    -- were already on and were not forced.
+    if current.hub and not force then
+        Follow.NoteStopCleared()
     end
 
     Follow.SetStop(hub, remaining)
@@ -22041,6 +23080,23 @@ function Follow.Start()
     end
 
     Follow.active = true
+
+    Follow.completed = 0
+
+    -- How many stops there were when the route started, so progress can be
+    -- reported as a fraction rather than as a running count that means
+    -- nothing on its own.
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local hubs
+
+    if mapID and CN.BuildZoneRoute then
+        local _, _, built = CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+
+        hubs = built
+    end
+
+    Follow.startedWith = (type(hubs) == "table") and #hubs or 0
 
     Settings().follow = true
 
@@ -22271,18 +23327,24 @@ function Session.Now()
     return os.clock()
 end
 
--- Speed is kept in two buckets, not one.
+-- Speed is kept in three buckets, not one.
 --
 -- A single median across mounted and unmounted travel is a number that is
 -- wrong in both states: too slow to plan a mounted route, too fast to plan a
--- walk around a town. Two medians are two honest answers.
+-- walk around a town.
+--
+-- 0.43.0 added the third, and it was the same mistake one level down: flying
+-- yourself was landing in `mounted` beside a ground mount, so the median was
+-- dragged upward by however much the player skyrides and every ground
+-- estimate inherited it. Three medians are three honest answers.
 local speed = {
     lastMapID  = nil,
     lastX      = nil,
     lastY      = nil,
     lastAt     = nil,
     lastMounted = nil,
-    samples    = { mounted = {}, onFoot = {} },
+    lastFlying = nil,
+    samples    = { mounted = {}, onFoot = {}, flying = {} },
 }
 
 -- SAMPLES SURVIVE A RELOAD.
@@ -22306,6 +23368,7 @@ local function Persisted()
 
     character.speedSamples.mounted = character.speedSamples.mounted or {}
     character.speedSamples.onFoot  = character.speedSamples.onFoot or {}
+    character.speedSamples.flying  = character.speedSamples.flying or {}
 
     return character.speedSamples
 end
@@ -22321,7 +23384,7 @@ function Session.LoadSamples()
 
     local loaded = 0
 
-    for _, bucket in ipairs({ "mounted", "onFoot" }) do
+    for _, bucket in ipairs({ "mounted", "onFoot", "flying" }) do
         speed.samples[bucket] = {}
 
         for _, value in ipairs(stored[bucket] or {}) do
@@ -22377,6 +23440,33 @@ end
 
 Session.IsMounted = Mounted
 
+-- Flying yourself, which is not the same as being on a flight path and not
+-- the same as a ground mount. On a taxi the client also reports the player as
+-- flying, and that movement belongs to Travel's flight-speed measurement
+-- rather than to this one -- so it is excluded here.
+local function Flying()
+    if UnitOnTaxi and UnitOnTaxi("player") then
+        return false
+    end
+
+    return (IsFlying and IsFlying()) and true or false
+end
+
+Session.IsFlying = Flying
+
+-- Which bucket the player's current movement belongs in.
+function Session.Bucket()
+    if Flying() then
+        return "flying"
+    end
+
+    if Mounted() then
+        return "mounted"
+    end
+
+    return "onFoot"
+end
+
 -- Called on a slow clock. Measures the distance covered since the last look.
 --
 -- Deliberately discards anything implausible: a teleport, a flight path, a
@@ -22387,6 +23477,7 @@ function Session.Observe()
 
     local now     = Session.Now()
     local mounted = Mounted()
+    local flying  = Flying()
 
     if not mapID or not x or not y then
         return nil
@@ -22395,16 +23486,23 @@ function Session.Observe()
     local previousMap, previousX, previousY, previousAt, previousMounted =
         speed.lastMapID, speed.lastX, speed.lastY, speed.lastAt, speed.lastMounted
 
+    -- Read BEFORE it is overwritten. The first version of the flying check
+    -- compared the new value against itself, which is always equal, so taking
+    -- off mid-interval produced a sample that was half ground speed and half
+    -- flight speed and was filed under whichever the player ended in.
+    local previousFlying = speed.lastFlying
+
     speed.lastMapID, speed.lastX, speed.lastY = mapID, x, y
     speed.lastAt, speed.lastMounted = now, mounted
+    speed.lastFlying = flying
 
     if previousMap ~= mapID or not previousAt then
         return nil
     end
 
     -- Mounting halfway through an interval makes the sample a blend of both
-    -- speeds and belongs to neither bucket.
-    if previousMounted ~= mounted then
+    -- speeds and belongs to neither bucket. The same is true of taking off.
+    if previousMounted ~= mounted or previousFlying ~= flying then
         return nil
     end
 
@@ -22434,7 +23532,8 @@ function Session.Observe()
         return nil
     end
 
-    local bucket = mounted and speed.samples.mounted or speed.samples.onFoot
+    local bucket = speed.samples[flying and "flying"
+        or (mounted and "mounted" or "onFoot")]
 
     table.insert(bucket, observed)
 
@@ -22483,19 +23582,42 @@ Session.Median = Median
 -- other bucket rather than to a constant: measured-but-wrong-state beats
 -- unmeasured.
 function Session.Speed(mounted)
+    local bucket
+
     if mounted == nil then
-        mounted = Mounted()
+        bucket = Session.Bucket()
+    elseif mounted == true then
+        bucket = "mounted"
+    elseif mounted == false then
+        bucket = "onFoot"
+    else
+        -- A caller that names a bucket outright: Travel asks for "flying"
+        -- when it is costing a journey the player would fly themselves,
+        -- which has nothing to do with how they happen to be moving now.
+        bucket = mounted
     end
 
-    local preferred = mounted and speed.samples.mounted or speed.samples.onFoot
-    local other     = mounted and speed.samples.onFoot or speed.samples.mounted
+    local preferred = speed.samples[bucket] or {}
 
     if #preferred >= Session.minSamples then
         return Median(preferred), true
     end
 
-    if #other >= Session.minSamples then
-        return Median(other), false
+    -- Fall back through the other buckets rather than to a constant:
+    -- measured-but-wrong-state beats unmeasured. Ordered nearest-first, so a
+    -- missing flying median falls to mounted before it falls to walking.
+    local fallbacks = {
+        flying  = { "mounted", "onFoot" },
+        mounted = { "flying", "onFoot" },
+        onFoot  = { "mounted", "flying" },
+    }
+
+    for _, name in ipairs(fallbacks[bucket] or {}) do
+        local other = speed.samples[name] or {}
+
+        if #other >= Session.minSamples then
+            return Median(other), false
+        end
     end
 
     return Session.defaultSpeed, false
@@ -22504,15 +23626,25 @@ end
 function Session.SpeedSampleCount(mounted)
     if mounted == nil then
         return #speed.samples.mounted + #speed.samples.onFoot
+            + #speed.samples.flying
     end
 
-    return mounted and #speed.samples.mounted or #speed.samples.onFoot
+    if mounted == true then
+        return #speed.samples.mounted
+    end
+
+    if mounted == false then
+        return #speed.samples.onFoot
+    end
+
+    return #(speed.samples[mounted] or {})
 end
 
 function Session.SpeedBuckets()
     return {
         mounted = Median(speed.samples.mounted),
         onFoot  = Median(speed.samples.onFoot),
+        flying  = Median(speed.samples.flying),
     }
 end
 
@@ -22759,8 +23891,94 @@ end
 -- Takes from the FRONT rather than choosing the best-fitting subset. The
 -- route is already ordered to minimise walking; cherry-picking stops out of
 -- it produces a plan that fits the clock and makes you cross the zone twice.
+-- HOW LONG YOU ACTUALLY PLAY.
+--
+-- `/cn plan` has always needed a number, and its example has always been
+-- thirty minutes -- a figure chosen because it sounds reasonable, not because
+-- anybody plays in thirty-minute units. The addon watches how long sessions
+-- run anyway; asking it is cheaper than asking the player.
+--
+-- Stored per character, capped, and used only as the DEFAULT: an explicit
+-- number always wins, because "I have twenty minutes" is a fact about tonight
+-- that no amount of history overrides.
+Session.lengthSampleCap = 20
+Session.minLengthSamples = 3
+
+local sessionStartedAt = nil
+
+local function Lengths()
+    local character = CN.character
+
+    if not character then
+        return nil
+    end
+
+    character.sessionLengths = character.sessionLengths or {}
+
+    return character.sessionLengths
+end
+
+Session.Lengths = Lengths
+
+function Session.BeginSession()
+    sessionStartedAt = Session.Now()
+end
+
+-- Called at logout and on a reload. A reload is not the end of a session, but
+-- there is no way to tell one from the other at the moment it happens -- so
+-- very short sessions are discarded rather than counted, which handles the
+-- reload case without needing to detect it.
+Session.minCountableMinutes = 8
+
+function Session.EndSession()
+    local lengths = Lengths()
+
+    if not lengths or not sessionStartedAt then
+        return false
+    end
+
+    local minutes = (Session.Now() - sessionStartedAt) / 60
+
+    sessionStartedAt = nil
+
+    if minutes < Session.minCountableMinutes or minutes > 720 then
+        return false
+    end
+
+    table.insert(lengths, math.floor(minutes + 0.5))
+
+    while #lengths > Session.lengthSampleCap do
+        table.remove(lengths, 1)
+    end
+
+    return true
+end
+
+-- Returns minutes and whether it was measured.
+function Session.TypicalSessionMinutes()
+    local lengths = Lengths()
+
+    if not lengths or #lengths < Session.minLengthSamples then
+        return 30, false
+    end
+
+    return math.floor(Median(lengths) + 0.5), true
+end
+
+CN:OnLogin(function()
+    Session.BeginSession()
+end)
+
+CN:RegisterEvent("PLAYER_LOGOUT", function()
+    Session.EndSession()
+end)
+
 function Session.Plan(minutes)
-    local budget = (tonumber(minutes) or 30) * 60
+    local requested = tonumber(minutes)
+
+    -- No number given: use however long this character usually plays, rather
+    -- than a round thirty that was only ever a placeholder.
+    local budget = (requested or Session.TypicalSessionMinutes()) * 60
 
     local mapID, x, y = CN.GetPlayerPosition()
 
@@ -22890,8 +24108,18 @@ CN:RegisterCommand{
         local minutes = tonumber(CN.Trim(args or ""))
 
         if not minutes or minutes <= 0 then
-            Print("Usage: |cffffff00/cn plan 30|r")
-            return
+            -- No number is no longer a usage error. The addon has watched how
+            -- long this character plays; asking it beats asking the player,
+            -- and a player who wanted a specific number can still say one.
+            local typical, measured = Session.TypicalSessionMinutes()
+
+            minutes = typical
+
+            Print("Planning " .. minutes .. " minutes -- "
+                .. (measured
+                    and ("|cff999999your usual session on this character|r")
+                    or ("|cff999999a default; play a few sessions and this "
+                        .. "becomes your own figure|r")))
         end
 
         local plan = Session.Plan(minutes)
@@ -24399,6 +25627,8 @@ end
 -- it again -- a stale claim about a destination that is no longer being
 -- tracked. Costs nothing to reset; costs the player's trust not to.
 local function Blank()
+    Navigation.ResetSmoothing()
+
     if not arrow then
         return
     end
@@ -24418,6 +25648,51 @@ local function Blank()
 end
 
 Navigation.Blank = Blank
+
+-- SMOOTHING.
+--
+-- The arrow recomputes ten times a second and snapped straight to each new
+-- bearing, so a player turning on the spot saw it step rather than sweep. The
+-- underlying number is right either way -- this is only about whether it
+-- reads as an instrument or as a slideshow.
+--
+-- Snaps rather than sweeps when the change is large: an arrow that eases
+-- through 170 degrees is pointing at nothing at all for a quarter of a second,
+-- which is worse than a jump. Passing a destination and turning around is
+-- exactly that case, and it is the one complaint this addon has actually
+-- received about the arrow.
+Navigation.smoothingFactor  = 0.35
+Navigation.smoothingSnapRad = math.rad(90)
+
+local smoothed = nil
+
+function Navigation.ResetSmoothing()
+    smoothed = nil
+end
+
+function Navigation.Smooth(bearing)
+    if not bearing then
+        return bearing
+    end
+
+    if not smoothed then
+        smoothed = bearing
+
+        return smoothed
+    end
+
+    local delta = Normalize(bearing - smoothed)
+
+    if math.abs(delta) >= Navigation.smoothingSnapRad then
+        smoothed = bearing
+
+        return smoothed
+    end
+
+    smoothed = Normalize(smoothed + (delta * Navigation.smoothingFactor))
+
+    return smoothed
+end
 
 local function Refresh()
     if not arrow then
@@ -24457,12 +25732,27 @@ local function Refresh()
     if state.relative then
         -- SetRotation turns counter-clockwise; the relative bearing is
         -- clockwise, hence the negation.
-        arrow.texture:SetRotation(-state.relative)
+        arrow.texture:SetRotation(-Navigation.Smooth(state.relative))
     end
 
     arrow.texture:SetVertexColor(Navigation.BearingColor(state.relative))
 
-    arrow.distance:SetText(Navigation.FormatDistance(state.yards))
+    local distanceText = Navigation.FormatDistance(state.yards)
+
+    -- NO INFORMATION CARRIED BY COLOUR ALONE.
+    --
+    -- The arrow's whole language is colour -- blue on course, amber drifting,
+    -- red walking away -- which is precisely the design that fails a
+    -- colourblind player. In that mode the same fact is written next to the
+    -- distance, where it survives the colours being indistinguishable.
+    local hud = CN:GetModule("Hud")
+
+    if hud and hud.IsColourblind() then
+        distanceText = distanceText .. " |cffffffff"
+            .. hud.BearingWord(state.relative) .. "|r"
+    end
+
+    arrow.distance:SetText(distanceText)
 
     -- Watch whether following the arrow actually works.
     Navigation.NoteObservation(state.relative, state.yards)
@@ -24533,6 +25823,12 @@ function Navigation.StartTicker()
 
         if not ok then
             DebugPrint("Arrow refresh failed: " .. tostring(err))
+
+            local errors = CN:GetModule("Errors")
+
+            if errors then
+                errors.Record("arrow refresh", err)
+            end
         end
     end)
 end
@@ -25900,6 +27196,259 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Group.lua'] = @'
+-- Modules/Group.lua
+-- Completion Navigator :: the state the player is actually in.
+--
+-- Two facts the addon has never read, both of which change what a sensible
+-- next action is, and both of which the client reports for free.
+--
+-- BEING DEAD.
+--
+-- A dead player's next action is not "collect a battle pet". It is "get back
+-- to your body". Until 0.43.0 the addon carried on recommending as though
+-- nothing had happened, which is not merely unhelpful -- it is the clearest
+-- possible signal that the addon is not paying attention.
+--
+-- BEING IN A GROUP.
+--
+-- The addon behaved identically whether you were alone or standing in a
+-- dungeon with four other people. Somebody in an instance with a group is not
+-- about to go and pick a herb in Durotar, and a recommendation that says so
+-- is noise at best and a reason to close the window at worst.
+--
+-- WHAT THIS DELIBERATELY IS NOT.
+--
+-- It is not addon-to-addon communication. No messages are sent, no protocol
+-- is defined, and nothing depends on anybody else running this addon. That
+-- design needs versioned messages and matching builds on both machines, and
+-- it becomes a support burden the moment either side is stale. Everything
+-- here is read from the client, about this player, on this machine.
+
+local ADDON_NAME, CN = ...
+
+local Group = CN:RegisterModule("Group")
+
+local Print = CN.Print
+
+------------------------------------------------------------
+-- STATE
+------------------------------------------------------------
+
+function Group.IsDead()
+    if UnitIsDeadOrGhost then
+        local ok, dead = pcall(UnitIsDeadOrGhost, "player")
+
+        if ok then
+            return dead and true or false
+        end
+    end
+
+    return false
+end
+
+function Group.IsGhost()
+    if UnitIsGhost then
+        local ok, ghost = pcall(UnitIsGhost, "player")
+
+        if ok then
+            return ghost and true or false
+        end
+    end
+
+    return false
+end
+
+function Group.Size()
+    if GetNumGroupMembers then
+        local ok, count = pcall(GetNumGroupMembers)
+
+        if ok and type(count) == "number" then
+            return count
+        end
+    end
+
+    return 0
+end
+
+function Group.InGroup()
+    return Group.Size() > 1
+end
+
+function Group.InRaid()
+    if IsInRaid then
+        local ok, raid = pcall(IsInRaid)
+
+        if ok then
+            return raid and true or false
+        end
+    end
+
+    return false
+end
+
+-- Returns inInstance, kind ("party", "raid", "scenario", "pvp", "none").
+function Group.Instance()
+    if not IsInInstance then
+        return false, "none"
+    end
+
+    local ok, inside, kind = pcall(IsInInstance)
+
+    if not ok then
+        return false, "none"
+    end
+
+    return inside and true or false, kind or "none"
+end
+
+-- One word for what the player is doing, which is all the ranking needs.
+function Group.Situation()
+    if Group.IsDead() then
+        return "dead"
+    end
+
+    local inside, kind = Group.Instance()
+
+    if inside and (kind == "party" or kind == "raid" or kind == "scenario") then
+        return "instanced"
+    end
+
+    if Group.InGroup() then
+        return "grouped"
+    end
+
+    return "solo"
+end
+
+------------------------------------------------------------
+-- WHAT IT CHANGES
+------------------------------------------------------------
+
+-- Types that make no sense to walk off and do while four other people are
+-- waiting at a boss. NOT hidden -- the player asked to see them at some point
+-- and the addon does not un-ask that -- just pushed down.
+Group.instancedPenalty = 0.35
+
+Group.instancedTypes = {
+    [CN.objectiveTypes.PET]         = true,
+    [CN.objectiveTypes.TOY]         = true,
+    [CN.objectiveTypes.MOUNT]       = true,
+    [CN.objectiveTypes.APPEARANCE]  = true,
+    [CN.objectiveTypes.EXPLORATION] = true,
+    [CN.objectiveTypes.RARE]        = true,
+    [CN.objectiveTypes.TREASURE]    = true,
+    [CN.objectiveTypes.VENDOR]      = true,
+    [CN.objectiveTypes.PROFESSION]  = true,
+    [CN.objectiveTypes.RECIPE]      = true,
+}
+
+-- While dead, everything is worth less than getting up. The multiplier is
+-- deliberately not zero: the list still answers "what next", it just stops
+-- pretending the player can act on it this second.
+Group.deadPenalty = 0.2
+
+CN.RegisterScoreAdjuster("Group", function(objective, score)
+    local situation = Group.Situation()
+
+    if situation == "dead" then
+        if objective and objective.reasons then
+            table.insert(objective.reasons, "you are dead -- this is for after")
+        end
+
+        return score * Group.deadPenalty
+    end
+
+    if situation == "instanced"
+        and objective
+        and Group.instancedTypes[objective.type] then
+
+        if objective.reasons then
+            table.insert(objective.reasons,
+                "outside work, and you are in an instance with a group")
+        end
+
+        return score * Group.instancedPenalty
+    end
+
+    return score
+end)
+
+------------------------------------------------------------
+-- SAYING SO
+------------------------------------------------------------
+
+-- The line the recommendation prints above everything else when the situation
+-- makes the list beside the point. Nil when there is nothing to say, which is
+-- most of the time -- an addon that comments on your circumstances constantly
+-- is an addon people turn off.
+function Group.Notice()
+    local situation = Group.Situation()
+
+    if situation == "dead" then
+        if Group.IsGhost() then
+            return "You are a ghost. Your body first -- the rest of this "
+                .. "keeps."
+        end
+
+        return "You are dead. Release or accept a resurrection first."
+    end
+
+    if situation == "instanced" then
+        local _, kind = Group.Instance()
+
+        return "You are in a " .. (kind == "raid" and "raid" or "instance")
+            .. " with " .. Group.Size() .. " people; outside work is ranked "
+            .. "down until you leave."
+    end
+
+    return nil
+end
+
+-- The situation changes what is worth doing, so the order has to be rebuilt.
+-- Cheap: this bumps the ranking generation rather than rebuilding providers,
+-- because no candidate's data changed -- only its weighting.
+for _, event in ipairs({
+    "PLAYER_DEAD", "PLAYER_ALIVE", "PLAYER_UNGHOST",
+    "GROUP_ROSTER_UPDATE", "PLAYER_ENTERING_WORLD",
+}) do
+    CN:RegisterEvent(event, function()
+        CN.InvalidateRanking()
+    end)
+end
+
+CN:RegisterCommand{
+    name    = "situation",
+    aliases = { "state" },
+    order   = 36,
+    help    = "What the addon thinks you are in the middle of.",
+    handler = function()
+        local situation = Group.Situation()
+
+        Print("Situation: |cffffff00" .. situation .. "|r")
+
+        local inside, kind = Group.Instance()
+
+        Print("  group: " .. (Group.InGroup()
+            and (Group.Size() .. (Group.InRaid() and " (raid)" or " (party)"))
+            or "solo"))
+        Print("  instance: " .. (inside and kind or "no"))
+        Print("  alive: " .. CN.YesNo(not Group.IsDead()))
+
+        local notice = Group.Notice()
+
+        if notice then
+            Print("|cffffd100" .. notice .. "|r")
+        else
+            Print("|cff999999Nothing about your situation is changing the "
+                .. "ranking right now.|r")
+        end
+    end,
+}
+
+return Group
+'@
+
 $Embedded['Modules\Travel.lua'] = @'
 -- Modules/Travel.lua
 -- Completion Navigator :: how long it actually takes to get there.
@@ -26321,6 +27870,206 @@ function Travel.ObserveFlight()
 end
 
 ------------------------------------------------------------
+-- FLYING YOURSELF
+------------------------------------------------------------
+
+-- Seconds spent mounting up and gaining height before any distance is
+-- covered. A constant, like the flight master's overhead, and for the same
+-- reason: it is an animation, not a measurement.
+Travel.takeoffSeconds = 6
+
+-- Whether the player can fly to the destination.
+--
+-- Two separate questions, and both have to be yes: does this character fly at
+-- all, and does the game allow it where they are going. `IsFlyableArea`
+-- answers for where the player IS, which is the honest approximation
+-- available -- the client will not answer for a zone the player is not in, so
+-- a cross-zone claim is checked at the near end and re-checked when they get
+-- there.
+function Travel.CanFly(mapID)
+    if not Travel.HasFlying() then
+        return false
+    end
+
+    if IsFlyableArea and not IsFlyableArea() then
+        return false
+    end
+
+    -- Same continent only; crossing one is handled above.
+    local continent = Travel.ContinentFor(mapID)
+
+    return continent ~= nil
+end
+
+-- Has this character ever actually flown? Measured, not assumed: the client
+-- exposes no reliable "can you fly here" for an arbitrary map, and skyriding
+-- availability changes with expansion, level and campaign progress. A
+-- character with flying samples has flown; one without has not, and the
+-- addon does not offer them a route they may not be able to take.
+function Travel.HasFlying()
+    local session = CN:GetModule("Session")
+
+    if not session or not session.SpeedSampleCount then
+        return false
+    end
+
+    return session.SpeedSampleCount("flying") >= (session.minSamples or 3)
+end
+
+-- Yards per second flying yourself, from the player's own measurements.
+function Travel.SelfFlightSpeed()
+    local session = CN:GetModule("Session")
+
+    if not session or not session.Speed then
+        return Travel.seededFlightSpeed, false
+    end
+
+    return session.Speed("flying")
+end
+
+------------------------------------------------------------
+-- HEARTHSTONES, PORTALS AND TELEPORTS
+------------------------------------------------------------
+
+-- WHAT THIS IS AND IS NOT.
+--
+-- It is a list of ways off this continent that the player DEMONSTRABLY has:
+-- an item in their bags, or a spell they know. Each one is reported with the
+-- cooldown the client gives, so "your hearthstone is ready" and "your
+-- hearthstone is on a 40 minute cooldown" are different answers.
+--
+-- It is NOT a routing model. The addon does not know where a hearthstone is
+-- bound in map terms -- `GetBindLocation` returns a name, and names do not
+-- convert to map ids -- so no duration is claimed and none is folded into any
+-- score. Naming the option is useful; costing it would be fiction.
+Travel.teleports = {
+    { kind = "item",  id = 6948,   label = "Hearthstone" },
+    { kind = "item",  id = 110560, label = "Garrison Hearthstone" },
+    { kind = "item",  id = 140192, label = "Dalaran Hearthstone" },
+    { kind = "item",  id = 141605, label = "Flight Master's Whistle" },
+    { kind = "spell", id = 556,    label = "Astral Recall" },
+    { kind = "spell", id = 3565,   label = "Teleport: Darnassus" },
+    { kind = "spell", id = 3562,   label = "Teleport: Ironforge" },
+    { kind = "spell", id = 3561,   label = "Teleport: Stormwind" },
+    { kind = "spell", id = 3567,   label = "Teleport: Orgrimmar" },
+    { kind = "spell", id = 3563,   label = "Teleport: Undercity" },
+    { kind = "spell", id = 3566,   label = "Teleport: Thunder Bluff" },
+    { kind = "spell", id = 18960,  label = "Teleport: Moonglade" },
+    { kind = "spell", id = 50977,  label = "Death Gate" },
+    { kind = "spell", id = 126892, label = "Zen Pilgrimage" },
+}
+
+local function ItemCooldown(itemID)
+    local count = 0
+
+    if C_Item and C_Item.GetItemCount then
+        count = C_Item.GetItemCount(itemID) or 0
+    elseif GetItemCount then
+        count = GetItemCount(itemID) or 0
+    end
+
+    if count <= 0 then
+        return nil
+    end
+
+    local start, duration
+
+    if C_Item and C_Item.GetItemCooldown then
+        start, duration = C_Item.GetItemCooldown(itemID)
+    elseif GetItemCooldown then
+        start, duration = GetItemCooldown(itemID)
+    end
+
+    if not start or not duration or duration == 0 then
+        return 0
+    end
+
+    local remaining = (start + duration) - ((GetTime and GetTime()) or 0)
+
+    return math.max(0, remaining)
+end
+
+local function SpellCooldown(spellID)
+    local known = false
+
+    if IsSpellKnown then
+        local ok, result = pcall(IsSpellKnown, spellID)
+
+        known = ok and result
+    end
+
+    if not known and IsPlayerSpell then
+        local ok, result = pcall(IsPlayerSpell, spellID)
+
+        known = ok and result
+    end
+
+    if not known then
+        return nil
+    end
+
+    local start, duration
+
+    if C_Spell and C_Spell.GetSpellCooldown then
+        local info = C_Spell.GetSpellCooldown(spellID)
+
+        if type(info) == "table" then
+            start, duration = info.startTime, info.duration
+        end
+    elseif GetSpellCooldown then
+        start, duration = GetSpellCooldown(spellID)
+    end
+
+    if not start or not duration or duration == 0 then
+        return 0
+    end
+
+    local remaining = (start + duration) - ((GetTime and GetTime()) or 0)
+
+    return math.max(0, remaining)
+end
+
+-- Every teleport this character has, with seconds of cooldown remaining.
+-- Ready ones first, because that is the order they are useful in.
+function Travel.ReadyTeleports()
+    local available = {}
+
+    for _, entry in ipairs(Travel.teleports) do
+        local remaining
+
+        if entry.kind == "item" then
+            remaining = ItemCooldown(entry.id)
+        else
+            remaining = SpellCooldown(entry.id)
+        end
+
+        if remaining then
+            table.insert(available, {
+                label     = entry.label,
+                kind      = entry.kind,
+                id        = entry.id,
+                remaining = remaining,
+                ready     = remaining <= 0,
+                -- Where a hearthstone actually goes. A name, because that is
+                -- all the client offers; deliberately not turned into a map.
+                bound     = (entry.id == 6948 and GetBindLocation)
+                    and GetBindLocation() or nil,
+            })
+        end
+    end
+
+    table.sort(available, function(a, b)
+        if a.ready ~= b.ready then
+            return a.ready
+        end
+
+        return a.remaining < b.remaining
+    end)
+
+    return available
+end
+
+------------------------------------------------------------
 -- THE ESTIMATE
 ------------------------------------------------------------
 
@@ -26337,9 +28086,17 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
     end
 
     if from.continent and to.continent and from.continent ~= to.continent then
-        -- Portals and boats exist and are not modelled. Saying nothing is
-        -- correct; inventing a duration is not.
-        return nil, false, { mode = "elsewhere" }
+        -- ANOTHER CONTINENT.
+        --
+        -- Still no duration: portal networks and boat schedules are not
+        -- modelled and a fabricated number would be worse than an admission.
+        -- But "I cannot cost this" and "there is no way to do it" are
+        -- different statements, and until 0.43.0 the addon made the first and
+        -- the player heard the second. So: say what is actually available.
+        return nil, false, {
+            mode      = "elsewhere",
+            teleports = Travel.ReadyTeleports(),
+        }
     end
 
     local session = CN:GetModule("Session")
@@ -26366,38 +28123,78 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
 
     local confident = runMeasured
 
+    -- SELF-FLYING (0.43.0).
+    --
+    -- In current content, flying yourself point to point usually beats both
+    -- running and the flight network: no walk to a flight master, no
+    -- overhead, and a straight line. Leaving it out meant the addon sent
+    -- people to a flight master for journeys they would simply fly.
+    --
+    -- Only offered where the player can actually fly: a zone with flying
+    -- disabled, or a character who has never flown, gets the ground answer.
+    if Travel.CanFly(toMapID) then
+        local flySpeed, flyMeasured = Travel.SelfFlightSpeed()
+
+        local seconds = (direct / flySpeed) + Travel.takeoffSeconds
+
+        if seconds < best.seconds then
+            best = {
+                seconds = seconds,
+                mode    = "self",
+                yards   = direct,
+            }
+
+            confident = flyMeasured
+        end
+    end
+
     local nodes = Travel.KnownNodes(toMapID) or {}
 
     if #nodes >= 2 then
-        local origin, originYards  = Travel.NearestNode(from, nodes)
-        local arrival, arrivalYards = Travel.NearestNode(to, nodes)
+        -- THE BEST PAIR, NOT THE NEAREST AT EACH END.
+        --
+        -- Nearest-to-you and nearest-to-target are two independently sensible
+        -- choices that together are often not the best route: a flight point
+        -- slightly further from you can sit much closer to where you are
+        -- going. The node count per continent is small enough to simply try
+        -- every pairing.
+        local flightSpeed, flightMeasured = Travel.FlightSpeed()
 
-        if origin and arrival and origin.id ~= arrival.id then
-            local flightYards = Travel.YardsBetweenPoints(origin.point, arrival.point)
+        for _, origin in ipairs(nodes) do
+            local originYards = Travel.YardsBetweenPoints(from, origin.point)
 
-            local flightSpeed, flightMeasured = Travel.FlightSpeed()
+            if originYards then
+                for _, arrival in ipairs(nodes) do
+                    if arrival.id ~= origin.id then
+                        local arrivalYards = Travel.YardsBetweenPoints(to, arrival.point)
 
-            if flightYards then
-                local seconds = (originYards / runSpeed)
-                    + Travel.flightOverheadSeconds
-                    + (flightYards / flightSpeed)
-                    + (arrivalYards / runSpeed)
+                        local flightYards =
+                            Travel.YardsBetweenPoints(origin.point, arrival.point)
 
-                if seconds < best.seconds then
-                    best = {
-                        seconds     = seconds,
-                        mode        = "fly",
-                        yards       = direct,
-                        runToNode   = originYards,
-                        flightYards = flightYards,
-                        runFromNode = arrivalYards,
-                        node        = origin.name,
-                        arrival     = arrival.name,
-                    }
+                        if arrivalYards and flightYards then
+                            local seconds = (originYards / runSpeed)
+                                + Travel.flightOverheadSeconds
+                                + (flightYards / flightSpeed)
+                                + (arrivalYards / runSpeed)
 
-                    -- A flight estimate is only as good as the flight speed
-                    -- behind it.
-                    confident = confident and flightMeasured
+                            if seconds < best.seconds then
+                                best = {
+                                    seconds     = seconds,
+                                    mode        = "fly",
+                                    yards       = direct,
+                                    runToNode   = originYards,
+                                    flightYards = flightYards,
+                                    runFromNode = arrivalYards,
+                                    node        = origin.name,
+                                    arrival     = arrival.name,
+                                }
+
+                                -- A flight estimate is only as good as the
+                                -- flight speed behind it.
+                                confident = runMeasured and flightMeasured
+                            end
+                        end
+                    end
                 end
             end
         end
@@ -26459,6 +28256,25 @@ end
 -- FORMATTING
 ------------------------------------------------------------
 
+-- Short "how long until it is usable" text. Minutes and seconds, because a
+-- cooldown the player is waiting on is measured in the units they are
+-- counting in.
+function Travel.FormatReset(seconds)
+    if not seconds or seconds <= 0 then
+        return "ready"
+    end
+
+    if seconds < 60 then
+        return math.floor(seconds) .. "s"
+    end
+
+    if seconds < 3600 then
+        return math.floor(seconds / 60) .. "m"
+    end
+
+    return string.format("%.1fh", seconds / 3600)
+end
+
 function Travel.Describe(detail, seconds, confident)
     if not seconds then
         return "travel time unknown"
@@ -26470,6 +28286,10 @@ function Travel.Describe(detail, seconds, confident)
         and session.FormatDuration(seconds)
         or (math.floor(seconds / 60) .. " min")
 
+    if detail and detail.mode == "self" then
+        text = text .. " |cff999999flying yourself|r"
+    end
+
     if detail and detail.mode == "fly" and detail.node then
         text = text .. " |cff999999via " .. tostring(detail.node)
         if detail.arrival then
@@ -26478,11 +28298,9 @@ function Travel.Describe(detail, seconds, confident)
         text = text .. "|r"
     end
 
-    if not confident then
-        text = text .. " |cff999999(estimated)|r"
-    end
-
-    return text
+    -- One convention, defined in Core, used by everything that prints a
+    -- number it is not certain of.
+    return CN.WithConfidence(text, CN.ConfidenceFor(confident))
 end
 
 ------------------------------------------------------------
@@ -26576,9 +28394,44 @@ CN:RegisterCommand{
                 session and session.FormatDuration
                     and session.FormatDuration(detail.yards / math.max(0.5, runSpeed))
                     or "unknown"))
+        elseif detail and detail.mode == "self" then
+            local flySpeed, flyMeasured = Travel.SelfFlightSpeed()
+
+            Print(string.format(
+                "  |cff999999%.0f yd direct at %.0f yd/s%s|r",
+                detail.yards, flySpeed,
+                flyMeasured and "" or " (estimated)"))
         elseif detail and detail.mode == "elsewhere" then
-            Print("|cff999999That is on another continent, and this addon does "
-                .. "not model portals -- so it will not guess.|r")
+            Print("|cff999999That is on another continent. Portals and boats "
+                .. "are not modelled, so no time is claimed -- but here is "
+                .. "what you have:|r")
+
+            local teleports = detail.teleports or {}
+
+            if #teleports == 0 then
+                Print("  |cff999999no hearthstone or teleport available|r")
+            end
+
+            for index, teleport in ipairs(teleports) do
+                if index > 5 then
+                    break
+                end
+
+                local line = "  " .. teleport.label
+
+                if teleport.bound then
+                    line = line .. " |cff999999to " .. teleport.bound .. "|r"
+                end
+
+                if teleport.ready then
+                    line = line .. " |cff73b873ready|r"
+                else
+                    line = line .. " |cfff56b61"
+                        .. Travel.FormatReset(teleport.remaining) .. "|r"
+                end
+
+                Print(line)
+            end
         end
     end,
 }
@@ -26781,6 +28634,13 @@ function Instances.DescribeSource(name)
 
     if first.instance then
         text = text .. " in " .. first.instance
+    end
+
+    -- WHICH DIFFICULTY, when the journal says so. A mount that only drops on
+    -- Mythic is a different plan from one that drops on Normal, and "go and
+    -- kill it" without that distinction sends people to the wrong lockout.
+    if first.difficulty then
+        text = text .. " |cff999999(" .. first.difficulty .. ")|r"
     end
 
     if #results > 1 then
@@ -27302,6 +29162,33 @@ CN.RegisterRecommendationHook("Preference", function(results)
 
                 local last = shownAt[key]
 
+                -- FINER THAN A TYPE, WHERE THE TYPE IS TOO COARSE.
+                --
+                -- "Quests" is one bucket containing two quite different
+                -- habits: people who follow the story, and people who clear
+                -- everything. Somebody who always does the campaign and never
+                -- touches side quests looks, at type resolution, like
+                -- somebody with no opinion at all -- the rate averages to the
+                -- middle and nothing moves.
+                --
+                -- Only quests get this. Every other type is one habit, and
+                -- six buckets that each learn nothing beat none at all.
+                local refined = Preference.Refine(objective)
+
+                if refined ~= objectiveType then
+                    local refinedRow = store[refined]
+
+                    if not refinedRow then
+                        refinedRow = { shown = 0, acted = 0 }
+
+                        store[refined] = refinedRow
+                    end
+
+                    if not last or (now - last) > Preference.actionWindowSeconds then
+                        refinedRow.shown = refinedRow.shown + 1
+                    end
+                end
+
                 if not last or (now - last) > Preference.actionWindowSeconds then
                     row.shown = row.shown + 1
 
@@ -27332,6 +29219,23 @@ Preference.exactIdEvents = {
 -- recommended it recently -- otherwise every quest anybody turns in would
 -- count as the addon's advice being taken, which would teach it that its
 -- opinion is always right.
+-- The sub-bucket an objective belongs in, or its plain type when it has none.
+function Preference.Refine(objective)
+    if not objective or objective.type ~= CN.objectiveTypes.QUEST then
+        return objective and objective.type
+    end
+
+    -- The game's own campaign data, which is what Loremaster already uses to
+    -- keep "the story" and "everything else" apart.
+    if CN.Blizzard and CN.Blizzard.IsQuestCampaign
+        and CN.Blizzard.IsQuestCampaign(objective.id) then
+
+        return "QUEST_CAMPAIGN"
+    end
+
+    return "QUEST_SIDE"
+end
+
 function Preference.NoteCompleted(objectiveType, objectiveID)
     if not Preference.IsEnabled() or not objectiveType then
         return false
@@ -27506,7 +29410,20 @@ end
 -- Applied in scoring, after the profile's own type weighting, so a focus you
 -- chose deliberately always outranks a habit the addon inferred.
 CN.RegisterScoreAdjuster("Preference", function(objective, score)
-    local multiplier, reason = Preference.Multiplier(objective and objective.type)
+    -- The finer bucket first, and only if it has earned an opinion of its
+    -- own. Falling back to the type means a player whose quest habits are
+    -- undifferentiated is treated exactly as before.
+    local refined = Preference.Refine(objective)
+
+    local multiplier, reason = 1, nil
+
+    if refined and refined ~= (objective and objective.type) then
+        multiplier, reason = Preference.Multiplier(refined)
+    end
+
+    if multiplier == 1 then
+        multiplier, reason = Preference.Multiplier(objective and objective.type)
+    end
 
     if multiplier == 1 then
         return score
@@ -27609,7 +29526,14 @@ CN:RegisterCommand{
         Print("What this character actually does:")
 
         for _, entry in ipairs(rows) do
-            local label = filters and filters.TypeLabel(entry.type) or entry.type
+            local labels = {
+                QUEST_CAMPAIGN = "Story quests",
+                QUEST_SIDE     = "Side quests",
+            }
+
+            local label = labels[entry.type]
+                or (filters and filters.TypeLabel(entry.type))
+                or entry.type
 
             local multiplier, reason = Preference.Multiplier(entry.type)
 
@@ -28091,24 +30015,12 @@ local Blizzard = CN.Blizzard
 
 SelfTest.results = { PASS = "PASS", FAIL = "FAIL", SKIP = "SKIP" }
 
-CN.selfTests = CN.selfTests or {}
-
--- definition = {
---     name  = "short label",
---     area  = "grouping",
---     run   = function() return status, detail end,
--- }
-function CN.RegisterSelfTest(definition)
-    if type(definition) ~= "table" or type(definition.run) ~= "function" then
-        return false
-    end
-
-    definition.order = definition.order or (#CN.selfTests + 1)
-
-    table.insert(CN.selfTests, definition)
-
-    return true
-end
+-- The registry itself is in Core.lua, so that a module registering a check
+-- does not have to load after this file:
+--
+--     CN.RegisterSelfTest{ name = ..., area = ..., run = function() end }
+--
+-- definition.run returns status, detail.
 
 function SelfTest.Run()
     local rows = { passed = 0, failed = 0, skipped = 0, checks = {} }
@@ -28677,6 +30589,1356 @@ CN:RegisterCommand{
 return SelfTest
 '@
 
+$Embedded['Modules\Orders.lua'] = @'
+-- Modules/Orders.lua
+-- Completion Navigator :: crafting orders, and a standing question about
+-- Delves.
+--
+-- CRAFTING ORDERS.
+--
+-- The addon has tracked recipes since 0.14.0 and never noticed that other
+-- people can pay you to use them, or that an order you placed yourself
+-- finishes and then sits there. Both are time-limited -- an order expires --
+-- and both are knowable from the client.
+--
+-- What it does NOT do is browse the order board. That requires standing at a
+-- crafting table with the frame open, and an addon that pokes at that UI to
+-- read it is an addon that fights the player for control of their own window.
+-- This reports what the client will answer without being asked to open
+-- anything: your own orders, and whether any of them are ready to collect.
+--
+-- DELVES.
+--
+-- Assessed twice and deliberately not built, for a reason that is written
+-- down rather than remembered: `C_DelvesUI` exposes interface plumbing --
+-- minimum level, which button to show -- and not progress. Delve credit
+-- toward the Great Vault already flows through the World row, so a Delves
+-- module would duplicate working behaviour with guesswork.
+--
+-- The decision has a trigger rather than a date: if a build ever exposes a
+-- progress API, the probe below starts answering and the self-test says so.
+-- That is the difference between a decision and a thing everyone forgot.
+
+local ADDON_NAME, CN = ...
+
+local Orders = CN:RegisterModule("Orders")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+
+------------------------------------------------------------
+-- CRAFTING ORDERS
+------------------------------------------------------------
+
+function Orders.IsAvailable()
+    return C_CraftingOrders ~= nil
+end
+
+-- Orders this character placed, as the client last reported them. The list is
+-- populated by the game when the order frame is opened, so this can be empty
+-- and empty is not an error -- it means "nothing known yet", and the command
+-- says so rather than claiming you have no orders.
+function Orders.Mine()
+    if not Orders.IsAvailable() or not C_CraftingOrders.GetMyOrders then
+        return nil
+    end
+
+    local ok, orders = pcall(C_CraftingOrders.GetMyOrders)
+
+    if not ok or type(orders) ~= "table" then
+        return nil
+    end
+
+    local rows = {}
+
+    for _, order in ipairs(orders) do
+        if type(order) == "table" then
+            table.insert(rows, {
+                orderID    = order.orderID,
+                itemID     = order.itemID,
+                itemName   = order.itemName,
+                expiresIn  = order.expirationTime
+                    and math.max(0, order.expirationTime - time()) or nil,
+                state      = order.orderState,
+                crafter    = order.crafterName,
+            })
+        end
+    end
+
+    return rows
+end
+
+-- Whether the client says something is waiting to be collected.
+function Orders.HasClaimable()
+    if not Orders.IsAvailable() then
+        return false
+    end
+
+    if C_CraftingOrders.GetClaimedOrder then
+        local ok, claimed = pcall(C_CraftingOrders.GetClaimedOrder)
+
+        if ok and claimed then
+            return true
+        end
+    end
+
+    return false
+end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- Deliberately narrow. An order that is finished, or one about to expire, is
+-- a real next action with a real deadline. "Someone somewhere might want a
+-- flask" is not, and the addon does not have the data to say it anyway.
+Orders.expiryHorizonSeconds = 86400
+
+CN.RegisterCandidateProvider("Orders", function()
+    local candidates = {}
+
+    local mine = Orders.Mine()
+
+    if not mine then
+        return candidates
+    end
+
+    for _, order in ipairs(mine) do
+        if order.expiresIn and order.expiresIn <= Orders.expiryHorizonSeconds
+            and not CN.IsIgnored(CN.objectiveTypes.RECIPE, order.orderID)
+            and not CN.IsDeferred(CN.objectiveTypes.RECIPE, order.orderID) then
+
+            local session = CN:GetModule("Session")
+
+            table.insert(candidates, CN.NewObjective({
+                id               = order.orderID,
+                type             = CN.objectiveTypes.RECIPE,
+                name             = "Crafting order: "
+                    .. tostring(order.itemName or order.itemID or "?"),
+                completionValue  = 3,
+                limitedTimeBonus = 2,
+                travelCost       = CN.unknownLocationCost,
+                expiresIn        = order.expiresIn,
+                reasons          = {
+                    "a crafting order you placed expires in "
+                        .. ((session and session.FormatDuration
+                            and session.FormatDuration(order.expiresIn))
+                            or "less than a day"),
+                },
+            }))
+        end
+    end
+
+    if Orders.HasClaimable() then
+        table.insert(candidates, CN.NewObjective({
+            id               = "claim",
+            type             = CN.objectiveTypes.RECIPE,
+            name             = "Collect your finished crafting order",
+            completionValue  = 5,
+            limitedTimeBonus = 2,
+            travelCost       = CN.unknownLocationCost,
+            reasons          = { "it is done and waiting at a crafting table" },
+        }))
+    end
+
+    return candidates
+end, {
+    events   = { "CRAFTINGORDERS_UPDATE_ORDER_COUNT", "CRAFTINGORDERS_CLAIM_ORDER_RESPONSE" },
+    cooldown = 30,
+})
+
+------------------------------------------------------------
+-- THE DELVES PROBE
+------------------------------------------------------------
+
+-- Names the exact API that would change the decision, so that "we looked and
+-- there was nothing" does not decay into "nobody ever checked".
+Orders.delveProgressAPIs = {
+    "GetDelvesProgress",
+    "GetDelveProgressInfo",
+    "GetSeasonProgress",
+}
+
+-- Returns available, detail.
+function Orders.DelveProgressAvailable()
+    if not C_DelvesUI then
+        return false, "C_DelvesUI is not present in this client"
+    end
+
+    for _, name in ipairs(Orders.delveProgressAPIs) do
+        if type(C_DelvesUI[name]) == "function" then
+            return true, "C_DelvesUI." .. name .. " exists -- Delve progress "
+                .. "is now readable, and this addon should be tracking it"
+        end
+    end
+
+    return false, "C_DelvesUI exists but exposes no progress function; Delve "
+        .. "credit still reaches the addon through the Great Vault's World row"
+end
+
+CN.RegisterSelfTest{
+    area = "instances",
+    name = "Delve progress is still unavailable",
+    run  = function()
+        local available, detail = Orders.DelveProgressAvailable()
+
+        if available then
+            -- A PASS would be wrong here. This check exists to notice a
+            -- decision going stale, and the answer that needs acting on is
+            -- the one that must stand out.
+            return "FAIL", detail
+        end
+
+        return "SKIP", detail
+    end,
+}
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "orders",
+    order   = 27,
+    help    = "Crafting orders you have placed, and anything ready to collect.",
+    handler = function()
+        if not Orders.IsAvailable() then
+            Print("This client has no crafting order system.")
+            return
+        end
+
+        local mine = Orders.Mine()
+
+        if not mine then
+            Print("Nothing known yet.")
+            Print("|cff999999The game only hands the addon your order list "
+                .. "once you have opened the order frame this session. It is "
+                .. "not asked to open on your behalf.|r")
+            return
+        end
+
+        if #mine == 0 then
+            Print("No orders outstanding.")
+        else
+            Print(#mine .. " order" .. (#mine == 1 and "" or "s") .. ":")
+
+            local session = CN:GetModule("Session")
+
+            for _, order in ipairs(mine) do
+                local line = "  " .. tostring(order.itemName or order.itemID)
+
+                if order.crafter then
+                    line = line .. " |cff999999claimed by "
+                        .. order.crafter .. "|r"
+                end
+
+                if order.expiresIn then
+                    line = line .. " |cffffff00expires in "
+                        .. ((session and session.FormatDuration
+                            and session.FormatDuration(order.expiresIn))
+                            or "soon") .. "|r"
+                end
+
+                Print(line)
+            end
+        end
+
+        if Orders.HasClaimable() then
+            Print("|cff73b873Something is finished and waiting to be "
+                .. "collected.|r")
+        end
+    end,
+}
+
+return Orders
+'@
+
+$Embedded['Modules\Contribute.lua'] = @'
+-- Modules/Contribute.lua
+-- Completion Navigator :: sharing what you learned, without a server.
+--
+-- THE PROBLEM.
+--
+-- The addon learns quest orderings from play, and that knowledge dies on the
+-- machine that learned it. One player's evening becomes better advice for
+-- that player and for nobody else. The obvious fix is a central database that
+-- collects everyone's observations -- and the obvious fix is wrong here, for
+-- reasons worth writing down rather than re-deriving:
+--
+--   * A World of Warcraft addon has NO network access. None. So "upload"
+--     necessarily means a second product -- a desktop application, an
+--     installer, an update channel -- and that is a larger undertaking than
+--     this addon.
+--   * Character name, realm and play times are personal data. Collecting them
+--     makes the publisher a data controller, with a privacy policy, deletion
+--     requests and breach obligations attached.
+--   * The project page promises, twice, that nothing leaves your machine.
+--
+-- So: a one-way, opt-in, de-identified export the player chooses to attach to
+-- a bug report. No server, no account, no personal data, and the promise on
+-- the store page stays true, because nothing leaves the machine unless the
+-- player themselves moves it.
+--
+-- WHAT IS IN AN EXPORT.
+--
+-- Quest IDs and orderings. That is all. No names, no realm, no character, no
+-- timestamps, no coordinates, no play history. The receiving end can verify
+-- what it is by reading it, which is a property worth more than any assurance
+-- in a privacy policy.
+
+local ADDON_NAME, CN = ...
+
+local Contribute = CN:RegisterModule("Contribute")
+
+local Print = CN.Print
+
+------------------------------------------------------------
+-- THE FORMAT
+------------------------------------------------------------
+
+-- Version first, so a future format change is detectable rather than
+-- misparsed. Deliberately plain text: a player can read it before deciding to
+-- send it, and anybody who has ever been asked to paste an opaque blob into a
+-- form knows why that matters.
+--
+--   CN1 <questID>:<prerequisiteID>,<prerequisiteID> ...
+Contribute.formatVersion = "CN1"
+
+function Contribute.Build()
+    local harvest = CN:GetModule("Harvest")
+
+    if not harvest or not harvest.AllConfident then
+        return nil, "the harvest module is not loaded"
+    end
+
+    local edges = harvest.AllConfident()
+
+    local ids = {}
+
+    for questID in pairs(edges) do
+        table.insert(ids, questID)
+    end
+
+    table.sort(ids)
+
+    if #ids == 0 then
+        return nil, "nothing is confident yet -- a chain has to hold on "
+            .. (harvest.confidenceThreshold or 3)
+            .. " characters before it is worth sending"
+    end
+
+    local parts = { Contribute.formatVersion }
+
+    for _, questID in ipairs(ids) do
+        local prerequisites = edges[questID]
+
+        table.sort(prerequisites)
+
+        table.insert(parts, questID .. ":" .. table.concat(prerequisites, ","))
+    end
+
+    return table.concat(parts, " "), nil, #ids
+end
+
+-- Reads an export back. Returns a table of questID -> { prerequisiteIDs }.
+--
+-- Strict: anything malformed is rejected outright rather than partially
+-- accepted. A half-parsed contribution is worse than a refused one, because
+-- it silently teaches the addon a chain nobody wrote.
+function Contribute.Parse(text)
+    if type(text) ~= "string" then
+        return nil, "not text"
+    end
+
+    text = CN.Trim(text)
+
+    local version, body = text:match("^(%u%u%d)%s+(.+)$")
+
+    if version ~= Contribute.formatVersion then
+        return nil, "not a Completion Navigator export "
+            .. "(expected " .. Contribute.formatVersion .. ")"
+    end
+
+    local edges = {}
+
+    local count = 0
+
+    for entry in body:gmatch("%S+") do
+        local questID, list = entry:match("^(%d+):([%d,]+)$")
+
+        if not questID then
+            return nil, "malformed entry: " .. entry
+        end
+
+        local prerequisites = {}
+
+        for id in list:gmatch("%d+") do
+            table.insert(prerequisites, tonumber(id))
+        end
+
+        if #prerequisites == 0 then
+            return nil, "entry with no prerequisites: " .. entry
+        end
+
+        edges[tonumber(questID)] = prerequisites
+
+        count = count + 1
+    end
+
+    if count == 0 then
+        return nil, "no entries"
+    end
+
+    return edges, nil, count
+end
+
+------------------------------------------------------------
+-- IMPORTING
+------------------------------------------------------------
+
+-- Imported chains land in their OWN store and are published as
+-- observedRequires, never as requires.
+--
+-- The distinction is the whole safety model: curated data is something a
+-- human checked, an observation is something the addon watched, and a
+-- contribution is something a stranger's addon watched. The third must never
+-- be able to present itself as the first, and /cn why has to be able to tell
+-- the player which it is looking at.
+function Contribute.Import(text)
+    local edges, err, count = Contribute.Parse(text)
+
+    if not edges then
+        return false, err
+    end
+
+    local store = CN.Account("contributed")
+
+    local added = 0
+
+    for questID, prerequisites in pairs(edges) do
+        if not store[questID] then
+            added = added + 1
+        end
+
+        store[questID] = prerequisites
+
+        CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
+            observedRequires = prerequisites,
+        })
+    end
+
+    CN.InvalidateCandidates()
+
+    return true, nil, count, added
+end
+
+function Contribute.Forget()
+    local store = CN.Account("contributed")
+
+    local count = CN.CountKeys(store)
+
+    for questID in pairs(store) do
+        store[questID] = nil
+    end
+
+    return count
+end
+
+CN:OnLogin(function()
+    -- Re-publish on login, because the dependency graph is rebuilt from
+    -- scratch each session and imported edges would otherwise silently stop
+    -- applying the next time the player logged in.
+    local store = CN.Account("contributed")
+
+    for questID, prerequisites in pairs(store) do
+        CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
+            observedRequires = prerequisites,
+        })
+    end
+end)
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "contribute",
+    args    = "[import <text>, or forget]",
+    order   = 37,
+    help    = "Share the quest chains you have learned, or take somebody "
+        .. "else's.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        local verb, rest = args:match("^(%S+)%s*(.*)$")
+
+        verb = verb and string.lower(verb) or ""
+
+        if verb == "forget" then
+            Print("Forgot " .. Contribute.Forget() .. " imported chain(s).")
+            return
+        end
+
+        if verb == "import" then
+            local ok, err, count, added = Contribute.Import(rest)
+
+            if not ok then
+                Print("|cfff56b61Not imported:|r " .. tostring(err))
+                return
+            end
+
+            Print("Imported " .. count .. " chain(s), " .. added .. " new.")
+            Print("|cff999999They are recorded as observations, not as facts: "
+                .. "|cffffff00/cn why|r will say the chain came from a "
+                .. "contribution rather than from curated data.|r")
+            return
+        end
+
+        local export, err, count = Contribute.Build()
+
+        if not export then
+            Print("Nothing to contribute yet.")
+            Print("|cff999999" .. tostring(err) .. "|r")
+            return
+        end
+
+        Print(count .. " chain(s) ready to share. This text and nothing else:")
+        Print("|cffffff00" .. export .. "|r")
+        Print("|cff999999It contains quest IDs and orderings. No character "
+            .. "name, no realm, no timestamps, no coordinates -- read it "
+            .. "before you send it, which is rather the point of a format you "
+            .. "can read.|r")
+        Print("Paste it into an issue on the tracker and it ships to everyone "
+            .. "in a later release.")
+    end,
+}
+
+return Contribute
+'@
+
+$Embedded['Modules\Welcome.lua'] = @'
+-- Modules/Welcome.lua
+-- Completion Navigator :: the first sixty seconds.
+--
+-- An addon is judged before it is understood. This one opened with a slash
+-- command and a list of things the player had not asked about, which is a
+-- perfectly honest way to present a tool and a poor way to introduce one.
+--
+-- WHAT THIS IS.
+--
+-- One question, asked once: what are you playing for right now? The answer
+-- sets the focus mode, which the addon already supports and which almost
+-- nobody discovers, because `/cn mode collecting` is a sentence you have to
+-- already know to type.
+--
+-- WHAT IT IS NOT.
+--
+--   * It is not a wizard. One screen, four buttons, and a way out.
+--   * It does not run again. Ever. An addon that re-introduces itself is an
+--     addon that has not noticed you already met.
+--   * It does not block anything. Close it and every command still works
+--     exactly as before -- nothing here is a gate.
+--   * It changes only the focus, which `/cn mode off` reverses completely.
+--     A first-run screen that quietly reconfigures things is a first-run
+--     screen people learn to distrust.
+
+local ADDON_NAME, CN = ...
+
+local Welcome = CN:RegisterModule("Welcome")
+
+local Print = CN.Print
+
+------------------------------------------------------------
+-- STATE
+------------------------------------------------------------
+
+local function Account()
+    return CN.Account()
+end
+
+function Welcome.HasSeen()
+    local account = Account()
+
+    return account and account.welcomed and true or false
+end
+
+function Welcome.MarkSeen()
+    local account = Account()
+
+    if account then
+        account.welcomed = true
+    end
+end
+
+------------------------------------------------------------
+-- THE CHOICES
+------------------------------------------------------------
+
+-- Four, because five is a menu and three leaves out collecting or levelling,
+-- which are the two most common answers. Each maps onto a focus that already
+-- exists rather than inventing new behaviour for the occasion.
+Welcome.choices = {
+    {
+        mode  = "leveling",
+        label = "Levelling",
+        note  = "Quests first, collections quiet.",
+    },
+    {
+        mode  = "collecting",
+        label = "Collecting",
+        note  = "Mounts, pets, toys and appearances.",
+    },
+    {
+        mode  = "reputation",
+        label = "Reputation & renown",
+        note  = "Factions, paragon and renown tracks.",
+    },
+    {
+        mode  = "everything",
+        label = "A bit of everything",
+        note  = "Balanced. The default.",
+    },
+}
+
+function Welcome.Choose(mode)
+    Welcome.MarkSeen()
+
+    if not mode or mode == "everything" then
+        return true, "everything"
+    end
+
+    local filters = CN:GetModule("Filters")
+
+    if filters and filters.ApplyMode then
+        filters.ApplyMode(mode)
+    end
+
+    CN.InvalidateCandidates()
+
+    return true, mode
+end
+
+------------------------------------------------------------
+-- THE FRAME
+------------------------------------------------------------
+
+local frame
+
+function Welcome.Build()
+    if frame or not CreateFrame then
+        return frame
+    end
+
+    frame = CreateFrame("Frame", "CompletionNavigatorWelcome", UIParent,
+        BackdropTemplateMixin and "BackdropTemplate" or nil)
+
+    frame:SetSize(420, 260)
+    frame:SetPoint("CENTER")
+    frame:SetFrameStrata("DIALOG")
+    frame:EnableMouse(true)
+    frame:SetMovable(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+
+    if frame.SetBackdrop then
+        frame:SetBackdrop({
+            bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
+            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+            tile = true, tileSize = 32, edgeSize = 32,
+            insets = { left = 8, right = 8, top = 8, bottom = 8 },
+        })
+    end
+
+    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", 0, -18)
+    title:SetText("Completion Navigator")
+
+    local body = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    body:SetPoint("TOPLEFT", 24, -48)
+    body:SetPoint("TOPRIGHT", -24, -48)
+    body:SetJustifyH("LEFT")
+    body:SetText("What are you playing for at the moment? This only sets a "
+        .. "starting focus -- everything is still tracked, and |cffffff00/cn "
+        .. "mode off|r puts it back.")
+
+    local previous
+
+    for index, choice in ipairs(Welcome.choices) do
+        local button = CreateFrame("Button", nil, frame,
+            "UIPanelButtonTemplate")
+
+        button:SetSize(180, 24)
+        button:SetText(choice.label)
+
+        if index == 1 then
+            button:SetPoint("TOPLEFT", 24, -104)
+        elseif index == 2 then
+            button:SetPoint("TOPLEFT", previous, "TOPRIGHT", 12, 0)
+        elseif index == 3 then
+            button:SetPoint("TOPLEFT", 24, -136)
+        else
+            button:SetPoint("TOPLEFT", previous, "TOPRIGHT", 12, 0)
+        end
+
+        button:SetScript("OnClick", function()
+            local _, mode = Welcome.Choose(choice.mode)
+
+            Print("Focus set to |cffffff00" .. mode .. "|r. "
+                .. "|cff999999/cn mode off|r undoes it.")
+            Print("Ask it anything with |cffffff00/cn|r, or open the window "
+                .. "with |cffffff00/cn ui|r.")
+
+            frame:Hide()
+        end)
+
+        previous = button
+    end
+
+    local note = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    note:SetPoint("BOTTOMLEFT", 24, 46)
+    note:SetPoint("BOTTOMRIGHT", -24, 46)
+    note:SetJustifyH("LEFT")
+    note:SetText("Nothing is scanned, sent or changed until you ask. "
+        .. "This appears once.")
+
+    local dismiss = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    dismiss:SetSize(120, 22)
+    dismiss:SetPoint("BOTTOM", 0, 16)
+    dismiss:SetText("Not now")
+    dismiss:SetScript("OnClick", function()
+        Welcome.MarkSeen()
+
+        Print("Right. |cffffff00/cn|r whenever you want it.")
+
+        frame:Hide()
+    end)
+
+    frame:Hide()
+
+    return frame
+end
+
+function Welcome.Show()
+    local built = Welcome.Build()
+
+    if built then
+        built:Show()
+
+        return true
+    end
+
+    -- No frame available -- a headless test, or a client that refuses to
+    -- create one. Say the same thing in chat rather than silently doing
+    -- nothing.
+    Print("Completion Navigator is installed. |cffffff00/cn mode leveling|r, "
+        .. "|cffffff00collecting|r, |cffffff00reputation|r or just "
+        .. "|cffffff00/cn|r to begin.")
+
+    Welcome.MarkSeen()
+
+    return false
+end
+
+CN:OnLogin(function()
+    if Welcome.HasSeen() then
+        return
+    end
+
+    -- After the login chatter, and after the setup reminder has had its turn.
+    -- Two things talking at once on a first login is worse than either alone.
+    if C_Timer and C_Timer.After then
+        C_Timer.After(8, function()
+            if not Welcome.HasSeen() then
+                Welcome.Show()
+            end
+        end)
+    end
+end)
+
+CN:RegisterCommand{
+    name    = "welcome",
+    order   = 38,
+    help    = "Show the first-run question again.",
+    handler = function()
+        Welcome.Show()
+    end,
+}
+
+return Welcome
+'@
+
+$Embedded['Modules\Hud.lua'] = @'
+-- Modules/Hud.lua
+-- Completion Navigator :: a small always-on frame, and the settings that make
+-- the whole addon legible.
+--
+-- THE HUD.
+--
+-- Off by default, like everything in this addon that puts pixels on the
+-- screen uninvited. It shows one line -- what to do next -- and nothing else,
+-- because a heads-up display that needs reading is not a heads-up display.
+--
+-- Distinct from Follow's frame, which appears only while a route is being
+-- walked and shows the current stop. This is for the player who is not
+-- following anything and wants the answer visible while they get on with
+-- something else.
+--
+-- ACCESSIBILITY.
+--
+-- Two settings that cost almost nothing and matter a great deal to the people
+-- who need them:
+--
+--   * A scale, because the default font is small and not everybody's monitor
+--     is two feet away.
+--   * A colourblind mode for the navigation arrow. The arrow's whole language
+--     is colour -- blue on course, amber drifting, red walking away -- which
+--     is exactly the design that fails eight percent of men. In this mode the
+--     arrow carries a short text label as well, so the information survives
+--     the colour being indistinguishable.
+--
+-- The rule behind both: no information carried by colour alone.
+
+local ADDON_NAME, CN = ...
+
+local Hud = CN:RegisterModule("Hud")
+
+local Print = CN.Print
+
+------------------------------------------------------------
+-- SETTINGS
+------------------------------------------------------------
+
+local function Settings()
+    return CN.Settings() or {}
+end
+
+function Hud.IsEnabled()
+    return Settings().hud == true
+end
+
+function Hud.Scale()
+    local scale = tonumber(Settings().uiScale)
+
+    if not scale or scale < 0.7 or scale > 2.0 then
+        return 1
+    end
+
+    return scale
+end
+
+function Hud.IsColourblind()
+    return Settings().colourblind == true
+end
+
+------------------------------------------------------------
+-- THE FRAME
+------------------------------------------------------------
+
+local frame, ticker
+
+local function Build()
+    if frame or not CreateFrame then
+        return frame
+    end
+
+    frame = CreateFrame("Frame", "CompletionNavigatorHud", UIParent)
+
+    frame:SetSize(260, 34)
+    frame:SetFrameStrata("BACKGROUND")
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetClampedToScreen(true)
+
+    local placement = Settings().hudPosition or {}
+
+    frame:SetPoint(placement.point or "TOP", UIParent,
+        placement.point or "TOP", placement.x or 0, placement.y or -220)
+
+    frame.label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.label:SetPoint("TOPLEFT")
+    frame.label:SetPoint("TOPRIGHT")
+    frame.label:SetJustifyH("LEFT")
+
+    frame.detail = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    frame.detail:SetPoint("TOPLEFT", frame.label, "BOTTOMLEFT", 0, -2)
+    frame.detail:SetPoint("TOPRIGHT", frame.label, "BOTTOMRIGHT", 0, -2)
+    frame.detail:SetJustifyH("LEFT")
+
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+
+        local point, _, _, x, y = self:GetPoint()
+
+        Settings().hudPosition = { point = point, x = x, y = y }
+    end)
+
+    frame:SetScale(Hud.Scale())
+
+    frame:Hide()
+
+    return frame
+end
+
+Hud.Build = Build
+
+function Hud.Refresh()
+    if not frame or not Hud.IsEnabled() then
+        return false
+    end
+
+    local results = CN.Recommend(1)
+
+    local objective = results and results[1]
+
+    if not objective then
+        frame.label:SetText("|cff999999nothing actionable|r")
+        frame.detail:SetText("")
+
+        return true
+    end
+
+    frame.label:SetText(tostring(objective.name or objective.id))
+
+    local reason = objective.reasons and objective.reasons[1]
+
+    frame.detail:SetText(reason and ("|cff999999" .. reason .. "|r") or "")
+
+    return true
+end
+
+function Hud.SetEnabled(enabled)
+    Settings().hud = enabled and true or nil
+
+    if enabled then
+        Build()
+
+        if frame then
+            frame:SetScale(Hud.Scale())
+            frame:Show()
+        end
+
+        -- Slow on purpose. The answer to "what next" changes when the player
+        -- does something, not several times a second, and a HUD that
+        -- recomputes constantly is a HUD that costs frames for nothing.
+        if C_Timer and C_Timer.NewTicker and not ticker then
+            ticker = C_Timer.NewTicker(5, function()
+                pcall(Hud.Refresh)
+            end)
+        end
+
+        Hud.Refresh()
+    else
+        if frame then
+            frame:Hide()
+        end
+
+        if ticker then
+            ticker:Cancel()
+            ticker = nil
+        end
+    end
+
+    return Hud.IsEnabled()
+end
+
+CN:OnLogin(function()
+    if Hud.IsEnabled() then
+        Hud.SetEnabled(true)
+    end
+end)
+
+------------------------------------------------------------
+-- ACCESSIBILITY APPLIED
+------------------------------------------------------------
+
+-- Everything the addon draws, at the player's scale.
+function Hud.ApplyScale()
+    local scale = Hud.Scale()
+
+    for _, name in ipairs({
+        "CompletionNavigatorFrame",
+        "CompletionNavigatorHud",
+        "CompletionNavigatorArrow",
+        "CompletionNavigatorFollow",
+        "CompletionNavigatorWelcome",
+    }) do
+        local target = _G and _G[name]
+
+        if target and target.SetScale then
+            pcall(target.SetScale, target, scale)
+        end
+    end
+
+    return scale
+end
+
+-- The word for a bearing, for players who cannot rely on the colour. Kept
+-- very short: it sits under an arrow, not in a paragraph.
+function Hud.BearingWord(relative)
+    if not relative then
+        return "?"
+    end
+
+    local off = math.abs(relative)
+
+    if off < 0.35 then
+        return "ahead"
+    end
+
+    if off < 1.2 then
+        return "veer"
+    end
+
+    if off < 2.4 then
+        return "turn"
+    end
+
+    return "back"
+end
+
+------------------------------------------------------------
+-- THE GAME'S OWN OPTIONS LIST
+------------------------------------------------------------
+
+-- The addon has had a settings tab since 0.15.0 and it lives inside a window
+-- you have to know how to open. Somebody who installs an addon and goes
+-- looking for its options goes to the game's options list, finds nothing, and
+-- reasonably concludes it has none.
+--
+-- Registered defensively: the API was replaced wholesale in 10.0 and the old
+-- one still exists on older clients, so both paths are here and neither is
+-- assumed.
+local registered = false
+
+function Hud.RegisterOptionsPanel()
+    if registered or not CreateFrame then
+        return registered
+    end
+
+    local panel = CreateFrame("Frame")
+
+    panel.name = "Completion Navigator"
+
+    local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 16, -16)
+    title:SetText("Completion Navigator")
+
+    local body = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    body:SetPoint("TOPLEFT", 16, -48)
+    body:SetPoint("TOPRIGHT", -16, -48)
+    body:SetJustifyH("LEFT")
+    body:SetText("Everything this addon can do is in its own window, which "
+        .. "has a Settings tab of its own.\n\n"
+        .. "/cn ui        open the window\n"
+        .. "/cn           what to do next\n"
+        .. "/cn scale     size of everything it draws\n"
+        .. "/cn colourblind   label the arrow in words\n"
+        .. "/cn hud       a small always-on line\n"
+        .. "/cn selftest  check the addon against your client")
+
+    local open = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    open:SetSize(160, 24)
+    open:SetPoint("TOPLEFT", 16, -190)
+    open:SetText("Open the window")
+    open:SetScript("OnClick", function()
+        if CompletionNavigator_ToggleUI then
+            CompletionNavigator_ToggleUI()
+        end
+    end)
+
+    -- Modern path first.
+    if SettingsPanel and Settings and Settings.RegisterCanvasLayoutCategory
+        and Settings.RegisterAddOnCategory then
+
+        local ok, category = pcall(Settings.RegisterCanvasLayoutCategory,
+            panel, panel.name)
+
+        if ok and category then
+            category.ID = panel.name
+
+            pcall(Settings.RegisterAddOnCategory, category)
+
+            registered = true
+        end
+    end
+
+    -- The pre-10.0 API, still present on Classic clients.
+    if not registered and InterfaceOptions_AddCategory then
+        local ok = pcall(InterfaceOptions_AddCategory, panel)
+
+        registered = ok and true or false
+    end
+
+    return registered
+end
+
+CN:OnLogin(function()
+    Hud.RegisterOptionsPanel()
+end)
+
+------------------------------------------------------------
+-- COMMANDS
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "hud",
+    args    = "[on or off]",
+    order   = 39,
+    help    = "A small always-on line showing what to do next.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        if args == "on" then
+            Hud.SetEnabled(true)
+        elseif args == "off" then
+            Hud.SetEnabled(false)
+        else
+            Hud.SetEnabled(not Hud.IsEnabled())
+        end
+
+        Print("Heads-up display: " .. CN.YesNo(Hud.IsEnabled()))
+
+        if Hud.IsEnabled() then
+            Print("|cff999999Drag it where you want it.|r")
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "scale",
+    args    = "<0.7 to 2.0>",
+    order   = 40,
+    help    = "Size of everything this addon draws.",
+    handler = function(args)
+        local scale = tonumber(CN.Trim(args or ""))
+
+        if not scale then
+            Print("Scale: " .. Hud.Scale())
+            Print("|cff999999Usage: /cn scale 1.25|r")
+            return
+        end
+
+        if scale < 0.7 or scale > 2.0 then
+            Print("Scale must be between 0.7 and 2.0.")
+            return
+        end
+
+        Settings().uiScale = scale
+
+        Hud.ApplyScale()
+
+        Print("Scale set to " .. scale .. ".")
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "colourblind",
+    aliases = { "colorblind" },
+    args    = "[on or off]",
+    order   = 41,
+    help    = "Label the arrow in words as well as colour.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        if args == "on" then
+            Settings().colourblind = true
+        elseif args == "off" then
+            Settings().colourblind = nil
+        else
+            Settings().colourblind = (not Hud.IsColourblind()) or nil
+        end
+
+        Print("Arrow labelled in words: " .. CN.YesNo(Hud.IsColourblind()))
+
+        local navigation = CN:GetModule("Navigation")
+
+        if navigation and navigation.Refresh then
+            navigation.Refresh()
+        end
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "cues",
+    args    = "[on or off]",
+    order   = 42,
+    help    = "Sound and a flash when a route finishes. Off by default.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        if args == "on" then
+            Settings().cues = true
+        elseif args == "off" then
+            Settings().cues = nil
+        else
+            Settings().cues = (not Settings().cues) or nil
+        end
+
+        Print("Completion cues: " .. CN.YesNo(Settings().cues))
+    end,
+}
+
+return Hud
+'@
+
+$Embedded['Modules\Errors.lua'] = @'
+-- Modules/Errors.lua
+-- Completion Navigator :: what went wrong, kept where the player can find it.
+--
+-- WHY.
+--
+-- Every bug report this project has received has been prose. "The arrow does
+-- not turn around." I guessed from that description twice and was wrong twice,
+-- and the fix both times was to build an instrument -- /cn navdiag, then
+-- /cn selftest -- so that the next report could carry evidence instead of
+-- adjectives.
+--
+-- This is the same move applied to errors themselves. The addon already wraps
+-- its risky work in pcall, which is why a failure inside a candidate provider
+-- does not break the player's session. The cost of that is that the failure is
+-- invisible: it happened, something was quietly missing from a list, and
+-- nobody will ever know.
+--
+-- So: keep them. A short ring buffer, in memory, that /cn errors prints.
+--
+-- WHAT THIS IS NOT.
+--
+-- It is not telemetry. Nothing is sent anywhere -- an addon cannot send
+-- anything anywhere -- and nothing is written to disk, because an error from
+-- three weeks ago is noise and a growing error log is a leak.
+
+local ADDON_NAME, CN = ...
+
+local Errors = CN:RegisterModule("Errors")
+
+local Print = CN.Print
+
+-- Twenty is enough to see a pattern and short enough that the memory cost is
+-- irrelevant. When it fills, the oldest goes: the recent ones are the ones
+-- somebody is trying to explain.
+Errors.capacity = 20
+
+local ring = {}
+
+local seen = {}
+
+function Errors.Record(context, message)
+    if not message then
+        return false
+    end
+
+    message = tostring(message)
+
+    -- REPEATS ARE COUNTED, NOT LISTED.
+    --
+    -- A failure inside a ticker fires ten times a second. Twenty identical
+    -- lines is not twenty pieces of evidence, and it pushes out the one
+    -- different error that would have explained the whole thing.
+    local key = tostring(context) .. "|" .. message
+
+    if seen[key] then
+        seen[key].count = seen[key].count + 1
+        seen[key].last  = time()
+
+        return true
+    end
+
+    local entry = {
+        context = tostring(context or "?"),
+        message = message,
+        first   = time(),
+        last    = time(),
+        count   = 1,
+    }
+
+    seen[key] = entry
+
+    table.insert(ring, entry)
+
+    while #ring > Errors.capacity do
+        local dropped = table.remove(ring, 1)
+
+        seen[tostring(dropped.context) .. "|" .. dropped.message] = nil
+    end
+
+    return true
+end
+
+function Errors.All()
+    return ring
+end
+
+function Errors.Count()
+    return #ring
+end
+
+function Errors.Clear()
+    local count = #ring
+
+    ring = {}
+    seen = {}
+
+    return count
+end
+
+-- Wraps a call so a failure is recorded rather than swallowed. Returns the
+-- same thing pcall does, so it is a drop-in replacement at every site that
+-- currently discards the error.
+function Errors.Guard(context, fn, ...)
+    local results = { pcall(fn, ...) }
+
+    if not results[1] then
+        Errors.Record(context, results[2])
+    end
+
+    -- unpack lives at the top level in the game's Lua 5.1, and on table in
+    -- 5.4 where the offline suite runs. Both, so this file works in both.
+    local unpackFn = rawget(table, "unpack") or unpack
+
+    return unpackFn(results)
+end
+
+CN.Guard = Errors.Guard
+
+CN:RegisterCommand{
+    name    = "errors",
+    aliases = { "log" },
+    args    = "[clear]",
+    order   = 43,
+    help    = "Anything that went wrong inside the addon this session.",
+    handler = function(args)
+        if string.lower(CN.Trim(args or "")) == "clear" then
+            Print("Cleared " .. Errors.Clear() .. " recorded error(s).")
+            return
+        end
+
+        if #ring == 0 then
+            Print("Nothing has gone wrong this session.")
+            Print("|cff999999Errors inside the addon are caught so they "
+                .. "cannot break your session -- which is also why they would "
+                .. "otherwise be invisible. They are recorded here instead.|r")
+            return
+        end
+
+        Print(#ring .. " error(s) recorded this session:")
+
+        for _, entry in ipairs(ring) do
+            Print("  |cfff56b61" .. entry.context .. "|r"
+                .. (entry.count > 1 and (" |cffffff00x" .. entry.count .. "|r") or ""))
+            Print("    |cff999999" .. entry.message .. "|r")
+        end
+
+        Print("|cff999999Paste this into a bug report along with "
+            .. "|cffffff00/cn selftest|r output.|r")
+    end,
+}
+
+return Errors
+'@
+
 $Embedded['Bindings.xml'] = @'
 <Bindings>
     <Binding name="COMPLETIONNAVIGATOR_TOGGLE" header="COMPLETIONNAVIGATOR" category="ADDONS">
@@ -28688,6 +31950,15 @@ $Embedded['Bindings.xml'] = @'
     <Binding name="COMPLETIONNAVIGATOR_GO" category="ADDONS">
         CompletionNavigator_Navigate()
     </Binding>
+    <Binding name="COMPLETIONNAVIGATOR_FOLLOW" category="ADDONS">
+        CompletionNavigator_ToggleFollow()
+    </Binding>
+    <Binding name="COMPLETIONNAVIGATOR_PLAN" category="ADDONS">
+        CompletionNavigator_Plan()
+    </Binding>
+    <Binding name="COMPLETIONNAVIGATOR_HUD" category="ADDONS">
+        CompletionNavigator_ToggleHud()
+    </Binding>
 </Bindings>
 '@
 
@@ -28696,7 +31967,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.42.0
+## Version: 0.43.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -28706,7 +31977,11 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## X-Email: developer@dambeaverstudios.com
 ## IconTexture: Interface\AddOns\CompletionNavigator\Media\Logo
 ## X-Curse-Project-ID: 1657613
-# ## X-Wago-ID:   (set this if the addon is also published to Wago)
+## X-Wago-ID: 
+# Left blank deliberately: the field must exist for the packager to publish to
+# Wago, and a wrong id publishes into somebody else's project. Fill it in with
+# the id from the Wago project page, then add WAGO_API_TOKEN to the repository
+# secrets -- the workflow already passes it through.
 
 # CN:FILES:BEGIN -- managed by cn.ps1 sync; do not edit by hand.
 Core.lua
@@ -28738,16 +32013,23 @@ Providers\HandyNotes.lua
 Providers\StaticData.lua
 Providers\TomTom.lua
 Data\Quests.lua
+Data\Community.lua
 Modules\Achievements.lua
 Modules\Alts.lua
 Modules\Appearances.lua
 Modules\Breakdown.lua
 Modules\Broker.lua
+Modules\Group.lua
 Modules\Travel.lua
 Modules\Instances.lua
 Modules\Preference.lua
 Modules\Capture.lua
 Modules\SelfTest.lua
+Modules\Orders.lua
+Modules\Contribute.lua
+Modules\Welcome.lua
+Modules\Hud.lua
+Modules\Errors.lua
 Modules\Chase.lua
 Modules\Currencies.lua
 Modules\Exploration.lua
@@ -28933,6 +32215,121 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.43.0]
+
+The largest release this addon has had. Fifty-three items, and the short
+version is: it knows how you actually travel, it knows what situation you are
+in, it introduces itself, and its tests now check themselves.
+
+### Fixed
+
+- **Flying yourself was filed under "mounted".** The speed model has had two
+  buckets since 0.31.0 -- mounted and on foot -- and skyriding landed in the
+  first one beside a ground mount, dragging that median upward by however much
+  you fly. That is the same mistake the file's own comment warns against, one
+  level down. Three buckets now, and the third one changes the answer to
+  almost every travel question.
+- **The addon never noticed you were dead.** Recommending a battle pet to a
+  corpse is the clearest possible signal that a tool is not watching. It now
+  says so first, and ranks everything down until you are up.
+- **A "quest three zones away" was structurally unanswerable.** The client only
+  lists quest pins for the map you are looking at, which the addon recorded as
+  a scope limit and left there. It now remembers every quest start it has ever
+  seen, so `/cn waiting` can tell you what you walked past in Azj-Kahet last
+  week.
+- **World quests were still costed with a straight line and a flat penalty.**
+  0.42.0 fixed that for ordinary quests and missed the provider where it
+  matters most -- world quests are scattered across a continent and they
+  expire.
+- **Weekly deadlines were worth exactly nothing until their last two hours.**
+  The urgency curve was built when everything with a deadline was a world
+  quest. A raid lockout you are six bosses into, with a day left, could not
+  outrank anything. There are two ramps now: a week-long one that breaks ties
+  between things that are all days away, and the original steep one on top,
+  which still dominates -- ten minutes beats four days, as it should.
+- **Account-wide currencies were recommended on every character.** The client
+  flags them; the addon ignored the flag. That is the exact mistake the
+  Warband work exists to prevent, in the one store nobody had told about it.
+- **The arrow stepped rather than swept.** It recomputes ten times a second and
+  snapped to each new bearing. It eases now -- except through a reversal,
+  which still snaps, because an arrow easing through 170 degrees is pointing
+  at nothing at all for a quarter of a second.
+
+### Added
+
+- **Flying yourself, hearthstones and teleports.** A journey is now costed
+  against three options -- run, take a flight path, or fly it yourself -- and
+  the third usually wins in current content. Cross-continent still refuses to
+  invent a duration, but it now lists what you actually have: every
+  hearthstone and teleport you know, with the cooldown the client reports.
+- **`/cn waiting`** -- quests you have seen and never picked up, by zone.
+- **`/cn situation`** -- what the addon thinks you are in the middle of, and
+  what that is changing about the ranking. In an instance with four other
+  people, outside work ranks down.
+- **`/cn orders`** -- crafting orders you placed, and anything finished and
+  waiting. It does not open or scrape the order frame.
+- **`/cn contribute`** -- shares the quest chains your play has taught the
+  addon, as one line of quest IDs you can read before you send it. No server,
+  no account, no personal data: the addon cannot upload anything, and this is
+  a format you paste into an issue yourself. Imports land as observations,
+  never as curated fact.
+- **A first-run question.** One screen, four buttons, asked once, setting the
+  focus mode that almost nobody discovered because `/cn mode collecting` is a
+  sentence you have to already know to type.
+- **Visible route progress.** Follow mode now says "stop 3 of 7 cleared" as you
+  walk it, and marks the moment a route is actually finished. Sound and a
+  flash are available and off by default.
+- **`/cn hud`** -- a small always-on line showing the next thing. Off by
+  default, like everything here that puts pixels on screen uninvited.
+- **`/cn scale` and `/cn colourblind`.** The arrow's entire language was
+  colour -- blue on course, amber drifting, red walking away -- which is
+  precisely the design that fails a colourblind player. In that mode it
+  carries the word as well.
+- **A filter box in the window**, and the addon now appears in the game's own
+  options list rather than only inside a window you have to know how to open.
+- **Three more keybindings**: follow, plan, and the heads-up line.
+- **`/cn errors`** -- failures inside the addon are caught so they cannot break
+  your session, which is also why they were invisible. They are kept now, and
+  a bug report can carry the text instead of a description of the text.
+- **`/cn dbsize` reports memory as well as disk.** One of the two was being
+  measured and the other assumed.
+- **Curated gating data**: class, race, faction and level, plus turn-in
+  locations, so `/cn why` can say "that one is for a Druid" rather than
+  leaving the player to work out why they cannot see it.
+- **Fifteen more translated strings**, across ten languages.
+- **A standing Delves probe.** The decision not to build Delve tracking has
+  been made twice, for a reason -- `C_DelvesUI` exposes interface plumbing and
+  not progress -- and a decision nobody re-checks becomes a thing everyone
+  forgot. The self-test now names the exact API that would change it.
+
+### Tooling
+
+- **`mutate.sh`** -- breaks the code on purpose, ten ways, and fails if the
+  suite does not notice. It found three holes on the day it was written, all
+  three now covered. This was being done by hand, from memory, which means
+  inconsistently.
+- **Performance budgets in CI.** Two regressions have shipped in this project
+  and both were visible in the benchmark output at the time. Printing a number
+  somebody has to remember is not a check.
+- **Release notes are cut from the changelog** for the version being built,
+  rather than the whole file since 0.1.0.
+- **`cn.ps1 interface`** -- sets the game interface version and prints the rest
+  of the patch checklist, which had been living in my head.
+- **Issue templates** that ask for `/cn selftest` and `/cn errors` output.
+- **The translation lint now checks both directions.** It caught orphaned
+  translations; the failure that actually happens is the reverse -- the key IS
+  the English string, so editing the English silently orphans every
+  translation of it.
+- **Coverage floor raised to 83%**, and the Wago publishing field prepared.
+
+### Notes
+
+- A surviving mutation is a hole in the test suite, not a mutation to delete.
+- The filter box keeps its state in a local rather than on the frame. Reading
+  an unset field off a frame does not reliably return nil -- a metatable can
+  answer -- and the first version relied on it. The harness caught that; a
+  player running a UI replacement might have found it instead.
 
 ## [0.42.0]
 
@@ -31189,7 +34586,7 @@ ignore:
 '@
 
 $Embedded['_curseforge\SUMMARY.txt'] = @'
-Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, costs the journey the way you would actually make it (flights included), batches nearby work into stops, and shows what is between you and what you want.
+Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, costs the journey the way you would really make it (run, fly or flight path), batches nearby work into stops, and shows what stands between you and it.
 '@
 
 $Embedded['_curseforge\DESCRIPTION.md'] = @'
@@ -31236,9 +34633,9 @@ Off by default, and it will not fight you: it advances when a stop is **done**, 
 
 Half an hour is not the same question as "what should I do next", and it gets its own answer: the stops that fit, in walking order, with what each one costs.
 
-Travel time is **computed** from the journey you would actually make: run to the nearest flight point **you have discovered**, fly, run from the far end — against simply running the whole way, whichever is quicker. Your running speed is measured from your own play, and so is your flying speed, because the client does not report it and it differs between expansions. Task time is **learned** the same way. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
+Travel time is **computed** from the journey you would actually make, weighing three options against each other: run it, take a flight path from the nearest point **you have discovered**, or fly it yourself — whichever is genuinely quicker. Your speed is measured from your own play, separately for running, riding and flying, because those are three different numbers and one median across them is wrong in all three. Task time is **learned** the same way. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
 
-A journey it cannot model — another continent, reached by a portal — returns **nothing** rather than a large number. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
+A journey it cannot model — another continent, reached by a portal — still refuses to invent a duration, but it now lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
 ## Aim it in one command
 
@@ -31332,6 +34729,9 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **Dungeon & raid lockouts** | What you are saved to, how many bosses are left in it, and when it resets |
 | **Boss loot** | The game's own Adventure Guide, so a drop can name the boss it comes from |
 | **Flight points** | The ones you have discovered, so a journey is costed the way you would actually make it |
+| **Your own speed** | Running, riding and flying, measured separately from your own play |
+| **Crafting orders** | The ones you placed, and anything finished and waiting |
+| **World events** | Timewalking and holidays, weighted by when they end |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
 
 Where the game does not supply a trustworthy total, it reports **counts rather than a percentage**. That is a deliberate rule, not a gap — an invented denominator is a number that looks like a fact.
@@ -31378,6 +34778,53 @@ The addon notices which kinds of objective you go and do, and leans that way. Th
 
 `/cn learned reset` forgets it. `/cn learned off` switches it off. Hiding a type outright is still `/cn show`.
 
+## It knows what you are in the middle of
+
+Dead, in a group, in an instance, or out in the world alone are four different situations, and only one of them makes "go and collect a battle pet" a sensible thing to say.
+
+```
+/cn situation
+```
+
+Dead, and it says so before anything else. In a dungeon with four other people, outside work ranks down until you leave — down, never hidden, because hiding something is your decision and not a counter's.
+
+## Quests you walked past
+
+```
+/cn waiting
+```
+
+The game only lists quest pins for the map you are looking at, so "what is waiting three zones away" used to be unanswerable. It still cannot enumerate a zone it has never seen — but it remembers every quest start it *has* seen, by zone, which covers everywhere you have actually been.
+
+## Built to be read
+
+A scale for everything it draws, and a mode that labels the arrow in words as well as colour — the arrow's whole language was colour, which is exactly the design that fails a colourblind player.
+
+```
+/cn scale 1.25
+/cn colourblind
+```
+
+An optional one-line heads-up display (`/cn hud`), a filter box in the window, keybindings for the things you do often, and an entry in the game's own options list rather than only inside a window you have to know how to open.
+
+## When something goes wrong
+
+```
+/cn errors
+```
+
+Failures inside the addon are caught so they cannot break your session — which is also why they were invisible. They are kept now, so a bug report can carry the text instead of a description of it.
+
+## Share what your play taught it
+
+```
+/cn contribute
+```
+
+Prints one line of quest IDs and orderings — no character name, no realm, no timestamps, nothing that identifies you. You can read the whole thing before deciding to send it, which is the point of a format you can read.
+
+Nothing is uploaded. The addon *cannot* upload; addons have no network access at all. Pasting it into an issue is the entire transport, and chains that arrive that way are recorded as observations, never as fact.
+
 ## Ask it whether it is working
 
 ```
@@ -31415,6 +34862,12 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn drops <name>` | Which boss drops it, and whether you are locked to it |
 | `/cn learned` | What the addon has worked out about how you play |
 | `/cn travel` | How long it takes to reach the top recommendation, and by what route |
+| `/cn situation` | What the addon thinks you are in the middle of |
+| `/cn waiting` | Quests you have seen and never picked up, by zone |
+| `/cn orders` | Crafting orders you placed, and anything ready to collect |
+| `/cn hud` | A small always-on line showing the next thing |
+| `/cn errors` | Anything that went wrong inside the addon this session |
+| `/cn contribute` | Share the quest chains your play has taught it |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |
@@ -31495,7 +34948,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.42.0
+0.43.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -31670,6 +35123,38 @@ jobs:
             exit 1
           fi
 
+      # Performance budgets. Two regressions have shipped in this project's
+      # history and BOTH were visible in the benchmark output at the time --
+      # printing a number somebody has to remember is not a check. The
+      # ceilings live in bench.lua and carry real headroom, because a budget
+      # that fails on runner noise gets deleted within a fortnight.
+      - name: Performance budgets
+        timeout-minutes: 6
+        run: |
+          if [ -f bench.lua ]; then
+            lua5.4 bench.lua . --budget
+          else
+            echo "bench.lua is missing; skipping budgets."
+          fi
+
+      # Mutation testing: does the suite actually notice when the code is
+      # wrong? A green suite proves the code runs. This proves the assertions
+      # would complain. It found three holes on the day it was written.
+      #
+      # NOT blocking, deliberately, and by the same rule as coverage: a
+      # surviving mutation means the SUITE is weak, not that the code is
+      # broken. Blocking a release on it would be blocking users from a fix
+      # because a test could be better.
+      - name: Mutation testing
+        continue-on-error: true
+        timeout-minutes: 8
+        run: |
+          if [ -f mutate.sh ]; then
+            bash mutate.sh .
+          else
+            echo "mutate.sh is missing; skipping mutation testing."
+          fi
+
       # Coverage, with a floor. A test suite whose reach nobody measures
       # drifts: it keeps passing while covering less and less of the addon.
       #
@@ -31685,7 +35170,7 @@ jobs:
       - name: Coverage
         continue-on-error: true
         timeout-minutes: 6
-        run: bash coverage.sh . 80
+        run: bash coverage.sh . 82
 
       # The packager SKIPS the CurseForge upload silently when CF_API_KEY is
       # missing -- the build still goes green and no file appears. Fail here
@@ -31708,12 +35193,282 @@ jobs:
 
       # BigWigs' packager is the standard tool; it reads .pkgmeta, builds the
       # zip, and uploads to CurseForge, WoWInterface and Wago as configured.
+      # RELEASE NOTES, FROM THE CHANGELOG.
+      #
+      # The packager will use a changelog if it can find one, and until now it
+      # was finding the whole file -- every version since 0.1.0 -- which makes
+      # a release page nobody scrolls. This extracts the section for the tag
+      # being built, so the notes are about this release and nothing else.
+      #
+      # Not blocking: badly formatted release notes are a cosmetic problem and
+      # the packager has its own fallback.
+      - name: Release notes for this version
+        continue-on-error: true
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          if [ ! -f CHANGELOG.md ]; then
+            echo "No CHANGELOG.md; the packager will fall back to its default."
+            exit 0
+          fi
+
+          awk -v version="## [$VERSION]" '
+            index($0, version) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::warning::No changelog section for $VERSION; notes left empty."
+            rm -f RELEASE_NOTES.md
+          else
+            echo "Release notes: $(wc -l < RELEASE_NOTES.md) lines."
+          fi
+
       # Reached regardless of the optional steps above.
+      #
+      # WAGO_API_TOKEN is passed through but not required: the packager skips
+      # a destination it has no credentials for, and Wago is a second channel
+      # rather than the primary one. X-Wago-ID in the .toc has to be filled in
+      # before anything reaches it.
       - name: Package and upload
         uses: BigWigsMods/packager@master
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
           GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+'@
+
+$Embedded['.github\ISSUE_TEMPLATE\bug_report.md'] = @'
+---
+name: Something is wrong
+about: The addon did something it should not, or failed to do something it should
+title: ""
+labels: bug
+---
+
+<!--
+Two of this addon's hardest bugs were reported as prose, and prose is a bad
+instrument: "the arrow does not turn around" was diagnosed wrongly twice
+before the addon grew commands that could answer the question directly.
+
+The three blocks below take about thirty seconds and usually contain the
+answer. Please paste the output rather than describing it.
+-->
+
+## What happened
+
+<!-- What you did, what you expected, and what you got instead. -->
+
+## `/cn selftest`
+
+<!-- Fifteen checks against your own client. Paste the whole output. -->
+
+```
+```
+
+## `/cn errors`
+
+<!-- Anything that went wrong inside the addon this session. Often empty. -->
+
+```
+```
+
+## If it is about the arrow or a distance, also `/cn navdiag`
+
+```
+```
+
+## Version
+
+<!-- The version shown on the addon list, and your game version. -->
+
+- Addon:
+- Game:
+'@
+
+$Embedded['.github\ISSUE_TEMPLATE\feature_request.md'] = @'
+---
+name: Something is missing
+about: A thing the addon should be able to answer and cannot
+title: ""
+labels: enhancement
+---
+
+## What question should it be able to answer?
+
+<!--
+This addon answers "what should I do next?". Requests phrased as a question
+it should be able to answer are much easier to build well than requests
+phrased as a feature.
+-->
+
+## What do you do today instead?
+
+<!-- Another addon, a website, a spreadsheet, or working it out by hand. -->
+
+## Anything it should NOT do
+
+<!--
+Useful and rarely asked. For example: this addon never invents a completion
+percentage where the game does not supply a trustworthy total, and never
+takes over your waypoint without being asked.
+-->
+'@
+
+$Embedded['.github\ISSUE_TEMPLATE\data_contribution.md'] = @'
+---
+name: Quest chain contribution
+about: Share what your own play taught the addon
+title: "Chains: "
+labels: data
+---
+
+<!--
+In game: /cn contribute
+
+That prints a single line of text containing quest IDs and orderings. No
+character name, no realm, no timestamps, no coordinates -- you can read the
+whole thing before you send it, which is the point of a format you can read.
+
+Nothing is uploaded by the addon. It cannot upload anything; World of Warcraft
+addons have no network access. Pasting it here is the entire transport.
+-->
+
+```
+```
+
+## Anything unusual about these chains?
+
+<!-- Faction-specific, class-specific, or an ordering you think is wrong. -->
+'@
+
+$Embedded['mutate.sh'] = @'
+#!/usr/bin/env bash
+# mutate.sh -- does the test suite actually test anything?
+#
+# WHY THIS EXISTS.
+#
+# A passing suite proves the code runs. It does not prove the assertions
+# would notice if the code were wrong, and this project has repeatedly found
+# tests that would not: an assertion comparing a value against the setting
+# that produced it, a fixture that failed a different check first, a
+# comparison so loose that east reading as west still passed.
+#
+# Every one of those was found by hand, by breaking the code on purpose and
+# seeing whether anything complained. That is a mechanical task and it was
+# being done from memory, which means it was being done inconsistently.
+#
+# Each mutation below is a deliberate, plausible bug. A mutation that SURVIVES
+# is a hole in the suite, and the correct response is to write the missing
+# assertion -- never to delete the mutation.
+#
+# Usage:  ./mutate.sh [tree]
+set -u
+
+TREE="${1:-build/CompletionNavigator}"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+PASSED=0
+SURVIVED=0
+
+mutate() {
+    local file="$1" from="$2" to="$3" label="$4"
+
+    rm -rf "$WORK/tree"
+    cp -r "$TREE" "$WORK/tree"
+
+    python3 - "$WORK/tree/$file" "$from" "$to" <<'PY'
+import sys
+path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path, encoding="utf-8").read()
+if text.count(old) != 1:
+    print("MUTATION NOT APPLICABLE: %s (%d matches)" % (old[:60], text.count(old)))
+    sys.exit(3)
+open(path, "w", encoding="utf-8").write(text.replace(old, new))
+PY
+
+    local applied=$?
+
+    if [ "$applied" = "3" ]; then
+        printf '  \033[33mstale\033[0m     %s\n' "$label"
+        SURVIVED=$((SURVIVED + 1))
+        return
+    fi
+
+    if lua5.4 harness.lua "$WORK/tree" >/dev/null 2>&1; then
+        printf '  \033[31mSURVIVED\033[0m  %s\n' "$label"
+        SURVIVED=$((SURVIVED + 1))
+    else
+        printf '  \033[32mkilled\033[0m    %s\n' "$label"
+        PASSED=$((PASSED + 1))
+    fi
+}
+
+echo "Mutation testing $TREE"
+echo
+
+mutate "Modules/Travel.lua" \
+    "                if seconds < best.seconds then" \
+    "                if true then" \
+    "travel always flies, even when running is quicker"
+
+mutate "Modules/Travel.lua" \
+    '        return nil, false, {
+            mode      = "elsewhere",' \
+    '        return 3600, false, {
+            mode      = "elsewhere",' \
+    "travel invents a cross-continent duration"
+
+mutate "Modules/Instances.lua" \
+    "            and lockout.defeated > 0" \
+    "            and lockout.defeated >= 0" \
+    "a lockout nothing has been killed in is recommended"
+
+mutate "Modules/Preference.lua" \
+    "    if not row or row.shown < Preference.minimumObservations then" \
+    "    if not row then" \
+    "learning acts before it has evidence"
+
+mutate "Modules/Chase.lua" \
+    "    if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then" \
+    "    if false then" \
+    "chase estimates a time from nothing"
+
+mutate "Scoring.lua" \
+    "    if secondsLeft < CN.urgencyHorizonSeconds then" \
+    "    if false then" \
+    "the short urgency ramp is removed"
+
+mutate "Modules/Navigation.lua" \
+    "    if math.abs(delta) >= Navigation.smoothingSnapRad then" \
+    "    if false then" \
+    "the arrow eases through a reversal instead of snapping"
+
+mutate "Modules/Group.lua" \
+    '        return score * Group.deadPenalty' \
+    "        return score" \
+    "recommendations ignore the player being dead"
+
+mutate "Modules/Contribute.lua" \
+    '    if version ~= Contribute.formatVersion then' \
+    "    if false then" \
+    "an import accepts text of any format"
+
+mutate "Core.lua" \
+    "    if level == CN.confidence.ESTIMATED then" \
+    "    if false then" \
+    "estimated numbers are printed as though measured"
+
+echo
+echo "$PASSED killed, $SURVIVED survived."
+
+if [ "$SURVIVED" -gt 0 ]; then
+    echo
+    echo "A surviving mutation is a hole in the suite. Write the assertion."
+    exit 1
+fi
 '@
 
 $Embedded['.gitattributes'] = @'
@@ -31783,6 +35538,18 @@ read_globals = {
     -- functions are globals rather than a namespaced table, which is why
     -- there are so many of them.
     "GetNumSavedInstances", "GetSavedInstanceInfo", "C_TaxiMap",
+
+    -- Memory reporting, sound and flash, group and death state, self-flying,
+    -- crafting orders and the settings panel. All optional, all guarded at
+    -- the call site, all real APIs the client provides.
+    "UpdateAddOnMemoryUsage", "GetAddOnMemoryUsage",
+    "SOUNDKIT", "PlaySound", "UIFrameFlash",
+    "UnitIsDeadOrGhost", "UnitIsGhost", "GetNumGroupMembers",
+    "IsInRaid", "IsInInstance", "IsFlying", "IsFlyableArea",
+    "C_CraftingOrders", "C_DelvesUI", "C_Bank", "C_Spell",
+    "IsSpellKnown", "IsPlayerSpell", "GetSpellCooldown", "GetItemCooldown",
+    "GetItemCount", "GetBindLocation", "EJ_GetDifficulty", "GetDifficultyInfo",
+    "SettingsPanel", "InterfaceOptions_AddCategory", "BackdropTemplateMixin",
     "EncounterJournal", "EJ_SelectInstance", "EJ_GetCurrentInstance",
     "EJ_GetInstanceInfo", "EJ_GetEncounterInfoByIndex", "EJ_GetEncounterInfo",
     "EJ_SetSearch", "EJ_ClearSearch", "EJ_GetNumSearchResults",
@@ -31812,11 +35579,17 @@ globals = {
     -- Binding labels, read by the client's key binding UI.
     "BINDING_HEADER_COMPLETIONNAVIGATOR",
     "BINDING_NAME_COMPLETIONNAVIGATOR_TOGGLE",
+    "BINDING_NAME_COMPLETIONNAVIGATOR_FOLLOW",
+    "BINDING_NAME_COMPLETIONNAVIGATOR_PLAN",
+    "BINDING_NAME_COMPLETIONNAVIGATOR_HUD",
     "BINDING_NAME_COMPLETIONNAVIGATOR_NEXT",
     "BINDING_NAME_COMPLETIONNAVIGATOR_GO",
 
     -- Binding handlers, called by name from Bindings.xml.
     "CompletionNavigator_ToggleUI",
+    "CompletionNavigator_ToggleFollow",
+    "CompletionNavigator_Plan",
+    "CompletionNavigator_ToggleHud",
     "CompletionNavigator_NextObjective",
     "CompletionNavigator_Navigate",
 
@@ -32246,6 +36019,48 @@ C_TaxiMap = {
         return copy
     end,
 }
+
+-- BEING DEAD, AND BEING IN A GROUP.
+--
+-- Both change what a sensible next action is, and neither was modelled until
+-- 0.43.0 -- so the stub did not model them either, which is exactly how a
+-- whole class of behaviour stays invisible to a test suite.
+CN_TEST_DEAD       = false
+CN_TEST_GHOST      = false
+CN_TEST_GROUP_SIZE = 1
+CN_TEST_INSTANCE   = nil
+
+function UnitIsDeadOrGhost(unit)
+    return unit == "player" and CN_TEST_DEAD or false
+end
+
+function UnitIsGhost(unit)
+    return unit == "player" and CN_TEST_GHOST or false
+end
+
+function GetNumGroupMembers()
+    return CN_TEST_GROUP_SIZE
+end
+
+function IsInRaid()
+    return CN_TEST_INSTANCE == "raid"
+end
+
+function IsInInstance()
+    if not CN_TEST_INSTANCE then
+        return false, "none"
+    end
+
+    return true, CN_TEST_INSTANCE
+end
+
+function IsFlying()
+    return false
+end
+
+function IsFlyableArea()
+    return true
+end
 
 CN_TEST_ON_TAXI = false
 
@@ -34120,7 +37935,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 17, "every candidate provider must register, got "
+assert(firstState.providers == 18, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -35213,9 +39028,15 @@ local vaultProvider = CN.candidateProviders["Vault"]
 -- weekly reset in exactly the same way, and "nothing expiring" has to mean
 -- nothing expiring.
 local instanceProvider = CN.candidateProviders["Instances"]
+local opportunityProvider = CN.candidateProviders["Opportunities"]
 
-CN.candidateProviders["Vault"]     = nil
-CN.candidateProviders["Instances"] = nil
+-- EVERY provider that emits something with a deadline, not just the two that
+-- emit weekly ones. World quests expire too, and from 0.43.0 the urgency
+-- curve has a second, week-long ramp, so a world quest six hours out is no
+-- longer worth exactly zero. "Nothing expiring" has to mean nothing.
+CN.candidateProviders["Vault"]         = nil
+CN.candidateProviders["Instances"]     = nil
+CN.candidateProviders["Opportunities"] = nil
 CN.InvalidateCandidates()
 
 local top = CN.Recommend(1)[1]
@@ -35226,8 +39047,9 @@ print("  top with nothing expiring = " .. tostring(top.name) .. " ("
 assert(top.type == "TITLE" and top.id == 2,
     "with nothing expiring, a pinned goal must rank first, got " .. tostring(top.name))
 
-CN.candidateProviders["Vault"]     = vaultProvider
-CN.candidateProviders["Instances"] = instanceProvider
+CN.candidateProviders["Vault"]         = vaultProvider
+CN.candidateProviders["Instances"]     = instanceProvider
+CN.candidateProviders["Opportunities"] = opportunityProvider
 CN.InvalidateCandidates()
 
 -- Removing it must put things back.
@@ -36215,7 +40037,27 @@ print("\nUrgency:")
         "urgency must climb faster per second as the deadline nears: "
         .. string.format("late=%.6f early=%.6f", lateRate, earlyRate))
 
-    assert(CN.UrgencyBonus(1) <= 1, "urgency is bounded")
+-- BOUNDED, but the bound is not 1 any more: 0.43.0 added a second, week-long
+    -- ramp worth `urgencyLongShare` on top of the short one. Asserted against
+    -- the constants rather than against a number typed here, so tuning the
+    -- curve cannot silently break the guarantee the assertion is about.
+    local ceiling = 1 + CN.urgencyLongShare
+
+    assert(CN.UrgencyBonus(1) <= ceiling,
+        "urgency is bounded, got " .. CN.UrgencyBonus(1))
+
+    -- THE LONG RAMP MUST NOT DROWN THE SHORT ONE.
+    --
+    -- A world quest with ten minutes on it still has to beat a lockout with
+    -- four days, or the fix for weekly content has broken daily content.
+    assert(CN.UrgencyBonus(600) > CN.UrgencyBonus(4 * 86400),
+        "ten minutes must outrank four days")
+
+    -- And a week-out deadline must be worth more than no deadline at all,
+    -- which is the thing that was broken: every lockout sat at exactly zero
+    -- until its last two hours.
+    assert(CN.UrgencyBonus(3 * 86400) > 0,
+        "a deadline three days out must carry some weight")
 
     -- And it must actually move a score.
     local calm = CN.NewObjective({ id = 1, type = CN.objectiveTypes.QUEST,
@@ -38905,6 +42747,433 @@ print("\nHow long a chase will take:")
     durations[QUEST] = nil
 end)()
 
+
+print("\nSituation awareness:")
+
+;(function()
+    local group = CN:GetModule("Group")
+
+    assert(group, "the Group module must load")
+
+    ------------------------------------------------------------
+    -- BEING DEAD CHANGES THE ANSWER.
+    --
+    -- Recommending a battle pet to a corpse is the clearest possible signal
+    -- that an addon is not watching what the player is doing.
+    ------------------------------------------------------------
+    CN_TEST_DEAD = false
+
+    local objective = { type = CN.objectiveTypes.PET, id = 1,
+        completionValue = 10, travelCost = 0, reasons = {} }
+
+    local alive = CN.ScoreObjective(objective)
+
+    CN_TEST_DEAD = true
+
+    CN.InvalidateRanking()
+
+    local dead = { type = CN.objectiveTypes.PET, id = 1,
+        completionValue = 10, travelCost = 0, reasons = {} }
+
+    local deadScore = CN.ScoreObjective(dead)
+
+    assert(deadScore < alive,
+        "everything is worth less than getting up: "
+        .. string.format("%.2f dead vs %.2f alive", deadScore, alive))
+
+    assert(deadScore > 0,
+        "but not zero -- the list still answers 'what next', it just stops "
+        .. "pretending you can act on it this second")
+
+    local explainedDeath = false
+
+    for _, reason in ipairs(dead.reasons) do
+        if reason:find("dead") then explainedDeath = true end
+    end
+
+    assert(explainedDeath, "and the line must say why it moved")
+
+    local notice = group.Notice()
+
+    assert(notice and notice:find("dead"),
+        "and the recommendation must lead with it: " .. tostring(notice))
+
+    print("  a dead player is told to get up first")
+
+    ------------------------------------------------------------
+    -- IN AN INSTANCE WITH A GROUP, OUTSIDE WORK RANKS DOWN.
+    ------------------------------------------------------------
+    CN_TEST_DEAD = false
+    CN_TEST_INSTANCE = "party"
+    CN_TEST_GROUP_SIZE = 5
+
+    CN.InvalidateRanking()
+
+    assert(group.Situation() == "instanced", "the situation must be read")
+
+    local inside = { type = CN.objectiveTypes.PET, id = 1,
+        completionValue = 10, travelCost = 0, reasons = {} }
+
+    local insideScore = CN.ScoreObjective(inside)
+
+    assert(insideScore < alive, "a pet detour ranks below its solo value")
+
+    local quest = { type = CN.objectiveTypes.QUEST, id = 1,
+        completionValue = 10, travelCost = 0, reasons = {} }
+
+    local questScore = CN.ScoreObjective(quest)
+
+    assert(questScore > insideScore,
+        "but only the outside-work types are pushed down")
+
+    CN_TEST_INSTANCE = nil
+    CN_TEST_GROUP_SIZE = 1
+    CN.InvalidateRanking()
+
+    print("  outside work ranks down in an instance, and only outside work")
+end)()
+
+print("\nContributed chains:")
+
+;(function()
+    local contribute = CN:GetModule("Contribute")
+
+    assert(contribute, "the Contribute module must load")
+
+    ------------------------------------------------------------
+    -- A MALFORMED IMPORT IS REFUSED OUTRIGHT.
+    --
+    -- A half-parsed contribution is worse than a refused one: it silently
+    -- teaches the addon a chain nobody wrote.
+    ------------------------------------------------------------
+    local rejects = {
+        "",
+        "hello",
+        "CN2 100:99",
+        "CN1",
+        "CN1 100",
+        "CN1 100:",
+        "CN1 abc:99",
+    }
+
+    for _, bad in ipairs(rejects) do
+        local parsed, err = contribute.Parse(bad)
+
+        assert(parsed == nil,
+            "must refuse: '" .. bad .. "'")
+        assert(err, "and say why")
+    end
+
+    ------------------------------------------------------------
+    -- A GOOD ONE ROUND-TRIPS.
+    ------------------------------------------------------------
+    local parsed, err, entries = contribute.Parse("CN1 100:98,99 200:150")
+
+    assert(parsed, "a well-formed export must parse: " .. tostring(err))
+    assert(entries == 2, "two entries, got " .. tostring(entries))
+    assert(#parsed[100] == 2 and parsed[100][1] == 98,
+        "with their prerequisites intact")
+
+    local ok, importErr, imported = contribute.Import("CN1 100:98,99 200:150")
+
+    assert(ok, "and import: " .. tostring(importErr))
+    assert(imported == 2, "both of them")
+
+    -- AS OBSERVATIONS, NEVER AS CURATED FACT. A stranger's addon watching an
+    -- ordering is the weakest of the three sources the addon has.
+    local imported100 = CN.GetDependency(CN.ObjectiveKey("QUEST", 100))
+
+    assert(imported100 and imported100.observedRequires,
+        "an imported chain is published as an observation")
+    assert(imported100.requires == nil,
+        "and must never be able to present itself as curated data")
+
+    assert(contribute.Forget() == 2, "and it can all be thrown away")
+
+    print("  malformed imports refused, good ones land as observations")
+end)()
+
+print("\nOne grammar for uncertainty:")
+
+;(function()
+    ------------------------------------------------------------
+    -- An estimated number must be visibly different from a measured one.
+    -- Three hedging styles taught readers to ignore all three.
+    ------------------------------------------------------------
+    local measured  = CN.WithConfidence("14 min", CN.confidence.MEASURED)
+    local estimated = CN.WithConfidence("14 min", CN.confidence.ESTIMATED)
+    local unknown   = CN.WithConfidence("14 min", CN.confidence.UNKNOWN)
+
+    assert(measured == "14 min", "a measured number is printed plain")
+
+    assert(estimated ~= measured,
+        "an estimate must not look identical to a measurement")
+    assert(estimated:find("estimated"), "and must say the word")
+
+    assert(not unknown:find("14"),
+        "and an unknown must not print the number at all, got " .. unknown)
+
+    assert(CN.ConfidenceFor(true) == CN.confidence.MEASURED)
+    assert(CN.ConfidenceFor(false) == CN.confidence.ESTIMATED)
+
+    print("  measured, estimated and unknown are three visibly different things")
+end)()
+
+
+print("\nErrors are kept where the player can find them:")
+
+;(function()
+    local errors = CN:GetModule("Errors")
+
+    assert(errors, "the Errors module must load")
+
+    errors.Clear()
+
+    ------------------------------------------------------------
+    -- A CAUGHT ERROR THAT NOBODY RECORDS IS AN ERROR NOBODY KNOWS ABOUT.
+    ------------------------------------------------------------
+    local ok, message = errors.Guard("a failing thing", function()
+        error("something broke")
+    end)
+
+    assert(ok == false, "Guard returns what pcall returns")
+    assert(tostring(message):find("something broke"), "including the message")
+
+    assert(errors.Count() == 1, "and records it")
+
+    ------------------------------------------------------------
+    -- REPEATS ARE COUNTED, NOT LISTED.
+    --
+    -- A failure inside a ticker fires ten times a second. Twenty identical
+    -- lines is not twenty pieces of evidence, and it pushes out the one
+    -- different error that would have explained the whole thing.
+    ------------------------------------------------------------
+    -- Recorded directly rather than through Guard: error() prefixes the
+    -- message with its own file and line, so two calls from two lines produce
+    -- two genuinely different messages -- which is correct, and which the
+    -- first version of this assertion mistook for a deduplication failure.
+    for _ = 1, 50 do
+        errors.Record("a ticker", "the same failure every tick")
+    end
+
+    assert(errors.Count() == 2,
+        "fifty identical failures collapse to one entry, alongside the "
+        .. "earlier distinct one -- got " .. errors.Count())
+
+    local repeated
+
+    for _, entry in ipairs(errors.All()) do
+        if entry.context == "a ticker" then repeated = entry end
+    end
+
+    assert(repeated and repeated.count == 50,
+        "with a count, got " .. tostring(repeated and repeated.count))
+
+    ------------------------------------------------------------
+    -- AND THE BUFFER IS BOUNDED.
+    ------------------------------------------------------------
+    for index = 1, errors.capacity + 10 do
+        errors.Record("context " .. index, "distinct failure " .. index)
+    end
+
+    assert(errors.Count() == errors.capacity,
+        "the ring is capped at " .. errors.capacity
+        .. ", got " .. errors.Count())
+
+    local oldest = errors.All()[1]
+
+    assert(not oldest.message:find("something broke"),
+        "and the oldest entries are the ones dropped")
+
+    assert(errors.Clear() == errors.capacity, "clearing reports what it threw away")
+    assert(errors.Count() == 0, "and empties it")
+
+    -- A successful call must record nothing at all.
+    local fine = errors.Guard("fine", function() return 42 end)
+
+    assert(fine == true, "a successful guard succeeds")
+    assert(errors.Count() == 0, "and records nothing")
+
+    print("  caught, deduplicated, bounded and clearable")
+end)()
+
+print("\nThe things that make it legible:")
+
+;(function()
+    local hud = CN:GetModule("Hud")
+
+    assert(hud, "the Hud module must load")
+
+    ------------------------------------------------------------
+    -- NO INFORMATION CARRIED BY COLOUR ALONE.
+    ------------------------------------------------------------
+    assert(hud.BearingWord(0) == "ahead", "straight on")
+    assert(hud.BearingWord(math.pi) == "back", "and a reversal")
+    assert(hud.BearingWord(nil) == "?", "and an unknown bearing is not a claim")
+
+    local words = {}
+
+    for _, radians in ipairs({ 0, 0.8, 1.6, 3.0 }) do
+        words[hud.BearingWord(radians)] = true
+    end
+
+    local distinct = 0
+
+    for _ in pairs(words) do distinct = distinct + 1 end
+
+    assert(distinct == 4,
+        "four bearings must produce four different words, got " .. distinct)
+
+    ------------------------------------------------------------
+    -- THE SCALE IS BOUNDED, because a scale of 0.01 is an addon the player
+    -- can no longer read well enough to fix.
+    ------------------------------------------------------------
+    local hudSettings = CN.Settings()
+
+    hudSettings.uiScale = 50
+
+    assert(hud.Scale() == 1, "an absurd scale falls back to 1")
+
+    hudSettings.uiScale = 1.25
+
+    assert(hud.Scale() == 1.25, "a sensible one is kept")
+
+    hudSettings.uiScale = nil
+
+    ------------------------------------------------------------
+    -- OFF BY DEFAULT. Everything that puts pixels on screen uninvited is.
+    ------------------------------------------------------------
+    assert(hud.IsEnabled() == false, "the heads-up line is off by default")
+    assert(hud.IsColourblind() == false, "and so is the word mode")
+
+    print("  four distinct bearing words, a bounded scale, both off by default")
+end)()
+
+print("\nDecisions that could go stale:")
+
+;(function()
+    local orders = CN:GetModule("Orders")
+
+    assert(orders, "the Orders module must load")
+
+    ------------------------------------------------------------
+    -- THE DELVES DECISION HAS A TRIGGER, NOT A DATE.
+    --
+    -- "We looked and there was nothing" decays into "nobody ever checked".
+    -- The probe names the exact API that would change the answer.
+    ------------------------------------------------------------
+    local delvesReadable, detail = orders.DelveProgressAvailable()
+
+    assert(delvesReadable == false, "no progress API in this client")
+    assert(detail and detail:find("C_DelvesUI"),
+        "and the reason names the API: " .. tostring(detail))
+
+    -- Now pretend a patch shipped one.
+    C_DelvesUI = { GetDelvesProgress = function() return {} end }
+
+    local nowAvailable, nowDetail = orders.DelveProgressAvailable()
+
+    assert(nowAvailable == true,
+        "a client that exposes progress must be noticed")
+    assert(nowDetail:find("should be tracking"),
+        "and must say what to do about it")
+
+    C_DelvesUI = nil
+
+    print("  the Delves decision re-checks itself against the client")
+end)()
+
+print("\nThe first sixty seconds:")
+
+;(function()
+    local welcome = CN:GetModule("Welcome")
+
+    assert(welcome, "the Welcome module must load")
+
+    local account = CN.Account()
+
+    account.welcomed = nil
+
+    assert(welcome.HasSeen() == false, "a fresh install has not been welcomed")
+
+    ------------------------------------------------------------
+    -- ONCE. EVER.
+    --
+    -- An addon that re-introduces itself is an addon that has not noticed
+    -- you already met.
+    ------------------------------------------------------------
+    welcome.Choose("collecting")
+
+    assert(welcome.HasSeen() == true, "choosing marks it seen")
+
+    -- And dismissing must mark it just as firmly as choosing, or the player
+    -- who said "not now" is asked again tomorrow.
+    account.welcomed = nil
+
+    welcome.MarkSeen()
+
+    assert(welcome.HasSeen() == true, "so does dismissing")
+
+    print("  asked once, whichever way it is answered")
+end)()
+
+
+print("\nEvery command runs without throwing:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CHEAPEST TEST IN THE SUITE, AND ONE OF THE MOST VALUABLE.
+    --
+    -- A command is the only part of this addon a player touches directly, and
+    -- a command that errors on an unusual state -- no data, nothing scanned,
+    -- a client that will not answer -- is the failure they actually see. Half
+    -- the commands in this release were written this week and none of them
+    -- had ever been executed by the suite.
+    --
+    -- Not asserting on output: what each command SAYS is tested elsewhere, by
+    -- tests that know what it means. This asserts only that it survives being
+    -- run against a client that is refusing to be helpful, which is the state
+    -- every one of these hits on a fresh install.
+    ------------------------------------------------------------
+    local commands = {
+        "travel", "situation", "orders", "waiting", "waiting nowhere",
+        "contribute", "contribute forget", "contribute import rubbish",
+        "hud", "hud off", "scale", "scale 1.5", "scale 99",
+        "colourblind", "colourblind off", "cues", "cues off",
+        "errors", "errors clear", "learned", "locale", "locale missing",
+        "instances", "drops", "drops Nothing At All",
+        "selftest", "capture", "capture clear", "dbsize", "welcome",
+    }
+
+    local failures = {}
+
+    for _, command in ipairs(commands) do
+        local ok, err = pcall(CN.HandleSlashCommand, command)
+
+        if not ok then
+            table.insert(failures, command .. " -> " .. tostring(err))
+        end
+    end
+
+    for _, failure in ipairs(failures) do
+        print("  THREW: " .. failure)
+    end
+
+    assert(#failures == 0,
+        #failures .. " command(s) threw against a bare client")
+
+    print("  " .. #commands .. " command invocations, none of them threw")
+
+    -- And the scale command must not have left a silly value behind: "scale
+    -- 99" was in that list deliberately.
+    local hud = CN:GetModule("Hud")
+
+    assert(hud.Scale() >= 0.7 and hud.Scale() <= 2.0,
+        "a refused scale must not be stored, got " .. hud.Scale())
+
+    print("  and a refused setting was not stored")
+end)()
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -38916,6 +43185,18 @@ $Embedded['bench.lua'] = @'
 -- Run:  lua5.4 bench.lua build/CompletionNavigator
 
 local ROOT = arg[1] or "build/CompletionNavigator"
+
+-- Read BEFORE `arg` is rewritten for the harness below, which replaces the
+-- whole table and would otherwise take the flag with it. The budget block at
+-- the end of this file therefore saw no arguments and silently did nothing --
+-- a check that cannot fail because it never runs.
+local ENFORCE_BUDGETS = false
+
+for _, argument in ipairs(arg) do
+    if argument == "--budget" then
+        ENFORCE_BUDGETS = true
+    end
+end
 
 -- Silence the harness's own output while it loads and self-tests.
 local realPrint = print
@@ -39001,6 +43282,13 @@ end
 -- TIMING
 ------------------------------------------------------------
 
+-- MEASUREMENTS, KEPT.
+--
+-- The benchmark printed numbers and threw them away, so a regression was only
+-- caught by somebody reading the output and remembering what it used to say.
+-- Nobody remembers. Recording them means CI can fail on one.
+CN_BENCH_RESULTS = {}
+
 local function bench(label, iterations, fn)
     -- Warm up, so the first-call cost of building any lazy index is not
     -- charged to the measurement.
@@ -39010,10 +43298,14 @@ local function bench(label, iterations, fn)
     for _ = 1, iterations do fn() end
     local elapsed = (os.clock() - started) * 1000
 
-    print(string.format("  %-38s %8.3f ms/call  (%d iterations)",
-        label, elapsed / iterations, iterations))
+    local perCall = elapsed / iterations
 
-    return elapsed / iterations
+    print(string.format("  %-38s %8.3f ms/call  (%d iterations)",
+        label, perCall, iterations))
+
+    CN_BENCH_RESULTS[label] = perCall
+
+    return perCall
 end
 
 print("\nData scale:")
@@ -39215,6 +43507,62 @@ do
             tooltips.ItemLines(123457)
         end)
     end
+end
+
+------------------------------------------------------------
+-- BUDGETS
+------------------------------------------------------------
+
+-- WHY THESE ARE ASSERTIONS AND NOT A REPORT.
+--
+-- Two performance regressions have shipped in this project's history, and
+-- both were visible in this file's output at the time. Printing a number that
+-- somebody has to compare against a number they remember is not a check; it
+-- is a document nobody reads.
+--
+-- The figures are ceilings with real headroom -- roughly three times the
+-- measured cost -- because a budget that fails on noise gets disabled within
+-- a fortnight, and a disabled budget catches nothing at all.
+--
+-- Run with: lua5.4 bench.lua <tree> --budget
+local BUDGETS = {
+    ["CollectCandidates(force)"]  = 20.0,
+    ["CollectCandidates()"]       = 0.05,
+    ["Recommend(1)"]              = 0.10,
+    ["Recommend(25)"]             = 0.40,
+    ["ItemLines on an ordinary item"] = 0.05,
+}
+
+if ENFORCE_BUDGETS then
+    print("\nBudgets:")
+
+    local failed = 0
+
+    for label, ceiling in pairs(BUDGETS) do
+        local measured = CN_BENCH_RESULTS[label]
+
+        if not measured then
+            print(string.format("  MISSING  %-38s (never measured)", label))
+
+            failed = failed + 1
+        elseif measured > ceiling then
+            print(string.format("  OVER     %-38s %.3f ms > %.3f ms",
+                label, measured, ceiling))
+
+            failed = failed + 1
+        else
+            print(string.format("  ok       %-38s %.3f ms of %.3f ms",
+                label, measured, ceiling))
+        end
+    end
+
+    if failed > 0 then
+        print("\n" .. failed .. " budget(s) exceeded.")
+
+        os.exit(1)
+    end
+
+    print("\nEvery measured path is inside its budget.")
 end
 '@
 
@@ -39685,7 +44033,7 @@ echo "  coverage: harness exercises the addon"
 if command -v luacov >/dev/null 2>&1; then
   # Run against the scaffolded tree, which is what actually ships.
   # init writes files without the execute bit; invoke through the shell.
-  (cd "$WORK" && bash coverage.sh . 80 > coverage.log 2>&1) || {
+  (cd "$WORK" && bash coverage.sh . 82 > coverage.log 2>&1) || {
     echo "FAIL: coverage below floor"; tail -15 "$WORK/coverage.log"; exit 1; }
   echo "    $(grep '^Total:' "$WORK/coverage.log")"
 else
@@ -39803,6 +44151,10 @@ blocking_allowed = {
     "Install LuaRocks", "Install Lua tooling",
     "Syntax check every Lua file", "Verify the .toc lists every Lua file",
     "Lint", "Run the offline harness",
+    # Budgets block, and should: a performance regression is a defect, two
+    # have shipped in this project, and both were visible in output nobody
+    # was comparing against anything.
+    "Performance budgets",
     "Verify the CurseForge token is available", "Package and upload",
 }
 
@@ -42370,6 +46722,40 @@ function Invoke-CNCheck {
                 }
             }
 
+            # THE OTHER DIRECTION, WHICH IS THE ONE THAT BITES.
+            #
+            # The check above catches a locale file translating a key that no
+            # longer exists. The failure that actually happens is the reverse:
+            # somebody edits the English wording of a string, and because the
+            # key IS the English string, every translation of it is silently
+            # orphaned -- the addon carries on showing English to a German
+            # player and nothing anywhere says so.
+            #
+            # A warning rather than a failure: a key with no translations yet
+            # is the normal state of a new string, not a mistake.
+            $translated = @{}
+
+            foreach ($localeFile in Get-ChildItem -Path $localeDir -Filter '*.lua') {
+                if ($localeFile.Name -eq 'enUS.lua') { continue }
+
+                $body = Get-Content -Raw -LiteralPath $localeFile.FullName
+
+                foreach ($match in [regex]::Matches($body, '\["((?:[^"\\]|\\.)*)"\]\s*=')) {
+                    $translated[$match.Groups[1].Value] = $true
+                }
+            }
+
+            $untranslated = 0
+
+            foreach ($key in $known.Keys) {
+                if (-not $translated.ContainsKey($key)) { $untranslated++ }
+            }
+
+            if ($untranslated -gt 0) {
+                Write-Host "  note  $untranslated of $($known.Count) strings have no translation in any locale" -ForegroundColor DarkYellow
+                Write-Host "        (new strings, or English wording that changed and orphaned its translations)" -ForegroundColor DarkGray
+            }
+
             if ($orphans -eq 0) {
                 Write-Host "  ok    every translation matches one of $($known.Count) live strings" -ForegroundColor DarkGray
             }
@@ -42886,6 +47272,62 @@ function Invoke-CNFixtures {
     Write-Host '  The harness picks it up automatically the next time it runs.' -ForegroundColor DarkGray
 }
 
+function Invoke-CNInterface {
+    # WHAT TO DO WHEN THE GAME PATCHES.
+    #
+    # Every expansion and most major patches bump the interface number, and an
+    # addon whose .toc is behind is shown as out of date -- which players read
+    # as broken. The bump itself is trivial; remembering the four things that
+    # go with it is not, and "I will remember" has already failed once in this
+    # project's history.
+    $toc = Read-CNFile 'CompletionNavigator.toc'
+
+    $current = if ($toc -match '(?m)^##\s*Interface:\s*(\d+)') { $Matches[1] } else { '?' }
+
+    $new = if ($Target) { $Target } else { $Value }
+
+    if (-not $new) {
+        Write-Host "Interface: $current" -ForegroundColor White
+        Write-Host ''
+        Write-Host '  Set a new one with:  .\cn.ps1 interface 120200' -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host '  The number is (major * 10000) + (minor * 100) + patch:' -ForegroundColor DarkGray
+        Write-Host '  11.0.2 is 110002, 12.1.0 is 120100.' -ForegroundColor DarkGray
+        return
+    }
+
+    if ($new -notmatch '^\d{5,6}$') {
+        Write-Host 'An interface version looks like 120100.' -ForegroundColor Yellow
+        return
+    }
+
+    Assert-CNWritable
+
+    $toc = [regex]::Replace($toc, '(?m)^##\s*Interface:\s*\d+', "## Interface: $new")
+    Write-CNFile 'CompletionNavigator.toc' $toc
+
+    Write-Host "Interface set to $new (was $current)." -ForegroundColor Green
+    Write-Host ''
+    Write-Host 'The rest of the patch checklist, in order:' -ForegroundColor White
+    Write-Host ''
+    Write-Host '  1. Log in and run  /cn selftest' -ForegroundColor Gray
+    Write-Host '     Fifteen checks against the live client. A renamed or removed' -ForegroundColor DarkGray
+    Write-Host '     API shows up here as a FAIL rather than as a bug report.' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  2. Run  /cn capture  then  .\cn.ps1 fixtures' -ForegroundColor Gray
+    Write-Host '     Re-records what the client actually returns. A patch that' -ForegroundColor DarkGray
+    Write-Host '     changes the shape of a return value is caught by the suite' -ForegroundColor DarkGray
+    Write-Host '     instead of by somebody playing.' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  3. Check  /cn errors  after half an hour of play' -ForegroundColor Gray
+    Write-Host '     Failures inside the addon are caught so they cannot break' -ForegroundColor DarkGray
+    Write-Host '     your session, which is also why they are invisible.' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  4. Run  .\cn.ps1 check  and  bash mutate.sh' -ForegroundColor Gray
+    Write-Host ''
+    Write-Host '  5. Only then bump the version and release.' -ForegroundColor Gray
+}
+
 function Invoke-CNRelease {
     Assert-CNWritable
 
@@ -43364,6 +47806,7 @@ function Show-CNHelp {
     Write-Host '  doctor                         Report the whole release chain state.'
     Write-Host '  harvest [path]                 Fold harvested quests from SavedVariables into Data.'
     Write-Host '  fixtures [path]                Lift a /cn capture recording out of SavedVariables for the tests.'
+    Write-Host '  interface [number]             Show or set the game interface version, with the patch checklist.'
     Write-Host '  relocate <path>                Copy the source out of Program Files.'
     Write-Host '  icon [path.png]                Convert a PNG into Media\Logo.tga for in-game use.'
     Write-Host '  gitinit                         Initialize git with a sane .gitignore.'
@@ -43401,6 +47844,7 @@ switch ($Command.ToLower()) {
     'sv'        { Invoke-CNSavedVars }
     'harvest'   { Invoke-CNHarvest }
     'fixtures'  { Invoke-CNFixtures }
+    'interface' { Invoke-CNInterface }
     'release'   { Invoke-CNRelease }
     'ci'        { Invoke-CNCI }
     'actions'   { Invoke-CNCI }

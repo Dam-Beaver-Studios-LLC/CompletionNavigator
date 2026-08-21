@@ -56,8 +56,119 @@ end
 -- ACCESS
 ------------------------------------------------------------
 
+-- CONTRIBUTED CHAINS.
+--
+-- Held apart from the curated table so that the difference between "checked"
+-- and "widely observed" survives being written to disk, and so /cn why can
+-- say which one it is quoting.
+Static.community = Static.community or {}
+
+function Static.RegisterCommunity(records)
+    if type(records) ~= "table" then
+        return 0
+    end
+
+    local added = 0
+
+    for questID, record in pairs(records) do
+        if type(record) == "table" and type(record.requires) == "table" then
+            Static.community[questID] = record
+
+            added = added + 1
+        end
+    end
+
+    return added
+end
+
+function Static.GetCommunity(questID)
+    return Static.community[questID]
+end
+
+function Static.CommunityCount()
+    local count = 0
+
+    for _ in pairs(Static.community) do
+        count = count + 1
+    end
+
+    return count
+end
+
 function Static.GetQuest(questID)
     return Static.quests[questID]
+end
+
+-- ELIGIBILITY, from curated data.
+--
+-- The client only draws quest pins the character qualifies for, so gating is
+-- normally handled by simply not seeing it. That is fine while the player is
+-- standing there and useless the moment they ask "why can nobody in my
+-- Warband do this?" -- which is exactly what /cn why and /cn alts are for.
+--
+-- Returns eligible, reason. A record with no gating fields is eligible, and
+-- says so with a nil reason rather than an empty claim.
+function Static.QuestEligibility(questID, character)
+    local record = Static.quests[questID]
+
+    if not record then
+        return true, nil
+    end
+
+    character = character or CN.character or {}
+
+    if record.faction and character.faction
+        and record.faction ~= character.faction then
+
+        return false, record.faction .. " only"
+    end
+
+    if record.minLevel and character.level
+        and character.level < record.minLevel then
+
+        return false, "level " .. record.minLevel .. " required"
+    end
+
+    local function allowed(list, value, label)
+        if type(list) ~= "table" or #list == 0 or not value then
+            return true
+        end
+
+        for _, entry in ipairs(list) do
+            if entry == value then
+                return true
+            end
+        end
+
+        return false, label .. " only: " .. table.concat(list, ", ")
+    end
+
+    local okClass, classReason = allowed(record.classes, character.class, "class")
+
+    if not okClass then
+        return false, classReason
+    end
+
+    local okRace, raceReason = allowed(record.races, character.race, "race")
+
+    if not okRace then
+        return false, raceReason
+    end
+
+    return true, nil
+end
+
+-- Where a quest is HANDED IN, which is not where it is picked up and is not
+-- what the client's moving "next waypoint" reports once you are part-way
+-- through it.
+function Static.GetQuestTurnIn(questID)
+    local record = Static.quests[questID]
+
+    if not record or not record.turnInMapID then
+        return nil
+    end
+
+    return record.turnInMapID, record.turnInX, record.turnInY
 end
 
 function Static.GetQuestName(questID)

@@ -47,24 +47,12 @@ local Blizzard = CN.Blizzard
 
 SelfTest.results = { PASS = "PASS", FAIL = "FAIL", SKIP = "SKIP" }
 
-CN.selfTests = CN.selfTests or {}
-
--- definition = {
---     name  = "short label",
---     area  = "grouping",
---     run   = function() return status, detail end,
--- }
-function CN.RegisterSelfTest(definition)
-    if type(definition) ~= "table" or type(definition.run) ~= "function" then
-        return false
-    end
-
-    definition.order = definition.order or (#CN.selfTests + 1)
-
-    table.insert(CN.selfTests, definition)
-
-    return true
-end
+-- The registry itself is in Core.lua, so that a module registering a check
+-- does not have to load after this file:
+--
+--     CN.RegisterSelfTest{ name = ..., area = ..., run = function() end }
+--
+-- definition.run returns status, detail.
 
 function SelfTest.Run()
     local rows = { passed = 0, failed = 0, skipped = 0, checks = {} }

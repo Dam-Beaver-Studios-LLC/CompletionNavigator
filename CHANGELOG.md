@@ -7,6 +7,121 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.43.0]
+
+The largest release this addon has had. Fifty-three items, and the short
+version is: it knows how you actually travel, it knows what situation you are
+in, it introduces itself, and its tests now check themselves.
+
+### Fixed
+
+- **Flying yourself was filed under "mounted".** The speed model has had two
+  buckets since 0.31.0 -- mounted and on foot -- and skyriding landed in the
+  first one beside a ground mount, dragging that median upward by however much
+  you fly. That is the same mistake the file's own comment warns against, one
+  level down. Three buckets now, and the third one changes the answer to
+  almost every travel question.
+- **The addon never noticed you were dead.** Recommending a battle pet to a
+  corpse is the clearest possible signal that a tool is not watching. It now
+  says so first, and ranks everything down until you are up.
+- **A "quest three zones away" was structurally unanswerable.** The client only
+  lists quest pins for the map you are looking at, which the addon recorded as
+  a scope limit and left there. It now remembers every quest start it has ever
+  seen, so `/cn waiting` can tell you what you walked past in Azj-Kahet last
+  week.
+- **World quests were still costed with a straight line and a flat penalty.**
+  0.42.0 fixed that for ordinary quests and missed the provider where it
+  matters most -- world quests are scattered across a continent and they
+  expire.
+- **Weekly deadlines were worth exactly nothing until their last two hours.**
+  The urgency curve was built when everything with a deadline was a world
+  quest. A raid lockout you are six bosses into, with a day left, could not
+  outrank anything. There are two ramps now: a week-long one that breaks ties
+  between things that are all days away, and the original steep one on top,
+  which still dominates -- ten minutes beats four days, as it should.
+- **Account-wide currencies were recommended on every character.** The client
+  flags them; the addon ignored the flag. That is the exact mistake the
+  Warband work exists to prevent, in the one store nobody had told about it.
+- **The arrow stepped rather than swept.** It recomputes ten times a second and
+  snapped to each new bearing. It eases now -- except through a reversal,
+  which still snaps, because an arrow easing through 170 degrees is pointing
+  at nothing at all for a quarter of a second.
+
+### Added
+
+- **Flying yourself, hearthstones and teleports.** A journey is now costed
+  against three options -- run, take a flight path, or fly it yourself -- and
+  the third usually wins in current content. Cross-continent still refuses to
+  invent a duration, but it now lists what you actually have: every
+  hearthstone and teleport you know, with the cooldown the client reports.
+- **`/cn waiting`** -- quests you have seen and never picked up, by zone.
+- **`/cn situation`** -- what the addon thinks you are in the middle of, and
+  what that is changing about the ranking. In an instance with four other
+  people, outside work ranks down.
+- **`/cn orders`** -- crafting orders you placed, and anything finished and
+  waiting. It does not open or scrape the order frame.
+- **`/cn contribute`** -- shares the quest chains your play has taught the
+  addon, as one line of quest IDs you can read before you send it. No server,
+  no account, no personal data: the addon cannot upload anything, and this is
+  a format you paste into an issue yourself. Imports land as observations,
+  never as curated fact.
+- **A first-run question.** One screen, four buttons, asked once, setting the
+  focus mode that almost nobody discovered because `/cn mode collecting` is a
+  sentence you have to already know to type.
+- **Visible route progress.** Follow mode now says "stop 3 of 7 cleared" as you
+  walk it, and marks the moment a route is actually finished. Sound and a
+  flash are available and off by default.
+- **`/cn hud`** -- a small always-on line showing the next thing. Off by
+  default, like everything here that puts pixels on screen uninvited.
+- **`/cn scale` and `/cn colourblind`.** The arrow's entire language was
+  colour -- blue on course, amber drifting, red walking away -- which is
+  precisely the design that fails a colourblind player. In that mode it
+  carries the word as well.
+- **A filter box in the window**, and the addon now appears in the game's own
+  options list rather than only inside a window you have to know how to open.
+- **Three more keybindings**: follow, plan, and the heads-up line.
+- **`/cn errors`** -- failures inside the addon are caught so they cannot break
+  your session, which is also why they were invisible. They are kept now, and
+  a bug report can carry the text instead of a description of the text.
+- **`/cn dbsize` reports memory as well as disk.** One of the two was being
+  measured and the other assumed.
+- **Curated gating data**: class, race, faction and level, plus turn-in
+  locations, so `/cn why` can say "that one is for a Druid" rather than
+  leaving the player to work out why they cannot see it.
+- **Fifteen more translated strings**, across ten languages.
+- **A standing Delves probe.** The decision not to build Delve tracking has
+  been made twice, for a reason -- `C_DelvesUI` exposes interface plumbing and
+  not progress -- and a decision nobody re-checks becomes a thing everyone
+  forgot. The self-test now names the exact API that would change it.
+
+### Tooling
+
+- **`mutate.sh`** -- breaks the code on purpose, ten ways, and fails if the
+  suite does not notice. It found three holes on the day it was written, all
+  three now covered. This was being done by hand, from memory, which means
+  inconsistently.
+- **Performance budgets in CI.** Two regressions have shipped in this project
+  and both were visible in the benchmark output at the time. Printing a number
+  somebody has to remember is not a check.
+- **Release notes are cut from the changelog** for the version being built,
+  rather than the whole file since 0.1.0.
+- **`cn.ps1 interface`** -- sets the game interface version and prints the rest
+  of the patch checklist, which had been living in my head.
+- **Issue templates** that ask for `/cn selftest` and `/cn errors` output.
+- **The translation lint now checks both directions.** It caught orphaned
+  translations; the failure that actually happens is the reverse -- the key IS
+  the English string, so editing the English silently orphans every
+  translation of it.
+- **Coverage floor raised to 83%**, and the Wago publishing field prepared.
+
+### Notes
+
+- A surviving mutation is a hole in the test suite, not a mutation to delete.
+- The filter box keeps its state in a local rather than on the frame. Reading
+  an unset field off a frame does not reliably return nil -- a metatable can
+  answer -- and the first version relied on it. The harness caught that; a
+  player running a UI replacement might have found it instead.
+
 ## [0.42.0]
 
 Travel that knows about flight paths, an honest answer to "how long will this

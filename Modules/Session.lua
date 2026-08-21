@@ -64,18 +64,24 @@ function Session.Now()
     return os.clock()
 end
 
--- Speed is kept in two buckets, not one.
+-- Speed is kept in three buckets, not one.
 --
 -- A single median across mounted and unmounted travel is a number that is
 -- wrong in both states: too slow to plan a mounted route, too fast to plan a
--- walk around a town. Two medians are two honest answers.
+-- walk around a town.
+--
+-- 0.43.0 added the third, and it was the same mistake one level down: flying
+-- yourself was landing in `mounted` beside a ground mount, so the median was
+-- dragged upward by however much the player skyrides and every ground
+-- estimate inherited it. Three medians are three honest answers.
 local speed = {
     lastMapID  = nil,
     lastX      = nil,
     lastY      = nil,
     lastAt     = nil,
     lastMounted = nil,
-    samples    = { mounted = {}, onFoot = {} },
+    lastFlying = nil,
+    samples    = { mounted = {}, onFoot = {}, flying = {} },
 }
 
 -- SAMPLES SURVIVE A RELOAD.
@@ -99,6 +105,7 @@ local function Persisted()
 
     character.speedSamples.mounted = character.speedSamples.mounted or {}
     character.speedSamples.onFoot  = character.speedSamples.onFoot or {}
+    character.speedSamples.flying  = character.speedSamples.flying or {}
 
     return character.speedSamples
 end
@@ -114,7 +121,7 @@ function Session.LoadSamples()
 
     local loaded = 0
 
-    for _, bucket in ipairs({ "mounted", "onFoot" }) do
+    for _, bucket in ipairs({ "mounted", "onFoot", "flying" }) do
         speed.samples[bucket] = {}
 
         for _, value in ipairs(stored[bucket] or {}) do
@@ -170,6 +177,33 @@ end
 
 Session.IsMounted = Mounted
 
+-- Flying yourself, which is not the same as being on a flight path and not
+-- the same as a ground mount. On a taxi the client also reports the player as
+-- flying, and that movement belongs to Travel's flight-speed measurement
+-- rather than to this one -- so it is excluded here.
+local function Flying()
+    if UnitOnTaxi and UnitOnTaxi("player") then
+        return false
+    end
+
+    return (IsFlying and IsFlying()) and true or false
+end
+
+Session.IsFlying = Flying
+
+-- Which bucket the player's current movement belongs in.
+function Session.Bucket()
+    if Flying() then
+        return "flying"
+    end
+
+    if Mounted() then
+        return "mounted"
+    end
+
+    return "onFoot"
+end
+
 -- Called on a slow clock. Measures the distance covered since the last look.
 --
 -- Deliberately discards anything implausible: a teleport, a flight path, a
@@ -180,6 +214,7 @@ function Session.Observe()
 
     local now     = Session.Now()
     local mounted = Mounted()
+    local flying  = Flying()
 
     if not mapID or not x or not y then
         return nil
@@ -188,16 +223,23 @@ function Session.Observe()
     local previousMap, previousX, previousY, previousAt, previousMounted =
         speed.lastMapID, speed.lastX, speed.lastY, speed.lastAt, speed.lastMounted
 
+    -- Read BEFORE it is overwritten. The first version of the flying check
+    -- compared the new value against itself, which is always equal, so taking
+    -- off mid-interval produced a sample that was half ground speed and half
+    -- flight speed and was filed under whichever the player ended in.
+    local previousFlying = speed.lastFlying
+
     speed.lastMapID, speed.lastX, speed.lastY = mapID, x, y
     speed.lastAt, speed.lastMounted = now, mounted
+    speed.lastFlying = flying
 
     if previousMap ~= mapID or not previousAt then
         return nil
     end
 
     -- Mounting halfway through an interval makes the sample a blend of both
-    -- speeds and belongs to neither bucket.
-    if previousMounted ~= mounted then
+    -- speeds and belongs to neither bucket. The same is true of taking off.
+    if previousMounted ~= mounted or previousFlying ~= flying then
         return nil
     end
 
@@ -227,7 +269,8 @@ function Session.Observe()
         return nil
     end
 
-    local bucket = mounted and speed.samples.mounted or speed.samples.onFoot
+    local bucket = speed.samples[flying and "flying"
+        or (mounted and "mounted" or "onFoot")]
 
     table.insert(bucket, observed)
 
@@ -276,19 +319,42 @@ Session.Median = Median
 -- other bucket rather than to a constant: measured-but-wrong-state beats
 -- unmeasured.
 function Session.Speed(mounted)
+    local bucket
+
     if mounted == nil then
-        mounted = Mounted()
+        bucket = Session.Bucket()
+    elseif mounted == true then
+        bucket = "mounted"
+    elseif mounted == false then
+        bucket = "onFoot"
+    else
+        -- A caller that names a bucket outright: Travel asks for "flying"
+        -- when it is costing a journey the player would fly themselves,
+        -- which has nothing to do with how they happen to be moving now.
+        bucket = mounted
     end
 
-    local preferred = mounted and speed.samples.mounted or speed.samples.onFoot
-    local other     = mounted and speed.samples.onFoot or speed.samples.mounted
+    local preferred = speed.samples[bucket] or {}
 
     if #preferred >= Session.minSamples then
         return Median(preferred), true
     end
 
-    if #other >= Session.minSamples then
-        return Median(other), false
+    -- Fall back through the other buckets rather than to a constant:
+    -- measured-but-wrong-state beats unmeasured. Ordered nearest-first, so a
+    -- missing flying median falls to mounted before it falls to walking.
+    local fallbacks = {
+        flying  = { "mounted", "onFoot" },
+        mounted = { "flying", "onFoot" },
+        onFoot  = { "mounted", "flying" },
+    }
+
+    for _, name in ipairs(fallbacks[bucket] or {}) do
+        local other = speed.samples[name] or {}
+
+        if #other >= Session.minSamples then
+            return Median(other), false
+        end
     end
 
     return Session.defaultSpeed, false
@@ -297,15 +363,25 @@ end
 function Session.SpeedSampleCount(mounted)
     if mounted == nil then
         return #speed.samples.mounted + #speed.samples.onFoot
+            + #speed.samples.flying
     end
 
-    return mounted and #speed.samples.mounted or #speed.samples.onFoot
+    if mounted == true then
+        return #speed.samples.mounted
+    end
+
+    if mounted == false then
+        return #speed.samples.onFoot
+    end
+
+    return #(speed.samples[mounted] or {})
 end
 
 function Session.SpeedBuckets()
     return {
         mounted = Median(speed.samples.mounted),
         onFoot  = Median(speed.samples.onFoot),
+        flying  = Median(speed.samples.flying),
     }
 end
 
@@ -552,8 +628,94 @@ end
 -- Takes from the FRONT rather than choosing the best-fitting subset. The
 -- route is already ordered to minimise walking; cherry-picking stops out of
 -- it produces a plan that fits the clock and makes you cross the zone twice.
+-- HOW LONG YOU ACTUALLY PLAY.
+--
+-- `/cn plan` has always needed a number, and its example has always been
+-- thirty minutes -- a figure chosen because it sounds reasonable, not because
+-- anybody plays in thirty-minute units. The addon watches how long sessions
+-- run anyway; asking it is cheaper than asking the player.
+--
+-- Stored per character, capped, and used only as the DEFAULT: an explicit
+-- number always wins, because "I have twenty minutes" is a fact about tonight
+-- that no amount of history overrides.
+Session.lengthSampleCap = 20
+Session.minLengthSamples = 3
+
+local sessionStartedAt = nil
+
+local function Lengths()
+    local character = CN.character
+
+    if not character then
+        return nil
+    end
+
+    character.sessionLengths = character.sessionLengths or {}
+
+    return character.sessionLengths
+end
+
+Session.Lengths = Lengths
+
+function Session.BeginSession()
+    sessionStartedAt = Session.Now()
+end
+
+-- Called at logout and on a reload. A reload is not the end of a session, but
+-- there is no way to tell one from the other at the moment it happens -- so
+-- very short sessions are discarded rather than counted, which handles the
+-- reload case without needing to detect it.
+Session.minCountableMinutes = 8
+
+function Session.EndSession()
+    local lengths = Lengths()
+
+    if not lengths or not sessionStartedAt then
+        return false
+    end
+
+    local minutes = (Session.Now() - sessionStartedAt) / 60
+
+    sessionStartedAt = nil
+
+    if minutes < Session.minCountableMinutes or minutes > 720 then
+        return false
+    end
+
+    table.insert(lengths, math.floor(minutes + 0.5))
+
+    while #lengths > Session.lengthSampleCap do
+        table.remove(lengths, 1)
+    end
+
+    return true
+end
+
+-- Returns minutes and whether it was measured.
+function Session.TypicalSessionMinutes()
+    local lengths = Lengths()
+
+    if not lengths or #lengths < Session.minLengthSamples then
+        return 30, false
+    end
+
+    return math.floor(Median(lengths) + 0.5), true
+end
+
+CN:OnLogin(function()
+    Session.BeginSession()
+end)
+
+CN:RegisterEvent("PLAYER_LOGOUT", function()
+    Session.EndSession()
+end)
+
 function Session.Plan(minutes)
-    local budget = (tonumber(minutes) or 30) * 60
+    local requested = tonumber(minutes)
+
+    -- No number given: use however long this character usually plays, rather
+    -- than a round thirty that was only ever a placeholder.
+    local budget = (requested or Session.TypicalSessionMinutes()) * 60
 
     local mapID, x, y = CN.GetPlayerPosition()
 
@@ -683,8 +845,18 @@ CN:RegisterCommand{
         local minutes = tonumber(CN.Trim(args or ""))
 
         if not minutes or minutes <= 0 then
-            Print("Usage: |cffffff00/cn plan 30|r")
-            return
+            -- No number is no longer a usage error. The addon has watched how
+            -- long this character plays; asking it beats asking the player,
+            -- and a player who wanted a specific number can still say one.
+            local typical, measured = Session.TypicalSessionMinutes()
+
+            minutes = typical
+
+            Print("Planning " .. minutes .. " minutes -- "
+                .. (measured
+                    and ("|cff999999your usual session on this character|r")
+                    or ("|cff999999a default; play a few sessions and this "
+                        .. "becomes your own figure|r")))
         end
 
         local plan = Session.Plan(minutes)

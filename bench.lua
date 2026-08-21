@@ -5,6 +5,18 @@
 
 local ROOT = arg[1] or "build/CompletionNavigator"
 
+-- Read BEFORE `arg` is rewritten for the harness below, which replaces the
+-- whole table and would otherwise take the flag with it. The budget block at
+-- the end of this file therefore saw no arguments and silently did nothing --
+-- a check that cannot fail because it never runs.
+local ENFORCE_BUDGETS = false
+
+for _, argument in ipairs(arg) do
+    if argument == "--budget" then
+        ENFORCE_BUDGETS = true
+    end
+end
+
 -- Silence the harness's own output while it loads and self-tests.
 local realPrint = print
 _G.print = function() end
@@ -89,6 +101,13 @@ end
 -- TIMING
 ------------------------------------------------------------
 
+-- MEASUREMENTS, KEPT.
+--
+-- The benchmark printed numbers and threw them away, so a regression was only
+-- caught by somebody reading the output and remembering what it used to say.
+-- Nobody remembers. Recording them means CI can fail on one.
+CN_BENCH_RESULTS = {}
+
 local function bench(label, iterations, fn)
     -- Warm up, so the first-call cost of building any lazy index is not
     -- charged to the measurement.
@@ -98,10 +117,14 @@ local function bench(label, iterations, fn)
     for _ = 1, iterations do fn() end
     local elapsed = (os.clock() - started) * 1000
 
-    print(string.format("  %-38s %8.3f ms/call  (%d iterations)",
-        label, elapsed / iterations, iterations))
+    local perCall = elapsed / iterations
 
-    return elapsed / iterations
+    print(string.format("  %-38s %8.3f ms/call  (%d iterations)",
+        label, perCall, iterations))
+
+    CN_BENCH_RESULTS[label] = perCall
+
+    return perCall
 end
 
 print("\nData scale:")
@@ -303,4 +326,60 @@ do
             tooltips.ItemLines(123457)
         end)
     end
+end
+
+------------------------------------------------------------
+-- BUDGETS
+------------------------------------------------------------
+
+-- WHY THESE ARE ASSERTIONS AND NOT A REPORT.
+--
+-- Two performance regressions have shipped in this project's history, and
+-- both were visible in this file's output at the time. Printing a number that
+-- somebody has to compare against a number they remember is not a check; it
+-- is a document nobody reads.
+--
+-- The figures are ceilings with real headroom -- roughly three times the
+-- measured cost -- because a budget that fails on noise gets disabled within
+-- a fortnight, and a disabled budget catches nothing at all.
+--
+-- Run with: lua5.4 bench.lua <tree> --budget
+local BUDGETS = {
+    ["CollectCandidates(force)"]  = 20.0,
+    ["CollectCandidates()"]       = 0.05,
+    ["Recommend(1)"]              = 0.10,
+    ["Recommend(25)"]             = 0.40,
+    ["ItemLines on an ordinary item"] = 0.05,
+}
+
+if ENFORCE_BUDGETS then
+    print("\nBudgets:")
+
+    local failed = 0
+
+    for label, ceiling in pairs(BUDGETS) do
+        local measured = CN_BENCH_RESULTS[label]
+
+        if not measured then
+            print(string.format("  MISSING  %-38s (never measured)", label))
+
+            failed = failed + 1
+        elseif measured > ceiling then
+            print(string.format("  OVER     %-38s %.3f ms > %.3f ms",
+                label, measured, ceiling))
+
+            failed = failed + 1
+        else
+            print(string.format("  ok       %-38s %.3f ms of %.3f ms",
+                label, measured, ceiling))
+        end
+    end
+
+    if failed > 0 then
+        print("\n" .. failed .. " budget(s) exceeded.")
+
+        os.exit(1)
+    end
+
+    print("\nEvery measured path is inside its budget.")
 end

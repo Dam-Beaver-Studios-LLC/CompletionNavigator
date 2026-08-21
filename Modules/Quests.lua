@@ -238,6 +238,8 @@ function Quests.AvailableOnMap(mapID)
         for _, poi in ipairs(Blizzard.GetQuestPOIsOnMap(relatedID)) do
             if poi.isQuestStart and not poi.inProgress then
                 consider(poi, "map")
+
+                Quests.RememberOffer(poi)
             end
         end
     end
@@ -257,6 +259,208 @@ function Quests.AvailableOnMap(mapID)
 
     return found
 end
+
+-- QUESTS THREE ZONES AWAY.
+--
+-- The client's POI list only answers for a map, and only for the map the
+-- player is looking at -- so "what is waiting for me in Azj-Kahet?" was
+-- structurally unanswerable and the addon said so in its own scope-limits
+-- note. It still cannot enumerate a zone it has never seen; what it can do
+-- is remember what it HAS seen.
+--
+-- Every quest start observed on any map is recorded, so a zone the player
+-- walked through last week can still be reported on. Bounded, and pruned
+-- when a quest is completed or picked up, because a remembered pin for a
+-- quest already in the log is worse than no pin.
+Quests.rememberedCap = 600
+
+local function Remembered()
+    return CN.Account("questPins")
+end
+
+Quests.Remembered = Remembered
+
+function Quests.RememberOffer(poi)
+    if not poi or not poi.questID or not poi.mapID then
+        return false
+    end
+
+    local store = Remembered()
+
+    -- Only what the client cannot re-derive instantly: no names, no
+    -- timestamps beyond the one that makes pruning possible.
+    store[poi.questID] = {
+        mapID = poi.mapID,
+        x     = poi.x and math.floor(poi.x * 1000 + 0.5) / 1000 or nil,
+        y     = poi.y and math.floor(poi.y * 1000 + 0.5) / 1000 or nil,
+    }
+
+    if CN.CountKeys(store) > Quests.rememberedCap then
+        Quests.PruneRemembered()
+    end
+
+    return true
+end
+
+-- Drops anything no longer worth remembering: completed, in the log, or --
+-- if still over the cap after that -- the lowest quest IDs, which are the
+-- oldest content and the least likely to be what the player is working on.
+function Quests.PruneRemembered()
+    local store = Remembered()
+
+    local dropped = 0
+
+    for questID in pairs(store) do
+        if Quests.IsCompletedByCharacter(questID)
+            or Blizzard.IsQuestInLog(questID) then
+
+            store[questID] = nil
+            dropped = dropped + 1
+        end
+    end
+
+    local remaining = CN.CountKeys(store)
+
+    if remaining > Quests.rememberedCap then
+        local ids = {}
+
+        for questID in pairs(store) do
+            table.insert(ids, questID)
+        end
+
+        table.sort(ids)
+
+        for index = 1, remaining - Quests.rememberedCap do
+            store[ids[index]] = nil
+            dropped = dropped + 1
+        end
+    end
+
+    return dropped
+end
+
+-- What is waiting in a zone the player is not standing in.
+function Quests.RememberedInZone(mapID)
+    local waiting = {}
+
+    if not mapID then
+        return waiting
+    end
+
+    for questID, record in pairs(Remembered()) do
+        if record.mapID == mapID
+            and not Quests.IsCompletedByCharacter(questID)
+            and not Blizzard.IsQuestInLog(questID) then
+
+            table.insert(waiting, {
+                questID = questID,
+                mapID   = record.mapID,
+                x       = record.x,
+                y       = record.y,
+            })
+        end
+    end
+
+    table.sort(waiting, function(a, b) return a.questID < b.questID end)
+
+    return waiting
+end
+
+-- Every zone with something remembered in it, most first.
+function Quests.RememberedZones()
+    local byZone = {}
+
+    for questID, record in pairs(Remembered()) do
+        if not Quests.IsCompletedByCharacter(questID)
+            and not Blizzard.IsQuestInLog(questID) then
+
+            byZone[record.mapID] = (byZone[record.mapID] or 0) + 1
+        end
+    end
+
+    local zones = {}
+
+    for zoneID, count in pairs(byZone) do
+        table.insert(zones, {
+            mapID = zoneID,
+            name  = Blizzard.GetMapName(zoneID),
+            count = count,
+        })
+    end
+
+    table.sort(zones, function(a, b)
+        if a.count ~= b.count then
+            return a.count > b.count
+        end
+
+        return (a.mapID or 0) < (b.mapID or 0)
+    end)
+
+    return zones
+end
+
+CN:RegisterEvent("QUEST_TURNED_IN", function()
+    Quests.PruneRemembered()
+end)
+
+CN:RegisterCommand{
+    name    = "waiting",
+    args    = "[zone name]",
+    order   = 23,
+    help    = "Quests you have walked past and never picked up, by zone.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        local zones = Quests.RememberedZones()
+
+        if #zones == 0 then
+            Print("Nothing remembered yet.")
+            Print("|cff999999The addon records quest starts as it sees them. "
+                .. "Walk through a zone once and it can tell you what you "
+                .. "left behind in it.|r")
+            return
+        end
+
+        if args ~= "" then
+            for _, zone in ipairs(zones) do
+                if zone.name and string.lower(zone.name):find(string.lower(args), 1, true) then
+                    Print(zone.name .. ": " .. zone.count .. " left behind")
+
+                    for index, entry in ipairs(Quests.RememberedInZone(zone.mapID)) do
+                        if index > 20 then
+                            Print("  |cff999999... and more|r")
+                            break
+                        end
+
+                        Print("  " .. (Quests.GetName(entry.questID)
+                            or ("quest " .. entry.questID)))
+                    end
+
+                    return
+                end
+            end
+
+            Print("Nothing remembered in a zone matching \"" .. args .. "\".")
+            return
+        end
+
+        Print("Quests you have seen and not taken:")
+
+        for index, zone in ipairs(zones) do
+            if index > 12 then
+                Print("  |cff999999... and " .. (#zones - 12) .. " more zones|r")
+                break
+            end
+
+            Print(string.format("  %-28s %d",
+                tostring(zone.name or zone.mapID), zone.count))
+        end
+
+        Print("|cff999999This is what the addon has actually seen, not every "
+            .. "quest in the game -- the client only lists pins for the map "
+            .. "you are looking at.|r")
+    end,
+}
 
 -- HOW FAR IS "HERE".
 --
@@ -621,6 +825,29 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
             and CN.character.faction ~= static.requiresFaction then
             return states.INELIGIBLE, CN.blockReasons.WRONG_FACTION, static.requiresFaction
         end
+    end
+
+    -- CURATED GATING (0.43.0).
+    --
+    -- Class, race, faction and level, from the static database. The client
+    -- handles this implicitly by not drawing a pin you do not qualify for,
+    -- which works while you are standing there and answers nothing when you
+    -- ask "could any of my characters do this?" -- which is precisely what
+    -- /cn alts is for.
+    local eligible, gateReason = CN.Static.QuestEligibility(questID)
+
+    if not eligible then
+        local reason = CN.blockReasons.WRONG_CLASS
+
+        if gateReason:find("^race") then
+            reason = CN.blockReasons.WRONG_RACE
+        elseif gateReason:find("^level") then
+            reason = CN.blockReasons.LEVEL_TOO_LOW
+        elseif gateReason:find("Alliance") or gateReason:find("Horde") then
+            reason = CN.blockReasons.WRONG_FACTION
+        end
+
+        return states.INELIGIBLE, reason, gateReason
     end
 
     -- Prerequisites nobody curated, inferred from repeated observation

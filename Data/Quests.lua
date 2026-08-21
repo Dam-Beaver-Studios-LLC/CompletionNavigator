@@ -14,6 +14,17 @@
 --   breadcrumb (boolean) skippable and permanently missable
 --   obsolete   (boolean) no longer obtainable
 --
+-- Added in 0.43.0, all optional, all for saying WHY something is not
+-- available rather than leaving the player to work it out:
+--
+--   classes    (table)   class file names that can take it, e.g. { "DRUID" }
+--   races      (table)   race file names, e.g. { "NIGHTELF" }
+--   faction    (string)  "Alliance" or "Horde"
+--   minLevel   (number)  character level required
+--   turnInMapID(number)  where it is handed IN, when that differs from where
+--   turnInX,               it is picked up -- the client's own waypoint moves
+--   turnInY                as you progress, so it cannot answer this
+--
 -- Add rows with:  .\cn.ps1 data quest <id> -Name "<title>"
 
 local ADDON_NAME, CN = ...

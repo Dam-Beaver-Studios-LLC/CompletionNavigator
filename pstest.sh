@@ -354,7 +354,7 @@ echo "  coverage: harness exercises the addon"
 if command -v luacov >/dev/null 2>&1; then
   # Run against the scaffolded tree, which is what actually ships.
   # init writes files without the execute bit; invoke through the shell.
-  (cd "$WORK" && bash coverage.sh . 80 > coverage.log 2>&1) || {
+  (cd "$WORK" && bash coverage.sh . 82 > coverage.log 2>&1) || {
     echo "FAIL: coverage below floor"; tail -15 "$WORK/coverage.log"; exit 1; }
   echo "    $(grep '^Total:' "$WORK/coverage.log")"
 else
@@ -472,6 +472,10 @@ blocking_allowed = {
     "Install LuaRocks", "Install Lua tooling",
     "Syntax check every Lua file", "Verify the .toc lists every Lua file",
     "Lint", "Run the offline harness",
+    # Budgets block, and should: a performance regression is a defect, two
+    # have shipped in this project, and both were visible in output nobody
+    # was comparing against anything.
+    "Performance budgets",
     "Verify the CurseForge token is available", "Package and upload",
 }
 

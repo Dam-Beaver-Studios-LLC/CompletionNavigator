@@ -572,25 +572,46 @@ function Chase.Estimate(chain)
         return nil
     end
 
-    -- Travel to the next step, once. Not to every step: the addon does not
-    -- know the order a chain will actually be walked, and adding a journey
-    -- per step would inflate the number by more than the work itself.
+    -- TRAVEL, LEG BY LEG (0.43.0).
+    --
+    -- The first version costed one journey -- player to the next step -- and
+    -- said so. That understated any chain whose steps are in different
+    -- places, which is most of them: a chain across three zones is three
+    -- journeys, and pretending it is one makes the estimate confidently short
+    -- in exactly the cases where the player most needs it to be right.
+    --
+    -- Walked in the order the steps are listed, which is the order the addon
+    -- would route them, starting from where the player actually is. Steps
+    -- with no location contribute no travel rather than a guessed hop.
     local travelSeconds = 0
 
     local travel = CN:GetModule("Travel")
 
-    local step = chain.next
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
 
-    if travel and step and (step.mapID or chain.mapID) then
-        local playerMap, playerX, playerY = CN.GetPlayerPosition()
+    if travel and playerMap then
+        local fromMap, fromX, fromY = playerMap, playerX, playerY
 
-        local estimated = playerMap and travel.EstimateSeconds(
-            playerMap, playerX, playerY,
-            step.mapID or chain.mapID,
-            step.x or chain.x,
-            step.y or chain.y)
+        for _, step in ipairs(chain.steps) do
+            if step.state ~= Chase.states.DONE
+                and step.state ~= Chase.states.NOTE then
 
-        travelSeconds = estimated or 0
+                local toMap = step.mapID or chain.mapID
+                local toX   = step.x or chain.x
+                local toY   = step.y or chain.y
+
+                if toMap and toX and toY and fromX and fromY then
+                    local leg = travel.EstimateSeconds(
+                        fromMap, fromX, fromY, toMap, toX, toY)
+
+                    if leg then
+                        travelSeconds = travelSeconds + leg
+
+                        fromMap, fromX, fromY = toMap, toX, toY
+                    end
+                end
+            end
+        end
     end
 
     if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then

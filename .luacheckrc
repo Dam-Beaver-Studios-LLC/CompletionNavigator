@@ -43,6 +43,18 @@ read_globals = {
     -- functions are globals rather than a namespaced table, which is why
     -- there are so many of them.
     "GetNumSavedInstances", "GetSavedInstanceInfo", "C_TaxiMap",
+
+    -- Memory reporting, sound and flash, group and death state, self-flying,
+    -- crafting orders and the settings panel. All optional, all guarded at
+    -- the call site, all real APIs the client provides.
+    "UpdateAddOnMemoryUsage", "GetAddOnMemoryUsage",
+    "SOUNDKIT", "PlaySound", "UIFrameFlash",
+    "UnitIsDeadOrGhost", "UnitIsGhost", "GetNumGroupMembers",
+    "IsInRaid", "IsInInstance", "IsFlying", "IsFlyableArea",
+    "C_CraftingOrders", "C_DelvesUI", "C_Bank", "C_Spell",
+    "IsSpellKnown", "IsPlayerSpell", "GetSpellCooldown", "GetItemCooldown",
+    "GetItemCount", "GetBindLocation", "EJ_GetDifficulty", "GetDifficultyInfo",
+    "SettingsPanel", "InterfaceOptions_AddCategory", "BackdropTemplateMixin",
     "EncounterJournal", "EJ_SelectInstance", "EJ_GetCurrentInstance",
     "EJ_GetInstanceInfo", "EJ_GetEncounterInfoByIndex", "EJ_GetEncounterInfo",
     "EJ_SetSearch", "EJ_ClearSearch", "EJ_GetNumSearchResults",
@@ -72,11 +84,17 @@ globals = {
     -- Binding labels, read by the client's key binding UI.
     "BINDING_HEADER_COMPLETIONNAVIGATOR",
     "BINDING_NAME_COMPLETIONNAVIGATOR_TOGGLE",
+    "BINDING_NAME_COMPLETIONNAVIGATOR_FOLLOW",
+    "BINDING_NAME_COMPLETIONNAVIGATOR_PLAN",
+    "BINDING_NAME_COMPLETIONNAVIGATOR_HUD",
     "BINDING_NAME_COMPLETIONNAVIGATOR_NEXT",
     "BINDING_NAME_COMPLETIONNAVIGATOR_GO",
 
     -- Binding handlers, called by name from Bindings.xml.
     "CompletionNavigator_ToggleUI",
+    "CompletionNavigator_ToggleFollow",
+    "CompletionNavigator_Plan",
+    "CompletionNavigator_ToggleHud",
     "CompletionNavigator_NextObjective",
     "CompletionNavigator_Navigate",
 

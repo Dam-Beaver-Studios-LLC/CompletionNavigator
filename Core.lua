@@ -18,7 +18,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.42.0"
+CN.version     = "0.43.0"
 CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -236,6 +236,68 @@ end
 -- Reputation numbers are the one place this addon prints figures large
 -- enough to be misread, and "42000 to go" reads as a different order of
 -- magnitude than "42,000 to go" at a glance.
+-- ONE GRAMMAR FOR "MEASURED" VERSUS "ESTIMATED".
+--
+-- The addon prints a lot of numbers and, until 0.43.0, said how much it
+-- trusted each one in a slightly different way every time: "(estimated)"
+-- here, "time unknown" there, a grey parenthetical somewhere else. A reader
+-- cannot learn three conventions, so in practice they learn none and treat
+-- every number as equally solid -- which is the opposite of what all that
+-- careful hedging was for.
+--
+-- Three states, one shape, used everywhere:
+--
+--   measured  -- from this player's own data, printed plain
+--   estimated -- a real calculation on a seeded input, marked
+--   unknown   -- not knowable, and the number is not printed at all
+CN.confidence = {
+    MEASURED  = "measured",
+    ESTIMATED = "estimated",
+    UNKNOWN   = "unknown",
+}
+
+-- Wraps a value in the convention. Returns the text to print.
+function CN.WithConfidence(text, level)
+    if level == CN.confidence.UNKNOWN or text == nil then
+        return "|cff999999unknown|r"
+    end
+
+    if level == CN.confidence.ESTIMATED then
+        return text .. " |cff999999(estimated)|r"
+    end
+
+    return text
+end
+
+-- Convenience for the common case: a boolean "was this measured".
+function CN.ConfidenceFor(measured)
+    return measured and CN.confidence.MEASURED or CN.confidence.ESTIMATED
+end
+
+-- THE SELF-TEST REGISTRY LIVES HERE, NOT IN THE MODULE THAT USES IT.
+--
+-- It was in Modules/SelfTest.lua, which meant any module registering a check
+-- had to load after it -- an invisible constraint that held in the .toc I
+-- maintain by hand and broke the moment the toolkit scaffolded the tree in a
+-- different order. The failure was a runtime error on load, in a module that
+-- has nothing to do with self-tests.
+--
+-- A registry belongs where everything can see it. The checks stay where they
+-- make sense.
+CN.selfTests = CN.selfTests or {}
+
+function CN.RegisterSelfTest(definition)
+    if type(definition) ~= "table" or type(definition.run) ~= "function" then
+        return false
+    end
+
+    definition.order = definition.order or (#CN.selfTests + 1)
+
+    table.insert(CN.selfTests, definition)
+
+    return true
+end
+
 function CN.Comma(number)
     number = tonumber(number)
 

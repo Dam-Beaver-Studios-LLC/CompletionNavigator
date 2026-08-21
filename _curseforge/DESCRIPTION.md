@@ -41,9 +41,9 @@ Off by default, and it will not fight you: it advances when a stop is **done**, 
 
 Half an hour is not the same question as "what should I do next", and it gets its own answer: the stops that fit, in walking order, with what each one costs.
 
-Travel time is **computed** from the journey you would actually make: run to the nearest flight point **you have discovered**, fly, run from the far end â€” against simply running the whole way, whichever is quicker. Your running speed is measured from your own play, and so is your flying speed, because the client does not report it and it differs between expansions. Task time is **learned** the same way. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
+Travel time is **computed** from the journey you would actually make, weighing three options against each other: run it, take a flight path from the nearest point **you have discovered**, or fly it yourself â€” whichever is genuinely quicker. Your speed is measured from your own play, separately for running, riding and flying, because those are three different numbers and one median across them is wrong in all three. Task time is **learned** the same way. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
 
-A journey it cannot model â€” another continent, reached by a portal â€” returns **nothing** rather than a large number. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
+A journey it cannot model â€” another continent, reached by a portal â€” still refuses to invent a duration, but it now lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
 ## Aim it in one command
 
@@ -137,6 +137,9 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **Dungeon & raid lockouts** | What you are saved to, how many bosses are left in it, and when it resets |
 | **Boss loot** | The game's own Adventure Guide, so a drop can name the boss it comes from |
 | **Flight points** | The ones you have discovered, so a journey is costed the way you would actually make it |
+| **Your own speed** | Running, riding and flying, measured separately from your own play |
+| **Crafting orders** | The ones you placed, and anything finished and waiting |
+| **World events** | Timewalking and holidays, weighted by when they end |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
 
 Where the game does not supply a trustworthy total, it reports **counts rather than a percentage**. That is a deliberate rule, not a gap â€” an invented denominator is a number that looks like a fact.
@@ -183,6 +186,53 @@ The addon notices which kinds of objective you go and do, and leans that way. Th
 
 `/cn learned reset` forgets it. `/cn learned off` switches it off. Hiding a type outright is still `/cn show`.
 
+## It knows what you are in the middle of
+
+Dead, in a group, in an instance, or out in the world alone are four different situations, and only one of them makes "go and collect a battle pet" a sensible thing to say.
+
+```
+/cn situation
+```
+
+Dead, and it says so before anything else. In a dungeon with four other people, outside work ranks down until you leave â€” down, never hidden, because hiding something is your decision and not a counter's.
+
+## Quests you walked past
+
+```
+/cn waiting
+```
+
+The game only lists quest pins for the map you are looking at, so "what is waiting three zones away" used to be unanswerable. It still cannot enumerate a zone it has never seen â€” but it remembers every quest start it *has* seen, by zone, which covers everywhere you have actually been.
+
+## Built to be read
+
+A scale for everything it draws, and a mode that labels the arrow in words as well as colour â€” the arrow's whole language was colour, which is exactly the design that fails a colourblind player.
+
+```
+/cn scale 1.25
+/cn colourblind
+```
+
+An optional one-line heads-up display (`/cn hud`), a filter box in the window, keybindings for the things you do often, and an entry in the game's own options list rather than only inside a window you have to know how to open.
+
+## When something goes wrong
+
+```
+/cn errors
+```
+
+Failures inside the addon are caught so they cannot break your session â€” which is also why they were invisible. They are kept now, so a bug report can carry the text instead of a description of it.
+
+## Share what your play taught it
+
+```
+/cn contribute
+```
+
+Prints one line of quest IDs and orderings â€” no character name, no realm, no timestamps, nothing that identifies you. You can read the whole thing before deciding to send it, which is the point of a format you can read.
+
+Nothing is uploaded. The addon *cannot* upload; addons have no network access at all. Pasting it into an issue is the entire transport, and chains that arrive that way are recorded as observations, never as fact.
+
 ## Ask it whether it is working
 
 ```
@@ -220,6 +270,12 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn drops <name>` | Which boss drops it, and whether you are locked to it |
 | `/cn learned` | What the addon has worked out about how you play |
 | `/cn travel` | How long it takes to reach the top recommendation, and by what route |
+| `/cn situation` | What the addon thinks you are in the middle of |
+| `/cn waiting` | Quests you have seen and never picked up, by zone |
+| `/cn orders` | Crafting orders you placed, and anything ready to collect |
+| `/cn hud` | A small always-on line showing the next thing |
+| `/cn errors` | Anything that went wrong inside the addon this session |
+| `/cn contribute` | Share the quest chains your play has taught it |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |

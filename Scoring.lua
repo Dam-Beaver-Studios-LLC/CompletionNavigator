@@ -57,20 +57,48 @@ CN.batchBonusCap          = 3
 CN.urgencyHorizonSeconds = 7200
 CN.urgencyWeight         = 4.0
 
+-- A SECOND HORIZON, ADDED IN 0.43.0.
+--
+-- Two hours was the right window when everything with a deadline was a world
+-- quest. It stopped being right when lockouts and the Great Vault arrived:
+-- both expire at the weekly reset, so both sat at exactly zero urgency for
+-- six and a half days and then jumped. A raid you are six bosses into, with
+-- eighteen hours left on it, is genuinely more urgent than the same raid on
+-- Wednesday -- and the curve could not say so.
+--
+-- So: a long ramp that starts a week out and carries a small amount of
+-- weight, and the original short ramp on top of it for the last two hours.
+-- The short one still dominates, which is the point -- a world quest with ten
+-- minutes on it should still beat a lockout with four days.
+CN.urgencyLongHorizonSeconds = 7 * 86400
+CN.urgencyLongShare          = 0.35
+
 function CN.UrgencyBonus(secondsLeft)
     if type(secondsLeft) ~= "number" or secondsLeft <= 0 then
         return 0
     end
 
-    if secondsLeft >= CN.urgencyHorizonSeconds then
-        return 0
+    local value = 0
+
+    if secondsLeft < CN.urgencyLongHorizonSeconds then
+        -- Linear across the week. Deliberately not squared: the point of this
+        -- term is to break ties between things that are all days away, and a
+        -- squared curve would leave them all at nearly zero, which is the
+        -- behaviour being fixed.
+        local remaining = 1 - (secondsLeft / CN.urgencyLongHorizonSeconds)
+
+        value = remaining * CN.urgencyLongShare
     end
 
-    -- Squared, so the last twenty minutes are worth much more than the first
-    -- hour of the window.
-    local remaining = 1 - (secondsLeft / CN.urgencyHorizonSeconds)
+    if secondsLeft < CN.urgencyHorizonSeconds then
+        -- Squared, so the last twenty minutes are worth much more than the
+        -- first hour of the window.
+        local remaining = 1 - (secondsLeft / CN.urgencyHorizonSeconds)
 
-    return remaining * remaining
+        value = value + (remaining * remaining)
+    end
+
+    return value
 end
 
 -- Priority profiles have two independent levers:
@@ -824,6 +852,20 @@ CN:RegisterCommand{
         local objective = results[1]
 
         CN.currentRecommendation = objective
+
+        -- SAY IT FIRST WHEN THE PLAYER CANNOT ACT ON THE ANSWER.
+        --
+        -- Recommending a battle pet to a corpse is the clearest possible
+        -- signal that the addon is not watching. The line goes above the
+        -- recommendation rather than below it, because it changes how to read
+        -- what follows.
+        local group = CN:GetModule("Group")
+
+        local notice = group and group.Notice()
+
+        if notice then
+            CN.Print("|cffffd100" .. notice .. "|r")
+        end
 
         CN.Print("Recommended next: " .. tostring(objective.name or objective.id)
             .. " |cff999999(" .. tostring(objective.type) .. ")|r")

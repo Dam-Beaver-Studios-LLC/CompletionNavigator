@@ -1241,12 +1241,42 @@ function Blizzard.GetTodaysEvents()
                 or event.sequenceType == "START"
                 or event.sequenceType == ""
 
+            -- WHEN IT ENDS, where the calendar says so.
+            --
+            -- Without this an active event is just a name, and the ranking
+            -- has nothing to weigh: "Timewalking is on" and "Timewalking ends
+            -- in four hours" are different pieces of advice. Some builds omit
+            -- the end time entirely, and nil is then the right answer rather
+            -- than a guessed week.
+            local endsIn
+
+            if type(event.endTime) == "table" and event.endTime.monthDay
+                and C_DateAndTime and C_DateAndTime.GetSecondsUntilWeeklyReset then
+
+                local finish = event.endTime
+
+                local nowStamp = time()
+
+                local okStamp, stamp = pcall(time, {
+                    year  = finish.year   or 0,
+                    month = finish.month  or 1,
+                    day   = finish.monthDay,
+                    hour  = finish.hour   or 0,
+                    min   = finish.minute or 0,
+                })
+
+                if okStamp and stamp and stamp > nowStamp then
+                    endsIn = stamp - nowStamp
+                end
+            end
+
             table.insert(events, {
                 title        = event.title,
                 eventType    = event.eventType,
                 calendarType = event.calendarType,
                 sequenceType = event.sequenceType,
                 ongoing      = ongoing,
+                endsIn       = endsIn,
             })
         end
     end
@@ -1374,6 +1404,12 @@ function Blizzard.GetCurrencyList()
                 maxWeeklyQuantity  = info.maxWeeklyQuantity or 0,
 
                 useTotalEarnedForMaxQty = info.useTotalEarnedForMaxQty and true or false,
+
+                -- Warband currencies. The client flags them and the addon
+                -- ignored the flag until 0.43.0, so one capped on your main
+                -- was recommended again on every alt.
+                accountWide = (info.isAccountWide
+                    or info.isAccountTransferable) and true or false,
             })
         end
     end
@@ -2159,11 +2195,29 @@ function Blizzard.SearchEncounterJournal(text, limit)
 
                 local encounterName = EJ_GetEncounterInfo and EJ_GetEncounterInfo(id)
 
+                -- The journal's current difficulty, where the build exposes
+                -- it. Reported rather than assumed: a nil here means the
+                -- client did not say, which is different from "any".
+                local difficulty
+
+                if EJ_GetDifficulty and GetDifficultyInfo then
+                    local gotDifficulty, difficultyID = pcall(EJ_GetDifficulty)
+
+                    if gotDifficulty and difficultyID then
+                        local gotName, name = pcall(GetDifficultyInfo, difficultyID)
+
+                        if gotName then
+                            difficulty = name
+                        end
+                    end
+                end
+
                 table.insert(found, {
                     encounterID = id,
                     encounter   = encounterName,
                     instanceID  = instanceID,
                     instance    = instanceName,
+                    difficulty  = difficulty,
                 })
             end
         end

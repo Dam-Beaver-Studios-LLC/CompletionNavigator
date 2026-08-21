@@ -193,6 +193,24 @@ function CN.GetPrerequisites(questID)
         add(harvest[questID].observedRequires)
     end
 
+    -- Chains other players contributed, shipped in Data/Community.lua or
+    -- imported by hand. Added LAST and never as curated data: they are the
+    -- weakest of the three sources and the ordering here is the order of
+    -- authority.
+    if CN.Static and CN.Static.GetCommunity then
+        local community = CN.Static.GetCommunity(questID)
+
+        if community then
+            add(community.requires)
+        end
+    end
+
+    local contributed = CN.Account and CN.Account("contributed")
+
+    if contributed and contributed[questID] then
+        add(contributed[questID])
+    end
+
     return ordered
 end
 

@@ -169,6 +169,38 @@ jobs:
             exit 1
           fi
 
+      # Performance budgets. Two regressions have shipped in this project's
+      # history and BOTH were visible in the benchmark output at the time --
+      # printing a number somebody has to remember is not a check. The
+      # ceilings live in bench.lua and carry real headroom, because a budget
+      # that fails on runner noise gets deleted within a fortnight.
+      - name: Performance budgets
+        timeout-minutes: 6
+        run: |
+          if [ -f bench.lua ]; then
+            lua5.4 bench.lua . --budget
+          else
+            echo "bench.lua is missing; skipping budgets."
+          fi
+
+      # Mutation testing: does the suite actually notice when the code is
+      # wrong? A green suite proves the code runs. This proves the assertions
+      # would complain. It found three holes on the day it was written.
+      #
+      # NOT blocking, deliberately, and by the same rule as coverage: a
+      # surviving mutation means the SUITE is weak, not that the code is
+      # broken. Blocking a release on it would be blocking users from a fix
+      # because a test could be better.
+      - name: Mutation testing
+        continue-on-error: true
+        timeout-minutes: 8
+        run: |
+          if [ -f mutate.sh ]; then
+            bash mutate.sh .
+          else
+            echo "mutate.sh is missing; skipping mutation testing."
+          fi
+
       # Coverage, with a floor. A test suite whose reach nobody measures
       # drifts: it keeps passing while covering less and less of the addon.
       #
@@ -184,7 +216,7 @@ jobs:
       - name: Coverage
         continue-on-error: true
         timeout-minutes: 6
-        run: bash coverage.sh . 80
+        run: bash coverage.sh . 82
 
       # The packager SKIPS the CurseForge upload silently when CF_API_KEY is
       # missing -- the build still goes green and no file appears. Fail here
@@ -207,9 +239,47 @@ jobs:
 
       # BigWigs' packager is the standard tool; it reads .pkgmeta, builds the
       # zip, and uploads to CurseForge, WoWInterface and Wago as configured.
+      # RELEASE NOTES, FROM THE CHANGELOG.
+      #
+      # The packager will use a changelog if it can find one, and until now it
+      # was finding the whole file -- every version since 0.1.0 -- which makes
+      # a release page nobody scrolls. This extracts the section for the tag
+      # being built, so the notes are about this release and nothing else.
+      #
+      # Not blocking: badly formatted release notes are a cosmetic problem and
+      # the packager has its own fallback.
+      - name: Release notes for this version
+        continue-on-error: true
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          if [ ! -f CHANGELOG.md ]; then
+            echo "No CHANGELOG.md; the packager will fall back to its default."
+            exit 0
+          fi
+
+          awk -v version="## [$VERSION]" '
+            index($0, version) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::warning::No changelog section for $VERSION; notes left empty."
+            rm -f RELEASE_NOTES.md
+          else
+            echo "Release notes: $(wc -l < RELEASE_NOTES.md) lines."
+          fi
+
       # Reached regardless of the optional steps above.
+      #
+      # WAGO_API_TOKEN is passed through but not required: the packager skips
+      # a destination it has no credentials for, and Wago is a second channel
+      # rather than the primary one. X-Wago-ID in the .toc has to be filled in
+      # before anything reaches it.
       - name: Package and upload
         uses: BigWigsMods/packager@master
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
           GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}

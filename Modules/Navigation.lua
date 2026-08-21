@@ -804,6 +804,8 @@ end
 -- it again -- a stale claim about a destination that is no longer being
 -- tracked. Costs nothing to reset; costs the player's trust not to.
 local function Blank()
+    Navigation.ResetSmoothing()
+
     if not arrow then
         return
     end
@@ -823,6 +825,51 @@ local function Blank()
 end
 
 Navigation.Blank = Blank
+
+-- SMOOTHING.
+--
+-- The arrow recomputes ten times a second and snapped straight to each new
+-- bearing, so a player turning on the spot saw it step rather than sweep. The
+-- underlying number is right either way -- this is only about whether it
+-- reads as an instrument or as a slideshow.
+--
+-- Snaps rather than sweeps when the change is large: an arrow that eases
+-- through 170 degrees is pointing at nothing at all for a quarter of a second,
+-- which is worse than a jump. Passing a destination and turning around is
+-- exactly that case, and it is the one complaint this addon has actually
+-- received about the arrow.
+Navigation.smoothingFactor  = 0.35
+Navigation.smoothingSnapRad = math.rad(90)
+
+local smoothed = nil
+
+function Navigation.ResetSmoothing()
+    smoothed = nil
+end
+
+function Navigation.Smooth(bearing)
+    if not bearing then
+        return bearing
+    end
+
+    if not smoothed then
+        smoothed = bearing
+
+        return smoothed
+    end
+
+    local delta = Normalize(bearing - smoothed)
+
+    if math.abs(delta) >= Navigation.smoothingSnapRad then
+        smoothed = bearing
+
+        return smoothed
+    end
+
+    smoothed = Normalize(smoothed + (delta * Navigation.smoothingFactor))
+
+    return smoothed
+end
 
 local function Refresh()
     if not arrow then
@@ -862,12 +909,27 @@ local function Refresh()
     if state.relative then
         -- SetRotation turns counter-clockwise; the relative bearing is
         -- clockwise, hence the negation.
-        arrow.texture:SetRotation(-state.relative)
+        arrow.texture:SetRotation(-Navigation.Smooth(state.relative))
     end
 
     arrow.texture:SetVertexColor(Navigation.BearingColor(state.relative))
 
-    arrow.distance:SetText(Navigation.FormatDistance(state.yards))
+    local distanceText = Navigation.FormatDistance(state.yards)
+
+    -- NO INFORMATION CARRIED BY COLOUR ALONE.
+    --
+    -- The arrow's whole language is colour -- blue on course, amber drifting,
+    -- red walking away -- which is precisely the design that fails a
+    -- colourblind player. In that mode the same fact is written next to the
+    -- distance, where it survives the colours being indistinguishable.
+    local hud = CN:GetModule("Hud")
+
+    if hud and hud.IsColourblind() then
+        distanceText = distanceText .. " |cffffffff"
+            .. hud.BearingWord(state.relative) .. "|r"
+    end
+
+    arrow.distance:SetText(distanceText)
 
     -- Watch whether following the arrow actually works.
     Navigation.NoteObservation(state.relative, state.yards)
@@ -938,6 +1000,12 @@ function Navigation.StartTicker()
 
         if not ok then
             DebugPrint("Arrow refresh failed: " .. tostring(err))
+
+            local errors = CN:GetModule("Errors")
+
+            if errors then
+                errors.Record("arrow refresh", err)
+            end
         end
     end)
 end

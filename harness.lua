@@ -368,6 +368,48 @@ C_TaxiMap = {
     end,
 }
 
+-- BEING DEAD, AND BEING IN A GROUP.
+--
+-- Both change what a sensible next action is, and neither was modelled until
+-- 0.43.0 -- so the stub did not model them either, which is exactly how a
+-- whole class of behaviour stays invisible to a test suite.
+CN_TEST_DEAD       = false
+CN_TEST_GHOST      = false
+CN_TEST_GROUP_SIZE = 1
+CN_TEST_INSTANCE   = nil
+
+function UnitIsDeadOrGhost(unit)
+    return unit == "player" and CN_TEST_DEAD or false
+end
+
+function UnitIsGhost(unit)
+    return unit == "player" and CN_TEST_GHOST or false
+end
+
+function GetNumGroupMembers()
+    return CN_TEST_GROUP_SIZE
+end
+
+function IsInRaid()
+    return CN_TEST_INSTANCE == "raid"
+end
+
+function IsInInstance()
+    if not CN_TEST_INSTANCE then
+        return false, "none"
+    end
+
+    return true, CN_TEST_INSTANCE
+end
+
+function IsFlying()
+    return false
+end
+
+function IsFlyableArea()
+    return true
+end
+
 CN_TEST_ON_TAXI = false
 
 -- SAVED INSTANCES.
@@ -2241,7 +2283,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 17, "every candidate provider must register, got "
+assert(firstState.providers == 18, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -3334,9 +3376,15 @@ local vaultProvider = CN.candidateProviders["Vault"]
 -- weekly reset in exactly the same way, and "nothing expiring" has to mean
 -- nothing expiring.
 local instanceProvider = CN.candidateProviders["Instances"]
+local opportunityProvider = CN.candidateProviders["Opportunities"]
 
-CN.candidateProviders["Vault"]     = nil
-CN.candidateProviders["Instances"] = nil
+-- EVERY provider that emits something with a deadline, not just the two that
+-- emit weekly ones. World quests expire too, and from 0.43.0 the urgency
+-- curve has a second, week-long ramp, so a world quest six hours out is no
+-- longer worth exactly zero. "Nothing expiring" has to mean nothing.
+CN.candidateProviders["Vault"]         = nil
+CN.candidateProviders["Instances"]     = nil
+CN.candidateProviders["Opportunities"] = nil
 CN.InvalidateCandidates()
 
 local top = CN.Recommend(1)[1]
@@ -3347,8 +3395,9 @@ print("  top with nothing expiring = " .. tostring(top.name) .. " ("
 assert(top.type == "TITLE" and top.id == 2,
     "with nothing expiring, a pinned goal must rank first, got " .. tostring(top.name))
 
-CN.candidateProviders["Vault"]     = vaultProvider
-CN.candidateProviders["Instances"] = instanceProvider
+CN.candidateProviders["Vault"]         = vaultProvider
+CN.candidateProviders["Instances"]     = instanceProvider
+CN.candidateProviders["Opportunities"] = opportunityProvider
 CN.InvalidateCandidates()
 
 -- Removing it must put things back.
@@ -4336,7 +4385,27 @@ print("\nUrgency:")
         "urgency must climb faster per second as the deadline nears: "
         .. string.format("late=%.6f early=%.6f", lateRate, earlyRate))
 
-    assert(CN.UrgencyBonus(1) <= 1, "urgency is bounded")
+-- BOUNDED, but the bound is not 1 any more: 0.43.0 added a second, week-long
+    -- ramp worth `urgencyLongShare` on top of the short one. Asserted against
+    -- the constants rather than against a number typed here, so tuning the
+    -- curve cannot silently break the guarantee the assertion is about.
+    local ceiling = 1 + CN.urgencyLongShare
+
+    assert(CN.UrgencyBonus(1) <= ceiling,
+        "urgency is bounded, got " .. CN.UrgencyBonus(1))
+
+    -- THE LONG RAMP MUST NOT DROWN THE SHORT ONE.
+    --
+    -- A world quest with ten minutes on it still has to beat a lockout with
+    -- four days, or the fix for weekly content has broken daily content.
+    assert(CN.UrgencyBonus(600) > CN.UrgencyBonus(4 * 86400),
+        "ten minutes must outrank four days")
+
+    -- And a week-out deadline must be worth more than no deadline at all,
+    -- which is the thing that was broken: every lockout sat at exactly zero
+    -- until its last two hours.
+    assert(CN.UrgencyBonus(3 * 86400) > 0,
+        "a deadline three days out must carry some weight")
 
     -- And it must actually move a score.
     local calm = CN.NewObjective({ id = 1, type = CN.objectiveTypes.QUEST,
@@ -7024,6 +7093,433 @@ print("\nHow long a chase will take:")
     print("  " .. described)
 
     durations[QUEST] = nil
+end)()
+
+
+print("\nSituation awareness:")
+
+;(function()
+    local group = CN:GetModule("Group")
+
+    assert(group, "the Group module must load")
+
+    ------------------------------------------------------------
+    -- BEING DEAD CHANGES THE ANSWER.
+    --
+    -- Recommending a battle pet to a corpse is the clearest possible signal
+    -- that an addon is not watching what the player is doing.
+    ------------------------------------------------------------
+    CN_TEST_DEAD = false
+
+    local objective = { type = CN.objectiveTypes.PET, id = 1,
+        completionValue = 10, travelCost = 0, reasons = {} }
+
+    local alive = CN.ScoreObjective(objective)
+
+    CN_TEST_DEAD = true
+
+    CN.InvalidateRanking()
+
+    local dead = { type = CN.objectiveTypes.PET, id = 1,
+        completionValue = 10, travelCost = 0, reasons = {} }
+
+    local deadScore = CN.ScoreObjective(dead)
+
+    assert(deadScore < alive,
+        "everything is worth less than getting up: "
+        .. string.format("%.2f dead vs %.2f alive", deadScore, alive))
+
+    assert(deadScore > 0,
+        "but not zero -- the list still answers 'what next', it just stops "
+        .. "pretending you can act on it this second")
+
+    local explainedDeath = false
+
+    for _, reason in ipairs(dead.reasons) do
+        if reason:find("dead") then explainedDeath = true end
+    end
+
+    assert(explainedDeath, "and the line must say why it moved")
+
+    local notice = group.Notice()
+
+    assert(notice and notice:find("dead"),
+        "and the recommendation must lead with it: " .. tostring(notice))
+
+    print("  a dead player is told to get up first")
+
+    ------------------------------------------------------------
+    -- IN AN INSTANCE WITH A GROUP, OUTSIDE WORK RANKS DOWN.
+    ------------------------------------------------------------
+    CN_TEST_DEAD = false
+    CN_TEST_INSTANCE = "party"
+    CN_TEST_GROUP_SIZE = 5
+
+    CN.InvalidateRanking()
+
+    assert(group.Situation() == "instanced", "the situation must be read")
+
+    local inside = { type = CN.objectiveTypes.PET, id = 1,
+        completionValue = 10, travelCost = 0, reasons = {} }
+
+    local insideScore = CN.ScoreObjective(inside)
+
+    assert(insideScore < alive, "a pet detour ranks below its solo value")
+
+    local quest = { type = CN.objectiveTypes.QUEST, id = 1,
+        completionValue = 10, travelCost = 0, reasons = {} }
+
+    local questScore = CN.ScoreObjective(quest)
+
+    assert(questScore > insideScore,
+        "but only the outside-work types are pushed down")
+
+    CN_TEST_INSTANCE = nil
+    CN_TEST_GROUP_SIZE = 1
+    CN.InvalidateRanking()
+
+    print("  outside work ranks down in an instance, and only outside work")
+end)()
+
+print("\nContributed chains:")
+
+;(function()
+    local contribute = CN:GetModule("Contribute")
+
+    assert(contribute, "the Contribute module must load")
+
+    ------------------------------------------------------------
+    -- A MALFORMED IMPORT IS REFUSED OUTRIGHT.
+    --
+    -- A half-parsed contribution is worse than a refused one: it silently
+    -- teaches the addon a chain nobody wrote.
+    ------------------------------------------------------------
+    local rejects = {
+        "",
+        "hello",
+        "CN2 100:99",
+        "CN1",
+        "CN1 100",
+        "CN1 100:",
+        "CN1 abc:99",
+    }
+
+    for _, bad in ipairs(rejects) do
+        local parsed, err = contribute.Parse(bad)
+
+        assert(parsed == nil,
+            "must refuse: '" .. bad .. "'")
+        assert(err, "and say why")
+    end
+
+    ------------------------------------------------------------
+    -- A GOOD ONE ROUND-TRIPS.
+    ------------------------------------------------------------
+    local parsed, err, entries = contribute.Parse("CN1 100:98,99 200:150")
+
+    assert(parsed, "a well-formed export must parse: " .. tostring(err))
+    assert(entries == 2, "two entries, got " .. tostring(entries))
+    assert(#parsed[100] == 2 and parsed[100][1] == 98,
+        "with their prerequisites intact")
+
+    local ok, importErr, imported = contribute.Import("CN1 100:98,99 200:150")
+
+    assert(ok, "and import: " .. tostring(importErr))
+    assert(imported == 2, "both of them")
+
+    -- AS OBSERVATIONS, NEVER AS CURATED FACT. A stranger's addon watching an
+    -- ordering is the weakest of the three sources the addon has.
+    local imported100 = CN.GetDependency(CN.ObjectiveKey("QUEST", 100))
+
+    assert(imported100 and imported100.observedRequires,
+        "an imported chain is published as an observation")
+    assert(imported100.requires == nil,
+        "and must never be able to present itself as curated data")
+
+    assert(contribute.Forget() == 2, "and it can all be thrown away")
+
+    print("  malformed imports refused, good ones land as observations")
+end)()
+
+print("\nOne grammar for uncertainty:")
+
+;(function()
+    ------------------------------------------------------------
+    -- An estimated number must be visibly different from a measured one.
+    -- Three hedging styles taught readers to ignore all three.
+    ------------------------------------------------------------
+    local measured  = CN.WithConfidence("14 min", CN.confidence.MEASURED)
+    local estimated = CN.WithConfidence("14 min", CN.confidence.ESTIMATED)
+    local unknown   = CN.WithConfidence("14 min", CN.confidence.UNKNOWN)
+
+    assert(measured == "14 min", "a measured number is printed plain")
+
+    assert(estimated ~= measured,
+        "an estimate must not look identical to a measurement")
+    assert(estimated:find("estimated"), "and must say the word")
+
+    assert(not unknown:find("14"),
+        "and an unknown must not print the number at all, got " .. unknown)
+
+    assert(CN.ConfidenceFor(true) == CN.confidence.MEASURED)
+    assert(CN.ConfidenceFor(false) == CN.confidence.ESTIMATED)
+
+    print("  measured, estimated and unknown are three visibly different things")
+end)()
+
+
+print("\nErrors are kept where the player can find them:")
+
+;(function()
+    local errors = CN:GetModule("Errors")
+
+    assert(errors, "the Errors module must load")
+
+    errors.Clear()
+
+    ------------------------------------------------------------
+    -- A CAUGHT ERROR THAT NOBODY RECORDS IS AN ERROR NOBODY KNOWS ABOUT.
+    ------------------------------------------------------------
+    local ok, message = errors.Guard("a failing thing", function()
+        error("something broke")
+    end)
+
+    assert(ok == false, "Guard returns what pcall returns")
+    assert(tostring(message):find("something broke"), "including the message")
+
+    assert(errors.Count() == 1, "and records it")
+
+    ------------------------------------------------------------
+    -- REPEATS ARE COUNTED, NOT LISTED.
+    --
+    -- A failure inside a ticker fires ten times a second. Twenty identical
+    -- lines is not twenty pieces of evidence, and it pushes out the one
+    -- different error that would have explained the whole thing.
+    ------------------------------------------------------------
+    -- Recorded directly rather than through Guard: error() prefixes the
+    -- message with its own file and line, so two calls from two lines produce
+    -- two genuinely different messages -- which is correct, and which the
+    -- first version of this assertion mistook for a deduplication failure.
+    for _ = 1, 50 do
+        errors.Record("a ticker", "the same failure every tick")
+    end
+
+    assert(errors.Count() == 2,
+        "fifty identical failures collapse to one entry, alongside the "
+        .. "earlier distinct one -- got " .. errors.Count())
+
+    local repeated
+
+    for _, entry in ipairs(errors.All()) do
+        if entry.context == "a ticker" then repeated = entry end
+    end
+
+    assert(repeated and repeated.count == 50,
+        "with a count, got " .. tostring(repeated and repeated.count))
+
+    ------------------------------------------------------------
+    -- AND THE BUFFER IS BOUNDED.
+    ------------------------------------------------------------
+    for index = 1, errors.capacity + 10 do
+        errors.Record("context " .. index, "distinct failure " .. index)
+    end
+
+    assert(errors.Count() == errors.capacity,
+        "the ring is capped at " .. errors.capacity
+        .. ", got " .. errors.Count())
+
+    local oldest = errors.All()[1]
+
+    assert(not oldest.message:find("something broke"),
+        "and the oldest entries are the ones dropped")
+
+    assert(errors.Clear() == errors.capacity, "clearing reports what it threw away")
+    assert(errors.Count() == 0, "and empties it")
+
+    -- A successful call must record nothing at all.
+    local fine = errors.Guard("fine", function() return 42 end)
+
+    assert(fine == true, "a successful guard succeeds")
+    assert(errors.Count() == 0, "and records nothing")
+
+    print("  caught, deduplicated, bounded and clearable")
+end)()
+
+print("\nThe things that make it legible:")
+
+;(function()
+    local hud = CN:GetModule("Hud")
+
+    assert(hud, "the Hud module must load")
+
+    ------------------------------------------------------------
+    -- NO INFORMATION CARRIED BY COLOUR ALONE.
+    ------------------------------------------------------------
+    assert(hud.BearingWord(0) == "ahead", "straight on")
+    assert(hud.BearingWord(math.pi) == "back", "and a reversal")
+    assert(hud.BearingWord(nil) == "?", "and an unknown bearing is not a claim")
+
+    local words = {}
+
+    for _, radians in ipairs({ 0, 0.8, 1.6, 3.0 }) do
+        words[hud.BearingWord(radians)] = true
+    end
+
+    local distinct = 0
+
+    for _ in pairs(words) do distinct = distinct + 1 end
+
+    assert(distinct == 4,
+        "four bearings must produce four different words, got " .. distinct)
+
+    ------------------------------------------------------------
+    -- THE SCALE IS BOUNDED, because a scale of 0.01 is an addon the player
+    -- can no longer read well enough to fix.
+    ------------------------------------------------------------
+    local hudSettings = CN.Settings()
+
+    hudSettings.uiScale = 50
+
+    assert(hud.Scale() == 1, "an absurd scale falls back to 1")
+
+    hudSettings.uiScale = 1.25
+
+    assert(hud.Scale() == 1.25, "a sensible one is kept")
+
+    hudSettings.uiScale = nil
+
+    ------------------------------------------------------------
+    -- OFF BY DEFAULT. Everything that puts pixels on screen uninvited is.
+    ------------------------------------------------------------
+    assert(hud.IsEnabled() == false, "the heads-up line is off by default")
+    assert(hud.IsColourblind() == false, "and so is the word mode")
+
+    print("  four distinct bearing words, a bounded scale, both off by default")
+end)()
+
+print("\nDecisions that could go stale:")
+
+;(function()
+    local orders = CN:GetModule("Orders")
+
+    assert(orders, "the Orders module must load")
+
+    ------------------------------------------------------------
+    -- THE DELVES DECISION HAS A TRIGGER, NOT A DATE.
+    --
+    -- "We looked and there was nothing" decays into "nobody ever checked".
+    -- The probe names the exact API that would change the answer.
+    ------------------------------------------------------------
+    local delvesReadable, detail = orders.DelveProgressAvailable()
+
+    assert(delvesReadable == false, "no progress API in this client")
+    assert(detail and detail:find("C_DelvesUI"),
+        "and the reason names the API: " .. tostring(detail))
+
+    -- Now pretend a patch shipped one.
+    C_DelvesUI = { GetDelvesProgress = function() return {} end }
+
+    local nowAvailable, nowDetail = orders.DelveProgressAvailable()
+
+    assert(nowAvailable == true,
+        "a client that exposes progress must be noticed")
+    assert(nowDetail:find("should be tracking"),
+        "and must say what to do about it")
+
+    C_DelvesUI = nil
+
+    print("  the Delves decision re-checks itself against the client")
+end)()
+
+print("\nThe first sixty seconds:")
+
+;(function()
+    local welcome = CN:GetModule("Welcome")
+
+    assert(welcome, "the Welcome module must load")
+
+    local account = CN.Account()
+
+    account.welcomed = nil
+
+    assert(welcome.HasSeen() == false, "a fresh install has not been welcomed")
+
+    ------------------------------------------------------------
+    -- ONCE. EVER.
+    --
+    -- An addon that re-introduces itself is an addon that has not noticed
+    -- you already met.
+    ------------------------------------------------------------
+    welcome.Choose("collecting")
+
+    assert(welcome.HasSeen() == true, "choosing marks it seen")
+
+    -- And dismissing must mark it just as firmly as choosing, or the player
+    -- who said "not now" is asked again tomorrow.
+    account.welcomed = nil
+
+    welcome.MarkSeen()
+
+    assert(welcome.HasSeen() == true, "so does dismissing")
+
+    print("  asked once, whichever way it is answered")
+end)()
+
+
+print("\nEvery command runs without throwing:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CHEAPEST TEST IN THE SUITE, AND ONE OF THE MOST VALUABLE.
+    --
+    -- A command is the only part of this addon a player touches directly, and
+    -- a command that errors on an unusual state -- no data, nothing scanned,
+    -- a client that will not answer -- is the failure they actually see. Half
+    -- the commands in this release were written this week and none of them
+    -- had ever been executed by the suite.
+    --
+    -- Not asserting on output: what each command SAYS is tested elsewhere, by
+    -- tests that know what it means. This asserts only that it survives being
+    -- run against a client that is refusing to be helpful, which is the state
+    -- every one of these hits on a fresh install.
+    ------------------------------------------------------------
+    local commands = {
+        "travel", "situation", "orders", "waiting", "waiting nowhere",
+        "contribute", "contribute forget", "contribute import rubbish",
+        "hud", "hud off", "scale", "scale 1.5", "scale 99",
+        "colourblind", "colourblind off", "cues", "cues off",
+        "errors", "errors clear", "learned", "locale", "locale missing",
+        "instances", "drops", "drops Nothing At All",
+        "selftest", "capture", "capture clear", "dbsize", "welcome",
+    }
+
+    local failures = {}
+
+    for _, command in ipairs(commands) do
+        local ok, err = pcall(CN.HandleSlashCommand, command)
+
+        if not ok then
+            table.insert(failures, command .. " -> " .. tostring(err))
+        end
+    end
+
+    for _, failure in ipairs(failures) do
+        print("  THREW: " .. failure)
+    end
+
+    assert(#failures == 0,
+        #failures .. " command(s) threw against a bare client")
+
+    print("  " .. #commands .. " command invocations, none of them threw")
+
+    -- And the scale command must not have left a silly value behind: "scale
+    -- 99" was in that list deliberately.
+    local hud = CN:GetModule("Hud")
+
+    assert(hud.Scale() >= 0.7 and hud.Scale() <= 2.0,
+        "a refused scale must not be stored, got " .. hud.Scale())
+
+    print("  and a refused setting was not stored")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

@@ -31,6 +31,24 @@ CN.localeKeys = {
     "another zone",
     "Arrived: %s",
     "Now heading to: %s",
+
+    -- Added in 0.43.0. Chosen by where a player's eye actually lands: the
+    -- arrow, the heads-up line, and the words the route says as it advances.
+    "ahead",
+    "veer",
+    "turn",
+    "back",
+    "nothing actionable",
+    "Stop cleared",
+    "Stop %d of %d cleared",
+    "Route complete.",
+    "estimated",
+    "unknown",
+    "ready",
+    "solo",
+    "dead",
+    "grouped",
+    "instanced",
 }
 
 CN.RegisterLocale("enUS", {})

@@ -194,6 +194,13 @@ function Instances.DescribeSource(name)
         text = text .. " in " .. first.instance
     end
 
+    -- WHICH DIFFICULTY, when the journal says so. A mount that only drops on
+    -- Mythic is a different plan from one that drops on Normal, and "go and
+    -- kill it" without that distinction sends people to the wrong lockout.
+    if first.difficulty then
+        text = text .. " |cff999999(" .. first.difficulty .. ")|r"
+    end
+
     if #results > 1 then
         text = text .. " (and " .. (#results - 1) .. " other "
             .. (#results == 2 and "encounter" or "encounters") .. ")"

@@ -24,4 +24,13 @@ CN.RegisterLocale("zhTW", {
     ["another zone"] = "å…¶ä»–å€åŸŸ",
     ["Arrived: %s"] = "å·²æŠµé”ï¼š%s",
     ["Now heading to: %s"] = "ç¾åœ¨å‰å¾€ï¼š%s",
+    ["ahead"] = "ç›´è¡Œ",
+    ["turn"] = "è½‰å‘",
+    ["back"] = "æŠ˜è¿”",
+    ["nothing actionable"] = "æš«ç„¡å¯åš",
+    ["estimated"] = "ä¼°ç®—",
+    ["unknown"] = "æœªçŸ¥",
+    ["ready"] = "å°±ç·’",
+    ["dead"] = "æ­»äº¡",
+    ["grouped"] = "çµ„éšŠä¸­",
 })

@@ -182,6 +182,66 @@ end
 --
 -- `force` exists for the player asking out loud ("/cn follow next"), which is
 -- a different thing from the addon deciding on its own.
+-- PROGRESS THE PLAYER CAN SEE.
+--
+-- Follow mode has always advanced silently: the waypoint moved, and that was
+-- the only evidence anything had happened. Somebody walking a route for
+-- twenty minutes had no sense of getting anywhere, which is the difference
+-- between a tool that feels like it is working with you and one that feels
+-- like a timer.
+--
+-- Counted per run rather than persisted -- "how far through tonight's route
+-- am I" is a question about tonight.
+Follow.completed = 0
+Follow.startedWith = 0
+
+function Follow.NoteStopCleared()
+    Follow.completed = Follow.completed + 1
+
+    local total = Follow.startedWith
+
+    local text = "Stop cleared"
+
+    if total > 0 then
+        text = string.format("Stop %d of %d cleared", Follow.completed, total)
+    end
+
+    Print("|cff73b873" .. text .. "|r")
+
+    -- A COMPLETION MOMENT, when there is genuinely nothing left. The route
+    -- finishing is the only thing this addon does that is worth a small
+    -- flourish, and it happens rarely enough to stay one.
+    if total > 0 and Follow.completed >= total then
+        Print("|cff5dd2fbRoute complete.|r " .. total .. " stops, "
+            .. "everything on it done.")
+
+        Follow.Celebrate()
+    end
+
+    return Follow.completed
+end
+
+-- Sound and a flash, both OFF by default, because unsolicited noise is the
+-- most intrusive thing an addon can do and this addon's standing rule is that
+-- nothing is taken over without being asked.
+function Follow.Celebrate()
+    local settings = CN.Settings()
+
+    if not settings or not settings.cues then
+        return false
+    end
+
+    if PlaySound and SOUNDKIT and SOUNDKIT.UI_QUEST_ROLLING_FORWARD_01 then
+        pcall(PlaySound, SOUNDKIT.UI_QUEST_ROLLING_FORWARD_01)
+    end
+
+    if UIFrameFlash and frame then
+        pcall(UIFrameFlash, frame, 0.3, 0.3, 1.2, false, 0, 0)
+    end
+
+    return true
+end
+
 function Follow.Advance(force)
     if not Follow.active then
         return false
@@ -227,6 +287,12 @@ function Follow.Advance(force)
         current.objectives = remaining
 
         return false
+    end
+
+    -- Something was actually finished if we are moving on from a stop we
+    -- were already on and were not forced.
+    if current.hub and not force then
+        Follow.NoteStopCleared()
     end
 
     Follow.SetStop(hub, remaining)
@@ -405,6 +471,23 @@ function Follow.Start()
     end
 
     Follow.active = true
+
+    Follow.completed = 0
+
+    -- How many stops there were when the route started, so progress can be
+    -- reported as a fraction rather than as a running count that means
+    -- nothing on its own.
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local hubs
+
+    if mapID and CN.BuildZoneRoute then
+        local _, _, built = CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+
+        hubs = built
+    end
+
+    Follow.startedWith = (type(hubs) == "table") and #hubs or 0
 
     Settings().follow = true
 

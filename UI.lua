@@ -217,8 +217,70 @@ local function CreateList(parent)
     -- ending -- a truncated list that looks complete is worse than a long one.
     list.maxRows = 200
 
+    -- A FILTER OVER WHATEVER IS BEING SHOWN.
+    --
+    -- Not a search across everything the addon knows -- that is what the
+    -- commands are for, and a search box that quietly queries a different
+    -- data set than the list under it is a lie about what you are looking at.
+    -- This narrows the rows already on screen, which is what people reach for
+    -- a box for.
+    -- STATE IN A LOCAL, NOT ON THE FRAME.
+    --
+    -- A frame is not a plain table: templates and mixins put a metatable on
+    -- it, and reading an unset field can return something other than nil.
+    -- The first version of this kept `list.filterText` on the frame and
+    -- relied on "unset means nil" -- which held in the game and did not hold
+    -- against the test harness's stub, whose __index answers every key. The
+    -- test caught it; a player with a different UI library might have found
+    -- it instead.
+    local filterText = nil
+
+    function list:SetFilter(text)
+        -- A stub EditBox, or a template whose GetText returns something
+        -- surprising, must not be able to poison the filter with a value that
+        -- string.find will throw on later -- three frames away from here,
+        -- where the cause is not obvious.
+        if type(text) ~= "string" then
+            text = ""
+        end
+
+        text = CN.Trim(text)
+
+        filterText = (text ~= "") and string.lower(text) or nil
+
+        if self.lastEntries then
+            self:SetEntries(self.lastEntries)
+        end
+    end
+
+    function list:Matches(entry)
+        if not filterText then
+            return true
+        end
+
+        local haystack = string.lower(tostring(entry.text or ""))
+
+        -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
+        -- name, not a regular expression, and a stray bracket must not throw.
+        return haystack:find(filterText, 1, true) ~= nil
+    end
+
     -- entries = { { text = , onClick = , tooltip = }, ... }
     function list:SetEntries(entries)
+        self.lastEntries = entries
+
+        if filterText then
+            local kept = {}
+
+            for _, entry in ipairs(entries) do
+                if self:Matches(entry) then
+                    table.insert(kept, entry)
+                end
+            end
+
+            entries = kept
+        end
+
         local width = scroll:GetWidth() or (WINDOW_WIDTH - 60)
 
         local shown = math.min(#entries, self.maxRows)
@@ -405,6 +467,34 @@ local function BuildWindow()
 
     window.tabButtons = {}
 
+    -- A FILTER BOX, ONE PER WINDOW.
+    --
+    -- Sits above the tabs so it plainly applies to whatever tab is showing,
+    -- rather than looking like part of one tab's contents. Empty by default
+    -- and cleared when the tab changes: a filter that persists invisibly
+    -- across tabs is how somebody concludes a list is empty when it is not.
+    local search = CreateFrame("EditBox", nil, window, "InputBoxTemplate")
+
+    search:SetSize(160, 20)
+    search:SetPoint("TOPRIGHT", -30, -26)
+    search:SetAutoFocus(false)
+    search:SetMaxLetters(40)
+
+    local searchLabel = window:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    searchLabel:SetPoint("RIGHT", search, "LEFT", -6, 0)
+    searchLabel:SetText("filter")
+
+    search:SetScript("OnTextChanged", function(self)
+        UI.SetFilter(self:GetText())
+    end)
+
+    search:SetScript("OnEscapePressed", function(self)
+        self:SetText("")
+        self:ClearFocus()
+    end)
+
+    window.search = search
+
     window.body = CreateFrame("Frame", nil, window)
     window.body:SetPoint("TOPLEFT", 10, -58)
     window.body:SetPoint("BOTTOMRIGHT", -10, 34)
@@ -554,6 +644,12 @@ function UI.SelectTab(index)
 
             if not ok then
                 Print("Error building the " .. tab.name .. " tab: " .. tostring(err))
+
+                local errors = CN:GetModule("Errors")
+
+                if errors then
+                    errors.Record("building the " .. tab.name .. " tab", err)
+                end
             end
         end
     end
@@ -567,6 +663,17 @@ end
 -- REFRESH
 ------------------------------------------------------------
 
+-- Applies the filter box to whichever list the current tab is showing.
+function UI.SetFilter(text)
+    local tab = UI.tabs[UI.selectedTab or 1]
+
+    local panel = tab and tab.panel
+
+    if panel and panel.list and panel.list.SetFilter then
+        panel.list:SetFilter(text)
+    end
+end
+
 function UI.Refresh()
     if not window or not window:IsShown() then
         return
@@ -579,6 +686,12 @@ function UI.Refresh()
 
         if not ok then
             Print("Error refreshing the " .. tab.name .. " tab: " .. tostring(err))
+
+            local errors = CN:GetModule("Errors")
+
+            if errors then
+                errors.Record("refreshing the " .. tab.name .. " tab", err)
+            end
         end
     end
 end
@@ -2299,10 +2412,39 @@ function CompletionNavigator_Navigate()
     end
 end
 
+-- One helper rather than three copies of the same four lines. The slash
+-- handler is the single entry point every command already goes through, so a
+-- binding is a keystroke that types for you.
+local function RunCommand(text)
+    local handler = SlashCmdList and SlashCmdList.COMPLETIONNAVIGATOR
+
+    if handler then
+        handler(text)
+    end
+end
+
+function CompletionNavigator_ToggleFollow()
+    RunCommand("follow")
+end
+
+function CompletionNavigator_Plan()
+    -- No argument: /cn plan now defaults to however long this character
+    -- usually plays, which is exactly the right behaviour for a key you press
+    -- without thinking about it.
+    RunCommand("plan")
+end
+
+function CompletionNavigator_ToggleHud()
+    RunCommand("hud")
+end
+
 BINDING_HEADER_COMPLETIONNAVIGATOR       = "Completion Navigator"
 BINDING_NAME_COMPLETIONNAVIGATOR_TOGGLE  = "Toggle window"
 BINDING_NAME_COMPLETIONNAVIGATOR_NEXT    = "Recommend next objective"
 BINDING_NAME_COMPLETIONNAVIGATOR_GO      = "Navigate to recommendation"
+BINDING_NAME_COMPLETIONNAVIGATOR_FOLLOW  = "Start or stop follow mode"
+BINDING_NAME_COMPLETIONNAVIGATOR_PLAN    = "Plan a session"
+BINDING_NAME_COMPLETIONNAVIGATOR_HUD     = "Toggle the heads-up line"
 
 ------------------------------------------------------------
 -- LIFECYCLE

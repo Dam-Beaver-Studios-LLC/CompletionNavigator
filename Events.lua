@@ -54,6 +54,14 @@ local function Dispatch(event, ...)
 
         if not ok then
             Print("Error in " .. event .. " handler: " .. tostring(err))
+
+            -- And keep it, so a bug report can carry the text rather than a
+            -- description of the text.
+            local errors = CN:GetModule("Errors")
+
+            if errors then
+                errors.Record(event .. " handler", err)
+            end
         end
     end
 end

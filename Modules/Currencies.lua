@@ -73,6 +73,7 @@ function Currencies.Scan()
                 earnedThisWeek    = currency.earnedThisWeek,
                 maxWeeklyQuantity = currency.maxWeeklyQuantity,
                 capped            = capped,
+                accountWide       = currency.accountWide or nil,
                 weeklyRemaining   = weeklyLeft,
                 lastSeen          = time(),
             }
@@ -190,11 +191,20 @@ CN.RegisterCandidateProvider("Currencies", function()
         if not CN.IsIgnored(CN.objectiveTypes.CURRENCY, currency.currencyID)
             and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, currency.currencyID) then
 
+            -- ACCOUNT-WIDE CURRENCIES ARE ACCOUNT-WIDE (0.43.0).
+            --
+            -- The client flags these and the addon ignored the flag, so a
+            -- Warband currency capped on one character was recommended again
+            -- on every other one -- the exact mistake the Warband work exists
+            -- to prevent, in the one store that had not been told about it.
+            local shared = currency.accountWide
+
             table.insert(candidates, CN.NewObjective({
                 id               = currency.currencyID,
                 type             = CN.objectiveTypes.CURRENCY,
-                name             = "Spend " .. tostring(currency.name),
-                accountWide      = false,
+                name             = "Spend " .. tostring(currency.name)
+                    .. (shared and " (Warband)" or ""),
+                accountWide      = shared and true or false,
                 completionValue  = 2,
                 limitedTimeBonus = 1,
                 travelCost       = 0,

@@ -24,4 +24,13 @@ CN.RegisterLocale("koKR", {
     ["another zone"] = "ë‹¤ë¥¸ ì§€ì—­",
     ["Arrived: %s"] = "ë„ì°©: %s",
     ["Now heading to: %s"] = "ë‹¤ìŒ ëª©ì ì§€: %s",
+    ["ahead"] = "ì§ì§„",
+    ["turn"] = "ë°©í–¥ ì „í™˜",
+    ["back"] = "ë’¤ë¡œ",
+    ["nothing actionable"] = "í•  ì¼ ì—†ìŒ",
+    ["estimated"] = "ì¶”ì •ì¹˜",
+    ["unknown"] = "ì•Œ ìˆ˜ ì—†ìŒ",
+    ["ready"] = "ì¤€ë¹„ë¨",
+    ["dead"] = "ì‚¬ë§",
+    ["grouped"] = "íŒŒí‹° ì¤‘",
 })

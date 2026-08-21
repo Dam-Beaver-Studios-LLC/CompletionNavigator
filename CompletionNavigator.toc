@@ -2,7 +2,7 @@
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.42.0
+## Version: 0.43.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -12,7 +12,11 @@
 ## X-Email: developer@dambeaverstudios.com
 ## IconTexture: Interface\AddOns\CompletionNavigator\Media\Logo
 ## X-Curse-Project-ID: 1657613
-# ## X-Wago-ID:   (set this if the addon is also published to Wago)
+## X-Wago-ID: 
+# Left blank deliberately: the field must exist for the packager to publish to
+# Wago, and a wrong id publishes into somebody else's project. Fill it in with
+# the id from the Wago project page, then add WAGO_API_TOKEN to the repository
+# secrets -- the workflow already passes it through.
 
 # CN:FILES:BEGIN -- managed by cn.ps1 sync; do not edit by hand.
 Core.lua
@@ -32,6 +36,7 @@ Providers\BtWQuests.lua
 Providers\HandyNotes.lua
 Providers\StaticData.lua
 Providers\TomTom.lua
+Data\Community.lua
 Data\Quests.lua
 Modules\Achievements.lua
 Modules\Alts.lua
@@ -40,18 +45,23 @@ Modules\Breakdown.lua
 Modules\Broker.lua
 Modules\Capture.lua
 Modules\Chase.lua
+Modules\Contribute.lua
 Modules\Currencies.lua
+Modules\Errors.lua
 Modules\Exploration.lua
 Modules\Filters.lua
 Modules\Follow.lua
 Modules\Goals.lua
+Modules\Group.lua
 Modules\Harvest.lua
+Modules\Hud.lua
 Modules\Instances.lua
 Modules\Loremaster.lua
 Modules\MapPins.lua
 Modules\Mounts.lua
 Modules\Navigation.lua
 Modules\Opportunities.lua
+Modules\Orders.lua
 Modules\Pets.lua
 Modules\Preference.lua
 Modules\Professions.lua
@@ -69,6 +79,7 @@ Modules\Travel.lua
 Modules\Vault.lua
 Modules\Vendors.lua
 Modules\Warband.lua
+Modules\Welcome.lua
 Locales\deDE.lua
 Locales\enUS.lua
 Locales\esES.lua

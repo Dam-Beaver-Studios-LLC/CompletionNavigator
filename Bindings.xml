@@ -8,4 +8,13 @@
     <Binding name="COMPLETIONNAVIGATOR_GO" category="ADDONS">
         CompletionNavigator_Navigate()
     </Binding>
+    <Binding name="COMPLETIONNAVIGATOR_FOLLOW" category="ADDONS">
+        CompletionNavigator_ToggleFollow()
+    </Binding>
+    <Binding name="COMPLETIONNAVIGATOR_PLAN" category="ADDONS">
+        CompletionNavigator_Plan()
+    </Binding>
+    <Binding name="COMPLETIONNAVIGATOR_HUD" category="ADDONS">
+        CompletionNavigator_ToggleHud()
+    </Binding>
 </Bindings>

@@ -152,7 +152,10 @@ end
 CN.RegisterCandidateProvider("Opportunities", function()
     local candidates = {}
 
-    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+    -- Only the map is needed now: travel cost is computed by CN.TravelCost,
+    -- which reads the player's position itself so every provider costs a
+    -- journey the same way.
+    local playerMap = CN.GetPlayerPosition()
 
     for _, worldQuest in ipairs(Opportunities.GetWorldQuests(playerMap)) do
         local reasons = {}
@@ -170,19 +173,14 @@ CN.RegisterCandidateProvider("Opportunities", function()
             table.insert(reasons, worldQuest.tagName)
         end
 
-        local travel = 0
+        -- Costed through the real travel model rather than a straight line
+        -- and a flat out-of-zone penalty, the same way quests have been
+        -- since 0.42.0. World quests are exactly where this matters: they
+        -- are scattered across a continent and they expire.
+        local travel = CN.TravelCost(worldQuest.mapID, worldQuest.x, worldQuest.y)
 
-        if worldQuest.x and worldQuest.y and playerX and playerY
-            and worldQuest.mapID == playerMap then
-
-            local dx = worldQuest.x - playerX
-            local dy = worldQuest.y - playerY
-
-            travel = math.sqrt((dx * dx) + (dy * dy)) * 10
-
+        if worldQuest.mapID == playerMap then
             table.insert(reasons, "in your current zone")
-        elseif worldQuest.mapID ~= playerMap then
-            travel = 25
         end
 
         table.insert(candidates, CN.NewObjective({
@@ -199,6 +197,41 @@ CN.RegisterCandidateProvider("Opportunities", function()
             expiresIn        = worldQuest.secondsLeft,
             reasons          = reasons,
         }))
+    end
+
+    -- ACTIVE EVENTS (0.43.0).
+    --
+    -- The calendar has been read since 0.20.0 and its answers went into
+    -- `/cn events` and nowhere else. A holiday or a Timewalking week is a
+    -- deadline in exactly the sense the ranking already understands -- it is
+    -- gone on a known date and it is not coming back for a year -- so it
+    -- belongs in the list rather than in a separate command.
+    for _, event in ipairs(Opportunities.GetActiveEvents()) do
+        if not CN.IsIgnored(CN.objectiveTypes.CURRENCY, event.title)
+            and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, event.title) then
+
+            local reasons = { "world event, on now" }
+
+            if event.endsIn then
+                table.insert(reasons, "ends in "
+                    .. Opportunities.FormatTimeLeft(event.endsIn))
+            end
+
+            -- Deliberately modest. The addon knows the event is running; it
+            -- does not know which of its quests you have done, so claiming
+            -- this is your most valuable next action would be a guess.
+            table.insert(candidates, CN.NewObjective({
+                id               = event.title,
+                type             = CN.objectiveTypes.CURRENCY,
+                name             = event.title,
+                completionValue  = 2,
+                limitedTimeBonus = event.endsIn
+                    and Opportunities.Urgency(event.endsIn) or 1,
+                travelCost       = CN.unknownLocationCost,
+                expiresIn        = event.endsIn,
+                reasons          = reasons,
+            }))
+        end
     end
 
     return candidates
