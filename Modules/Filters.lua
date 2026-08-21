@@ -288,8 +288,17 @@ function Filters.DescribeObjective(objectiveType, id)
     end
 
     if objectiveType == types.PET and numericID then
+        -- The client's journal first: since 0.36.0 the addon no longer keeps
+        -- its own copy of every pet name on disk.
+        local live = CN.Blizzard.GetPetName(numericID)
+
+        if live then
+            return live
+        end
+
         local record = CN.Account("pets")[numericID]
-        return record and record.name or ("Pet " .. numericID)
+
+        return (record and record.name) or ("Pet " .. numericID)
     end
 
     if objectiveType == types.MOUNT and numericID then

@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.35.0'
+$script:ToolkitVersion = '0.36.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,8 +117,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.35.0"
-CN.dbVersion   = 5
+CN.version     = "0.36.0"
+CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -598,6 +598,48 @@ CN.migrations = {
         if dropped > 0 then
             CN.DebugPrint("Dropped " .. dropped
                 .. " cached item names the client already knows.")
+        end
+    end,
+
+    -- 5 -> 6: the same argument, applied to the two remaining stores.
+    --
+    -- Achievements kept a name and a point value for every tracked row;
+    -- pets kept a name for all eighteen hundred. Both come back from the
+    -- client instantly, and both were being written to disk on every logout
+    -- and parsed again on every login.
+    --
+    -- Stripped in place so the space is reclaimed on the next login rather
+    -- than on the next full rescan.
+    [5] = function(db)
+        db.account = db.account or {}
+
+        local dropped = 0
+
+        local function strip(store, fields)
+            if type(store) ~= "table" then
+                return
+            end
+
+            for _, record in pairs(store) do
+                if type(record) == "table" then
+                    for _, field in ipairs(fields) do
+                        if record[field] ~= nil then
+                            record[field] = nil
+                            dropped = dropped + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        strip(db.account.achievements, { "name", "points", "lastSeen" })
+        strip(db.account.pets, { "name", "firstSeen", "lastSeen" })
+        strip(db.account.toys, { "firstSeen", "lastSeen" })
+        strip(db.account.achievementTotals, { "lastSeen" })
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " stored values the client already knows.")
         end
     end,
 }
@@ -6836,6 +6878,25 @@ function Blizzard.GetPetByIndex(index)
     }
 end
 
+-- A pet's name, from the client's own journal.
+--
+-- Exists so the addon can stop keeping its own copy of eighteen hundred pet
+-- names on disk. The journal answers instantly and is always current, which a
+-- saved copy is not.
+function Blizzard.GetPetName(speciesID)
+    if not speciesID or not C_PetJournal or not C_PetJournal.GetPetInfoBySpeciesID then
+        return nil
+    end
+
+    local ok, name = pcall(C_PetJournal.GetPetInfoBySpeciesID, speciesID)
+
+    if ok and name and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
 function Blizzard.GetPetCollectedCount(speciesID)
     if C_PetJournal and C_PetJournal.GetNumCollectedInfo then
         return C_PetJournal.GetNumCollectedInfo(speciesID)
@@ -10974,6 +11035,22 @@ local function Wipe(tbl)
     end
 end
 
+-- An achievement's name, from the client, falling back to whatever an older
+-- database still carries.
+--
+-- Names and point values used to be stored for every tracked achievement --
+-- 394 KB at retail scale, in a file the game rewrites on every logout, and
+-- every byte of it re-derivable from `GetAchievementInfo` in microseconds.
+local function NameOf(achievementID, record)
+    local live = CN.Blizzard.GetAchievementName(achievementID)
+
+    if live then
+        return live
+    end
+
+    return (record and record.name) or ("Achievement " .. tostring(achievementID))
+end
+
 local function Store()
     return CN.Account("achievements")
 end
@@ -10982,7 +11059,8 @@ local function Totals()
     return CN.Account("achievementTotals")
 end
 
-Achievements.Store = Store
+Achievements.Store  = Store
+Achievements.NameOf = NameOf
 
 -- Bumped whenever the store is rewritten, so the candidate provider knows
 -- when its shortlist is stale. See CN.Shortlist.
@@ -11050,7 +11128,6 @@ function Achievements.Scan()
         totals[categoryID] = {
             total     = total,
             completed = categoryCompleted,
-            lastSeen  = time(),
         }
 
         for index = 1, total do
@@ -11070,12 +11147,9 @@ function Achievements.Scan()
                     if criteria == 0 or done > 0 then
                         store[achievement.achievementID] = {
                             achievementID = achievement.achievementID,
-                            name          = achievement.name,
-                            points        = achievement.points,
                             categoryID    = categoryID,
                             done          = done,
                             criteria      = criteria,
-                            lastSeen      = time(),
                         }
 
                         if criteria > 0 and done >= criteria - 2 then
@@ -11123,8 +11197,12 @@ end
 function Achievements.Closest(limit)
     local rows = {}
 
-    for _, record in pairs(Store()) do
+    for achievementID, record in pairs(Store()) do
         if record.criteria and record.criteria > 0 and record.done > 0 then
+            -- The name is resolved once, here, rather than left nil for the
+            -- caller to trip over. It is not read from disk any more.
+            record.resolvedName = NameOf(achievementID, record)
+
             table.insert(rows, record)
         end
     end
@@ -11134,7 +11212,7 @@ function Achievements.Closest(limit)
         local bLeft = b.criteria - b.done
 
         if aLeft == bLeft then
-            return (a.name or "") < (b.name or "")
+            return (a.resolvedName or "") < (b.resolvedName or "")
         end
 
         return aLeft < bLeft
@@ -11164,8 +11242,10 @@ function Achievements.Resolve(text)
     local matches = {}
 
     for id, record in pairs(Store()) do
-        if record.name and string.find(string.lower(record.name), needle, 1, true) then
-            table.insert(matches, { id = id, name = record.name })
+        local name = NameOf(id, record)
+
+        if name and string.find(string.lower(name), needle, 1, true) then
+            table.insert(matches, { id = id, name = name })
         end
     end
 
@@ -11246,7 +11326,7 @@ CN.RegisterCandidateProvider("Achievements", function()
             return CN.NewObjective({
                 id              = achievementID,
                 type            = CN.objectiveTypes.ACHIEVEMENT,
-                name            = record.name,
+                name            = NameOf(achievementID, record),
                 accountWide     = true,
                 completionValue = value,
                 reasons         = {
@@ -11296,7 +11376,6 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
                 local wasNear = IsNearlyDone(record)
 
                 record.done     = done
-                record.lastSeen = time()
 
                 -- Only a change that crosses the shortlist boundary can
                 -- change what the provider would produce. Bumping the
@@ -11352,7 +11431,7 @@ CN:RegisterCommand{
         local closest = Achievements.Closest(5)
 
         for _, record in ipairs(closest) do
-            Print("  " .. record.name .. " |cff999999("
+            Print("  " .. NameOf(record.achievementID or 0, record) .. " |cff999999("
                 .. record.done .. "/" .. record.criteria .. ")|r")
         end
     end,
@@ -11373,7 +11452,7 @@ CN:RegisterCommand{
         end
 
         for index, record in ipairs(closest) do
-            Print(index .. ". " .. record.name .. " |cff999999("
+            Print(index .. ". " .. NameOf(record.achievementID or 0, record) .. " |cff999999("
                 .. record.done .. "/" .. record.criteria .. ", "
                 .. record.points .. " points)|r")
         end
@@ -11401,11 +11480,29 @@ local Blizzard   = CN.Blizzard
 -- STORAGE
 ------------------------------------------------------------
 
+-- A pet's name, from the client, falling back to anything an older database
+-- still carries.
+--
+-- The name used to be stored for all eighteen hundred pets -- 274 KB of a
+-- file the game rewrites on every logout, duplicating a journal the client
+-- keeps in memory anyway. Persist only what the client cannot re-supply.
+local function NameOf(speciesID, record)
+    local live = CN.Blizzard.GetPetName(speciesID)
+
+    if live then
+        return live
+    end
+
+    -- Databases written before 0.36.0 still hold one.
+    return (record and record.name) or ("Pet " .. tostring(speciesID))
+end
+
 local function Store()
     return CN.Account("pets")
 end
 
-Pets.Store = Store
+Pets.Store  = Store
+Pets.NameOf = NameOf
 
 ------------------------------------------------------------
 -- SCAN
@@ -11429,11 +11526,8 @@ function Pets.Scan()
             if pet and pet.speciesID then
                 local collected, limit = Blizzard.GetPetCollectedCount(pet.speciesID)
 
-                local existing = store[pet.speciesID]
-
                 store[pet.speciesID] = {
                     speciesID  = pet.speciesID,
-                    name       = pet.name,
                     petType    = pet.petType,
                     isWild     = pet.isWild,
                     canBattle  = pet.canBattle,
@@ -11441,8 +11535,6 @@ function Pets.Scan()
                     collected  = (collected or 0) > 0,
                     count      = collected or 0,
                     limit      = limit or 3,
-                    firstSeen  = existing and existing.firstSeen or time(),
-                    lastSeen   = time(),
                 }
 
                 seen = seen + 1
@@ -11519,8 +11611,10 @@ function Pets.Resolve(text)
     local matches = {}
 
     for id, record in pairs(Store()) do
-        if record.name and string.find(string.lower(record.name), needle, 1, true) then
-            table.insert(matches, { id = id, name = record.name })
+        local name = NameOf(id, record)
+
+        if name and string.find(string.lower(name), needle, 1, true) then
+            table.insert(matches, { id = id, name = name })
         end
     end
 
@@ -11546,11 +11640,11 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.PET, function(speciesID)
     end
 
     if record.collected then
-        return states.COMPLETED, "Already collected", record.name
+        return states.COMPLETED, "Already collected", NameOf(speciesID, record)
     end
 
     if record.obtainable == false then
-        return states.UNOBTAINABLE, CN.blockReasons.UNOBTAINABLE, record.name
+        return states.UNOBTAINABLE, CN.blockReasons.UNOBTAINABLE, NameOf(speciesID, record)
     end
 
     return states.AVAILABLE, nil, nil
@@ -11594,7 +11688,7 @@ CN.RegisterCandidateProvider("Pets", function()
             return CN.NewObjective({
                 id              = speciesID,
                 type            = CN.objectiveTypes.PET,
-                name            = record.name,
+                name            = NameOf(speciesID, record),
                 accountWide     = true,
                 completionValue = value,
                 reasons         = reasons,
@@ -11691,7 +11785,7 @@ CN:RegisterCommand{
 
         local record = Store()[speciesID]
 
-        Print(record.name .. " |cff999999(" .. speciesID .. ")|r")
+        Print(NameOf(speciesID, record) .. " |cff999999(" .. speciesID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected)
             .. (record.collected and (" (" .. record.count .. "/" .. record.limit .. ")") or ""))
         Print("Wild: " .. CN.YesNo(record.isWild)
@@ -12073,14 +12167,10 @@ function Toys.Scan()
             local toy = Blizzard.GetToyByIndex(index)
 
             if toy and toy.itemID then
-                local existing = store[toy.itemID]
-
                 store[toy.itemID] = {
                     itemID    = toy.itemID,
                     name      = toy.name,
                     collected = toy.collected,
-                    firstSeen = existing and existing.firstSeen or time(),
-                    lastSeen  = time(),
                 }
 
                 seen = seen + 1
@@ -12886,7 +12976,6 @@ function Professions.Scan()
             rank        = line.rank,
             maxRank     = line.maxRank,
             recipesSeen = existing and existing.recipesSeen or false,
-            lastSeen    = time(),
         }
     end
 
@@ -16310,8 +16399,17 @@ function Filters.DescribeObjective(objectiveType, id)
     end
 
     if objectiveType == types.PET and numericID then
+        -- The client's journal first: since 0.36.0 the addon no longer keeps
+        -- its own copy of every pet name on disk.
+        local live = CN.Blizzard.GetPetName(numericID)
+
+        if live then
+            return live
+        end
+
         local record = CN.Account("pets")[numericID]
-        return record and record.name or ("Pet " .. numericID)
+
+        return (record and record.name) or ("Pet " .. numericID)
     end
 
     if objectiveType == types.MOUNT and numericID then
@@ -24212,7 +24310,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.35.0
+## Version: 0.36.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -24432,6 +24530,47 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.36.0]
+
+Finishing what 0.35.0 measured.
+
+### Changed
+
+- **Saved data: 947 KB down to 832 KB**, and 1,275 KB down to 832 KB across
+  the two releases -- a third less written on every logout and parsed on every
+  login.
+  Achievements kept a name and a point value for every tracked row; pets kept
+  a name for all eighteen hundred. Every one of those comes back from the
+  client in microseconds. Names now resolve live, from the achievement info
+  and the pet journal, and databases written before this release still honour
+  whatever name they are carrying until the migration clears it.
+- **Per-row timestamps are gone.** Achievements, pets, toys and recipes each
+  stamped `firstSeen` and `lastSeen` on every row. Nothing read them. Roughly
+  seven thousand rows carried a pair of values that existed only to be written
+  to disk and parsed back. (The per-character `lastSeen` is a different thing
+  and stays -- `/cn alts` needs it to say how old its information is.)
+- The migration reclaims all of it on the next login rather than on the next
+  full rescan.
+
+### Notes
+
+- These were named in the 0.35.0 roadmap with their measurements, and pets
+  were deliberately deferred there because the name had six consumers
+  including a search. Doing it in its own release, with a resolver and tests
+  rather than at the end of an unrelated one, is why it took two versions
+  instead of one.
+- The benchmark fixture had to be corrected first -- twice now. It was writing
+  the *old* shape, so it would have reported a saving that had not happened.
+  A performance measurement taken against a fixture that does not match what
+  the code writes is a measurement of nothing, and this is the second release
+  running where checking that came before believing the number.
+  The timestamp removal is real but does **not** appear in the 832 KB figure,
+  because the fixture never modelled the timestamps in the first place. Said
+  plainly rather than folded into a larger claim.
+- **The navigation arrow is untouched again.** Two fixes to it remain
+  unverified; `/cn navdiag` will answer it in one command when there is time
+  to look.
 
 ## [0.35.0]
 
@@ -26221,7 +26360,7 @@ Deliberately after the above. Polish on top of thin features is lipstick.
 
 **Effort:** moderate. **Risk:** low.
 
-### 2.8 Stop persisting what the client already knows — **started in 0.35.0**
+### 2.8 Stop persisting what the client already knows — **DONE in 0.36.0**
 
 The saved-variables file is rewritten in full on every logout and parsed on every login. Measured at retail scale it was **1,275 KB**, and the largest single contributor was a copy of the client's own item cache: every vendor stored the *name* of every item it sold.
 
@@ -26232,7 +26371,9 @@ Vendors are done — 488 KB to 160 KB, and the total to 947 KB. The same argumen
 | `achievements` | 394 KB | `name`, `points` — both from `GetAchievementInfo` |
 | `pets` | 274 KB | `name` — from `GetPetInfoBySpeciesID` |
 
-Pets were deliberately left alone in 0.35.0: the name has six consumers including a name search, and a six-site refactor rushed at the end of a release is how a saving becomes a regression. `/cn dbsize` reports the current figure so this cannot quietly grow back.
+Both were done in 0.36.0, along with the per-row timestamps that four stores wrote and nothing read. **1,275 KB to 832 KB** across the two releases.
+
+What remains is genuinely earned: quest observations, cross-character knowledge, learned durations, and the player's own settings and goals. `/cn dbsize` reports the current figure so this cannot quietly grow back.
 
 **Effort:** small each. **Risk:** low for achievements, medium for pets.
 
@@ -26524,7 +26665,7 @@ An addon that watches this much of the game can easily cost more than it gives b
 
 It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer — the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 
-It is careful about disk, too. The game rewrites an addon's saved data in full every time you log out and reads it back every time you log in, so this one stores only what the game cannot tell it instantly — your history, what your other characters have done, and your own choices. It does not keep a second copy of things the client already knows. `/cn dbsize` will show you exactly what it is holding.
+It is careful about disk, too — about a third less than it used to write, after two releases spent measuring it. The game rewrites an addon's saved data in full every time you log out and reads it back every time you log in, so this one stores only what the game cannot tell it instantly — your history, what your other characters have done, and your own choices. It does not keep a second copy of things the client already knows. `/cn dbsize` will show you exactly what it is holding.
 
 There is a benchmark in the repository, and the numbers above come out of it rather than out of a marketing meeting.
 
@@ -26576,7 +26717,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.35.0
+0.36.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -27573,6 +27714,19 @@ local petSpecies = {
 }
 
 C_PetJournal = {
+    -- The journal knows every pet's name. The addon stopped keeping its own
+    -- copy in 0.36.0, so this is now the only source -- and a stub that did
+    -- not provide it would make the addon look broken rather than lean.
+    GetPetInfoBySpeciesID = function(speciesID)
+        for _, pet in ipairs(petSpecies or {}) do
+            if pet.speciesID == speciesID then
+                return pet.name
+            end
+        end
+
+        return nil
+    end,
+
     GetSearchFilter          = function() return "" end,
     SetSearchFilter          = function() end,
     SetAllPetSourcesChecked  = function() end,
@@ -32106,6 +32260,88 @@ print("\nWhat gets written to disk:")
 end)()
 
 
+print("\nNames come from the client, not from disk:")
+
+;(function()
+    local pets = CN:GetModule("Pets")
+    local achievements = CN:GetModule("Achievements")
+
+    pets.Scan()
+
+    local petStore = pets.Store()
+
+    local sample = petStore[101]
+
+    assert(sample, "the pet was scanned")
+    assert(sample.name == nil,
+        "a pet name must not be written to disk -- the journal has it")
+    assert(pets.NameOf(101, sample) == "Wild Critter",
+        "and it must resolve from the client, got "
+        .. tostring(pets.NameOf(101, sample)))
+
+    -- An older database still carrying a name must keep working.
+    assert(pets.NameOf(999999, { name = "Legacy Name" }) == "Legacy Name",
+        "a name already on disk is still honoured until the migration runs")
+
+    -- And something the client cannot name must degrade to something
+    -- readable rather than to nil, which would reach the UI as an error.
+    assert(pets.NameOf(999999, nil):find("999999"),
+        "an unknown pet still produces a usable label")
+
+    achievements.Scan()
+
+    local achievementStore = achievements.Store()
+
+    local anyAchievement, anyID = nil, nil
+
+    for id, record in pairs(achievementStore) do
+        if not anyAchievement then
+            anyAchievement, anyID = record, id
+        end
+    end
+
+    if anyAchievement then
+        assert(anyAchievement.name == nil,
+            "an achievement name must not be written to disk")
+        assert(anyAchievement.points == nil,
+            "nor its point value -- the client supplies both")
+        assert(achievements.NameOf(anyID, anyAchievement),
+            "and the name still resolves")
+    end
+
+    -- WRITE-ONLY DATA. These were stamped on every row and read by nothing.
+    for _, record in pairs(petStore) do
+        assert(record.lastSeen == nil and record.firstSeen == nil,
+            "per-row timestamps are written and never read; they must not be "
+            .. "persisted")
+    end
+
+    -- THE MIGRATION reclaims all of it without a rescan.
+    local legacy = {
+        version = 5,
+        account = {
+            achievements = { [1] = { name = "Old", points = 10, done = 1, criteria = 3, lastSeen = 123 } },
+            pets         = { [2] = { name = "Old Pet", collected = true, firstSeen = 1, lastSeen = 2 } },
+        },
+    }
+
+    CN.migrations[5](legacy)
+
+    local a = legacy.account.achievements[1]
+    local p = legacy.account.pets[2]
+
+    assert(a.name == nil and a.points == nil and a.lastSeen == nil,
+        "the migration strips what the client re-supplies")
+    assert(a.done == 1 and a.criteria == 3,
+        "and keeps what it does not -- progress is the addon's own record")
+    assert(p.name == nil and p.firstSeen == nil,
+        "pets are stripped too")
+    assert(p.collected == true, "without losing collection state")
+
+    print("  names resolve live; write-only fields are gone")
+end)()
+
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -32146,9 +32382,10 @@ local N_VENDOR_ITEMS = 400
 
 local pets = CN.Account('pets')
 for i = 1, N_PETS do
+    -- No name: the client's journal has it. Keeping the fixture in step with
+    -- what the addon actually writes is the whole point of measuring.
     pets[10000 + i] = {
         speciesID = 10000 + i,
-        name = "Pet " .. i,
         collected = (i % 3 == 0),
         obtainable = true,
         isWild = (i % 5 == 0),
@@ -32161,7 +32398,6 @@ for i = 1, N_ACHIEVEMENTS do
     local criteria = 1 + (i % 12)
     achievements[20000 + i] = {
         achievementID = 20000 + i,
-        name = "Achievement " .. i,
         criteria = criteria,
         done = math.max(0, criteria - (i % 4)),
         points = 10,

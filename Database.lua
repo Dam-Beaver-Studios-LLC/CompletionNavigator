@@ -206,6 +206,48 @@ CN.migrations = {
                 .. " cached item names the client already knows.")
         end
     end,
+
+    -- 5 -> 6: the same argument, applied to the two remaining stores.
+    --
+    -- Achievements kept a name and a point value for every tracked row;
+    -- pets kept a name for all eighteen hundred. Both come back from the
+    -- client instantly, and both were being written to disk on every logout
+    -- and parsed again on every login.
+    --
+    -- Stripped in place so the space is reclaimed on the next login rather
+    -- than on the next full rescan.
+    [5] = function(db)
+        db.account = db.account or {}
+
+        local dropped = 0
+
+        local function strip(store, fields)
+            if type(store) ~= "table" then
+                return
+            end
+
+            for _, record in pairs(store) do
+                if type(record) == "table" then
+                    for _, field in ipairs(fields) do
+                        if record[field] ~= nil then
+                            record[field] = nil
+                            dropped = dropped + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        strip(db.account.achievements, { "name", "points", "lastSeen" })
+        strip(db.account.pets, { "name", "firstSeen", "lastSeen" })
+        strip(db.account.toys, { "firstSeen", "lastSeen" })
+        strip(db.account.achievementTotals, { "lastSeen" })
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " stored values the client already knows.")
+        end
+    end,
 }
 
 local function Migrate(db)

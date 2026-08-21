@@ -17,11 +17,29 @@ local Blizzard   = CN.Blizzard
 -- STORAGE
 ------------------------------------------------------------
 
+-- A pet's name, from the client, falling back to anything an older database
+-- still carries.
+--
+-- The name used to be stored for all eighteen hundred pets -- 274 KB of a
+-- file the game rewrites on every logout, duplicating a journal the client
+-- keeps in memory anyway. Persist only what the client cannot re-supply.
+local function NameOf(speciesID, record)
+    local live = CN.Blizzard.GetPetName(speciesID)
+
+    if live then
+        return live
+    end
+
+    -- Databases written before 0.36.0 still hold one.
+    return (record and record.name) or ("Pet " .. tostring(speciesID))
+end
+
 local function Store()
     return CN.Account("pets")
 end
 
-Pets.Store = Store
+Pets.Store  = Store
+Pets.NameOf = NameOf
 
 ------------------------------------------------------------
 -- SCAN
@@ -45,11 +63,8 @@ function Pets.Scan()
             if pet and pet.speciesID then
                 local collected, limit = Blizzard.GetPetCollectedCount(pet.speciesID)
 
-                local existing = store[pet.speciesID]
-
                 store[pet.speciesID] = {
                     speciesID  = pet.speciesID,
-                    name       = pet.name,
                     petType    = pet.petType,
                     isWild     = pet.isWild,
                     canBattle  = pet.canBattle,
@@ -57,8 +72,6 @@ function Pets.Scan()
                     collected  = (collected or 0) > 0,
                     count      = collected or 0,
                     limit      = limit or 3,
-                    firstSeen  = existing and existing.firstSeen or time(),
-                    lastSeen   = time(),
                 }
 
                 seen = seen + 1
@@ -135,8 +148,10 @@ function Pets.Resolve(text)
     local matches = {}
 
     for id, record in pairs(Store()) do
-        if record.name and string.find(string.lower(record.name), needle, 1, true) then
-            table.insert(matches, { id = id, name = record.name })
+        local name = NameOf(id, record)
+
+        if name and string.find(string.lower(name), needle, 1, true) then
+            table.insert(matches, { id = id, name = name })
         end
     end
 
@@ -162,11 +177,11 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.PET, function(speciesID)
     end
 
     if record.collected then
-        return states.COMPLETED, "Already collected", record.name
+        return states.COMPLETED, "Already collected", NameOf(speciesID, record)
     end
 
     if record.obtainable == false then
-        return states.UNOBTAINABLE, CN.blockReasons.UNOBTAINABLE, record.name
+        return states.UNOBTAINABLE, CN.blockReasons.UNOBTAINABLE, NameOf(speciesID, record)
     end
 
     return states.AVAILABLE, nil, nil
@@ -210,7 +225,7 @@ CN.RegisterCandidateProvider("Pets", function()
             return CN.NewObjective({
                 id              = speciesID,
                 type            = CN.objectiveTypes.PET,
-                name            = record.name,
+                name            = NameOf(speciesID, record),
                 accountWide     = true,
                 completionValue = value,
                 reasons         = reasons,
@@ -307,7 +322,7 @@ CN:RegisterCommand{
 
         local record = Store()[speciesID]
 
-        Print(record.name .. " |cff999999(" .. speciesID .. ")|r")
+        Print(NameOf(speciesID, record) .. " |cff999999(" .. speciesID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected)
             .. (record.collected and (" (" .. record.count .. "/" .. record.limit .. ")") or ""))
         Print("Wild: " .. CN.YesNo(record.isWild)

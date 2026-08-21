@@ -26,6 +26,22 @@ local function Wipe(tbl)
     end
 end
 
+-- An achievement's name, from the client, falling back to whatever an older
+-- database still carries.
+--
+-- Names and point values used to be stored for every tracked achievement --
+-- 394 KB at retail scale, in a file the game rewrites on every logout, and
+-- every byte of it re-derivable from `GetAchievementInfo` in microseconds.
+local function NameOf(achievementID, record)
+    local live = CN.Blizzard.GetAchievementName(achievementID)
+
+    if live then
+        return live
+    end
+
+    return (record and record.name) or ("Achievement " .. tostring(achievementID))
+end
+
 local function Store()
     return CN.Account("achievements")
 end
@@ -34,7 +50,8 @@ local function Totals()
     return CN.Account("achievementTotals")
 end
 
-Achievements.Store = Store
+Achievements.Store  = Store
+Achievements.NameOf = NameOf
 
 -- Bumped whenever the store is rewritten, so the candidate provider knows
 -- when its shortlist is stale. See CN.Shortlist.
@@ -102,7 +119,6 @@ function Achievements.Scan()
         totals[categoryID] = {
             total     = total,
             completed = categoryCompleted,
-            lastSeen  = time(),
         }
 
         for index = 1, total do
@@ -122,12 +138,9 @@ function Achievements.Scan()
                     if criteria == 0 or done > 0 then
                         store[achievement.achievementID] = {
                             achievementID = achievement.achievementID,
-                            name          = achievement.name,
-                            points        = achievement.points,
                             categoryID    = categoryID,
                             done          = done,
                             criteria      = criteria,
-                            lastSeen      = time(),
                         }
 
                         if criteria > 0 and done >= criteria - 2 then
@@ -175,8 +188,12 @@ end
 function Achievements.Closest(limit)
     local rows = {}
 
-    for _, record in pairs(Store()) do
+    for achievementID, record in pairs(Store()) do
         if record.criteria and record.criteria > 0 and record.done > 0 then
+            -- The name is resolved once, here, rather than left nil for the
+            -- caller to trip over. It is not read from disk any more.
+            record.resolvedName = NameOf(achievementID, record)
+
             table.insert(rows, record)
         end
     end
@@ -186,7 +203,7 @@ function Achievements.Closest(limit)
         local bLeft = b.criteria - b.done
 
         if aLeft == bLeft then
-            return (a.name or "") < (b.name or "")
+            return (a.resolvedName or "") < (b.resolvedName or "")
         end
 
         return aLeft < bLeft
@@ -216,8 +233,10 @@ function Achievements.Resolve(text)
     local matches = {}
 
     for id, record in pairs(Store()) do
-        if record.name and string.find(string.lower(record.name), needle, 1, true) then
-            table.insert(matches, { id = id, name = record.name })
+        local name = NameOf(id, record)
+
+        if name and string.find(string.lower(name), needle, 1, true) then
+            table.insert(matches, { id = id, name = name })
         end
     end
 
@@ -298,7 +317,7 @@ CN.RegisterCandidateProvider("Achievements", function()
             return CN.NewObjective({
                 id              = achievementID,
                 type            = CN.objectiveTypes.ACHIEVEMENT,
-                name            = record.name,
+                name            = NameOf(achievementID, record),
                 accountWide     = true,
                 completionValue = value,
                 reasons         = {
@@ -348,7 +367,6 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
                 local wasNear = IsNearlyDone(record)
 
                 record.done     = done
-                record.lastSeen = time()
 
                 -- Only a change that crosses the shortlist boundary can
                 -- change what the provider would produce. Bumping the
@@ -404,7 +422,7 @@ CN:RegisterCommand{
         local closest = Achievements.Closest(5)
 
         for _, record in ipairs(closest) do
-            Print("  " .. record.name .. " |cff999999("
+            Print("  " .. NameOf(record.achievementID or 0, record) .. " |cff999999("
                 .. record.done .. "/" .. record.criteria .. ")|r")
         end
     end,
@@ -425,7 +443,7 @@ CN:RegisterCommand{
         end
 
         for index, record in ipairs(closest) do
-            Print(index .. ". " .. record.name .. " |cff999999("
+            Print(index .. ". " .. NameOf(record.achievementID or 0, record) .. " |cff999999("
                 .. record.done .. "/" .. record.criteria .. ", "
                 .. record.points .. " points)|r")
         end

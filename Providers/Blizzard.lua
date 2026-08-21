@@ -571,6 +571,25 @@ function Blizzard.GetPetByIndex(index)
     }
 end
 
+-- A pet's name, from the client's own journal.
+--
+-- Exists so the addon can stop keeping its own copy of eighteen hundred pet
+-- names on disk. The journal answers instantly and is always current, which a
+-- saved copy is not.
+function Blizzard.GetPetName(speciesID)
+    if not speciesID or not C_PetJournal or not C_PetJournal.GetPetInfoBySpeciesID then
+        return nil
+    end
+
+    local ok, name = pcall(C_PetJournal.GetPetInfoBySpeciesID, speciesID)
+
+    if ok and name and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
 function Blizzard.GetPetCollectedCount(speciesID)
     if C_PetJournal and C_PetJournal.GetNumCollectedInfo then
         return C_PetJournal.GetNumCollectedInfo(speciesID)

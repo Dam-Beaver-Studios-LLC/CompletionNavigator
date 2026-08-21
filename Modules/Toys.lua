@@ -38,14 +38,10 @@ function Toys.Scan()
             local toy = Blizzard.GetToyByIndex(index)
 
             if toy and toy.itemID then
-                local existing = store[toy.itemID]
-
                 store[toy.itemID] = {
                     itemID    = toy.itemID,
                     name      = toy.name,
                     collected = toy.collected,
-                    firstSeen = existing and existing.firstSeen or time(),
-                    lastSeen  = time(),
                 }
 
                 seen = seen + 1

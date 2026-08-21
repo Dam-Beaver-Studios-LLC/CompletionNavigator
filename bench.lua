@@ -33,9 +33,10 @@ local N_VENDOR_ITEMS = 400
 
 local pets = CN.Account('pets')
 for i = 1, N_PETS do
+    -- No name: the client's journal has it. Keeping the fixture in step with
+    -- what the addon actually writes is the whole point of measuring.
     pets[10000 + i] = {
         speciesID = 10000 + i,
-        name = "Pet " .. i,
         collected = (i % 3 == 0),
         obtainable = true,
         isWild = (i % 5 == 0),
@@ -48,7 +49,6 @@ for i = 1, N_ACHIEVEMENTS do
     local criteria = 1 + (i % 12)
     achievements[20000 + i] = {
         achievementID = 20000 + i,
-        name = "Achievement " .. i,
         criteria = criteria,
         done = math.max(0, criteria - (i % 4)),
         points = 10,

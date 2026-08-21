@@ -82,7 +82,6 @@ function Professions.Scan()
             rank        = line.rank,
             maxRank     = line.maxRank,
             recipesSeen = existing and existing.recipesSeen or false,
-            lastSeen    = time(),
         }
     end
 

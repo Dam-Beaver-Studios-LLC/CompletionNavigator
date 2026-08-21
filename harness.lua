@@ -623,6 +623,19 @@ local petSpecies = {
 }
 
 C_PetJournal = {
+    -- The journal knows every pet's name. The addon stopped keeping its own
+    -- copy in 0.36.0, so this is now the only source -- and a stub that did
+    -- not provide it would make the addon look broken rather than lean.
+    GetPetInfoBySpeciesID = function(speciesID)
+        for _, pet in ipairs(petSpecies or {}) do
+            if pet.speciesID == speciesID then
+                return pet.name
+            end
+        end
+
+        return nil
+    end,
+
     GetSearchFilter          = function() return "" end,
     SetSearchFilter          = function() end,
     SetAllPetSourcesChecked  = function() end,
@@ -5153,6 +5166,88 @@ print("\nWhat gets written to disk:")
     store[88888] = nil
 
     print(string.format("  a 300-item vendor costs %.1f KB", bytes / 1024))
+end)()
+
+
+print("\nNames come from the client, not from disk:")
+
+;(function()
+    local pets = CN:GetModule("Pets")
+    local achievements = CN:GetModule("Achievements")
+
+    pets.Scan()
+
+    local petStore = pets.Store()
+
+    local sample = petStore[101]
+
+    assert(sample, "the pet was scanned")
+    assert(sample.name == nil,
+        "a pet name must not be written to disk -- the journal has it")
+    assert(pets.NameOf(101, sample) == "Wild Critter",
+        "and it must resolve from the client, got "
+        .. tostring(pets.NameOf(101, sample)))
+
+    -- An older database still carrying a name must keep working.
+    assert(pets.NameOf(999999, { name = "Legacy Name" }) == "Legacy Name",
+        "a name already on disk is still honoured until the migration runs")
+
+    -- And something the client cannot name must degrade to something
+    -- readable rather than to nil, which would reach the UI as an error.
+    assert(pets.NameOf(999999, nil):find("999999"),
+        "an unknown pet still produces a usable label")
+
+    achievements.Scan()
+
+    local achievementStore = achievements.Store()
+
+    local anyAchievement, anyID = nil, nil
+
+    for id, record in pairs(achievementStore) do
+        if not anyAchievement then
+            anyAchievement, anyID = record, id
+        end
+    end
+
+    if anyAchievement then
+        assert(anyAchievement.name == nil,
+            "an achievement name must not be written to disk")
+        assert(anyAchievement.points == nil,
+            "nor its point value -- the client supplies both")
+        assert(achievements.NameOf(anyID, anyAchievement),
+            "and the name still resolves")
+    end
+
+    -- WRITE-ONLY DATA. These were stamped on every row and read by nothing.
+    for _, record in pairs(petStore) do
+        assert(record.lastSeen == nil and record.firstSeen == nil,
+            "per-row timestamps are written and never read; they must not be "
+            .. "persisted")
+    end
+
+    -- THE MIGRATION reclaims all of it without a rescan.
+    local legacy = {
+        version = 5,
+        account = {
+            achievements = { [1] = { name = "Old", points = 10, done = 1, criteria = 3, lastSeen = 123 } },
+            pets         = { [2] = { name = "Old Pet", collected = true, firstSeen = 1, lastSeen = 2 } },
+        },
+    }
+
+    CN.migrations[5](legacy)
+
+    local a = legacy.account.achievements[1]
+    local p = legacy.account.pets[2]
+
+    assert(a.name == nil and a.points == nil and a.lastSeen == nil,
+        "the migration strips what the client re-supplies")
+    assert(a.done == 1 and a.criteria == 3,
+        "and keeps what it does not -- progress is the addon's own record")
+    assert(p.name == nil and p.firstSeen == nil,
+        "pets are stripped too")
+    assert(p.collected == true, "without losing collection state")
+
+    print("  names resolve live; write-only fields are gone")
 end)()
 
 

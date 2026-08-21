@@ -7,6 +7,47 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.36.0]
+
+Finishing what 0.35.0 measured.
+
+### Changed
+
+- **Saved data: 947 KB down to 832 KB**, and 1,275 KB down to 832 KB across
+  the two releases -- a third less written on every logout and parsed on every
+  login.
+  Achievements kept a name and a point value for every tracked row; pets kept
+  a name for all eighteen hundred. Every one of those comes back from the
+  client in microseconds. Names now resolve live, from the achievement info
+  and the pet journal, and databases written before this release still honour
+  whatever name they are carrying until the migration clears it.
+- **Per-row timestamps are gone.** Achievements, pets, toys and recipes each
+  stamped `firstSeen` and `lastSeen` on every row. Nothing read them. Roughly
+  seven thousand rows carried a pair of values that existed only to be written
+  to disk and parsed back. (The per-character `lastSeen` is a different thing
+  and stays -- `/cn alts` needs it to say how old its information is.)
+- The migration reclaims all of it on the next login rather than on the next
+  full rescan.
+
+### Notes
+
+- These were named in the 0.35.0 roadmap with their measurements, and pets
+  were deliberately deferred there because the name had six consumers
+  including a search. Doing it in its own release, with a resolver and tests
+  rather than at the end of an unrelated one, is why it took two versions
+  instead of one.
+- The benchmark fixture had to be corrected first -- twice now. It was writing
+  the *old* shape, so it would have reported a saving that had not happened.
+  A performance measurement taken against a fixture that does not match what
+  the code writes is a measurement of nothing, and this is the second release
+  running where checking that came before believing the number.
+  The timestamp removal is real but does **not** appear in the 832 KB figure,
+  because the fixture never modelled the timestamps in the first place. Said
+  plainly rather than folded into a larger claim.
+- **The navigation arrow is untouched again.** Two fixes to it remain
+  unverified; `/cn navdiag` will answer it in one command when there is time
+  to look.
+
 ## [0.35.0]
 
 A third of what this addon saved to disk was a copy of something the game
