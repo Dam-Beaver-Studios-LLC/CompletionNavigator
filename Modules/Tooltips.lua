@@ -289,6 +289,22 @@ function Tooltips.ItemLines(itemID, itemName)
             if reason then
                 Add(lines, reason, { 0.6, 0.6, 0.6 })
             end
+
+            -- ONE MORE LINE, WHERE IT SAYS SOMETHING THE FIRST DID NOT.
+            --
+            -- 0.43.0 added the top reason, which answers "should I care?".
+            -- The second question a player asks of a collectible is "where
+            -- does it come from?", and the addon has known that since 0.41.0
+            -- without ever putting it where the mouse already is.
+            local instances = CN:GetModule("Instances")
+
+            if instances and itemName then
+                local ok, source = pcall(instances.DescribeSource, itemName)
+
+                if ok and source then
+                    Add(lines, "Drops from " .. source, { 0.6, 0.6, 0.6 })
+                end
+            end
         end
     end
 

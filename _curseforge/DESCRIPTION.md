@@ -88,6 +88,8 @@ The route is drawn on the world map as numbered pins, one per stop, in walking o
 
 Toggle with `/cn pins`, or from the options panel.
 
+Lists in the window can be sorted alphabetically as well as by rank, and the filter box can follow you between tabs if you want it to (`/cn keepfilter`).
+
 ## Quests you have not picked up yet
 
 The exclamation marks in front of you are often the cheapest next action available. Completion Navigator reads available quests from the map, not only your quest log, so *"go and collect that one"* is an answer it can give â€” weighted above an accepted quest you have not started, because the walk is short and it unlocks whatever follows.
@@ -143,6 +145,9 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **Your mailbox** | What is expiring, and whether anything is attached to it |
 | **Keystones** | The one you hold, and that it is replaced at the reset |
 | **Profession knowledge** | Weekly, capped, and gone if the week passes |
+| **Appearance sets** | Which are nearly complete, with a real count of pieces |
+| **Your bank** | Recorded when you open one, so what is in it stays findable |
+| **Flight paths you have flown** | So a route the addon suggests is one you can actually take |
 | **World events** | Timewalking and holidays, weighted by when they end |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
 
@@ -197,7 +202,9 @@ The addon notices which kinds of objective you go and do, and leans that way. Th
 /cn bags
 ```
 
-A surprising amount of *what should I do next* is already in there: the item that starts a quest, sitting since a boss dropped it, and mounts, pets and toys you own and have not learned. Those cost **zero** travel, because they are in your bag â€” which makes them the cheapest thing the addon can ever recommend.
+A surprising amount of *what should I do next* is already in there: the item that starts a quest, sitting since a boss dropped it, mounts, pets and toys you own and have not learned, and recipes you bought and never used. Those cost **zero** travel, because they are in your bag â€” which makes them the cheapest thing the addon can ever recommend.
+
+It also knows how close you are, in things rather than in percent. *One more feather* and *eighteen more boars* are different suggestions, and the first one outranks a quest you have not started.
 
 Nothing is used, learned, moved or sold on your behalf. It reads.
 
@@ -208,6 +215,14 @@ Nothing is used, learned, moved or sold on your behalf. It reads.
 ```
 
 Mail about to expire **with something attached** â€” expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Weekly profession knowledge, which is the most permanently missable thing in the game. Heirlooms.
+
+## Sets, not just pieces
+
+```
+/cn sets
+```
+
+Collecting appearances is done by set â€” nobody wants *one more shoulder*, they want the set finished. The game supplies a real denominator there, which this addon is otherwise short of, so **four of five pieces** is a fact rather than an estimate. A set you have barely begun is a decision about your evening, not a next action, and is left out.
 
 ## Where to go when this zone is done
 
@@ -321,6 +336,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn clock` | Everything with a deadline that is not a quest |
 | `/cn nearby` | What is worth doing outside this zone, and how far away it is |
 | `/cn order` | Why the list is in the order it is in |
+| `/cn sets` | Appearance sets nearly finished, and your guild |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |

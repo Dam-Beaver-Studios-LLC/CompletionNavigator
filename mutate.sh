@@ -163,6 +163,51 @@ mutate "Modules/Errors.lua" \
     "    while false do" \
     "the error ring grows without bound"
 
+mutate "Modules/Inventory.lua" \
+    "        if not objective.finished then" \
+    "        if true then" \
+    "finished objectives are reported as work left"
+
+mutate "Modules/Inventory.lua" \
+    "            if objective.remaining <= Inventory.nearlyDoneRemaining then" \
+    "            if true then" \
+    "everything is called nearly done"
+
+mutate "Modules/Travel.lua" \
+    "    if fromID > toID then
+        fromID, toID = toID, fromID
+    end" \
+    "    if false then
+        fromID, toID = toID, fromID
+    end" \
+    "a flight only counts in the direction it was flown"
+
+mutate "UI/List.lua" \
+    "        if mode == \"ranked\" then
+            return entries
+        end" \
+    "        if false then
+            return entries
+        end" \
+    "the ranking is re-sorted alphabetically by default"
+
+mutate "Modules/Sets.lua" \
+    "        if set.total > 0 and missing > 0 and missing <= maxMissing then" \
+    "        if set.total > 0 and missing <= maxMissing then" \
+    "a finished set is offered as nearly finished"
+
+# The break the 0.45.0 split actually introduced, kept as a permanent guard:
+# the tab builders must reach the list constructor through the table, because
+# UI/List.lua loads after UI.lua and a local captured there is nil forever.
+mutate "UI.lua" \
+    "        panel.list = UI.CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint(\"TOPLEFT\", panel.why, \"BOTTOMLEFT\", -4, -14)" \
+    "        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint(\"TOPLEFT\", panel.why, \"BOTTOMLEFT\", -4, -14)" \
+    "a tab builder calls the list constructor as a global"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

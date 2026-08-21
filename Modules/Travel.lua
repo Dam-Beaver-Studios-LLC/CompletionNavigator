@@ -423,6 +423,116 @@ function Travel.ObserveFlight()
 end
 
 ------------------------------------------------------------
+-- WHICH FLIGHTS ACTUALLY CONNECT
+------------------------------------------------------------
+
+-- THE ASSUMPTION THIS REPLACES.
+--
+-- The costing has assumed since 0.42.0 that any flight point on a continent
+-- can reach any other. Mostly true, and wrong often enough to matter: routes
+-- go through hubs, some connect only one way, and a few zones are served by a
+-- single node that reaches almost nothing.
+--
+-- There is no API that answers "does A connect to B". There is, however, the
+-- player, who takes flights -- and a flight taken is proof that its two ends
+-- connect. So: watch, remember, and prefer a pair that is known to work over
+-- one that is merely plausible.
+--
+-- Nothing is ever ruled OUT by this. A pair never observed is not a pair that
+-- does not connect; it is a pair nobody has flown yet, and treating those as
+-- impossible would make the model worse than the assumption it replaces.
+local function Routes()
+    return CN.Account("flightRoutes")
+end
+
+Travel.Routes = Routes
+
+local function RouteKey(fromID, toID)
+    if not fromID or not toID then
+        return nil
+    end
+
+    -- Undirected: a flight path that carries you one way is evidence the two
+    -- points are on the same network, which is what the costing needs.
+    if fromID > toID then
+        fromID, toID = toID, fromID
+    end
+
+    return fromID .. ":" .. toID
+end
+
+Travel.RouteKey = RouteKey
+
+function Travel.NoteRoute(fromID, toID)
+    local key = RouteKey(fromID, toID)
+
+    if not key then
+        return false
+    end
+
+    local routes = Routes()
+
+    routes[key] = (routes[key] or 0) + 1
+
+    return true
+end
+
+function Travel.IsKnownRoute(fromID, toID)
+    local key = RouteKey(fromID, toID)
+
+    return key ~= nil and (Routes()[key] or 0) > 0
+end
+
+-- How much a known pair is preferred. A multiplier on the estimate rather
+-- than a hard filter, because an unobserved pair is unproven, not impossible
+-- -- and a small preference is enough to break a tie between two routes of
+-- similar length.
+Travel.knownRouteBonus = 0.9
+
+-- The flight the player is currently on, so its endpoints can be recorded
+-- when it ends. Which node they left from is known at the moment they board:
+-- it is the nearest one to where they were standing.
+local boarding = nil
+
+function Travel.NoteBoarding()
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local point = mapID and Travel.WorldPoint(mapID, x, y)
+
+    local node = point and Travel.NearestNode(point, Travel.KnownNodes(mapID))
+
+    boarding = node and node.id or nil
+
+    return boarding
+end
+
+function Travel.NoteLanding()
+    if not boarding then
+        return false
+    end
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local point = mapID and Travel.WorldPoint(mapID, x, y)
+
+    local node = point and Travel.NearestNode(point, Travel.KnownNodes(mapID))
+
+    local landed = node and node.id
+
+    local recorded = false
+
+    if landed and landed ~= boarding then
+        recorded = Travel.NoteRoute(boarding, landed)
+
+        DebugPrint("Flight recorded: " .. boarding .. " to " .. landed .. ".")
+    end
+
+    boarding = nil
+
+    return recorded
+end
+
+------------------------------------------------------------
 -- FLYING YOURSELF
 ------------------------------------------------------------
 
@@ -830,6 +940,13 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
                                 + (flightYards / flightSpeed)
                                 + (arrivalYards / runSpeed)
 
+                            -- A pair the player has actually flown beats an
+                            -- equivalent pair nobody has: same distance, one
+                            -- of them proven to connect.
+                            if Travel.IsKnownRoute(origin.id, arrival.id) then
+                                seconds = seconds * Travel.knownRouteBonus
+                            end
+
                             if seconds < best.seconds then
                                 best = {
                                     seconds     = seconds,
@@ -987,6 +1104,9 @@ local ticker
 Travel.tickSeconds = 1
 
 CN:RegisterEvent("PLAYER_CONTROL_LOST", function()
+    -- Losing control is the moment a flight starts. Record where from.
+    pcall(Travel.NoteBoarding)
+
     if ticker or not C_Timer or not C_Timer.NewTicker then
         return
     end
@@ -995,6 +1115,9 @@ CN:RegisterEvent("PLAYER_CONTROL_LOST", function()
         local flying = Travel.ObserveFlight()
 
         if not flying and ticker then
+            -- The flight has ended: record which two points it joined.
+            pcall(Travel.NoteLanding)
+
             ticker:Cancel()
             ticker = nil
         end

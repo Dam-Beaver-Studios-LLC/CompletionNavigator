@@ -139,7 +139,7 @@ end
 
 CN:RegisterCommand{
     name    = "locale",
-    args    = "[missing]",
+    args    = "[missing or export]",
     order   = 33,
     help    = "Which language the addon is using, and how much is translated.",
     handler = function(args)
@@ -193,6 +193,35 @@ CN:RegisterCommand{
                 .. "English this session. |cffffff00/cn locale missing|r "
                 .. "lists them -- that list is exactly what a translator "
                 .. "needs.|r")
+        end
+
+        if args == "export" then
+            -- A PASTE-READY FILE, NOT A LIST TO RETYPE.
+            --
+            -- `/cn locale missing` names what fell back to English, which is
+            -- the right diagnostic and the wrong deliverable: a translator
+            -- then has to build the Lua themselves, and the barrier to
+            -- helping should not include learning this addon's file format.
+            local keys = {}
+
+            for _, key in ipairs(CN.localeKeys or {}) do
+                table.insert(keys, key)
+            end
+
+            table.sort(keys)
+
+            Print("Paste this into Locales/" .. stats.locale .. ".lua and "
+                .. "fill in the right-hand side:")
+
+            for _, key in ipairs(keys) do
+                Print('    ["' .. key .. '"] = "",')
+            end
+
+            Print("|cff999999" .. #keys .. " keys. Leave anything you are not "
+                .. "sure of blank -- an empty string is ignored, and English "
+                .. "is a better answer than a guess.|r")
+
+            return
         end
 
         local languages = {}

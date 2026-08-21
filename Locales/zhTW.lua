@@ -33,4 +33,11 @@ CN.RegisterLocale("zhTW", {
     ["ready"] = "å°±ç·’",
     ["dead"] = "æ­»äº¡",
     ["grouped"] = "çµ„éšŠä¸­",
+    ["left"] = "å‰©é¤˜",
+    ["expiring"] = "å³å°‡éŽæœŸ",
+    ["in your bags"] = "åœ¨ä½ çš„èƒŒåŒ…è£¡",
+    ["uncollected"] = "æœªæ”¶é›†",
+    ["%d of %d"] = "%d / %d",
+    ["on foot"] = "æ­¥è¡Œ",
+    ["measured"] = "å¯¦æ¸¬",
 })

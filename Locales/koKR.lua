@@ -33,4 +33,11 @@ CN.RegisterLocale("koKR", {
     ["ready"] = "ì¤€ë¹„ë¨",
     ["dead"] = "ì‚¬ë§",
     ["grouped"] = "íŒŒí‹° ì¤‘",
+    ["left"] = "ë‚¨ìŒ",
+    ["expiring"] = "ë§Œë£Œ ìž„ë°•",
+    ["in your bags"] = "ê°€ë°© ì•ˆ",
+    ["uncollected"] = "ë¯¸ìˆ˜ì§‘",
+    ["%d of %d"] = "%d / %d",
+    ["on foot"] = "ë„ë³´",
+    ["measured"] = "ì¸¡ì •ë¨",
 })

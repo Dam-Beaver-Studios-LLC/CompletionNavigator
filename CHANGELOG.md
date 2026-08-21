@@ -7,6 +7,94 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.45.0]
+
+Two promises this addon made in writing and did not keep, the last of the
+backlog that can be built without a live client, and the first structural
+split of the codebase.
+
+### Fixed
+
+- **Two features that existed only in a comment.** `Modules/Inventory.lua`
+  opened, in 0.44.0, by saying the addon would tell you *"forty of the fifty
+  things a quest wants, so the answer is ten more"* and would notice *"a
+  recipe you already own and have not learned"*. It did neither: the file
+  collected quest starters and stopped. Writing down what something is going
+  to do and then not doing it is worse than not writing it down, because the
+  next reader believes it. Both are built now, and the counting one is worth
+  **more the closer it is** -- "one more feather" outranks a quest not begun.
+- **`Inventory.bankIDs` had been declared and read by nothing** since the
+  module was written -- a list of container numbers sitting there looking like
+  a feature. The bank is scanned when you open one, remembered by item, and
+  reported with its age, because the client will not describe a bank you are
+  not standing at.
+
+### Added
+
+- **Appearance sets.** The addon has tracked individual appearances since
+  0.13.0 without ever knowing the game groups them -- and collecting is
+  overwhelmingly done by set. "Four of five pieces" is a real denominator,
+  which this addon is normally short of. A finished set is not offered as
+  nearly finished; a set barely begun is a decision, not a next action.
+- **Your guild, and what you could queue for** -- read-only. The addon does
+  not put you in a queue, and will not.
+- **Flight paths are learned rather than assumed.** The costing has assumed
+  since 0.42.0 that any flight point reaches any other on a continent. Mostly
+  true; wrong often enough to matter. There is no API for "does A connect to
+  B", so the addon watches the flights you take -- a flight taken is proof --
+  and prefers a proven pair. A pair never flown is **not** ruled out: that
+  would be worse than the assumption it replaces.
+- **`/cn locale export`** prints a paste-ready block for a translator, rather
+  than a list they would have to turn into Lua themselves.
+- **Sortable lists** -- as ranked, alphabetical, reversed. "As ranked" is
+  first, so the default never changes for anybody who does not go looking.
+- **The window's filter can follow you between tabs** (`/cn keepfilter`), off
+  by default, because a filter that persists invisibly is how a list looks
+  empty when it is not.
+- **Middle-click the minimap button** to start or stop follow mode.
+- **Tooltips say where a collectible drops from**, which the addon has known
+  since 0.41.0 without putting it where the mouse already is.
+- **`cn.ps1 provenance`** -- how many quest rows are curated, how many were
+  folded in from observed play, and how many were contributed. The
+  distinction is preserved carefully at runtime and was invisible in the
+  repository, where the decisions get made.
+- **Sixteen more translated strings** across ten languages.
+
+### Structure
+
+- **`Providers/Blizzard.lua` split into three** at 2,250 lines --
+  quests/reputation/character/map, collections, and the world -- divided by
+  what the client is asked about, because that is how patches break things.
+  `CN.Blizzard` is still one table.
+- **The list widget moved out of `UI.lua`** into `UI/List.lua`. It is the
+  piece with the least to do with the rest: it knows about rows, pooling,
+  filtering and sorting, and nothing about what is in them.
+- **`Modules/Navigation.lua` was deliberately NOT split.** Its four sections
+  share half a dozen upvalues -- the target, the arrow, the smoothing state,
+  the calibration counters -- so separating them is a real refactor rather
+  than a move. It is also the one subsystem carrying a fix that has not yet
+  been confirmed in game. Splitting it now would mean that if the arrow is
+  still wrong, nobody could tell which change did it.
+
+### Tooling
+
+- **Twenty-three mutations, up from eighteen.** The five new ones found one
+  hole, now closed.
+- **A test that had quietly become two assertions in one.** "Appearance
+  candidates are capped" counted objectives BY TYPE across the whole list, so
+  the moment a second provider began emitting appearances it was asserting
+  something about two unrelated caps added together. It counts its own
+  provider now.
+- **The curated data accessors have tests at last.** Class, race, faction,
+  level and turn-in shipped as schema in 0.43.0 with no rows and nothing
+  exercising the readers -- a schema nothing reads is a schema that is wrong
+  the first time somebody fills it in.
+
+### Notes
+
+- An unknown quest is eligible. Absence of curated data is not a block, and
+  never becomes one.
+
 ## [0.44.0]
 
 The addon can see your bags, your mailbox and your keystone; it can cost a

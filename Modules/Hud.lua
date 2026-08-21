@@ -405,6 +405,34 @@ CN:RegisterCommand{
 }
 
 CN:RegisterCommand{
+    name    = "keepfilter",
+    args    = "[on or off]",
+    order   = 44,
+    help    = "Whether the window's filter box follows you between tabs.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        local settings = Settings()
+
+        if args == "on" then
+            settings.keepFilter = true
+        elseif args == "off" then
+            settings.keepFilter = nil
+        else
+            settings.keepFilter = (not settings.keepFilter) or nil
+        end
+
+        Print("Filter follows you between tabs: "
+            .. CN.YesNo(settings.keepFilter))
+
+        if not settings.keepFilter then
+            Print("|cff999999Off is the safer default: a filter that persists "
+                .. "invisibly is how a list looks empty when it is not.|r")
+        end
+    end,
+}
+
+CN:RegisterCommand{
     name    = "cues",
     args    = "[on or off]",
     order   = 42,

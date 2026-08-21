@@ -1,0 +1,428 @@
+-- Providers/BlizzardCollections.lua
+-- Completion Navigator :: pets, mounts, toys, appearances and titles.
+--
+-- SPLIT OUT OF Providers/Blizzard.lua IN 0.45.0.
+--
+-- That file had grown to 2,250 lines and held every call this addon makes
+-- into the client. The original argument for one file was sound -- a patch
+-- that renames an API is a one-file fix rather than a hunt -- and it stopped
+-- being true somewhere around the point where finding the function you wanted
+-- required a search rather than a scroll.
+--
+-- The three files divide by what the client is being asked ABOUT, which is
+-- also how patches break things: a collections patch breaks collection APIs.
+-- `CN.Blizzard` is still one table; only the source is divided.
+
+local ADDON_NAME, CN = ...
+
+local Blizzard = CN.Blizzard
+
+-- BATTLE PETS
+------------------------------------------------------------
+
+-- The pet journal reports only what the player's current filters allow, so
+-- any complete scan must widen the filters and then put them back.
+function Blizzard.WithAllPetsShown(scan)
+    if not C_PetJournal then
+        return
+    end
+
+    local search = C_PetJournal.GetSearchFilter and C_PetJournal.GetSearchFilter() or ""
+
+    if C_PetJournal.SetSearchFilter then
+        C_PetJournal.SetSearchFilter("")
+    end
+
+    if C_PetJournal.SetAllPetSourcesChecked then
+        C_PetJournal.SetAllPetSourcesChecked(true)
+    end
+
+    if C_PetJournal.SetAllPetTypesChecked then
+        C_PetJournal.SetAllPetTypesChecked(true)
+    end
+
+    if C_PetJournal.SetFilterChecked and LE_PET_JOURNAL_FILTER_COLLECTED then
+        C_PetJournal.SetFilterChecked(LE_PET_JOURNAL_FILTER_COLLECTED, true)
+        C_PetJournal.SetFilterChecked(LE_PET_JOURNAL_FILTER_NOT_COLLECTED, true)
+    end
+
+    local ok, err = pcall(scan)
+
+    if C_PetJournal.SetSearchFilter and search ~= "" then
+        C_PetJournal.SetSearchFilter(search)
+    end
+
+    if not ok then
+        error(err, 0)
+    end
+end
+
+function Blizzard.GetNumPets()
+    if C_PetJournal and C_PetJournal.GetNumPets then
+        return C_PetJournal.GetNumPets()
+    end
+
+    return 0, 0
+end
+
+function Blizzard.GetPetByIndex(index)
+    if not C_PetJournal or not C_PetJournal.GetPetInfoByIndex then
+        return nil
+    end
+
+    local petID, speciesID, owned, customName, level, favorite, isRevoked,
+          speciesName, icon, petType, companionID, tooltip, description,
+          isWild, canBattle, isTradeable, isUnique, obtainable =
+          C_PetJournal.GetPetInfoByIndex(index)
+
+    if not speciesID then
+        return nil
+    end
+
+    return {
+        petID       = petID,
+        speciesID   = speciesID,
+        owned       = owned and true or false,
+        level       = level,
+        favorite    = favorite and true or false,
+        name        = speciesName,
+        icon        = icon,
+        petType     = petType,
+        isWild      = isWild and true or false,
+        canBattle   = canBattle and true or false,
+        obtainable  = obtainable ~= false,
+        description = description,
+    }
+end
+
+-- A pet's name, from the client's own journal.
+--
+-- Exists so the addon can stop keeping its own copy of eighteen hundred pet
+-- names on disk. The journal answers instantly and is always current, which a
+-- saved copy is not.
+function Blizzard.GetPetName(speciesID)
+    if not speciesID or not C_PetJournal or not C_PetJournal.GetPetInfoBySpeciesID then
+        return nil
+    end
+
+    local ok, name = pcall(C_PetJournal.GetPetInfoBySpeciesID, speciesID)
+
+    if ok and name and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
+function Blizzard.GetPetCollectedCount(speciesID)
+    if C_PetJournal and C_PetJournal.GetNumCollectedInfo then
+        return C_PetJournal.GetNumCollectedInfo(speciesID)
+    end
+
+    return 0, 0
+end
+
+------------------------------------------------------------
+-- MOUNTS
+------------------------------------------------------------
+
+function Blizzard.GetMountIDs()
+    if C_MountJournal and C_MountJournal.GetMountIDs then
+        return C_MountJournal.GetMountIDs()
+    end
+
+    return {}
+end
+
+function Blizzard.GetMountByID(mountID)
+    if not C_MountJournal or not C_MountJournal.GetMountInfoByID then
+        return nil
+    end
+
+    local name, spellID, icon, isActive, isUsable, sourceType, isFavorite,
+          isFactionSpecific, faction, shouldHideOnChar, isCollected =
+          C_MountJournal.GetMountInfoByID(mountID)
+
+    if not name then
+        return nil
+    end
+
+    local source, description
+
+    if C_MountJournal.GetMountInfoExtraByID then
+        local _, extraDescription, extraSource = C_MountJournal.GetMountInfoExtraByID(mountID)
+
+        description = extraDescription
+        source      = extraSource
+    end
+
+    return {
+        mountID           = mountID,
+        name              = name,
+        spellID           = spellID,
+        icon              = icon,
+        sourceType        = sourceType,
+        isFactionSpecific = isFactionSpecific and true or false,
+        faction           = faction,
+        hiddenOnCharacter = shouldHideOnChar and true or false,
+        isCollected       = isCollected and true or false,
+        source            = source,
+        description       = description,
+    }
+end
+
+------------------------------------------------------------
+-- TOYS
+------------------------------------------------------------
+
+-- Same filter problem as the pet journal.
+function Blizzard.WithAllToysShown(scan)
+    if not C_ToyBox then
+        return
+    end
+
+    if C_ToyBox.SetFilterString then
+        C_ToyBox.SetFilterString("")
+    end
+
+    if C_ToyBox.SetCollectedShown then
+        C_ToyBox.SetCollectedShown(true)
+    end
+
+    if C_ToyBox.SetUncollectedShown then
+        C_ToyBox.SetUncollectedShown(true)
+    end
+
+    if C_ToyBox.SetAllSourceTypeFilters then
+        C_ToyBox.SetAllSourceTypeFilters(true)
+    end
+
+    local ok, err = pcall(scan)
+
+    if not ok then
+        error(err, 0)
+    end
+end
+
+function Blizzard.GetNumToys()
+    if C_ToyBox and C_ToyBox.GetNumFilteredToys then
+        return C_ToyBox.GetNumFilteredToys()
+    end
+
+    if C_ToyBox and C_ToyBox.GetNumToys then
+        return C_ToyBox.GetNumToys()
+    end
+
+    return 0
+end
+
+function Blizzard.GetToyByIndex(index)
+    if not C_ToyBox or not C_ToyBox.GetToyFromIndex then
+        return nil
+    end
+
+    local itemID = C_ToyBox.GetToyFromIndex(index)
+
+    if not itemID or itemID == 0 then
+        return nil
+    end
+
+    local _, name, icon = C_ToyBox.GetToyInfo(itemID)
+
+    return {
+        itemID    = itemID,
+        name      = name,
+        icon      = icon,
+        collected = PlayerHasToy and PlayerHasToy(itemID) and true or false,
+    }
+end
+
+------------------------------------------------------------
+-- APPEARANCES (TRANSMOG)
+------------------------------------------------------------
+
+-- Appearance counts are reported per category. Individual appearance
+-- enumeration is enormous; the per-category totals are what a completion
+-- dashboard actually needs.
+function Blizzard.GetAppearanceCategories()
+    local categories = {}
+
+    if not C_TransmogCollection then
+        return categories
+    end
+
+    local names = C_TransmogCollection.GetCategoryInfo
+        and Enum and Enum.TransmogCollectionType
+
+    if not names then
+        return categories
+    end
+
+    for _, categoryID in pairs(Enum.TransmogCollectionType) do
+        if type(categoryID) == "number" then
+            local name = C_TransmogCollection.GetCategoryInfo(categoryID)
+
+            if name then
+                local collected = C_TransmogCollection.GetCategoryCollectedCount
+                    and C_TransmogCollection.GetCategoryCollectedCount(categoryID) or 0
+
+                local total = C_TransmogCollection.GetCategoryTotal
+                    and C_TransmogCollection.GetCategoryTotal(categoryID) or 0
+
+                if total and total > 0 then
+                    table.insert(categories, {
+                        categoryID = categoryID,
+                        name       = name,
+                        collected  = collected,
+                        total      = total,
+                    })
+                end
+            end
+        end
+    end
+
+    table.sort(categories, function(a, b) return a.name < b.name end)
+
+    return categories
+end
+
+------------------------------------------------------------
+-- TITLES
+------------------------------------------------------------
+
+function Blizzard.GetTitles()
+    local titles = {}
+
+    if not GetNumTitles then
+        return titles
+    end
+
+    for index = 1, GetNumTitles() do
+        local name = GetTitleName and GetTitleName(index)
+
+        if name and name ~= "" then
+            table.insert(titles, {
+                titleID = index,
+                name    = (name:gsub("^%s+", ""):gsub("%s+$", "")),
+                known   = IsTitleKnown and IsTitleKnown(index) and true or false,
+            })
+        end
+    end
+
+    return titles
+end
+
+------------------------------------------------------------
+-- ACHIEVEMENTS
+------------------------------------------------------------
+
+function Blizzard.GetAchievementCategories()
+    if GetCategoryList then
+        return GetCategoryList()
+    end
+
+    return {}
+end
+
+function Blizzard.GetCategoryCounts(categoryID)
+    if not GetCategoryNumAchievements then
+        return 0, 0
+    end
+
+    local total, completed = GetCategoryNumAchievements(categoryID, true)
+
+    return total or 0, completed or 0
+end
+
+function Blizzard.GetAchievementInCategory(categoryID, index)
+    if not GetAchievementInfo then
+        return nil
+    end
+
+    local id, name, points, completed, _, _, _, description, flags, icon =
+        GetAchievementInfo(categoryID, index)
+
+    if not id then
+        return nil
+    end
+
+    return {
+        achievementID = id,
+        name          = name,
+        points        = points or 0,
+        completed     = completed and true or false,
+        description   = description,
+        icon          = icon,
+        flags         = flags,
+    }
+end
+
+-- Points for one achievement, live from the client.
+--
+-- The addon stopped storing points in 0.36.0 because the client answers
+-- instantly and a copy on disk was dead weight. That was right, and it left
+-- one caller reading a field that no longer exists -- so this is the
+-- replacement it should have had at the time.
+function Blizzard.GetAchievementPoints(achievementID)
+    if not GetAchievementInfo or not achievementID then
+        return nil
+    end
+
+    local ok, _, _, points = pcall(GetAchievementInfo, achievementID)
+
+    if not ok then
+        return nil
+    end
+
+    return points
+end
+
+-- Returns completedCriteria, totalCriteria for one achievement.
+-- The achievement's name, straight from the client.
+--
+-- Needed because a player can pin an achievement the addon has never scanned,
+-- and answering them with "Achievement 12345" is the addon admitting it did
+-- not look.
+function Blizzard.GetAchievementName(achievementID)
+    if not GetAchievementInfo or not achievementID then
+        return nil
+    end
+
+    local ok, _, name = pcall(GetAchievementInfo, achievementID)
+
+    if ok and name and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
+function Blizzard.GetAchievementProgress(achievementID)
+    if not GetAchievementNumCriteria or not GetAchievementCriteriaInfo then
+        return 0, 0
+    end
+
+    local total = GetAchievementNumCriteria(achievementID) or 0
+    local done  = 0
+
+    for index = 1, total do
+        local _, _, criteriaCompleted = GetAchievementCriteriaInfo(achievementID, index)
+
+        if criteriaCompleted then
+            done = done + 1
+        end
+    end
+
+    return done, total
+end
+
+function Blizzard.GetAchievementTotals()
+    if GetNumCompletedAchievements then
+        local total, completed = GetNumCompletedAchievements(true)
+        return total or 0, completed or 0
+    end
+
+    return 0, 0
+end
+
+------------------------------------------------------------

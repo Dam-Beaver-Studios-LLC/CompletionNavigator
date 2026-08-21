@@ -423,6 +423,66 @@ C_Container = {
     end,
 }
 
+-- QUEST OBJECTIVES THAT COUNT SOMETHING.
+--
+-- "3 of 12 feathers" is the state the addon could describe only as "not
+-- finished" until 0.45.0, so the stub had no notion of it either.
+-- APPEARANCE SETS, including one already finished -- because "nearly
+-- finished" and "finished" are the two states a set-tracking feature must
+-- never confuse, and a fixture without a completed set cannot tell them
+-- apart.
+CN_TEST_SETS = {
+    { setID = 1, name = "Almost There",  collected = false,
+      pieces = { true, true, true, true, false } },
+    { setID = 2, name = "Finished",      collected = true,
+      pieces = { true, true, true } },
+    { setID = 3, name = "Barely Begun",  collected = false,
+      pieces = { true, false, false, false, false, false } },
+}
+
+C_TransmogSets = {
+    GetAllSets = function()
+        local sets = {}
+
+        for _, set in ipairs(CN_TEST_SETS) do
+            table.insert(sets, {
+                setID     = set.setID,
+                name      = set.name,
+                collected = set.collected,
+            })
+        end
+
+        return sets
+    end,
+
+    GetSetPrimaryAppearances = function(setID)
+        for _, set in ipairs(CN_TEST_SETS) do
+            if set.setID == setID then
+                local pieces = {}
+
+                for _, collected in ipairs(set.pieces) do
+                    table.insert(pieces, { collected = collected })
+                end
+
+                return pieces
+            end
+        end
+
+        return {}
+    end,
+}
+
+CN_TEST_OBJECTIVES = {
+    [9001] = {
+        { text = "Sunscale Feathers", type = "item",
+          numFulfilled = 11, numRequired = 12, finished = false },
+    },
+    [9002] = {
+        { text = "Boars slain", type = "monster",
+          numFulfilled = 2, numRequired = 20, finished = false },
+    },
+}
+
 CN_TEST_MAIL = {
     { sender = "Auction House", subject = "Sold", money = 100, items = 0, daysLeft = 1.5 },
     { sender = "A Friend",      subject = "Here", money = 0,   items = 2, daysLeft = 2.0 },
@@ -752,9 +812,17 @@ C_QuestLog = {
         return nil
     end,
     GetQuestObjectives = function(id)
+        -- COUNTING objectives where the fixture defines them, so the addon's
+        -- "eleven of twelve" path is exercised rather than only its
+        -- "finished or not" one.
+        if CN_TEST_OBJECTIVES[id] then
+            return CN_TEST_OBJECTIVES[id]
+        end
+
         if id == 9002 then
             return { { finished = true }, { finished = false } }
         end
+
         return {}
     end,
 }
@@ -2357,7 +2425,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 20, "every candidate provider must register, got "
+assert(firstState.providers == 21, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -2857,11 +2925,18 @@ assert((byType.TOY or 0) > 0,
     "a toy sold by a recorded vendor must be recommended")
 
 -- Appearances are capped to a few slots, not one per category.
+--
+-- Counted from the APPEARANCES PROVIDER rather than by type across the whole
+-- list: 0.45.0 added a second provider that also emits APPEARANCE objectives
+-- (nearly-finished sets), and a by-type count silently turned this into an
+-- assertion about two unrelated caps added together.
 local appearances = CN:GetModule("Appearances")
 
-assert((byType.APPEARANCE or 0) <= appearances.candidateSlots,
+local appearanceCandidates = CN.candidateProviders["Appearances"].fn()
+
+assert(#appearanceCandidates <= appearances.candidateSlots,
     "appearance candidates must be capped to the least-complete slots, got "
-    .. tostring(byType.APPEARANCE))
+    .. #appearanceCandidates)
 
 -- Titles deliberately have no provider: the client exposes no source, so
 -- there is no action to name. This asserts the decision, so that adding a
@@ -7601,6 +7676,7 @@ print("\nEvery command runs without throwing:")
         "errors", "errors clear", "learned", "locale", "locale missing",
         "instances", "drops", "drops Nothing At All",
         "bags", "clock", "nearby", "order", "order 2", "situation",
+        "sets", "keepfilter", "keepfilter off", "locale export",
         "help", "help all", "help lockout", "help nothingmatchesthis",
         "selftest", "capture", "capture clear", "dbsize", "welcome",
     }
@@ -8214,6 +8290,474 @@ print("\nA whole session, end to end:")
             .. errors.All()[1].message) or ""))
 
     print("  login, ask, explain, route, plan, follow, log out -- no errors")
+end)()
+
+
+print("\nHow close a quest actually is:")
+
+;(function()
+    local inventory = CN:GetModule("Inventory")
+
+    ------------------------------------------------------------
+    -- THE PROMISE THIS FILE'S HEADER MADE IN 0.44.0 AND DID NOT KEEP.
+    --
+    -- "Forty of the fifty things a quest wants, so the answer is 'ten more'."
+    -- The header said it; the code collected quest starters and nothing else.
+    -- Writing down what something is going to do and then not doing it is
+    -- worse than not writing it down, because the next reader believes it.
+    ------------------------------------------------------------
+    local progress = inventory.QuestProgress(9001)
+
+    assert(#progress == 1, "a counting objective is reported, got " .. #progress)
+    assert(progress[1].remaining == 1, "one feather to go, got "
+        .. progress[1].remaining)
+    assert(progress[1].done == 11 and progress[1].required == 12,
+        "with the client's own counts")
+
+    -- Finished objectives are not outstanding work.
+    CN_TEST_OBJECTIVES[9003] = {
+        { text = "Done already", numFulfilled = 5, numRequired = 5, finished = true },
+    }
+
+    assert(#inventory.QuestProgress(9003) == 0,
+        "a finished objective is not something left to do")
+
+    CN_TEST_OBJECTIVES[9003] = nil
+
+    ------------------------------------------------------------
+    -- NEAREST TO DONE FIRST, and only what is genuinely near.
+    ------------------------------------------------------------
+    local nearly = inventory.NearlyDone()
+
+    assert(#nearly >= 1, "the nearly-done list must find the feathers")
+
+    for _, row in ipairs(nearly) do
+        assert(row.remaining <= inventory.nearlyDoneRemaining,
+            "eighteen boars away is not 'nearly done'")
+    end
+
+    assert(nearly[1].remaining <= (nearly[2] and nearly[2].remaining or 99),
+        "closest first")
+
+    -- And it must be worth MORE the closer it is, or the ranking has learned
+    -- nothing from knowing the number.
+    local inventoryCandidates = CN.candidateProviders["Inventory"].fn()
+
+    local nearlyCandidate
+
+    for _, candidate in ipairs(inventoryCandidates) do
+        if candidate.id == 9001 then nearlyCandidate = candidate end
+    end
+
+    assert(nearlyCandidate, "the nearly-done quest is recommended")
+    assert(nearlyCandidate.completionValue > 2,
+        "and is worth more than a quest not started")
+
+    print("  '" .. nearly[1].remaining .. " more' is a different answer from 'not finished'")
+end)()
+
+print("\nWhich flights are known to connect:")
+
+;(function()
+    local travel = CN:GetModule("Travel")
+
+    local routes = travel.Routes()
+
+    for key in pairs(routes) do
+        routes[key] = nil
+    end
+
+    ------------------------------------------------------------
+    -- UNDIRECTED, because a flight in one direction is evidence the two
+    -- points are on the same network -- which is what the costing needs.
+    ------------------------------------------------------------
+    assert(travel.NoteRoute(1, 2), "a flight is recorded")
+
+    assert(travel.IsKnownRoute(1, 2), "in the direction it was flown")
+    assert(travel.IsKnownRoute(2, 1), "and in the other one")
+
+    assert(not travel.IsKnownRoute(1, 3),
+        "a pair nobody has flown is not known")
+
+    ------------------------------------------------------------
+    -- AND AN UNKNOWN PAIR IS NOT RULED OUT.
+    --
+    -- There is no API for "does A connect to B". Treating never-observed as
+    -- impossible would make the model worse than the assumption it replaced,
+    -- because most pairs are never observed by anybody.
+    ------------------------------------------------------------
+    assert(travel.knownRouteBonus < 1 and travel.knownRouteBonus > 0.5,
+        "a known route is preferred, not mandatory")
+
+    for key in pairs(routes) do
+        routes[key] = nil
+    end
+
+    print("  a flight taken is proof; a flight not taken is not disproof")
+end)()
+
+print("\nThe list, sorted the way you asked:")
+
+;(function()
+    local list = CN.UI.CreateList(CreateFrame("Frame"))
+
+    local entries = {
+        { text = "Zebra" },
+        { text = "apple" },
+        { text = "Mango" },
+    }
+
+    list:SetEntries(entries)
+
+    ------------------------------------------------------------
+    -- "AS RANKED" IS FIRST, so the default never changes for anybody who
+    -- does not go looking for this.
+    ------------------------------------------------------------
+    assert(list:SortMode() == "ranked", "the ranking is the default order")
+
+    assert(list.rows[1].entry.text == "Zebra",
+        "and it is left exactly as the tab produced it")
+
+    assert(list:CycleSort() == "name", "clicking cycles to alphabetical")
+
+    assert(string.lower(list.rows[1].entry.text) == "apple",
+        "which is case-insensitive, got " .. list.rows[1].entry.text)
+
+    assert(list:CycleSort() == "reverse", "then reversed")
+
+    assert(list.rows[1].entry.text == "Zebra", "the other way round")
+
+    assert(list:CycleSort() == "ranked", "and back to the ranking")
+
+    print("  three orders, and the ranking is the one you get by default")
+end)()
+
+
+print("\nAppearance sets:")
+
+;(function()
+    local sets = CN:GetModule("Sets")
+
+    assert(sets, "the Sets module must load")
+
+    local all, readable = sets.All()
+
+    assert(readable, "the client must be answering")
+    assert(#all == 3, "every set is read, got " .. #all)
+
+    ------------------------------------------------------------
+    -- FINISHED IS NOT NEARLY FINISHED.
+    --
+    -- The two states a set feature must never confuse. A completed set has
+    -- zero pieces missing, and "zero missing" satisfies "within two missing"
+    -- unless somebody says otherwise -- which is exactly the off-by-one that
+    -- would put every finished set in the player's to-do list forever.
+    ------------------------------------------------------------
+    local nearly = sets.NearlyComplete()
+
+    for _, set in ipairs(nearly) do
+        assert(set.missing > 0,
+            "a finished set is not something left to do: " .. tostring(set.name))
+        assert(set.name ~= "Finished", "and specifically not that one")
+    end
+
+    assert(#nearly == 1, "only the one within two pieces, got " .. #nearly)
+    assert(nearly[1].name == "Almost There", "and it is the right one")
+
+    -- Five pieces missing is a decision about the evening, not a next action.
+    for _, set in ipairs(nearly) do
+        assert(set.name ~= "Barely Begun", "a set barely started is not near")
+    end
+
+    local setCandidates = CN.candidateProviders["Sets"].fn()
+
+    assert(#setCandidates == 1, "one recommendation, got " .. #setCandidates)
+    assert(setCandidates[1].reasons[1]:find("4 of 5"),
+        "carrying the real denominator: " .. setCandidates[1].reasons[1])
+
+    print("  " .. #all .. " sets read, one within two pieces, the finished one left alone")
+end)()
+
+
+print("\nThe curated data accessors:")
+
+;(function()
+    ------------------------------------------------------------
+    -- ELIGIBILITY AND TURN-IN DATA SHIPPED AS SCHEMA IN 0.43.0 WITH NO ROWS,
+    -- AND NOTHING HAS EVER EXERCISED THE READERS.
+    --
+    -- A schema nothing reads is a schema that will be wrong the first time
+    -- somebody fills it in. These rows are registered by the test rather than
+    -- shipped, so the accessors are tested without pretending the database
+    -- has content it does not.
+    ------------------------------------------------------------
+    local Static = CN.Static
+
+    Static.RegisterQuests({
+        [77001] = {
+            name    = "For Druids Only",
+            classes = { "DRUID" },
+        },
+        [77002] = {
+            name     = "Level Gate",
+            minLevel = 70,
+        },
+        [77003] = {
+            name    = "Alliance Business",
+            faction = "Alliance",
+        },
+        [77004] = {
+            name        = "Handed In Elsewhere",
+            mapID       = 94,
+            turnInMapID = 2112,
+            turnInX     = 0.5,
+            turnInY     = 0.5,
+        },
+    })
+
+    local character = { class = "WARRIOR", race = "HUMAN",
+        faction = "Alliance", level = 60 }
+
+    local ok, reason = Static.QuestEligibility(77001, character)
+
+    assert(ok == false, "a druid quest is not for a warrior")
+    assert(reason and reason:find("class"), "and says which gate: " .. tostring(reason))
+
+    assert(Static.QuestEligibility(77001,
+        { class = "DRUID", faction = "Alliance", level = 60 }),
+        "and a druid may take it")
+
+    local levelOk, levelReason = Static.QuestEligibility(77002, character)
+
+    assert(levelOk == false and levelReason:find("70"),
+        "a level gate reports the level")
+
+    local factionOk, factionReason = Static.QuestEligibility(77003,
+        { faction = "Horde", level = 60 })
+
+    assert(factionOk == false and factionReason:find("Alliance"),
+        "and a faction gate reports the faction")
+
+    -- A row with no gating fields is eligible, and says so with NIL rather
+    -- than an empty claim.
+    local plainOk, plainReason = Static.QuestEligibility(77004, character)
+
+    assert(plainOk == true and plainReason == nil,
+        "an ungated quest is eligible with no reason attached")
+
+    -- A quest nobody has curated is eligible: absence of data is not a block.
+    assert(Static.QuestEligibility(999999, character) == true,
+        "an unknown quest must not be treated as blocked")
+
+    ------------------------------------------------------------
+    -- WHERE IT IS HANDED IN, which the client's moving waypoint cannot say.
+    ------------------------------------------------------------
+    local mapID, x, y = Static.GetQuestTurnIn(77004)
+
+    assert(mapID == 2112 and x == 0.5, "the turn-in location is readable")
+
+    assert(Static.GetQuestTurnIn(77001) == nil,
+        "and a row without one says nothing rather than guessing")
+
+    print("  class, race, faction, level and turn-in all read back correctly")
+end)()
+
+print("\nWhat is on a clock, in detail:")
+
+;(function()
+    local waiting = CN:GetModule("Waiting")
+
+    ------------------------------------------------------------
+    -- A KEYSTONE IS A DEADLINE, NOT A GEAR FEATURE.
+    ------------------------------------------------------------
+    C_MythicPlus = {
+        GetOwnedKeystoneLevel = function() return 12 end,
+        GetOwnedKeystoneChallengeMapID = function() return 501 end,
+    }
+
+    C_ChallengeMode = {
+        GetMapUIInfo = function() return "The Stonevault" end,
+    }
+
+    local keystone = waiting.Keystone()
+
+    assert(keystone, "a held keystone is found")
+    assert(keystone.level == 12, "at its level")
+    assert(keystone.name == "The Stonevault", "and named")
+    assert(keystone.expiresIn and keystone.expiresIn > 0,
+        "with the weekly reset as its expiry, because it is replaced then "
+        .. "whether it is used or not")
+
+    C_MythicPlus.GetOwnedKeystoneLevel = function() return 0 end
+
+    assert(waiting.Keystone() == nil,
+        "and no keystone means no objective, not a zero-level one")
+
+    ------------------------------------------------------------
+    -- HEIRLOOMS: a collection with a journal nothing had ever read.
+    ------------------------------------------------------------
+    C_Heirloom = {
+        GetNumHeirlooms = function() return 3 end,
+        GetHeirloomItemIDFromIndex = function(index) return 70000 + index end,
+        PlayerHasHeirloom = function(itemID) return itemID == 70001 end,
+    }
+
+    local heirlooms = waiting.Heirlooms()
+
+    assert(heirlooms and heirlooms.total == 3, "every heirloom is counted")
+    assert(heirlooms.collected == 1, "and only the owned one, got "
+        .. heirlooms.collected)
+
+    C_MythicPlus  = nil
+    C_ChallengeMode = nil
+    C_Heirloom    = nil
+
+    assert(waiting.Keystone() == nil,
+        "a client without the API answers nothing rather than throwing")
+    assert(waiting.Heirlooms() == nil, "the same for heirlooms")
+
+    print("  keystone, heirlooms, and a client that offers neither")
+end)()
+
+
+print("\nCrafting orders, and a decision that could go stale:")
+
+;(function()
+    local orders = CN:GetModule("Orders")
+
+    ------------------------------------------------------------
+    -- NOTHING KNOWN IS NOT THE SAME AS NOTHING OUTSTANDING.
+    --
+    -- The client only hands over the order list once the player has opened
+    -- the order frame. Reporting "you have no orders" in that state would be
+    -- the addon stating something it does not know.
+    ------------------------------------------------------------
+    assert(orders.IsAvailable() == false,
+        "with no crafting API, the feature is simply unavailable")
+
+    assert(orders.Mine() == nil,
+        "and Mine() says nothing rather than claiming an empty list")
+
+    C_CraftingOrders = {
+        GetMyOrders = function()
+            return {
+                { orderID = 1, itemID = 5001, itemName = "Flask",
+                  expirationTime = time() + 3600, crafterName = "Someone" },
+                { orderID = 2, itemID = 5002, itemName = "Not Urgent",
+                  expirationTime = time() + (10 * 86400) },
+            }
+        end,
+        GetClaimedOrder = function() return nil end,
+    }
+
+    assert(orders.IsAvailable(), "with the API present it is available")
+
+    local mine = orders.Mine()
+
+    assert(mine and #mine == 2, "both orders are read")
+    assert(mine[1].expiresIn and mine[1].expiresIn <= 3600,
+        "with a real remaining time")
+
+    ------------------------------------------------------------
+    -- ONLY WHAT IS ACTUALLY ABOUT TO EXPIRE IS A NEXT ACTION.
+    ------------------------------------------------------------
+    local orderCandidates = CN.candidateProviders["Orders"].fn()
+
+    assert(#orderCandidates == 1,
+        "an order ten days out is not urgent, got " .. #orderCandidates)
+    assert(orderCandidates[1].id == 1, "and it is the one expiring within a day")
+
+    C_CraftingOrders.GetClaimedOrder = function() return { orderID = 9 } end
+
+    local withClaim = CN.candidateProviders["Orders"].fn()
+
+    assert(#withClaim == 2, "something finished and waiting is also an action")
+
+    C_CraftingOrders = nil
+
+    assert(#CN.candidateProviders["Orders"].fn() == 0,
+        "and none of it survives the API going away")
+
+    print("  orders read, only the expiring one recommended")
+end)()
+
+
+print("\nEvery tab builds:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE GAP THAT LET A REAL BREAK THROUGH.
+    --
+    -- Splitting the list widget out of UI.lua in 0.45.0 left nine tab
+    -- builders calling a bare `CreateList`, which after the move resolved to
+    -- a global that does not exist. Every tab would have failed to build in
+    -- game. The suite passed, because it opened the window -- which builds
+    -- ONE tab, lazily -- and never touched the other ten.
+    --
+    -- luacheck caught it. A linter catching what a test suite cannot is a
+    -- gap in the suite, not a reason to rely on the linter.
+    ------------------------------------------------------------
+    local UI = CN.UI
+
+    assert(#UI.tabs >= 10, "the window must have its tabs, got " .. #UI.tabs)
+
+    -- READ THE ERROR RECORDER, NOT pcall.
+    --
+    -- SelectTab wraps each builder in its own pcall so that one broken tab
+    -- cannot take the window down with it -- which is right, and means a
+    -- caller's pcall NEVER sees the failure. The first version of this test
+    -- wrapped SelectTab and passed against a tree where every tab was broken.
+    --
+    -- 0.44.0 built the thing that makes this checkable: errors caught inside
+    -- the addon are recorded rather than only printed.
+    local errors = CN:GetModule("Errors")
+
+    errors.Clear()
+
+    -- FORCE A REBUILD.
+    --
+    -- Panels are built once and cached, so by the time this section runs the
+    -- earlier tests have already built whichever tabs they touched -- and any
+    -- failure happened before the Clear above. Dropping the panels makes this
+    -- test build all eleven itself, which is the thing it claims to check.
+    for _, tab in ipairs(UI.tabs) do
+        tab.panel = nil
+    end
+
+    UI.Toggle()
+
+    for index = 1, #UI.tabs do
+        UI.SelectTab(index)
+
+        -- And refreshing it, which is the path that runs on every event while
+        -- somebody is looking at that tab.
+        UI.Refresh()
+    end
+
+    for _, entry in ipairs(errors.All()) do
+        print("  BROKEN: " .. entry.context .. " -- " .. entry.message)
+    end
+
+    assert(errors.Count() == 0,
+        errors.Count() .. " tab(s) failed to build or refresh")
+
+    -- Every tab that made a list must actually have one, or "it built" means
+    -- only that nothing threw.
+    local withLists = 0
+
+    for _, tab in ipairs(UI.tabs) do
+        if tab.panel and tab.panel.list then
+            withLists = withLists + 1
+        end
+    end
+
+    assert(withLists >= 8,
+        "most tabs are list tabs and must have built one, got " .. withLists)
+
+    UI.Toggle()
+
+    print("  " .. #UI.tabs .. " tabs built and refreshed, " .. withLists
+        .. " of them with lists")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

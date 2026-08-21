@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.44.0'
+$script:ToolkitVersion = '0.45.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.44.0"
+CN.version     = "0.45.0"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -2665,7 +2665,7 @@ end
 
 CN:RegisterCommand{
     name    = "locale",
-    args    = "[missing]",
+    args    = "[missing or export]",
     order   = 33,
     help    = "Which language the addon is using, and how much is translated.",
     handler = function(args)
@@ -2719,6 +2719,35 @@ CN:RegisterCommand{
                 .. "English this session. |cffffff00/cn locale missing|r "
                 .. "lists them -- that list is exactly what a translator "
                 .. "needs.|r")
+        end
+
+        if args == "export" then
+            -- A PASTE-READY FILE, NOT A LIST TO RETYPE.
+            --
+            -- `/cn locale missing` names what fell back to English, which is
+            -- the right diagnostic and the wrong deliverable: a translator
+            -- then has to build the Lua themselves, and the barrier to
+            -- helping should not include learning this addon's file format.
+            local keys = {}
+
+            for _, key in ipairs(CN.localeKeys or {}) do
+                table.insert(keys, key)
+            end
+
+            table.sort(keys)
+
+            Print("Paste this into Locales/" .. stats.locale .. ".lua and "
+                .. "fill in the right-hand side:")
+
+            for _, key in ipairs(keys) do
+                Print('    ["' .. key .. '"] = "",')
+            end
+
+            Print("|cff999999" .. #keys .. " keys. Leave anything you are not "
+                .. "sure of blank -- an empty string is ignored, and English "
+                .. "is a better answer than a guess.|r")
+
+            return
         end
 
         local languages = {}
@@ -2788,6 +2817,26 @@ CN.localeKeys = {
     "dead",
     "grouped",
     "instanced",
+
+    -- Added in 0.45.0: the words on the newest surfaces, chosen the same way
+    -- as the last batch -- where a player's eye lands, not where the strings
+    -- happen to be easy to extract.
+    "ready",
+    "cleared",
+    "left",
+    "expiring",
+    "in your bags",
+    "uncollected",
+    "quest starter",
+    "%d more",
+    "%d of %d",
+    "another zone",
+    "flying yourself",
+    "on a flight path",
+    "on foot",
+    "measured",
+    "Nothing to do right now.",
+    "Nothing is on a clock right now.",
 }
 
 CN.RegisterLocale("enUS", {})
@@ -2836,6 +2885,20 @@ CN.RegisterLocale("deDE", {
     ["dead"] = "tot",
     ["grouped"] = "in einer Gruppe",
     ["instanced"] = "in einer Instanz",
+    ["cleared"] = "erledigt",
+    ["left"] = "übrig",
+    ["expiring"] = "läuft ab",
+    ["in your bags"] = "in deinen Taschen",
+    ["uncollected"] = "nicht gesammelt",
+    ["quest starter"] = "Questgegenstand",
+    ["%d more"] = "noch %d",
+    ["%d of %d"] = "%d von %d",
+    ["flying yourself"] = "selbst fliegen",
+    ["on a flight path"] = "per Flugroute",
+    ["on foot"] = "zu Fuß",
+    ["measured"] = "gemessen",
+    ["Nothing to do right now."] = "Im Moment nichts zu tun.",
+    ["Nothing is on a clock right now."] = "Nichts läuft gerade ab.",
 })
 '@
 
@@ -2882,6 +2945,20 @@ CN.RegisterLocale("esES", {
     ["dead"] = "muerto",
     ["grouped"] = "en grupo",
     ["instanced"] = "en una instancia",
+    ["cleared"] = "completado",
+    ["left"] = "restante",
+    ["expiring"] = "caduca pronto",
+    ["in your bags"] = "en tus bolsas",
+    ["uncollected"] = "sin coleccionar",
+    ["quest starter"] = "objeto de misión",
+    ["%d more"] = "%d más",
+    ["%d of %d"] = "%d de %d",
+    ["flying yourself"] = "volando tú mismo",
+    ["on a flight path"] = "en ruta de vuelo",
+    ["on foot"] = "a pie",
+    ["measured"] = "medido",
+    ["Nothing to do right now."] = "Nada que hacer ahora mismo.",
+    ["Nothing is on a clock right now."] = "Nada caduca ahora mismo.",
 })
 '@
 
@@ -2928,6 +3005,20 @@ CN.RegisterLocale("esMX", {
     ["dead"] = "muerto",
     ["grouped"] = "en grupo",
     ["instanced"] = "en una instancia",
+    ["cleared"] = "completado",
+    ["left"] = "restante",
+    ["expiring"] = "caduca pronto",
+    ["in your bags"] = "en tus bolsas",
+    ["uncollected"] = "sin coleccionar",
+    ["quest starter"] = "objeto de misión",
+    ["%d more"] = "%d más",
+    ["%d of %d"] = "%d de %d",
+    ["flying yourself"] = "volando tú mismo",
+    ["on a flight path"] = "en ruta de vuelo",
+    ["on foot"] = "a pie",
+    ["measured"] = "medido",
+    ["Nothing to do right now."] = "Nada que hacer ahora mismo.",
+    ["Nothing is on a clock right now."] = "Nada caduca ahora mismo.",
 })
 '@
 
@@ -2974,6 +3065,20 @@ CN.RegisterLocale("frFR", {
     ["dead"] = "mort",
     ["grouped"] = "en groupe",
     ["instanced"] = "en instance",
+    ["cleared"] = "terminé",
+    ["left"] = "restant",
+    ["expiring"] = "expire bientôt",
+    ["in your bags"] = "dans vos sacs",
+    ["uncollected"] = "non collecté",
+    ["quest starter"] = "objet de quête",
+    ["%d more"] = "encore %d",
+    ["%d of %d"] = "%d sur %d",
+    ["flying yourself"] = "en volant vous-même",
+    ["on a flight path"] = "en vol régulier",
+    ["on foot"] = "à pied",
+    ["measured"] = "mesuré",
+    ["Nothing to do right now."] = "Rien à faire pour le moment.",
+    ["Nothing is on a clock right now."] = "Rien n'expire pour le moment.",
 })
 '@
 
@@ -3020,6 +3125,20 @@ CN.RegisterLocale("itIT", {
     ["dead"] = "morto",
     ["grouped"] = "in gruppo",
     ["instanced"] = "in istanza",
+    ["cleared"] = "completato",
+    ["left"] = "rimanenti",
+    ["expiring"] = "in scadenza",
+    ["in your bags"] = "nelle tue borse",
+    ["uncollected"] = "non collezionato",
+    ["quest starter"] = "oggetto di missione",
+    ["%d more"] = "altri %d",
+    ["%d of %d"] = "%d di %d",
+    ["flying yourself"] = "volando da solo",
+    ["on a flight path"] = "su rotta di volo",
+    ["on foot"] = "a piedi",
+    ["measured"] = "misurato",
+    ["Nothing to do right now."] = "Niente da fare al momento.",
+    ["Nothing is on a clock right now."] = "Nulla sta scadendo al momento.",
 })
 '@
 
@@ -3059,6 +3178,13 @@ CN.RegisterLocale("koKR", {
     ["ready"] = "준비됨",
     ["dead"] = "사망",
     ["grouped"] = "파티 중",
+    ["left"] = "남음",
+    ["expiring"] = "만료 임박",
+    ["in your bags"] = "가방 안",
+    ["uncollected"] = "미수집",
+    ["%d of %d"] = "%d / %d",
+    ["on foot"] = "도보",
+    ["measured"] = "측정됨",
 })
 '@
 
@@ -3105,6 +3231,20 @@ CN.RegisterLocale("ptBR", {
     ["dead"] = "morto",
     ["grouped"] = "em grupo",
     ["instanced"] = "em uma instância",
+    ["cleared"] = "concluído",
+    ["left"] = "restante",
+    ["expiring"] = "expirando",
+    ["in your bags"] = "nas suas bolsas",
+    ["uncollected"] = "não coletado",
+    ["quest starter"] = "item de missão",
+    ["%d more"] = "mais %d",
+    ["%d of %d"] = "%d de %d",
+    ["flying yourself"] = "voando você mesmo",
+    ["on a flight path"] = "em rota de voo",
+    ["on foot"] = "a pé",
+    ["measured"] = "medido",
+    ["Nothing to do right now."] = "Nada a fazer agora.",
+    ["Nothing is on a clock right now."] = "Nada está expirando agora.",
 })
 '@
 
@@ -3144,6 +3284,14 @@ CN.RegisterLocale("ruRU", {
     ["ready"] = "готово",
     ["dead"] = "мертв",
     ["grouped"] = "в группе",
+    ["left"] = "осталось",
+    ["expiring"] = "истекает",
+    ["in your bags"] = "в сумках",
+    ["uncollected"] = "не собрано",
+    ["%d more"] = "ещё %d",
+    ["%d of %d"] = "%d из %d",
+    ["on foot"] = "пешком",
+    ["measured"] = "измерено",
 })
 '@
 
@@ -3190,6 +3338,20 @@ CN.RegisterLocale("zhCN", {
     ["dead"] = "死亡",
     ["grouped"] = "组队中",
     ["instanced"] = "副本中",
+    ["cleared"] = "已完成",
+    ["left"] = "剩余",
+    ["expiring"] = "即将过期",
+    ["in your bags"] = "在你的背包里",
+    ["uncollected"] = "未收集",
+    ["quest starter"] = "任务起始物品",
+    ["%d more"] = "还差 %d",
+    ["%d of %d"] = "%d / %d",
+    ["flying yourself"] = "自行飞行",
+    ["on a flight path"] = "飞行路线",
+    ["on foot"] = "步行",
+    ["measured"] = "实测",
+    ["Nothing to do right now."] = "目前没有可做的事。",
+    ["Nothing is on a clock right now."] = "目前没有计时的事项。",
 })
 '@
 
@@ -3229,6 +3391,13 @@ CN.RegisterLocale("zhTW", {
     ["ready"] = "就緒",
     ["dead"] = "死亡",
     ["grouped"] = "組隊中",
+    ["left"] = "剩餘",
+    ["expiring"] = "即將過期",
+    ["in your bags"] = "在你的背包裡",
+    ["uncollected"] = "未收集",
+    ["%d of %d"] = "%d / %d",
+    ["on foot"] = "步行",
+    ["measured"] = "實測",
 })
 '@
 
@@ -5412,11 +5581,24 @@ local UI = {}
 
 CN.UI = UI
 
+-- Published for UI/List.lua, which draws the rows inside this chrome and has
+-- to know how wide they get and how tall they are.
+UI.WINDOW_WIDTH = 560
+UI.ROW_HEIGHT   = 20
+
+-- LATE-BOUND ON PURPOSE.
+--
+-- The tab builders below call UI.CreateList rather than a local, because
+-- UI/List.lua loads AFTER this file: a local captured here would be nil
+-- forever. The first version of the split left them calling a bare
+-- `CreateList`, which resolved to a global that does not exist -- every tab
+-- would have failed to build in game. luacheck caught it; the harness did
+-- not, because it never builds all eleven tabs.
+
 local Print = CN.Print
 
 local WINDOW_WIDTH  = 560
 local WINDOW_HEIGHT = 440
-local ROW_HEIGHT    = 20
 
 local window, minimapButton
 
@@ -5512,218 +5694,6 @@ end
 -- SCROLLING LIST
 ------------------------------------------------------------
 
--- Creates a reusable row list. Rows are pooled; SetRows swaps the data.
-local function CreateList(parent)
-    local list = CreateFrame("Frame", nil, parent)
-
-    list:SetPoint("TOPLEFT", 8, -8)
-    list:SetPoint("BOTTOMRIGHT", -8, 8)
-
-    local scroll = SafeCreateFrame("ScrollFrame", nil, list, "UIPanelScrollFrameTemplate")
-
-    scroll:SetPoint("TOPLEFT")
-    scroll:SetPoint("BOTTOMRIGHT", -26, 0)
-
-    local content = CreateFrame("Frame", nil, scroll)
-
-    content:SetSize(1, 1)
-    scroll:SetScrollChild(content)
-
-    list.rows = {}
-
-    function list:GetRow(index)
-        if self.rows[index] then
-            return self.rows[index]
-        end
-
-        local row = CreateFrame("Button", nil, content)
-
-        row:SetHeight(ROW_HEIGHT)
-        row:SetPoint("TOPLEFT", 0, -((index - 1) * ROW_HEIGHT))
-        row:SetPoint("TOPRIGHT", 0, -((index - 1) * ROW_HEIGHT))
-
-        row.highlight = row:CreateTexture(nil, "HIGHLIGHT")
-        row.highlight:SetAllPoints()
-        row.highlight:SetColorTexture(1, 1, 1, 0.10)
-
-        row.label = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
-        row.label:SetPoint("LEFT", 4, 0)
-        row.label:SetPoint("RIGHT", -4, 0)
-        row.label:SetJustifyH("LEFT")
-
-        -- HANDLERS ARE BOUND ONCE, HERE.
-        --
-        -- They used to be created inside SetEntries, which meant three fresh
-        -- closures per row on every redraw -- three hundred of them for a
-        -- hundred-row list, every time the window refreshed, each one
-        -- capturing a table it did not need to capture. In this game that is
-        -- not an abstract cost: allocation churn is what garbage collection
-        -- pauses are made of, and a pause is a stutter.
-        --
-        -- Bound once and reading `row.entry`, which SetEntries already sets,
-        -- a redraw now allocates nothing at all.
-        row:SetScript("OnClick", function(clicked)
-            local entry = clicked.entry
-
-            if entry and entry.onClick then
-                entry.onClick()
-            end
-        end)
-
-        row:SetScript("OnEnter", function(hovered)
-            local entry = hovered.entry
-
-            if not entry or not entry.tooltip or not GameTooltip then
-                return
-            end
-
-            GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
-            GameTooltip:SetText(entry.tooltip, nil, nil, nil, nil, true)
-            GameTooltip:Show()
-        end)
-
-        row:SetScript("OnLeave", function()
-            if GameTooltip then
-                GameTooltip:Hide()
-            end
-        end)
-
-        self.rows[index] = row
-
-        return row
-    end
-
-    -- A CEILING ON ROWS.
-    --
-    -- Every row is a frame, and frames cannot be destroyed in this game --
-    -- only hidden and reused. A list that renders one entry per row therefore
-    -- grows its frame pool to the size of the largest list it has ever been
-    -- shown, permanently, for the rest of the session. Nothing capped that.
-    --
-    -- Two hundred rows is far more than anyone reads before scrolling and
-    -- more than any tab currently produces; the point is that the number
-    -- exists at all. When it bites, the list says so rather than silently
-    -- ending -- a truncated list that looks complete is worse than a long one.
-    list.maxRows = 200
-
-    -- A FILTER OVER WHATEVER IS BEING SHOWN.
-    --
-    -- Not a search across everything the addon knows -- that is what the
-    -- commands are for, and a search box that quietly queries a different
-    -- data set than the list under it is a lie about what you are looking at.
-    -- This narrows the rows already on screen, which is what people reach for
-    -- a box for.
-    -- STATE IN A LOCAL, NOT ON THE FRAME.
-    --
-    -- A frame is not a plain table: templates and mixins put a metatable on
-    -- it, and reading an unset field can return something other than nil.
-    -- The first version of this kept `list.filterText` on the frame and
-    -- relied on "unset means nil" -- which held in the game and did not hold
-    -- against the test harness's stub, whose __index answers every key. The
-    -- test caught it; a player with a different UI library might have found
-    -- it instead.
-    local filterText = nil
-
-    function list:SetFilter(text)
-        -- A stub EditBox, or a template whose GetText returns something
-        -- surprising, must not be able to poison the filter with a value that
-        -- string.find will throw on later -- three frames away from here,
-        -- where the cause is not obvious.
-        if type(text) ~= "string" then
-            text = ""
-        end
-
-        text = CN.Trim(text)
-
-        filterText = (text ~= "") and string.lower(text) or nil
-
-        if self.lastEntries then
-            self:SetEntries(self.lastEntries)
-        end
-    end
-
-    function list:Matches(entry)
-        if not filterText then
-            return true
-        end
-
-        local haystack = string.lower(tostring(entry.text or ""))
-
-        -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
-        -- name, not a regular expression, and a stray bracket must not throw.
-        return haystack:find(filterText, 1, true) ~= nil
-    end
-
-    -- entries = { { text = , onClick = , tooltip = }, ... }
-    function list:SetEntries(entries)
-        self.lastEntries = entries
-
-        if filterText then
-            local kept = {}
-
-            for _, entry in ipairs(entries) do
-                if self:Matches(entry) then
-                    table.insert(kept, entry)
-                end
-            end
-
-            entries = kept
-        end
-
-        local width = scroll:GetWidth() or (WINDOW_WIDTH - 60)
-
-        local shown = math.min(#entries, self.maxRows)
-
-        local truncated = #entries - shown
-
-        if truncated > 0 then
-            -- Room for the line that explains the truncation.
-            shown = shown - 1
-            truncated = truncated + 1
-        end
-
-        content:SetSize(width, math.max(1, (shown + (truncated > 0 and 1 or 0)) * ROW_HEIGHT))
-
-        for index = 1, shown do
-            local entry = entries[index]
-
-            local row = self:GetRow(index)
-
-            row.label:SetText(entry.text or "")
-
-            -- The only thing a redraw changes. The handlers were bound when
-            -- the row was created and read this.
-            row.entry = entry
-
-            row:Show()
-        end
-
-        local used = shown
-
-        if truncated > 0 then
-            used = shown + 1
-
-            local row = self:GetRow(used)
-
-            row.label:SetText("|cff999999... and " .. truncated
-                .. " more not shown|r")
-
-            row.entry = nil
-
-            row:Show()
-        end
-
-        for index = used + 1, #self.rows do
-            self.rows[index]:Hide()
-        end
-
-        return used
-    end
-
-    return list
-end
-
-UI.CreateList = CreateList
 
 ------------------------------------------------------------
 -- BUTTON HELPERS
@@ -5877,6 +5847,24 @@ local function BuildWindow()
         UI.SetFilter(self:GetText())
     end)
 
+    -- KEEP THE FILTER ACROSS TABS, OR CLEAR IT?
+    --
+    -- It clears on a tab change, which is the safer default: a filter that
+    -- persists invisibly is how somebody concludes a list is empty when it is
+    -- not. But a player comparing the same search across tabs -- looking for
+    -- one mount in Collections and then in Goals -- wants the opposite, and
+    -- was retyping it every time.
+    --
+    -- So: a setting, defaulting to the safe behaviour, and the box shows what
+    -- it is doing rather than leaving the player to work it out.
+    search:SetScript("OnEditFocusLost", function(self)
+        local settings = CN.Settings()
+
+        if settings and settings.keepFilter and self:GetText() ~= "" then
+            UI.persistedFilter = self:GetText()
+        end
+    end)
+
     search:SetScript("OnEscapePressed", function(self)
         self:SetText("")
         self:ClearFocus()
@@ -6010,6 +5998,19 @@ function UI.SelectTab(index)
 
     UI.selectedTab = index
 
+    -- The filter belongs to the tab being left. Clear the box unless the
+    -- player has asked for it to follow them, in which case put it back on
+    -- the new tab rather than leaving a filtered list with an empty box.
+    if window.search then
+        local settings = CN.Settings()
+
+        if settings and settings.keepFilter and UI.persistedFilter then
+            window.search:SetText(UI.persistedFilter)
+        else
+            window.search:SetText("")
+        end
+    end
+
     for buttonIndex, button in ipairs(window.tabButtons) do
         if buttonIndex == index then
             button:SetEnabled(false)
@@ -6053,6 +6054,23 @@ end
 ------------------------------------------------------------
 
 -- Applies the filter box to whichever list the current tab is showing.
+-- Re-applied when a tab changes, but only if the player asked for that.
+function UI.RestoreFilter()
+    local settings = CN.Settings()
+
+    if not settings or not settings.keepFilter or not UI.persistedFilter then
+        return false
+    end
+
+    if window and window.search then
+        window.search:SetText(UI.persistedFilter)
+    end
+
+    UI.SetFilter(UI.persistedFilter)
+
+    return true
+end
+
 function UI.SetFilter(text)
     local tab = UI.tabs[UI.selectedTab or 1]
 
@@ -6213,7 +6231,7 @@ UI.RegisterTab{
         end)
         panel.filter:SetPoint("LEFT", panel.ignore, "RIGHT", 6, 0)
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", panel.why, "BOTTOMLEFT", -4, -14)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -6346,7 +6364,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -6555,7 +6573,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -6705,7 +6723,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -6783,7 +6801,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -6879,7 +6897,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 64)
@@ -7093,7 +7111,7 @@ UI.RegisterTab{
         panel.sub:SetPoint("TOPLEFT", panel.header, "BOTTOMLEFT", 0, -4)
         panel.sub:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -52)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 40)
@@ -7243,7 +7261,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -7327,7 +7345,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -7650,7 +7668,10 @@ local function BuildMinimapButton()
     minimapButton:SetSize(31, 31)
     minimapButton:SetFrameStrata("MEDIUM")
     minimapButton:SetFrameLevel(8)
-    minimapButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    -- Middle-click added in 0.45.0. Three buttons, three of the things a
+    -- player does most: open it, navigate, and start following.
+    minimapButton:RegisterForClicks("LeftButtonUp", "RightButtonUp",
+        "MiddleButtonUp")
     minimapButton:RegisterForDrag("LeftButton")
     minimapButton:SetMovable(true)
 
@@ -7678,6 +7699,16 @@ local function BuildMinimapButton()
     end
 
     minimapButton:SetScript("OnClick", function(self, button)
+        if button == "MiddleButton" then
+            -- Follow mode is the addon's hands-free state and it was three
+            -- keystrokes or a scroll through the window away. It is the thing
+            -- somebody with the button on their minimap most wants one click
+            -- from.
+            CN.HandleSlashCommand("follow")
+
+            return
+        end
+
         if button == "RightButton" then
             local results = CN.Recommend(1)
 
@@ -7943,6 +7974,304 @@ CN:RegisterCommand{
 }
 '@
 
+$Embedded['UI\List.lua'] = @'
+-- UI/List.lua
+-- Completion Navigator :: the scrolling list every tab is built out of.
+--
+-- SPLIT OUT OF UI.lua IN 0.45.0.
+--
+-- UI.lua had reached 2,550 lines holding a window, eleven tabs, a minimap
+-- button, keybinding entry points and this. The list is the piece with the
+-- least to do with the rest: it knows about rows, pooling, filtering and
+-- sorting, and nothing about what is in them.
+--
+-- Only this piece moved. The tabs stayed where they are, because each one
+-- reaches into window-local helpers and moving them would be a refactor with
+-- real regression risk in a release that already carries a great deal --
+-- which is a judgement about timing rather than about the value of doing it.
+
+local ADDON_NAME, CN = ...
+
+local UI = CN.UI
+
+-- Shared with UI.lua, which owns the chrome these rows sit inside.
+local WINDOW_WIDTH = UI.WINDOW_WIDTH or 560
+local ROW_HEIGHT   = UI.ROW_HEIGHT or 20
+
+local SafeCreateFrame = UI.SafeCreateFrame
+
+-- Creates a reusable row list. Rows are pooled; SetRows swaps the data.
+local function CreateList(parent)
+    local list = CreateFrame("Frame", nil, parent)
+
+    list:SetPoint("TOPLEFT", 8, -8)
+    list:SetPoint("BOTTOMRIGHT", -8, 8)
+
+    local scroll = SafeCreateFrame("ScrollFrame", nil, list, "UIPanelScrollFrameTemplate")
+
+    scroll:SetPoint("TOPLEFT")
+    scroll:SetPoint("BOTTOMRIGHT", -26, 0)
+
+    local content = CreateFrame("Frame", nil, scroll)
+
+    content:SetSize(1, 1)
+    scroll:SetScrollChild(content)
+
+    list.rows = {}
+
+    function list:GetRow(index)
+        if self.rows[index] then
+            return self.rows[index]
+        end
+
+        local row = CreateFrame("Button", nil, content)
+
+        row:SetHeight(ROW_HEIGHT)
+        row:SetPoint("TOPLEFT", 0, -((index - 1) * ROW_HEIGHT))
+        row:SetPoint("TOPRIGHT", 0, -((index - 1) * ROW_HEIGHT))
+
+        row.highlight = row:CreateTexture(nil, "HIGHLIGHT")
+        row.highlight:SetAllPoints()
+        row.highlight:SetColorTexture(1, 1, 1, 0.10)
+
+        row.label = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
+        row.label:SetPoint("LEFT", 4, 0)
+        row.label:SetPoint("RIGHT", -4, 0)
+        row.label:SetJustifyH("LEFT")
+
+        -- HANDLERS ARE BOUND ONCE, HERE.
+        --
+        -- They used to be created inside SetEntries, which meant three fresh
+        -- closures per row on every redraw -- three hundred of them for a
+        -- hundred-row list, every time the window refreshed, each one
+        -- capturing a table it did not need to capture. In this game that is
+        -- not an abstract cost: allocation churn is what garbage collection
+        -- pauses are made of, and a pause is a stutter.
+        --
+        -- Bound once and reading `row.entry`, which SetEntries already sets,
+        -- a redraw now allocates nothing at all.
+        row:SetScript("OnClick", function(clicked)
+            local entry = clicked.entry
+
+            if entry and entry.onClick then
+                entry.onClick()
+            end
+        end)
+
+        row:SetScript("OnEnter", function(hovered)
+            local entry = hovered.entry
+
+            if not entry or not entry.tooltip or not GameTooltip then
+                return
+            end
+
+            GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
+            GameTooltip:SetText(entry.tooltip, nil, nil, nil, nil, true)
+            GameTooltip:Show()
+        end)
+
+        row:SetScript("OnLeave", function()
+            if GameTooltip then
+                GameTooltip:Hide()
+            end
+        end)
+
+        self.rows[index] = row
+
+        return row
+    end
+
+    -- A CEILING ON ROWS.
+    --
+    -- Every row is a frame, and frames cannot be destroyed in this game --
+    -- only hidden and reused. A list that renders one entry per row therefore
+    -- grows its frame pool to the size of the largest list it has ever been
+    -- shown, permanently, for the rest of the session. Nothing capped that.
+    --
+    -- Two hundred rows is far more than anyone reads before scrolling and
+    -- more than any tab currently produces; the point is that the number
+    -- exists at all. When it bites, the list says so rather than silently
+    -- ending -- a truncated list that looks complete is worse than a long one.
+    list.maxRows = 200
+
+    -- A FILTER OVER WHATEVER IS BEING SHOWN.
+    --
+    -- Not a search across everything the addon knows -- that is what the
+    -- commands are for, and a search box that quietly queries a different
+    -- data set than the list under it is a lie about what you are looking at.
+    -- This narrows the rows already on screen, which is what people reach for
+    -- a box for.
+    -- STATE IN A LOCAL, NOT ON THE FRAME.
+    --
+    -- A frame is not a plain table: templates and mixins put a metatable on
+    -- it, and reading an unset field can return something other than nil.
+    -- The first version of this kept `list.filterText` on the frame and
+    -- relied on "unset means nil" -- which held in the game and did not hold
+    -- against the test harness's stub, whose __index answers every key. The
+    -- test caught it; a player with a different UI library might have found
+    -- it instead.
+    local filterText = nil
+
+    function list:SetFilter(text)
+        -- A stub EditBox, or a template whose GetText returns something
+        -- surprising, must not be able to poison the filter with a value that
+        -- string.find will throw on later -- three frames away from here,
+        -- where the cause is not obvious.
+        if type(text) ~= "string" then
+            text = ""
+        end
+
+        text = CN.Trim(text)
+
+        filterText = (text ~= "") and string.lower(text) or nil
+
+        if self.lastEntries then
+            self:SetEntries(self.lastEntries)
+        end
+    end
+
+    -- SORTING.
+    --
+    -- Every list in this window has been in whatever order its tab produced,
+    -- which is the right default -- the ranking IS the product -- and the
+    -- wrong only option. Somebody looking for a specific mount wants
+    -- alphabetical; somebody auditing progress wants it grouped.
+    --
+    -- Three orders, cycled by clicking the header, and "as ranked" is first
+    -- so the default never changes for anybody who does not go looking.
+    list.sortModes = { "ranked", "name", "reverse" }
+    list.sortIndex = 1
+
+    function list:SortMode()
+        return self.sortModes[self.sortIndex] or "ranked"
+    end
+
+    function list:CycleSort()
+        self.sortIndex = (self.sortIndex % #self.sortModes) + 1
+
+        if self.lastEntries then
+            self:SetEntries(self.lastEntries)
+        end
+
+        return self:SortMode()
+    end
+
+    function list:ApplySort(entries)
+        local mode = self:SortMode()
+
+        if mode == "ranked" then
+            return entries
+        end
+
+        local sorted = {}
+
+        for _, entry in ipairs(entries) do
+            table.insert(sorted, entry)
+        end
+
+        -- A stable-enough comparison on the visible text: the rows are what
+        -- the player is reading, so the order they asked for is an order over
+        -- what they can see, not over an id they cannot.
+        table.sort(sorted, function(a, b)
+            local left  = string.lower(tostring(a.text or ""))
+            local right = string.lower(tostring(b.text or ""))
+
+            if mode == "reverse" then
+                return left > right
+            end
+
+            return left < right
+        end)
+
+        return sorted
+    end
+
+    function list:Matches(entry)
+        if not filterText then
+            return true
+        end
+
+        local haystack = string.lower(tostring(entry.text or ""))
+
+        -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
+        -- name, not a regular expression, and a stray bracket must not throw.
+        return haystack:find(filterText, 1, true) ~= nil
+    end
+
+    -- entries = { { text = , onClick = , tooltip = }, ... }
+    function list:SetEntries(entries)
+        self.lastEntries = entries
+
+        if filterText then
+            local kept = {}
+
+            for _, entry in ipairs(entries) do
+                if self:Matches(entry) then
+                    table.insert(kept, entry)
+                end
+            end
+
+            entries = kept
+        end
+
+        entries = self:ApplySort(entries)
+
+        local width = scroll:GetWidth() or (WINDOW_WIDTH - 60)
+
+        local shown = math.min(#entries, self.maxRows)
+
+        local truncated = #entries - shown
+
+        if truncated > 0 then
+            -- Room for the line that explains the truncation.
+            shown = shown - 1
+            truncated = truncated + 1
+        end
+
+        content:SetSize(width, math.max(1, (shown + (truncated > 0 and 1 or 0)) * ROW_HEIGHT))
+
+        for index = 1, shown do
+            local entry = entries[index]
+
+            local row = self:GetRow(index)
+
+            row.label:SetText(entry.text or "")
+
+            -- The only thing a redraw changes. The handlers were bound when
+            -- the row was created and read this.
+            row.entry = entry
+
+            row:Show()
+        end
+
+        local used = shown
+
+        if truncated > 0 then
+            used = shown + 1
+
+            local row = self:GetRow(used)
+
+            row.label:SetText("|cff999999... and " .. truncated
+                .. " more not shown|r")
+
+            row.entry = nil
+
+            row:Show()
+        end
+
+        for index = used + 1, #self.rows do
+            self.rows[index]:Hide()
+        end
+
+        return used
+    end
+
+    return list
+end
+
+UI.CreateList = CreateList
+'@
+
 $Embedded['Data\Quests.lua'] = @'
 -- Data/Quests.lua
 -- Completion Navigator :: curated static quest data.
@@ -8022,9 +8351,20 @@ $Embedded['Providers\Blizzard.lua'] = @'
 -- Providers/Blizzard.lua
 -- Completion Navigator :: thin, defensive wrappers over Blizzard APIs.
 --
--- Every call into the client goes through here. Blizzard renames and
--- removes APIs between patches; keeping the surface area in one file means
--- a patch break is a one-file fix rather than a hunt.
+-- Every call into the client goes through this FILE SET. Blizzard renames and
+-- removes APIs between patches; keeping the surface area together means a
+-- patch break is a contained fix rather than a hunt through the addon.
+--
+-- Split into three in 0.45.0, at 2,250 lines, when "keep it in one file"
+-- stopped meaning "easy to find" and started meaning "search, do not scroll":
+--
+--   Blizzard.lua             quests, reputation, character, map
+--   BlizzardCollections.lua  pets, mounts, toys, appearances, titles
+--   BlizzardWorld.lua        professions, the vault, currencies, instances
+--
+-- Divided by what the client is asked ABOUT, because that is also how patches
+-- break things -- a collections patch breaks collection APIs. `CN.Blizzard`
+-- remains a single table; only the source is divided.
 
 local ADDON_NAME, CN = ...
 
@@ -8302,6 +8642,45 @@ function Blizzard.GetQuestObjectiveProgress(questID)
     return done, total
 end
 
+-- Objectives that are COUNTING something, with where they stand.
+--
+-- "3/12 Sunscale Feathers" is a different piece of advice from "not started"
+-- and from "finished", and the addon has only ever known the middle one
+-- existed in aggregate. Returns an array of:
+--   { text, type, done, required, remaining, finished }
+function Blizzard.GetCountingObjectives(questID)
+    local rows = {}
+
+    if not C_QuestLog or not C_QuestLog.GetQuestObjectives then
+        return rows
+    end
+
+    local ok, objectives = pcall(C_QuestLog.GetQuestObjectives, questID)
+
+    if not ok or type(objectives) ~= "table" then
+        return rows
+    end
+
+    for _, objective in ipairs(objectives) do
+        local required = objective.numRequired or 0
+
+        if required > 1 then
+            local done = objective.numFulfilled or 0
+
+            table.insert(rows, {
+                text      = objective.text,
+                type      = objective.type,
+                done      = done,
+                required  = required,
+                remaining = math.max(0, required - done),
+                finished  = objective.finished and true or false,
+            })
+        end
+    end
+
+    return rows
+end
+
 function Blizzard.GetQuestZone(questID)
     if C_TaskQuest and C_TaskQuest.GetQuestZoneID then
         local mapID = C_TaskQuest.GetQuestZoneID(questID)
@@ -8514,6 +8893,28 @@ function Blizzard.GetMapName(mapID)
 end
 
 ------------------------------------------------------------
+'@
+
+$Embedded['Providers\BlizzardCollections.lua'] = @'
+-- Providers/BlizzardCollections.lua
+-- Completion Navigator :: pets, mounts, toys, appearances and titles.
+--
+-- SPLIT OUT OF Providers/Blizzard.lua IN 0.45.0.
+--
+-- That file had grown to 2,250 lines and held every call this addon makes
+-- into the client. The original argument for one file was sound -- a patch
+-- that renames an API is a one-file fix rather than a hunt -- and it stopped
+-- being true somewhere around the point where finding the function you wanted
+-- required a search rather than a scroll.
+--
+-- The three files divide by what the client is being asked ABOUT, which is
+-- also how patches break things: a collections patch breaks collection APIs.
+-- `CN.Blizzard` is still one table; only the source is divided.
+
+local ADDON_NAME, CN = ...
+
+local Blizzard = CN.Blizzard
+
 -- BATTLE PETS
 ------------------------------------------------------------
 
@@ -8923,6 +9324,28 @@ function Blizzard.GetAchievementTotals()
 end
 
 ------------------------------------------------------------
+'@
+
+$Embedded['Providers\BlizzardWorld.lua'] = @'
+-- Providers/BlizzardWorld.lua
+-- Completion Navigator :: professions, the vault, currencies, instances and the world.
+--
+-- SPLIT OUT OF Providers/Blizzard.lua IN 0.45.0.
+--
+-- That file had grown to 2,250 lines and held every call this addon makes
+-- into the client. The original argument for one file was sound -- a patch
+-- that renames an API is a one-file fix rather than a hunt -- and it stopped
+-- being true somewhere around the point where finding the function you wanted
+-- required a search rather than a scroll.
+--
+-- The three files divide by what the client is being asked ABOUT, which is
+-- also how patches break things: a collections patch breaks collection APIs.
+-- `CN.Blizzard` is still one table; only the source is divided.
+
+local ADDON_NAME, CN = ...
+
+local Blizzard = CN.Blizzard
+
 -- PROFESSIONS AND RECIPES
 ------------------------------------------------------------
 
@@ -20186,6 +20609,22 @@ function Tooltips.ItemLines(itemID, itemName)
             if reason then
                 Add(lines, reason, { 0.6, 0.6, 0.6 })
             end
+
+            -- ONE MORE LINE, WHERE IT SAYS SOMETHING THE FIRST DID NOT.
+            --
+            -- 0.43.0 added the top reason, which answers "should I care?".
+            -- The second question a player asks of a collectible is "where
+            -- does it come from?", and the addon has known that since 0.41.0
+            -- without ever putting it where the mouse already is.
+            local instances = CN:GetModule("Instances")
+
+            if instances and itemName then
+                local ok, source = pcall(instances.DescribeSource, itemName)
+
+                if ok and source then
+                    Add(lines, "Drops from " .. source, { 0.6, 0.6, 0.6 })
+                end
+            end
         end
     end
 
@@ -28358,6 +28797,148 @@ function Inventory.UncollectedItems()
     return found
 end
 
+-- HOW CLOSE AN ACCEPTED QUEST IS, IN THINGS RATHER THAN IN PERCENT.
+--
+-- This file's own header has promised since 0.44.0 that the addon would say
+-- "ten more" rather than "go and do that quest". It did not: the header
+-- described an intention and the code collected quest STARTERS and nothing
+-- else. Writing down what a thing is going to do and then not doing it is
+-- worse than not writing it down, because the next reader believes it.
+--
+-- The client counts these itself, which is the whole reason this is cheap:
+-- an objective that requires more than one of something reports how many are
+-- done. Returns the objectives that are counting and unfinished, nearest to
+-- completion first -- because "one more" is a completely different suggestion
+-- from "nineteen more".
+function Inventory.QuestProgress(questID)
+    local rows = {}
+
+    for _, objective in ipairs(Blizzard.GetCountingObjectives(questID)) do
+        if not objective.finished then
+            table.insert(rows, objective)
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        return a.remaining < b.remaining
+    end)
+
+    return rows
+end
+
+-- The same question across every quest in the log: what is nearly done?
+Inventory.nearlyDoneRemaining = 3
+
+function Inventory.NearlyDone()
+    local rows = {}
+
+    for _, entry in ipairs(Blizzard.GetQuestLogEntries()) do
+        for _, objective in ipairs(Inventory.QuestProgress(entry.questID)) do
+            if objective.remaining <= Inventory.nearlyDoneRemaining then
+                table.insert(rows, {
+                    questID   = entry.questID,
+                    title     = entry.title,
+                    text      = objective.text,
+                    done      = objective.done,
+                    required  = objective.required,
+                    remaining = objective.remaining,
+                })
+            end
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        if a.remaining ~= b.remaining then
+            return a.remaining < b.remaining
+        end
+
+        return (a.questID or 0) < (b.questID or 0)
+    end)
+
+    return rows
+end
+
+-- RECIPES YOU OWN AND HAVE NOT LEARNED.
+--
+-- The other promise this header made and did not keep. An unlearned recipe in
+-- a bag is a profession skill-up sitting in your inventory, and the addon has
+-- been recommending vendors that sell recipes while ignoring the ones you
+-- already bought.
+--
+-- Item class 9 is Recipe. The client will say whether the character already
+-- knows it -- an already-known recipe is greyed in the tooltip -- but there
+-- is no clean API for that state, so this reports what is CARRIED and leaves
+-- the "already known" question to the tooltip, which answers it visually.
+function Inventory.Recipes()
+    local recipes = {}
+
+    if not C_Item or not C_Item.GetItemInfoInstant then
+        return recipes
+    end
+
+    for _, item in ipairs(Inventory.Scan()) do
+        local ok, _, _, _, _, classID = pcall(C_Item.GetItemInfoInstant, item.itemID)
+
+        if ok and classID == 9 then
+            item.kind = CN.objectiveTypes.RECIPE
+
+            table.insert(recipes, item)
+        end
+    end
+
+    return recipes
+end
+
+------------------------------------------------------------
+-- THE BANK
+------------------------------------------------------------
+
+-- `bankIDs` has been declared since 0.44.0 and read by nothing -- a list of
+-- container numbers sitting there looking like a feature.
+--
+-- The client refuses to describe bank containers unless the bank frame is
+-- open, so this is only answerable while the player is standing at one. The
+-- honest shape is therefore: scan when it is open, remember what was seen,
+-- and report the remembered set with the date it was taken -- never
+-- presenting a week-old snapshot as current.
+function Inventory.BankStore()
+    return CN.Account("bank")
+end
+
+function Inventory.ScanBank()
+    local items = Inventory.Scan(Inventory.bankIDs)
+
+    local store = Inventory.BankStore()
+
+    for key in pairs(store) do
+        store[key] = nil
+    end
+
+    -- Item ids and counts only. The bag and slot of something in a bank is
+    -- not worth a byte on disk: it moves, and the player is looking at it.
+    for _, item in ipairs(items) do
+        store[item.itemID] = (store[item.itemID] or 0) + (item.count or 1)
+    end
+
+    store.scannedAt = time()
+
+    return #items
+end
+
+function Inventory.InBank(itemID)
+    if not itemID then
+        return 0
+    end
+
+    return Inventory.BankStore()[itemID] or 0
+end
+
+CN:RegisterEvent("BANKFRAME_OPENED", function()
+    local counted = Inventory.ScanBank()
+
+    DebugPrint("Bank scanned: " .. counted .. " stacks.")
+end)
+
 function Inventory.Summary()
     local items = Inventory.Scan()
 
@@ -28397,6 +28978,32 @@ CN.RegisterCandidateProvider("Inventory", function()
                 travelCost       = 0,
                 reasons          = {
                     "a quest starter in your bags -- right-click it",
+                },
+            }))
+        end
+    end
+
+    -- NEARLY-FINISHED OBJECTIVES.
+    --
+    -- "One more Sunscale Feather" is the cheapest quest advice there is, and
+    -- the ranking could not distinguish it from a quest not yet started.
+    for _, row in ipairs(Inventory.NearlyDone()) do
+        if not CN.IsIgnored(CN.objectiveTypes.QUEST, row.questID)
+            and not CN.IsDeferred(CN.objectiveTypes.QUEST, row.questID) then
+
+            table.insert(candidates, CN.NewObjective({
+                id               = row.questID,
+                type             = CN.objectiveTypes.QUEST,
+                name             = tostring(row.title or ("Quest " .. row.questID))
+                    .. ": " .. row.remaining .. " more",
+                state            = CN.objectiveStates.AVAILABLE,
+
+                -- Worth more the closer it is, which is the entire point.
+                completionValue  = 2 + (Inventory.nearlyDoneRemaining - row.remaining),
+                travelCost       = CN.unknownLocationCost,
+                reasons          = {
+                    string.format("%s -- %d of %d done",
+                        tostring(row.text or "objective"), row.done, row.required),
                 },
             }))
         end
@@ -28469,7 +29076,48 @@ CN:RegisterCommand{
             end
         end
 
-        if #starters == 0 and #uncollected == 0 then
+        local recipes = Inventory.Recipes()
+
+        if #recipes > 0 then
+            Print(#recipes .. " recipe(s) carried:")
+
+            for _, item in ipairs(recipes) do
+                Print("  " .. (Blizzard.GetItemName(item.itemID)
+                    or ("item " .. item.itemID)))
+            end
+        end
+
+        local nearly = Inventory.NearlyDone()
+
+        if #nearly > 0 then
+            Print("Nearly finished:")
+
+            for index, row in ipairs(nearly) do
+                if index > 8 then
+                    Print("  |cff999999... and " .. (#nearly - 8) .. " more|r")
+                    break
+                end
+
+                Print(string.format("  |cffffff00%d more|r %s |cff999999(%d/%d)|r",
+                    row.remaining, tostring(row.text or row.title),
+                    row.done, row.required))
+            end
+        end
+
+        local bank = Inventory.BankStore()
+
+        if bank.scannedAt then
+            local age = math.max(0, time() - bank.scannedAt)
+
+            Print("|cff999999Bank: " .. (CN.CountKeys(bank) - 1)
+                .. " kinds of item, seen "
+                .. math.floor(age / 3600) .. "h ago -- the client only "
+                .. "describes it while you are standing at one.|r")
+        end
+
+        if #starters == 0 and #uncollected == 0 and #recipes == 0
+            and #nearly == 0 then
+
             Print("|cff999999Nothing in there needs doing.|r")
         end
 
@@ -28851,6 +29499,303 @@ CN:RegisterCommand{
 }
 
 return Waiting
+'@
+
+$Embedded['Modules\Sets.lua'] = @'
+-- Modules/Sets.lua
+-- Completion Navigator :: appearance SETS, the guild, and what you could
+-- queue for.
+--
+-- Three readers, one file, for the same reason Waiting holds four: each is a
+-- thin wrapper over a client API the addon had never opened, and none of them
+-- carries enough behaviour to justify a module of its own.
+--
+-- SETS.
+--
+-- The addon has tracked individual appearances since 0.13.0 and has never
+-- known that the game groups them. That matters because collecting is
+-- overwhelmingly done by SET -- nobody wants "one more shoulder", they want
+-- the tier set finished -- and "3 of 5 pieces" is a genuine denominator the
+-- client supplies, which this addon is otherwise very short of.
+--
+-- GUILD.
+--
+-- Guild achievements and guild reputation are a whole progression track that
+-- was structurally invisible. Modest scope deliberately: what the guild is,
+-- and whether the character is close to anything in it.
+--
+-- QUEUES.
+--
+-- "You could run this right now" is a different and more useful sentence than
+-- "this dungeon exists". The client knows what the character is eligible for;
+-- the addon never asked.
+
+local ADDON_NAME, CN = ...
+
+local Sets = CN:RegisterModule("Sets")
+
+local Print = CN.Print
+
+------------------------------------------------------------
+-- APPEARANCE SETS
+------------------------------------------------------------
+
+function Sets.IsAvailable()
+    return C_TransmogSets ~= nil and C_TransmogSets.GetAllSets ~= nil
+end
+
+-- Every set the client will describe, with how much of it is collected.
+--
+-- Bounded: there are several thousand sets across the game's history and each
+-- one costs a call to enumerate its pieces. The cap is a real limit on what
+-- this answers, so it is stated rather than hidden -- the command says how
+-- many were examined.
+Sets.scanCap = 400
+
+function Sets.All(limit)
+    limit = limit or Sets.scanCap
+
+    local rows = {}
+
+    if not Sets.IsAvailable() then
+        return rows, false
+    end
+
+    local ok, all = pcall(C_TransmogSets.GetAllSets)
+
+    if not ok or type(all) ~= "table" then
+        return rows, false
+    end
+
+    local examined = 0
+
+    for _, set in ipairs(all) do
+        if examined >= limit then
+            break
+        end
+
+        if set.setID and set.collected ~= nil then
+            examined = examined + 1
+
+            local total, collected = 0, 0
+
+            if C_TransmogSets.GetSetPrimaryAppearances then
+                local gotPieces, pieces =
+                    pcall(C_TransmogSets.GetSetPrimaryAppearances, set.setID)
+
+                if gotPieces and type(pieces) == "table" then
+                    for _, piece in ipairs(pieces) do
+                        total = total + 1
+
+                        if piece.collected then
+                            collected = collected + 1
+                        end
+                    end
+                end
+            end
+
+            table.insert(rows, {
+                setID     = set.setID,
+                name      = set.name,
+                label     = set.label,
+                collected = collected,
+                total     = total,
+                complete  = set.collected and true or false,
+            })
+        end
+    end
+
+    return rows, true, examined
+end
+
+-- The sets closest to finished, which is the only ordering anybody wants.
+-- A set with nothing collected is not "nearly done"; it is a decision.
+function Sets.NearlyComplete(maxMissing)
+    maxMissing = maxMissing or 2
+
+    local rows = {}
+
+    for _, set in ipairs((Sets.All())) do
+        local missing = set.total - set.collected
+
+        if set.total > 0 and missing > 0 and missing <= maxMissing then
+            set.missing = missing
+
+            table.insert(rows, set)
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        if a.missing ~= b.missing then
+            return a.missing < b.missing
+        end
+
+        return (a.setID or 0) < (b.setID or 0)
+    end)
+
+    return rows
+end
+
+------------------------------------------------------------
+-- THE GUILD
+------------------------------------------------------------
+
+function Sets.Guild()
+    if not IsInGuild then
+        return nil
+    end
+
+    local ok, inGuild = pcall(IsInGuild)
+
+    if not ok or not inGuild then
+        return nil
+    end
+
+    local name, rank, rankIndex
+
+    if GetGuildInfo then
+        local gotInfo, guildName, guildRank, guildRankIndex =
+            pcall(GetGuildInfo, "player")
+
+        if gotInfo then
+            name, rank, rankIndex = guildName, guildRank, guildRankIndex
+        end
+    end
+
+    return {
+        name      = name,
+        rank      = rank,
+        rankIndex = rankIndex,
+    }
+end
+
+------------------------------------------------------------
+-- WHAT YOU COULD QUEUE FOR
+------------------------------------------------------------
+
+-- Deliberately read-only, and deliberately not a queueing button. An addon
+-- that puts you in a group finder queue is an addon that will one day do it
+-- while you are in a raid.
+function Sets.Queues()
+    local rows = {}
+
+    if not C_LFGList or not C_LFGList.GetAvailableActivities then
+        return rows, false
+    end
+
+    local ok, activities = pcall(C_LFGList.GetAvailableActivities)
+
+    if not ok or type(activities) ~= "table" then
+        return rows, false
+    end
+
+    for _, activityID in ipairs(activities) do
+        local gotInfo, info = pcall(C_LFGList.GetActivityInfoTable, activityID)
+
+        if gotInfo and type(info) == "table" and info.fullName then
+            table.insert(rows, {
+                activityID = activityID,
+                name       = info.fullName,
+                maxPlayers = info.maxNumPlayers,
+            })
+        end
+    end
+
+    return rows, true
+end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+CN.RegisterCandidateProvider("Sets", function()
+    local candidates = {}
+
+    for _, set in ipairs(Sets.NearlyComplete()) do
+        if not CN.IsIgnored(CN.objectiveTypes.APPEARANCE, set.setID)
+            and not CN.IsDeferred(CN.objectiveTypes.APPEARANCE, set.setID) then
+
+            table.insert(candidates, CN.NewObjective({
+                id               = set.setID,
+                type             = CN.objectiveTypes.APPEARANCE,
+                name             = tostring(set.name or ("Set " .. set.setID))
+                    .. ": " .. set.missing .. " piece(s) left",
+
+                -- A REAL denominator, which this addon is normally short of.
+                completionValue  = 3 + (3 - math.min(3, set.missing)),
+                travelCost       = CN.unknownLocationCost,
+                reasons          = {
+                    set.collected .. " of " .. set.total .. " pieces collected",
+                },
+            }))
+        end
+    end
+
+    return candidates
+end, {
+    events   = { "TRANSMOG_COLLECTION_UPDATED" },
+    cooldown = 60,
+})
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "sets",
+    aliases = { "guild", "queues" },
+    order   = 31,
+    help    = "Appearance sets nearly finished, your guild, and what you "
+        .. "could queue for.",
+    handler = function()
+        local rows, readable, examined = Sets.All()
+
+        if not readable then
+            Print("|cff999999This client does not expose appearance sets.|r")
+        else
+            local nearly = Sets.NearlyComplete()
+
+            Print(#rows .. " sets read"
+                .. (examined and examined >= Sets.scanCap
+                    and (" |cff999999(capped at " .. Sets.scanCap
+                        .. "; there are more)|r") or "") .. ".")
+
+            if #nearly == 0 then
+                Print("|cff999999None of them is within two pieces.|r")
+            else
+                Print("Nearly finished:")
+
+                for index, set in ipairs(nearly) do
+                    if index > 10 then
+                        Print("  |cff999999... and " .. (#nearly - 10) .. " more|r")
+                        break
+                    end
+
+                    Print(string.format("  |cffffff00%d left|r %s |cff999999(%d/%d)|r",
+                        set.missing, tostring(set.name or set.setID),
+                        set.collected, set.total))
+                end
+            end
+        end
+
+        local guild = Sets.Guild()
+
+        if guild then
+            Print("Guild: |cffffff00" .. tostring(guild.name or "?") .. "|r"
+                .. (guild.rank and (" |cff999999" .. guild.rank .. "|r") or ""))
+        end
+
+        local queues, queueReadable = Sets.Queues()
+
+        if queueReadable and #queues > 0 then
+            Print(#queues .. " activities you are eligible to queue for.")
+            Print("|cff999999The addon reads that list. It does not queue you "
+                .. "for anything.|r")
+        end
+    end,
+}
+
+return Sets
 '@
 
 $Embedded['Modules\Travel.lua'] = @'
@@ -29279,6 +30224,116 @@ function Travel.ObserveFlight()
 end
 
 ------------------------------------------------------------
+-- WHICH FLIGHTS ACTUALLY CONNECT
+------------------------------------------------------------
+
+-- THE ASSUMPTION THIS REPLACES.
+--
+-- The costing has assumed since 0.42.0 that any flight point on a continent
+-- can reach any other. Mostly true, and wrong often enough to matter: routes
+-- go through hubs, some connect only one way, and a few zones are served by a
+-- single node that reaches almost nothing.
+--
+-- There is no API that answers "does A connect to B". There is, however, the
+-- player, who takes flights -- and a flight taken is proof that its two ends
+-- connect. So: watch, remember, and prefer a pair that is known to work over
+-- one that is merely plausible.
+--
+-- Nothing is ever ruled OUT by this. A pair never observed is not a pair that
+-- does not connect; it is a pair nobody has flown yet, and treating those as
+-- impossible would make the model worse than the assumption it replaces.
+local function Routes()
+    return CN.Account("flightRoutes")
+end
+
+Travel.Routes = Routes
+
+local function RouteKey(fromID, toID)
+    if not fromID or not toID then
+        return nil
+    end
+
+    -- Undirected: a flight path that carries you one way is evidence the two
+    -- points are on the same network, which is what the costing needs.
+    if fromID > toID then
+        fromID, toID = toID, fromID
+    end
+
+    return fromID .. ":" .. toID
+end
+
+Travel.RouteKey = RouteKey
+
+function Travel.NoteRoute(fromID, toID)
+    local key = RouteKey(fromID, toID)
+
+    if not key then
+        return false
+    end
+
+    local routes = Routes()
+
+    routes[key] = (routes[key] or 0) + 1
+
+    return true
+end
+
+function Travel.IsKnownRoute(fromID, toID)
+    local key = RouteKey(fromID, toID)
+
+    return key ~= nil and (Routes()[key] or 0) > 0
+end
+
+-- How much a known pair is preferred. A multiplier on the estimate rather
+-- than a hard filter, because an unobserved pair is unproven, not impossible
+-- -- and a small preference is enough to break a tie between two routes of
+-- similar length.
+Travel.knownRouteBonus = 0.9
+
+-- The flight the player is currently on, so its endpoints can be recorded
+-- when it ends. Which node they left from is known at the moment they board:
+-- it is the nearest one to where they were standing.
+local boarding = nil
+
+function Travel.NoteBoarding()
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local point = mapID and Travel.WorldPoint(mapID, x, y)
+
+    local node = point and Travel.NearestNode(point, Travel.KnownNodes(mapID))
+
+    boarding = node and node.id or nil
+
+    return boarding
+end
+
+function Travel.NoteLanding()
+    if not boarding then
+        return false
+    end
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local point = mapID and Travel.WorldPoint(mapID, x, y)
+
+    local node = point and Travel.NearestNode(point, Travel.KnownNodes(mapID))
+
+    local landed = node and node.id
+
+    local recorded = false
+
+    if landed and landed ~= boarding then
+        recorded = Travel.NoteRoute(boarding, landed)
+
+        DebugPrint("Flight recorded: " .. boarding .. " to " .. landed .. ".")
+    end
+
+    boarding = nil
+
+    return recorded
+end
+
+------------------------------------------------------------
 -- FLYING YOURSELF
 ------------------------------------------------------------
 
@@ -29686,6 +30741,13 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
                                 + (flightYards / flightSpeed)
                                 + (arrivalYards / runSpeed)
 
+                            -- A pair the player has actually flown beats an
+                            -- equivalent pair nobody has: same distance, one
+                            -- of them proven to connect.
+                            if Travel.IsKnownRoute(origin.id, arrival.id) then
+                                seconds = seconds * Travel.knownRouteBonus
+                            end
+
                             if seconds < best.seconds then
                                 best = {
                                     seconds     = seconds,
@@ -29843,6 +30905,9 @@ local ticker
 Travel.tickSeconds = 1
 
 CN:RegisterEvent("PLAYER_CONTROL_LOST", function()
+    -- Losing control is the moment a flight starts. Record where from.
+    pcall(Travel.NoteBoarding)
+
     if ticker or not C_Timer or not C_Timer.NewTicker then
         return
     end
@@ -29851,6 +30916,9 @@ CN:RegisterEvent("PLAYER_CONTROL_LOST", function()
         local flying = Travel.ObserveFlight()
 
         if not flying and ticker then
+            -- The flight has ended: record which two points it joined.
+            pcall(Travel.NoteLanding)
+
             ticker:Cancel()
             ticker = nil
         end
@@ -33309,6 +34377,34 @@ CN:RegisterCommand{
 }
 
 CN:RegisterCommand{
+    name    = "keepfilter",
+    args    = "[on or off]",
+    order   = 44,
+    help    = "Whether the window's filter box follows you between tabs.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        local settings = Settings()
+
+        if args == "on" then
+            settings.keepFilter = true
+        elseif args == "off" then
+            settings.keepFilter = nil
+        else
+            settings.keepFilter = (not settings.keepFilter) or nil
+        end
+
+        Print("Filter follows you between tabs: "
+            .. CN.YesNo(settings.keepFilter))
+
+        if not settings.keepFilter then
+            Print("|cff999999Off is the safer default: a filter that persists "
+                .. "invisibly is how a list looks empty when it is not.|r")
+        end
+    end,
+}
+
+CN:RegisterCommand{
     name    = "cues",
     args    = "[on or off]",
     order   = 42,
@@ -33594,7 +34690,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.44.0
+## Version: 0.45.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -33633,8 +34729,11 @@ Locales\zhTW.lua
 Scoring.lua
 Routing.lua
 UI.lua
+UI\List.lua
 Providers\ATT.lua
 Providers\Blizzard.lua
+Providers\BlizzardCollections.lua
+Providers\BlizzardWorld.lua
 Providers\BtWQuests.lua
 Providers\HandyNotes.lua
 Providers\StaticData.lua
@@ -33649,6 +34748,7 @@ Modules\Broker.lua
 Modules\Group.lua
 Modules\Inventory.lua
 Modules\Waiting.lua
+Modules\Sets.lua
 Modules\Travel.lua
 Modules\Instances.lua
 Modules\Preference.lua
@@ -33844,6 +34944,94 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.45.0]
+
+Two promises this addon made in writing and did not keep, the last of the
+backlog that can be built without a live client, and the first structural
+split of the codebase.
+
+### Fixed
+
+- **Two features that existed only in a comment.** `Modules/Inventory.lua`
+  opened, in 0.44.0, by saying the addon would tell you *"forty of the fifty
+  things a quest wants, so the answer is ten more"* and would notice *"a
+  recipe you already own and have not learned"*. It did neither: the file
+  collected quest starters and stopped. Writing down what something is going
+  to do and then not doing it is worse than not writing it down, because the
+  next reader believes it. Both are built now, and the counting one is worth
+  **more the closer it is** -- "one more feather" outranks a quest not begun.
+- **`Inventory.bankIDs` had been declared and read by nothing** since the
+  module was written -- a list of container numbers sitting there looking like
+  a feature. The bank is scanned when you open one, remembered by item, and
+  reported with its age, because the client will not describe a bank you are
+  not standing at.
+
+### Added
+
+- **Appearance sets.** The addon has tracked individual appearances since
+  0.13.0 without ever knowing the game groups them -- and collecting is
+  overwhelmingly done by set. "Four of five pieces" is a real denominator,
+  which this addon is normally short of. A finished set is not offered as
+  nearly finished; a set barely begun is a decision, not a next action.
+- **Your guild, and what you could queue for** -- read-only. The addon does
+  not put you in a queue, and will not.
+- **Flight paths are learned rather than assumed.** The costing has assumed
+  since 0.42.0 that any flight point reaches any other on a continent. Mostly
+  true; wrong often enough to matter. There is no API for "does A connect to
+  B", so the addon watches the flights you take -- a flight taken is proof --
+  and prefers a proven pair. A pair never flown is **not** ruled out: that
+  would be worse than the assumption it replaces.
+- **`/cn locale export`** prints a paste-ready block for a translator, rather
+  than a list they would have to turn into Lua themselves.
+- **Sortable lists** -- as ranked, alphabetical, reversed. "As ranked" is
+  first, so the default never changes for anybody who does not go looking.
+- **The window's filter can follow you between tabs** (`/cn keepfilter`), off
+  by default, because a filter that persists invisibly is how a list looks
+  empty when it is not.
+- **Middle-click the minimap button** to start or stop follow mode.
+- **Tooltips say where a collectible drops from**, which the addon has known
+  since 0.41.0 without putting it where the mouse already is.
+- **`cn.ps1 provenance`** -- how many quest rows are curated, how many were
+  folded in from observed play, and how many were contributed. The
+  distinction is preserved carefully at runtime and was invisible in the
+  repository, where the decisions get made.
+- **Sixteen more translated strings** across ten languages.
+
+### Structure
+
+- **`Providers/Blizzard.lua` split into three** at 2,250 lines --
+  quests/reputation/character/map, collections, and the world -- divided by
+  what the client is asked about, because that is how patches break things.
+  `CN.Blizzard` is still one table.
+- **The list widget moved out of `UI.lua`** into `UI/List.lua`. It is the
+  piece with the least to do with the rest: it knows about rows, pooling,
+  filtering and sorting, and nothing about what is in them.
+- **`Modules/Navigation.lua` was deliberately NOT split.** Its four sections
+  share half a dozen upvalues -- the target, the arrow, the smoothing state,
+  the calibration counters -- so separating them is a real refactor rather
+  than a move. It is also the one subsystem carrying a fix that has not yet
+  been confirmed in game. Splitting it now would mean that if the arrow is
+  still wrong, nobody could tell which change did it.
+
+### Tooling
+
+- **Twenty-three mutations, up from eighteen.** The five new ones found one
+  hole, now closed.
+- **A test that had quietly become two assertions in one.** "Appearance
+  candidates are capped" counted objectives BY TYPE across the whole list, so
+  the moment a second provider began emitting appearances it was asserting
+  something about two unrelated caps added together. It counts its own
+  provider now.
+- **The curated data accessors have tests at last.** Class, race, faction,
+  level and turn-in shipped as schema in 0.43.0 with no rows and nothing
+  exercising the readers -- a schema nothing reads is a schema that is wrong
+  the first time somebody fills it in.
+
+### Notes
+
+- An unknown quest is eligible. Absence of curated data is not a block, and
+  never becomes one.
 
 ## [0.44.0]
 
@@ -36454,6 +37642,8 @@ The route is drawn on the world map as numbered pins, one per stop, in walking o
 
 Toggle with `/cn pins`, or from the options panel.
 
+Lists in the window can be sorted alphabetically as well as by rank, and the filter box can follow you between tabs if you want it to (`/cn keepfilter`).
+
 ## Quests you have not picked up yet
 
 The exclamation marks in front of you are often the cheapest next action available. Completion Navigator reads available quests from the map, not only your quest log, so *"go and collect that one"* is an answer it can give — weighted above an accepted quest you have not started, because the walk is short and it unlocks whatever follows.
@@ -36509,6 +37699,9 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **Your mailbox** | What is expiring, and whether anything is attached to it |
 | **Keystones** | The one you hold, and that it is replaced at the reset |
 | **Profession knowledge** | Weekly, capped, and gone if the week passes |
+| **Appearance sets** | Which are nearly complete, with a real count of pieces |
+| **Your bank** | Recorded when you open one, so what is in it stays findable |
+| **Flight paths you have flown** | So a route the addon suggests is one you can actually take |
 | **World events** | Timewalking and holidays, weighted by when they end |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
 
@@ -36563,7 +37756,9 @@ The addon notices which kinds of objective you go and do, and leans that way. Th
 /cn bags
 ```
 
-A surprising amount of *what should I do next* is already in there: the item that starts a quest, sitting since a boss dropped it, and mounts, pets and toys you own and have not learned. Those cost **zero** travel, because they are in your bag — which makes them the cheapest thing the addon can ever recommend.
+A surprising amount of *what should I do next* is already in there: the item that starts a quest, sitting since a boss dropped it, mounts, pets and toys you own and have not learned, and recipes you bought and never used. Those cost **zero** travel, because they are in your bag — which makes them the cheapest thing the addon can ever recommend.
+
+It also knows how close you are, in things rather than in percent. *One more feather* and *eighteen more boars* are different suggestions, and the first one outranks a quest you have not started.
 
 Nothing is used, learned, moved or sold on your behalf. It reads.
 
@@ -36574,6 +37769,14 @@ Nothing is used, learned, moved or sold on your behalf. It reads.
 ```
 
 Mail about to expire **with something attached** — expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Weekly profession knowledge, which is the most permanently missable thing in the game. Heirlooms.
+
+## Sets, not just pieces
+
+```
+/cn sets
+```
+
+Collecting appearances is done by set — nobody wants *one more shoulder*, they want the set finished. The game supplies a real denominator there, which this addon is otherwise short of, so **four of five pieces** is a fact rather than an estimate. A set you have barely begun is a decision about your evening, not a next action, and is left out.
 
 ## Where to go when this zone is done
 
@@ -36687,6 +37890,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn clock` | Everything with a deadline that is not a quest |
 | `/cn nearby` | What is worth doing outside this zone, and how far away it is |
 | `/cn order` | Why the list is in the order it is in |
+| `/cn sets` | Appearance sets nearly finished, and your guild |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |
@@ -36767,7 +37971,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.44.0
+0.45.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -37348,6 +38552,51 @@ mutate "Modules/Errors.lua" \
     "    while false do" \
     "the error ring grows without bound"
 
+mutate "Modules/Inventory.lua" \
+    "        if not objective.finished then" \
+    "        if true then" \
+    "finished objectives are reported as work left"
+
+mutate "Modules/Inventory.lua" \
+    "            if objective.remaining <= Inventory.nearlyDoneRemaining then" \
+    "            if true then" \
+    "everything is called nearly done"
+
+mutate "Modules/Travel.lua" \
+    "    if fromID > toID then
+        fromID, toID = toID, fromID
+    end" \
+    "    if false then
+        fromID, toID = toID, fromID
+    end" \
+    "a flight only counts in the direction it was flown"
+
+mutate "UI/List.lua" \
+    "        if mode == \"ranked\" then
+            return entries
+        end" \
+    "        if false then
+            return entries
+        end" \
+    "the ranking is re-sorted alphabetically by default"
+
+mutate "Modules/Sets.lua" \
+    "        if set.total > 0 and missing > 0 and missing <= maxMissing then" \
+    "        if set.total > 0 and missing <= maxMissing then" \
+    "a finished set is offered as nearly finished"
+
+# The break the 0.45.0 split actually introduced, kept as a permanent guard:
+# the tab builders must reach the list constructor through the table, because
+# UI/List.lua loads after UI.lua and a local captured there is nil forever.
+mutate "UI.lua" \
+    "        panel.list = UI.CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint(\"TOPLEFT\", panel.why, \"BOTTOMLEFT\", -4, -14)" \
+    "        panel.list = CreateList(panel)
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint(\"TOPLEFT\", panel.why, \"BOTTOMLEFT\", -4, -14)" \
+    "a tab builder calls the list constructor as a global"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 
@@ -37440,6 +38689,7 @@ read_globals = {
     "C_Container", "GetInboxNumItems", "GetInboxHeaderInfo",
     "C_MythicPlus", "C_ChallengeMode", "C_Heirloom",
     "C_ToyBox", "PlayerHasToy",
+    "C_TransmogSets", "C_LFGList", "IsInGuild", "GetGuildInfo",
     "IsSpellKnown", "IsPlayerSpell", "GetSpellCooldown", "GetItemCooldown",
     "GetItemCount", "GetBindLocation", "EJ_GetDifficulty", "GetDifficultyInfo",
     "SettingsPanel", "InterfaceOptions_AddCategory", "BackdropTemplateMixin",
@@ -37517,12 +38767,20 @@ ignore = {
     "211/Print",
 }
 
-files["Providers/Blizzard.lua"] = {
-    -- This file exists to absorb the client's positional return lists. Naming
-    -- every slot is what makes the call sites readable; most are unused by
-    -- design, and replacing them with select() would make the file worse.
-    ignore = { "211" },
-}
+-- The provider files exist to absorb the client's positional return lists.
+-- Naming every slot is what makes the call sites readable; most are unused by
+-- design, and replacing them with select() would make the files worse.
+--
+-- All three, since the split in 0.45.0 -- the exception belonged to the ROLE,
+-- not to the filename, and naming only the original file would have meant the
+-- warnings reappeared the moment the role moved.
+for _, provider in ipairs({
+    "Providers/Blizzard.lua",
+    "Providers/BlizzardCollections.lua",
+    "Providers/BlizzardWorld.lua",
+}) do
+    files[provider] = { ignore = { "211" } }
+end
 
 -- Test tooling. The harness exists to define the globals the addon reads, so
 -- "setting an undefined global" is its entire job; linting it under the addon's
@@ -37968,6 +39226,66 @@ C_Container = {
     end,
 }
 
+-- QUEST OBJECTIVES THAT COUNT SOMETHING.
+--
+-- "3 of 12 feathers" is the state the addon could describe only as "not
+-- finished" until 0.45.0, so the stub had no notion of it either.
+-- APPEARANCE SETS, including one already finished -- because "nearly
+-- finished" and "finished" are the two states a set-tracking feature must
+-- never confuse, and a fixture without a completed set cannot tell them
+-- apart.
+CN_TEST_SETS = {
+    { setID = 1, name = "Almost There",  collected = false,
+      pieces = { true, true, true, true, false } },
+    { setID = 2, name = "Finished",      collected = true,
+      pieces = { true, true, true } },
+    { setID = 3, name = "Barely Begun",  collected = false,
+      pieces = { true, false, false, false, false, false } },
+}
+
+C_TransmogSets = {
+    GetAllSets = function()
+        local sets = {}
+
+        for _, set in ipairs(CN_TEST_SETS) do
+            table.insert(sets, {
+                setID     = set.setID,
+                name      = set.name,
+                collected = set.collected,
+            })
+        end
+
+        return sets
+    end,
+
+    GetSetPrimaryAppearances = function(setID)
+        for _, set in ipairs(CN_TEST_SETS) do
+            if set.setID == setID then
+                local pieces = {}
+
+                for _, collected in ipairs(set.pieces) do
+                    table.insert(pieces, { collected = collected })
+                end
+
+                return pieces
+            end
+        end
+
+        return {}
+    end,
+}
+
+CN_TEST_OBJECTIVES = {
+    [9001] = {
+        { text = "Sunscale Feathers", type = "item",
+          numFulfilled = 11, numRequired = 12, finished = false },
+    },
+    [9002] = {
+        { text = "Boars slain", type = "monster",
+          numFulfilled = 2, numRequired = 20, finished = false },
+    },
+}
+
 CN_TEST_MAIL = {
     { sender = "Auction House", subject = "Sold", money = 100, items = 0, daysLeft = 1.5 },
     { sender = "A Friend",      subject = "Here", money = 0,   items = 2, daysLeft = 2.0 },
@@ -38297,9 +39615,17 @@ C_QuestLog = {
         return nil
     end,
     GetQuestObjectives = function(id)
+        -- COUNTING objectives where the fixture defines them, so the addon's
+        -- "eleven of twelve" path is exercised rather than only its
+        -- "finished or not" one.
+        if CN_TEST_OBJECTIVES[id] then
+            return CN_TEST_OBJECTIVES[id]
+        end
+
         if id == 9002 then
             return { { finished = true }, { finished = false } }
         end
+
         return {}
     end,
 }
@@ -39902,7 +41228,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 20, "every candidate provider must register, got "
+assert(firstState.providers == 21, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -40402,11 +41728,18 @@ assert((byType.TOY or 0) > 0,
     "a toy sold by a recorded vendor must be recommended")
 
 -- Appearances are capped to a few slots, not one per category.
+--
+-- Counted from the APPEARANCES PROVIDER rather than by type across the whole
+-- list: 0.45.0 added a second provider that also emits APPEARANCE objectives
+-- (nearly-finished sets), and a by-type count silently turned this into an
+-- assertion about two unrelated caps added together.
 local appearances = CN:GetModule("Appearances")
 
-assert((byType.APPEARANCE or 0) <= appearances.candidateSlots,
+local appearanceCandidates = CN.candidateProviders["Appearances"].fn()
+
+assert(#appearanceCandidates <= appearances.candidateSlots,
     "appearance candidates must be capped to the least-complete slots, got "
-    .. tostring(byType.APPEARANCE))
+    .. #appearanceCandidates)
 
 -- Titles deliberately have no provider: the client exposes no source, so
 -- there is no action to name. This asserts the decision, so that adding a
@@ -45146,6 +46479,7 @@ print("\nEvery command runs without throwing:")
         "errors", "errors clear", "learned", "locale", "locale missing",
         "instances", "drops", "drops Nothing At All",
         "bags", "clock", "nearby", "order", "order 2", "situation",
+        "sets", "keepfilter", "keepfilter off", "locale export",
         "help", "help all", "help lockout", "help nothingmatchesthis",
         "selftest", "capture", "capture clear", "dbsize", "welcome",
     }
@@ -45759,6 +47093,474 @@ print("\nA whole session, end to end:")
             .. errors.All()[1].message) or ""))
 
     print("  login, ask, explain, route, plan, follow, log out -- no errors")
+end)()
+
+
+print("\nHow close a quest actually is:")
+
+;(function()
+    local inventory = CN:GetModule("Inventory")
+
+    ------------------------------------------------------------
+    -- THE PROMISE THIS FILE'S HEADER MADE IN 0.44.0 AND DID NOT KEEP.
+    --
+    -- "Forty of the fifty things a quest wants, so the answer is 'ten more'."
+    -- The header said it; the code collected quest starters and nothing else.
+    -- Writing down what something is going to do and then not doing it is
+    -- worse than not writing it down, because the next reader believes it.
+    ------------------------------------------------------------
+    local progress = inventory.QuestProgress(9001)
+
+    assert(#progress == 1, "a counting objective is reported, got " .. #progress)
+    assert(progress[1].remaining == 1, "one feather to go, got "
+        .. progress[1].remaining)
+    assert(progress[1].done == 11 and progress[1].required == 12,
+        "with the client's own counts")
+
+    -- Finished objectives are not outstanding work.
+    CN_TEST_OBJECTIVES[9003] = {
+        { text = "Done already", numFulfilled = 5, numRequired = 5, finished = true },
+    }
+
+    assert(#inventory.QuestProgress(9003) == 0,
+        "a finished objective is not something left to do")
+
+    CN_TEST_OBJECTIVES[9003] = nil
+
+    ------------------------------------------------------------
+    -- NEAREST TO DONE FIRST, and only what is genuinely near.
+    ------------------------------------------------------------
+    local nearly = inventory.NearlyDone()
+
+    assert(#nearly >= 1, "the nearly-done list must find the feathers")
+
+    for _, row in ipairs(nearly) do
+        assert(row.remaining <= inventory.nearlyDoneRemaining,
+            "eighteen boars away is not 'nearly done'")
+    end
+
+    assert(nearly[1].remaining <= (nearly[2] and nearly[2].remaining or 99),
+        "closest first")
+
+    -- And it must be worth MORE the closer it is, or the ranking has learned
+    -- nothing from knowing the number.
+    local inventoryCandidates = CN.candidateProviders["Inventory"].fn()
+
+    local nearlyCandidate
+
+    for _, candidate in ipairs(inventoryCandidates) do
+        if candidate.id == 9001 then nearlyCandidate = candidate end
+    end
+
+    assert(nearlyCandidate, "the nearly-done quest is recommended")
+    assert(nearlyCandidate.completionValue > 2,
+        "and is worth more than a quest not started")
+
+    print("  '" .. nearly[1].remaining .. " more' is a different answer from 'not finished'")
+end)()
+
+print("\nWhich flights are known to connect:")
+
+;(function()
+    local travel = CN:GetModule("Travel")
+
+    local routes = travel.Routes()
+
+    for key in pairs(routes) do
+        routes[key] = nil
+    end
+
+    ------------------------------------------------------------
+    -- UNDIRECTED, because a flight in one direction is evidence the two
+    -- points are on the same network -- which is what the costing needs.
+    ------------------------------------------------------------
+    assert(travel.NoteRoute(1, 2), "a flight is recorded")
+
+    assert(travel.IsKnownRoute(1, 2), "in the direction it was flown")
+    assert(travel.IsKnownRoute(2, 1), "and in the other one")
+
+    assert(not travel.IsKnownRoute(1, 3),
+        "a pair nobody has flown is not known")
+
+    ------------------------------------------------------------
+    -- AND AN UNKNOWN PAIR IS NOT RULED OUT.
+    --
+    -- There is no API for "does A connect to B". Treating never-observed as
+    -- impossible would make the model worse than the assumption it replaced,
+    -- because most pairs are never observed by anybody.
+    ------------------------------------------------------------
+    assert(travel.knownRouteBonus < 1 and travel.knownRouteBonus > 0.5,
+        "a known route is preferred, not mandatory")
+
+    for key in pairs(routes) do
+        routes[key] = nil
+    end
+
+    print("  a flight taken is proof; a flight not taken is not disproof")
+end)()
+
+print("\nThe list, sorted the way you asked:")
+
+;(function()
+    local list = CN.UI.CreateList(CreateFrame("Frame"))
+
+    local entries = {
+        { text = "Zebra" },
+        { text = "apple" },
+        { text = "Mango" },
+    }
+
+    list:SetEntries(entries)
+
+    ------------------------------------------------------------
+    -- "AS RANKED" IS FIRST, so the default never changes for anybody who
+    -- does not go looking for this.
+    ------------------------------------------------------------
+    assert(list:SortMode() == "ranked", "the ranking is the default order")
+
+    assert(list.rows[1].entry.text == "Zebra",
+        "and it is left exactly as the tab produced it")
+
+    assert(list:CycleSort() == "name", "clicking cycles to alphabetical")
+
+    assert(string.lower(list.rows[1].entry.text) == "apple",
+        "which is case-insensitive, got " .. list.rows[1].entry.text)
+
+    assert(list:CycleSort() == "reverse", "then reversed")
+
+    assert(list.rows[1].entry.text == "Zebra", "the other way round")
+
+    assert(list:CycleSort() == "ranked", "and back to the ranking")
+
+    print("  three orders, and the ranking is the one you get by default")
+end)()
+
+
+print("\nAppearance sets:")
+
+;(function()
+    local sets = CN:GetModule("Sets")
+
+    assert(sets, "the Sets module must load")
+
+    local all, readable = sets.All()
+
+    assert(readable, "the client must be answering")
+    assert(#all == 3, "every set is read, got " .. #all)
+
+    ------------------------------------------------------------
+    -- FINISHED IS NOT NEARLY FINISHED.
+    --
+    -- The two states a set feature must never confuse. A completed set has
+    -- zero pieces missing, and "zero missing" satisfies "within two missing"
+    -- unless somebody says otherwise -- which is exactly the off-by-one that
+    -- would put every finished set in the player's to-do list forever.
+    ------------------------------------------------------------
+    local nearly = sets.NearlyComplete()
+
+    for _, set in ipairs(nearly) do
+        assert(set.missing > 0,
+            "a finished set is not something left to do: " .. tostring(set.name))
+        assert(set.name ~= "Finished", "and specifically not that one")
+    end
+
+    assert(#nearly == 1, "only the one within two pieces, got " .. #nearly)
+    assert(nearly[1].name == "Almost There", "and it is the right one")
+
+    -- Five pieces missing is a decision about the evening, not a next action.
+    for _, set in ipairs(nearly) do
+        assert(set.name ~= "Barely Begun", "a set barely started is not near")
+    end
+
+    local setCandidates = CN.candidateProviders["Sets"].fn()
+
+    assert(#setCandidates == 1, "one recommendation, got " .. #setCandidates)
+    assert(setCandidates[1].reasons[1]:find("4 of 5"),
+        "carrying the real denominator: " .. setCandidates[1].reasons[1])
+
+    print("  " .. #all .. " sets read, one within two pieces, the finished one left alone")
+end)()
+
+
+print("\nThe curated data accessors:")
+
+;(function()
+    ------------------------------------------------------------
+    -- ELIGIBILITY AND TURN-IN DATA SHIPPED AS SCHEMA IN 0.43.0 WITH NO ROWS,
+    -- AND NOTHING HAS EVER EXERCISED THE READERS.
+    --
+    -- A schema nothing reads is a schema that will be wrong the first time
+    -- somebody fills it in. These rows are registered by the test rather than
+    -- shipped, so the accessors are tested without pretending the database
+    -- has content it does not.
+    ------------------------------------------------------------
+    local Static = CN.Static
+
+    Static.RegisterQuests({
+        [77001] = {
+            name    = "For Druids Only",
+            classes = { "DRUID" },
+        },
+        [77002] = {
+            name     = "Level Gate",
+            minLevel = 70,
+        },
+        [77003] = {
+            name    = "Alliance Business",
+            faction = "Alliance",
+        },
+        [77004] = {
+            name        = "Handed In Elsewhere",
+            mapID       = 94,
+            turnInMapID = 2112,
+            turnInX     = 0.5,
+            turnInY     = 0.5,
+        },
+    })
+
+    local character = { class = "WARRIOR", race = "HUMAN",
+        faction = "Alliance", level = 60 }
+
+    local ok, reason = Static.QuestEligibility(77001, character)
+
+    assert(ok == false, "a druid quest is not for a warrior")
+    assert(reason and reason:find("class"), "and says which gate: " .. tostring(reason))
+
+    assert(Static.QuestEligibility(77001,
+        { class = "DRUID", faction = "Alliance", level = 60 }),
+        "and a druid may take it")
+
+    local levelOk, levelReason = Static.QuestEligibility(77002, character)
+
+    assert(levelOk == false and levelReason:find("70"),
+        "a level gate reports the level")
+
+    local factionOk, factionReason = Static.QuestEligibility(77003,
+        { faction = "Horde", level = 60 })
+
+    assert(factionOk == false and factionReason:find("Alliance"),
+        "and a faction gate reports the faction")
+
+    -- A row with no gating fields is eligible, and says so with NIL rather
+    -- than an empty claim.
+    local plainOk, plainReason = Static.QuestEligibility(77004, character)
+
+    assert(plainOk == true and plainReason == nil,
+        "an ungated quest is eligible with no reason attached")
+
+    -- A quest nobody has curated is eligible: absence of data is not a block.
+    assert(Static.QuestEligibility(999999, character) == true,
+        "an unknown quest must not be treated as blocked")
+
+    ------------------------------------------------------------
+    -- WHERE IT IS HANDED IN, which the client's moving waypoint cannot say.
+    ------------------------------------------------------------
+    local mapID, x, y = Static.GetQuestTurnIn(77004)
+
+    assert(mapID == 2112 and x == 0.5, "the turn-in location is readable")
+
+    assert(Static.GetQuestTurnIn(77001) == nil,
+        "and a row without one says nothing rather than guessing")
+
+    print("  class, race, faction, level and turn-in all read back correctly")
+end)()
+
+print("\nWhat is on a clock, in detail:")
+
+;(function()
+    local waiting = CN:GetModule("Waiting")
+
+    ------------------------------------------------------------
+    -- A KEYSTONE IS A DEADLINE, NOT A GEAR FEATURE.
+    ------------------------------------------------------------
+    C_MythicPlus = {
+        GetOwnedKeystoneLevel = function() return 12 end,
+        GetOwnedKeystoneChallengeMapID = function() return 501 end,
+    }
+
+    C_ChallengeMode = {
+        GetMapUIInfo = function() return "The Stonevault" end,
+    }
+
+    local keystone = waiting.Keystone()
+
+    assert(keystone, "a held keystone is found")
+    assert(keystone.level == 12, "at its level")
+    assert(keystone.name == "The Stonevault", "and named")
+    assert(keystone.expiresIn and keystone.expiresIn > 0,
+        "with the weekly reset as its expiry, because it is replaced then "
+        .. "whether it is used or not")
+
+    C_MythicPlus.GetOwnedKeystoneLevel = function() return 0 end
+
+    assert(waiting.Keystone() == nil,
+        "and no keystone means no objective, not a zero-level one")
+
+    ------------------------------------------------------------
+    -- HEIRLOOMS: a collection with a journal nothing had ever read.
+    ------------------------------------------------------------
+    C_Heirloom = {
+        GetNumHeirlooms = function() return 3 end,
+        GetHeirloomItemIDFromIndex = function(index) return 70000 + index end,
+        PlayerHasHeirloom = function(itemID) return itemID == 70001 end,
+    }
+
+    local heirlooms = waiting.Heirlooms()
+
+    assert(heirlooms and heirlooms.total == 3, "every heirloom is counted")
+    assert(heirlooms.collected == 1, "and only the owned one, got "
+        .. heirlooms.collected)
+
+    C_MythicPlus  = nil
+    C_ChallengeMode = nil
+    C_Heirloom    = nil
+
+    assert(waiting.Keystone() == nil,
+        "a client without the API answers nothing rather than throwing")
+    assert(waiting.Heirlooms() == nil, "the same for heirlooms")
+
+    print("  keystone, heirlooms, and a client that offers neither")
+end)()
+
+
+print("\nCrafting orders, and a decision that could go stale:")
+
+;(function()
+    local orders = CN:GetModule("Orders")
+
+    ------------------------------------------------------------
+    -- NOTHING KNOWN IS NOT THE SAME AS NOTHING OUTSTANDING.
+    --
+    -- The client only hands over the order list once the player has opened
+    -- the order frame. Reporting "you have no orders" in that state would be
+    -- the addon stating something it does not know.
+    ------------------------------------------------------------
+    assert(orders.IsAvailable() == false,
+        "with no crafting API, the feature is simply unavailable")
+
+    assert(orders.Mine() == nil,
+        "and Mine() says nothing rather than claiming an empty list")
+
+    C_CraftingOrders = {
+        GetMyOrders = function()
+            return {
+                { orderID = 1, itemID = 5001, itemName = "Flask",
+                  expirationTime = time() + 3600, crafterName = "Someone" },
+                { orderID = 2, itemID = 5002, itemName = "Not Urgent",
+                  expirationTime = time() + (10 * 86400) },
+            }
+        end,
+        GetClaimedOrder = function() return nil end,
+    }
+
+    assert(orders.IsAvailable(), "with the API present it is available")
+
+    local mine = orders.Mine()
+
+    assert(mine and #mine == 2, "both orders are read")
+    assert(mine[1].expiresIn and mine[1].expiresIn <= 3600,
+        "with a real remaining time")
+
+    ------------------------------------------------------------
+    -- ONLY WHAT IS ACTUALLY ABOUT TO EXPIRE IS A NEXT ACTION.
+    ------------------------------------------------------------
+    local orderCandidates = CN.candidateProviders["Orders"].fn()
+
+    assert(#orderCandidates == 1,
+        "an order ten days out is not urgent, got " .. #orderCandidates)
+    assert(orderCandidates[1].id == 1, "and it is the one expiring within a day")
+
+    C_CraftingOrders.GetClaimedOrder = function() return { orderID = 9 } end
+
+    local withClaim = CN.candidateProviders["Orders"].fn()
+
+    assert(#withClaim == 2, "something finished and waiting is also an action")
+
+    C_CraftingOrders = nil
+
+    assert(#CN.candidateProviders["Orders"].fn() == 0,
+        "and none of it survives the API going away")
+
+    print("  orders read, only the expiring one recommended")
+end)()
+
+
+print("\nEvery tab builds:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE GAP THAT LET A REAL BREAK THROUGH.
+    --
+    -- Splitting the list widget out of UI.lua in 0.45.0 left nine tab
+    -- builders calling a bare `CreateList`, which after the move resolved to
+    -- a global that does not exist. Every tab would have failed to build in
+    -- game. The suite passed, because it opened the window -- which builds
+    -- ONE tab, lazily -- and never touched the other ten.
+    --
+    -- luacheck caught it. A linter catching what a test suite cannot is a
+    -- gap in the suite, not a reason to rely on the linter.
+    ------------------------------------------------------------
+    local UI = CN.UI
+
+    assert(#UI.tabs >= 10, "the window must have its tabs, got " .. #UI.tabs)
+
+    -- READ THE ERROR RECORDER, NOT pcall.
+    --
+    -- SelectTab wraps each builder in its own pcall so that one broken tab
+    -- cannot take the window down with it -- which is right, and means a
+    -- caller's pcall NEVER sees the failure. The first version of this test
+    -- wrapped SelectTab and passed against a tree where every tab was broken.
+    --
+    -- 0.44.0 built the thing that makes this checkable: errors caught inside
+    -- the addon are recorded rather than only printed.
+    local errors = CN:GetModule("Errors")
+
+    errors.Clear()
+
+    -- FORCE A REBUILD.
+    --
+    -- Panels are built once and cached, so by the time this section runs the
+    -- earlier tests have already built whichever tabs they touched -- and any
+    -- failure happened before the Clear above. Dropping the panels makes this
+    -- test build all eleven itself, which is the thing it claims to check.
+    for _, tab in ipairs(UI.tabs) do
+        tab.panel = nil
+    end
+
+    UI.Toggle()
+
+    for index = 1, #UI.tabs do
+        UI.SelectTab(index)
+
+        -- And refreshing it, which is the path that runs on every event while
+        -- somebody is looking at that tab.
+        UI.Refresh()
+    end
+
+    for _, entry in ipairs(errors.All()) do
+        print("  BROKEN: " .. entry.context .. " -- " .. entry.message)
+    end
+
+    assert(errors.Count() == 0,
+        errors.Count() .. " tab(s) failed to build or refresh")
+
+    -- Every tab that made a list must actually have one, or "it built" means
+    -- only that nothing threw.
+    local withLists = 0
+
+    for _, tab in ipairs(UI.tabs) do
+        if tab.panel and tab.panel.list then
+            withLists = withLists + 1
+        end
+    end
+
+    assert(withLists >= 8,
+        "most tabs are list tabs and must have built one, got " .. withLists)
+
+    UI.Toggle()
+
+    print("  " .. #UI.tabs .. " tabs built and refreshed, " .. withLists
+        .. " of them with lists")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")
@@ -50167,6 +51969,69 @@ function Invoke-CNContribution {
     Write-Host '  Next:  .\cn.ps1 check' -ForegroundColor DarkGray
 }
 
+function Invoke-CNProvenance {
+    # WHICH DATA ROWS HAS A HUMAN ACTUALLY CHECKED?
+    #
+    # Three sources now feed the quest database and they are not equally
+    # trustworthy: rows somebody curated, rows folded in from observed play,
+    # and rows contributed by other players' installs. The distinction is
+    # carefully preserved at runtime -- /cn why says which kind it is quoting
+    # -- and was invisible in the repository, where the decisions get made.
+    #
+    # Reports each group, and specifically the rows marked as observed, which
+    # are the ones worth spot-checking against a wiki before a release.
+    $quests = Read-CNFile 'Data\Quests.lua'
+
+    if ($null -eq $quests) { throw "Data\Quests.lua not found. Run: .\cn.ps1 init" }
+
+    $community = Read-CNFile 'Data\Community.lua'
+
+    $curated  = 0
+    $observed = 0
+
+    foreach ($match in [regex]::Matches($quests, '(?m)^\s*\[(\d+)\]\s*=\s*\{')) {
+        $block = Get-CNLuaBlock -Text $quests -StartIndex $match.Index
+
+        if (-not $block) { continue }
+
+        if ($block.Body -match 'chain observed on') { $observed++ } else { $curated++ }
+    }
+
+    $contributed = 0
+
+    if ($community) {
+        $contributed = ([regex]::Matches($community, '(?m)^\s*\[(\d+)\]\s*=\s*\{')).Count
+    }
+
+    Write-Host 'Quest data by provenance:' -ForegroundColor White
+    Write-Host ''
+    Write-Host ("  curated, checked by hand     {0}" -f $curated) -ForegroundColor Green
+    Write-Host ("  folded in from observed play {0}" -f $observed) -ForegroundColor Yellow
+    Write-Host ("  contributed by players       {0}" -f $contributed) -ForegroundColor DarkYellow
+    Write-Host ''
+
+    if ($observed -gt 0) {
+        Write-Host '  The observed rows are marked in the file. They held on three or' -ForegroundColor DarkGray
+        Write-Host '  more characters, which is good evidence and is not the same as' -ForegroundColor DarkGray
+        Write-Host '  somebody having looked. Spot-check before relying on them.' -ForegroundColor DarkGray
+        Write-Host ''
+    }
+
+    if ($contributed -gt 0) {
+        Write-Host '  Contributed rows live in Data\Community.lua and are published as' -ForegroundColor DarkGray
+        Write-Host '  observations, never as curated data. Merging the two files would' -ForegroundColor DarkGray
+        Write-Host '  destroy that distinction permanently.' -ForegroundColor DarkGray
+        Write-Host ''
+    }
+
+    $total = $curated + $observed + $contributed
+
+    if ($total -eq 0) {
+        Write-Host '  Nothing yet. The database fills from play:' -ForegroundColor DarkGray
+        Write-Host '    /cn harvestnow, log out, then .\cn.ps1 harvest' -ForegroundColor DarkGray
+    }
+}
+
 function Invoke-CNRelease {
     Assert-CNWritable
 
@@ -50647,6 +52512,7 @@ function Show-CNHelp {
     Write-Host '  fixtures [path]                Lift a /cn capture recording out of SavedVariables for the tests.'
     Write-Host '  interface [number]             Show or set the game interface version, with the patch checklist.'
     Write-Host '  contribution "<CN1 ...>"       Fold a /cn contribute string into Data\Community.lua.'
+    Write-Host '  provenance                     Which data rows are curated, observed, or contributed.'
     Write-Host '  relocate <path>                Copy the source out of Program Files.'
     Write-Host '  icon [path.png]                Convert a PNG into Media\Logo.tga for in-game use.'
     Write-Host '  gitinit                         Initialize git with a sane .gitignore.'
@@ -50686,6 +52552,7 @@ switch ($Command.ToLower()) {
     'fixtures'  { Invoke-CNFixtures }
     'interface' { Invoke-CNInterface }
     'contribution' { Invoke-CNContribution }
+    'provenance' { Invoke-CNProvenance }
     'release'   { Invoke-CNRelease }
     'ci'        { Invoke-CNCI }
     'actions'   { Invoke-CNCI }

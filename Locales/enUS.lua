@@ -49,6 +49,26 @@ CN.localeKeys = {
     "dead",
     "grouped",
     "instanced",
+
+    -- Added in 0.45.0: the words on the newest surfaces, chosen the same way
+    -- as the last batch -- where a player's eye lands, not where the strings
+    -- happen to be easy to extract.
+    "ready",
+    "cleared",
+    "left",
+    "expiring",
+    "in your bags",
+    "uncollected",
+    "quest starter",
+    "%d more",
+    "%d of %d",
+    "another zone",
+    "flying yourself",
+    "on a flight path",
+    "on foot",
+    "measured",
+    "Nothing to do right now.",
+    "Nothing is on a clock right now.",
 }
 
 CN.RegisterLocale("enUS", {})

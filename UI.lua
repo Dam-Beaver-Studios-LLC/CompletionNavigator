@@ -23,11 +23,24 @@ local UI = {}
 
 CN.UI = UI
 
+-- Published for UI/List.lua, which draws the rows inside this chrome and has
+-- to know how wide they get and how tall they are.
+UI.WINDOW_WIDTH = 560
+UI.ROW_HEIGHT   = 20
+
+-- LATE-BOUND ON PURPOSE.
+--
+-- The tab builders below call UI.CreateList rather than a local, because
+-- UI/List.lua loads AFTER this file: a local captured here would be nil
+-- forever. The first version of the split left them calling a bare
+-- `CreateList`, which resolved to a global that does not exist -- every tab
+-- would have failed to build in game. luacheck caught it; the harness did
+-- not, because it never builds all eleven tabs.
+
 local Print = CN.Print
 
 local WINDOW_WIDTH  = 560
 local WINDOW_HEIGHT = 440
-local ROW_HEIGHT    = 20
 
 local window, minimapButton
 
@@ -123,218 +136,6 @@ end
 -- SCROLLING LIST
 ------------------------------------------------------------
 
--- Creates a reusable row list. Rows are pooled; SetRows swaps the data.
-local function CreateList(parent)
-    local list = CreateFrame("Frame", nil, parent)
-
-    list:SetPoint("TOPLEFT", 8, -8)
-    list:SetPoint("BOTTOMRIGHT", -8, 8)
-
-    local scroll = SafeCreateFrame("ScrollFrame", nil, list, "UIPanelScrollFrameTemplate")
-
-    scroll:SetPoint("TOPLEFT")
-    scroll:SetPoint("BOTTOMRIGHT", -26, 0)
-
-    local content = CreateFrame("Frame", nil, scroll)
-
-    content:SetSize(1, 1)
-    scroll:SetScrollChild(content)
-
-    list.rows = {}
-
-    function list:GetRow(index)
-        if self.rows[index] then
-            return self.rows[index]
-        end
-
-        local row = CreateFrame("Button", nil, content)
-
-        row:SetHeight(ROW_HEIGHT)
-        row:SetPoint("TOPLEFT", 0, -((index - 1) * ROW_HEIGHT))
-        row:SetPoint("TOPRIGHT", 0, -((index - 1) * ROW_HEIGHT))
-
-        row.highlight = row:CreateTexture(nil, "HIGHLIGHT")
-        row.highlight:SetAllPoints()
-        row.highlight:SetColorTexture(1, 1, 1, 0.10)
-
-        row.label = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
-        row.label:SetPoint("LEFT", 4, 0)
-        row.label:SetPoint("RIGHT", -4, 0)
-        row.label:SetJustifyH("LEFT")
-
-        -- HANDLERS ARE BOUND ONCE, HERE.
-        --
-        -- They used to be created inside SetEntries, which meant three fresh
-        -- closures per row on every redraw -- three hundred of them for a
-        -- hundred-row list, every time the window refreshed, each one
-        -- capturing a table it did not need to capture. In this game that is
-        -- not an abstract cost: allocation churn is what garbage collection
-        -- pauses are made of, and a pause is a stutter.
-        --
-        -- Bound once and reading `row.entry`, which SetEntries already sets,
-        -- a redraw now allocates nothing at all.
-        row:SetScript("OnClick", function(clicked)
-            local entry = clicked.entry
-
-            if entry and entry.onClick then
-                entry.onClick()
-            end
-        end)
-
-        row:SetScript("OnEnter", function(hovered)
-            local entry = hovered.entry
-
-            if not entry or not entry.tooltip or not GameTooltip then
-                return
-            end
-
-            GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
-            GameTooltip:SetText(entry.tooltip, nil, nil, nil, nil, true)
-            GameTooltip:Show()
-        end)
-
-        row:SetScript("OnLeave", function()
-            if GameTooltip then
-                GameTooltip:Hide()
-            end
-        end)
-
-        self.rows[index] = row
-
-        return row
-    end
-
-    -- A CEILING ON ROWS.
-    --
-    -- Every row is a frame, and frames cannot be destroyed in this game --
-    -- only hidden and reused. A list that renders one entry per row therefore
-    -- grows its frame pool to the size of the largest list it has ever been
-    -- shown, permanently, for the rest of the session. Nothing capped that.
-    --
-    -- Two hundred rows is far more than anyone reads before scrolling and
-    -- more than any tab currently produces; the point is that the number
-    -- exists at all. When it bites, the list says so rather than silently
-    -- ending -- a truncated list that looks complete is worse than a long one.
-    list.maxRows = 200
-
-    -- A FILTER OVER WHATEVER IS BEING SHOWN.
-    --
-    -- Not a search across everything the addon knows -- that is what the
-    -- commands are for, and a search box that quietly queries a different
-    -- data set than the list under it is a lie about what you are looking at.
-    -- This narrows the rows already on screen, which is what people reach for
-    -- a box for.
-    -- STATE IN A LOCAL, NOT ON THE FRAME.
-    --
-    -- A frame is not a plain table: templates and mixins put a metatable on
-    -- it, and reading an unset field can return something other than nil.
-    -- The first version of this kept `list.filterText` on the frame and
-    -- relied on "unset means nil" -- which held in the game and did not hold
-    -- against the test harness's stub, whose __index answers every key. The
-    -- test caught it; a player with a different UI library might have found
-    -- it instead.
-    local filterText = nil
-
-    function list:SetFilter(text)
-        -- A stub EditBox, or a template whose GetText returns something
-        -- surprising, must not be able to poison the filter with a value that
-        -- string.find will throw on later -- three frames away from here,
-        -- where the cause is not obvious.
-        if type(text) ~= "string" then
-            text = ""
-        end
-
-        text = CN.Trim(text)
-
-        filterText = (text ~= "") and string.lower(text) or nil
-
-        if self.lastEntries then
-            self:SetEntries(self.lastEntries)
-        end
-    end
-
-    function list:Matches(entry)
-        if not filterText then
-            return true
-        end
-
-        local haystack = string.lower(tostring(entry.text or ""))
-
-        -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
-        -- name, not a regular expression, and a stray bracket must not throw.
-        return haystack:find(filterText, 1, true) ~= nil
-    end
-
-    -- entries = { { text = , onClick = , tooltip = }, ... }
-    function list:SetEntries(entries)
-        self.lastEntries = entries
-
-        if filterText then
-            local kept = {}
-
-            for _, entry in ipairs(entries) do
-                if self:Matches(entry) then
-                    table.insert(kept, entry)
-                end
-            end
-
-            entries = kept
-        end
-
-        local width = scroll:GetWidth() or (WINDOW_WIDTH - 60)
-
-        local shown = math.min(#entries, self.maxRows)
-
-        local truncated = #entries - shown
-
-        if truncated > 0 then
-            -- Room for the line that explains the truncation.
-            shown = shown - 1
-            truncated = truncated + 1
-        end
-
-        content:SetSize(width, math.max(1, (shown + (truncated > 0 and 1 or 0)) * ROW_HEIGHT))
-
-        for index = 1, shown do
-            local entry = entries[index]
-
-            local row = self:GetRow(index)
-
-            row.label:SetText(entry.text or "")
-
-            -- The only thing a redraw changes. The handlers were bound when
-            -- the row was created and read this.
-            row.entry = entry
-
-            row:Show()
-        end
-
-        local used = shown
-
-        if truncated > 0 then
-            used = shown + 1
-
-            local row = self:GetRow(used)
-
-            row.label:SetText("|cff999999... and " .. truncated
-                .. " more not shown|r")
-
-            row.entry = nil
-
-            row:Show()
-        end
-
-        for index = used + 1, #self.rows do
-            self.rows[index]:Hide()
-        end
-
-        return used
-    end
-
-    return list
-end
-
-UI.CreateList = CreateList
 
 ------------------------------------------------------------
 -- BUTTON HELPERS
@@ -488,6 +289,24 @@ local function BuildWindow()
         UI.SetFilter(self:GetText())
     end)
 
+    -- KEEP THE FILTER ACROSS TABS, OR CLEAR IT?
+    --
+    -- It clears on a tab change, which is the safer default: a filter that
+    -- persists invisibly is how somebody concludes a list is empty when it is
+    -- not. But a player comparing the same search across tabs -- looking for
+    -- one mount in Collections and then in Goals -- wants the opposite, and
+    -- was retyping it every time.
+    --
+    -- So: a setting, defaulting to the safe behaviour, and the box shows what
+    -- it is doing rather than leaving the player to work it out.
+    search:SetScript("OnEditFocusLost", function(self)
+        local settings = CN.Settings()
+
+        if settings and settings.keepFilter and self:GetText() ~= "" then
+            UI.persistedFilter = self:GetText()
+        end
+    end)
+
     search:SetScript("OnEscapePressed", function(self)
         self:SetText("")
         self:ClearFocus()
@@ -621,6 +440,19 @@ function UI.SelectTab(index)
 
     UI.selectedTab = index
 
+    -- The filter belongs to the tab being left. Clear the box unless the
+    -- player has asked for it to follow them, in which case put it back on
+    -- the new tab rather than leaving a filtered list with an empty box.
+    if window.search then
+        local settings = CN.Settings()
+
+        if settings and settings.keepFilter and UI.persistedFilter then
+            window.search:SetText(UI.persistedFilter)
+        else
+            window.search:SetText("")
+        end
+    end
+
     for buttonIndex, button in ipairs(window.tabButtons) do
         if buttonIndex == index then
             button:SetEnabled(false)
@@ -664,6 +496,23 @@ end
 ------------------------------------------------------------
 
 -- Applies the filter box to whichever list the current tab is showing.
+-- Re-applied when a tab changes, but only if the player asked for that.
+function UI.RestoreFilter()
+    local settings = CN.Settings()
+
+    if not settings or not settings.keepFilter or not UI.persistedFilter then
+        return false
+    end
+
+    if window and window.search then
+        window.search:SetText(UI.persistedFilter)
+    end
+
+    UI.SetFilter(UI.persistedFilter)
+
+    return true
+end
+
 function UI.SetFilter(text)
     local tab = UI.tabs[UI.selectedTab or 1]
 
@@ -824,7 +673,7 @@ UI.RegisterTab{
         end)
         panel.filter:SetPoint("LEFT", panel.ignore, "RIGHT", 6, 0)
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", panel.why, "BOTTOMLEFT", -4, -14)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -957,7 +806,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -1166,7 +1015,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -1316,7 +1165,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -1394,7 +1243,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -1490,7 +1339,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 64)
@@ -1704,7 +1553,7 @@ UI.RegisterTab{
         panel.sub:SetPoint("TOPLEFT", panel.header, "BOTTOMLEFT", 0, -4)
         panel.sub:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -52)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 40)
@@ -1854,7 +1703,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -1938,7 +1787,7 @@ UI.RegisterTab{
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
-        panel.list = CreateList(panel)
+        panel.list = UI.CreateList(panel)
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -2261,7 +2110,10 @@ local function BuildMinimapButton()
     minimapButton:SetSize(31, 31)
     minimapButton:SetFrameStrata("MEDIUM")
     minimapButton:SetFrameLevel(8)
-    minimapButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    -- Middle-click added in 0.45.0. Three buttons, three of the things a
+    -- player does most: open it, navigate, and start following.
+    minimapButton:RegisterForClicks("LeftButtonUp", "RightButtonUp",
+        "MiddleButtonUp")
     minimapButton:RegisterForDrag("LeftButton")
     minimapButton:SetMovable(true)
 
@@ -2289,6 +2141,16 @@ local function BuildMinimapButton()
     end
 
     minimapButton:SetScript("OnClick", function(self, button)
+        if button == "MiddleButton" then
+            -- Follow mode is the addon's hands-free state and it was three
+            -- keystrokes or a scroll through the window away. It is the thing
+            -- somebody with the button on their minimap most wants one click
+            -- from.
+            CN.HandleSlashCommand("follow")
+
+            return
+        end
+
         if button == "RightButton" then
             local results = CN.Recommend(1)
 

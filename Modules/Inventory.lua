@@ -188,6 +188,148 @@ function Inventory.UncollectedItems()
     return found
 end
 
+-- HOW CLOSE AN ACCEPTED QUEST IS, IN THINGS RATHER THAN IN PERCENT.
+--
+-- This file's own header has promised since 0.44.0 that the addon would say
+-- "ten more" rather than "go and do that quest". It did not: the header
+-- described an intention and the code collected quest STARTERS and nothing
+-- else. Writing down what a thing is going to do and then not doing it is
+-- worse than not writing it down, because the next reader believes it.
+--
+-- The client counts these itself, which is the whole reason this is cheap:
+-- an objective that requires more than one of something reports how many are
+-- done. Returns the objectives that are counting and unfinished, nearest to
+-- completion first -- because "one more" is a completely different suggestion
+-- from "nineteen more".
+function Inventory.QuestProgress(questID)
+    local rows = {}
+
+    for _, objective in ipairs(Blizzard.GetCountingObjectives(questID)) do
+        if not objective.finished then
+            table.insert(rows, objective)
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        return a.remaining < b.remaining
+    end)
+
+    return rows
+end
+
+-- The same question across every quest in the log: what is nearly done?
+Inventory.nearlyDoneRemaining = 3
+
+function Inventory.NearlyDone()
+    local rows = {}
+
+    for _, entry in ipairs(Blizzard.GetQuestLogEntries()) do
+        for _, objective in ipairs(Inventory.QuestProgress(entry.questID)) do
+            if objective.remaining <= Inventory.nearlyDoneRemaining then
+                table.insert(rows, {
+                    questID   = entry.questID,
+                    title     = entry.title,
+                    text      = objective.text,
+                    done      = objective.done,
+                    required  = objective.required,
+                    remaining = objective.remaining,
+                })
+            end
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        if a.remaining ~= b.remaining then
+            return a.remaining < b.remaining
+        end
+
+        return (a.questID or 0) < (b.questID or 0)
+    end)
+
+    return rows
+end
+
+-- RECIPES YOU OWN AND HAVE NOT LEARNED.
+--
+-- The other promise this header made and did not keep. An unlearned recipe in
+-- a bag is a profession skill-up sitting in your inventory, and the addon has
+-- been recommending vendors that sell recipes while ignoring the ones you
+-- already bought.
+--
+-- Item class 9 is Recipe. The client will say whether the character already
+-- knows it -- an already-known recipe is greyed in the tooltip -- but there
+-- is no clean API for that state, so this reports what is CARRIED and leaves
+-- the "already known" question to the tooltip, which answers it visually.
+function Inventory.Recipes()
+    local recipes = {}
+
+    if not C_Item or not C_Item.GetItemInfoInstant then
+        return recipes
+    end
+
+    for _, item in ipairs(Inventory.Scan()) do
+        local ok, _, _, _, _, classID = pcall(C_Item.GetItemInfoInstant, item.itemID)
+
+        if ok and classID == 9 then
+            item.kind = CN.objectiveTypes.RECIPE
+
+            table.insert(recipes, item)
+        end
+    end
+
+    return recipes
+end
+
+------------------------------------------------------------
+-- THE BANK
+------------------------------------------------------------
+
+-- `bankIDs` has been declared since 0.44.0 and read by nothing -- a list of
+-- container numbers sitting there looking like a feature.
+--
+-- The client refuses to describe bank containers unless the bank frame is
+-- open, so this is only answerable while the player is standing at one. The
+-- honest shape is therefore: scan when it is open, remember what was seen,
+-- and report the remembered set with the date it was taken -- never
+-- presenting a week-old snapshot as current.
+function Inventory.BankStore()
+    return CN.Account("bank")
+end
+
+function Inventory.ScanBank()
+    local items = Inventory.Scan(Inventory.bankIDs)
+
+    local store = Inventory.BankStore()
+
+    for key in pairs(store) do
+        store[key] = nil
+    end
+
+    -- Item ids and counts only. The bag and slot of something in a bank is
+    -- not worth a byte on disk: it moves, and the player is looking at it.
+    for _, item in ipairs(items) do
+        store[item.itemID] = (store[item.itemID] or 0) + (item.count or 1)
+    end
+
+    store.scannedAt = time()
+
+    return #items
+end
+
+function Inventory.InBank(itemID)
+    if not itemID then
+        return 0
+    end
+
+    return Inventory.BankStore()[itemID] or 0
+end
+
+CN:RegisterEvent("BANKFRAME_OPENED", function()
+    local counted = Inventory.ScanBank()
+
+    DebugPrint("Bank scanned: " .. counted .. " stacks.")
+end)
+
 function Inventory.Summary()
     local items = Inventory.Scan()
 
@@ -227,6 +369,32 @@ CN.RegisterCandidateProvider("Inventory", function()
                 travelCost       = 0,
                 reasons          = {
                     "a quest starter in your bags -- right-click it",
+                },
+            }))
+        end
+    end
+
+    -- NEARLY-FINISHED OBJECTIVES.
+    --
+    -- "One more Sunscale Feather" is the cheapest quest advice there is, and
+    -- the ranking could not distinguish it from a quest not yet started.
+    for _, row in ipairs(Inventory.NearlyDone()) do
+        if not CN.IsIgnored(CN.objectiveTypes.QUEST, row.questID)
+            and not CN.IsDeferred(CN.objectiveTypes.QUEST, row.questID) then
+
+            table.insert(candidates, CN.NewObjective({
+                id               = row.questID,
+                type             = CN.objectiveTypes.QUEST,
+                name             = tostring(row.title or ("Quest " .. row.questID))
+                    .. ": " .. row.remaining .. " more",
+                state            = CN.objectiveStates.AVAILABLE,
+
+                -- Worth more the closer it is, which is the entire point.
+                completionValue  = 2 + (Inventory.nearlyDoneRemaining - row.remaining),
+                travelCost       = CN.unknownLocationCost,
+                reasons          = {
+                    string.format("%s -- %d of %d done",
+                        tostring(row.text or "objective"), row.done, row.required),
                 },
             }))
         end
@@ -299,7 +467,48 @@ CN:RegisterCommand{
             end
         end
 
-        if #starters == 0 and #uncollected == 0 then
+        local recipes = Inventory.Recipes()
+
+        if #recipes > 0 then
+            Print(#recipes .. " recipe(s) carried:")
+
+            for _, item in ipairs(recipes) do
+                Print("  " .. (Blizzard.GetItemName(item.itemID)
+                    or ("item " .. item.itemID)))
+            end
+        end
+
+        local nearly = Inventory.NearlyDone()
+
+        if #nearly > 0 then
+            Print("Nearly finished:")
+
+            for index, row in ipairs(nearly) do
+                if index > 8 then
+                    Print("  |cff999999... and " .. (#nearly - 8) .. " more|r")
+                    break
+                end
+
+                Print(string.format("  |cffffff00%d more|r %s |cff999999(%d/%d)|r",
+                    row.remaining, tostring(row.text or row.title),
+                    row.done, row.required))
+            end
+        end
+
+        local bank = Inventory.BankStore()
+
+        if bank.scannedAt then
+            local age = math.max(0, time() - bank.scannedAt)
+
+            Print("|cff999999Bank: " .. (CN.CountKeys(bank) - 1)
+                .. " kinds of item, seen "
+                .. math.floor(age / 3600) .. "h ago -- the client only "
+                .. "describes it while you are standing at one.|r")
+        end
+
+        if #starters == 0 and #uncollected == 0 and #recipes == 0
+            and #nearly == 0 then
+
             Print("|cff999999Nothing in there needs doing.|r")
         end
 

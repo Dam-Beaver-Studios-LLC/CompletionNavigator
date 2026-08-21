@@ -58,6 +58,7 @@ read_globals = {
     "C_Container", "GetInboxNumItems", "GetInboxHeaderInfo",
     "C_MythicPlus", "C_ChallengeMode", "C_Heirloom",
     "C_ToyBox", "PlayerHasToy",
+    "C_TransmogSets", "C_LFGList", "IsInGuild", "GetGuildInfo",
     "IsSpellKnown", "IsPlayerSpell", "GetSpellCooldown", "GetItemCooldown",
     "GetItemCount", "GetBindLocation", "EJ_GetDifficulty", "GetDifficultyInfo",
     "SettingsPanel", "InterfaceOptions_AddCategory", "BackdropTemplateMixin",
@@ -135,12 +136,20 @@ ignore = {
     "211/Print",
 }
 
-files["Providers/Blizzard.lua"] = {
-    -- This file exists to absorb the client's positional return lists. Naming
-    -- every slot is what makes the call sites readable; most are unused by
-    -- design, and replacing them with select() would make the file worse.
-    ignore = { "211" },
-}
+-- The provider files exist to absorb the client's positional return lists.
+-- Naming every slot is what makes the call sites readable; most are unused by
+-- design, and replacing them with select() would make the files worse.
+--
+-- All three, since the split in 0.45.0 -- the exception belonged to the ROLE,
+-- not to the filename, and naming only the original file would have meant the
+-- warnings reappeared the moment the role moved.
+for _, provider in ipairs({
+    "Providers/Blizzard.lua",
+    "Providers/BlizzardCollections.lua",
+    "Providers/BlizzardWorld.lua",
+}) do
+    files[provider] = { ignore = { "211" } }
+end
 
 -- Test tooling. The harness exists to define the globals the addon reads, so
 -- "setting an undefined global" is its entire job; linting it under the addon's
