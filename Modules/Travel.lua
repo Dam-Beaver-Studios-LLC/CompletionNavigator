@@ -303,6 +303,11 @@ Travel.seededFlightSpeed = 25
 -- gossip window -- would be measuring the player's reading speed.
 Travel.flightOverheadSeconds = 20
 
+-- Casting a teleport and loading the destination. A constant for the same
+-- reason as the others: it is an animation and a loading screen, not
+-- something worth instrumenting.
+Travel.castSeconds = 15
+
 Travel.speedSampleCap = 20
 
 local function Samples()
@@ -434,12 +439,52 @@ Travel.takeoffSeconds = 6
 -- available -- the client will not answer for a zone the player is not in, so
 -- a cross-zone claim is checked at the near end and re-checked when they get
 -- there.
+-- Which zones the player has actually been able to fly in.
+--
+-- `IsFlyableArea` answers for where the player IS STANDING, and there is no
+-- API that answers for anywhere else -- so a cross-zone claim was being made
+-- from the near end and could be wrong at the far end. Remembering the answer
+-- per zone, as it is observed, turns that guess into evidence: a zone the
+-- player has flown in is flyable, and one they have been in and could not fly
+-- in is not.
+local function FlightMemory()
+    return CN.Account("flyableZones")
+end
+
+Travel.FlightMemory = FlightMemory
+
+function Travel.NoteFlyable(mapID)
+    if not mapID or not IsFlyableArea then
+        return nil
+    end
+
+    local ok, flyable = pcall(IsFlyableArea)
+
+    if not ok then
+        return nil
+    end
+
+    FlightMemory()[mapID] = flyable and true or false
+
+    return flyable
+end
+
 function Travel.CanFly(mapID)
     if not Travel.HasFlying() then
         return false
     end
 
-    if IsFlyableArea and not IsFlyableArea() then
+    -- What is REMEMBERED about the destination beats what is true where the
+    -- player happens to be standing.
+    local remembered = mapID and FlightMemory()[mapID]
+
+    if remembered == false then
+        return false
+    end
+
+    if remembered ~= true and IsFlyableArea and not IsFlyableArea() then
+        -- Nothing remembered, and flight is disabled here. The conservative
+        -- answer is the one the player can definitely follow.
         return false
     end
 
@@ -490,18 +535,28 @@ end
 -- bound in map terms -- `GetBindLocation` returns a name, and names do not
 -- convert to map ids -- so no duration is claimed and none is folded into any
 -- score. Naming the option is useful; costing it would be fiction.
+-- WHERE A TELEPORT ACTUALLY GOES.
+--
+-- The client will not convert a hearthstone's bind location into a map, and
+-- it will not tell you where a mage portal leads either. Both are knowable
+-- facts about the game rather than about the player, so they are curated
+-- here -- which is the same argument that put quest locations in Data.
+--
+-- `mapID` is the ZONE the teleport lands in. Where it is nil, the option is
+-- still listed and simply cannot be costed; naming a shortcut you have is
+-- useful even when the addon cannot price it.
 Travel.teleports = {
     { kind = "item",  id = 6948,   label = "Hearthstone" },
     { kind = "item",  id = 110560, label = "Garrison Hearthstone" },
     { kind = "item",  id = 140192, label = "Dalaran Hearthstone" },
     { kind = "item",  id = 141605, label = "Flight Master's Whistle" },
     { kind = "spell", id = 556,    label = "Astral Recall" },
-    { kind = "spell", id = 3565,   label = "Teleport: Darnassus" },
-    { kind = "spell", id = 3562,   label = "Teleport: Ironforge" },
-    { kind = "spell", id = 3561,   label = "Teleport: Stormwind" },
-    { kind = "spell", id = 3567,   label = "Teleport: Orgrimmar" },
-    { kind = "spell", id = 3563,   label = "Teleport: Undercity" },
-    { kind = "spell", id = 3566,   label = "Teleport: Thunder Bluff" },
+    { kind = "spell", id = 3565,   label = "Teleport: Darnassus",     mapID = 89 },
+    { kind = "spell", id = 3562,   label = "Teleport: Ironforge",     mapID = 87 },
+    { kind = "spell", id = 3561,   label = "Teleport: Stormwind",     mapID = 84 },
+    { kind = "spell", id = 3567,   label = "Teleport: Orgrimmar",     mapID = 85 },
+    { kind = "spell", id = 3563,   label = "Teleport: Undercity",     mapID = 90 },
+    { kind = "spell", id = 3566,   label = "Teleport: Thunder Bluff", mapID = 88 },
     { kind = "spell", id = 18960,  label = "Teleport: Moonglade" },
     { kind = "spell", id = 50977,  label = "Death Gate" },
     { kind = "spell", id = 126892, label = "Zen Pilgrimage" },
@@ -596,6 +651,7 @@ function Travel.ReadyTeleports()
                 label     = entry.label,
                 kind      = entry.kind,
                 id        = entry.id,
+                mapID     = entry.mapID,
                 remaining = remaining,
                 ready     = remaining <= 0,
                 -- Where a hearthstone actually goes. A name, because that is
@@ -641,9 +697,58 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         -- But "I cannot cost this" and "there is no way to do it" are
         -- different statements, and until 0.43.0 the addon made the first and
         -- the player heard the second. So: say what is actually available.
+        local teleports = Travel.ReadyTeleports()
+
+        -- COSTED THROUGH A TELEPORT, WHERE ONE LANDS SOMEWHERE USEFUL.
+        --
+        -- Until 0.44.0 a cross-continent journey returned nothing at all,
+        -- which is honest and unhelpful: the real answer is usually "hearth,
+        -- then fly for ten seconds". Where a teleport has a known destination
+        -- ON THE TARGET'S CONTINENT, the journey becomes castable: the
+        -- teleport, plus the ordinary journey from where it drops you.
+        --
+        -- A teleport on cooldown is still offered, with the wait added --
+        -- because "twenty minutes, then four" is a real answer and often the
+        -- right one.
+        local best
+
+        for _, teleport in ipairs(teleports) do
+            local landing = teleport.mapID and Travel.WorldPoint(teleport.mapID, 0.5, 0.5)
+
+            if landing and landing.continent == to.continent then
+                local onward, _, onwardDetail = Travel.EstimateSeconds(
+                    teleport.mapID, 0.5, 0.5, toMapID, toX, toY)
+
+                if onward then
+                    local seconds = onward + Travel.castSeconds
+                        + (teleport.ready and 0 or teleport.remaining)
+
+                    if not best or seconds < best.seconds then
+                        best = {
+                            seconds   = seconds,
+                            mode      = "teleport",
+                            via       = teleport.label,
+                            waited    = teleport.ready and 0 or teleport.remaining,
+                            onward    = onward,
+                            onwardMode = onwardDetail and onwardDetail.mode,
+                        }
+                    end
+                end
+            end
+        end
+
+        if best then
+            -- Never confident: the onward leg is measured from the middle of
+            -- the landing zone, because the addon does not know precisely
+            -- where a teleport puts you down.
+            best.teleports = teleports
+
+            return best.seconds, false, best
+        end
+
         return nil, false, {
             mode      = "elsewhere",
-            teleports = Travel.ReadyTeleports(),
+            teleports = teleports,
         }
     end
 
@@ -825,7 +930,7 @@ end
 
 function Travel.Describe(detail, seconds, confident)
     if not seconds then
-        return "travel time unknown"
+        return CN.WithConfidence(nil, CN.confidence.UNKNOWN) .. " travel time"
     end
 
     local session = CN:GetModule("Session")
@@ -836,6 +941,17 @@ function Travel.Describe(detail, seconds, confident)
 
     if detail and detail.mode == "self" then
         text = text .. " |cff999999flying yourself|r"
+    end
+
+    if detail and detail.mode == "teleport" then
+        text = text .. " |cff999999via " .. tostring(detail.via)
+
+        if (detail.waited or 0) > 0 then
+            text = text .. ", after a " .. Travel.FormatReset(detail.waited)
+                .. " cooldown"
+        end
+
+        text = text .. "|r"
     end
 
     if detail and detail.mode == "fly" and detail.node then
@@ -948,7 +1064,7 @@ CN:RegisterCommand{
             Print(string.format(
                 "  |cff999999%.0f yd direct at %.0f yd/s%s|r",
                 detail.yards, flySpeed,
-                flyMeasured and "" or " (estimated)"))
+                flyMeasured and "" or " |cff999999(estimated)|r"))
         elseif detail and detail.mode == "elsewhere" then
             Print("|cff999999That is on another continent. Portals and boats "
                 .. "are not modelled, so no time is claimed -- but here is "

@@ -21,7 +21,168 @@ local Print = CN.Print
 -- HELP
 ------------------------------------------------------------
 
-local function ShowHelp()
+-- ONE FLAT LIST OF 120 COMMANDS IS A LIST NOBODY READS.
+--
+-- Help printed every command in registration order, which was fine at twelve
+-- and is useless at a hundred and twenty: the answer to "what can this thing
+-- do?" scrolled past in a wall of yellow, and the commands people actually
+-- needed were indistinguishable from the diagnostics.
+--
+-- Three changes, none of them clever:
+--
+--   * A SHORT list by default -- the dozen things worth knowing on day one.
+--   * `/cn help all` for the whole thing, grouped.
+--   * `/cn help <word>` searches names and descriptions, because somebody
+--     who half-remembers "the one about lockouts" should not have to read a
+--     hundred and twenty lines to find `/cn instances`.
+CN.helpEssentials = {
+    "", "next", "go", "why", "order", "plan", "follow", "zone", "nearby",
+    "chase", "mode", "show", "ui", "setup", "selftest",
+}
+
+-- Groups, by what the player is trying to do rather than by which module
+-- happens to own the command.
+CN.helpGroups = {
+    { title = "Deciding what to do",
+      names = { "next", "why", "order", "plan", "mode", "show", "learned",
+                "situation", "goal", "chase" } },
+    { title = "Getting there",
+      names = { "go", "travel", "nav", "navdiag", "arrow", "calibrate",
+                "pins", "follow", "zone", "nearby", "where am i" } },
+    { title = "What is left",
+      names = { "progress", "loremaster", "zones", "available", "waiting",
+                "breakdown", "vault", "instances", "drops", "clock", "bags",
+                "orders", "alts" } },
+    { title = "Setting it up",
+      names = { "setup", "ui", "scale", "colourblind", "hud", "cues",
+                "locale", "welcome" } },
+    { title = "When something is wrong",
+      names = { "selftest", "errors", "dbsize", "capture", "contribute",
+                "harvest", "debug" } },
+}
+
+local function PrintCommand(definition, indent)
+    local line = (indent or "") .. "|cffffff00/cn " .. definition.name
+
+    if definition.args and definition.args ~= "" then
+        line = line .. " " .. definition.args
+    end
+
+    line = line .. "|r"
+
+    if definition.help and definition.help ~= "" then
+        line = line .. " - " .. definition.help
+    end
+
+    Print(line)
+end
+
+local function Find(name)
+    for _, definition in ipairs(CN.commandList) do
+        if definition.name == name then
+            return definition
+        end
+    end
+
+    return nil
+end
+
+local function ShowEssentials()
+    Print("The ones worth knowing:")
+
+    for _, name in ipairs(CN.helpEssentials) do
+        local definition = Find(name)
+
+        if definition then
+            PrintCommand(definition, "  ")
+        end
+    end
+
+    Print("|cff999999" .. #CN.commandList .. " commands in total. "
+        .. "|cffffff00/cn help all|r lists them by what they are for, and "
+        .. "|cffffff00/cn help <word>|r searches them.|r")
+end
+
+local function SearchHelp(term)
+    term = string.lower(term)
+
+    local matches = {}
+
+    for _, definition in ipairs(CN.commandList) do
+        local haystack = string.lower(definition.name .. " "
+            .. tostring(definition.help or ""))
+
+        if haystack:find(term, 1, true) then
+            table.insert(matches, definition)
+        end
+    end
+
+    if #matches == 0 then
+        Print("Nothing matches \"" .. term .. "\".")
+        Print("|cff999999/cn help all|r lists everything.")
+        return
+    end
+
+    Print(#matches .. " command(s) matching \"" .. term .. "\":")
+
+    for _, definition in ipairs(matches) do
+        PrintCommand(definition, "  ")
+    end
+end
+
+local function ShowGrouped()
+    local shown = {}
+
+    for _, group in ipairs(CN.helpGroups) do
+        Print("|cffffd100" .. group.title .. "|r")
+
+        for _, name in ipairs(group.names) do
+            local definition = Find(name)
+
+            if definition then
+                PrintCommand(definition, "  ")
+
+                shown[name] = true
+            end
+        end
+    end
+
+    local rest = {}
+
+    for _, definition in ipairs(CN.commandList) do
+        if not shown[definition.name] then
+            table.insert(rest, definition)
+        end
+    end
+
+    if #rest > 0 then
+        table.sort(rest, function(a, b) return a.name < b.name end)
+
+        Print("|cffffd100Everything else|r")
+
+        for _, definition in ipairs(rest) do
+            PrintCommand(definition, "  ")
+        end
+    end
+end
+
+local function ShowHelp(args)
+    args = CN.Trim(args or "")
+
+    if args ~= "" then
+        if string.lower(args) == "all" then
+            ShowGrouped()
+        else
+            SearchHelp(args)
+        end
+
+        return
+    end
+
+    ShowEssentials()
+end
+
+local function ShowFullHelp()
     Print("Commands:")
 
     local sorted = {}
@@ -55,7 +216,8 @@ local function ShowHelp()
     end
 end
 
-CN.ShowHelp = ShowHelp
+CN.ShowHelp     = ShowHelp
+CN.ShowFullHelp = ShowFullHelp
 
 ------------------------------------------------------------
 -- STATUS
@@ -154,10 +316,11 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "help",
+    args    = "[all, or a word to search for]",
     order   = 2,
-    help    = "Show this help.",
-    handler = function()
-        ShowHelp()
+    help    = "The commands worth knowing; 'all' for every one.",
+    handler = function(args)
+        ShowHelp(args)
     end,
 }
 

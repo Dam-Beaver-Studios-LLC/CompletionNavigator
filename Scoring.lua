@@ -832,6 +832,141 @@ function CN.ExplainRecommendation(objective)
     return lines
 end
 
+-- WHY IS THE LIST IN THIS ORDER?
+--
+-- `/cn why` has always explained ONE line: what is blocking it, what it is
+-- worth. Nobody asks that first. The first question anybody asks of a ranked
+-- list is why the thing at the top is at the top, and specifically why it is
+-- above the thing they expected to see there -- which is a question about two
+-- objectives and the weights between them, and the addon could not answer it
+-- at all.
+--
+-- This takes the scoring apart for one objective and shows every term that
+-- contributed, biggest first, with the weight applied. It is the same
+-- arithmetic ScoreObjective does; if the two ever disagree, this is wrong.
+function CN.ExplainScore(objective)
+    if type(objective) ~= "table" then
+        return {}
+    end
+
+    local settings = CN.Settings()
+    local mode     = (settings and settings.priorityMode) or "balanced"
+    local profile  = CN.priorityProfiles[mode] or {}
+
+    local w = {}
+
+    for key, value in pairs(CN.scoreWeights) do
+        w[key] = value
+    end
+
+    if profile.weights then
+        for key, value in pairs(profile.weights) do
+            w[key] = value
+        end
+    end
+
+    local travel = objective.travelCost
+
+    if travel == nil then
+        travel = CN.unknownLocationCost
+    end
+
+    local terms = {
+        { label = "what finishing it is worth",
+          value = (objective.completionValue or 1) * w.completionValue },
+        { label = "what it unlocks",
+          value = (objective.unlockValue or 0) * w.unlockValue },
+        { label = "limited time",
+          value = (objective.limitedTimeBonus or 0) * w.limitedTimeBonus },
+        { label = "nearby",
+          value = (objective.nearbyBonus or 0) * w.nearbyBonus },
+        { label = "your stated preference",
+          value = (objective.userPreference or 0) * w.userPreference },
+        { label = "suits this character",
+          value = (objective.characterSuitability or 0) * w.characterSuitability },
+        { label = "getting there",
+          value = travel * w.travelCost },
+        { label = "how long it takes",
+          value = (objective.estimatedTime or 0) * w.estimatedTime },
+        { label = "difficulty",
+          value = (objective.difficultyCost or 0) * w.difficultyCost },
+        { label = "prerequisites",
+          value = (objective.dependencyCost or 0) * w.dependencyCost },
+    }
+
+    if objective.expiresIn then
+        table.insert(terms, {
+            label = "deadline",
+            value = CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight,
+        })
+    end
+
+    if objective.hubSize and objective.hubSize > 1 then
+        table.insert(terms, {
+            label = "batches with " .. (objective.hubSize - 1) .. " other thing(s)",
+            value = math.min(CN.batchBonusCap,
+                (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus,
+        })
+    end
+
+    local kept = {}
+
+    for _, term in ipairs(terms) do
+        if math.abs(term.value) > 0.001 then
+            table.insert(kept, term)
+        end
+    end
+
+    table.sort(kept, function(a, b)
+        return math.abs(a.value) > math.abs(b.value)
+    end)
+
+    return kept
+end
+
+CN:RegisterCommand{
+    name    = "order",
+    aliases = { "ranking" },
+    args    = "[how many]",
+    order   = 17,
+    help    = "Why the list is in the order it is in.",
+    handler = function(args)
+        local wanted = tonumber(CN.Trim(args or "")) or 3
+
+        wanted = math.max(1, math.min(5, wanted))
+
+        local results = CN.Recommend(wanted)
+
+        if #results == 0 then
+            CN.Print("Nothing is being recommended, so there is no order to "
+                .. "explain.")
+            return
+        end
+
+        local settings = CN.Settings()
+
+        CN.Print("Focus: |cffffff00"
+            .. tostring((settings and settings.priorityMode) or "balanced")
+            .. "|r")
+
+        for index, objective in ipairs(results) do
+            CN.Print(string.format("%d. |cffffffff%s|r |cff999999%.1f|r",
+                index, tostring(objective.name or objective.id),
+                objective.priorityWeight or 0))
+
+            for _, term in ipairs(CN.ExplainScore(objective)) do
+                CN.Print(string.format("     %s%+.1f|r  %s",
+                    term.value >= 0 and "|cff73b873" or "|cfff56b61",
+                    term.value, term.label))
+            end
+        end
+
+        CN.Print("|cff999999Every line above is a term in the same sum. "
+            .. "|cffffff00/cn mode|r changes the weights; |cffffff00/cn why|r "
+            .. "explains one objective in detail.|r")
+    end,
+}
+
 ------------------------------------------------------------
 -- COMMAND
 ------------------------------------------------------------

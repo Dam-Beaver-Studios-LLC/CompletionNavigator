@@ -590,7 +590,18 @@ function Chase.Estimate(chain)
     local playerMap, playerX, playerY = CN.GetPlayerPosition()
 
     if travel and playerMap then
-        local fromMap, fromX, fromY = playerMap, playerX, playerY
+        -- NEAREST-FIRST, not listed-order.
+        --
+        -- 0.42.0 costed one journey; 0.43.0 costed every leg but walked them
+        -- in the order the steps happened to be listed, which is the order a
+        -- criteria list came back in -- no relation to geography. On a chain
+        -- whose steps are scattered that overstates the total badly.
+        --
+        -- This is the same greedy nearest-neighbour walk the zone router
+        -- uses, and it is an ESTIMATE either way: the point is not to find
+        -- the optimal tour, it is to stop pretending the player will walk a
+        -- deliberately silly one.
+        local pending = {}
 
         for _, step in ipairs(chain.steps) do
             if step.state ~= Chase.states.DONE
@@ -600,17 +611,35 @@ function Chase.Estimate(chain)
                 local toX   = step.x or chain.x
                 local toY   = step.y or chain.y
 
-                if toMap and toX and toY and fromX and fromY then
-                    local leg = travel.EstimateSeconds(
-                        fromMap, fromX, fromY, toMap, toX, toY)
-
-                    if leg then
-                        travelSeconds = travelSeconds + leg
-
-                        fromMap, fromX, fromY = toMap, toX, toY
-                    end
+                if toMap and toX and toY then
+                    table.insert(pending, { mapID = toMap, x = toX, y = toY })
                 end
             end
+        end
+
+        local fromMap, fromX, fromY = playerMap, playerX, playerY
+
+        while #pending > 0 and fromX do
+            local bestIndex, bestSeconds
+
+            for index, target in ipairs(pending) do
+                local leg = travel.EstimateSeconds(
+                    fromMap, fromX, fromY, target.mapID, target.x, target.y)
+
+                if leg and (not bestSeconds or leg < bestSeconds) then
+                    bestIndex, bestSeconds = index, leg
+                end
+            end
+
+            if not bestIndex then
+                break
+            end
+
+            local chosen = table.remove(pending, bestIndex)
+
+            travelSeconds = travelSeconds + bestSeconds
+
+            fromMap, fromX, fromY = chosen.mapID, chosen.x, chosen.y
         end
     end
 
@@ -658,7 +687,7 @@ function Chase.DescribeEstimate(chain)
     end
 
     if not estimate.enough then
-        return "time unknown |cff999999-- "
+        return CN.WithConfidence(nil, CN.confidence.UNKNOWN) .. " time |cff999999-- "
             .. estimate.unknown .. " of "
             .. (estimate.timed + estimate.unknown)
             .. " steps are kinds of thing this addon has not watched you do "

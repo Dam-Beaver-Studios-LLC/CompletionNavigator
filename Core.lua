@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.43.1"
-CN.dbVersion   = 6
+CN.version     = "0.44.0"
+CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -272,6 +272,36 @@ end
 -- Convenience for the common case: a boolean "was this measured".
 function CN.ConfidenceFor(measured)
     return measured and CN.confidence.MEASURED or CN.confidence.ESTIMATED
+end
+
+-- LANGUAGE COMPATIBILITY.
+--
+-- Everything in this block exists because the game and the test suite run
+-- different languages. WoW is Lua 5.1; the suite is 5.4. Anything that
+-- behaves differently between them is a defect waiting for a player to find,
+-- and 0.43.1 shipped after exactly that happened -- see CN.Atan2 below.
+--
+-- The rule these enforce is simple: if a construct means two things, the
+-- addon uses neither directly. It uses one of these.
+
+-- unpack moved to table.unpack in 5.2. The game still has the global.
+CN.Unpack = rawget(table, "unpack") or unpack
+
+-- MODULO ON NEGATIVE NUMBERS.
+--
+-- `math.fmod` truncates toward zero and `%` floors, so they disagree in sign
+-- for negative operands -- and bearings are negative half the time. 5.1 and
+-- 5.4 also differ in whether math.fmod accepts floats cleanly.
+--
+-- This is the floored version, which is what every angle in this addon wants:
+-- the result carries the sign of the divisor, so wrapping an angle into a
+-- range never produces the wrong half of the circle.
+function CN.Mod(value, divisor)
+    if not value or not divisor or divisor == 0 then
+        return 0
+    end
+
+    return value - (math.floor(value / divisor) * divisor)
 end
 
 -- THE SINGLE MOST IMPORTANT FUNCTION IN THIS FILE.

@@ -139,6 +139,10 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **Flight points** | The ones you have discovered, so a journey is costed the way you would actually make it |
 | **Your own speed** | Running, riding and flying, measured separately from your own play |
 | **Crafting orders** | The ones you placed, and anything finished and waiting |
+| **Your bags** | Quest starters and uncollected mounts, pets and toys you are already carrying |
+| **Your mailbox** | What is expiring, and whether anything is attached to it |
+| **Keystones** | The one you hold, and that it is replaced at the reset |
+| **Profession knowledge** | Weekly, capped, and gone if the week passes |
 | **World events** | Timewalking and holidays, weighted by when they end |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
 
@@ -159,6 +163,7 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | **Follows** | Hands-free: the current stop on screen, advancing as you clear it |
 | **Learns** | Quest prerequisites inferred from your own play, never guessed from a single sighting |
 | **Adapts** | Which kinds of objective you actually go and do, within clamped limits, and it says so on the line |
+| **Shows its working** | `/cn order` breaks the ranking into the terms that produced it |
 
 ## Dungeons and raids
 
@@ -185,6 +190,42 @@ Reading the game's Adventure Guide changes what it is displaying, so the addon w
 The addon notices which kinds of objective you go and do, and leans that way. The guardrails matter more than the learning: nothing moves until a type has been shown 25 times, the adjustment is clamped so a type you skip gets quieter but never silent, and every adjusted line **says on the line** that it was adjusted. The counters decay, so it tracks how you play now rather than how you played in June. A focus you set with `/cn mode` always beats a habit it inferred.
 
 `/cn learned reset` forgets it. `/cn learned off` switches it off. Hiding a type outright is still `/cn show`.
+
+## It looks in your bags
+
+```
+/cn bags
+```
+
+A surprising amount of *what should I do next* is already in there: the item that starts a quest, sitting since a boss dropped it, and mounts, pets and toys you own and have not learned. Those cost **zero** travel, because they are in your bag â€” which makes them the cheapest thing the addon can ever recommend.
+
+Nothing is used, learned, moved or sold on your behalf. It reads.
+
+## Things with a clock on them
+
+```
+/cn clock
+```
+
+Mail about to expire **with something attached** â€” expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Weekly profession knowledge, which is the most permanently missable thing in the game. Heirlooms.
+
+## Where to go when this zone is done
+
+```
+/cn nearby
+```
+
+What is worth doing outside this zone, ordered by **how long it takes to get there** rather than how far away it is â€” a flight point changes that answer, and a mountain range changes it the other way.
+
+Another continent is costable now too, where a teleport you know lands on the right side of it: the addon prices the teleport, the cooldown you would wait through, and the ordinary journey from where it drops you.
+
+## Why is it in this order?
+
+```
+/cn order
+```
+
+Every term in the score for the top few, biggest first, adding up to the number shown. `/cn why` explains one objective; this explains the ranking â€” including why the thing you expected to see at the top is not.
 
 ## It knows what you are in the middle of
 
@@ -276,6 +317,10 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn hud` | A small always-on line showing the next thing |
 | `/cn errors` | Anything that went wrong inside the addon this session |
 | `/cn contribute` | Share the quest chains your play has taught it |
+| `/cn bags` | What is in your bags that you could act on now |
+| `/cn clock` | Everything with a deadline that is not a quest |
+| `/cn nearby` | What is worth doing outside this zone, and how far away it is |
+| `/cn order` | Why the list is in the order it is in |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |

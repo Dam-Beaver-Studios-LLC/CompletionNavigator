@@ -187,6 +187,30 @@ FOLDED=$(grep -c 'requires  = { 8230 }' Data/Quests.lua)
 # nothing to do with what it is testing.
 rm -rf fixtures-tmp
 
+# A CONTRIBUTION FOLDS INTO THE COMMUNITY FILE, AND ONLY INTO THAT ONE.
+#
+# Community rows are believed because several installs agreed, not because a
+# human checked them. Letting them into Data\Quests.lua would destroy that
+# distinction permanently and silently.
+$PWSH -NoProfile -File ./cn.ps1 contribution "CN1 100:98,99 200:150" > contrib.log 2>&1
+grep -q "new rows to add            2" contrib.log \
+  || { echo "FAIL: the contribution was not folded"; cat contrib.log; exit 1; }
+grep -q "requires = { 98, 99 }" Data/Community.lua \
+  || { echo "FAIL: the chain is not in the community file"; exit 1; }
+grep -q "100" Data/Quests.lua \
+  && { echo "FAIL: a contribution leaked into the curated database"; exit 1; }
+luac5.4 -p Data/Community.lua || { echo "FAIL: contribution produced invalid Lua"; exit 1; }
+
+# Malformed input must change nothing at all, rather than importing the half
+# it could parse.
+BEFORE=$(md5sum Data/Community.lua | cut -d" " -f1)
+$PWSH -NoProfile -File ./cn.ps1 contribution "CN1 100:98 rubbish" > contrib2.log 2>&1
+grep -q "malformed" contrib2.log \
+  || { echo "FAIL: malformed contribution was not refused"; cat contrib2.log; exit 1; }
+AFTER=$(md5sum Data/Community.lua | cut -d" " -f1)
+[ "$BEFORE" = "$AFTER" ] \
+  || { echo "FAIL: a refused contribution still changed the file"; exit 1; }
+
 # Running it again must add nothing.
 $PWSH -NoProfile -File ./cn.ps1 harvest ./sv.lua > harvest2.log 2>&1
 grep -q "Nothing to add" harvest2.log || { echo "FAIL: harvest is not idempotent"; cat harvest2.log; exit 1; }

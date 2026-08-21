@@ -7,6 +7,95 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.44.0]
+
+The addon can see your bags, your mailbox and your keystone; it can cost a
+journey to another continent; and it can tell you why the list is in the order
+it is in. Two more defects found by the tooling built in 0.43.1.
+
+### Fixed
+
+- **Every flying speed sample was being thrown away.** 0.43.0 added a third
+  speed bucket for flying yourself and left the sanity band alone -- a single
+  range written when both buckets were ground travel, rejecting anything above
+  60 yards per second. That is *below* the speed you actually fly at, so every
+  genuine sample was discarded as implausible, the bucket never filled, and
+  the flying estimate would have stayed seeded forever while appearing to
+  work. The band is per bucket now. Found by a test that assumed a realistic
+  flying speed.
+- **Quest starters you had already used were recommended again.** The client
+  flags an item as starting a quest whether or not you have accepted it.
+- **The session planner laid out routes you could not start** -- the ranking
+  knew you were dead or in a dungeon since 0.43.0 and the planner did not.
+
+### Added
+
+- **It looks in your bags.** `C_Container` appeared nowhere in this addon for
+  twenty-nine releases, and a surprising amount of "what should I do next?"
+  is already in there: the item that starts a quest, sitting since a boss
+  dropped it, and mounts, pets and toys you own and have not learned. They
+  cost **zero** travel, which is the honest number. `/cn bags`.
+- **Things with a clock on them** -- `/cn clock`. Mail about to expire *with
+  something attached* (expired mail is destroyed, not returned), the keystone
+  that is replaced at the reset whether you use it or not, weekly profession
+  knowledge that does not come back, and heirlooms.
+- **Another continent is now costable.** Where a teleport you know lands on
+  the right continent, the journey is priced: the teleport, the cooldown you
+  would wait through, and the ordinary journey from where it drops you.
+  Destinations are curated, because the client will not convert a bind
+  location into a map.
+- **`/cn nearby`** -- what is worth doing outside this zone, ordered by how
+  long it takes to get there rather than how far away it is. The router has
+  been zone-scoped since it was written; the distance function stopped being
+  zone-scoped in 0.42.0 and nobody told the router.
+- **`/cn order`** -- why the list is in this order. Every term in the score for
+  the top few, biggest first, summing to the number shown. `/cn why` explains
+  one objective; this explains the ranking.
+- **Flying is remembered per zone.** `IsFlyableArea` answers for where you are
+  standing and nothing answers for where you are going, so the addon records
+  what it observes and trusts that over the near end.
+- **`/cn help` is no longer 120 lines.** A dozen essentials by default,
+  `/cn help all` grouped by what you are trying to do, and `/cn help <word>`
+  searches names and descriptions.
+- **The chase estimate walks its legs nearest-first** rather than in whatever
+  order the steps happened to be listed.
+- **The arrow's distance figure is eased**, like its rotation, and snaps on a
+  real jump.
+- **Errors survive a logout.** One summary line each, shown once and then
+  forgotten -- because the case that mattered was somebody relogging before
+  they thought to look.
+
+### Tooling
+
+- **A rule against constructs that mean two different things.** Seven of them,
+  checked across every shipped file: two-argument `math.atan`, `table.unpack`,
+  `math.fmod`, `goto`, `math.type`, `math.tointeger`, integer division. Each
+  names what breaks and what to use instead. This is the generalisation of
+  the 0.43.1 defect.
+- **`CN.Mod` and `CN.Unpack`** join `CN.Atan2`: if a construct means two
+  things, the addon uses neither directly.
+- **An end-to-end session test** -- login, ask, explain, route, plan, follow,
+  log out -- asserting that nothing throws in the order a player actually does
+  things. Every part was tested; the sequence was not.
+- **Eighteen mutations, up from ten.** The eight new ones found six holes in
+  the suite on the day they were written; all six now have assertions. One of
+  the eight was itself wrong -- `%` in Lua is already floored, so mutating to
+  it changed nothing -- and was replaced with `math.fmod`, which is the real
+  hazard.
+- **Two more performance budgets**, and a zero measurement is now a FAILURE
+  rather than a pass: "UI refresh: 0.000 ms" meant the function had returned
+  immediately without running, which is a budget guarding nothing.
+- **`bench.lua --history`** appends every measurement to a TSV. Budgets catch
+  a cliff; they do not catch a slope, and the cold rebuild has crept from
+  3.9ms to 6.2ms across eight releases without ever failing a gate.
+- **Database version 7**, which enforces the remembered-quest-pin ceiling on
+  read rather than trusting that it was never exceeded.
+
+### Notes
+
+- Nothing in this release uses, learns, moves, sends or opens anything. It
+  reads your bags and your mailbox and tells you what is in them.
+
 ## [0.43.1]
 
 One defect, found by evaluating the addon against the language the game

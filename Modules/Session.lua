@@ -112,6 +112,35 @@ end
 
 Session.Persisted = Persisted
 
+-- THE SANITY BAND, PER BUCKET.
+--
+-- It was a single range -- above half a yard a second, below sixty -- written
+-- when there were two buckets and both were ground travel. Sixty is a
+-- perfectly good ceiling for running and riding, and it is BELOW the speed a
+-- player actually flies at.
+--
+-- So when 0.43.0 added the flying bucket, every genuine flying sample was
+-- silently discarded as implausible, the bucket never filled, and the flying
+-- estimate stayed permanently seeded. The feature would have looked like it
+-- was working and never learned anything. Caught by a test that assumed a
+-- realistic flying speed.
+Session.speedBands = {
+    onFoot  = { 0.5, 60 },
+    mounted = { 0.5, 60 },
+
+    -- Skyriding sustains well past sixty and bursts higher. The upper bound
+    -- is the same one Travel uses for a taxi: fast enough to be a loading
+    -- screen rather than a mount.
+    flying  = { 0.5, 200 },
+}
+
+function Session.IsPlausibleSpeed(value, bucket)
+    local band = Session.speedBands[bucket or "onFoot"]
+        or Session.speedBands.onFoot
+
+    return value > band[1] and value < band[2]
+end
+
 function Session.LoadSamples()
     local stored = Persisted()
 
@@ -125,7 +154,7 @@ function Session.LoadSamples()
         speed.samples[bucket] = {}
 
         for _, value in ipairs(stored[bucket] or {}) do
-            if type(value) == "number" and value > 0.5 and value < 60 then
+            if type(value) == "number" and Session.IsPlausibleSpeed(value, bucket) then
                 table.insert(speed.samples[bucket], value)
                 loaded = loaded + 1
             end
@@ -264,13 +293,16 @@ function Session.Observe()
     local observed = yards / elapsed
 
     -- A player on foot does about 7 yards a second; mounted, roughly 14 to
-    -- 20. Anything above 60 is not travel, it is a loading screen.
-    if observed < 0.5 or observed > 60 then
+    -- 20; flying, a great deal more. The ceiling is per bucket for exactly
+    -- that reason -- see Session.speedBands.
+    local bucketName = flying and "flying"
+        or (mounted and "mounted" or "onFoot")
+
+    if not Session.IsPlausibleSpeed(observed, bucketName) then
         return nil
     end
 
-    local bucket = speed.samples[flying and "flying"
-        or (mounted and "mounted" or "onFoot")]
+    local bucket = speed.samples[bucketName]
 
     table.insert(bucket, observed)
 
@@ -713,6 +745,27 @@ end)
 function Session.Plan(minutes)
     local requested = tonumber(minutes)
 
+    -- THE RANKING KNOWS WHERE YOU ARE; THE PLANNER DID NOT.
+    --
+    -- 0.43.0 taught the ranking about being dead and being in an instance,
+    -- and the session planner carried on laying out a walking route through
+    -- the open world regardless -- which is a plan the player cannot start.
+    local group = CN:GetModule("Group")
+
+    local situation = group and group.Situation()
+
+    if situation == "dead" or situation == "instanced" then
+        return {
+            minutes   = (requested or Session.TypicalSessionMinutes()),
+            stops     = {},
+            seconds   = 0,
+            confident = true,
+            skipped   = 0,
+            blocked   = situation,
+            notice    = group and group.Notice(),
+        }
+    end
+
     -- No number given: use however long this character usually plays, rather
     -- than a round thirty that was only ever a placeholder.
     local budget = (requested or Session.TypicalSessionMinutes()) * 60
@@ -861,6 +914,17 @@ CN:RegisterCommand{
 
         local plan = Session.Plan(minutes)
 
+        if plan.blocked then
+            -- Not "nothing to plan around": there is plenty, and the player
+            -- cannot start any of it from where they are. Saying the first
+            -- when the second is true is how an addon earns a reputation for
+            -- not paying attention.
+            Print(plan.notice or "Not while you are in the middle of that.")
+            Print("|cff999999The plan is waiting; ask again when you are back "
+                .. "in the world.|r")
+            return
+        end
+
         if #plan.stops == 0 then
             Print("Nothing here to plan around.")
             return
@@ -870,14 +934,14 @@ CN:RegisterCommand{
             #plan.stops,
             #plan.stops == 1 and "" or "s",
             Session.FormatDuration(plan.seconds),
-            minutes))
+            plan.minutes))
 
         for index, stop in ipairs(plan.stops) do
             Print(string.format("  %d. |cffffff00%s|r |cff999999%s|r",
                 index,
                 tostring(stop.summary or "stop"),
                 stop.confident and Session.FormatDuration(stop.seconds)
-                    or "time unknown"))
+                    or (CN.WithConfidence(nil, CN.confidence.UNKNOWN) .. " time")))
         end
 
         if plan.skipped > 0 then

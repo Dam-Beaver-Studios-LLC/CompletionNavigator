@@ -115,6 +115,54 @@ mutate "Core.lua" \
     "    if false then" \
     "estimated numbers are printed as though measured"
 
+mutate "Modules/Inventory.lua" \
+    "        if ok and type(info) == \"table\" and info.questID and not info.isActive then" \
+    "        if ok and type(info) == \"table\" and info.questID then" \
+    "quest starters already accepted are offered again"
+
+mutate "Modules/Waiting.lua" \
+    "        if mail.expiring and (mail.items > 0 or mail.money > 0) then" \
+    "        if mail.expiring then" \
+    "empty expiring mail is treated as something to save"
+
+mutate "Modules/Travel.lua" \
+    "    if remembered == false then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "flying is offered in a zone known not to allow it"
+
+# NOT `value % divisor`: Lua's own operator is already floored, so that
+# mutation is behaviourally identical and survived for the honest reason that
+# it was not a defect. math.fmod truncates toward zero, which is the actual
+# hazard this helper exists to avoid.
+mutate "Core.lua" \
+    "    return value - (math.floor(value / divisor) * divisor)" \
+    "    return math.fmod(value, divisor)" \
+    "modulo truncates toward zero instead of flooring"
+
+mutate "Scoring.lua" \
+    "        if math.abs(term.value) > 0.001 then" \
+    "        if true then" \
+    "the ranking explanation lists terms worth nothing"
+
+mutate "Modules/Group.lua" \
+    "        return score * Group.instancedPenalty" \
+    "        return score" \
+    "outside work is not ranked down inside an instance"
+
+mutate "Modules/Session.lua" \
+    "    if situation == \"dead\" or situation == \"instanced\" then" \
+    "    if false then" \
+    "the planner lays out a route you cannot start"
+
+mutate "Modules/Errors.lua" \
+    "    while #ring > Errors.capacity do" \
+    "    while false do" \
+    "the error ring grows without bound"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

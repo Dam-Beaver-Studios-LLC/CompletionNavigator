@@ -11,6 +11,13 @@ local ROOT = arg[1] or "build/CompletionNavigator"
 -- a check that cannot fail because it never runs.
 local ENFORCE_BUDGETS = false
 
+-- Kept, because `arg` is replaced wholesale below for the harness.
+BENCH_ARGS = {}
+
+for _, argument in ipairs(arg) do
+    table.insert(BENCH_ARGS, argument)
+end
+
 for _, argument in ipairs(arg) do
     if argument == "--budget" then
         ENFORCE_BUDGETS = true
@@ -328,6 +335,23 @@ do
     end
 end
 
+print("\nThe paths a player triggers without meaning to:")
+
+do
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    bench("BuildZoneRoute()", 50, function()
+        CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+    end)
+
+    -- NOT UI.Refresh: it returns immediately unless the window is genuinely
+    -- shown, and the harness's frames are not. Measuring it produced a
+    -- confident 0.000 ms for a function that never ran -- a budget that
+    -- cannot fail is a budget that guards nothing.
+    --
+    -- Chase.All() below is the real cost of an open window, and it does run.
+end
+
 ------------------------------------------------------------
 -- BUDGETS
 ------------------------------------------------------------
@@ -350,6 +374,12 @@ local BUDGETS = {
     ["Recommend(1)"]              = 0.10,
     ["Recommend(25)"]             = 0.40,
     ["ItemLines on an ordinary item"] = 0.05,
+
+    -- Added in 0.44.0. The two paths a player triggers most often without
+    -- meaning to: opening the window, and the router recomputing because they
+    -- walked into a new zone.
+    ["BuildZoneRoute()"]          = 8.0,
+    ["Chase.All() with 8 goals"]  = 5.0,
 }
 
 if ENFORCE_BUDGETS then
@@ -362,6 +392,18 @@ if ENFORCE_BUDGETS then
 
         if not measured then
             print(string.format("  MISSING  %-38s (never measured)", label))
+
+            failed = failed + 1
+        elseif measured <= 0 then
+            -- A ZERO IS NOT A PASS.
+            --
+            -- "UI refresh: 0.000 ms" meant the window was not open and the
+            -- function returned immediately -- a budget that can never fail
+            -- because the thing it guards never ran. That is the same shape
+            -- as a vacuous test, and it gets the same treatment: reported,
+            -- not counted as a success.
+            print(string.format("  NOT RUN  %-38s (measured 0 -- the path did "
+                .. "not execute)", label))
 
             failed = failed + 1
         elseif measured > ceiling then
@@ -382,4 +424,65 @@ if ENFORCE_BUDGETS then
     end
 
     print("\nEvery measured path is inside its budget.")
+end
+
+------------------------------------------------------------
+-- HISTORY
+------------------------------------------------------------
+
+-- BUDGETS CATCH A CLIFF. THEY DO NOT CATCH A SLOPE.
+--
+-- A ceiling with threefold headroom is the right shape for a gate: it fails
+-- on a regression and not on runner noise. It is exactly the wrong shape for
+-- noticing that the cold rebuild has crept from 3.9ms to 6.2ms across eight
+-- releases, each step small enough to be invisible and the total large enough
+-- to matter -- which is what actually happened between 0.36.0 and 0.44.0.
+--
+-- So: append every run to a file, one line per measurement, with the version.
+-- No analysis and no thresholds; a file somebody can look at, sorted by the
+-- thing that changed. `--history` writes it; nothing reads it automatically,
+-- because a trend needs a person.
+local writingHistory = false
+
+for _, argument in ipairs(BENCH_ARGS) do
+    if argument == "--history" then
+        writingHistory = true
+    end
+end
+
+if writingHistory then
+    local path = "bench-history.tsv"
+
+    local existing = io.open(path, "r")
+
+    local needsHeader = existing == nil
+
+    if existing then
+        existing:close()
+    end
+
+    local handle = io.open(path, "a")
+
+    if handle then
+        if needsHeader then
+            handle:write("version\tmeasurement\tms\n")
+        end
+
+        local labels = {}
+
+        for label in pairs(CN_BENCH_RESULTS) do
+            table.insert(labels, label)
+        end
+
+        table.sort(labels)
+
+        for _, label in ipairs(labels) do
+            handle:write(string.format("%s\t%s\t%.4f\n",
+                CN.version, label, CN_BENCH_RESULTS[label]))
+        end
+
+        handle:close()
+
+        print("\nAppended " .. #labels .. " measurements to " .. path .. ".")
+    end
 end

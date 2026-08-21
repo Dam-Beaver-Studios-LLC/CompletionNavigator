@@ -131,9 +131,23 @@ function Hud.Refresh()
 
     frame.label:SetText(tostring(objective.name or objective.id))
 
-    local reason = objective.reasons and objective.reasons[1]
+    local detail = objective.reasons and objective.reasons[1]
 
-    frame.detail:SetText(reason and ("|cff999999" .. reason .. "|r") or "")
+    -- WHILE A ROUTE IS BEING WALKED, SAY HOW FAR THROUGH IT YOU ARE.
+    --
+    -- The reason line is the right thing to show when nothing else is
+    -- happening. It is the wrong thing when the player is nine stops into a
+    -- twelve-stop route, which is exactly when a glanceable frame earns its
+    -- place on the screen.
+    local follow = CN:GetModule("Follow")
+
+    if follow and follow.active and (follow.startedWith or 0) > 0 then
+        detail = string.format("stop %d of %d",
+            math.min((follow.completed or 0) + 1, follow.startedWith),
+            follow.startedWith)
+    end
+
+    frame.detail:SetText(detail and ("|cff999999" .. detail .. "|r") or "")
 
     return true
 end

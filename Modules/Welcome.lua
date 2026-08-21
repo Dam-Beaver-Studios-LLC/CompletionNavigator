@@ -170,6 +170,19 @@ function Welcome.Build()
             Print("Ask it anything with |cffffff00/cn|r, or open the window "
                 .. "with |cffffff00/cn ui|r.")
 
+            -- OFFER THE SCAN HERE, where the player is already answering
+            -- questions -- rather than leaving it to a reminder that arrives
+            -- later, out of context, and reads like nagging. Offered, not
+            -- run: a first-run screen that starts work uninvited is the
+            -- opposite of what this addon does everywhere else.
+            local setup = CN:GetModule("Setup")
+
+            if setup and setup.HasRun and not setup.HasRun() then
+                Print("It has not looked at your collections yet. "
+                    .. "|cffffff00/cn setup|r does that once, and takes a "
+                    .. "few seconds.")
+            end
+
             frame:Hide()
         end)
 

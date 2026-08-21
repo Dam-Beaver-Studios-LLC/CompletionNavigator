@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.43.1'
+$script:ToolkitVersion = '0.44.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,8 +117,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.43.1"
-CN.dbVersion   = 6
+CN.version     = "0.44.0"
+CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -371,6 +371,36 @@ end
 -- Convenience for the common case: a boolean "was this measured".
 function CN.ConfidenceFor(measured)
     return measured and CN.confidence.MEASURED or CN.confidence.ESTIMATED
+end
+
+-- LANGUAGE COMPATIBILITY.
+--
+-- Everything in this block exists because the game and the test suite run
+-- different languages. WoW is Lua 5.1; the suite is 5.4. Anything that
+-- behaves differently between them is a defect waiting for a player to find,
+-- and 0.43.1 shipped after exactly that happened -- see CN.Atan2 below.
+--
+-- The rule these enforce is simple: if a construct means two things, the
+-- addon uses neither directly. It uses one of these.
+
+-- unpack moved to table.unpack in 5.2. The game still has the global.
+CN.Unpack = rawget(table, "unpack") or unpack
+
+-- MODULO ON NEGATIVE NUMBERS.
+--
+-- `math.fmod` truncates toward zero and `%` floors, so they disagree in sign
+-- for negative operands -- and bearings are negative half the time. 5.1 and
+-- 5.4 also differ in whether math.fmod accepts floats cleanly.
+--
+-- This is the floored version, which is what every angle in this addon wants:
+-- the result carries the sign of the divisor, so wrapping an angle into a
+-- range never produces the wrong half of the circle.
+function CN.Mod(value, divisor)
+    if not value or not divisor or divisor == 0 then
+        return 0
+    end
+
+    return value - (math.floor(value / divisor) * divisor)
 end
 
 -- THE SINGLE MOST IMPORTANT FUNCTION IN THIS FILE.
@@ -735,6 +765,49 @@ CN.migrations = {
             CN.DebugPrint("Dropped " .. dropped
                 .. " stored values the client already knows.")
         end
+    end,
+
+    -- 6 -> 7. Five stores arrived between 0.40.0 and 0.43.0 and none needed a
+    -- migration, so the version never moved -- which meant the ladder could
+    -- not be used to enforce anything about them either.
+    --
+    -- The remembered quest pins are the one that matters: they are written on
+    -- every scan of a map, capped by a constant in the module, and the cap
+    -- was enforced only at the moment of writing. A database that grew past
+    -- it under an older build, or through a version where the constant was
+    -- larger, stayed large forever. Trim on the way in instead of trusting
+    -- that it never happened.
+    [6] = function(db)
+        db.account = db.account or {}
+
+        local pins = db.account.questPins
+
+        if type(pins) ~= "table" then
+            return
+        end
+
+        local ceiling = 600
+
+        local ids = {}
+
+        for questID in pairs(pins) do
+            table.insert(ids, questID)
+        end
+
+        if #ids <= ceiling then
+            return
+        end
+
+        table.sort(ids)
+
+        -- Lowest ids first: the oldest content, and the least likely to be
+        -- what anybody is working on now.
+        for index = 1, #ids - ceiling do
+            pins[ids[index]] = nil
+        end
+
+        CN.DebugPrint("Trimmed " .. (#ids - ceiling)
+            .. " remembered quest pins over the ceiling.")
     end,
 }
 
@@ -2035,7 +2108,168 @@ local Print = CN.Print
 -- HELP
 ------------------------------------------------------------
 
-local function ShowHelp()
+-- ONE FLAT LIST OF 120 COMMANDS IS A LIST NOBODY READS.
+--
+-- Help printed every command in registration order, which was fine at twelve
+-- and is useless at a hundred and twenty: the answer to "what can this thing
+-- do?" scrolled past in a wall of yellow, and the commands people actually
+-- needed were indistinguishable from the diagnostics.
+--
+-- Three changes, none of them clever:
+--
+--   * A SHORT list by default -- the dozen things worth knowing on day one.
+--   * `/cn help all` for the whole thing, grouped.
+--   * `/cn help <word>` searches names and descriptions, because somebody
+--     who half-remembers "the one about lockouts" should not have to read a
+--     hundred and twenty lines to find `/cn instances`.
+CN.helpEssentials = {
+    "", "next", "go", "why", "order", "plan", "follow", "zone", "nearby",
+    "chase", "mode", "show", "ui", "setup", "selftest",
+}
+
+-- Groups, by what the player is trying to do rather than by which module
+-- happens to own the command.
+CN.helpGroups = {
+    { title = "Deciding what to do",
+      names = { "next", "why", "order", "plan", "mode", "show", "learned",
+                "situation", "goal", "chase" } },
+    { title = "Getting there",
+      names = { "go", "travel", "nav", "navdiag", "arrow", "calibrate",
+                "pins", "follow", "zone", "nearby", "where am i" } },
+    { title = "What is left",
+      names = { "progress", "loremaster", "zones", "available", "waiting",
+                "breakdown", "vault", "instances", "drops", "clock", "bags",
+                "orders", "alts" } },
+    { title = "Setting it up",
+      names = { "setup", "ui", "scale", "colourblind", "hud", "cues",
+                "locale", "welcome" } },
+    { title = "When something is wrong",
+      names = { "selftest", "errors", "dbsize", "capture", "contribute",
+                "harvest", "debug" } },
+}
+
+local function PrintCommand(definition, indent)
+    local line = (indent or "") .. "|cffffff00/cn " .. definition.name
+
+    if definition.args and definition.args ~= "" then
+        line = line .. " " .. definition.args
+    end
+
+    line = line .. "|r"
+
+    if definition.help and definition.help ~= "" then
+        line = line .. " - " .. definition.help
+    end
+
+    Print(line)
+end
+
+local function Find(name)
+    for _, definition in ipairs(CN.commandList) do
+        if definition.name == name then
+            return definition
+        end
+    end
+
+    return nil
+end
+
+local function ShowEssentials()
+    Print("The ones worth knowing:")
+
+    for _, name in ipairs(CN.helpEssentials) do
+        local definition = Find(name)
+
+        if definition then
+            PrintCommand(definition, "  ")
+        end
+    end
+
+    Print("|cff999999" .. #CN.commandList .. " commands in total. "
+        .. "|cffffff00/cn help all|r lists them by what they are for, and "
+        .. "|cffffff00/cn help <word>|r searches them.|r")
+end
+
+local function SearchHelp(term)
+    term = string.lower(term)
+
+    local matches = {}
+
+    for _, definition in ipairs(CN.commandList) do
+        local haystack = string.lower(definition.name .. " "
+            .. tostring(definition.help or ""))
+
+        if haystack:find(term, 1, true) then
+            table.insert(matches, definition)
+        end
+    end
+
+    if #matches == 0 then
+        Print("Nothing matches \"" .. term .. "\".")
+        Print("|cff999999/cn help all|r lists everything.")
+        return
+    end
+
+    Print(#matches .. " command(s) matching \"" .. term .. "\":")
+
+    for _, definition in ipairs(matches) do
+        PrintCommand(definition, "  ")
+    end
+end
+
+local function ShowGrouped()
+    local shown = {}
+
+    for _, group in ipairs(CN.helpGroups) do
+        Print("|cffffd100" .. group.title .. "|r")
+
+        for _, name in ipairs(group.names) do
+            local definition = Find(name)
+
+            if definition then
+                PrintCommand(definition, "  ")
+
+                shown[name] = true
+            end
+        end
+    end
+
+    local rest = {}
+
+    for _, definition in ipairs(CN.commandList) do
+        if not shown[definition.name] then
+            table.insert(rest, definition)
+        end
+    end
+
+    if #rest > 0 then
+        table.sort(rest, function(a, b) return a.name < b.name end)
+
+        Print("|cffffd100Everything else|r")
+
+        for _, definition in ipairs(rest) do
+            PrintCommand(definition, "  ")
+        end
+    end
+end
+
+local function ShowHelp(args)
+    args = CN.Trim(args or "")
+
+    if args ~= "" then
+        if string.lower(args) == "all" then
+            ShowGrouped()
+        else
+            SearchHelp(args)
+        end
+
+        return
+    end
+
+    ShowEssentials()
+end
+
+local function ShowFullHelp()
     Print("Commands:")
 
     local sorted = {}
@@ -2069,7 +2303,8 @@ local function ShowHelp()
     end
 end
 
-CN.ShowHelp = ShowHelp
+CN.ShowHelp     = ShowHelp
+CN.ShowFullHelp = ShowFullHelp
 
 ------------------------------------------------------------
 -- STATUS
@@ -2168,10 +2403,11 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "help",
+    args    = "[all, or a word to search for]",
     order   = 2,
-    help    = "Show this help.",
-    handler = function()
-        ShowHelp()
+    help    = "The commands worth knowing; 'all' for every one.",
+    handler = function(args)
+        ShowHelp(args)
     end,
 }
 
@@ -3831,6 +4067,141 @@ function CN.ExplainRecommendation(objective)
     return lines
 end
 
+-- WHY IS THE LIST IN THIS ORDER?
+--
+-- `/cn why` has always explained ONE line: what is blocking it, what it is
+-- worth. Nobody asks that first. The first question anybody asks of a ranked
+-- list is why the thing at the top is at the top, and specifically why it is
+-- above the thing they expected to see there -- which is a question about two
+-- objectives and the weights between them, and the addon could not answer it
+-- at all.
+--
+-- This takes the scoring apart for one objective and shows every term that
+-- contributed, biggest first, with the weight applied. It is the same
+-- arithmetic ScoreObjective does; if the two ever disagree, this is wrong.
+function CN.ExplainScore(objective)
+    if type(objective) ~= "table" then
+        return {}
+    end
+
+    local settings = CN.Settings()
+    local mode     = (settings and settings.priorityMode) or "balanced"
+    local profile  = CN.priorityProfiles[mode] or {}
+
+    local w = {}
+
+    for key, value in pairs(CN.scoreWeights) do
+        w[key] = value
+    end
+
+    if profile.weights then
+        for key, value in pairs(profile.weights) do
+            w[key] = value
+        end
+    end
+
+    local travel = objective.travelCost
+
+    if travel == nil then
+        travel = CN.unknownLocationCost
+    end
+
+    local terms = {
+        { label = "what finishing it is worth",
+          value = (objective.completionValue or 1) * w.completionValue },
+        { label = "what it unlocks",
+          value = (objective.unlockValue or 0) * w.unlockValue },
+        { label = "limited time",
+          value = (objective.limitedTimeBonus or 0) * w.limitedTimeBonus },
+        { label = "nearby",
+          value = (objective.nearbyBonus or 0) * w.nearbyBonus },
+        { label = "your stated preference",
+          value = (objective.userPreference or 0) * w.userPreference },
+        { label = "suits this character",
+          value = (objective.characterSuitability or 0) * w.characterSuitability },
+        { label = "getting there",
+          value = travel * w.travelCost },
+        { label = "how long it takes",
+          value = (objective.estimatedTime or 0) * w.estimatedTime },
+        { label = "difficulty",
+          value = (objective.difficultyCost or 0) * w.difficultyCost },
+        { label = "prerequisites",
+          value = (objective.dependencyCost or 0) * w.dependencyCost },
+    }
+
+    if objective.expiresIn then
+        table.insert(terms, {
+            label = "deadline",
+            value = CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight,
+        })
+    end
+
+    if objective.hubSize and objective.hubSize > 1 then
+        table.insert(terms, {
+            label = "batches with " .. (objective.hubSize - 1) .. " other thing(s)",
+            value = math.min(CN.batchBonusCap,
+                (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus,
+        })
+    end
+
+    local kept = {}
+
+    for _, term in ipairs(terms) do
+        if math.abs(term.value) > 0.001 then
+            table.insert(kept, term)
+        end
+    end
+
+    table.sort(kept, function(a, b)
+        return math.abs(a.value) > math.abs(b.value)
+    end)
+
+    return kept
+end
+
+CN:RegisterCommand{
+    name    = "order",
+    aliases = { "ranking" },
+    args    = "[how many]",
+    order   = 17,
+    help    = "Why the list is in the order it is in.",
+    handler = function(args)
+        local wanted = tonumber(CN.Trim(args or "")) or 3
+
+        wanted = math.max(1, math.min(5, wanted))
+
+        local results = CN.Recommend(wanted)
+
+        if #results == 0 then
+            CN.Print("Nothing is being recommended, so there is no order to "
+                .. "explain.")
+            return
+        end
+
+        local settings = CN.Settings()
+
+        CN.Print("Focus: |cffffff00"
+            .. tostring((settings and settings.priorityMode) or "balanced")
+            .. "|r")
+
+        for index, objective in ipairs(results) do
+            CN.Print(string.format("%d. |cffffffff%s|r |cff999999%.1f|r",
+                index, tostring(objective.name or objective.id),
+                objective.priorityWeight or 0))
+
+            for _, term in ipairs(CN.ExplainScore(objective)) do
+                CN.Print(string.format("     %s%+.1f|r  %s",
+                    term.value >= 0 and "|cff73b873" or "|cfff56b61",
+                    term.value, term.label))
+            end
+        end
+
+        CN.Print("|cff999999Every line above is a term in the same sum. "
+            .. "|cffffff00/cn mode|r changes the weights; |cffffff00/cn why|r "
+            .. "explains one objective in detail.|r")
+    end,
+}
+
 ------------------------------------------------------------
 -- COMMAND
 ------------------------------------------------------------
@@ -4494,6 +4865,89 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     return route, skipped, orderedHubs
 end
 
+-- ACROSS ZONES, NOT ONLY WITHIN ONE.
+--
+-- Every route in this addon has been zone-scoped since the routing engine was
+-- written, because the distance function could not compare two points on
+-- different maps. 0.42.0 fixed that -- world coordinates are continuous
+-- across a continent -- and the router was never told.
+--
+-- So a player who cleared their zone got "nothing left here" and no sense of
+-- where to go next, while the addon knew perfectly well that four things were
+-- waiting one zone over and roughly how long it took to get to each.
+--
+-- Ordered by TIME, not by distance: an objective across a mountain range with
+-- a flight point at each end is nearer than one half as far away with no
+-- route to it. The travel model already answers that question.
+--
+-- Returns { objective, seconds, mapID, zone } sorted by cost.
+CN.crossZoneCap = 25
+
+function CN.BuildCrossZoneRoute(limit)
+    limit = limit or CN.crossZoneCap
+
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+    if not playerMap then
+        return {}
+    end
+
+    local travel = CN:GetModule("Travel")
+
+    if not travel then
+        return {}
+    end
+
+    local elsewhere = {}
+
+    for _, objective in ipairs(CN.CollectCandidates()) do
+        local visible = (not CN.IsObjectiveTypeEnabled)
+            or CN.IsObjectiveTypeEnabled(objective.type)
+
+        if visible
+            and objective.mapID
+            and objective.mapID ~= playerMap
+            and objective.x and objective.y then
+
+            CN.ScoreObjective(objective)
+
+            table.insert(elsewhere, objective)
+        end
+    end
+
+    -- Cost only the best-scoring handful. Estimating a journey is four client
+    -- conversions and a scan of the flight network, and doing it for every
+    -- candidate in a full database would cost more than the answer is worth
+    -- -- the same reasoning that caps every other bounded collection here.
+    table.sort(elsewhere, function(a, b)
+        return (a.priorityWeight or 0) > (b.priorityWeight or 0)
+    end)
+
+    local rows = {}
+
+    for index = 1, math.min(#elsewhere, limit) do
+        local objective = elsewhere[index]
+
+        local seconds = travel.EstimateSeconds(playerMap, playerX, playerY,
+            objective.mapID, objective.x, objective.y)
+
+        if seconds then
+            table.insert(rows, {
+                objective = objective,
+                seconds   = seconds,
+                mapID     = objective.mapID,
+                zone      = CN.Blizzard.GetMapName(objective.mapID),
+            })
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        return a.seconds < b.seconds
+    end)
+
+    return rows
+end
+
 -- Counts what remains in the zone, grouped by objective type. Deliberately
 -- not a percentage: a percentage needs a trustworthy denominator, and the
 -- static database is nowhere near complete enough to provide one.
@@ -4656,6 +5110,53 @@ end)
 ------------------------------------------------------------
 -- COMMANDS
 ------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "nearby",
+    aliases = { "elsewhere" },
+    order   = 30,
+    help    = "What is worth doing OUTSIDE this zone, by how long it takes "
+        .. "to get there.",
+    handler = function()
+        local rows = CN.BuildCrossZoneRoute()
+
+        if #rows == 0 then
+            CN.Print("Nothing outside this zone is costable right now.")
+            CN.Print("|cff999999Either everything worth doing is here, or the "
+                .. "client will not convert the positions -- which happens "
+                .. "during a loading screen and fixes itself.|r")
+            return
+        end
+
+        local session = CN:GetModule("Session")
+
+        CN.Print("Outside this zone, nearest first:")
+
+        local lastZone
+
+        for index, row in ipairs(rows) do
+            if index > 12 then
+                CN.Print("  |cff999999... and " .. (#rows - 12) .. " more|r")
+                break
+            end
+
+            if row.zone ~= lastZone then
+                CN.Print("|cffffd100" .. tostring(row.zone or row.mapID) .. "|r")
+
+                lastZone = row.zone
+            end
+
+            CN.Print(string.format("  %-34s |cff999999%s|r",
+                tostring(row.objective.name or row.objective.id),
+                session and session.FormatDuration
+                    and session.FormatDuration(row.seconds)
+                    or (math.floor(row.seconds / 60) .. "m")))
+        end
+
+        CN.Print("|cff999999Ordered by how long it takes to get there, not by "
+            .. "how far away it is -- a flight point changes that answer.|r")
+    end,
+}
 
 CN:RegisterCommand{
     name    = "zone",
@@ -21502,7 +22003,18 @@ function Chase.Estimate(chain)
     local playerMap, playerX, playerY = CN.GetPlayerPosition()
 
     if travel and playerMap then
-        local fromMap, fromX, fromY = playerMap, playerX, playerY
+        -- NEAREST-FIRST, not listed-order.
+        --
+        -- 0.42.0 costed one journey; 0.43.0 costed every leg but walked them
+        -- in the order the steps happened to be listed, which is the order a
+        -- criteria list came back in -- no relation to geography. On a chain
+        -- whose steps are scattered that overstates the total badly.
+        --
+        -- This is the same greedy nearest-neighbour walk the zone router
+        -- uses, and it is an ESTIMATE either way: the point is not to find
+        -- the optimal tour, it is to stop pretending the player will walk a
+        -- deliberately silly one.
+        local pending = {}
 
         for _, step in ipairs(chain.steps) do
             if step.state ~= Chase.states.DONE
@@ -21512,17 +22024,35 @@ function Chase.Estimate(chain)
                 local toX   = step.x or chain.x
                 local toY   = step.y or chain.y
 
-                if toMap and toX and toY and fromX and fromY then
-                    local leg = travel.EstimateSeconds(
-                        fromMap, fromX, fromY, toMap, toX, toY)
-
-                    if leg then
-                        travelSeconds = travelSeconds + leg
-
-                        fromMap, fromX, fromY = toMap, toX, toY
-                    end
+                if toMap and toX and toY then
+                    table.insert(pending, { mapID = toMap, x = toX, y = toY })
                 end
             end
+        end
+
+        local fromMap, fromX, fromY = playerMap, playerX, playerY
+
+        while #pending > 0 and fromX do
+            local bestIndex, bestSeconds
+
+            for index, target in ipairs(pending) do
+                local leg = travel.EstimateSeconds(
+                    fromMap, fromX, fromY, target.mapID, target.x, target.y)
+
+                if leg and (not bestSeconds or leg < bestSeconds) then
+                    bestIndex, bestSeconds = index, leg
+                end
+            end
+
+            if not bestIndex then
+                break
+            end
+
+            local chosen = table.remove(pending, bestIndex)
+
+            travelSeconds = travelSeconds + bestSeconds
+
+            fromMap, fromX, fromY = chosen.mapID, chosen.x, chosen.y
         end
     end
 
@@ -21570,7 +22100,7 @@ function Chase.DescribeEstimate(chain)
     end
 
     if not estimate.enough then
-        return "time unknown |cff999999-- "
+        return CN.WithConfidence(nil, CN.confidence.UNKNOWN) .. " time |cff999999-- "
             .. estimate.unknown .. " of "
             .. (estimate.timed + estimate.unknown)
             .. " steps are kinds of thing this addon has not watched you do "
@@ -23461,6 +23991,35 @@ end
 
 Session.Persisted = Persisted
 
+-- THE SANITY BAND, PER BUCKET.
+--
+-- It was a single range -- above half a yard a second, below sixty -- written
+-- when there were two buckets and both were ground travel. Sixty is a
+-- perfectly good ceiling for running and riding, and it is BELOW the speed a
+-- player actually flies at.
+--
+-- So when 0.43.0 added the flying bucket, every genuine flying sample was
+-- silently discarded as implausible, the bucket never filled, and the flying
+-- estimate stayed permanently seeded. The feature would have looked like it
+-- was working and never learned anything. Caught by a test that assumed a
+-- realistic flying speed.
+Session.speedBands = {
+    onFoot  = { 0.5, 60 },
+    mounted = { 0.5, 60 },
+
+    -- Skyriding sustains well past sixty and bursts higher. The upper bound
+    -- is the same one Travel uses for a taxi: fast enough to be a loading
+    -- screen rather than a mount.
+    flying  = { 0.5, 200 },
+}
+
+function Session.IsPlausibleSpeed(value, bucket)
+    local band = Session.speedBands[bucket or "onFoot"]
+        or Session.speedBands.onFoot
+
+    return value > band[1] and value < band[2]
+end
+
 function Session.LoadSamples()
     local stored = Persisted()
 
@@ -23474,7 +24033,7 @@ function Session.LoadSamples()
         speed.samples[bucket] = {}
 
         for _, value in ipairs(stored[bucket] or {}) do
-            if type(value) == "number" and value > 0.5 and value < 60 then
+            if type(value) == "number" and Session.IsPlausibleSpeed(value, bucket) then
                 table.insert(speed.samples[bucket], value)
                 loaded = loaded + 1
             end
@@ -23613,13 +24172,16 @@ function Session.Observe()
     local observed = yards / elapsed
 
     -- A player on foot does about 7 yards a second; mounted, roughly 14 to
-    -- 20. Anything above 60 is not travel, it is a loading screen.
-    if observed < 0.5 or observed > 60 then
+    -- 20; flying, a great deal more. The ceiling is per bucket for exactly
+    -- that reason -- see Session.speedBands.
+    local bucketName = flying and "flying"
+        or (mounted and "mounted" or "onFoot")
+
+    if not Session.IsPlausibleSpeed(observed, bucketName) then
         return nil
     end
 
-    local bucket = speed.samples[flying and "flying"
-        or (mounted and "mounted" or "onFoot")]
+    local bucket = speed.samples[bucketName]
 
     table.insert(bucket, observed)
 
@@ -24062,6 +24624,27 @@ end)
 function Session.Plan(minutes)
     local requested = tonumber(minutes)
 
+    -- THE RANKING KNOWS WHERE YOU ARE; THE PLANNER DID NOT.
+    --
+    -- 0.43.0 taught the ranking about being dead and being in an instance,
+    -- and the session planner carried on laying out a walking route through
+    -- the open world regardless -- which is a plan the player cannot start.
+    local group = CN:GetModule("Group")
+
+    local situation = group and group.Situation()
+
+    if situation == "dead" or situation == "instanced" then
+        return {
+            minutes   = (requested or Session.TypicalSessionMinutes()),
+            stops     = {},
+            seconds   = 0,
+            confident = true,
+            skipped   = 0,
+            blocked   = situation,
+            notice    = group and group.Notice(),
+        }
+    end
+
     -- No number given: use however long this character usually plays, rather
     -- than a round thirty that was only ever a placeholder.
     local budget = (requested or Session.TypicalSessionMinutes()) * 60
@@ -24210,6 +24793,17 @@ CN:RegisterCommand{
 
         local plan = Session.Plan(minutes)
 
+        if plan.blocked then
+            -- Not "nothing to plan around": there is plenty, and the player
+            -- cannot start any of it from where they are. Saying the first
+            -- when the second is true is how an addon earns a reputation for
+            -- not paying attention.
+            Print(plan.notice or "Not while you are in the middle of that.")
+            Print("|cff999999The plan is waiting; ask again when you are back "
+                .. "in the world.|r")
+            return
+        end
+
         if #plan.stops == 0 then
             Print("Nothing here to plan around.")
             return
@@ -24219,14 +24813,14 @@ CN:RegisterCommand{
             #plan.stops,
             #plan.stops == 1 and "" or "s",
             Session.FormatDuration(plan.seconds),
-            minutes))
+            plan.minutes))
 
         for index, stop in ipairs(plan.stops) do
             Print(string.format("  %d. |cffffff00%s|r |cff999999%s|r",
                 index,
                 tostring(stop.summary or "stop"),
                 stop.confident and Session.FormatDuration(stop.seconds)
-                    or "time unknown"))
+                    or (CN.WithConfidence(nil, CN.confidence.UNKNOWN) .. " time")))
         end
 
         if plan.skipped > 0 then
@@ -25714,6 +26308,7 @@ end
 -- tracked. Costs nothing to reset; costs the player's trust not to.
 local function Blank()
     Navigation.ResetSmoothing()
+    Navigation.ResetDistanceSmoothing()
 
     if not arrow then
         return
@@ -25780,6 +26375,39 @@ function Navigation.Smooth(bearing)
     return smoothed
 end
 
+-- Distance, eased. Snaps on a large jump for the same reason the rotation
+-- does: a teleport, a flight path or a loading screen is a real change and
+-- easing through it would show a number that was never true.
+Navigation.distanceSmoothing = 0.5
+Navigation.distanceSnapYards = 80
+
+local smoothedDistance = nil
+
+function Navigation.ResetDistanceSmoothing()
+    smoothedDistance = nil
+end
+
+function Navigation.SmoothDistance(yards)
+    if not yards then
+        smoothedDistance = nil
+
+        return nil
+    end
+
+    if not smoothedDistance
+        or math.abs(yards - smoothedDistance) >= Navigation.distanceSnapYards then
+
+        smoothedDistance = yards
+
+        return smoothedDistance
+    end
+
+    smoothedDistance = smoothedDistance
+        + ((yards - smoothedDistance) * Navigation.distanceSmoothing)
+
+    return smoothedDistance
+end
+
 local function Refresh()
     if not arrow then
         return
@@ -25823,7 +26451,11 @@ local function Refresh()
 
     arrow.texture:SetVertexColor(Navigation.BearingColor(state.relative))
 
-    local distanceText = Navigation.FormatDistance(state.yards)
+    -- The distance figure jumped the way the rotation used to, because it is
+    -- recomputed from a position the client rounds. Same treatment, and a
+    -- much lower factor: distance should look steady, not sluggish.
+    local distanceText = Navigation.FormatDistance(
+        Navigation.SmoothDistance(state.yards))
 
     -- NO INFORMATION CARRIED BY COLOUR ALONE.
     --
@@ -27535,6 +28167,692 @@ CN:RegisterCommand{
 return Group
 '@
 
+$Embedded['Modules\Inventory.lua'] = @'
+-- Modules/Inventory.lua
+-- Completion Navigator :: what you are already carrying.
+--
+-- WHAT WAS MISSING.
+--
+-- `C_Container` appeared nowhere in this addon. Twenty-nine releases of
+-- answering "what should I do next?" without ever looking in the player's
+-- bags, which is where a surprising amount of the answer already is:
+--
+--   * The item that STARTS a quest, sitting in a bag since a boss dropped it.
+--   * Forty of the fifty things a quest wants, so the answer is "ten more",
+--     not "go and do that quest".
+--   * A recipe you already own and have not learned.
+--   * A mount, a pet or a toy in item form, uncollected and in a bag.
+--
+-- Every one of those is a next action the addon could not see, and three of
+-- them are the cheapest actions available: the walk is zero yards.
+--
+-- WHAT IT DOES NOT DO.
+--
+-- It does not use anything, learn anything, sell anything or move anything. It
+-- reads. The standing rule in this addon is that it prompts and never acts,
+-- and an addon that starts using items out of your bags is an addon that will
+-- eventually use the wrong one.
+
+local ADDON_NAME, CN = ...
+
+local Inventory = CN:RegisterModule("Inventory")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+------------------------------------------------------------
+-- READING THE BAGS
+------------------------------------------------------------
+
+-- Backpack plus four bags, and the reagent bag where the client has one.
+-- Numbers rather than a constant because the constants have been renamed
+-- twice and the numbers have not changed since 2004.
+Inventory.bagIDs = { 0, 1, 2, 3, 4, 5 }
+
+-- Bank containers. Read only while the bank is open -- the client refuses
+-- otherwise, and a cached answer about a bank you are not standing at is a
+-- claim the addon cannot support.
+Inventory.bankIDs = { -1, 6, 7, 8, 9, 10, 11, 12 }
+
+function Inventory.IsAvailable()
+    return C_Container ~= nil
+        and C_Container.GetContainerNumSlots ~= nil
+        and C_Container.GetContainerItemInfo ~= nil
+end
+
+-- Every item in a set of containers, as { itemID, count, link, quality, bag,
+-- slot, questItem, questID, isUsable }.
+function Inventory.Scan(containers)
+    local items = {}
+
+    if not Inventory.IsAvailable() then
+        return items
+    end
+
+    for _, bag in ipairs(containers or Inventory.bagIDs) do
+        local gotSlots, slots = pcall(C_Container.GetContainerNumSlots, bag)
+
+        if gotSlots and type(slots) == "number" and slots > 0 then
+            for slot = 1, slots do
+                local gotInfo, info =
+                    pcall(C_Container.GetContainerItemInfo, bag, slot)
+
+                if gotInfo and type(info) == "table" and info.itemID then
+                    table.insert(items, {
+                        itemID   = info.itemID,
+                        count    = info.stackCount or 1,
+                        link     = info.hyperlink,
+                        quality  = info.quality,
+                        bag      = bag,
+                        slot     = slot,
+                        questItem = info.hasNoValue and true or false,
+                    })
+                end
+            end
+        end
+    end
+
+    return items
+end
+
+-- How many of an item the player is carrying, across every bag.
+function Inventory.Count(itemID)
+    if not itemID then
+        return 0
+    end
+
+    if C_Item and C_Item.GetItemCount then
+        local ok, count = pcall(C_Item.GetItemCount, itemID)
+
+        if ok and count then
+            return count
+        end
+    end
+
+    if GetItemCount then
+        local ok, count = pcall(GetItemCount, itemID)
+
+        if ok and count then
+            return count
+        end
+    end
+
+    return 0
+end
+
+------------------------------------------------------------
+-- WHAT IS ACTIONABLE IN THERE
+------------------------------------------------------------
+
+-- Items that start a quest. The client will say so directly, which makes this
+-- the single most reliable thing in the file -- and the addon has been
+-- ignoring it since the first build.
+function Inventory.QuestStarters()
+    local starters = {}
+
+    if not Inventory.IsAvailable() or not C_Container.GetContainerItemQuestInfo then
+        return starters
+    end
+
+    for _, item in ipairs(Inventory.Scan()) do
+        local ok, info = pcall(C_Container.GetContainerItemQuestInfo,
+            item.bag, item.slot)
+
+        if ok and type(info) == "table" and info.questID and not info.isActive then
+            item.questID = info.questID
+
+            table.insert(starters, item)
+        end
+    end
+
+    return starters
+end
+
+-- Collectible items sitting in a bag: a mount, a pet, a toy or a recipe the
+-- player owns and has not used. Zero yards from where they are standing.
+function Inventory.UncollectedItems()
+    local found = {}
+
+    for _, item in ipairs(Inventory.Scan()) do
+        -- Collection state comes from the journals, which are the authority.
+        -- Asking "is this item a mount" and "do I own that mount" are two
+        -- different questions and only the second one keeps the addon from
+        -- telling somebody to learn what they already have.
+        local mountID = Blizzard.GetMountFromItem(item.itemID)
+
+        local mount = mountID and Blizzard.GetMountByID(mountID)
+
+        if mount and not mount.collected then
+            item.kind = CN.objectiveTypes.MOUNT
+            item.collectibleID = mountID
+
+            table.insert(found, item)
+        else
+            local speciesID = Blizzard.GetPetSpeciesFromItem(item.itemID)
+
+            local pets = CN:GetModule("Pets")
+
+            if speciesID and pets and pets.Store()[speciesID]
+                and not pets.Store()[speciesID].collected then
+
+                item.kind = CN.objectiveTypes.PET
+                item.collectibleID = speciesID
+
+                table.insert(found, item)
+            elseif PlayerHasToy and C_ToyBox and C_ToyBox.GetToyInfo then
+                local isToy = select(2, pcall(C_ToyBox.GetToyInfo, item.itemID))
+
+                local owned = select(2, pcall(PlayerHasToy, item.itemID))
+
+                if isToy and not owned then
+                    item.kind = CN.objectiveTypes.TOY
+                    item.collectibleID = item.itemID
+
+                    table.insert(found, item)
+                end
+            end
+        end
+    end
+
+    return found
+end
+
+function Inventory.Summary()
+    local items = Inventory.Scan()
+
+    return {
+        items    = #items,
+        starters = #Inventory.QuestStarters(),
+        uncollected = #Inventory.UncollectedItems(),
+    }
+end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+-- The cheapest actions the addon can offer: the walk is zero.
+CN.RegisterCandidateProvider("Inventory", function()
+    local candidates = {}
+
+    if not Inventory.IsAvailable() then
+        return candidates
+    end
+
+    for _, item in ipairs(Inventory.QuestStarters()) do
+        if not CN.IsIgnored(CN.objectiveTypes.QUEST, item.questID)
+            and not CN.IsDeferred(CN.objectiveTypes.QUEST, item.questID) then
+
+            table.insert(candidates, CN.NewObjective({
+                id               = item.questID,
+                type             = CN.objectiveTypes.QUEST,
+                name             = "Start: " .. (Blizzard.GetItemName(item.itemID)
+                    or ("item " .. item.itemID)),
+                state            = CN.objectiveStates.AVAILABLE,
+                completionValue  = 3,
+                unlockValue      = 1,
+
+                -- Zero, and it is the honest number: the item is in your bag.
+                travelCost       = 0,
+                reasons          = {
+                    "a quest starter in your bags -- right-click it",
+                },
+            }))
+        end
+    end
+
+    for _, item in ipairs(Inventory.UncollectedItems()) do
+        if not CN.IsIgnored(item.kind, item.collectibleID)
+            and not CN.IsDeferred(item.kind, item.collectibleID) then
+
+            table.insert(candidates, CN.NewObjective({
+                id               = item.collectibleID,
+                type             = item.kind,
+                name             = Blizzard.GetItemName(item.itemID)
+                    or ("item " .. item.itemID),
+                completionValue  = 4,
+                travelCost       = 0,
+                reasons          = {
+                    "already in your bags, uncollected",
+                },
+            }))
+        end
+    end
+
+    return candidates
+end, {
+    events   = { "BAG_UPDATE_DELAYED", "PLAYER_ENTERING_WORLD" },
+    cooldown = 5,
+})
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "bags",
+    aliases = { "inventory" },
+    order   = 28,
+    help    = "What is in your bags that you could act on right now.",
+    handler = function()
+        if not Inventory.IsAvailable() then
+            Print("This client does not expose container contents.")
+            return
+        end
+
+        local summary = Inventory.Summary()
+
+        Print(summary.items .. " items carried.")
+
+        local starters = Inventory.QuestStarters()
+
+        if #starters > 0 then
+            Print(#starters .. " of them start a quest:")
+
+            for _, item in ipairs(starters) do
+                Print("  " .. (Blizzard.GetItemName(item.itemID)
+                    or ("item " .. item.itemID))
+                    .. " |cff999999bag " .. item.bag .. ", slot " .. item.slot .. "|r")
+            end
+        end
+
+        local uncollected = Inventory.UncollectedItems()
+
+        if #uncollected > 0 then
+            Print(#uncollected .. " are collectibles you have not learned:")
+
+            for _, item in ipairs(uncollected) do
+                Print("  " .. (Blizzard.GetItemName(item.itemID)
+                    or ("item " .. item.itemID))
+                    .. " |cff999999" .. tostring(item.kind) .. "|r")
+            end
+        end
+
+        if #starters == 0 and #uncollected == 0 then
+            Print("|cff999999Nothing in there needs doing.|r")
+        end
+
+        Print("|cff999999Nothing is used, learned or moved on your behalf.|r")
+    end,
+}
+
+return Inventory
+'@
+
+$Embedded['Modules\Waiting.lua'] = @'
+-- Modules/Waiting.lua
+-- Completion Navigator :: things with a clock on them that the addon could
+-- not see.
+--
+-- Four systems, one file, because each is thirty lines and none of them
+-- deserves a module. What they share is the only thing that matters to the
+-- ranking: a deadline, and something lost when it passes.
+--
+--   MAIL          -- expires and is destroyed. Thirty days, and the client
+--                    tells you how many are left.
+--   KEYSTONE      -- the one in your bag is gone at the weekly reset.
+--   KNOWLEDGE     -- profession knowledge is weekly, capped, and permanently
+--                    missable: the week you skip does not come back.
+--   HEIRLOOMS     -- no deadline, but a collection with its own journal that
+--                    nothing in this addon had ever read.
+--
+-- ON MAIL, SPECIFICALLY.
+--
+-- This reads the mailbox the client has already told the addon about. It does
+-- not open mail, take attachments, or send anything. An addon that empties
+-- your mailbox unprompted is one bad edge case away from destroying something
+-- irreplaceable, and the standing rule here is that the addon prompts and
+-- never acts.
+
+local ADDON_NAME, CN = ...
+
+local Waiting = CN:RegisterModule("Waiting")
+
+local Print      = CN.Print
+local Blizzard   = CN.Blizzard
+
+------------------------------------------------------------
+-- MAIL
+------------------------------------------------------------
+
+-- Below this, it is worth interrupting whatever the player is doing. Three
+-- days: enough warning to be actionable, short enough that it is not shouting
+-- about mail that arrived this morning.
+Waiting.mailWarningDays = 3
+
+function Waiting.Mail()
+    local items = {}
+
+    if not GetInboxNumItems or not GetInboxHeaderInfo then
+        return items, false
+    end
+
+    local ok, count = pcall(GetInboxNumItems)
+
+    if not ok or not count or count == 0 then
+        return items, true
+    end
+
+    for index = 1, count do
+        local gotInfo, _, _, sender, subject, money, _, daysLeft, itemCount =
+            pcall(GetInboxHeaderInfo, index)
+
+        if gotInfo and daysLeft then
+            table.insert(items, {
+                sender    = sender,
+                subject   = subject,
+                money     = money or 0,
+                items     = itemCount or 0,
+                daysLeft  = daysLeft,
+                expiring  = daysLeft <= Waiting.mailWarningDays,
+            })
+        end
+    end
+
+    table.sort(items, function(a, b)
+        return (a.daysLeft or 0) < (b.daysLeft or 0)
+    end)
+
+    return items, true
+end
+
+function Waiting.ExpiringMail()
+    local expiring = {}
+
+    for _, mail in ipairs((Waiting.Mail())) do
+        if mail.expiring and (mail.items > 0 or mail.money > 0) then
+            table.insert(expiring, mail)
+        end
+    end
+
+    return expiring
+end
+
+------------------------------------------------------------
+-- KEYSTONE
+------------------------------------------------------------
+
+function Waiting.Keystone()
+    if not C_MythicPlus then
+        return nil
+    end
+
+    local level, mapID
+
+    if C_MythicPlus.GetOwnedKeystoneLevel then
+        local ok, owned = pcall(C_MythicPlus.GetOwnedKeystoneLevel)
+
+        if ok then
+            level = owned
+        end
+    end
+
+    if not level or level == 0 then
+        return nil
+    end
+
+    if C_MythicPlus.GetOwnedKeystoneChallengeMapID then
+        local ok, owned = pcall(C_MythicPlus.GetOwnedKeystoneChallengeMapID)
+
+        if ok then
+            mapID = owned
+        end
+    end
+
+    local name
+
+    if mapID and C_ChallengeMode and C_ChallengeMode.GetMapUIInfo then
+        local ok, mapName = pcall(C_ChallengeMode.GetMapUIInfo, mapID)
+
+        if ok then
+            name = mapName
+        end
+    end
+
+    return {
+        level = level,
+        mapID = mapID,
+        name  = name,
+        -- A keystone is replaced at the reset whether or not it is used, so
+        -- the reset IS its expiry.
+        expiresIn = Blizzard.GetSecondsUntilWeeklyReset(),
+    }
+end
+
+------------------------------------------------------------
+-- PROFESSION KNOWLEDGE
+------------------------------------------------------------
+
+-- Weekly knowledge is the most permanently missable thing in modern
+-- professions: the cap resets, and a week not collected is gone. The client
+-- exposes it as a currency, which is why this reads currencies rather than
+-- the profession API -- fewer moving parts, and it works for every expansion
+-- that has used the pattern.
+Waiting.knowledgePattern = "[Kk]nowledge"
+
+function Waiting.Knowledge()
+    local rows = {}
+
+    local currencies = CN:GetModule("Currencies")
+
+    if not currencies or not currencies.Store then
+        return rows
+    end
+
+    for currencyID, record in pairs(currencies.Store()) do
+        if record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0
+            and (record.weeklyRemaining or 0) > 0 then
+
+            local name = Blizzard.GetCurrency(currencyID)
+
+            name = name and name.name
+
+            if name and name:find(Waiting.knowledgePattern) then
+                table.insert(rows, {
+                    currencyID = currencyID,
+                    name       = name,
+                    remaining  = record.weeklyRemaining,
+                    cap        = record.maxWeeklyQuantity,
+                })
+            end
+        end
+    end
+
+    table.sort(rows, function(a, b) return a.currencyID < b.currencyID end)
+
+    return rows
+end
+
+------------------------------------------------------------
+-- HEIRLOOMS
+------------------------------------------------------------
+
+function Waiting.Heirlooms()
+    if not C_Heirloom or not C_Heirloom.GetNumHeirlooms then
+        return nil
+    end
+
+    local ok, total = pcall(C_Heirloom.GetNumHeirlooms)
+
+    if not ok or not total then
+        return nil
+    end
+
+    local collected = 0
+
+    for index = 1, total do
+        local gotID, itemID = pcall(C_Heirloom.GetHeirloomItemIDFromIndex, index)
+
+        if gotID and itemID then
+            local gotOwned, owned = pcall(C_Heirloom.PlayerHasHeirloom, itemID)
+
+            if gotOwned and owned then
+                collected = collected + 1
+            end
+        end
+    end
+
+    return { total = total, collected = collected }
+end
+
+------------------------------------------------------------
+-- CANDIDATES
+------------------------------------------------------------
+
+CN.RegisterCandidateProvider("Waiting", function()
+    local candidates = {}
+
+    -- MAIL. Ranked by what is actually at stake: mail with something in it,
+    -- about to be destroyed.
+    local expiring = Waiting.ExpiringMail()
+
+    if #expiring > 0 then
+        local soonest = expiring[1]
+
+        table.insert(candidates, CN.NewObjective({
+            id               = "mail",
+            type             = CN.objectiveTypes.CURRENCY,
+            name             = #expiring .. " mail expiring",
+            completionValue  = 6,
+            limitedTimeBonus = 3,
+            travelCost       = 3,
+            expiresIn        = math.max(0, (soonest.daysLeft or 0) * 86400),
+            reasons          = {
+                string.format("%d message(s) with attachments, the first in "
+                    .. "%.1f days", #expiring, soonest.daysLeft or 0),
+                "expired mail is destroyed, not returned",
+            },
+        }))
+    end
+
+    -- KEYSTONE. Not gearing: a thing in your bag that is replaced on Tuesday
+    -- whether you use it or not.
+    local keystone = Waiting.Keystone()
+
+    if keystone and not CN.IsIgnored(CN.objectiveTypes.INSTANCE, "keystone")
+        and not CN.IsDeferred(CN.objectiveTypes.INSTANCE, "keystone") then
+
+        table.insert(candidates, CN.NewObjective({
+            id               = "keystone",
+            type             = CN.objectiveTypes.INSTANCE,
+            name             = "Keystone: " .. (keystone.name or "unknown")
+                .. " +" .. keystone.level,
+            completionValue  = 4,
+            limitedTimeBonus = 2,
+            travelCost       = 3,
+            expiresIn        = keystone.expiresIn,
+            reasons          = {
+                "your keystone is replaced at the weekly reset whether you "
+                    .. "use it or not",
+            },
+        }))
+    end
+
+    -- KNOWLEDGE. The most permanently missable thing in the game that the
+    -- addon can see.
+    for _, row in ipairs(Waiting.Knowledge()) do
+        if not CN.IsIgnored(CN.objectiveTypes.PROFESSION, row.currencyID)
+            and not CN.IsDeferred(CN.objectiveTypes.PROFESSION, row.currencyID) then
+
+            table.insert(candidates, CN.NewObjective({
+                id               = row.currencyID,
+                type             = CN.objectiveTypes.PROFESSION,
+                name             = row.name .. ": " .. row.remaining .. " left this week",
+                completionValue  = 5,
+                limitedTimeBonus = 2,
+                travelCost       = CN.unknownLocationCost,
+                expiresIn        = Blizzard.GetSecondsUntilWeeklyReset(),
+                reasons          = {
+                    row.remaining .. " of " .. row.cap .. " still collectable this week",
+                    "a week not collected does not come back",
+                },
+            }))
+        end
+    end
+
+    return candidates
+end, {
+    events   = { "MAIL_INBOX_UPDATE", "BAG_UPDATE_DELAYED", "CURRENCY_DISPLAY_UPDATE" },
+    volatile = true,
+    cooldown = 30,
+})
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "clock",
+    aliases = { "expiring" },
+    order   = 29,
+    help    = "Everything with a deadline that is not a quest.",
+    handler = function()
+        local said = false
+
+        local mail, readable = Waiting.Mail()
+
+        if not readable then
+            Print("|cff999999Mail cannot be read in this client.|r")
+        elseif #mail == 0 then
+            Print("|cff999999No mail, or the mailbox has not been opened this "
+                .. "session -- the client only hands the addon the inbox once "
+                .. "you have looked at it.|r")
+        else
+            Print(#mail .. " message(s) in your mailbox:")
+
+            for index, entry in ipairs(mail) do
+                if index > 5 then
+                    Print("  |cff999999... and " .. (#mail - 5) .. " more|r")
+                    break
+                end
+
+                local colour = entry.expiring and "|cfff56b61" or "|cff999999"
+
+                Print(string.format("  %s%.1f days|r %s |cff999999from %s|r",
+                    colour, entry.daysLeft or 0,
+                    tostring(entry.subject or "(no subject)"),
+                    tostring(entry.sender or "?")))
+            end
+
+            said = true
+        end
+
+        local keystone = Waiting.Keystone()
+
+        if keystone then
+            Print("Keystone: " .. (keystone.name or "unknown")
+                .. " |cffffff00+" .. keystone.level .. "|r")
+
+            said = true
+        end
+
+        local knowledge = Waiting.Knowledge()
+
+        for _, row in ipairs(knowledge) do
+            Print(row.name .. ": |cffffff00" .. row.remaining
+                .. "|r of " .. row.cap .. " still collectable this week")
+
+            said = true
+        end
+
+        local heirlooms = Waiting.Heirlooms()
+
+        if heirlooms then
+            Print("Heirlooms: " .. heirlooms.collected .. " of " .. heirlooms.total)
+
+            said = true
+        end
+
+        if not said then
+            Print("Nothing is on a clock right now.")
+        end
+    end,
+}
+
+return Waiting
+'@
+
 $Embedded['Modules\Travel.lua'] = @'
 -- Modules/Travel.lua
 -- Completion Navigator :: how long it actually takes to get there.
@@ -27841,6 +29159,11 @@ Travel.seededFlightSpeed = 25
 -- gossip window -- would be measuring the player's reading speed.
 Travel.flightOverheadSeconds = 20
 
+-- Casting a teleport and loading the destination. A constant for the same
+-- reason as the others: it is an animation and a loading screen, not
+-- something worth instrumenting.
+Travel.castSeconds = 15
+
 Travel.speedSampleCap = 20
 
 local function Samples()
@@ -27972,12 +29295,52 @@ Travel.takeoffSeconds = 6
 -- available -- the client will not answer for a zone the player is not in, so
 -- a cross-zone claim is checked at the near end and re-checked when they get
 -- there.
+-- Which zones the player has actually been able to fly in.
+--
+-- `IsFlyableArea` answers for where the player IS STANDING, and there is no
+-- API that answers for anywhere else -- so a cross-zone claim was being made
+-- from the near end and could be wrong at the far end. Remembering the answer
+-- per zone, as it is observed, turns that guess into evidence: a zone the
+-- player has flown in is flyable, and one they have been in and could not fly
+-- in is not.
+local function FlightMemory()
+    return CN.Account("flyableZones")
+end
+
+Travel.FlightMemory = FlightMemory
+
+function Travel.NoteFlyable(mapID)
+    if not mapID or not IsFlyableArea then
+        return nil
+    end
+
+    local ok, flyable = pcall(IsFlyableArea)
+
+    if not ok then
+        return nil
+    end
+
+    FlightMemory()[mapID] = flyable and true or false
+
+    return flyable
+end
+
 function Travel.CanFly(mapID)
     if not Travel.HasFlying() then
         return false
     end
 
-    if IsFlyableArea and not IsFlyableArea() then
+    -- What is REMEMBERED about the destination beats what is true where the
+    -- player happens to be standing.
+    local remembered = mapID and FlightMemory()[mapID]
+
+    if remembered == false then
+        return false
+    end
+
+    if remembered ~= true and IsFlyableArea and not IsFlyableArea() then
+        -- Nothing remembered, and flight is disabled here. The conservative
+        -- answer is the one the player can definitely follow.
         return false
     end
 
@@ -28028,18 +29391,28 @@ end
 -- bound in map terms -- `GetBindLocation` returns a name, and names do not
 -- convert to map ids -- so no duration is claimed and none is folded into any
 -- score. Naming the option is useful; costing it would be fiction.
+-- WHERE A TELEPORT ACTUALLY GOES.
+--
+-- The client will not convert a hearthstone's bind location into a map, and
+-- it will not tell you where a mage portal leads either. Both are knowable
+-- facts about the game rather than about the player, so they are curated
+-- here -- which is the same argument that put quest locations in Data.
+--
+-- `mapID` is the ZONE the teleport lands in. Where it is nil, the option is
+-- still listed and simply cannot be costed; naming a shortcut you have is
+-- useful even when the addon cannot price it.
 Travel.teleports = {
     { kind = "item",  id = 6948,   label = "Hearthstone" },
     { kind = "item",  id = 110560, label = "Garrison Hearthstone" },
     { kind = "item",  id = 140192, label = "Dalaran Hearthstone" },
     { kind = "item",  id = 141605, label = "Flight Master's Whistle" },
     { kind = "spell", id = 556,    label = "Astral Recall" },
-    { kind = "spell", id = 3565,   label = "Teleport: Darnassus" },
-    { kind = "spell", id = 3562,   label = "Teleport: Ironforge" },
-    { kind = "spell", id = 3561,   label = "Teleport: Stormwind" },
-    { kind = "spell", id = 3567,   label = "Teleport: Orgrimmar" },
-    { kind = "spell", id = 3563,   label = "Teleport: Undercity" },
-    { kind = "spell", id = 3566,   label = "Teleport: Thunder Bluff" },
+    { kind = "spell", id = 3565,   label = "Teleport: Darnassus",     mapID = 89 },
+    { kind = "spell", id = 3562,   label = "Teleport: Ironforge",     mapID = 87 },
+    { kind = "spell", id = 3561,   label = "Teleport: Stormwind",     mapID = 84 },
+    { kind = "spell", id = 3567,   label = "Teleport: Orgrimmar",     mapID = 85 },
+    { kind = "spell", id = 3563,   label = "Teleport: Undercity",     mapID = 90 },
+    { kind = "spell", id = 3566,   label = "Teleport: Thunder Bluff", mapID = 88 },
     { kind = "spell", id = 18960,  label = "Teleport: Moonglade" },
     { kind = "spell", id = 50977,  label = "Death Gate" },
     { kind = "spell", id = 126892, label = "Zen Pilgrimage" },
@@ -28134,6 +29507,7 @@ function Travel.ReadyTeleports()
                 label     = entry.label,
                 kind      = entry.kind,
                 id        = entry.id,
+                mapID     = entry.mapID,
                 remaining = remaining,
                 ready     = remaining <= 0,
                 -- Where a hearthstone actually goes. A name, because that is
@@ -28179,9 +29553,58 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         -- But "I cannot cost this" and "there is no way to do it" are
         -- different statements, and until 0.43.0 the addon made the first and
         -- the player heard the second. So: say what is actually available.
+        local teleports = Travel.ReadyTeleports()
+
+        -- COSTED THROUGH A TELEPORT, WHERE ONE LANDS SOMEWHERE USEFUL.
+        --
+        -- Until 0.44.0 a cross-continent journey returned nothing at all,
+        -- which is honest and unhelpful: the real answer is usually "hearth,
+        -- then fly for ten seconds". Where a teleport has a known destination
+        -- ON THE TARGET'S CONTINENT, the journey becomes castable: the
+        -- teleport, plus the ordinary journey from where it drops you.
+        --
+        -- A teleport on cooldown is still offered, with the wait added --
+        -- because "twenty minutes, then four" is a real answer and often the
+        -- right one.
+        local best
+
+        for _, teleport in ipairs(teleports) do
+            local landing = teleport.mapID and Travel.WorldPoint(teleport.mapID, 0.5, 0.5)
+
+            if landing and landing.continent == to.continent then
+                local onward, _, onwardDetail = Travel.EstimateSeconds(
+                    teleport.mapID, 0.5, 0.5, toMapID, toX, toY)
+
+                if onward then
+                    local seconds = onward + Travel.castSeconds
+                        + (teleport.ready and 0 or teleport.remaining)
+
+                    if not best or seconds < best.seconds then
+                        best = {
+                            seconds   = seconds,
+                            mode      = "teleport",
+                            via       = teleport.label,
+                            waited    = teleport.ready and 0 or teleport.remaining,
+                            onward    = onward,
+                            onwardMode = onwardDetail and onwardDetail.mode,
+                        }
+                    end
+                end
+            end
+        end
+
+        if best then
+            -- Never confident: the onward leg is measured from the middle of
+            -- the landing zone, because the addon does not know precisely
+            -- where a teleport puts you down.
+            best.teleports = teleports
+
+            return best.seconds, false, best
+        end
+
         return nil, false, {
             mode      = "elsewhere",
-            teleports = Travel.ReadyTeleports(),
+            teleports = teleports,
         }
     end
 
@@ -28363,7 +29786,7 @@ end
 
 function Travel.Describe(detail, seconds, confident)
     if not seconds then
-        return "travel time unknown"
+        return CN.WithConfidence(nil, CN.confidence.UNKNOWN) .. " travel time"
     end
 
     local session = CN:GetModule("Session")
@@ -28374,6 +29797,17 @@ function Travel.Describe(detail, seconds, confident)
 
     if detail and detail.mode == "self" then
         text = text .. " |cff999999flying yourself|r"
+    end
+
+    if detail and detail.mode == "teleport" then
+        text = text .. " |cff999999via " .. tostring(detail.via)
+
+        if (detail.waited or 0) > 0 then
+            text = text .. ", after a " .. Travel.FormatReset(detail.waited)
+                .. " cooldown"
+        end
+
+        text = text .. "|r"
     end
 
     if detail and detail.mode == "fly" and detail.node then
@@ -28486,7 +29920,7 @@ CN:RegisterCommand{
             Print(string.format(
                 "  |cff999999%.0f yd direct at %.0f yd/s%s|r",
                 detail.yards, flySpeed,
-                flyMeasured and "" or " (estimated)"))
+                flyMeasured and "" or " |cff999999(estimated)|r"))
         elseif detail and detail.mode == "elsewhere" then
             Print("|cff999999That is on another continent. Portals and boats "
                 .. "are not modelled, so no time is claimed -- but here is "
@@ -31375,6 +32809,19 @@ function Welcome.Build()
             Print("Ask it anything with |cffffff00/cn|r, or open the window "
                 .. "with |cffffff00/cn ui|r.")
 
+            -- OFFER THE SCAN HERE, where the player is already answering
+            -- questions -- rather than leaving it to a reminder that arrives
+            -- later, out of context, and reads like nagging. Offered, not
+            -- run: a first-run screen that starts work uninvited is the
+            -- opposite of what this addon does everywhere else.
+            local setup = CN:GetModule("Setup")
+
+            if setup and setup.HasRun and not setup.HasRun() then
+                Print("It has not looked at your collections yet. "
+                    .. "|cffffff00/cn setup|r does that once, and takes a "
+                    .. "few seconds.")
+            end
+
             frame:Hide()
         end)
 
@@ -31588,9 +33035,23 @@ function Hud.Refresh()
 
     frame.label:SetText(tostring(objective.name or objective.id))
 
-    local reason = objective.reasons and objective.reasons[1]
+    local detail = objective.reasons and objective.reasons[1]
 
-    frame.detail:SetText(reason and ("|cff999999" .. reason .. "|r") or "")
+    -- WHILE A ROUTE IS BEING WALKED, SAY HOW FAR THROUGH IT YOU ARE.
+    --
+    -- The reason line is the right thing to show when nothing else is
+    -- happening. It is the wrong thing when the player is nine stops into a
+    -- twelve-stop route, which is exactly when a glanceable frame earns its
+    -- place on the screen.
+    local follow = CN:GetModule("Follow")
+
+    if follow and follow.active and (follow.startedWith or 0) > 0 then
+        detail = string.format("stop %d of %d",
+            math.min((follow.completed or 0) + 1, follow.startedWith),
+            follow.startedWith)
+    end
+
+    frame.detail:SetText(detail and ("|cff999999" .. detail .. "|r") or "")
 
     return true
 end
@@ -31989,6 +33450,68 @@ end
 
 CN.Guard = Errors.Guard
 
+------------------------------------------------------------
+-- THE PREVIOUS SESSION
+------------------------------------------------------------
+
+-- ONE SUMMARY LINE PER ERROR, KEPT ACROSS A LOGOUT.
+--
+-- The ring buffer is in memory, deliberately: a growing error log is a leak,
+-- and an error from three weeks ago is noise. But the case that matters most
+-- -- something went wrong, and the player relogged before thinking to look --
+-- was exactly the case where the evidence was gone.
+--
+-- So the counts survive, and nothing else: context, message, and how many
+-- times. Cleared whenever the player reads them, and capped at the same size
+-- as the live ring.
+local function Stored()
+    return CN.Account("lastErrors")
+end
+
+function Errors.Persist()
+    local stored = Stored()
+
+    for key in pairs(stored) do
+        stored[key] = nil
+    end
+
+    for index, entry in ipairs(ring) do
+        stored[index] = {
+            context = entry.context,
+            message = entry.message,
+            count   = entry.count,
+        }
+    end
+
+    return #ring
+end
+
+function Errors.Previous()
+    local rows = {}
+
+    for _, entry in ipairs(Stored()) do
+        table.insert(rows, entry)
+    end
+
+    return rows
+end
+
+function Errors.ForgetPrevious()
+    local stored = Stored()
+
+    local count = #stored
+
+    for key in pairs(stored) do
+        stored[key] = nil
+    end
+
+    return count
+end
+
+CN:RegisterEvent("PLAYER_LOGOUT", function()
+    Errors.Persist()
+end)
+
 CN:RegisterCommand{
     name    = "errors",
     aliases = { "log" },
@@ -32002,6 +33525,24 @@ CN:RegisterCommand{
         end
 
         if #ring == 0 then
+            local previous = Errors.Previous()
+
+            if #previous > 0 then
+                Print("Nothing this session. From the previous one:")
+
+                for _, entry in ipairs(previous) do
+                    Print("  |cfff56b61" .. tostring(entry.context) .. "|r"
+                        .. ((entry.count or 1) > 1
+                            and (" |cffffff00x" .. entry.count .. "|r") or ""))
+                    Print("    |cff999999" .. tostring(entry.message) .. "|r")
+                end
+
+                Errors.ForgetPrevious()
+
+                Print("|cff999999Shown once, then forgotten.|r")
+                return
+            end
+
             Print("Nothing has gone wrong this session.")
             Print("|cff999999Errors inside the addon are caught so they "
                 .. "cannot break your session -- which is also why they would "
@@ -32053,7 +33594,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.43.1
+## Version: 0.44.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -32106,6 +33647,8 @@ Modules\Appearances.lua
 Modules\Breakdown.lua
 Modules\Broker.lua
 Modules\Group.lua
+Modules\Inventory.lua
+Modules\Waiting.lua
 Modules\Travel.lua
 Modules\Instances.lua
 Modules\Preference.lua
@@ -32301,6 +33844,95 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.44.0]
+
+The addon can see your bags, your mailbox and your keystone; it can cost a
+journey to another continent; and it can tell you why the list is in the order
+it is in. Two more defects found by the tooling built in 0.43.1.
+
+### Fixed
+
+- **Every flying speed sample was being thrown away.** 0.43.0 added a third
+  speed bucket for flying yourself and left the sanity band alone -- a single
+  range written when both buckets were ground travel, rejecting anything above
+  60 yards per second. That is *below* the speed you actually fly at, so every
+  genuine sample was discarded as implausible, the bucket never filled, and
+  the flying estimate would have stayed seeded forever while appearing to
+  work. The band is per bucket now. Found by a test that assumed a realistic
+  flying speed.
+- **Quest starters you had already used were recommended again.** The client
+  flags an item as starting a quest whether or not you have accepted it.
+- **The session planner laid out routes you could not start** -- the ranking
+  knew you were dead or in a dungeon since 0.43.0 and the planner did not.
+
+### Added
+
+- **It looks in your bags.** `C_Container` appeared nowhere in this addon for
+  twenty-nine releases, and a surprising amount of "what should I do next?"
+  is already in there: the item that starts a quest, sitting since a boss
+  dropped it, and mounts, pets and toys you own and have not learned. They
+  cost **zero** travel, which is the honest number. `/cn bags`.
+- **Things with a clock on them** -- `/cn clock`. Mail about to expire *with
+  something attached* (expired mail is destroyed, not returned), the keystone
+  that is replaced at the reset whether you use it or not, weekly profession
+  knowledge that does not come back, and heirlooms.
+- **Another continent is now costable.** Where a teleport you know lands on
+  the right continent, the journey is priced: the teleport, the cooldown you
+  would wait through, and the ordinary journey from where it drops you.
+  Destinations are curated, because the client will not convert a bind
+  location into a map.
+- **`/cn nearby`** -- what is worth doing outside this zone, ordered by how
+  long it takes to get there rather than how far away it is. The router has
+  been zone-scoped since it was written; the distance function stopped being
+  zone-scoped in 0.42.0 and nobody told the router.
+- **`/cn order`** -- why the list is in this order. Every term in the score for
+  the top few, biggest first, summing to the number shown. `/cn why` explains
+  one objective; this explains the ranking.
+- **Flying is remembered per zone.** `IsFlyableArea` answers for where you are
+  standing and nothing answers for where you are going, so the addon records
+  what it observes and trusts that over the near end.
+- **`/cn help` is no longer 120 lines.** A dozen essentials by default,
+  `/cn help all` grouped by what you are trying to do, and `/cn help <word>`
+  searches names and descriptions.
+- **The chase estimate walks its legs nearest-first** rather than in whatever
+  order the steps happened to be listed.
+- **The arrow's distance figure is eased**, like its rotation, and snaps on a
+  real jump.
+- **Errors survive a logout.** One summary line each, shown once and then
+  forgotten -- because the case that mattered was somebody relogging before
+  they thought to look.
+
+### Tooling
+
+- **A rule against constructs that mean two different things.** Seven of them,
+  checked across every shipped file: two-argument `math.atan`, `table.unpack`,
+  `math.fmod`, `goto`, `math.type`, `math.tointeger`, integer division. Each
+  names what breaks and what to use instead. This is the generalisation of
+  the 0.43.1 defect.
+- **`CN.Mod` and `CN.Unpack`** join `CN.Atan2`: if a construct means two
+  things, the addon uses neither directly.
+- **An end-to-end session test** -- login, ask, explain, route, plan, follow,
+  log out -- asserting that nothing throws in the order a player actually does
+  things. Every part was tested; the sequence was not.
+- **Eighteen mutations, up from ten.** The eight new ones found six holes in
+  the suite on the day they were written; all six now have assertions. One of
+  the eight was itself wrong -- `%` in Lua is already floored, so mutating to
+  it changed nothing -- and was replaced with `math.fmod`, which is the real
+  hazard.
+- **Two more performance budgets**, and a zero measurement is now a FAILURE
+  rather than a pass: "UI refresh: 0.000 ms" meant the function had returned
+  immediately without running, which is a budget guarding nothing.
+- **`bench.lua --history`** appends every measurement to a TSV. Budgets catch
+  a cliff; they do not catch a slope, and the cold rebuild has crept from
+  3.9ms to 6.2ms across eight releases without ever failing a gate.
+- **Database version 7**, which enforces the remembered-quest-pin ceiling on
+  read rather than trusting that it was never exceeded.
+
+### Notes
+
+- Nothing in this release uses, learns, moves, sends or opens anything. It
+  reads your bags and your mailbox and tells you what is in them.
 
 ## [0.43.1]
 
@@ -34728,7 +36360,7 @@ ignore:
 '@
 
 $Embedded['_curseforge\SUMMARY.txt'] = @'
-Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, costs the journey the way you would really make it (run, fly or flight path), batches nearby work into stops, and shows what stands between you and it.
+Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, including what is already in your bags, costs the journey the way you would really make it, and shows its working when you ask why.
 '@
 
 $Embedded['_curseforge\DESCRIPTION.md'] = @'
@@ -34873,6 +36505,10 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **Flight points** | The ones you have discovered, so a journey is costed the way you would actually make it |
 | **Your own speed** | Running, riding and flying, measured separately from your own play |
 | **Crafting orders** | The ones you placed, and anything finished and waiting |
+| **Your bags** | Quest starters and uncollected mounts, pets and toys you are already carrying |
+| **Your mailbox** | What is expiring, and whether anything is attached to it |
+| **Keystones** | The one you hold, and that it is replaced at the reset |
+| **Profession knowledge** | Weekly, capped, and gone if the week passes |
 | **World events** | Timewalking and holidays, weighted by when they end |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
 
@@ -34893,6 +36529,7 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | **Follows** | Hands-free: the current stop on screen, advancing as you clear it |
 | **Learns** | Quest prerequisites inferred from your own play, never guessed from a single sighting |
 | **Adapts** | Which kinds of objective you actually go and do, within clamped limits, and it says so on the line |
+| **Shows its working** | `/cn order` breaks the ranking into the terms that produced it |
 
 ## Dungeons and raids
 
@@ -34919,6 +36556,42 @@ Reading the game's Adventure Guide changes what it is displaying, so the addon w
 The addon notices which kinds of objective you go and do, and leans that way. The guardrails matter more than the learning: nothing moves until a type has been shown 25 times, the adjustment is clamped so a type you skip gets quieter but never silent, and every adjusted line **says on the line** that it was adjusted. The counters decay, so it tracks how you play now rather than how you played in June. A focus you set with `/cn mode` always beats a habit it inferred.
 
 `/cn learned reset` forgets it. `/cn learned off` switches it off. Hiding a type outright is still `/cn show`.
+
+## It looks in your bags
+
+```
+/cn bags
+```
+
+A surprising amount of *what should I do next* is already in there: the item that starts a quest, sitting since a boss dropped it, and mounts, pets and toys you own and have not learned. Those cost **zero** travel, because they are in your bag — which makes them the cheapest thing the addon can ever recommend.
+
+Nothing is used, learned, moved or sold on your behalf. It reads.
+
+## Things with a clock on them
+
+```
+/cn clock
+```
+
+Mail about to expire **with something attached** — expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Weekly profession knowledge, which is the most permanently missable thing in the game. Heirlooms.
+
+## Where to go when this zone is done
+
+```
+/cn nearby
+```
+
+What is worth doing outside this zone, ordered by **how long it takes to get there** rather than how far away it is — a flight point changes that answer, and a mountain range changes it the other way.
+
+Another continent is costable now too, where a teleport you know lands on the right side of it: the addon prices the teleport, the cooldown you would wait through, and the ordinary journey from where it drops you.
+
+## Why is it in this order?
+
+```
+/cn order
+```
+
+Every term in the score for the top few, biggest first, adding up to the number shown. `/cn why` explains one objective; this explains the ranking — including why the thing you expected to see at the top is not.
 
 ## It knows what you are in the middle of
 
@@ -35010,6 +36683,10 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn hud` | A small always-on line showing the next thing |
 | `/cn errors` | Anything that went wrong inside the addon this session |
 | `/cn contribute` | Share the quest chains your play has taught it |
+| `/cn bags` | What is in your bags that you could act on now |
+| `/cn clock` | Everything with a deadline that is not a quest |
+| `/cn nearby` | What is worth doing outside this zone, and how far away it is |
+| `/cn order` | Why the list is in the order it is in |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |
@@ -35090,7 +36767,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.43.1
+0.44.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -35623,6 +37300,54 @@ mutate "Core.lua" \
     "    if false then" \
     "estimated numbers are printed as though measured"
 
+mutate "Modules/Inventory.lua" \
+    "        if ok and type(info) == \"table\" and info.questID and not info.isActive then" \
+    "        if ok and type(info) == \"table\" and info.questID then" \
+    "quest starters already accepted are offered again"
+
+mutate "Modules/Waiting.lua" \
+    "        if mail.expiring and (mail.items > 0 or mail.money > 0) then" \
+    "        if mail.expiring then" \
+    "empty expiring mail is treated as something to save"
+
+mutate "Modules/Travel.lua" \
+    "    if remembered == false then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "flying is offered in a zone known not to allow it"
+
+# NOT `value % divisor`: Lua's own operator is already floored, so that
+# mutation is behaviourally identical and survived for the honest reason that
+# it was not a defect. math.fmod truncates toward zero, which is the actual
+# hazard this helper exists to avoid.
+mutate "Core.lua" \
+    "    return value - (math.floor(value / divisor) * divisor)" \
+    "    return math.fmod(value, divisor)" \
+    "modulo truncates toward zero instead of flooring"
+
+mutate "Scoring.lua" \
+    "        if math.abs(term.value) > 0.001 then" \
+    "        if true then" \
+    "the ranking explanation lists terms worth nothing"
+
+mutate "Modules/Group.lua" \
+    "        return score * Group.instancedPenalty" \
+    "        return score" \
+    "outside work is not ranked down inside an instance"
+
+mutate "Modules/Session.lua" \
+    "    if situation == \"dead\" or situation == \"instanced\" then" \
+    "    if false then" \
+    "the planner lays out a route you cannot start"
+
+mutate "Modules/Errors.lua" \
+    "    while #ring > Errors.capacity do" \
+    "    while false do" \
+    "the error ring grows without bound"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 
@@ -35709,6 +37434,12 @@ read_globals = {
     "UnitIsDeadOrGhost", "UnitIsGhost", "GetNumGroupMembers",
     "IsInRaid", "IsInInstance", "IsFlying", "IsFlyableArea",
     "C_CraftingOrders", "C_DelvesUI", "C_Bank", "C_Spell",
+
+    -- Bags, mail, keystones, heirlooms and challenge modes: five systems the
+    -- addon began reading in 0.44.0.
+    "C_Container", "GetInboxNumItems", "GetInboxHeaderInfo",
+    "C_MythicPlus", "C_ChallengeMode", "C_Heirloom",
+    "C_ToyBox", "PlayerHasToy",
     "IsSpellKnown", "IsPlayerSpell", "GetSpellCooldown", "GetItemCooldown",
     "GetItemCount", "GetBindLocation", "EJ_GetDifficulty", "GetDifficultyInfo",
     "SettingsPanel", "InterfaceOptions_AddCategory", "BackdropTemplateMixin",
@@ -36193,6 +37924,74 @@ C_TaxiMap = {
 -- Both change what a sensible next action is, and neither was modelled until
 -- 0.43.0 -- so the stub did not model them either, which is exactly how a
 -- whole class of behaviour stays invisible to a test suite.
+-- BAGS, MAIL AND A KEYSTONE.
+--
+-- All three are systems the addon could not see before 0.44.0, so the stub
+-- could not either -- which is how an entire class of behaviour stays
+-- invisible to a suite that otherwise looks thorough.
+CN_TEST_BAGS = {
+    [0] = {
+        { itemID = 60001, stackCount = 1, quest = { questID = 44001, isActive = false } },
+        { itemID = 60002, stackCount = 20 },
+        -- Already accepted: the client still flags it, and offering it again
+        -- would send the player to right-click something they have used.
+        { itemID = 60003, stackCount = 1, quest = { questID = 44002, isActive = true } },
+    },
+}
+
+C_Container = {
+    GetContainerNumSlots = function(bag)
+        local slots = CN_TEST_BAGS[bag]
+
+        return slots and #slots or 0
+    end,
+
+    GetContainerItemInfo = function(bag, slot)
+        local item = CN_TEST_BAGS[bag] and CN_TEST_BAGS[bag][slot]
+
+        if not item then
+            return nil
+        end
+
+        return {
+            itemID     = item.itemID,
+            stackCount = item.stackCount,
+            hyperlink  = "|cffffffff|Hitem:" .. item.itemID .. "|h[Item]|h|r",
+            quality    = 1,
+        }
+    end,
+
+    GetContainerItemQuestInfo = function(bag, slot)
+        local item = CN_TEST_BAGS[bag] and CN_TEST_BAGS[bag][slot]
+
+        return item and item.quest or {}
+    end,
+}
+
+CN_TEST_MAIL = {
+    { sender = "Auction House", subject = "Sold", money = 100, items = 0, daysLeft = 1.5 },
+    { sender = "A Friend",      subject = "Here", money = 0,   items = 2, daysLeft = 2.0 },
+    { sender = "Nobody",        subject = "Old",  money = 0,   items = 0, daysLeft = 0.5 },
+    { sender = "A Friend",      subject = "Later", money = 0,  items = 1, daysLeft = 25 },
+}
+
+function GetInboxNumItems()
+    return #CN_TEST_MAIL
+end
+
+function GetInboxHeaderInfo(index)
+    local mail = CN_TEST_MAIL[index]
+
+    if not mail then
+        return nil
+    end
+
+    -- packageIcon, stationeryIcon, sender, subject, money, CODAmount,
+    -- daysLeft, itemCount
+    return nil, nil, mail.sender, mail.subject, mail.money, 0,
+        mail.daysLeft, mail.items
+end
+
 CN_TEST_DEAD       = false
 CN_TEST_GHOST      = false
 CN_TEST_GROUP_SIZE = 1
@@ -38103,7 +39902,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 18, "every candidate provider must register, got "
+assert(firstState.providers == 20, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -39176,13 +40975,18 @@ assert(goalObjective.isGoal, "a goal candidate must be flagged as one")
 --
 -- What must hold is that the goal is near the top, and first once nothing
 -- is expiring.
-local ranked = CN.Recommend(5)
+-- Deep enough that adding another deadline provider cannot push the goal off
+-- the end of the list and fail this for a reason unrelated to goals. That has
+-- now happened twice.
+local ranked = CN.Recommend(12)
 
 print("  ranked with vault present:")
 
 for index, objective in ipairs(ranked) do
-    print("    " .. index .. ". " .. tostring(objective.name)
-        .. " (" .. string.format("%.1f", objective.priorityWeight or 0) .. ")")
+    if index <= 6 then
+        print("    " .. index .. ". " .. tostring(objective.name)
+            .. " (" .. string.format("%.1f", objective.priorityWeight or 0) .. ")")
+    end
 end
 
 local goalRank
@@ -39222,9 +41026,15 @@ local opportunityProvider = CN.candidateProviders["Opportunities"]
 -- emit weekly ones. World quests expire too, and from 0.43.0 the urgency
 -- curve has a second, week-long ramp, so a world quest six hours out is no
 -- longer worth exactly zero. "Nothing expiring" has to mean nothing.
+-- Every provider that emits a deadline. The list grows with each release --
+-- Vault, then Instances, then Opportunities, now Waiting -- which is itself
+-- the argument for asserting the PROPERTY above rather than a fixed rank.
+local waitingProvider = CN.candidateProviders["Waiting"]
+
 CN.candidateProviders["Vault"]         = nil
 CN.candidateProviders["Instances"]     = nil
 CN.candidateProviders["Opportunities"] = nil
+CN.candidateProviders["Waiting"]       = nil
 CN.InvalidateCandidates()
 
 local top = CN.Recommend(1)[1]
@@ -39238,6 +41048,7 @@ assert(top.type == "TITLE" and top.id == 2,
 CN.candidateProviders["Vault"]         = vaultProvider
 CN.candidateProviders["Instances"]     = instanceProvider
 CN.candidateProviders["Opportunities"] = opportunityProvider
+CN.candidateProviders["Waiting"]       = waitingProvider
 CN.InvalidateCandidates()
 
 -- Removing it must put things back.
@@ -43334,6 +45145,8 @@ print("\nEvery command runs without throwing:")
         "colourblind", "colourblind off", "cues", "cues off",
         "errors", "errors clear", "learned", "locale", "locale missing",
         "instances", "drops", "drops Nothing At All",
+        "bags", "clock", "nearby", "order", "order 2", "situation",
+        "help", "help all", "help lockout", "help nothingmatchesthis",
         "selftest", "capture", "capture clear", "dbsize", "welcome",
     }
 
@@ -43355,6 +45168,27 @@ print("\nEvery command runs without throwing:")
         #failures .. " command(s) threw against a bare client")
 
     print("  " .. #commands .. " command invocations, none of them threw")
+
+    -- AND THE COMMANDS THAT READ NEW SYSTEMS MUST SURVIVE THOSE SYSTEMS
+    -- BEING ABSENT. A client without a mailbox, without containers, without
+    -- a keystone: every one of those is an ordinary state, not an error.
+    local savedContainer = C_Container
+    local savedInbox     = GetInboxNumItems
+
+    C_Container      = nil
+    GetInboxNumItems = nil
+
+    for _, command in ipairs({ "bags", "clock", "travel", "nearby" }) do
+        local ok, err = pcall(CN.HandleSlashCommand, command)
+
+        assert(ok, command .. " threw when the client offered nothing: "
+            .. tostring(err))
+    end
+
+    C_Container      = savedContainer
+    GetInboxNumItems = savedInbox
+
+    print("  and four of them survive a client that answers nothing")
 
     -- And the scale command must not have left a silly value behind: "scale
     -- 99" was in that list deliberately.
@@ -43485,6 +45319,448 @@ print("\nThe language the game actually runs:")
     print("  and no shipped file uses the two-argument form")
 end)()
 
+
+print("\nConstructs that mean two different things:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE RULE, NOT THE INSTANCE.
+    --
+    -- 0.43.1 fixed two-argument math.atan, which is silently wrong in the
+    -- game's Lua. The fix was one function. What stops the next one is a rule
+    -- that reads every shipped file and refuses anything whose meaning
+    -- depends on which interpreter is running.
+    --
+    -- Each entry names WHAT breaks and WHERE the addon runs, because a lint
+    -- that says "forbidden" and not "why" gets worked around.
+    ------------------------------------------------------------
+    local hazards = {
+        {
+            pattern = "math%.atan%s*%([^)]-,",
+            what    = "two-argument math.atan",
+            why     = "5.1 discards the second argument silently; use CN.Atan2",
+        },
+        {
+            pattern = "table%.unpack",
+            what    = "table.unpack",
+            why     = "does not exist in 5.1; use CN.Unpack",
+        },
+        {
+            pattern = "math%.fmod",
+            what    = "math.fmod",
+            why     = "disagrees with %% on sign for negative operands; use CN.Mod",
+        },
+        {
+            pattern = "%f[%w]goto%f[%W]",
+            what    = "goto",
+            why     = "5.2 syntax; the game's parser rejects it outright",
+        },
+        {
+            pattern = "math%.tointeger",
+            what    = "math.tointeger",
+            why     = "5.3 only; 5.1 has no integer subtype",
+        },
+        {
+            pattern = "math%.type",
+            what    = "math.type",
+            why     = "5.3 only",
+        },
+        {
+            pattern = "[^%s%w_%.%)%]\"']//[^%s]",
+            what    = "integer division //",
+            why     = "5.3 operator; 5.1 reads it as a syntax error",
+        },
+    }
+
+    local manifestFiles = {}
+
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the manifest must be readable")
+
+    for line in manifest:lines() do
+        local relative = line:match("^([%w\\/_%.]+%.lua)%s*$")
+
+        if relative then
+            table.insert(manifestFiles, relative)
+        end
+    end
+
+    manifest:close()
+
+    assert(#manifestFiles > 40, "the manifest must list the tree, got " .. #manifestFiles)
+
+    local offences = {}
+
+    for _, relative in ipairs(manifestFiles) do
+        local handle = io.open(ROOT .. "/" .. relative:gsub("\\", "/"), "r")
+
+        if handle then
+            local body = handle:read("*a")
+
+            handle:close()
+
+            -- Comments are stripped first, or every explanation of a hazard
+            -- counts as an instance of it -- including the ones written to
+            -- stop somebody reintroducing it.
+            body = body:gsub("%-%-%[%[.-%]%]", ""):gsub("%-%-[^\n]*", "")
+
+            for _, hazard in ipairs(hazards) do
+                if body:find(hazard.pattern) then
+                    table.insert(offences, string.format(
+                        "%s uses %s (%s)", relative, hazard.what, hazard.why))
+                end
+            end
+        end
+    end
+
+    for _, offence in ipairs(offences) do
+        print("  " .. offence)
+    end
+
+    assert(#offences == 0,
+        #offences .. " construct(s) that behave differently in the game's Lua")
+
+    print("  " .. #manifestFiles .. " files scanned for " .. #hazards
+        .. " constructs that differ between 5.1 and 5.4")
+
+    ------------------------------------------------------------
+    -- AND THE HELPERS THEMSELVES MUST BE RIGHT.
+    ------------------------------------------------------------
+    assert(CN.Unpack({ 1, 2, 3 }) == 1, "Unpack unpacks")
+
+    -- Floored, so the result carries the sign of the DIVISOR. This is what
+    -- every angle in the addon wants: wrapping never lands in the wrong half
+    -- of the circle. math.fmod would answer -1 here.
+    assert(CN.Mod(-1, 4) == 3,
+        "modulo must floor, got " .. CN.Mod(-1, 4))
+    assert(CN.Mod(5, 4) == 1, "and be ordinary for positives")
+    assert(CN.Mod(1, 0) == 0, "and refuse to divide by zero rather than throw")
+
+    print("  and the replacements behave the same in both")
+end)()
+
+
+print("\nWhat you are already carrying:")
+
+;(function()
+    local inventory = CN:GetModule("Inventory")
+
+    assert(inventory, "the Inventory module must load")
+
+    assert(inventory.IsAvailable(), "the container API must be modelled")
+
+    local items = inventory.Scan()
+
+    assert(#items == 3, "every occupied slot is read, got " .. #items)
+
+    ------------------------------------------------------------
+    -- A QUEST STARTER YOU HAVE ALREADY USED IS NOT A NEXT ACTION.
+    --
+    -- The client flags the item either way; `isActive` is the difference
+    -- between "right-click this" and "you did, it is in your log".
+    ------------------------------------------------------------
+    local starters = inventory.QuestStarters()
+
+    assert(#starters == 1,
+        "only the unaccepted starter counts, got " .. #starters)
+    assert(starters[1].questID == 44001, "and it is the right one")
+
+    local bagCandidates = CN.candidateProviders["Inventory"].fn()
+
+    local bagOffered = {}
+
+    for _, candidate in ipairs(bagCandidates) do
+        bagOffered[candidate.id] = candidate
+    end
+
+    assert(bagOffered[44001], "the unaccepted starter is recommended")
+    assert(not bagOffered[44002],
+        "the accepted one must NOT be -- it would send the player to "
+        .. "right-click something they have already used")
+
+    -- ZERO TRAVEL, and it is the honest number rather than a flattering one:
+    -- the item is in their bag.
+    assert(bagOffered[44001].travelCost == 0,
+        "an item in your bag costs nothing to reach")
+
+    print("  bags read, and an accepted starter is not offered twice")
+end)()
+
+print("\nThings with a clock on them:")
+
+;(function()
+    local waiting = CN:GetModule("Waiting")
+
+    assert(waiting, "the Waiting module must load")
+
+    local mail, readable = waiting.Mail()
+
+    assert(readable, "the mailbox must be readable")
+    assert(#mail == 4, "every message is read, got " .. #mail)
+
+    -- Sorted by what expires first, because that is the order they matter in.
+    assert(mail[1].daysLeft <= mail[2].daysLeft, "soonest first")
+
+    ------------------------------------------------------------
+    -- EXPIRING MAIL WITH NOTHING IN IT IS NOT A LOSS.
+    --
+    -- Mail is destroyed when it expires. That only matters if something is
+    -- attached: telling somebody to run to a mailbox to save an empty message
+    -- from a stranger is the addon crying wolf, and the next warning is the
+    -- one they ignore.
+    ------------------------------------------------------------
+    local expiring = waiting.ExpiringMail()
+
+    assert(#expiring == 2,
+        "only expiring mail WITH attachments counts, got " .. #expiring)
+
+    for _, entry in ipairs(expiring) do
+        assert(entry.items > 0 or entry.money > 0,
+            "nothing empty may be in that list")
+        assert(entry.daysLeft <= waiting.mailWarningDays,
+            "nor anything that is not expiring soon")
+    end
+
+    local waitingCandidates = CN.candidateProviders["Waiting"].fn()
+
+    local mailCandidate
+
+    for _, candidate in ipairs(waitingCandidates) do
+        if candidate.id == "mail" then mailCandidate = candidate end
+    end
+
+    assert(mailCandidate, "expiring mail is a real objective")
+    assert(mailCandidate.expiresIn and mailCandidate.expiresIn > 0,
+        "with a real deadline attached")
+
+    print("  " .. #expiring .. " messages worth saving, and the empty one is left alone")
+end)()
+
+print("\nFlight, where flight is allowed:")
+
+;(function()
+    local travel = CN:GetModule("Travel")
+
+    local memory = travel.FlightMemory()
+
+    for key in pairs(memory) do
+        memory[key] = nil
+    end
+
+    local session = CN:GetModule("Session")
+
+    -- Give the character enough flying samples to count as able to fly.
+    local samples = CN.character.speedSamples
+
+    samples.flying = {}
+
+    for _ = 1, 10 do
+        table.insert(samples.flying, 60)
+    end
+
+    session.LoadSamples()
+
+    assert(travel.HasFlying(), "a character with flight samples can fly")
+
+    ------------------------------------------------------------
+    -- A ZONE KNOWN NOT TO ALLOW FLYING MUST NOT BE FLOWN TO.
+    --
+    -- IsFlyableArea answers for where the player is STANDING and there is no
+    -- API that answers for anywhere else, so the addon remembers what it has
+    -- observed per zone. A plan the player cannot follow is worse than a
+    -- pessimistic one they can.
+    ------------------------------------------------------------
+    memory[94] = false
+
+    assert(travel.CanFly(94) == false,
+        "a zone remembered as no-fly must refuse")
+
+    memory[94] = true
+
+    assert(travel.CanFly(94) == true,
+        "and one remembered as flyable must allow it")
+
+    for key in pairs(memory) do
+        memory[key] = nil
+    end
+
+    samples.flying = {}
+
+    session.LoadSamples()
+
+    print("  what was observed about a zone beats what is true where you stand")
+end)()
+
+print("\nWhy the list is in this order:")
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY TERM SHOWN MUST HAVE ACTUALLY CONTRIBUTED.
+    --
+    -- An explanation listing ten terms, eight of them zero, is a wall of
+    -- noise that hides the two that decided the answer.
+    ------------------------------------------------------------
+    local objective = CN.NewObjective({
+        id              = 1,
+        type            = CN.objectiveTypes.QUEST,
+        name            = "A Quest",
+        completionValue = 5,
+        travelCost      = 3,
+    })
+
+    local terms = CN.ExplainScore(objective)
+
+    assert(#terms > 0, "something must explain the score")
+
+    for _, term in ipairs(terms) do
+        assert(math.abs(term.value) > 0.001,
+            "a term worth nothing must not be listed: " .. term.label)
+    end
+
+    -- Biggest first: the reader wants the reason, not an inventory.
+    for index = 2, #terms do
+        assert(math.abs(terms[index - 1].value) >= math.abs(terms[index].value),
+            "terms must be ordered by how much they mattered")
+    end
+
+    -- And the explanation must add up to the score, or it is a story about
+    -- an arithmetic the addon is not actually doing.
+    local total = 0
+
+    for _, term in ipairs(terms) do
+        total = total + term.value
+    end
+
+    local scored = CN.ScoreObjective(objective)
+
+    assert(math.abs(total - scored) < 0.01,
+        string.format("the terms must sum to the score: %.2f vs %.2f",
+            total, scored))
+
+    print("  " .. #terms .. " terms, ordered by weight, summing to the score")
+end)()
+
+print("\nA plan you can actually start:")
+
+;(function()
+    local session = CN:GetModule("Session")
+
+    CN_TEST_INSTANCE   = "party"
+    CN_TEST_GROUP_SIZE = 5
+
+    CN.InvalidateRanking()
+
+    local plan = session.Plan(30)
+
+    assert(plan.blocked == "instanced",
+        "a plan cannot be walked from inside a dungeon")
+    assert(#plan.stops == 0, "so no stops are offered")
+    assert(plan.notice, "and the player is told why")
+
+    CN_TEST_INSTANCE   = nil
+    CN_TEST_GROUP_SIZE = 1
+
+    CN.InvalidateRanking()
+
+    local normal = session.Plan(30)
+
+    assert(normal.blocked == nil, "and outside, planning resumes")
+
+    print("  the planner refuses rather than laying out a route you cannot walk")
+end)()
+
+
+print("\nA whole session, end to end:")
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY PART OF THIS IS TESTED. THE SEQUENCE WAS NOT.
+    --
+    -- Scanning works. Recommending works. Routing works. Following works.
+    -- Each has its own section above, each starts from a fixture arranged to
+    -- suit it, and none of them proves the addon survives being used in the
+    -- order a player uses it -- which is the only order that has ever
+    -- mattered to anybody.
+    --
+    -- This walks one login: scan, ask, route, follow a stop, finish, and log
+    -- out. It asserts the handful of things that must be true at each step
+    -- and, more importantly, that nothing throws along the way.
+    ------------------------------------------------------------
+    local errors = CN:GetModule("Errors")
+
+    errors.Clear()
+
+    local session = CN:GetModule("Session")
+    local follow  = CN:GetModule("Follow")
+
+    -- 1. A fresh login.
+    CN.InvalidateCandidates()
+
+    local welcome = CN:GetModule("Welcome")
+
+    CN.Account().welcomed = true
+
+    -- 2. Ask the question the addon exists to answer.
+    local first = CN.Recommend(1)[1]
+
+    assert(first, "a scanned character must get an answer")
+    assert(first.name, "and it must have a name to show")
+
+    -- 3. Ask why, and why that order -- both of which read the same scoring.
+    local explained = CN.ExplainRecommendation(first)
+
+    assert(#explained > 0, "every recommendation carries a reason")
+
+    local terms = CN.ExplainScore(first)
+
+    assert(#terms > 0, "and the order can be explained")
+
+    -- 4. Route the zone.
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local route, skipped, hubs = CN.BuildZoneRoute(mapID, x, y)
+
+    assert(type(route) == "table", "a route is a list")
+    assert(type(hubs) == "table", "grouped into stops")
+
+    -- 5. And what is outside it.
+    local otherZones = CN.BuildCrossZoneRoute()
+
+    assert(type(otherZones) == "table", "the next zone is costable")
+
+    -- 6. Plan the time available.
+    local plan = session.Plan(30)
+
+    assert(plan and plan.minutes == 30, "a plan covers the minutes asked for")
+
+    -- 7. Follow the route, clear a stop, and stop following.
+    follow.Start()
+
+    assert(follow.active, "follow mode starts")
+    assert(follow.completed == 0, "with nothing cleared yet")
+
+    follow.NoteStopCleared()
+
+    assert(follow.completed == 1, "and counts what is cleared")
+
+    follow.Stop()
+
+    assert(not follow.active, "and stops when told")
+
+    -- 8. Log out. Speed samples, session length and the error summary all
+    --    have to survive this without complaint.
+    CN.FireEvent("PLAYER_LOGOUT")
+
+    -- 9. NOTHING may have gone wrong in any of that.
+    assert(errors.Count() == 0,
+        errors.Count() .. " error(s) during an ordinary session: "
+        .. (errors.All()[1] and (errors.All()[1].context .. " -- "
+            .. errors.All()[1].message) or ""))
+
+    print("  login, ask, explain, route, plan, follow, log out -- no errors")
+end)()
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -43502,6 +45778,13 @@ local ROOT = arg[1] or "build/CompletionNavigator"
 -- the end of this file therefore saw no arguments and silently did nothing --
 -- a check that cannot fail because it never runs.
 local ENFORCE_BUDGETS = false
+
+-- Kept, because `arg` is replaced wholesale below for the harness.
+BENCH_ARGS = {}
+
+for _, argument in ipairs(arg) do
+    table.insert(BENCH_ARGS, argument)
+end
 
 for _, argument in ipairs(arg) do
     if argument == "--budget" then
@@ -43820,6 +46103,23 @@ do
     end
 end
 
+print("\nThe paths a player triggers without meaning to:")
+
+do
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    bench("BuildZoneRoute()", 50, function()
+        CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+    end)
+
+    -- NOT UI.Refresh: it returns immediately unless the window is genuinely
+    -- shown, and the harness's frames are not. Measuring it produced a
+    -- confident 0.000 ms for a function that never ran -- a budget that
+    -- cannot fail is a budget that guards nothing.
+    --
+    -- Chase.All() below is the real cost of an open window, and it does run.
+end
+
 ------------------------------------------------------------
 -- BUDGETS
 ------------------------------------------------------------
@@ -43842,6 +46142,12 @@ local BUDGETS = {
     ["Recommend(1)"]              = 0.10,
     ["Recommend(25)"]             = 0.40,
     ["ItemLines on an ordinary item"] = 0.05,
+
+    -- Added in 0.44.0. The two paths a player triggers most often without
+    -- meaning to: opening the window, and the router recomputing because they
+    -- walked into a new zone.
+    ["BuildZoneRoute()"]          = 8.0,
+    ["Chase.All() with 8 goals"]  = 5.0,
 }
 
 if ENFORCE_BUDGETS then
@@ -43854,6 +46160,18 @@ if ENFORCE_BUDGETS then
 
         if not measured then
             print(string.format("  MISSING  %-38s (never measured)", label))
+
+            failed = failed + 1
+        elseif measured <= 0 then
+            -- A ZERO IS NOT A PASS.
+            --
+            -- "UI refresh: 0.000 ms" meant the window was not open and the
+            -- function returned immediately -- a budget that can never fail
+            -- because the thing it guards never ran. That is the same shape
+            -- as a vacuous test, and it gets the same treatment: reported,
+            -- not counted as a success.
+            print(string.format("  NOT RUN  %-38s (measured 0 -- the path did "
+                .. "not execute)", label))
 
             failed = failed + 1
         elseif measured > ceiling then
@@ -43874,6 +46192,67 @@ if ENFORCE_BUDGETS then
     end
 
     print("\nEvery measured path is inside its budget.")
+end
+
+------------------------------------------------------------
+-- HISTORY
+------------------------------------------------------------
+
+-- BUDGETS CATCH A CLIFF. THEY DO NOT CATCH A SLOPE.
+--
+-- A ceiling with threefold headroom is the right shape for a gate: it fails
+-- on a regression and not on runner noise. It is exactly the wrong shape for
+-- noticing that the cold rebuild has crept from 3.9ms to 6.2ms across eight
+-- releases, each step small enough to be invisible and the total large enough
+-- to matter -- which is what actually happened between 0.36.0 and 0.44.0.
+--
+-- So: append every run to a file, one line per measurement, with the version.
+-- No analysis and no thresholds; a file somebody can look at, sorted by the
+-- thing that changed. `--history` writes it; nothing reads it automatically,
+-- because a trend needs a person.
+local writingHistory = false
+
+for _, argument in ipairs(BENCH_ARGS) do
+    if argument == "--history" then
+        writingHistory = true
+    end
+end
+
+if writingHistory then
+    local path = "bench-history.tsv"
+
+    local existing = io.open(path, "r")
+
+    local needsHeader = existing == nil
+
+    if existing then
+        existing:close()
+    end
+
+    local handle = io.open(path, "a")
+
+    if handle then
+        if needsHeader then
+            handle:write("version\tmeasurement\tms\n")
+        end
+
+        local labels = {}
+
+        for label in pairs(CN_BENCH_RESULTS) do
+            table.insert(labels, label)
+        end
+
+        table.sort(labels)
+
+        for _, label in ipairs(labels) do
+            handle:write(string.format("%s\t%s\t%.4f\n",
+                CN.version, label, CN_BENCH_RESULTS[label]))
+        end
+
+        handle:close()
+
+        print("\nAppended " .. #labels .. " measurements to " .. path .. ".")
+    end
 end
 '@
 
@@ -44176,6 +46555,30 @@ FOLDED=$(grep -c 'requires  = { 8230 }' Data/Quests.lua)
 # that leaves rubbish behind makes a later test fail for a reason that has
 # nothing to do with what it is testing.
 rm -rf fixtures-tmp
+
+# A CONTRIBUTION FOLDS INTO THE COMMUNITY FILE, AND ONLY INTO THAT ONE.
+#
+# Community rows are believed because several installs agreed, not because a
+# human checked them. Letting them into Data\Quests.lua would destroy that
+# distinction permanently and silently.
+$PWSH -NoProfile -File ./cn.ps1 contribution "CN1 100:98,99 200:150" > contrib.log 2>&1
+grep -q "new rows to add            2" contrib.log \
+  || { echo "FAIL: the contribution was not folded"; cat contrib.log; exit 1; }
+grep -q "requires = { 98, 99 }" Data/Community.lua \
+  || { echo "FAIL: the chain is not in the community file"; exit 1; }
+grep -q "100" Data/Quests.lua \
+  && { echo "FAIL: a contribution leaked into the curated database"; exit 1; }
+luac5.4 -p Data/Community.lua || { echo "FAIL: contribution produced invalid Lua"; exit 1; }
+
+# Malformed input must change nothing at all, rather than importing the half
+# it could parse.
+BEFORE=$(md5sum Data/Community.lua | cut -d" " -f1)
+$PWSH -NoProfile -File ./cn.ps1 contribution "CN1 100:98 rubbish" > contrib2.log 2>&1
+grep -q "malformed" contrib2.log \
+  || { echo "FAIL: malformed contribution was not refused"; cat contrib2.log; exit 1; }
+AFTER=$(md5sum Data/Community.lua | cut -d" " -f1)
+[ "$BEFORE" = "$AFTER" ] \
+  || { echo "FAIL: a refused contribution still changed the file"; exit 1; }
 
 # Running it again must add nothing.
 $PWSH -NoProfile -File ./cn.ps1 harvest ./sv.lua > harvest2.log 2>&1
@@ -47657,6 +50060,113 @@ function Invoke-CNInterface {
     Write-Host '  5. Only then bump the version and release.' -ForegroundColor Gray
 }
 
+function Invoke-CNContribution {
+    # FOLDS A `/cn contribute` STRING INTO Data\Community.lua.
+    #
+    # The addon can produce the string and can import one in game; what was
+    # missing was the path that gets a contribution from a player's issue into
+    # the shipped package -- which is the only step that makes a contribution
+    # worth anything to anybody else.
+    #
+    # Community rows are held apart from curated ones deliberately: they are
+    # believed because several installs agreed, not because a human checked.
+    # Merging the two files would be a one-line convenience that destroyed the
+    # distinction permanently.
+    Assert-CNWritable
+
+    $text = if ($Target) { $Target } else { $Value }
+
+    if (-not $text) {
+        Write-Host 'Usage: .\cn.ps1 contribution "CN1 100:98,99 200:150"' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host '  The string comes from /cn contribute in game.' -ForegroundColor DarkGray
+        return
+    }
+
+    $text = $text.Trim()
+
+    if ($text -notmatch '^CN1\s+') {
+        Write-Host 'Not a Completion Navigator export (expected it to start with CN1).' -ForegroundColor Red
+        return
+    }
+
+    $entries = @{}
+    $malformed = 0
+
+    foreach ($token in ($text -replace '^CN1\s+', '') -split '\s+') {
+        if (-not $token) { continue }
+
+        if ($token -match '^(\d+):([\d,]+)$') {
+            $questID = [int] $Matches[1]
+
+            $ids = @()
+
+            foreach ($id in ($Matches[2] -split ',')) {
+                if ($id) { $ids += [int] $id }
+            }
+
+            if ($ids.Count -gt 0) { $entries[$questID] = $ids }
+        }
+        else {
+            $malformed++
+        }
+    }
+
+    if ($malformed -gt 0) {
+        # Strict, exactly as the in-game importer is: a half-parsed
+        # contribution silently teaches the addon a chain nobody wrote.
+        Write-Host "$malformed malformed entry(ies); nothing was written." -ForegroundColor Red
+        return
+    }
+
+    if ($entries.Count -eq 0) {
+        Write-Host 'No entries in that string.' -ForegroundColor Yellow
+        return
+    }
+
+    $relative = 'Data\Community.lua'
+    $existing = Read-CNFile $relative
+
+    if ($null -eq $existing) { throw "$relative not found. Run: .\cn.ps1 init" }
+
+    $lines   = New-Object System.Collections.Generic.List[string]
+    $added   = 0
+    $skipped = 0
+
+    foreach ($questID in ($entries.Keys | Sort-Object)) {
+        if ($existing -match ('\[\s*' + $questID + '\s*\]\s*=')) {
+            $skipped++
+            continue
+        }
+
+        $ids = $entries[$questID] -join ', '
+
+        $lines.Add("    [$questID] = { requires = { $ids }, sources = 1 },") | Out-Null
+
+        $added++
+    }
+
+    Write-Host "Entries in the contribution: $($entries.Count)" -ForegroundColor White
+    Write-Host "  already present            $skipped" -ForegroundColor DarkGray
+    Write-Host "  new rows to add            $added" -ForegroundColor $(if ($added -gt 0) { 'Green' } else { 'DarkGray' })
+
+    if ($added -eq 0) {
+        Write-Host 'Nothing to add.' -ForegroundColor Yellow
+        return
+    }
+
+    Invoke-CNBackup -Quiet
+
+    Add-CNBlock -Relative $relative -Block ($lines -join "`n") -Marker '-- CN:DATA:COMMUNITY'
+
+    Write-Host "Added $added row(s) to $relative" -ForegroundColor Green
+    Write-Host ''
+    Write-Host '  sources = 1 means ONE contributor agreed. Raise it as more' -ForegroundColor DarkGray
+    Write-Host '  arrive; below two, a row does not belong in that file.' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  Next:  .\cn.ps1 check' -ForegroundColor DarkGray
+}
+
 function Invoke-CNRelease {
     Assert-CNWritable
 
@@ -48136,6 +50646,7 @@ function Show-CNHelp {
     Write-Host '  harvest [path]                 Fold harvested quests from SavedVariables into Data.'
     Write-Host '  fixtures [path]                Lift a /cn capture recording out of SavedVariables for the tests.'
     Write-Host '  interface [number]             Show or set the game interface version, with the patch checklist.'
+    Write-Host '  contribution "<CN1 ...>"       Fold a /cn contribute string into Data\Community.lua.'
     Write-Host '  relocate <path>                Copy the source out of Program Files.'
     Write-Host '  icon [path.png]                Convert a PNG into Media\Logo.tga for in-game use.'
     Write-Host '  gitinit                         Initialize git with a sane .gitignore.'
@@ -48174,6 +50685,7 @@ switch ($Command.ToLower()) {
     'harvest'   { Invoke-CNHarvest }
     'fixtures'  { Invoke-CNFixtures }
     'interface' { Invoke-CNInterface }
+    'contribution' { Invoke-CNContribution }
     'release'   { Invoke-CNRelease }
     'ci'        { Invoke-CNCI }
     'actions'   { Invoke-CNCI }

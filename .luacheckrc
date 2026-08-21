@@ -52,6 +52,12 @@ read_globals = {
     "UnitIsDeadOrGhost", "UnitIsGhost", "GetNumGroupMembers",
     "IsInRaid", "IsInInstance", "IsFlying", "IsFlyableArea",
     "C_CraftingOrders", "C_DelvesUI", "C_Bank", "C_Spell",
+
+    -- Bags, mail, keystones, heirlooms and challenge modes: five systems the
+    -- addon began reading in 0.44.0.
+    "C_Container", "GetInboxNumItems", "GetInboxHeaderInfo",
+    "C_MythicPlus", "C_ChallengeMode", "C_Heirloom",
+    "C_ToyBox", "PlayerHasToy",
     "IsSpellKnown", "IsPlayerSpell", "GetSpellCooldown", "GetItemCooldown",
     "GetItemCount", "GetBindLocation", "EJ_GetDifficulty", "GetDifficultyInfo",
     "SettingsPanel", "InterfaceOptions_AddCategory", "BackdropTemplateMixin",

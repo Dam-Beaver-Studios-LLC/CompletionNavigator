@@ -116,6 +116,68 @@ end
 
 CN.Guard = Errors.Guard
 
+------------------------------------------------------------
+-- THE PREVIOUS SESSION
+------------------------------------------------------------
+
+-- ONE SUMMARY LINE PER ERROR, KEPT ACROSS A LOGOUT.
+--
+-- The ring buffer is in memory, deliberately: a growing error log is a leak,
+-- and an error from three weeks ago is noise. But the case that matters most
+-- -- something went wrong, and the player relogged before thinking to look --
+-- was exactly the case where the evidence was gone.
+--
+-- So the counts survive, and nothing else: context, message, and how many
+-- times. Cleared whenever the player reads them, and capped at the same size
+-- as the live ring.
+local function Stored()
+    return CN.Account("lastErrors")
+end
+
+function Errors.Persist()
+    local stored = Stored()
+
+    for key in pairs(stored) do
+        stored[key] = nil
+    end
+
+    for index, entry in ipairs(ring) do
+        stored[index] = {
+            context = entry.context,
+            message = entry.message,
+            count   = entry.count,
+        }
+    end
+
+    return #ring
+end
+
+function Errors.Previous()
+    local rows = {}
+
+    for _, entry in ipairs(Stored()) do
+        table.insert(rows, entry)
+    end
+
+    return rows
+end
+
+function Errors.ForgetPrevious()
+    local stored = Stored()
+
+    local count = #stored
+
+    for key in pairs(stored) do
+        stored[key] = nil
+    end
+
+    return count
+end
+
+CN:RegisterEvent("PLAYER_LOGOUT", function()
+    Errors.Persist()
+end)
+
 CN:RegisterCommand{
     name    = "errors",
     aliases = { "log" },
@@ -129,6 +191,24 @@ CN:RegisterCommand{
         end
 
         if #ring == 0 then
+            local previous = Errors.Previous()
+
+            if #previous > 0 then
+                Print("Nothing this session. From the previous one:")
+
+                for _, entry in ipairs(previous) do
+                    Print("  |cfff56b61" .. tostring(entry.context) .. "|r"
+                        .. ((entry.count or 1) > 1
+                            and (" |cffffff00x" .. entry.count .. "|r") or ""))
+                    Print("    |cff999999" .. tostring(entry.message) .. "|r")
+                end
+
+                Errors.ForgetPrevious()
+
+                Print("|cff999999Shown once, then forgotten.|r")
+                return
+            end
+
             Print("Nothing has gone wrong this session.")
             Print("|cff999999Errors inside the addon are caught so they "
                 .. "cannot break your session -- which is also why they would "

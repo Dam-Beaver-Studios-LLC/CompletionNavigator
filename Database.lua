@@ -248,6 +248,49 @@ CN.migrations = {
                 .. " stored values the client already knows.")
         end
     end,
+
+    -- 6 -> 7. Five stores arrived between 0.40.0 and 0.43.0 and none needed a
+    -- migration, so the version never moved -- which meant the ladder could
+    -- not be used to enforce anything about them either.
+    --
+    -- The remembered quest pins are the one that matters: they are written on
+    -- every scan of a map, capped by a constant in the module, and the cap
+    -- was enforced only at the moment of writing. A database that grew past
+    -- it under an older build, or through a version where the constant was
+    -- larger, stayed large forever. Trim on the way in instead of trusting
+    -- that it never happened.
+    [6] = function(db)
+        db.account = db.account or {}
+
+        local pins = db.account.questPins
+
+        if type(pins) ~= "table" then
+            return
+        end
+
+        local ceiling = 600
+
+        local ids = {}
+
+        for questID in pairs(pins) do
+            table.insert(ids, questID)
+        end
+
+        if #ids <= ceiling then
+            return
+        end
+
+        table.sort(ids)
+
+        -- Lowest ids first: the oldest content, and the least likely to be
+        -- what anybody is working on now.
+        for index = 1, #ids - ceiling do
+            pins[ids[index]] = nil
+        end
+
+        CN.DebugPrint("Trimmed " .. (#ids - ceiling)
+            .. " remembered quest pins over the ceiling.")
+    end,
 }
 
 local function Migrate(db)

@@ -805,6 +805,7 @@ end
 -- tracked. Costs nothing to reset; costs the player's trust not to.
 local function Blank()
     Navigation.ResetSmoothing()
+    Navigation.ResetDistanceSmoothing()
 
     if not arrow then
         return
@@ -871,6 +872,39 @@ function Navigation.Smooth(bearing)
     return smoothed
 end
 
+-- Distance, eased. Snaps on a large jump for the same reason the rotation
+-- does: a teleport, a flight path or a loading screen is a real change and
+-- easing through it would show a number that was never true.
+Navigation.distanceSmoothing = 0.5
+Navigation.distanceSnapYards = 80
+
+local smoothedDistance = nil
+
+function Navigation.ResetDistanceSmoothing()
+    smoothedDistance = nil
+end
+
+function Navigation.SmoothDistance(yards)
+    if not yards then
+        smoothedDistance = nil
+
+        return nil
+    end
+
+    if not smoothedDistance
+        or math.abs(yards - smoothedDistance) >= Navigation.distanceSnapYards then
+
+        smoothedDistance = yards
+
+        return smoothedDistance
+    end
+
+    smoothedDistance = smoothedDistance
+        + ((yards - smoothedDistance) * Navigation.distanceSmoothing)
+
+    return smoothedDistance
+end
+
 local function Refresh()
     if not arrow then
         return
@@ -914,7 +948,11 @@ local function Refresh()
 
     arrow.texture:SetVertexColor(Navigation.BearingColor(state.relative))
 
-    local distanceText = Navigation.FormatDistance(state.yards)
+    -- The distance figure jumped the way the rotation used to, because it is
+    -- recomputed from a position the client rounds. Same treatment, and a
+    -- much lower factor: distance should look steady, not sluggish.
+    local distanceText = Navigation.FormatDistance(
+        Navigation.SmoothDistance(state.yards))
 
     -- NO INFORMATION CARRIED BY COLOUR ALONE.
     --

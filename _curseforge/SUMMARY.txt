@@ -1,1 +1,1 @@
-Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, costs the journey the way you would really make it (run, fly or flight path), batches nearby work into stops, and shows what stands between you and it.
+Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, including what is already in your bags, costs the journey the way you would really make it, and shows its working when you ask why.

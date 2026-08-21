@@ -517,6 +517,89 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     return route, skipped, orderedHubs
 end
 
+-- ACROSS ZONES, NOT ONLY WITHIN ONE.
+--
+-- Every route in this addon has been zone-scoped since the routing engine was
+-- written, because the distance function could not compare two points on
+-- different maps. 0.42.0 fixed that -- world coordinates are continuous
+-- across a continent -- and the router was never told.
+--
+-- So a player who cleared their zone got "nothing left here" and no sense of
+-- where to go next, while the addon knew perfectly well that four things were
+-- waiting one zone over and roughly how long it took to get to each.
+--
+-- Ordered by TIME, not by distance: an objective across a mountain range with
+-- a flight point at each end is nearer than one half as far away with no
+-- route to it. The travel model already answers that question.
+--
+-- Returns { objective, seconds, mapID, zone } sorted by cost.
+CN.crossZoneCap = 25
+
+function CN.BuildCrossZoneRoute(limit)
+    limit = limit or CN.crossZoneCap
+
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+    if not playerMap then
+        return {}
+    end
+
+    local travel = CN:GetModule("Travel")
+
+    if not travel then
+        return {}
+    end
+
+    local elsewhere = {}
+
+    for _, objective in ipairs(CN.CollectCandidates()) do
+        local visible = (not CN.IsObjectiveTypeEnabled)
+            or CN.IsObjectiveTypeEnabled(objective.type)
+
+        if visible
+            and objective.mapID
+            and objective.mapID ~= playerMap
+            and objective.x and objective.y then
+
+            CN.ScoreObjective(objective)
+
+            table.insert(elsewhere, objective)
+        end
+    end
+
+    -- Cost only the best-scoring handful. Estimating a journey is four client
+    -- conversions and a scan of the flight network, and doing it for every
+    -- candidate in a full database would cost more than the answer is worth
+    -- -- the same reasoning that caps every other bounded collection here.
+    table.sort(elsewhere, function(a, b)
+        return (a.priorityWeight or 0) > (b.priorityWeight or 0)
+    end)
+
+    local rows = {}
+
+    for index = 1, math.min(#elsewhere, limit) do
+        local objective = elsewhere[index]
+
+        local seconds = travel.EstimateSeconds(playerMap, playerX, playerY,
+            objective.mapID, objective.x, objective.y)
+
+        if seconds then
+            table.insert(rows, {
+                objective = objective,
+                seconds   = seconds,
+                mapID     = objective.mapID,
+                zone      = CN.Blizzard.GetMapName(objective.mapID),
+            })
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        return a.seconds < b.seconds
+    end)
+
+    return rows
+end
+
 -- Counts what remains in the zone, grouped by objective type. Deliberately
 -- not a percentage: a percentage needs a trustworthy denominator, and the
 -- static database is nowhere near complete enough to provide one.
@@ -679,6 +762,53 @@ end)
 ------------------------------------------------------------
 -- COMMANDS
 ------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "nearby",
+    aliases = { "elsewhere" },
+    order   = 30,
+    help    = "What is worth doing OUTSIDE this zone, by how long it takes "
+        .. "to get there.",
+    handler = function()
+        local rows = CN.BuildCrossZoneRoute()
+
+        if #rows == 0 then
+            CN.Print("Nothing outside this zone is costable right now.")
+            CN.Print("|cff999999Either everything worth doing is here, or the "
+                .. "client will not convert the positions -- which happens "
+                .. "during a loading screen and fixes itself.|r")
+            return
+        end
+
+        local session = CN:GetModule("Session")
+
+        CN.Print("Outside this zone, nearest first:")
+
+        local lastZone
+
+        for index, row in ipairs(rows) do
+            if index > 12 then
+                CN.Print("  |cff999999... and " .. (#rows - 12) .. " more|r")
+                break
+            end
+
+            if row.zone ~= lastZone then
+                CN.Print("|cffffd100" .. tostring(row.zone or row.mapID) .. "|r")
+
+                lastZone = row.zone
+            end
+
+            CN.Print(string.format("  %-34s |cff999999%s|r",
+                tostring(row.objective.name or row.objective.id),
+                session and session.FormatDuration
+                    and session.FormatDuration(row.seconds)
+                    or (math.floor(row.seconds / 60) .. "m")))
+        end
+
+        CN.Print("|cff999999Ordered by how long it takes to get there, not by "
+            .. "how far away it is -- a flight point changes that answer.|r")
+    end,
+}
 
 CN:RegisterCommand{
     name    = "zone",

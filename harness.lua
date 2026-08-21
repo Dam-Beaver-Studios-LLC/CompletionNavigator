@@ -379,6 +379,74 @@ C_TaxiMap = {
 -- Both change what a sensible next action is, and neither was modelled until
 -- 0.43.0 -- so the stub did not model them either, which is exactly how a
 -- whole class of behaviour stays invisible to a test suite.
+-- BAGS, MAIL AND A KEYSTONE.
+--
+-- All three are systems the addon could not see before 0.44.0, so the stub
+-- could not either -- which is how an entire class of behaviour stays
+-- invisible to a suite that otherwise looks thorough.
+CN_TEST_BAGS = {
+    [0] = {
+        { itemID = 60001, stackCount = 1, quest = { questID = 44001, isActive = false } },
+        { itemID = 60002, stackCount = 20 },
+        -- Already accepted: the client still flags it, and offering it again
+        -- would send the player to right-click something they have used.
+        { itemID = 60003, stackCount = 1, quest = { questID = 44002, isActive = true } },
+    },
+}
+
+C_Container = {
+    GetContainerNumSlots = function(bag)
+        local slots = CN_TEST_BAGS[bag]
+
+        return slots and #slots or 0
+    end,
+
+    GetContainerItemInfo = function(bag, slot)
+        local item = CN_TEST_BAGS[bag] and CN_TEST_BAGS[bag][slot]
+
+        if not item then
+            return nil
+        end
+
+        return {
+            itemID     = item.itemID,
+            stackCount = item.stackCount,
+            hyperlink  = "|cffffffff|Hitem:" .. item.itemID .. "|h[Item]|h|r",
+            quality    = 1,
+        }
+    end,
+
+    GetContainerItemQuestInfo = function(bag, slot)
+        local item = CN_TEST_BAGS[bag] and CN_TEST_BAGS[bag][slot]
+
+        return item and item.quest or {}
+    end,
+}
+
+CN_TEST_MAIL = {
+    { sender = "Auction House", subject = "Sold", money = 100, items = 0, daysLeft = 1.5 },
+    { sender = "A Friend",      subject = "Here", money = 0,   items = 2, daysLeft = 2.0 },
+    { sender = "Nobody",        subject = "Old",  money = 0,   items = 0, daysLeft = 0.5 },
+    { sender = "A Friend",      subject = "Later", money = 0,  items = 1, daysLeft = 25 },
+}
+
+function GetInboxNumItems()
+    return #CN_TEST_MAIL
+end
+
+function GetInboxHeaderInfo(index)
+    local mail = CN_TEST_MAIL[index]
+
+    if not mail then
+        return nil
+    end
+
+    -- packageIcon, stationeryIcon, sender, subject, money, CODAmount,
+    -- daysLeft, itemCount
+    return nil, nil, mail.sender, mail.subject, mail.money, 0,
+        mail.daysLeft, mail.items
+end
+
 CN_TEST_DEAD       = false
 CN_TEST_GHOST      = false
 CN_TEST_GROUP_SIZE = 1
@@ -2289,7 +2357,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 18, "every candidate provider must register, got "
+assert(firstState.providers == 20, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -3362,13 +3430,18 @@ assert(goalObjective.isGoal, "a goal candidate must be flagged as one")
 --
 -- What must hold is that the goal is near the top, and first once nothing
 -- is expiring.
-local ranked = CN.Recommend(5)
+-- Deep enough that adding another deadline provider cannot push the goal off
+-- the end of the list and fail this for a reason unrelated to goals. That has
+-- now happened twice.
+local ranked = CN.Recommend(12)
 
 print("  ranked with vault present:")
 
 for index, objective in ipairs(ranked) do
-    print("    " .. index .. ". " .. tostring(objective.name)
-        .. " (" .. string.format("%.1f", objective.priorityWeight or 0) .. ")")
+    if index <= 6 then
+        print("    " .. index .. ". " .. tostring(objective.name)
+            .. " (" .. string.format("%.1f", objective.priorityWeight or 0) .. ")")
+    end
 end
 
 local goalRank
@@ -3408,9 +3481,15 @@ local opportunityProvider = CN.candidateProviders["Opportunities"]
 -- emit weekly ones. World quests expire too, and from 0.43.0 the urgency
 -- curve has a second, week-long ramp, so a world quest six hours out is no
 -- longer worth exactly zero. "Nothing expiring" has to mean nothing.
+-- Every provider that emits a deadline. The list grows with each release --
+-- Vault, then Instances, then Opportunities, now Waiting -- which is itself
+-- the argument for asserting the PROPERTY above rather than a fixed rank.
+local waitingProvider = CN.candidateProviders["Waiting"]
+
 CN.candidateProviders["Vault"]         = nil
 CN.candidateProviders["Instances"]     = nil
 CN.candidateProviders["Opportunities"] = nil
+CN.candidateProviders["Waiting"]       = nil
 CN.InvalidateCandidates()
 
 local top = CN.Recommend(1)[1]
@@ -3424,6 +3503,7 @@ assert(top.type == "TITLE" and top.id == 2,
 CN.candidateProviders["Vault"]         = vaultProvider
 CN.candidateProviders["Instances"]     = instanceProvider
 CN.candidateProviders["Opportunities"] = opportunityProvider
+CN.candidateProviders["Waiting"]       = waitingProvider
 CN.InvalidateCandidates()
 
 -- Removing it must put things back.
@@ -7520,6 +7600,8 @@ print("\nEvery command runs without throwing:")
         "colourblind", "colourblind off", "cues", "cues off",
         "errors", "errors clear", "learned", "locale", "locale missing",
         "instances", "drops", "drops Nothing At All",
+        "bags", "clock", "nearby", "order", "order 2", "situation",
+        "help", "help all", "help lockout", "help nothingmatchesthis",
         "selftest", "capture", "capture clear", "dbsize", "welcome",
     }
 
@@ -7541,6 +7623,27 @@ print("\nEvery command runs without throwing:")
         #failures .. " command(s) threw against a bare client")
 
     print("  " .. #commands .. " command invocations, none of them threw")
+
+    -- AND THE COMMANDS THAT READ NEW SYSTEMS MUST SURVIVE THOSE SYSTEMS
+    -- BEING ABSENT. A client without a mailbox, without containers, without
+    -- a keystone: every one of those is an ordinary state, not an error.
+    local savedContainer = C_Container
+    local savedInbox     = GetInboxNumItems
+
+    C_Container      = nil
+    GetInboxNumItems = nil
+
+    for _, command in ipairs({ "bags", "clock", "travel", "nearby" }) do
+        local ok, err = pcall(CN.HandleSlashCommand, command)
+
+        assert(ok, command .. " threw when the client offered nothing: "
+            .. tostring(err))
+    end
+
+    C_Container      = savedContainer
+    GetInboxNumItems = savedInbox
+
+    print("  and four of them survive a client that answers nothing")
 
     -- And the scale command must not have left a silly value behind: "scale
     -- 99" was in that list deliberately.
@@ -7669,6 +7772,448 @@ print("\nThe language the game actually runs:")
         .. "CN.Atan2. Found in: " .. table.concat(offenders, ", "))
 
     print("  and no shipped file uses the two-argument form")
+end)()
+
+
+print("\nConstructs that mean two different things:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE RULE, NOT THE INSTANCE.
+    --
+    -- 0.43.1 fixed two-argument math.atan, which is silently wrong in the
+    -- game's Lua. The fix was one function. What stops the next one is a rule
+    -- that reads every shipped file and refuses anything whose meaning
+    -- depends on which interpreter is running.
+    --
+    -- Each entry names WHAT breaks and WHERE the addon runs, because a lint
+    -- that says "forbidden" and not "why" gets worked around.
+    ------------------------------------------------------------
+    local hazards = {
+        {
+            pattern = "math%.atan%s*%([^)]-,",
+            what    = "two-argument math.atan",
+            why     = "5.1 discards the second argument silently; use CN.Atan2",
+        },
+        {
+            pattern = "table%.unpack",
+            what    = "table.unpack",
+            why     = "does not exist in 5.1; use CN.Unpack",
+        },
+        {
+            pattern = "math%.fmod",
+            what    = "math.fmod",
+            why     = "disagrees with %% on sign for negative operands; use CN.Mod",
+        },
+        {
+            pattern = "%f[%w]goto%f[%W]",
+            what    = "goto",
+            why     = "5.2 syntax; the game's parser rejects it outright",
+        },
+        {
+            pattern = "math%.tointeger",
+            what    = "math.tointeger",
+            why     = "5.3 only; 5.1 has no integer subtype",
+        },
+        {
+            pattern = "math%.type",
+            what    = "math.type",
+            why     = "5.3 only",
+        },
+        {
+            pattern = "[^%s%w_%.%)%]\"']//[^%s]",
+            what    = "integer division //",
+            why     = "5.3 operator; 5.1 reads it as a syntax error",
+        },
+    }
+
+    local manifestFiles = {}
+
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the manifest must be readable")
+
+    for line in manifest:lines() do
+        local relative = line:match("^([%w\\/_%.]+%.lua)%s*$")
+
+        if relative then
+            table.insert(manifestFiles, relative)
+        end
+    end
+
+    manifest:close()
+
+    assert(#manifestFiles > 40, "the manifest must list the tree, got " .. #manifestFiles)
+
+    local offences = {}
+
+    for _, relative in ipairs(manifestFiles) do
+        local handle = io.open(ROOT .. "/" .. relative:gsub("\\", "/"), "r")
+
+        if handle then
+            local body = handle:read("*a")
+
+            handle:close()
+
+            -- Comments are stripped first, or every explanation of a hazard
+            -- counts as an instance of it -- including the ones written to
+            -- stop somebody reintroducing it.
+            body = body:gsub("%-%-%[%[.-%]%]", ""):gsub("%-%-[^\n]*", "")
+
+            for _, hazard in ipairs(hazards) do
+                if body:find(hazard.pattern) then
+                    table.insert(offences, string.format(
+                        "%s uses %s (%s)", relative, hazard.what, hazard.why))
+                end
+            end
+        end
+    end
+
+    for _, offence in ipairs(offences) do
+        print("  " .. offence)
+    end
+
+    assert(#offences == 0,
+        #offences .. " construct(s) that behave differently in the game's Lua")
+
+    print("  " .. #manifestFiles .. " files scanned for " .. #hazards
+        .. " constructs that differ between 5.1 and 5.4")
+
+    ------------------------------------------------------------
+    -- AND THE HELPERS THEMSELVES MUST BE RIGHT.
+    ------------------------------------------------------------
+    assert(CN.Unpack({ 1, 2, 3 }) == 1, "Unpack unpacks")
+
+    -- Floored, so the result carries the sign of the DIVISOR. This is what
+    -- every angle in the addon wants: wrapping never lands in the wrong half
+    -- of the circle. math.fmod would answer -1 here.
+    assert(CN.Mod(-1, 4) == 3,
+        "modulo must floor, got " .. CN.Mod(-1, 4))
+    assert(CN.Mod(5, 4) == 1, "and be ordinary for positives")
+    assert(CN.Mod(1, 0) == 0, "and refuse to divide by zero rather than throw")
+
+    print("  and the replacements behave the same in both")
+end)()
+
+
+print("\nWhat you are already carrying:")
+
+;(function()
+    local inventory = CN:GetModule("Inventory")
+
+    assert(inventory, "the Inventory module must load")
+
+    assert(inventory.IsAvailable(), "the container API must be modelled")
+
+    local items = inventory.Scan()
+
+    assert(#items == 3, "every occupied slot is read, got " .. #items)
+
+    ------------------------------------------------------------
+    -- A QUEST STARTER YOU HAVE ALREADY USED IS NOT A NEXT ACTION.
+    --
+    -- The client flags the item either way; `isActive` is the difference
+    -- between "right-click this" and "you did, it is in your log".
+    ------------------------------------------------------------
+    local starters = inventory.QuestStarters()
+
+    assert(#starters == 1,
+        "only the unaccepted starter counts, got " .. #starters)
+    assert(starters[1].questID == 44001, "and it is the right one")
+
+    local bagCandidates = CN.candidateProviders["Inventory"].fn()
+
+    local bagOffered = {}
+
+    for _, candidate in ipairs(bagCandidates) do
+        bagOffered[candidate.id] = candidate
+    end
+
+    assert(bagOffered[44001], "the unaccepted starter is recommended")
+    assert(not bagOffered[44002],
+        "the accepted one must NOT be -- it would send the player to "
+        .. "right-click something they have already used")
+
+    -- ZERO TRAVEL, and it is the honest number rather than a flattering one:
+    -- the item is in their bag.
+    assert(bagOffered[44001].travelCost == 0,
+        "an item in your bag costs nothing to reach")
+
+    print("  bags read, and an accepted starter is not offered twice")
+end)()
+
+print("\nThings with a clock on them:")
+
+;(function()
+    local waiting = CN:GetModule("Waiting")
+
+    assert(waiting, "the Waiting module must load")
+
+    local mail, readable = waiting.Mail()
+
+    assert(readable, "the mailbox must be readable")
+    assert(#mail == 4, "every message is read, got " .. #mail)
+
+    -- Sorted by what expires first, because that is the order they matter in.
+    assert(mail[1].daysLeft <= mail[2].daysLeft, "soonest first")
+
+    ------------------------------------------------------------
+    -- EXPIRING MAIL WITH NOTHING IN IT IS NOT A LOSS.
+    --
+    -- Mail is destroyed when it expires. That only matters if something is
+    -- attached: telling somebody to run to a mailbox to save an empty message
+    -- from a stranger is the addon crying wolf, and the next warning is the
+    -- one they ignore.
+    ------------------------------------------------------------
+    local expiring = waiting.ExpiringMail()
+
+    assert(#expiring == 2,
+        "only expiring mail WITH attachments counts, got " .. #expiring)
+
+    for _, entry in ipairs(expiring) do
+        assert(entry.items > 0 or entry.money > 0,
+            "nothing empty may be in that list")
+        assert(entry.daysLeft <= waiting.mailWarningDays,
+            "nor anything that is not expiring soon")
+    end
+
+    local waitingCandidates = CN.candidateProviders["Waiting"].fn()
+
+    local mailCandidate
+
+    for _, candidate in ipairs(waitingCandidates) do
+        if candidate.id == "mail" then mailCandidate = candidate end
+    end
+
+    assert(mailCandidate, "expiring mail is a real objective")
+    assert(mailCandidate.expiresIn and mailCandidate.expiresIn > 0,
+        "with a real deadline attached")
+
+    print("  " .. #expiring .. " messages worth saving, and the empty one is left alone")
+end)()
+
+print("\nFlight, where flight is allowed:")
+
+;(function()
+    local travel = CN:GetModule("Travel")
+
+    local memory = travel.FlightMemory()
+
+    for key in pairs(memory) do
+        memory[key] = nil
+    end
+
+    local session = CN:GetModule("Session")
+
+    -- Give the character enough flying samples to count as able to fly.
+    local samples = CN.character.speedSamples
+
+    samples.flying = {}
+
+    for _ = 1, 10 do
+        table.insert(samples.flying, 60)
+    end
+
+    session.LoadSamples()
+
+    assert(travel.HasFlying(), "a character with flight samples can fly")
+
+    ------------------------------------------------------------
+    -- A ZONE KNOWN NOT TO ALLOW FLYING MUST NOT BE FLOWN TO.
+    --
+    -- IsFlyableArea answers for where the player is STANDING and there is no
+    -- API that answers for anywhere else, so the addon remembers what it has
+    -- observed per zone. A plan the player cannot follow is worse than a
+    -- pessimistic one they can.
+    ------------------------------------------------------------
+    memory[94] = false
+
+    assert(travel.CanFly(94) == false,
+        "a zone remembered as no-fly must refuse")
+
+    memory[94] = true
+
+    assert(travel.CanFly(94) == true,
+        "and one remembered as flyable must allow it")
+
+    for key in pairs(memory) do
+        memory[key] = nil
+    end
+
+    samples.flying = {}
+
+    session.LoadSamples()
+
+    print("  what was observed about a zone beats what is true where you stand")
+end)()
+
+print("\nWhy the list is in this order:")
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY TERM SHOWN MUST HAVE ACTUALLY CONTRIBUTED.
+    --
+    -- An explanation listing ten terms, eight of them zero, is a wall of
+    -- noise that hides the two that decided the answer.
+    ------------------------------------------------------------
+    local objective = CN.NewObjective({
+        id              = 1,
+        type            = CN.objectiveTypes.QUEST,
+        name            = "A Quest",
+        completionValue = 5,
+        travelCost      = 3,
+    })
+
+    local terms = CN.ExplainScore(objective)
+
+    assert(#terms > 0, "something must explain the score")
+
+    for _, term in ipairs(terms) do
+        assert(math.abs(term.value) > 0.001,
+            "a term worth nothing must not be listed: " .. term.label)
+    end
+
+    -- Biggest first: the reader wants the reason, not an inventory.
+    for index = 2, #terms do
+        assert(math.abs(terms[index - 1].value) >= math.abs(terms[index].value),
+            "terms must be ordered by how much they mattered")
+    end
+
+    -- And the explanation must add up to the score, or it is a story about
+    -- an arithmetic the addon is not actually doing.
+    local total = 0
+
+    for _, term in ipairs(terms) do
+        total = total + term.value
+    end
+
+    local scored = CN.ScoreObjective(objective)
+
+    assert(math.abs(total - scored) < 0.01,
+        string.format("the terms must sum to the score: %.2f vs %.2f",
+            total, scored))
+
+    print("  " .. #terms .. " terms, ordered by weight, summing to the score")
+end)()
+
+print("\nA plan you can actually start:")
+
+;(function()
+    local session = CN:GetModule("Session")
+
+    CN_TEST_INSTANCE   = "party"
+    CN_TEST_GROUP_SIZE = 5
+
+    CN.InvalidateRanking()
+
+    local plan = session.Plan(30)
+
+    assert(plan.blocked == "instanced",
+        "a plan cannot be walked from inside a dungeon")
+    assert(#plan.stops == 0, "so no stops are offered")
+    assert(plan.notice, "and the player is told why")
+
+    CN_TEST_INSTANCE   = nil
+    CN_TEST_GROUP_SIZE = 1
+
+    CN.InvalidateRanking()
+
+    local normal = session.Plan(30)
+
+    assert(normal.blocked == nil, "and outside, planning resumes")
+
+    print("  the planner refuses rather than laying out a route you cannot walk")
+end)()
+
+
+print("\nA whole session, end to end:")
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY PART OF THIS IS TESTED. THE SEQUENCE WAS NOT.
+    --
+    -- Scanning works. Recommending works. Routing works. Following works.
+    -- Each has its own section above, each starts from a fixture arranged to
+    -- suit it, and none of them proves the addon survives being used in the
+    -- order a player uses it -- which is the only order that has ever
+    -- mattered to anybody.
+    --
+    -- This walks one login: scan, ask, route, follow a stop, finish, and log
+    -- out. It asserts the handful of things that must be true at each step
+    -- and, more importantly, that nothing throws along the way.
+    ------------------------------------------------------------
+    local errors = CN:GetModule("Errors")
+
+    errors.Clear()
+
+    local session = CN:GetModule("Session")
+    local follow  = CN:GetModule("Follow")
+
+    -- 1. A fresh login.
+    CN.InvalidateCandidates()
+
+    local welcome = CN:GetModule("Welcome")
+
+    CN.Account().welcomed = true
+
+    -- 2. Ask the question the addon exists to answer.
+    local first = CN.Recommend(1)[1]
+
+    assert(first, "a scanned character must get an answer")
+    assert(first.name, "and it must have a name to show")
+
+    -- 3. Ask why, and why that order -- both of which read the same scoring.
+    local explained = CN.ExplainRecommendation(first)
+
+    assert(#explained > 0, "every recommendation carries a reason")
+
+    local terms = CN.ExplainScore(first)
+
+    assert(#terms > 0, "and the order can be explained")
+
+    -- 4. Route the zone.
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local route, skipped, hubs = CN.BuildZoneRoute(mapID, x, y)
+
+    assert(type(route) == "table", "a route is a list")
+    assert(type(hubs) == "table", "grouped into stops")
+
+    -- 5. And what is outside it.
+    local otherZones = CN.BuildCrossZoneRoute()
+
+    assert(type(otherZones) == "table", "the next zone is costable")
+
+    -- 6. Plan the time available.
+    local plan = session.Plan(30)
+
+    assert(plan and plan.minutes == 30, "a plan covers the minutes asked for")
+
+    -- 7. Follow the route, clear a stop, and stop following.
+    follow.Start()
+
+    assert(follow.active, "follow mode starts")
+    assert(follow.completed == 0, "with nothing cleared yet")
+
+    follow.NoteStopCleared()
+
+    assert(follow.completed == 1, "and counts what is cleared")
+
+    follow.Stop()
+
+    assert(not follow.active, "and stops when told")
+
+    -- 8. Log out. Speed samples, session length and the error summary all
+    --    have to survive this without complaint.
+    CN.FireEvent("PLAYER_LOGOUT")
+
+    -- 9. NOTHING may have gone wrong in any of that.
+    assert(errors.Count() == 0,
+        errors.Count() .. " error(s) during an ordinary session: "
+        .. (errors.All()[1] and (errors.All()[1].context .. " -- "
+            .. errors.All()[1].message) or ""))
+
+    print("  login, ask, explain, route, plan, follow, log out -- no errors")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")
