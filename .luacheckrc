@@ -42,7 +42,7 @@ read_globals = {
     -- Saved instances and the Adventure Guide (Encounter Journal). The EJ
     -- functions are globals rather than a namespaced table, which is why
     -- there are so many of them.
-    "GetNumSavedInstances", "GetSavedInstanceInfo",
+    "GetNumSavedInstances", "GetSavedInstanceInfo", "C_TaxiMap",
     "EncounterJournal", "EJ_SelectInstance", "EJ_GetCurrentInstance",
     "EJ_GetInstanceInfo", "EJ_GetEncounterInfoByIndex", "EJ_GetEncounterInfo",
     "EJ_SetSearch", "EJ_ClearSearch", "EJ_GetNumSearchResults",

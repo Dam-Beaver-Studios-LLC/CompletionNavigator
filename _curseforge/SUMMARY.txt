@@ -1,1 +1,1 @@
-Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, including the lockouts you are part-way through, batches nearby work into stops, routes it on your map, and shows what is between you and what you want.
+Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, costs the journey the way you would actually make it (flights included), batches nearby work into stops, and shows what is between you and what you want.

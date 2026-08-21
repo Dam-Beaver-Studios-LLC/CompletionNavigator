@@ -724,7 +724,10 @@ end
 CN.RegisterCandidateProvider("Quests", function()
     local candidates = {}
 
-    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+    -- The coordinates are no longer needed here: travel cost is asked for
+    -- by map and point, and CN.TravelCost reads the player's position itself
+    -- so that every provider costs a journey the same way.
+    local playerMap = CN.GetPlayerPosition()
 
     local seen = {}
 
@@ -809,15 +812,21 @@ CN.RegisterCandidateProvider("Quests", function()
         if mapID and playerMap then
             if mapID == playerMap then
                 table.insert(reasons, "in your current zone")
+            end
 
-                if x and y and playerX and playerY then
-                    local dx = x - playerX
-                    local dy = y - playerY
+            -- COSTED AS THE JOURNEY YOU WOULD ACTUALLY MAKE.
+            --
+            -- Before 0.42.0 this was a straight line within the zone and a
+            -- flat 25 for anywhere else -- so the zone over the ridge and the
+            -- far side of the continent cost exactly the same, and a zone
+            -- with a flight master in it cost the same as one without.
+            local measured, fromTravel = CN.TravelCost(mapID, x, y)
 
-                    travel = math.sqrt((dx * dx) + (dy * dy)) * 10
-                end
-            else
-                travel = 25
+            travel = measured or travel
+
+            if fromTravel and mapID ~= playerMap then
+                table.insert(reasons, "another zone, costed by how long the "
+                    .. "journey actually takes")
             end
         elseif not mapID then
             -- Unknown location: usable as a suggestion, useless for routing.

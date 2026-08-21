@@ -19,6 +19,8 @@ Pin a mount, an appearance, an achievement, a reputation â€” anything you a
 
 Every step in a chain carries a state. Done steps are behind you, one step is marked **next**, and blocked steps say what is blocking them. The **Next step** button goes to that step rather than to the goal itself â€” because the mount may be behind a dungeon you cannot enter yet, while its attunement quest is forty yards away.
 
+It also says how long the whole thing is likely to take â€” as a **range**, never a figure, because task times vary by more than a third with competition, group size and luck. Where more than half the steps are kinds of thing it has never watched you do, it says *time unknown* and how many, rather than averaging its way to a number that looks like a fact.
+
 Where the game supplies a real denominator â€” achievement criteria, reputation standing â€” you get a real bar. Where it does not, you get the truth instead of a bar. An appearance has several sources and needs only one of them, so it lists them and says so rather than pretending you are "1 of 9" of the way there.
 
 ## Follow the route
@@ -39,7 +41,9 @@ Off by default, and it will not fight you: it advances when a stop is **done**, 
 
 Half an hour is not the same question as "what should I do next", and it gets its own answer: the stops that fit, in walking order, with what each one costs.
 
-Travel time is **computed** from real distances and from how fast you actually move â€” the addon watches your position and works it out, discarding flight paths and loading screens. Task time is **learned** from your own play. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
+Travel time is **computed** from the journey you would actually make: run to the nearest flight point **you have discovered**, fly, run from the far end â€” against simply running the whole way, whichever is quicker. Your running speed is measured from your own play, and so is your flying speed, because the client does not report it and it differs between expansions. Task time is **learned** the same way. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
+
+A journey it cannot model â€” another continent, reached by a portal â€” returns **nothing** rather than a large number. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
 ## Aim it in one command
 
@@ -132,6 +136,7 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **The Great Vault** | All three rows, what is unlocked, and what is still one step away |
 | **Dungeon & raid lockouts** | What you are saved to, how many bosses are left in it, and when it resets |
 | **Boss loot** | The game's own Adventure Guide, so a drop can name the boss it comes from |
+| **Flight points** | The ones you have discovered, so a journey is costed the way you would actually make it |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
 
 Where the game does not supply a trustworthy total, it reports **counts rather than a percentage**. That is a deliberate rule, not a gap â€” an invented denominator is a number that looks like a fact.
@@ -142,7 +147,7 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | --- | --- |
 | **Ranks** | One list, ordered by what is actually worth doing now, with a stated reason for every line |
 | **Prioritises deadlines** | Dailies, timed quests, world quests, capped currencies and the Vault all climb as their reset approaches, steeply in the last stretch |
-| **Fits your session** | A plan sized to the minutes you have, from measured travel and learned task times |
+| **Fits your session** | A plan sized to the minutes you have, from measured travel â€” flights included â€” and learned task times |
 | **Explains** | `/cn why` names what is blocking something â€” level, reputation, profession, faction, an unfinished prerequisite |
 | **Batches** | Nearby work collapses into stops so you stop crossing the zone and coming back |
 | **Routes** | Stop to stop, improved with a second pass, drawn on your map in walking order |
@@ -214,6 +219,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn instances` | What you are saved to, and how much of it is left |
 | `/cn drops <name>` | Which boss drops it, and whether you are locked to it |
 | `/cn learned` | What the addon has worked out about how you play |
+| `/cn travel` | How long it takes to reach the top recommendation, and by what route |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |

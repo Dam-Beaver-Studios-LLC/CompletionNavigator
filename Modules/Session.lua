@@ -502,21 +502,26 @@ end
 function Session.EstimateHub(hub, fromX, fromY)
     local confident = true
 
-    local nav = CN:GetModule("Navigation")
-
     local travelSeconds = 0
 
-    if nav and nav.DistanceYards and hub.mapID and hub.x and hub.y
-        and fromX and fromY then
+    -- ASK TRAVEL, WHICH KNOWS ABOUT FLIGHT PATHS.
+    --
+    -- This used to be a straight line at running speed between two points on
+    -- the same map, and gave up entirely when the maps differed -- so a stop
+    -- one zone away was either uncosted or costed as though you would run
+    -- there in a straight line through the mountains.
+    local travel = CN:GetModule("Travel")
 
-        local yards = nav.DistanceYards(hub.mapID, fromX, fromY, hub.x, hub.y)
+    local playerMap = CN.GetPlayerPosition()
 
-        if yards then
-            local rate, measured = Session.Speed()
+    if travel and hub.mapID and hub.x and hub.y and fromX and fromY and playerMap then
+        local seconds, sure = travel.EstimateSeconds(
+            playerMap, fromX, fromY, hub.mapID, hub.x, hub.y)
 
-            travelSeconds = yards / math.max(0.5, rate)
+        if seconds then
+            travelSeconds = seconds
 
-            if not measured then
+            if not sure then
                 confident = false
             end
         else

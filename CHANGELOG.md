@@ -7,6 +7,65 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.42.0]
+
+Travel that knows about flight paths, an honest answer to "how long will this
+take", and prerequisite chains that finally reach the shipped data.
+
+### Fixed
+
+- **Every travel figure in the addon was a straight line.** Within a zone that
+  is very nearly right. Between zones it was not even approximately right, and
+  the addon covered that with a flat penalty: anything outside your current
+  zone cost the same whether it was over the next ridge or on the far side of
+  the continent. A journey is now costed the way you would actually make it --
+  run to the nearest flight point **you have discovered**, fly, run from the
+  arrival point -- against simply running the whole way, whichever is quicker.
+  This is why `/cn plan 30` could put a nine-minute flight into your half hour.
+- **Flight speed was not merely unknown, it was thrown away.** The addon has
+  measured your running speed for several releases and explicitly discarded
+  taxi movement while doing it. It now measures your flying speed too, from
+  your own flights, and says *estimated* until it has. The client does not
+  expose the number and it differs between expansions, so measuring is the
+  only honest way to have it.
+- **Harvested prerequisites could never reach `Data/Quests.lua`.** The addon
+  wrote them, the toolkit's parser could not see an array field at all, and so
+  it silently dropped every chain -- both halves looking like they worked. The
+  parser reads them now, `cn.ps1 harvest` writes them, and a row that already
+  exists for its location gains its chain rather than being skipped whole. A
+  `requires` that is already there is never overwritten: curated data outranks
+  observation, so this is an insert, not an update.
+- **Two maps meant no distance at all.** Cross-map distances are now computed
+  in world coordinates, which are continuous across a continent, instead of in
+  map coordinates, which are normalised per map and cannot be compared.
+
+### Added
+
+- **`/cn chase` now says how long the goal will take.** The addon already
+  measured how long each kind of objective takes *you* and how long it takes
+  to get anywhere; nothing multiplied them. It is a **range**, not a figure,
+  because task times vary by more than a third with competition, group size
+  and luck -- and where more than half the steps are kinds of thing it has
+  never watched you do, it says *time unknown* and how many, rather than
+  averaging its way to a number that looks like a fact.
+- **`/cn travel`** -- how long it takes to reach the top recommendation and by
+  what route: how far to the flight point, how far in the air, how far at the
+  far end, and what running the whole way would have cost. Also how many
+  flight points you know and whether your flying speed has been measured yet.
+
+### Notes
+
+- Two continents with no flight between them return **nothing**, not a large
+  number. Portals and boats are not modelled, and a fabricated four hours
+  would be worse than an admission.
+- Flight points you have not discovered do not exist as far as the costing is
+  concerned, because they do not exist for you either. A pessimistic plan you
+  can follow beats an optimistic one you cannot.
+- The one invented constant in the travel model is the twenty seconds a flight
+  costs before it starts moving -- talking to the flight master, mounting, and
+  landing. It is a constant rather than a measurement because timing it would
+  mostly be timing how fast you read a gossip window.
+
 ## [0.41.0]
 
 The addon can see inside a dungeon, it learns what you actually do, and its

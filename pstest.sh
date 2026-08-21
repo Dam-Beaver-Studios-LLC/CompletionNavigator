@@ -99,6 +99,9 @@ CompletionNavigatorDB = {
 				["mapID"] = 2112,
 				["x"] = 0.611,
 				["y"] = 0.482,
+				["observedRequires"] = {
+					71230, 71231,
+				},
 				["maybeRequires"] = {
 					1, 2,
 				},
@@ -122,9 +125,67 @@ grep -q '71234' Data/Quests.lua || { echo "FAIL: harvested quest not written"; e
 grep -q '555'   Data/Quests.lua && { echo "FAIL: questMetadata leaked into the static database"; exit 1; }
 grep -q '99001' Data/Quests.lua && { echo "FAIL: unlocated quest added without -Force"; exit 1; }
 
+# THE CHAIN MUST COME WITH IT.
+#
+# Prerequisites are the whole reason the harvest exists, and until 0.42.0 the
+# toolkit's parser could not see an array field at all -- so the addon wrote
+# them, the toolkit silently dropped them, and both halves looked like they
+# worked.
+grep -q 'requires  = { 71230, 71231 }' Data/Quests.lua \
+  || { echo "FAIL: harvested prerequisites were not written"; exit 1; }
+
+# And a guess must NOT: maybeRequires is what the addon calls an ordering it
+# has seen too few times to believe.
+grep -q 'requires  = { 1, 2 }' Data/Quests.lua \
+  && { echo "FAIL: unconfident prerequisites were shipped as fact"; exit 1; }
+
 # Escaped quotes must survive the round trip, and the file must still be Lua.
 grep -q 'A Quest With .* In It' Data/Quests.lua || { echo "FAIL: quoted name mangled"; exit 1; }
 luac5.4 -p Data/Quests.lua || { echo "FAIL: harvest produced invalid Lua"; exit 1; }
+
+# FOLDING INTO A ROW THAT ALREADY EXISTS.
+#
+# A row is usually added for its location long before enough characters have
+# walked the chain for its prerequisites to be believed. Skipping the whole row
+# meant that evidence, when it finally arrived, had nowhere to go.
+mkdir -p fixtures-tmp
+cat > fixtures-tmp/sv2.lua <<'SAVEDVARS2'
+
+CompletionNavigatorDB = {
+	["account"] = {
+		["questHarvest"] = {
+			[8237] = {
+				["name"] = "Already Curated",
+				["mapID"] = 94,
+				["x"] = 0.42,
+				["y"] = 0.55,
+				["observedRequires"] = {
+					8230,
+				},
+			},
+		},
+	},
+}
+SAVEDVARS2
+
+$PWSH -NoProfile -File ./cn.ps1 harvest ./fixtures-tmp/sv2.lua > harvestfold.log 2>&1
+grep -q "chains folded into existing rows 1" harvestfold.log \
+  || { echo "FAIL: a chain was not folded into the existing row"; cat harvestfold.log; exit 1; }
+grep -q 'requires  = { 8230 }' Data/Quests.lua \
+  || { echo "FAIL: the folded chain is not in the file"; exit 1; }
+luac5.4 -p Data/Quests.lua || { echo "FAIL: folding produced invalid Lua"; exit 1; }
+
+# And folding must be idempotent: a second run must not duplicate it.
+$PWSH -NoProfile -File ./cn.ps1 harvest ./fixtures-tmp/sv2.lua > harvestfold2.log 2>&1
+FOLDED=$(grep -c 'requires  = { 8230 }' Data/Quests.lua)
+[ "$FOLDED" = "1" ] \
+  || { echo "FAIL: folding is not idempotent ($FOLDED copies)"; exit 1; }
+
+# The fixture must not linger where `check` will find it: a stray .lua file in
+# the tree is exactly the thing check is supposed to complain about, and a test
+# that leaves rubbish behind makes a later test fail for a reason that has
+# nothing to do with what it is testing.
+rm -rf fixtures-tmp
 
 # Running it again must add nothing.
 $PWSH -NoProfile -File ./cn.ps1 harvest ./sv.lua > harvest2.log 2>&1

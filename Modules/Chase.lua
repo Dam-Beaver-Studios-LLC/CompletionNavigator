@@ -511,6 +511,155 @@ function Chase.NavigateNext(chain)
 end
 
 ------------------------------------------------------------
+-- HOW LONG IS THIS GOING TO TAKE
+------------------------------------------------------------
+
+-- The addon already measures two things and never multiplied them together:
+-- how long each kind of objective takes this player (Session, from watching)
+-- and how long it takes to get anywhere (Travel, from flight paths and
+-- measured speed). A chain is a list of steps of known types in known places.
+--
+-- RULES, WHICH ARE THE SAME RULES AS EVERYWHERE ELSE IN THIS ADDON.
+--
+--   * A step whose type has never been timed contributes nothing and is
+--     COUNTED as unknown. It is not filled in with an average of other types.
+--   * The result is a RANGE, not a figure. Anybody who has played knows that
+--     "four hours" is a claim nobody can make; "three to six hours" is one
+--     the data actually supports.
+--   * If more steps are unknown than known, no estimate is offered at all.
+--     Half an answer stated confidently is worse than "not enough to say".
+
+-- How wide the range is either side of the estimate. Chosen to be honest
+-- rather than flattering: task times in this game vary by more than a third
+-- depending on competition for mobs, group size and luck.
+Chase.estimateSpread = 0.4
+
+-- Below this proportion of steps timed, say nothing.
+Chase.estimateCoverage = 0.5
+
+function Chase.Estimate(chain)
+    if type(chain) ~= "table" or #(chain.steps or {}) == 0 then
+        return nil
+    end
+
+    local session = CN:GetModule("Session")
+
+    if not session or not session.TypicalSeconds then
+        return nil
+    end
+
+    local seconds, timed, unknown = 0, 0, 0
+
+    for _, step in ipairs(chain.steps) do
+        -- Notes are context and done steps are behind you; neither is work.
+        if step.state ~= Chase.states.DONE and step.state ~= Chase.states.NOTE then
+            local objectiveType = step.objectiveType or chain.type
+
+            local typical = objectiveType and session.TypicalSeconds(objectiveType)
+
+            if typical then
+                seconds = seconds + typical
+                timed   = timed + 1
+            else
+                unknown = unknown + 1
+            end
+        end
+    end
+
+    local outstanding = timed + unknown
+
+    if outstanding == 0 then
+        return nil
+    end
+
+    -- Travel to the next step, once. Not to every step: the addon does not
+    -- know the order a chain will actually be walked, and adding a journey
+    -- per step would inflate the number by more than the work itself.
+    local travelSeconds = 0
+
+    local travel = CN:GetModule("Travel")
+
+    local step = chain.next
+
+    if travel and step and (step.mapID or chain.mapID) then
+        local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+        local estimated = playerMap and travel.EstimateSeconds(
+            playerMap, playerX, playerY,
+            step.mapID or chain.mapID,
+            step.x or chain.x,
+            step.y or chain.y)
+
+        travelSeconds = estimated or 0
+    end
+
+    if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then
+        return {
+            seconds     = nil,
+            timed       = timed,
+            unknown     = unknown,
+            travel      = travelSeconds,
+            enough      = false,
+        }
+    end
+
+    -- Steps that have never been timed still have to happen. Charging them at
+    -- the average of the ones that have is the least-wrong option available,
+    -- and it widens the range rather than hiding in it.
+    local perStep = seconds / timed
+
+    local total = seconds + (unknown * perStep) + travelSeconds
+
+    return {
+        seconds = total,
+        low     = total * (1 - Chase.estimateSpread),
+        high    = total * (1 + Chase.estimateSpread),
+        timed   = timed,
+        unknown = unknown,
+        travel  = travelSeconds,
+        enough  = true,
+    }
+end
+
+function Chase.DescribeEstimate(chain)
+    local estimate = Chase.Estimate(chain)
+
+    if not estimate then
+        return nil
+    end
+
+    local session = CN:GetModule("Session")
+
+    local function format(seconds)
+        return session and session.FormatDuration
+            and session.FormatDuration(seconds)
+            or (math.floor((seconds or 0) / 60) .. "m")
+    end
+
+    if not estimate.enough then
+        return "time unknown |cff999999-- "
+            .. estimate.unknown .. " of "
+            .. (estimate.timed + estimate.unknown)
+            .. " steps are kinds of thing this addon has not watched you do "
+            .. "often enough to time|r"
+    end
+
+    local text = "roughly " .. format(estimate.low) .. " to " .. format(estimate.high)
+
+    if estimate.travel > 60 then
+        text = text .. " |cff999999including " .. format(estimate.travel)
+            .. " to get there|r"
+    end
+
+    if estimate.unknown > 0 then
+        text = text .. " |cff999999(" .. estimate.unknown
+            .. " step(s) untimed, charged at the rate of the rest)|r"
+    end
+
+    return text
+end
+
+------------------------------------------------------------
 -- COMMAND
 ------------------------------------------------------------
 
@@ -553,6 +702,12 @@ local function PrintChain(chain)
             step.text))
 
         shown = shown + 1
+    end
+
+    local estimate = Chase.DescribeEstimate(chain)
+
+    if estimate then
+        Print("  |cffffd100Time:|r " .. estimate)
     end
 
     if chain.character then

@@ -252,7 +252,9 @@ end
 -- reads both but reports them differently, so "you have not done X" and "on
 -- three of your characters X came first" never read as the same claim.
 function Harvest.PublishConfident()
-    local published = 0
+    local published, recorded = 0, 0
+
+    local store = Store()
 
     for questID, prerequisites in pairs(Harvest.AllConfident()) do
         CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
@@ -260,6 +262,34 @@ function Harvest.PublishConfident()
         })
 
         published = published + 1
+
+        -- AND WRITE IT FLAT, so the toolkit can fold it into Data\Quests.lua
+        -- without having to understand the nested evidence table.
+        --
+        -- Until 0.42.0 the confident sets existed only in memory and in the
+        -- dependency graph, which meant the shipped static data could never
+        -- learn anything from real play -- the whole point of harvesting.
+        --
+        -- UNDER ITS OWN NAME, NOT `requires`.
+        --
+        -- Writing it as `requires` was the first attempt and it was wrong: the
+        -- eligibility checker reads that field as curated fact, so /cn why
+        -- stopped saying "on three of your characters X came first" and
+        -- started saying "X is required" -- inference masquerading as
+        -- authority, through a door I had just built for it. The existing
+        -- test for that distinction caught it.
+        local record = store[questID]
+
+        if record and not record.observedRequires and #prerequisites > 0 then
+            record.observedRequires = prerequisites
+
+            recorded = recorded + 1
+        end
+    end
+
+    if recorded > 0 then
+        DebugPrint("Recorded " .. recorded
+            .. " observed prerequisite set(s) for export.")
     end
 
     if published > 0 then

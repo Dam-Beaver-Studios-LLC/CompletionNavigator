@@ -69,7 +69,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.41.0'
+$script:ToolkitVersion = '0.42.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +117,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.41.0"
+CN.version     = "0.42.0"
 CN.dbVersion   = 6
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -10666,7 +10666,10 @@ end
 CN.RegisterCandidateProvider("Quests", function()
     local candidates = {}
 
-    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+    -- The coordinates are no longer needed here: travel cost is asked for
+    -- by map and point, and CN.TravelCost reads the player's position itself
+    -- so that every provider costs a journey the same way.
+    local playerMap = CN.GetPlayerPosition()
 
     local seen = {}
 
@@ -10751,15 +10754,21 @@ CN.RegisterCandidateProvider("Quests", function()
         if mapID and playerMap then
             if mapID == playerMap then
                 table.insert(reasons, "in your current zone")
+            end
 
-                if x and y and playerX and playerY then
-                    local dx = x - playerX
-                    local dy = y - playerY
+            -- COSTED AS THE JOURNEY YOU WOULD ACTUALLY MAKE.
+            --
+            -- Before 0.42.0 this was a straight line within the zone and a
+            -- flat 25 for anywhere else -- so the zone over the ridge and the
+            -- far side of the continent cost exactly the same, and a zone
+            -- with a flight master in it cost the same as one without.
+            local measured, fromTravel = CN.TravelCost(mapID, x, y)
 
-                    travel = math.sqrt((dx * dx) + (dy * dy)) * 10
-                end
-            else
-                travel = 25
+            travel = measured or travel
+
+            if fromTravel and mapID ~= playerMap then
+                table.insert(reasons, "another zone, costed by how long the "
+                    .. "journey actually takes")
             end
         elseif not mapID then
             -- Unknown location: usable as a suggestion, useless for routing.
@@ -14623,7 +14632,9 @@ end
 -- reads both but reports them differently, so "you have not done X" and "on
 -- three of your characters X came first" never read as the same claim.
 function Harvest.PublishConfident()
-    local published = 0
+    local published, recorded = 0, 0
+
+    local store = Store()
 
     for questID, prerequisites in pairs(Harvest.AllConfident()) do
         CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
@@ -14631,6 +14642,34 @@ function Harvest.PublishConfident()
         })
 
         published = published + 1
+
+        -- AND WRITE IT FLAT, so the toolkit can fold it into Data\Quests.lua
+        -- without having to understand the nested evidence table.
+        --
+        -- Until 0.42.0 the confident sets existed only in memory and in the
+        -- dependency graph, which meant the shipped static data could never
+        -- learn anything from real play -- the whole point of harvesting.
+        --
+        -- UNDER ITS OWN NAME, NOT `requires`.
+        --
+        -- Writing it as `requires` was the first attempt and it was wrong: the
+        -- eligibility checker reads that field as curated fact, so /cn why
+        -- stopped saying "on three of your characters X came first" and
+        -- started saying "X is required" -- inference masquerading as
+        -- authority, through a door I had just built for it. The existing
+        -- test for that distinction caught it.
+        local record = store[questID]
+
+        if record and not record.observedRequires and #prerequisites > 0 then
+            record.observedRequires = prerequisites
+
+            recorded = recorded + 1
+        end
+    end
+
+    if recorded > 0 then
+        DebugPrint("Recorded " .. recorded
+            .. " observed prerequisite set(s) for export.")
     end
 
     if published > 0 then
@@ -20346,6 +20385,155 @@ function Chase.NavigateNext(chain)
 end
 
 ------------------------------------------------------------
+-- HOW LONG IS THIS GOING TO TAKE
+------------------------------------------------------------
+
+-- The addon already measures two things and never multiplied them together:
+-- how long each kind of objective takes this player (Session, from watching)
+-- and how long it takes to get anywhere (Travel, from flight paths and
+-- measured speed). A chain is a list of steps of known types in known places.
+--
+-- RULES, WHICH ARE THE SAME RULES AS EVERYWHERE ELSE IN THIS ADDON.
+--
+--   * A step whose type has never been timed contributes nothing and is
+--     COUNTED as unknown. It is not filled in with an average of other types.
+--   * The result is a RANGE, not a figure. Anybody who has played knows that
+--     "four hours" is a claim nobody can make; "three to six hours" is one
+--     the data actually supports.
+--   * If more steps are unknown than known, no estimate is offered at all.
+--     Half an answer stated confidently is worse than "not enough to say".
+
+-- How wide the range is either side of the estimate. Chosen to be honest
+-- rather than flattering: task times in this game vary by more than a third
+-- depending on competition for mobs, group size and luck.
+Chase.estimateSpread = 0.4
+
+-- Below this proportion of steps timed, say nothing.
+Chase.estimateCoverage = 0.5
+
+function Chase.Estimate(chain)
+    if type(chain) ~= "table" or #(chain.steps or {}) == 0 then
+        return nil
+    end
+
+    local session = CN:GetModule("Session")
+
+    if not session or not session.TypicalSeconds then
+        return nil
+    end
+
+    local seconds, timed, unknown = 0, 0, 0
+
+    for _, step in ipairs(chain.steps) do
+        -- Notes are context and done steps are behind you; neither is work.
+        if step.state ~= Chase.states.DONE and step.state ~= Chase.states.NOTE then
+            local objectiveType = step.objectiveType or chain.type
+
+            local typical = objectiveType and session.TypicalSeconds(objectiveType)
+
+            if typical then
+                seconds = seconds + typical
+                timed   = timed + 1
+            else
+                unknown = unknown + 1
+            end
+        end
+    end
+
+    local outstanding = timed + unknown
+
+    if outstanding == 0 then
+        return nil
+    end
+
+    -- Travel to the next step, once. Not to every step: the addon does not
+    -- know the order a chain will actually be walked, and adding a journey
+    -- per step would inflate the number by more than the work itself.
+    local travelSeconds = 0
+
+    local travel = CN:GetModule("Travel")
+
+    local step = chain.next
+
+    if travel and step and (step.mapID or chain.mapID) then
+        local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+        local estimated = playerMap and travel.EstimateSeconds(
+            playerMap, playerX, playerY,
+            step.mapID or chain.mapID,
+            step.x or chain.x,
+            step.y or chain.y)
+
+        travelSeconds = estimated or 0
+    end
+
+    if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then
+        return {
+            seconds     = nil,
+            timed       = timed,
+            unknown     = unknown,
+            travel      = travelSeconds,
+            enough      = false,
+        }
+    end
+
+    -- Steps that have never been timed still have to happen. Charging them at
+    -- the average of the ones that have is the least-wrong option available,
+    -- and it widens the range rather than hiding in it.
+    local perStep = seconds / timed
+
+    local total = seconds + (unknown * perStep) + travelSeconds
+
+    return {
+        seconds = total,
+        low     = total * (1 - Chase.estimateSpread),
+        high    = total * (1 + Chase.estimateSpread),
+        timed   = timed,
+        unknown = unknown,
+        travel  = travelSeconds,
+        enough  = true,
+    }
+end
+
+function Chase.DescribeEstimate(chain)
+    local estimate = Chase.Estimate(chain)
+
+    if not estimate then
+        return nil
+    end
+
+    local session = CN:GetModule("Session")
+
+    local function format(seconds)
+        return session and session.FormatDuration
+            and session.FormatDuration(seconds)
+            or (math.floor((seconds or 0) / 60) .. "m")
+    end
+
+    if not estimate.enough then
+        return "time unknown |cff999999-- "
+            .. estimate.unknown .. " of "
+            .. (estimate.timed + estimate.unknown)
+            .. " steps are kinds of thing this addon has not watched you do "
+            .. "often enough to time|r"
+    end
+
+    local text = "roughly " .. format(estimate.low) .. " to " .. format(estimate.high)
+
+    if estimate.travel > 60 then
+        text = text .. " |cff999999including " .. format(estimate.travel)
+            .. " to get there|r"
+    end
+
+    if estimate.unknown > 0 then
+        text = text .. " |cff999999(" .. estimate.unknown
+            .. " step(s) untimed, charged at the rate of the rest)|r"
+    end
+
+    return text
+end
+
+------------------------------------------------------------
 -- COMMAND
 ------------------------------------------------------------
 
@@ -20388,6 +20576,12 @@ local function PrintChain(chain)
             step.text))
 
         shown = shown + 1
+    end
+
+    local estimate = Chase.DescribeEstimate(chain)
+
+    if estimate then
+        Print("  |cffffd100Time:|r " .. estimate)
     end
 
     if chain.character then
@@ -22515,21 +22709,26 @@ end
 function Session.EstimateHub(hub, fromX, fromY)
     local confident = true
 
-    local nav = CN:GetModule("Navigation")
-
     local travelSeconds = 0
 
-    if nav and nav.DistanceYards and hub.mapID and hub.x and hub.y
-        and fromX and fromY then
+    -- ASK TRAVEL, WHICH KNOWS ABOUT FLIGHT PATHS.
+    --
+    -- This used to be a straight line at running speed between two points on
+    -- the same map, and gave up entirely when the maps differed -- so a stop
+    -- one zone away was either uncosted or costed as though you would run
+    -- there in a straight line through the mountains.
+    local travel = CN:GetModule("Travel")
 
-        local yards = nav.DistanceYards(hub.mapID, fromX, fromY, hub.x, hub.y)
+    local playerMap = CN.GetPlayerPosition()
 
-        if yards then
-            local rate, measured = Session.Speed()
+    if travel and hub.mapID and hub.x and hub.y and fromX and fromY and playerMap then
+        local seconds, sure = travel.EstimateSeconds(
+            playerMap, fromX, fromY, hub.mapID, hub.x, hub.y)
 
-            travelSeconds = yards / math.max(0.5, rate)
+        if seconds then
+            travelSeconds = seconds
 
-            if not measured then
+            if not sure then
                 confident = false
             end
         else
@@ -25701,6 +25900,692 @@ CN:RegisterCommand{
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
 
+$Embedded['Modules\Travel.lua'] = @'
+-- Modules/Travel.lua
+-- Completion Navigator :: how long it actually takes to get there.
+--
+-- WHAT WAS WRONG.
+--
+-- Every travel figure in this addon was a straight line. Within a zone that is
+-- very nearly right -- you run in roughly the direction you are going. Between
+-- zones it is not even approximately right, and the addon papered over that
+-- with a flat penalty: anything outside your current zone cost the same
+-- whether it was over the next ridge or on the far side of the continent.
+--
+-- That flat number is why `/cn plan 30` could put something in your half hour
+-- that is a flight and a ride away, and why `/cn zones` ranked a zone with a
+-- flight master in it the same as one without.
+--
+-- WHAT THIS DOES.
+--
+-- Costs a journey the way you would actually make it: run to the nearest
+-- flight point you know, fly, run from the arrival point to the target -- and
+-- compares that against simply running the whole way, taking whichever is
+-- quicker. Flight points you have not discovered do not exist as far as this
+-- is concerned, because they do not exist for you either.
+--
+-- WHAT IT REFUSES TO DO.
+--
+-- Guess. Flight speed is MEASURED, from your own flights, exactly the way
+-- running speed already is -- the client will not tell us and the number
+-- differs between expansions. Until it has been measured, estimates are
+-- returned with confidence false and every caller says so out loud rather
+-- than printing a number that looks like a fact.
+--
+-- Two continents with no flight between them return nil, not a large number.
+-- "I do not know" is an answer; a fabricated four hours is not.
+
+local ADDON_NAME, CN = ...
+
+local Travel = CN:RegisterModule("Travel")
+
+local Print      = CN.Print
+local DebugPrint = CN.DebugPrint
+local Blizzard   = CN.Blizzard
+
+------------------------------------------------------------
+-- POINTS IN THE WORLD
+------------------------------------------------------------
+
+-- Map coordinates are normalized per map, so two points on different maps
+-- cannot be compared at all in map space. World coordinates can: they are
+-- yards, they are continuous across a continent, and the client will convert
+-- into them. This is what makes a cross-zone distance possible where the old
+-- code simply gave up and charged a flat penalty.
+-- MEMOISED, and safely so: a map coordinate's world position is a property of
+-- the world, not of the player, so it cannot go stale. The conversion is a
+-- client call with a table allocation on either side of it, and costing a
+-- journey needs four of them -- which the quest provider then does once per
+-- candidate.
+--
+-- Bounded rather than unbounded: a long session touches a lot of points, and a
+-- cache with no ceiling is a memory leak with good intentions.
+local worldPoints = {}
+local worldPointCount = 0
+
+Travel.worldPointCap = 2048
+
+function Travel.ForgetWorldPoints()
+    worldPoints = {}
+    worldPointCount = 0
+end
+
+function Travel.WorldPoint(mapID, x, y)
+    if not (mapID and x and y) then
+        return nil
+    end
+
+    -- Rounded to about a yard on any map. Finer than that is precision the
+    -- callers do not use and cache entries nothing will ever hit again.
+    local key = mapID .. ":" .. math.floor(x * 10000) .. ":" .. math.floor(y * 10000)
+
+    local cached = worldPoints[key]
+
+    if cached ~= nil then
+        if cached == false then
+            return nil
+        end
+
+        return cached
+    end
+
+    if not C_Map or not C_Map.GetWorldPosFromMapPos or not CreateVector2D then
+        return nil
+    end
+
+    local ok, continentID, position =
+        pcall(C_Map.GetWorldPosFromMapPos, mapID, CreateVector2D(x, y))
+
+    if not ok or not position then
+        -- NOT cached as a miss: during a loading screen the client refuses
+        -- every conversion, and remembering that would poison the cache for
+        -- the rest of the session.
+        return nil
+    end
+
+    local wx, wy
+
+    if position.GetXY then
+        local gotXY, gx, gy = pcall(position.GetXY, position)
+
+        if gotXY then
+            wx, wy = gx, gy
+        end
+    end
+
+    wx = wx or position.x
+    wy = wy or position.y
+
+    if not wx or not wy then
+        return nil
+    end
+
+    local point = { continent = continentID, x = wx, y = wy }
+
+    if worldPointCount >= Travel.worldPointCap then
+        Travel.ForgetWorldPoints()
+    end
+
+    worldPoints[key] = point
+    worldPointCount  = worldPointCount + 1
+
+    return point
+end
+
+-- Yards between two world points, or nil when they are not on the same
+-- continent -- in which case the straight-line number would be meaningless
+-- rather than merely imprecise.
+function Travel.YardsBetweenPoints(from, to)
+    if not from or not to then
+        return nil
+    end
+
+    if from.continent and to.continent and from.continent ~= to.continent then
+        return nil
+    end
+
+    local dx = to.x - from.x
+    local dy = to.y - from.y
+
+    return math.sqrt((dx * dx) + (dy * dy))
+end
+
+-- The headline: distance between two points that may be on different maps.
+function Travel.YardsBetween(fromMapID, fromX, fromY, toMapID, toX, toY)
+    return Travel.YardsBetweenPoints(
+        Travel.WorldPoint(fromMapID, fromX, fromY),
+        Travel.WorldPoint(toMapID, toX, toY))
+end
+
+------------------------------------------------------------
+-- FLIGHT POINTS
+------------------------------------------------------------
+
+-- The continent a map belongs to. Taxi nodes are listed per continent, and a
+-- zone map will not answer for them.
+function Travel.ContinentFor(mapID)
+    local guard = 0
+
+    while mapID and guard < 12 do
+        local info = Blizzard.GetMapInfo(mapID)
+
+        if not info then
+            return nil
+        end
+
+        -- Enum.UIMapType.Continent == 2.
+        if info.mapType == 2 then
+            return mapID
+        end
+
+        mapID = info.parentMapID
+
+        guard = guard + 1
+    end
+
+    return nil
+end
+
+-- Cached per continent. The set of flight points you know changes only when
+-- you discover one, which is rare and which the client announces.
+local nodeCache = {}
+
+function Travel.ForgetNodes()
+    nodeCache = {}
+end
+
+-- Only nodes you can actually use. An undiscovered flight master is not a
+-- shortcut, and costing a journey through one would produce a plan you cannot
+-- follow -- which is worse than a pessimistic plan you can.
+local function IsUsable(node)
+    if not node then
+        return false
+    end
+
+    if not Enum or not Enum.FlightPathState then
+        -- Unknown enum: trust the client's list rather than dropping
+        -- everything, and let the distance maths decide.
+        return true
+    end
+
+    return node.state == Enum.FlightPathState.Current
+        or node.state == Enum.FlightPathState.Reachable
+end
+
+function Travel.KnownNodes(mapID)
+    local continent = Travel.ContinentFor(mapID)
+
+    if not continent then
+        return {}, nil
+    end
+
+    if nodeCache[continent] then
+        return nodeCache[continent], continent
+    end
+
+    if not C_TaxiMap or not C_TaxiMap.GetAllTaxiNodes then
+        return {}, continent
+    end
+
+    local ok, nodes = pcall(C_TaxiMap.GetAllTaxiNodes, continent)
+
+    if not ok or type(nodes) ~= "table" then
+        return {}, continent
+    end
+
+    local usable = {}
+
+    for _, node in ipairs(nodes) do
+        if IsUsable(node) and node.position then
+            local nx, ny
+
+            if node.position.GetXY then
+                local gotXY, gx, gy = pcall(node.position.GetXY, node.position)
+
+                if gotXY then
+                    nx, ny = gx, gy
+                end
+            end
+
+            nx = nx or node.position.x
+            ny = ny or node.position.y
+
+            local point = nx and Travel.WorldPoint(continent, nx, ny)
+
+            if point then
+                table.insert(usable, {
+                    name  = node.name,
+                    id    = node.nodeID,
+                    point = point,
+                })
+            end
+        end
+    end
+
+    nodeCache[continent] = usable
+
+    return usable, continent
+end
+
+-- Nearest known flight point to a world point, and how far it is.
+function Travel.NearestNode(point, nodes)
+    if not point then
+        return nil, nil
+    end
+
+    local best, bestYards
+
+    for _, node in ipairs(nodes or {}) do
+        local yards = Travel.YardsBetweenPoints(point, node.point)
+
+        if yards and (not bestYards or yards < bestYards) then
+            best, bestYards = node, yards
+        end
+    end
+
+    return best, bestYards
+end
+
+------------------------------------------------------------
+-- HOW FAST YOU FLY
+------------------------------------------------------------
+
+-- MEASURED, not assumed. Flight-path speed differs by expansion and by
+-- whether the route is a modern one, the client does not expose it, and
+-- Session already discards taxi movement when learning running speed -- so
+-- nothing in the addon knew this number at all.
+--
+-- Seeded with a figure that is in the right area so the feature does
+-- something on day one, and flagged as unmeasured until the player has
+-- actually flown, exactly as running speed is.
+Travel.seededFlightSpeed = 25
+
+-- The part of a flight that is not flying: talking to the flight master,
+-- taking off, and landing. A constant rather than a measurement because it is
+-- dominated by a fixed animation, and because the alternative -- timing the
+-- gossip window -- would be measuring the player's reading speed.
+Travel.flightOverheadSeconds = 20
+
+Travel.speedSampleCap = 20
+
+local function Samples()
+    local account = CN.Account("flight")
+
+    account.samples = account.samples or {}
+
+    return account.samples
+end
+
+local flight = {
+    point = nil,
+    at    = nil,
+    yards = 0,
+    seconds = 0,
+}
+
+local function Median(values)
+    if not values or #values == 0 then
+        return nil
+    end
+
+    local sorted = {}
+
+    for _, value in ipairs(values) do
+        table.insert(sorted, value)
+    end
+
+    table.sort(sorted)
+
+    local middle = math.floor(#sorted / 2)
+
+    if #sorted % 2 == 1 then
+        return sorted[middle + 1]
+    end
+
+    return (sorted[middle] + sorted[middle + 1]) / 2
+end
+
+-- Returns yards per second and whether it was measured.
+function Travel.FlightSpeed()
+    local measured = Median(Samples())
+
+    if measured and measured > 0 then
+        return measured, true
+    end
+
+    return Travel.seededFlightSpeed, false
+end
+
+function Travel.FlightSampleCount()
+    return #Samples()
+end
+
+-- Called on a timer while the player is on a taxi. Accumulates distance and
+-- time for the whole flight and records ONE sample when it ends, rather than
+-- one per tick: a flight is a single observation of a constant speed, and
+-- treating each tick as independent would let a long flight drown out every
+-- other measurement.
+function Travel.ObserveFlight()
+    local onTaxi = UnitOnTaxi and UnitOnTaxi("player")
+
+    local now = (GetTime and GetTime()) or 0
+
+    if not onTaxi then
+        if flight.at and flight.seconds > 10 and flight.yards > 100 then
+            local speed = flight.yards / flight.seconds
+
+            -- Sanity bounds. A loading screen or a zone change mid-flight can
+            -- produce a figure no aircraft in this game achieves, and one bad
+            -- sample in a median of twenty is survivable but pointless.
+            if speed > 5 and speed < 200 then
+                local samples = Samples()
+
+                table.insert(samples, speed)
+
+                while #samples > Travel.speedSampleCap do
+                    table.remove(samples, 1)
+                end
+
+                DebugPrint(string.format(
+                    "Flight speed sampled: %.1f yards/second over %.0f yards.",
+                    speed, flight.yards))
+            end
+        end
+
+        flight.point, flight.at = nil, nil
+        flight.yards, flight.seconds = 0, 0
+
+        return false
+    end
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    local point = mapID and Travel.WorldPoint(mapID, x, y)
+
+    if point and flight.point and flight.at then
+        local yards = Travel.YardsBetweenPoints(flight.point, point)
+
+        local elapsed = now - flight.at
+
+        -- Crossing a continent boundary mid-flight yields nil, which is not a
+        -- reason to throw the flight away -- just this interval.
+        if yards and elapsed > 0 and elapsed < 10 then
+            flight.yards   = flight.yards + yards
+            flight.seconds = flight.seconds + elapsed
+        end
+    end
+
+    flight.point, flight.at = point, now
+
+    return true
+end
+
+------------------------------------------------------------
+-- THE ESTIMATE
+------------------------------------------------------------
+
+-- Returns seconds, confident, detail.
+--
+-- detail = { mode = "run"|"fly", yards, runToNode, flightYards, runFromNode,
+--            node, arrival }
+function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
+    local from = Travel.WorldPoint(fromMapID, fromX, fromY)
+    local to   = Travel.WorldPoint(toMapID, toX, toY)
+
+    if not from or not to then
+        return nil, false, nil
+    end
+
+    if from.continent and to.continent and from.continent ~= to.continent then
+        -- Portals and boats exist and are not modelled. Saying nothing is
+        -- correct; inventing a duration is not.
+        return nil, false, { mode = "elsewhere" }
+    end
+
+    local session = CN:GetModule("Session")
+
+    local runSpeed, runMeasured = 7, false
+
+    if session and session.Speed then
+        runSpeed, runMeasured = session.Speed()
+    end
+
+    runSpeed = math.max(0.5, runSpeed)
+
+    local direct = Travel.YardsBetweenPoints(from, to)
+
+    if not direct then
+        return nil, false, nil
+    end
+
+    local best = {
+        seconds = direct / runSpeed,
+        mode    = "run",
+        yards   = direct,
+    }
+
+    local confident = runMeasured
+
+    local nodes = Travel.KnownNodes(toMapID) or {}
+
+    if #nodes >= 2 then
+        local origin, originYards  = Travel.NearestNode(from, nodes)
+        local arrival, arrivalYards = Travel.NearestNode(to, nodes)
+
+        if origin and arrival and origin.id ~= arrival.id then
+            local flightYards = Travel.YardsBetweenPoints(origin.point, arrival.point)
+
+            local flightSpeed, flightMeasured = Travel.FlightSpeed()
+
+            if flightYards then
+                local seconds = (originYards / runSpeed)
+                    + Travel.flightOverheadSeconds
+                    + (flightYards / flightSpeed)
+                    + (arrivalYards / runSpeed)
+
+                if seconds < best.seconds then
+                    best = {
+                        seconds     = seconds,
+                        mode        = "fly",
+                        yards       = direct,
+                        runToNode   = originYards,
+                        flightYards = flightYards,
+                        runFromNode = arrivalYards,
+                        node        = origin.name,
+                        arrival     = arrival.name,
+                    }
+
+                    -- A flight estimate is only as good as the flight speed
+                    -- behind it.
+                    confident = confident and flightMeasured
+                end
+            end
+        end
+    end
+
+    return best.seconds, confident, best
+end
+
+-- The same answer on the scale the scorer uses, where roughly ten is "across
+-- a zone". Kept as a separate function so the scoring scale and the human
+-- number never drift apart: one is derived from the other.
+Travel.secondsPerCostPoint = 30
+Travel.maximumCost         = 40
+
+function Travel.CostFor(mapID, x, y)
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+    if not playerMap or not mapID or not x or not y then
+        return nil
+    end
+
+    local seconds = Travel.EstimateSeconds(playerMap, playerX, playerY, mapID, x, y)
+
+    if not seconds then
+        return nil
+    end
+
+    return math.min(Travel.maximumCost, seconds / Travel.secondsPerCostPoint)
+end
+
+-- Published so providers do not each have to decide what to do when the
+-- estimate is unavailable. Falls back to what the addon did before this
+-- module existed, which is a flat penalty for another zone.
+CN.fallbackZoneCost = 25
+
+function CN.TravelCost(mapID, x, y)
+    local travel = CN:GetModule("Travel")
+
+    local cost = travel and travel.CostFor(mapID, x, y)
+
+    if cost then
+        return cost, true
+    end
+
+    local playerMap = CN.GetPlayerPosition()
+
+    if mapID and playerMap and mapID == playerMap then
+        return CN.unknownLocationCost, false
+    end
+
+    if not mapID then
+        return CN.unknownLocationCost, false
+    end
+
+    return CN.fallbackZoneCost, false
+end
+
+------------------------------------------------------------
+-- FORMATTING
+------------------------------------------------------------
+
+function Travel.Describe(detail, seconds, confident)
+    if not seconds then
+        return "travel time unknown"
+    end
+
+    local session = CN:GetModule("Session")
+
+    local text = session and session.FormatDuration
+        and session.FormatDuration(seconds)
+        or (math.floor(seconds / 60) .. " min")
+
+    if detail and detail.mode == "fly" and detail.node then
+        text = text .. " |cff999999via " .. tostring(detail.node)
+        if detail.arrival then
+            text = text .. " to " .. tostring(detail.arrival)
+        end
+        text = text .. "|r"
+    end
+
+    if not confident then
+        text = text .. " |cff999999(estimated)|r"
+    end
+
+    return text
+end
+
+------------------------------------------------------------
+-- EVENTS
+------------------------------------------------------------
+
+-- Discovering a flight point changes every cross-zone answer this module
+-- gives, so the cache goes when it happens.
+for _, event in ipairs({ "TAXIMAP_OPENED", "NEW_TAXI_NODE", "PLAYER_ENTERING_WORLD" }) do
+    CN:RegisterEvent(event, function()
+        Travel.ForgetNodes()
+
+        CN.InvalidateCandidates()
+    end)
+end
+
+-- Sampling the flight only while there is a flight to sample.
+local ticker
+
+Travel.tickSeconds = 1
+
+CN:RegisterEvent("PLAYER_CONTROL_LOST", function()
+    if ticker or not C_Timer or not C_Timer.NewTicker then
+        return
+    end
+
+    ticker = C_Timer.NewTicker(Travel.tickSeconds, function()
+        local flying = Travel.ObserveFlight()
+
+        if not flying and ticker then
+            ticker:Cancel()
+            ticker = nil
+        end
+    end)
+end)
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+CN:RegisterCommand{
+    name    = "travel",
+    order   = 26,
+    help    = "How long it takes to reach the top recommendation, and how.",
+    handler = function()
+        local nodes, continent = Travel.KnownNodes(CN.GetPlayerPosition())
+
+        local speed, measured = Travel.FlightSpeed()
+
+        Print(string.format("Flight points known on this continent: %d", #nodes))
+        Print(string.format("Flight speed: %.1f yards/second %s",
+            speed, measured
+                and ("|cff999999from " .. Travel.FlightSampleCount()
+                    .. " of your own flights|r")
+                or "|cff999999estimated -- take a flight path and it will be measured|r"))
+
+        if not continent then
+            Print("|cff999999The client will not say which continent this is.|r")
+        end
+
+        local results = CN.Recommend(1)
+
+        local target = results and results[1]
+
+        if not target or not target.mapID or not target.x then
+            Print("|cff999999Nothing with a location is being recommended, so "
+                .. "there is nothing to cost.|r")
+            return
+        end
+
+        local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+        local seconds, confident, detail = Travel.EstimateSeconds(
+            playerMap, playerX, playerY, target.mapID, target.x, target.y)
+
+        Print("To " .. tostring(target.name) .. ": "
+            .. Travel.Describe(detail, seconds, confident))
+
+        if detail and detail.mode == "fly" then
+            local session = CN:GetModule("Session")
+
+            local runSpeed = session and session.Speed() or 7
+
+            Print(string.format(
+                "  |cff999999%.0f yd to %s, %.0f yd in the air, %.0f yd at the "
+                .. "far end -- against %.0f yd on foot|r",
+                detail.runToNode, tostring(detail.node), detail.flightYards,
+                detail.runFromNode, detail.yards))
+
+            Print(string.format("  |cff999999running the whole way: %s|r",
+                session and session.FormatDuration
+                    and session.FormatDuration(detail.yards / math.max(0.5, runSpeed))
+                    or "unknown"))
+        elseif detail and detail.mode == "elsewhere" then
+            Print("|cff999999That is on another continent, and this addon does "
+                .. "not model portals -- so it will not guess.|r")
+        end
+    end,
+}
+
+return Travel
+'@
+
 $Embedded['Modules\Instances.lua'] = @'
 -- Modules/Instances.lua
 -- Completion Navigator :: dungeons and raids, which the addon could not see.
@@ -27811,7 +28696,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.41.0
+## Version: 0.42.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -27858,6 +28743,7 @@ Modules\Alts.lua
 Modules\Appearances.lua
 Modules\Breakdown.lua
 Modules\Broker.lua
+Modules\Travel.lua
 Modules\Instances.lua
 Modules\Preference.lua
 Modules\Capture.lua
@@ -28047,6 +28933,65 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.42.0]
+
+Travel that knows about flight paths, an honest answer to "how long will this
+take", and prerequisite chains that finally reach the shipped data.
+
+### Fixed
+
+- **Every travel figure in the addon was a straight line.** Within a zone that
+  is very nearly right. Between zones it was not even approximately right, and
+  the addon covered that with a flat penalty: anything outside your current
+  zone cost the same whether it was over the next ridge or on the far side of
+  the continent. A journey is now costed the way you would actually make it --
+  run to the nearest flight point **you have discovered**, fly, run from the
+  arrival point -- against simply running the whole way, whichever is quicker.
+  This is why `/cn plan 30` could put a nine-minute flight into your half hour.
+- **Flight speed was not merely unknown, it was thrown away.** The addon has
+  measured your running speed for several releases and explicitly discarded
+  taxi movement while doing it. It now measures your flying speed too, from
+  your own flights, and says *estimated* until it has. The client does not
+  expose the number and it differs between expansions, so measuring is the
+  only honest way to have it.
+- **Harvested prerequisites could never reach `Data/Quests.lua`.** The addon
+  wrote them, the toolkit's parser could not see an array field at all, and so
+  it silently dropped every chain -- both halves looking like they worked. The
+  parser reads them now, `cn.ps1 harvest` writes them, and a row that already
+  exists for its location gains its chain rather than being skipped whole. A
+  `requires` that is already there is never overwritten: curated data outranks
+  observation, so this is an insert, not an update.
+- **Two maps meant no distance at all.** Cross-map distances are now computed
+  in world coordinates, which are continuous across a continent, instead of in
+  map coordinates, which are normalised per map and cannot be compared.
+
+### Added
+
+- **`/cn chase` now says how long the goal will take.** The addon already
+  measured how long each kind of objective takes *you* and how long it takes
+  to get anywhere; nothing multiplied them. It is a **range**, not a figure,
+  because task times vary by more than a third with competition, group size
+  and luck -- and where more than half the steps are kinds of thing it has
+  never watched you do, it says *time unknown* and how many, rather than
+  averaging its way to a number that looks like a fact.
+- **`/cn travel`** -- how long it takes to reach the top recommendation and by
+  what route: how far to the flight point, how far in the air, how far at the
+  far end, and what running the whole way would have cost. Also how many
+  flight points you know and whether your flying speed has been measured yet.
+
+### Notes
+
+- Two continents with no flight between them return **nothing**, not a large
+  number. Portals and boats are not modelled, and a fabricated four hours
+  would be worse than an admission.
+- Flight points you have not discovered do not exist as far as the costing is
+  concerned, because they do not exist for you either. A pessimistic plan you
+  can follow beats an optimistic one you cannot.
+- The one invented constant in the travel model is the twenty seconds a flight
+  costs before it starts moving -- talking to the flight master, mounting, and
+  landing. It is a constant rather than a measurement because timing it would
+  mostly be timing how fast you read a gossip window.
 
 ## [0.41.0]
 
@@ -30244,7 +31189,7 @@ ignore:
 '@
 
 $Embedded['_curseforge\SUMMARY.txt'] = @'
-Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, including the lockouts you are part-way through, batches nearby work into stops, routes it on your map, and shows what is between you and what you want.
+Answers "what should I do next?" rather than "what am I missing?" -- ranks what is worth doing now, costs the journey the way you would actually make it (flights included), batches nearby work into stops, and shows what is between you and what you want.
 '@
 
 $Embedded['_curseforge\DESCRIPTION.md'] = @'
@@ -30269,6 +31214,8 @@ Pin a mount, an appearance, an achievement, a reputation — anything you are wo
 
 Every step in a chain carries a state. Done steps are behind you, one step is marked **next**, and blocked steps say what is blocking them. The **Next step** button goes to that step rather than to the goal itself — because the mount may be behind a dungeon you cannot enter yet, while its attunement quest is forty yards away.
 
+It also says how long the whole thing is likely to take — as a **range**, never a figure, because task times vary by more than a third with competition, group size and luck. Where more than half the steps are kinds of thing it has never watched you do, it says *time unknown* and how many, rather than averaging its way to a number that looks like a fact.
+
 Where the game supplies a real denominator — achievement criteria, reputation standing — you get a real bar. Where it does not, you get the truth instead of a bar. An appearance has several sources and needs only one of them, so it lists them and says so rather than pretending you are "1 of 9" of the way there.
 
 ## Follow the route
@@ -30289,7 +31236,9 @@ Off by default, and it will not fight you: it advances when a stop is **done**, 
 
 Half an hour is not the same question as "what should I do next", and it gets its own answer: the stops that fit, in walking order, with what each one costs.
 
-Travel time is **computed** from real distances and from how fast you actually move — the addon watches your position and works it out, discarding flight paths and loading screens. Task time is **learned** from your own play. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
+Travel time is **computed** from the journey you would actually make: run to the nearest flight point **you have discovered**, fly, run from the far end — against simply running the whole way, whichever is quicker. Your running speed is measured from your own play, and so is your flying speed, because the client does not report it and it differs between expansions. Task time is **learned** the same way. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
+
+A journey it cannot model — another continent, reached by a portal — returns **nothing** rather than a large number. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
 ## Aim it in one command
 
@@ -30382,6 +31331,7 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **The Great Vault** | All three rows, what is unlocked, and what is still one step away |
 | **Dungeon & raid lockouts** | What you are saved to, how many bosses are left in it, and when it resets |
 | **Boss loot** | The game's own Adventure Guide, so a drop can name the boss it comes from |
+| **Flight points** | The ones you have discovered, so a journey is costed the way you would actually make it |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
 
 Where the game does not supply a trustworthy total, it reports **counts rather than a percentage**. That is a deliberate rule, not a gap — an invented denominator is a number that looks like a fact.
@@ -30392,7 +31342,7 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | --- | --- |
 | **Ranks** | One list, ordered by what is actually worth doing now, with a stated reason for every line |
 | **Prioritises deadlines** | Dailies, timed quests, world quests, capped currencies and the Vault all climb as their reset approaches, steeply in the last stretch |
-| **Fits your session** | A plan sized to the minutes you have, from measured travel and learned task times |
+| **Fits your session** | A plan sized to the minutes you have, from measured travel — flights included — and learned task times |
 | **Explains** | `/cn why` names what is blocking something — level, reputation, profession, faction, an unfinished prerequisite |
 | **Batches** | Nearby work collapses into stops so you stop crossing the zone and coming back |
 | **Routes** | Stop to stop, improved with a second pass, drawn on your map in walking order |
@@ -30464,6 +31414,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn instances` | What you are saved to, and how much of it is left |
 | `/cn drops <name>` | Which boss drops it, and whether you are locked to it |
 | `/cn learned` | What the addon has worked out about how you play |
+| `/cn travel` | How long it takes to reach the top recommendation, and by what route |
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |
@@ -30544,7 +31495,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.41.0
+0.42.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -30831,7 +31782,7 @@ read_globals = {
     -- Saved instances and the Adventure Guide (Encounter Journal). The EJ
     -- functions are globals rather than a namespaced table, which is why
     -- there are so many of them.
-    "GetNumSavedInstances", "GetSavedInstanceInfo",
+    "GetNumSavedInstances", "GetSavedInstanceInfo", "C_TaxiMap",
     "EncounterJournal", "EJ_SelectInstance", "EJ_GetCurrentInstance",
     "EJ_GetInstanceInfo", "EJ_GetEncounterInfoByIndex", "EJ_GetEncounterInfo",
     "EJ_SetSearch", "EJ_ClearSearch", "EJ_GetNumSearchResults",
@@ -31144,7 +32095,7 @@ function UnitFactionGroup() return "Alliance" end
 -- to neither bucket and must be discarded.
 CN_TEST_MOUNTED = false
 function IsMounted() return CN_TEST_MOUNTED end
-function UnitOnTaxi() return false end
+function UnitOnTaxi() return CN_TEST_ON_TAXI end
 
 -- Combat state. The interesting case is that the addon must NOT move a
 -- waypoint while the player is being hit by something.
@@ -31243,9 +32194,60 @@ C_Map = {
 
         local span = CN_TEST_MAP_SPAN or { 1000, 1000 }
 
-        return 1, CreateVector2D(point.x * span[1], point.y * span[2])
+        -- The CONTINENT id matters as much as the position: two points on
+        -- different continents cannot be compared at all, and a stub that
+        -- said "continent 1" for everything would let a cross-continent
+        -- journey be costed as though you could run it.
+        local continent = (CN_TEST_CONTINENT_FOR_MAP
+            and CN_TEST_CONTINENT_FOR_MAP[mapID]) or 1
+
+        return continent, CreateVector2D(point.x * span[1], point.y * span[2])
     end,
 }
+
+-- FLIGHT POINTS.
+--
+-- Positions are in the CONTINENT map's coordinates, not the zone's, which is
+-- the kind of detail a stub gets wrong by accident and then hides forever.
+-- CN_TEST_TAXI_NODES is keyed by continent map id.
+--
+-- state: Enum.FlightPathState -- Current 0, Reachable 1, Unreachable 2. An
+-- unreachable node is one you have NOT discovered, and costing a journey
+-- through one produces a plan the player cannot follow.
+Enum = Enum or {}
+
+Enum.FlightPathState = { Current = 0, Reachable = 1, Unreachable = 2 }
+
+CN_TEST_TAXI_NODES = {
+    -- Keyed by CONTINENT map id: 1941 is Quel'Thalas in the stub's map tree,
+    -- and zone 94 sits under it.
+    [1941] = {
+        { nodeID = 1, name = "Near Node",  state = 1, position = { x = 0.40, y = 0.50 } },
+        { nodeID = 2, name = "Far Node",   state = 1, position = { x = 0.90, y = 0.50 } },
+        { nodeID = 3, name = "Undiscovered", state = 2, position = { x = 0.95, y = 0.52 } },
+    },
+}
+
+C_TaxiMap = {
+    GetAllTaxiNodes = function(continentID)
+        local nodes = CN_TEST_TAXI_NODES[continentID] or {}
+
+        local copy = {}
+
+        for _, node in ipairs(nodes) do
+            table.insert(copy, {
+                nodeID   = node.nodeID,
+                name     = node.name,
+                state    = node.state,
+                position = CreateVector2D(node.position.x, node.position.y),
+            })
+        end
+
+        return copy
+    end,
+}
+
+CN_TEST_ON_TAXI = false
 
 -- SAVED INSTANCES.
 --
@@ -31424,6 +32426,11 @@ CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
 -- distance figures elsewhere stay checkable by hand; tests that care about
 -- angles set it to something the shape of a real zone.
 CN_TEST_MAP_SPAN = { 1000, 1000 }
+
+-- The span is set through CN_TEST_SetMapSpan, which is defined once the addon
+-- has loaded: changing the shape of the world has to invalidate everything the
+-- addon measured from it.
+
 
 -- Maps that can express where the player is standing.
 CN_TEST_PLAYER_MAPS = { [94] = true }
@@ -33079,6 +34086,31 @@ end
 -- Sections further down run inside their own functions (Lua caps a function
 -- at 200 locals and this file is at the ceiling), so they cannot see the
 -- upvalue. Publish it.
+-- CHANGING THE SHAPE OF THE WORLD INVALIDATES WHAT WAS MEASURED FROM IT.
+--
+-- Two modules memoise conversions that are constant in the real game -- map
+-- scales and world positions -- and are right to cache them. A fixture that
+-- resizes the map is doing something the game never does, so it has to say so.
+--
+-- DEFINED HERE, NOT BESIDE THE STUB. The first version sat next to
+-- CN_TEST_MAP_SPAN, above the line where `CN` is declared, so it referenced a
+-- global that is nil at call time, guarded that with `if CN and ...`, and
+-- therefore did nothing at all -- silently, while looking careful. The next
+-- test then measured the previous test's world.
+function CN_TEST_SetMapSpan(span)
+    CN_TEST_MAP_SPAN = span
+
+    local navigation = CN:GetModule("Navigation")
+    local travel     = CN:GetModule("Travel")
+
+    assert(navigation and travel,
+        "the geometry modules must be loaded before the fixture resizes a map")
+
+    navigation.ForgetMapScales()
+    travel.ForgetWorldPoints()
+    travel.ForgetNodes()
+end
+
 CN.FireEvent = fire
 
 CN.CollectCandidates(true)
@@ -36874,7 +37906,7 @@ print("\nWhich way the client counts facing:")
     local savedX, savedY = CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y
     local savedSpan      = CN_TEST_MAP_SPAN
 
-    CN_TEST_MAP_SPAN = { 1000, 1000 }
+    CN_TEST_SetMapSpan({ 1000, 1000 })
 
     navigation.ForgetMapScales()
     navigation.SetFacingSign(1)
@@ -36925,7 +37957,7 @@ print("\nWhich way the client counts facing:")
 
     CN_TEST_SetFacing(0)
     CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = savedX, savedY
-    CN_TEST_MAP_SPAN = savedSpan
+    CN_TEST_SetMapSpan(savedSpan)
     navigation.ForgetMapScales()
     navigation.SetFacingSign(1)
     navigation.ResetMotion()
@@ -36939,7 +37971,7 @@ print("\nAngles on a map that is not square:")
     local savedSpan = CN_TEST_MAP_SPAN
 
     -- Twice as wide as it is tall, which is nothing unusual for a zone.
-    CN_TEST_MAP_SPAN = { 2000, 1000 }
+    CN_TEST_SetMapSpan({ 2000, 1000 })
 
     navigation.ForgetMapScales()
 
@@ -36970,7 +38002,7 @@ print("\nAngles on a map that is not square:")
 
     -- A SQUARE MAP MUST BE UNCHANGED. The correction has to be free where
     -- there is nothing to correct.
-    CN_TEST_MAP_SPAN = { 1000, 1000 }
+    CN_TEST_SetMapSpan({ 1000, 1000 })
 
     navigation.ForgetMapScales()
 
@@ -37003,7 +38035,7 @@ print("\nAngles on a map that is not square:")
     print("  bearings are measured in yards, and a failed measurement is "
         .. "not remembered")
 
-    CN_TEST_MAP_SPAN = savedSpan
+    CN_TEST_SetMapSpan(savedSpan)
     navigation.ForgetMapScales()
 end)()
 
@@ -37561,6 +38593,318 @@ print("\nStubs, audited against a real client:")
     print("  " .. audited .. " stubs match what the client actually returned")
 end)()
 
+
+print("\nGetting there:")
+
+;(function()
+    local travel = CN:GetModule("Travel")
+
+    assert(travel, "the Travel module must load")
+
+    travel.ForgetNodes()
+
+    local savedSpan = CN_TEST_MAP_SPAN
+
+    CN_TEST_SetMapSpan({ 4000, 4000 })
+
+    ------------------------------------------------------------
+    -- TWO MAPS USED TO MEAN NO DISTANCE AT ALL.
+    --
+    -- Map coordinates are normalized per map, so 0.5 on one map and 0.5 on
+    -- another are not comparable and the old code returned nil. World
+    -- coordinates are yards and are continuous across a continent.
+    ------------------------------------------------------------
+    local sameMap = travel.YardsBetween(94, 0.1, 0.5, 94, 0.2, 0.5)
+
+    assert(sameMap and math.abs(sameMap - 400) < 1,
+        "a tenth of a 4000 yard map is 400 yards, got " .. tostring(sameMap))
+
+    local crossMap = travel.YardsBetween(94, 0.1, 0.5, 2112, 0.2, 0.5)
+
+    assert(crossMap, "two different maps must still yield a distance")
+
+    print("  cross-map distances are measured in world yards")
+
+    ------------------------------------------------------------
+    -- ONLY FLIGHT POINTS YOU HAVE DISCOVERED.
+    --
+    -- Costing a journey through an undiscovered flight master produces a plan
+    -- the player cannot follow, which is worse than a pessimistic one.
+    ------------------------------------------------------------
+    local nodes, continent = travel.KnownNodes(94)
+
+    assert(continent == 1941, "the continent must be found by walking parents, got "
+        .. tostring(continent))
+
+    assert(#nodes == 2, "an undiscovered node must not be usable, got " .. #nodes)
+
+    for _, node in ipairs(nodes) do
+        assert(node.name ~= "Undiscovered", "and specifically not that one")
+    end
+
+    print("  " .. #nodes .. " known flight points; the undiscovered one is not offered")
+
+    ------------------------------------------------------------
+    -- FLYING MUST BEAT RUNNING WHEN, AND ONLY WHEN, IT IS QUICKER.
+    ------------------------------------------------------------
+    local far, farConfident, farDetail =
+        travel.EstimateSeconds(94, 0.40, 0.50, 94, 0.90, 0.50)
+
+    assert(far, "a long journey must be costable")
+
+    assert(farDetail.mode == "fly",
+        "across the continent, with a flight point at each end, flying wins")
+
+    local session = CN:GetModule("Session")
+
+    local runSpeed = session.Speed()
+
+    local runningTheWholeWay = farDetail.yards / runSpeed
+
+    assert(far < runningTheWholeWay,
+        "and it must actually be quicker than running: "
+        .. string.format("%.0f vs %.0f seconds", far, runningTheWholeWay))
+
+    -- A SHORT HOP MUST NOT BE FLOWN.
+    --
+    -- Deliberately positioned so the two ends have DIFFERENT nearest flight
+    -- points, which means the flight branch is actually evaluated and
+    -- rejected on cost. The first version of this case put both ends next to
+    -- the same node, so the comparison never ran at all and the rule could
+    -- have been deleted without the suite noticing.
+    local near, _, nearDetail =
+        travel.EstimateSeconds(94, 0.40, 0.50, 94, 0.66, 0.50)
+
+    assert(nearDetail.mode == "run",
+        "a journey quicker on foot must be run, not flown")
+
+    -- NOT "cheaper than the long journey", which was the first assertion here
+    -- and was simply false: a long flight legitimately beats a medium run,
+    -- and asserting otherwise would have forced a wrong answer into the code.
+    -- The property that matters is that a run estimate is a run: the whole
+    -- distance at running speed, with no flight overhead hidden in it.
+    assert(math.abs(near - (nearDetail.yards / runSpeed)) < 1,
+        "a run estimate must be the whole distance at running speed, got "
+        .. string.format("%.0f vs %.0f", near, nearDetail.yards / runSpeed))
+
+    print("  a long journey flies, a short one runs")
+
+    ------------------------------------------------------------
+    -- FLIGHT SPEED IS MEASURED, AND SAID TO BE UNMEASURED UNTIL IT IS.
+    ------------------------------------------------------------
+    CN.Account("flight").samples = {}
+
+    local seeded, measured = travel.FlightSpeed()
+
+    assert(seeded == travel.seededFlightSpeed and measured == false,
+        "an unflown character has a seeded speed, flagged as unmeasured")
+
+    assert(farConfident == false,
+        "and an estimate built on it must not claim confidence")
+
+    -- Now fly. The sample is taken when the flight ENDS, not per tick: a
+    -- flight is one observation of a constant speed, and counting every tick
+    -- would let one long flight drown out every other measurement.
+    local savedX, savedY = CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y
+
+    CN_TEST_ON_TAXI = true
+    CN_TEST_CLOCK   = 1000
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.10, 0.50
+
+    travel.ObserveFlight()
+
+    for step = 1, 20 do
+        CN_TEST_CLOCK = 1000 + step
+        -- 0.02 of a 4000 yard map per second = 80 yards/second.
+        CN_TEST_PLAYER_X = 0.10 + (step * 0.02)
+
+        travel.ObserveFlight()
+    end
+
+    assert(travel.FlightSampleCount() == 0,
+        "nothing is recorded while still in the air")
+
+    CN_TEST_ON_TAXI = false
+
+    travel.ObserveFlight()
+
+    assert(travel.FlightSampleCount() == 1,
+        "one flight is one sample, got " .. travel.FlightSampleCount())
+
+    local flown, nowMeasured = travel.FlightSpeed()
+
+    assert(nowMeasured, "and the speed is now measured")
+    assert(math.abs(flown - 80) < 5,
+        "at about 80 yards per second, got " .. string.format("%.1f", flown))
+
+    print(string.format("  flight speed measured from one flight: %.0f yd/s", flown))
+
+    ------------------------------------------------------------
+    -- ANOTHER CONTINENT IS "I DO NOT KNOW", NOT A LARGE NUMBER.
+    ------------------------------------------------------------
+    CN_TEST_CONTINENT_FOR_MAP = { [2112] = 99 }
+
+    local offContinent, _, elsewhereDetail =
+        travel.EstimateSeconds(94, 0.4, 0.5, 2112, 0.5, 0.5)
+
+    assert(offContinent == nil,
+        "a journey the addon cannot model must return nothing")
+    assert(elsewhereDetail and elsewhereDetail.mode == "elsewhere",
+        "and must say why")
+
+    CN_TEST_CONTINENT_FOR_MAP = nil
+
+    print("  another continent returns nothing rather than a fabricated number")
+
+    ------------------------------------------------------------
+    -- A FAILED CONVERSION MUST NOT BE REMEMBERED.
+    --
+    -- During a loading screen the client refuses every conversion. Caching
+    -- that refusal would leave the addon unable to cost any journey for the
+    -- rest of the session, and nothing would ever tell the player why.
+    ------------------------------------------------------------
+    travel.ForgetWorldPoints()
+
+    local realConvert = C_Map.GetWorldPosFromMapPos
+
+    C_Map.GetWorldPosFromMapPos = function() return nil, nil end
+
+    assert(travel.WorldPoint(94, 0.3, 0.3) == nil,
+        "a client that will not convert yields nothing")
+
+    C_Map.GetWorldPosFromMapPos = realConvert
+
+    assert(travel.WorldPoint(94, 0.3, 0.3) ~= nil,
+        "and the question must be asked again once it can answer")
+
+    print("  a refused conversion is not remembered as an answer")
+
+    ------------------------------------------------------------
+    -- AND THE SESSION PLANNER MUST ACTUALLY SPEND THE TRAVEL TIME.
+    --
+    -- The plan exists to answer "what fits in half an hour". A planner that
+    -- costs the work and not the journey answers a different question, and
+    -- flatters itself doing it.
+    ------------------------------------------------------------
+    local durations = CN.Account("taskDurations")
+
+    local QUEST = CN.objectiveTypes.QUEST
+
+    local savedDurations = durations[QUEST]
+
+    durations[QUEST] = {}
+
+    for _ = 1, 20 do
+        table.insert(durations[QUEST], 60)
+    end
+
+    local hub = {
+        mapID = 94, x = 0.90, y = 0.50,
+        objectives = { { type = QUEST, id = 1 } },
+    }
+
+    local total, _, travelPart, workPart =
+        session.EstimateHub(hub, 0.40, 0.50)
+
+    assert(workPart and math.abs(workPart - 60) < 1,
+        "the work is one timed quest")
+    assert(travelPart and travelPart > 30,
+        "and the journey across the zone must cost something, got "
+        .. tostring(travelPart))
+    assert(math.abs(total - (travelPart + workPart)) < 1,
+        "the estimate is the sum of both")
+
+    print(string.format("  the planner spends %.0fs travelling and %.0fs working",
+        travelPart, workPart))
+
+    durations[QUEST] = savedDurations
+
+    CN_TEST_ON_TAXI = false
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = savedX, savedY
+    CN_TEST_SetMapSpan(savedSpan)
+    nav.ForgetMapScales()
+    travel.ForgetNodes()
+end)()
+
+print("\nHow long a chase will take:")
+
+;(function()
+    local chase = CN:GetModule("Chase")
+    local session = CN:GetModule("Session")
+
+    local QUEST = CN.objectiveTypes.QUEST
+
+    ------------------------------------------------------------
+    -- NOT ENOUGH TIMED STEPS MEANS NO NUMBER.
+    --
+    -- Half an answer stated confidently is worse than "not enough to say".
+    ------------------------------------------------------------
+    local durations = CN.Account("taskDurations")
+
+    durations[QUEST] = nil
+
+    local chain = {
+        name  = "Test Goal",
+        type  = QUEST,
+        steps = {
+            { state = chase.states.TODO, text = "one", objectiveType = QUEST },
+            { state = chase.states.TODO, text = "two", objectiveType = QUEST },
+            { state = chase.states.DONE, text = "done", objectiveType = QUEST },
+            { state = chase.states.NOTE, text = "context" },
+        },
+    }
+
+    local blind = chase.Estimate(chain)
+
+    assert(blind and blind.enough == false,
+        "an untimed chain must refuse to estimate")
+    assert(blind.unknown == 2, "and must count what it could not time, got "
+        .. tostring(blind.unknown))
+
+    local text = chase.DescribeEstimate(chain)
+
+    assert(text:find("unknown"), "and must say so: " .. text)
+
+    -- DONE AND NOTE STEPS ARE NOT WORK. Counting them would inflate every
+    -- estimate by everything the player has already finished.
+    assert(blind.timed + blind.unknown == 2,
+        "finished steps and notes are not outstanding work")
+
+    print("  an untimed chain says 'unknown' rather than guessing")
+
+    ------------------------------------------------------------
+    -- WITH DATA, A RANGE -- NEVER A FIGURE.
+    ------------------------------------------------------------
+    durations[QUEST] = {}
+
+    for _ = 1, 20 do
+        table.insert(durations[QUEST], 600)
+    end
+
+    local typical = session.TypicalSeconds(QUEST)
+
+    assert(typical == 600, "the fixture must be timed, got " .. tostring(typical))
+
+    local estimate = chase.Estimate(chain)
+
+    assert(estimate.enough, "with data it must estimate")
+    assert(math.abs(estimate.seconds - 1200) < 60,
+        "two ten-minute steps is twenty minutes, got "
+        .. string.format("%.0f", estimate.seconds))
+
+    assert(estimate.low < estimate.seconds and estimate.high > estimate.seconds,
+        "the answer must be a range")
+
+    local described = chase.DescribeEstimate(chain)
+
+    assert(described:find("to"), "and must be printed as one: " .. described)
+
+    print("  " .. described)
+
+    durations[QUEST] = nil
+end)()
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -38086,6 +39430,9 @@ CompletionNavigatorDB = {
 				["mapID"] = 2112,
 				["x"] = 0.611,
 				["y"] = 0.482,
+				["observedRequires"] = {
+					71230, 71231,
+				},
 				["maybeRequires"] = {
 					1, 2,
 				},
@@ -38109,9 +39456,67 @@ grep -q '71234' Data/Quests.lua || { echo "FAIL: harvested quest not written"; e
 grep -q '555'   Data/Quests.lua && { echo "FAIL: questMetadata leaked into the static database"; exit 1; }
 grep -q '99001' Data/Quests.lua && { echo "FAIL: unlocated quest added without -Force"; exit 1; }
 
+# THE CHAIN MUST COME WITH IT.
+#
+# Prerequisites are the whole reason the harvest exists, and until 0.42.0 the
+# toolkit's parser could not see an array field at all -- so the addon wrote
+# them, the toolkit silently dropped them, and both halves looked like they
+# worked.
+grep -q 'requires  = { 71230, 71231 }' Data/Quests.lua \
+  || { echo "FAIL: harvested prerequisites were not written"; exit 1; }
+
+# And a guess must NOT: maybeRequires is what the addon calls an ordering it
+# has seen too few times to believe.
+grep -q 'requires  = { 1, 2 }' Data/Quests.lua \
+  && { echo "FAIL: unconfident prerequisites were shipped as fact"; exit 1; }
+
 # Escaped quotes must survive the round trip, and the file must still be Lua.
 grep -q 'A Quest With .* In It' Data/Quests.lua || { echo "FAIL: quoted name mangled"; exit 1; }
 luac5.4 -p Data/Quests.lua || { echo "FAIL: harvest produced invalid Lua"; exit 1; }
+
+# FOLDING INTO A ROW THAT ALREADY EXISTS.
+#
+# A row is usually added for its location long before enough characters have
+# walked the chain for its prerequisites to be believed. Skipping the whole row
+# meant that evidence, when it finally arrived, had nowhere to go.
+mkdir -p fixtures-tmp
+cat > fixtures-tmp/sv2.lua <<'SAVEDVARS2'
+
+CompletionNavigatorDB = {
+	["account"] = {
+		["questHarvest"] = {
+			[8237] = {
+				["name"] = "Already Curated",
+				["mapID"] = 94,
+				["x"] = 0.42,
+				["y"] = 0.55,
+				["observedRequires"] = {
+					8230,
+				},
+			},
+		},
+	},
+}
+SAVEDVARS2
+
+$PWSH -NoProfile -File ./cn.ps1 harvest ./fixtures-tmp/sv2.lua > harvestfold.log 2>&1
+grep -q "chains folded into existing rows 1" harvestfold.log \
+  || { echo "FAIL: a chain was not folded into the existing row"; cat harvestfold.log; exit 1; }
+grep -q 'requires  = { 8230 }' Data/Quests.lua \
+  || { echo "FAIL: the folded chain is not in the file"; exit 1; }
+luac5.4 -p Data/Quests.lua || { echo "FAIL: folding produced invalid Lua"; exit 1; }
+
+# And folding must be idempotent: a second run must not duplicate it.
+$PWSH -NoProfile -File ./cn.ps1 harvest ./fixtures-tmp/sv2.lua > harvestfold2.log 2>&1
+FOLDED=$(grep -c 'requires  = { 8230 }' Data/Quests.lua)
+[ "$FOLDED" = "1" ] \
+  || { echo "FAIL: folding is not idempotent ($FOLDED copies)"; exit 1; }
+
+# The fixture must not linger where `check` will find it: a stray .lua file in
+# the tree is exactly the thing check is supposed to complain about, and a test
+# that leaves rubbish behind makes a later test fail for a reason that has
+# nothing to do with what it is testing.
+rm -rf fixtures-tmp
 
 # Running it again must add nothing.
 $PWSH -NoProfile -File ./cn.ps1 harvest ./sv.lua > harvest2.log 2>&1
@@ -40142,6 +41547,26 @@ function Get-CNSavedRecords {
             $fields[$key] = $value
         }
 
+        # ARRAY FIELDS -- `["requires"] = { 123, 456 }`.
+        #
+        # The scalar matcher above cannot see these, which is why prerequisite
+        # data harvested from real play could never reach Data\Quests.lua: the
+        # addon wrote it, the toolkit could not read it, and nobody noticed
+        # because both halves worked.
+        foreach ($array in [regex]::Matches($block.Body,
+            '\["(requires|unlocks|observedRequires)"\]\s*=\s*\{([^{}]*)\}')) {
+
+            $ids = @()
+
+            foreach ($number in [regex]::Matches($array.Groups[2].Value, '\d+')) {
+                $ids += [int] $number.Value
+            }
+
+            if ($ids.Count -gt 0) {
+                $fields[$array.Groups[1].Value + '_array'] = $ids
+            }
+        }
+
         if ($fields.Count -gt 0) { $records[$id] = $fields }
 
         $index = $block.End + 1
@@ -40265,10 +41690,48 @@ function Invoke-CNHarvest {
     $unlocated  = 0
     $lines      = New-Object System.Collections.Generic.List[string]
 
+    $merged = 0
+
     foreach ($id in ($harvested.Keys | Sort-Object)) {
         $record = $harvested[$id]
 
         if ($existing -match ('\[\s*' + $id + '\s*\]\s*=')) {
+            # A ROW THAT EXISTS CAN STILL BE MISSING ITS CHAIN.
+            #
+            # Rows are usually added for a location long before enough
+            # characters have walked a chain to make its prerequisites
+            # believable. Skipping the whole row meant that evidence, once it
+            # finally arrived, had nowhere to go.
+            #
+            # So: fill in `requires` where the row has none. Never replace one
+            # that is already there -- curated data outranks observation, and
+            # that rule is why this is an insert rather than an update.
+            if (-not $record.ContainsKey('requires_array') -and
+                $record.ContainsKey('observedRequires_array')) {
+
+                $record['requires_array']    = $record['observedRequires_array']
+                $record['requires_observed'] = $true
+            }
+
+            if ($record.ContainsKey('requires_array')) {
+                $rowMatch = [regex]::Match($existing, '\[\s*' + $id + '\s*\]\s*=\s*\{')
+
+                if ($rowMatch.Success) {
+                    $rowBlock = Get-CNLuaBlock -Text $existing -StartIndex $rowMatch.Index
+
+                    if ($rowBlock -and $rowBlock.Body -notmatch 'requires\s*=') {
+                        $insert = '        requires  = { ' +
+                            ($record.requires_array -join ', ') + ' },'
+
+                        $existing = $existing.Substring(0, $rowBlock.Start + 1) +
+                            "`n" + $insert + $existing.Substring($rowBlock.Start + 1)
+
+                        $merged++
+                        continue
+                    }
+                }
+            }
+
             $skipped++
             continue
         }
@@ -40300,6 +41763,31 @@ function Invoke-CNHarvest {
             $lines.Add("        requiresLevel = $($record.requiresLevel),") | Out-Null
         }
 
+        if (-not $record.ContainsKey('requires_array') -and
+            $record.ContainsKey('observedRequires_array')) {
+
+            $record['requires_array']    = $record['observedRequires_array']
+            $record['requires_observed'] = $true
+        }
+
+        if ($record.ContainsKey('requires_array')) {
+            if ($record.ContainsKey('requires_observed')) {
+                # Marked in the file, because the row now reads as curated data
+                # and somebody -- probably me, in a year -- will want to know
+                # which rows were only ever inferred from play.
+                $lines.Add('        -- chain observed on three or more ' +
+                    'characters; spot-check before trusting') | Out-Null
+            }
+
+            $lines.Add('        requires  = { ' +
+                ($record.requires_array -join ', ') + ' },') | Out-Null
+        }
+
+        if ($record.ContainsKey('unlocks_array')) {
+            $lines.Add('        unlocks   = { ' +
+                ($record.unlocks_array -join ', ') + ' },') | Out-Null
+        }
+
         $lines.Add('    },') | Out-Null
 
         $added++
@@ -40307,16 +41795,29 @@ function Invoke-CNHarvest {
 
     Write-Host "Harvested in SavedVariables: $($harvested.Count)" -ForegroundColor White
     Write-Host "  already in $relative       $skipped" -ForegroundColor DarkGray
+    Write-Host "  chains folded into existing rows $merged" -ForegroundColor $(if ($merged -gt 0) { 'Green' } else { 'DarkGray' })
     Write-Host "  without coordinates        $unlocated$(if (-not $Force -and $unlocated -gt 0) { '  (skipped; -Force includes them)' })" -ForegroundColor DarkGray
     Write-Host "  new rows to add            $added" -ForegroundColor $(if ($added -gt 0) { 'Green' } else { 'DarkGray' })
     Write-Host ''
 
-    if ($added -eq 0) {
+    if ($added -eq 0 -and $merged -eq 0) {
         Write-Host 'Nothing to add.' -ForegroundColor Yellow
         return
     }
 
     Invoke-CNBackup -Quiet
+
+    if ($merged -gt 0) {
+        Write-CNFile $relative $existing
+
+        Write-Host "Folded $merged prerequisite chain$(if ($merged -eq 1) { '' } else { 's' }) into existing rows." -ForegroundColor Green
+    }
+
+    if ($added -eq 0) {
+        Write-Host ''
+        Write-Host '  Next:  .\cn.ps1 check' -ForegroundColor DarkGray
+        return
+    }
 
     Add-CNBlock -Relative $relative -Block ($lines -join "`n") -Marker $script:DataMark
 

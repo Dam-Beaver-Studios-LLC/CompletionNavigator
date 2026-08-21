@@ -216,7 +216,7 @@ function UnitFactionGroup() return "Alliance" end
 -- to neither bucket and must be discarded.
 CN_TEST_MOUNTED = false
 function IsMounted() return CN_TEST_MOUNTED end
-function UnitOnTaxi() return false end
+function UnitOnTaxi() return CN_TEST_ON_TAXI end
 
 -- Combat state. The interesting case is that the addon must NOT move a
 -- waypoint while the player is being hit by something.
@@ -315,9 +315,60 @@ C_Map = {
 
         local span = CN_TEST_MAP_SPAN or { 1000, 1000 }
 
-        return 1, CreateVector2D(point.x * span[1], point.y * span[2])
+        -- The CONTINENT id matters as much as the position: two points on
+        -- different continents cannot be compared at all, and a stub that
+        -- said "continent 1" for everything would let a cross-continent
+        -- journey be costed as though you could run it.
+        local continent = (CN_TEST_CONTINENT_FOR_MAP
+            and CN_TEST_CONTINENT_FOR_MAP[mapID]) or 1
+
+        return continent, CreateVector2D(point.x * span[1], point.y * span[2])
     end,
 }
+
+-- FLIGHT POINTS.
+--
+-- Positions are in the CONTINENT map's coordinates, not the zone's, which is
+-- the kind of detail a stub gets wrong by accident and then hides forever.
+-- CN_TEST_TAXI_NODES is keyed by continent map id.
+--
+-- state: Enum.FlightPathState -- Current 0, Reachable 1, Unreachable 2. An
+-- unreachable node is one you have NOT discovered, and costing a journey
+-- through one produces a plan the player cannot follow.
+Enum = Enum or {}
+
+Enum.FlightPathState = { Current = 0, Reachable = 1, Unreachable = 2 }
+
+CN_TEST_TAXI_NODES = {
+    -- Keyed by CONTINENT map id: 1941 is Quel'Thalas in the stub's map tree,
+    -- and zone 94 sits under it.
+    [1941] = {
+        { nodeID = 1, name = "Near Node",  state = 1, position = { x = 0.40, y = 0.50 } },
+        { nodeID = 2, name = "Far Node",   state = 1, position = { x = 0.90, y = 0.50 } },
+        { nodeID = 3, name = "Undiscovered", state = 2, position = { x = 0.95, y = 0.52 } },
+    },
+}
+
+C_TaxiMap = {
+    GetAllTaxiNodes = function(continentID)
+        local nodes = CN_TEST_TAXI_NODES[continentID] or {}
+
+        local copy = {}
+
+        for _, node in ipairs(nodes) do
+            table.insert(copy, {
+                nodeID   = node.nodeID,
+                name     = node.name,
+                state    = node.state,
+                position = CreateVector2D(node.position.x, node.position.y),
+            })
+        end
+
+        return copy
+    end,
+}
+
+CN_TEST_ON_TAXI = false
 
 -- SAVED INSTANCES.
 --
@@ -496,6 +547,11 @@ CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
 -- distance figures elsewhere stay checkable by hand; tests that care about
 -- angles set it to something the shape of a real zone.
 CN_TEST_MAP_SPAN = { 1000, 1000 }
+
+-- The span is set through CN_TEST_SetMapSpan, which is defined once the addon
+-- has loaded: changing the shape of the world has to invalidate everything the
+-- addon measured from it.
+
 
 -- Maps that can express where the player is standing.
 CN_TEST_PLAYER_MAPS = { [94] = true }
@@ -2151,6 +2207,31 @@ end
 -- Sections further down run inside their own functions (Lua caps a function
 -- at 200 locals and this file is at the ceiling), so they cannot see the
 -- upvalue. Publish it.
+-- CHANGING THE SHAPE OF THE WORLD INVALIDATES WHAT WAS MEASURED FROM IT.
+--
+-- Two modules memoise conversions that are constant in the real game -- map
+-- scales and world positions -- and are right to cache them. A fixture that
+-- resizes the map is doing something the game never does, so it has to say so.
+--
+-- DEFINED HERE, NOT BESIDE THE STUB. The first version sat next to
+-- CN_TEST_MAP_SPAN, above the line where `CN` is declared, so it referenced a
+-- global that is nil at call time, guarded that with `if CN and ...`, and
+-- therefore did nothing at all -- silently, while looking careful. The next
+-- test then measured the previous test's world.
+function CN_TEST_SetMapSpan(span)
+    CN_TEST_MAP_SPAN = span
+
+    local navigation = CN:GetModule("Navigation")
+    local travel     = CN:GetModule("Travel")
+
+    assert(navigation and travel,
+        "the geometry modules must be loaded before the fixture resizes a map")
+
+    navigation.ForgetMapScales()
+    travel.ForgetWorldPoints()
+    travel.ForgetNodes()
+end
+
 CN.FireEvent = fire
 
 CN.CollectCandidates(true)
@@ -5946,7 +6027,7 @@ print("\nWhich way the client counts facing:")
     local savedX, savedY = CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y
     local savedSpan      = CN_TEST_MAP_SPAN
 
-    CN_TEST_MAP_SPAN = { 1000, 1000 }
+    CN_TEST_SetMapSpan({ 1000, 1000 })
 
     navigation.ForgetMapScales()
     navigation.SetFacingSign(1)
@@ -5997,7 +6078,7 @@ print("\nWhich way the client counts facing:")
 
     CN_TEST_SetFacing(0)
     CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = savedX, savedY
-    CN_TEST_MAP_SPAN = savedSpan
+    CN_TEST_SetMapSpan(savedSpan)
     navigation.ForgetMapScales()
     navigation.SetFacingSign(1)
     navigation.ResetMotion()
@@ -6011,7 +6092,7 @@ print("\nAngles on a map that is not square:")
     local savedSpan = CN_TEST_MAP_SPAN
 
     -- Twice as wide as it is tall, which is nothing unusual for a zone.
-    CN_TEST_MAP_SPAN = { 2000, 1000 }
+    CN_TEST_SetMapSpan({ 2000, 1000 })
 
     navigation.ForgetMapScales()
 
@@ -6042,7 +6123,7 @@ print("\nAngles on a map that is not square:")
 
     -- A SQUARE MAP MUST BE UNCHANGED. The correction has to be free where
     -- there is nothing to correct.
-    CN_TEST_MAP_SPAN = { 1000, 1000 }
+    CN_TEST_SetMapSpan({ 1000, 1000 })
 
     navigation.ForgetMapScales()
 
@@ -6075,7 +6156,7 @@ print("\nAngles on a map that is not square:")
     print("  bearings are measured in yards, and a failed measurement is "
         .. "not remembered")
 
-    CN_TEST_MAP_SPAN = savedSpan
+    CN_TEST_SetMapSpan(savedSpan)
     navigation.ForgetMapScales()
 end)()
 
@@ -6631,6 +6712,318 @@ print("\nStubs, audited against a real client:")
         #complaints .. " stub(s) are simpler than the client they stand in for")
 
     print("  " .. audited .. " stubs match what the client actually returned")
+end)()
+
+
+print("\nGetting there:")
+
+;(function()
+    local travel = CN:GetModule("Travel")
+
+    assert(travel, "the Travel module must load")
+
+    travel.ForgetNodes()
+
+    local savedSpan = CN_TEST_MAP_SPAN
+
+    CN_TEST_SetMapSpan({ 4000, 4000 })
+
+    ------------------------------------------------------------
+    -- TWO MAPS USED TO MEAN NO DISTANCE AT ALL.
+    --
+    -- Map coordinates are normalized per map, so 0.5 on one map and 0.5 on
+    -- another are not comparable and the old code returned nil. World
+    -- coordinates are yards and are continuous across a continent.
+    ------------------------------------------------------------
+    local sameMap = travel.YardsBetween(94, 0.1, 0.5, 94, 0.2, 0.5)
+
+    assert(sameMap and math.abs(sameMap - 400) < 1,
+        "a tenth of a 4000 yard map is 400 yards, got " .. tostring(sameMap))
+
+    local crossMap = travel.YardsBetween(94, 0.1, 0.5, 2112, 0.2, 0.5)
+
+    assert(crossMap, "two different maps must still yield a distance")
+
+    print("  cross-map distances are measured in world yards")
+
+    ------------------------------------------------------------
+    -- ONLY FLIGHT POINTS YOU HAVE DISCOVERED.
+    --
+    -- Costing a journey through an undiscovered flight master produces a plan
+    -- the player cannot follow, which is worse than a pessimistic one.
+    ------------------------------------------------------------
+    local nodes, continent = travel.KnownNodes(94)
+
+    assert(continent == 1941, "the continent must be found by walking parents, got "
+        .. tostring(continent))
+
+    assert(#nodes == 2, "an undiscovered node must not be usable, got " .. #nodes)
+
+    for _, node in ipairs(nodes) do
+        assert(node.name ~= "Undiscovered", "and specifically not that one")
+    end
+
+    print("  " .. #nodes .. " known flight points; the undiscovered one is not offered")
+
+    ------------------------------------------------------------
+    -- FLYING MUST BEAT RUNNING WHEN, AND ONLY WHEN, IT IS QUICKER.
+    ------------------------------------------------------------
+    local far, farConfident, farDetail =
+        travel.EstimateSeconds(94, 0.40, 0.50, 94, 0.90, 0.50)
+
+    assert(far, "a long journey must be costable")
+
+    assert(farDetail.mode == "fly",
+        "across the continent, with a flight point at each end, flying wins")
+
+    local session = CN:GetModule("Session")
+
+    local runSpeed = session.Speed()
+
+    local runningTheWholeWay = farDetail.yards / runSpeed
+
+    assert(far < runningTheWholeWay,
+        "and it must actually be quicker than running: "
+        .. string.format("%.0f vs %.0f seconds", far, runningTheWholeWay))
+
+    -- A SHORT HOP MUST NOT BE FLOWN.
+    --
+    -- Deliberately positioned so the two ends have DIFFERENT nearest flight
+    -- points, which means the flight branch is actually evaluated and
+    -- rejected on cost. The first version of this case put both ends next to
+    -- the same node, so the comparison never ran at all and the rule could
+    -- have been deleted without the suite noticing.
+    local near, _, nearDetail =
+        travel.EstimateSeconds(94, 0.40, 0.50, 94, 0.66, 0.50)
+
+    assert(nearDetail.mode == "run",
+        "a journey quicker on foot must be run, not flown")
+
+    -- NOT "cheaper than the long journey", which was the first assertion here
+    -- and was simply false: a long flight legitimately beats a medium run,
+    -- and asserting otherwise would have forced a wrong answer into the code.
+    -- The property that matters is that a run estimate is a run: the whole
+    -- distance at running speed, with no flight overhead hidden in it.
+    assert(math.abs(near - (nearDetail.yards / runSpeed)) < 1,
+        "a run estimate must be the whole distance at running speed, got "
+        .. string.format("%.0f vs %.0f", near, nearDetail.yards / runSpeed))
+
+    print("  a long journey flies, a short one runs")
+
+    ------------------------------------------------------------
+    -- FLIGHT SPEED IS MEASURED, AND SAID TO BE UNMEASURED UNTIL IT IS.
+    ------------------------------------------------------------
+    CN.Account("flight").samples = {}
+
+    local seeded, measured = travel.FlightSpeed()
+
+    assert(seeded == travel.seededFlightSpeed and measured == false,
+        "an unflown character has a seeded speed, flagged as unmeasured")
+
+    assert(farConfident == false,
+        "and an estimate built on it must not claim confidence")
+
+    -- Now fly. The sample is taken when the flight ENDS, not per tick: a
+    -- flight is one observation of a constant speed, and counting every tick
+    -- would let one long flight drown out every other measurement.
+    local savedX, savedY = CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y
+
+    CN_TEST_ON_TAXI = true
+    CN_TEST_CLOCK   = 1000
+
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.10, 0.50
+
+    travel.ObserveFlight()
+
+    for step = 1, 20 do
+        CN_TEST_CLOCK = 1000 + step
+        -- 0.02 of a 4000 yard map per second = 80 yards/second.
+        CN_TEST_PLAYER_X = 0.10 + (step * 0.02)
+
+        travel.ObserveFlight()
+    end
+
+    assert(travel.FlightSampleCount() == 0,
+        "nothing is recorded while still in the air")
+
+    CN_TEST_ON_TAXI = false
+
+    travel.ObserveFlight()
+
+    assert(travel.FlightSampleCount() == 1,
+        "one flight is one sample, got " .. travel.FlightSampleCount())
+
+    local flown, nowMeasured = travel.FlightSpeed()
+
+    assert(nowMeasured, "and the speed is now measured")
+    assert(math.abs(flown - 80) < 5,
+        "at about 80 yards per second, got " .. string.format("%.1f", flown))
+
+    print(string.format("  flight speed measured from one flight: %.0f yd/s", flown))
+
+    ------------------------------------------------------------
+    -- ANOTHER CONTINENT IS "I DO NOT KNOW", NOT A LARGE NUMBER.
+    ------------------------------------------------------------
+    CN_TEST_CONTINENT_FOR_MAP = { [2112] = 99 }
+
+    local offContinent, _, elsewhereDetail =
+        travel.EstimateSeconds(94, 0.4, 0.5, 2112, 0.5, 0.5)
+
+    assert(offContinent == nil,
+        "a journey the addon cannot model must return nothing")
+    assert(elsewhereDetail and elsewhereDetail.mode == "elsewhere",
+        "and must say why")
+
+    CN_TEST_CONTINENT_FOR_MAP = nil
+
+    print("  another continent returns nothing rather than a fabricated number")
+
+    ------------------------------------------------------------
+    -- A FAILED CONVERSION MUST NOT BE REMEMBERED.
+    --
+    -- During a loading screen the client refuses every conversion. Caching
+    -- that refusal would leave the addon unable to cost any journey for the
+    -- rest of the session, and nothing would ever tell the player why.
+    ------------------------------------------------------------
+    travel.ForgetWorldPoints()
+
+    local realConvert = C_Map.GetWorldPosFromMapPos
+
+    C_Map.GetWorldPosFromMapPos = function() return nil, nil end
+
+    assert(travel.WorldPoint(94, 0.3, 0.3) == nil,
+        "a client that will not convert yields nothing")
+
+    C_Map.GetWorldPosFromMapPos = realConvert
+
+    assert(travel.WorldPoint(94, 0.3, 0.3) ~= nil,
+        "and the question must be asked again once it can answer")
+
+    print("  a refused conversion is not remembered as an answer")
+
+    ------------------------------------------------------------
+    -- AND THE SESSION PLANNER MUST ACTUALLY SPEND THE TRAVEL TIME.
+    --
+    -- The plan exists to answer "what fits in half an hour". A planner that
+    -- costs the work and not the journey answers a different question, and
+    -- flatters itself doing it.
+    ------------------------------------------------------------
+    local durations = CN.Account("taskDurations")
+
+    local QUEST = CN.objectiveTypes.QUEST
+
+    local savedDurations = durations[QUEST]
+
+    durations[QUEST] = {}
+
+    for _ = 1, 20 do
+        table.insert(durations[QUEST], 60)
+    end
+
+    local hub = {
+        mapID = 94, x = 0.90, y = 0.50,
+        objectives = { { type = QUEST, id = 1 } },
+    }
+
+    local total, _, travelPart, workPart =
+        session.EstimateHub(hub, 0.40, 0.50)
+
+    assert(workPart and math.abs(workPart - 60) < 1,
+        "the work is one timed quest")
+    assert(travelPart and travelPart > 30,
+        "and the journey across the zone must cost something, got "
+        .. tostring(travelPart))
+    assert(math.abs(total - (travelPart + workPart)) < 1,
+        "the estimate is the sum of both")
+
+    print(string.format("  the planner spends %.0fs travelling and %.0fs working",
+        travelPart, workPart))
+
+    durations[QUEST] = savedDurations
+
+    CN_TEST_ON_TAXI = false
+    CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = savedX, savedY
+    CN_TEST_SetMapSpan(savedSpan)
+    nav.ForgetMapScales()
+    travel.ForgetNodes()
+end)()
+
+print("\nHow long a chase will take:")
+
+;(function()
+    local chase = CN:GetModule("Chase")
+    local session = CN:GetModule("Session")
+
+    local QUEST = CN.objectiveTypes.QUEST
+
+    ------------------------------------------------------------
+    -- NOT ENOUGH TIMED STEPS MEANS NO NUMBER.
+    --
+    -- Half an answer stated confidently is worse than "not enough to say".
+    ------------------------------------------------------------
+    local durations = CN.Account("taskDurations")
+
+    durations[QUEST] = nil
+
+    local chain = {
+        name  = "Test Goal",
+        type  = QUEST,
+        steps = {
+            { state = chase.states.TODO, text = "one", objectiveType = QUEST },
+            { state = chase.states.TODO, text = "two", objectiveType = QUEST },
+            { state = chase.states.DONE, text = "done", objectiveType = QUEST },
+            { state = chase.states.NOTE, text = "context" },
+        },
+    }
+
+    local blind = chase.Estimate(chain)
+
+    assert(blind and blind.enough == false,
+        "an untimed chain must refuse to estimate")
+    assert(blind.unknown == 2, "and must count what it could not time, got "
+        .. tostring(blind.unknown))
+
+    local text = chase.DescribeEstimate(chain)
+
+    assert(text:find("unknown"), "and must say so: " .. text)
+
+    -- DONE AND NOTE STEPS ARE NOT WORK. Counting them would inflate every
+    -- estimate by everything the player has already finished.
+    assert(blind.timed + blind.unknown == 2,
+        "finished steps and notes are not outstanding work")
+
+    print("  an untimed chain says 'unknown' rather than guessing")
+
+    ------------------------------------------------------------
+    -- WITH DATA, A RANGE -- NEVER A FIGURE.
+    ------------------------------------------------------------
+    durations[QUEST] = {}
+
+    for _ = 1, 20 do
+        table.insert(durations[QUEST], 600)
+    end
+
+    local typical = session.TypicalSeconds(QUEST)
+
+    assert(typical == 600, "the fixture must be timed, got " .. tostring(typical))
+
+    local estimate = chase.Estimate(chain)
+
+    assert(estimate.enough, "with data it must estimate")
+    assert(math.abs(estimate.seconds - 1200) < 60,
+        "two ten-minute steps is twenty minutes, got "
+        .. string.format("%.0f", estimate.seconds))
+
+    assert(estimate.low < estimate.seconds and estimate.high > estimate.seconds,
+        "the answer must be a range")
+
+    local described = chase.DescribeEstimate(chain)
+
+    assert(described:find("to"), "and must be printed as one: " .. described)
+
+    print("  " .. described)
+
+    durations[QUEST] = nil
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")
