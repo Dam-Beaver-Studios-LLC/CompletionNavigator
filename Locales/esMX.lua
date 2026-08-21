@@ -32,6 +32,7 @@ CN.RegisterLocale("esMX", {
     ["back"] = "date la vuelta",
     ["nothing actionable"] = "nada que hacer",
     ["Stop cleared"] = "Parada completada",
+    ["Stop %d of %d cleared"] = "Parada %d de %d completada",
     ["Route complete."] = "Ruta completada.",
     ["estimated"] = "estimado",
     ["unknown"] = "desconocido",

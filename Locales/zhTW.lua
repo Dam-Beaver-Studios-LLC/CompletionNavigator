@@ -28,6 +28,8 @@ CN.RegisterLocale("zhTW", {
     ["turn"] = "è½‰å‘",
     ["back"] = "æŠ˜è¿”",
     ["nothing actionable"] = "æš«ç„¡å¯åš",
+    ["Stop cleared"] = "ç«™é»žå®Œæˆ",
+    ["Stop %d of %d cleared"] = "ç«™é»ž %d/%d å®Œæˆ",
     ["estimated"] = "ä¼°ç®—",
     ["unknown"] = "æœªçŸ¥",
     ["ready"] = "å°±ç·’",

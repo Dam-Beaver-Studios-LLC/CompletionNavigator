@@ -53,7 +53,13 @@ CN.localeKeys = {
     -- Added in 0.45.0: the words on the newest surfaces, chosen the same way
     -- as the last batch -- where a player's eye lands, not where the strings
     -- happen to be easy to extract.
-    "ready",
+    --
+    -- "ready" and "another zone" were listed a second time here in 0.45.0.
+    -- A duplicate in the canonical list is not harmless: this file is the one
+    -- authoritative answer to "which strings does the addon use", the lint
+    -- counts it, and 48 entries describing 46 strings makes every coverage
+    -- number it reports wrong. Removed in 0.48.1, and the lint now refuses a
+    -- list that repeats itself.
     "cleared",
     "left",
     "expiring",
@@ -62,7 +68,6 @@ CN.localeKeys = {
     "quest starter",
     "%d more",
     "%d of %d",
-    "another zone",
     "flying yourself",
     "on a flight path",
     "on foot",

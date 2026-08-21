@@ -32,6 +32,7 @@ CN.RegisterLocale("itIT", {
     ["back"] = "torna indietro",
     ["nothing actionable"] = "niente da fare",
     ["Stop cleared"] = "Tappa completata",
+    ["Stop %d of %d cleared"] = "Tappa %d di %d completata",
     ["Route complete."] = "Percorso completato.",
     ["estimated"] = "stimato",
     ["unknown"] = "sconosciuto",

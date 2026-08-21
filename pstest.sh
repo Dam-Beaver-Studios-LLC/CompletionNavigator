@@ -46,6 +46,42 @@ echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
 grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
+echo "  a string with no translation anywhere blocks the release"
+# THE NOTE THAT PRINTED FOR FOUR RELEASES AND WAS SCROLLED PAST.
+#
+# "1 of 46 strings have no translation in any locale" appeared in every check
+# from 0.45.0 onward. It was true -- "Stop %d of %d cleared" was added to the
+# canonical key list and never handed to a translator -- and being a note, it
+# was ignored every single time, including by the person who wrote the string.
+cp Locales/enUS.lua Locales/enUS.bak
+python3 - <<'EOF'
+p = 'Locales/enUS.lua'
+s = open(p, encoding='utf-8').read()
+s = s.replace('    "cleared",', '    "cleared",\n    "untranslated probe",', 1)
+open(p, 'w', encoding='utf-8').write(s)
+EOF
+$PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q 'no translation in ANY locale' \
+  || { echo "FAIL: an untranslated string must block the release"; exit 1; }
+$PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q '"untranslated probe"' \
+  || { echo "FAIL: and it must say WHICH string"; exit 1; }
+
+# A duplicate in the canonical list makes every count reported against it wrong.
+cp Locales/enUS.bak Locales/enUS.lua
+python3 - <<'EOF'
+p = 'Locales/enUS.lua'
+s = open(p, encoding='utf-8').read()
+s = s.replace('    "cleared",', '    "cleared",\n    "cleared",', 1)
+open(p, 'w', encoding='utf-8').write(s)
+EOF
+$PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q 'more than once' \
+  || { echo "FAIL: a duplicated canonical key must block the release"; exit 1; }
+
+mv Locales/enUS.bak Locales/enUS.lua
+$PWSH -NoProfile -File ./cn.ps1 check > localecheck.log 2>&1
+grep -q "All checks passed" localecheck.log \
+  || { echo "FAIL: the shipped locales do not pass their own lint"; cat localecheck.log; exit 1; }
+echo "    named, blocking, and the shipped locales are complete"
+
 echo "  three lists of what counts as addon source, agreeing"
 # THE FAILURE THAT COST THREE RELEASES.
 #

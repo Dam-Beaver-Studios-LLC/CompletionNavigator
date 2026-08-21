@@ -12,7 +12,6 @@
 ## X-Email: developer@dambeaverstudios.com
 ## IconTexture: Interface\AddOns\CompletionNavigator\Media\Logo
 ## X-Curse-Project-ID: 1657613
-## X-Wago-ID: 
 # Left blank deliberately: the field must exist for the packager to publish to
 # Wago, and a wrong id publishes into somebody else's project. Fill it in with
 # the id from the Wago project page, then add WAGO_API_TOKEN to the repository

@@ -32,6 +32,7 @@ CN.RegisterLocale("zhCN", {
     ["back"] = "æŠ˜è¿”",
     ["nothing actionable"] = "æš‚æ— å¯åš",
     ["Stop cleared"] = "ç«™ç‚¹å®Œæˆ",
+    ["Stop %d of %d cleared"] = "ç«™ç‚¹ %d/%d å®Œæˆ",
     ["Route complete."] = "è·¯çº¿å®Œæˆã€‚",
     ["estimated"] = "ä¼°ç®—",
     ["unknown"] = "æœªçŸ¥",

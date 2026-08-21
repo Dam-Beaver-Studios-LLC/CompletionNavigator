@@ -7166,7 +7166,35 @@ print("\nStubs, audited against a real client:")
     ------------------------------------------------------------
     local path = ROOT .. "/../fixtures/captured.lua"
 
-    local chunk = loadfile(path) or loadfile("fixtures/captured.lua")
+    -- A FILE THAT EXISTS AND WILL NOT PARSE IS NOT "NO RECORDING".
+    --
+    -- `loadfile` returns nil both for a file that is absent and for one that
+    -- is broken, and this treated the two identically -- so a corrupt
+    -- recording printed "no recording present, stubs are UNVERIFIED" and the
+    -- run carried on green. The strongest test in this project would have
+    -- been silently absent while a file sat in the repository claiming to
+    -- provide it.
+    local chunk
+
+    for _, candidate in ipairs({ path, "fixtures/captured.lua" }) do
+        local handle = io.open(candidate, "r")
+
+        if handle then
+            handle:close()
+
+            local loaded, why = loadfile(candidate)
+
+            if not loaded then
+                error(candidate .. " exists and will not parse: "
+                    .. tostring(why)
+                    .. " -- re-run cn.ps1 fixtures, or delete it")
+            end
+
+            chunk = loaded
+
+            break
+        end
+    end
 
     if not chunk then
         -- BLOCKING WHERE A CLIENT CAN EXIST; ADVISORY WHERE ONE CANNOT.

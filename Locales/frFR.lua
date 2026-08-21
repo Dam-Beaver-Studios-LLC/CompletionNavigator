@@ -32,6 +32,7 @@ CN.RegisterLocale("frFR", {
     ["back"] = "demi-tour",
     ["nothing actionable"] = "rien Ã  faire",
     ["Stop cleared"] = "Ã‰tape terminÃ©e",
+    ["Stop %d of %d cleared"] = "Ã‰tape %d sur %d terminÃ©e",
     ["Route complete."] = "ItinÃ©raire terminÃ©.",
     ["estimated"] = "estimÃ©",
     ["unknown"] = "inconnu",

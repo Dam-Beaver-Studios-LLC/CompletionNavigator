@@ -2890,7 +2890,13 @@ CN.localeKeys = {
     -- Added in 0.45.0: the words on the newest surfaces, chosen the same way
     -- as the last batch -- where a player's eye lands, not where the strings
     -- happen to be easy to extract.
-    "ready",
+    --
+    -- "ready" and "another zone" were listed a second time here in 0.45.0.
+    -- A duplicate in the canonical list is not harmless: this file is the one
+    -- authoritative answer to "which strings does the addon use", the lint
+    -- counts it, and 48 entries describing 46 strings makes every coverage
+    -- number it reports wrong. Removed in 0.48.1, and the lint now refuses a
+    -- list that repeats itself.
     "cleared",
     "left",
     "expiring",
@@ -2899,7 +2905,6 @@ CN.localeKeys = {
     "quest starter",
     "%d more",
     "%d of %d",
-    "another zone",
     "flying yourself",
     "on a flight path",
     "on foot",
@@ -2946,6 +2951,7 @@ CN.RegisterLocale("deDE", {
     ["back"] = "zurück",
     ["nothing actionable"] = "nichts zu tun",
     ["Stop cleared"] = "Station erledigt",
+    ["Stop %d of %d cleared"] = "Station %d von %d erledigt",
     ["Route complete."] = "Route abgeschlossen.",
     ["estimated"] = "geschätzt",
     ["unknown"] = "unbekannt",
@@ -3006,6 +3012,7 @@ CN.RegisterLocale("esES", {
     ["back"] = "date la vuelta",
     ["nothing actionable"] = "nada que hacer",
     ["Stop cleared"] = "Parada completada",
+    ["Stop %d of %d cleared"] = "Parada %d de %d completada",
     ["Route complete."] = "Ruta completada.",
     ["estimated"] = "estimado",
     ["unknown"] = "desconocido",
@@ -3066,6 +3073,7 @@ CN.RegisterLocale("esMX", {
     ["back"] = "date la vuelta",
     ["nothing actionable"] = "nada que hacer",
     ["Stop cleared"] = "Parada completada",
+    ["Stop %d of %d cleared"] = "Parada %d de %d completada",
     ["Route complete."] = "Ruta completada.",
     ["estimated"] = "estimado",
     ["unknown"] = "desconocido",
@@ -3126,6 +3134,7 @@ CN.RegisterLocale("frFR", {
     ["back"] = "demi-tour",
     ["nothing actionable"] = "rien à faire",
     ["Stop cleared"] = "Étape terminée",
+    ["Stop %d of %d cleared"] = "Étape %d sur %d terminée",
     ["Route complete."] = "Itinéraire terminé.",
     ["estimated"] = "estimé",
     ["unknown"] = "inconnu",
@@ -3186,6 +3195,7 @@ CN.RegisterLocale("itIT", {
     ["back"] = "torna indietro",
     ["nothing actionable"] = "niente da fare",
     ["Stop cleared"] = "Tappa completata",
+    ["Stop %d of %d cleared"] = "Tappa %d di %d completata",
     ["Route complete."] = "Percorso completato.",
     ["estimated"] = "stimato",
     ["unknown"] = "sconosciuto",
@@ -3242,6 +3252,8 @@ CN.RegisterLocale("koKR", {
     ["turn"] = "방향 전환",
     ["back"] = "뒤로",
     ["nothing actionable"] = "할 일 없음",
+    ["Stop cleared"] = "지점 완료",
+    ["Stop %d of %d cleared"] = "%d/%d 지점 완료",
     ["estimated"] = "추정치",
     ["unknown"] = "알 수 없음",
     ["ready"] = "준비됨",
@@ -3292,6 +3304,7 @@ CN.RegisterLocale("ptBR", {
     ["back"] = "volte",
     ["nothing actionable"] = "nada a fazer",
     ["Stop cleared"] = "Parada concluída",
+    ["Stop %d of %d cleared"] = "Parada %d de %d concluída",
     ["Route complete."] = "Rota concluída.",
     ["estimated"] = "estimado",
     ["unknown"] = "desconhecido",
@@ -3348,6 +3361,8 @@ CN.RegisterLocale("ruRU", {
     ["turn"] = "развернуться",
     ["back"] = "назад",
     ["nothing actionable"] = "нечего делать",
+    ["Stop cleared"] = "Точка пройдена",
+    ["Stop %d of %d cleared"] = "Точка %d из %d пройдена",
     ["estimated"] = "оценка",
     ["unknown"] = "неизвестно",
     ["ready"] = "готово",
@@ -3399,6 +3414,7 @@ CN.RegisterLocale("zhCN", {
     ["back"] = "折返",
     ["nothing actionable"] = "暂无可做",
     ["Stop cleared"] = "站点完成",
+    ["Stop %d of %d cleared"] = "站点 %d/%d 完成",
     ["Route complete."] = "路线完成。",
     ["estimated"] = "估算",
     ["unknown"] = "未知",
@@ -3455,6 +3471,8 @@ CN.RegisterLocale("zhTW", {
     ["turn"] = "轉向",
     ["back"] = "折返",
     ["nothing actionable"] = "暫無可做",
+    ["Stop cleared"] = "站點完成",
+    ["Stop %d of %d cleared"] = "站點 %d/%d 完成",
     ["estimated"] = "估算",
     ["unknown"] = "未知",
     ["ready"] = "就緒",
@@ -35776,7 +35794,6 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## X-Email: developer@dambeaverstudios.com
 ## IconTexture: Interface\AddOns\CompletionNavigator\Media\Logo
 ## X-Curse-Project-ID: 1657613
-## X-Wago-ID: 
 # Left blank deliberately: the field must exist for the packager to publish to
 # Wago, and a wrong id publishes into somebody else's project. Fill it in with
 # the id from the Wago project page, then add WAGO_API_TOKEN to the repository
@@ -36031,6 +36048,36 @@ release pipeline did.
 
 ### Fixed
 
+- **A string in the addon was never translated, and the check said so for
+  four releases.** `Stop %d of %d cleared` -- the line follow mode shows when
+  you finish a stop on a multi-stop route -- was added to the canonical string
+  list in 0.45.0 and handed to no translator, so every non-English player has
+  been seeing English there. `check` printed *"1 of 46 strings have no
+  translation in any locale"* on every run since and it was scrolled past
+  every time, because it was a note. **A note nobody acts on is not a check.**
+  A string translated in NO locale now fails the build and is named in the
+  output; partial coverage stays a note, because a string in six languages
+  and not the seventh is ordinary work in progress. All ten locales now carry
+  it.
+- **The canonical string list repeated itself.** `ready` and `another zone`
+  were each listed twice from 0.45.0, so the list claimed 48 entries for 46
+  strings and every coverage figure reported against it was wrong -- including
+  the note above. Duplicates now fail.
+- **A recording that will not parse no longer reads as no recording at all.**
+  The harness loads `fixtures/captured.lua` and treated "the file is missing"
+  and "the file is broken" identically, so a corrupt one printed *"stubs are
+  UNVERIFIED"* and the run went green. The strongest test in this project
+  would have been silently absent while a file sat in the repository claiming
+  to provide it. It is now a hard failure that names the parse error.
+- **A stray file under `fixtures/` is now reported.** The toolkit writes
+  exactly one recording, `captured.lua`. Anything else there was put in by
+  hand, is read by nothing, and can look like broken addon source to any tool
+  that walks the tree.
+- **`## X-Wago-ID:` sat in the `.toc` with no value.** The packager reads that
+  header to decide whether to publish to Wago, and a blank value is a value --
+  it is being asked to upload to a project id of `""`. An absent header is
+  understood; an empty one has to be interpreted. The line is gone, and any
+  `X-` header present with no value now fails the check.
 - **A captured client recording failed the build.** `cn.ps1 fixtures` writes
   `fixtures/captured.lua` -- evidence read only by the test harness, and the
   thing that makes the stub audit possible at all. It is a `.lua` file sitting
@@ -47538,7 +47585,35 @@ print("\nStubs, audited against a real client:")
     ------------------------------------------------------------
     local path = ROOT .. "/../fixtures/captured.lua"
 
-    local chunk = loadfile(path) or loadfile("fixtures/captured.lua")
+    -- A FILE THAT EXISTS AND WILL NOT PARSE IS NOT "NO RECORDING".
+    --
+    -- `loadfile` returns nil both for a file that is absent and for one that
+    -- is broken, and this treated the two identically -- so a corrupt
+    -- recording printed "no recording present, stubs are UNVERIFIED" and the
+    -- run carried on green. The strongest test in this project would have
+    -- been silently absent while a file sat in the repository claiming to
+    -- provide it.
+    local chunk
+
+    for _, candidate in ipairs({ path, "fixtures/captured.lua" }) do
+        local handle = io.open(candidate, "r")
+
+        if handle then
+            handle:close()
+
+            local loaded, why = loadfile(candidate)
+
+            if not loaded then
+                error(candidate .. " exists and will not parse: "
+                    .. tostring(why)
+                    .. " -- re-run cn.ps1 fixtures, or delete it")
+            end
+
+            chunk = loaded
+
+            break
+        end
+    end
 
     if not chunk then
         -- BLOCKING WHERE A CLIENT CAN EXIST; ADVISORY WHERE ONE CANNOT.
@@ -51490,6 +51565,42 @@ echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
 grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
+echo "  a string with no translation anywhere blocks the release"
+# THE NOTE THAT PRINTED FOR FOUR RELEASES AND WAS SCROLLED PAST.
+#
+# "1 of 46 strings have no translation in any locale" appeared in every check
+# from 0.45.0 onward. It was true -- "Stop %d of %d cleared" was added to the
+# canonical key list and never handed to a translator -- and being a note, it
+# was ignored every single time, including by the person who wrote the string.
+cp Locales/enUS.lua Locales/enUS.bak
+python3 - <<'EOF'
+p = 'Locales/enUS.lua'
+s = open(p, encoding='utf-8').read()
+s = s.replace('    "cleared",', '    "cleared",\n    "untranslated probe",', 1)
+open(p, 'w', encoding='utf-8').write(s)
+EOF
+$PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q 'no translation in ANY locale' \
+  || { echo "FAIL: an untranslated string must block the release"; exit 1; }
+$PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q '"untranslated probe"' \
+  || { echo "FAIL: and it must say WHICH string"; exit 1; }
+
+# A duplicate in the canonical list makes every count reported against it wrong.
+cp Locales/enUS.bak Locales/enUS.lua
+python3 - <<'EOF'
+p = 'Locales/enUS.lua'
+s = open(p, encoding='utf-8').read()
+s = s.replace('    "cleared",', '    "cleared",\n    "cleared",', 1)
+open(p, 'w', encoding='utf-8').write(s)
+EOF
+$PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q 'more than once' \
+  || { echo "FAIL: a duplicated canonical key must block the release"; exit 1; }
+
+mv Locales/enUS.bak Locales/enUS.lua
+$PWSH -NoProfile -File ./cn.ps1 check > localecheck.log 2>&1
+grep -q "All checks passed" localecheck.log \
+  || { echo "FAIL: the shipped locales do not pass their own lint"; cat localecheck.log; exit 1; }
+echo "    named, blocking, and the shipped locales are complete"
+
 echo "  three lists of what counts as addon source, agreeing"
 # THE FAILURE THAT COST THREE RELEASES.
 #
@@ -54541,6 +54652,20 @@ function Invoke-CNCheck {
         }
     }
 
+    # A HEADER FIELD PRESENT AND EMPTY IS NOT THE SAME AS ABSENT.
+    #
+    # `## X-Wago-ID:` with nothing after it sat in the .toc for many releases.
+    # The packager reads that header to decide whether to publish to Wago, and
+    # a blank value is a value: it is asked to upload to a project id of "".
+    # An absent header is understood; an empty one has to be interpreted.
+    #
+    # Applies to every X- field, because the same trap is there for each.
+    foreach ($match in [regex]::Matches($toc, '(?m)^##\s*(X-[A-Za-z0-9-]+)\s*:\s*$')) {
+        Write-Host "  FAIL  .toc has $($match.Groups[1].Value) with no value." -ForegroundColor Red
+        Write-Host '        Fill it in or delete the line; an empty header is not an absent one.' -ForegroundColor DarkGray
+        $problems++
+    }
+
     # Byte-order marks break some Lua parsers and look like garbage in game.
     foreach ($file in $onDisk) {
         $bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:Root $file))
@@ -54592,6 +54717,35 @@ function Invoke-CNCheck {
             $problems++
         }
 
+        # A DUPLICATE IN THE CANONICAL LIST IS NOT HARMLESS.
+        #
+        # This file is the one authoritative answer to "which strings does the
+        # addon use", and every coverage number printed below is a fraction of
+        # its length. 0.45.0 listed two keys twice, so the list claimed 48
+        # entries for 46 strings and every count reported against it was
+        # wrong.
+        $seenKeys = @{}
+        $duplicateKeys = @()
+
+        foreach ($match in [regex]::Matches($canonical, '(?m)^\s*"((?:[^"\\]|\\.)*)",\s*$')) {
+            $key = $match.Groups[1].Value
+
+            if ($seenKeys.ContainsKey($key)) {
+                $duplicateKeys += $key
+            }
+            else {
+                $seenKeys[$key] = $true
+            }
+        }
+
+        if ($duplicateKeys.Count -gt 0) {
+            foreach ($key in ($duplicateKeys | Sort-Object -Unique)) {
+                Write-Host "  FAIL  Locales\enUS.lua lists `"$key`" more than once." -ForegroundColor Red
+            }
+
+            $problems++
+        }
+
         $localeDir = Join-Path (Get-Location) 'Locales'
 
         if (Test-Path $localeDir) {
@@ -54636,15 +54790,35 @@ function Invoke-CNCheck {
                 }
             }
 
-            $untranslated = 0
+            $untranslated = @()
 
             foreach ($key in $known.Keys) {
-                if (-not $translated.ContainsKey($key)) { $untranslated++ }
+                if (-not $translated.ContainsKey($key)) { $untranslated += $key }
             }
 
-            if ($untranslated -gt 0) {
-                Write-Host "  note  $untranslated of $($known.Count) strings have no translation in any locale" -ForegroundColor DarkYellow
-                Write-Host "        (new strings, or English wording that changed and orphaned its translations)" -ForegroundColor DarkGray
+            # A NOTE THAT NOBODY ACTS ON IS NOT A CHECK.
+            #
+            # This printed "1 of 46 strings have no translation in any locale"
+            # for four consecutive releases and was scrolled past every time,
+            # including by the author of the string. A key translated in NO
+            # locale is not partial coverage -- it is a string that was added
+            # and never handed to a translator, which is the exact thing this
+            # lint was written for. So it fails, and it NAMES the string,
+            # because "1 of 46" is not actionable and the name is.
+            #
+            # Partial coverage stays a note: a key translated into six
+            # languages and not the seventh is ordinary work in progress.
+            if ($untranslated.Count -gt 0) {
+                Write-Host "  FAIL  $($untranslated.Count) of $($known.Count) strings have no translation in ANY locale:" -ForegroundColor Red
+
+                foreach ($key in ($untranslated | Sort-Object)) {
+                    Write-Host "          `"$key`"" -ForegroundColor Red
+                }
+
+                Write-Host '        Add them to every Locales\*.lua file, or remove them from' -ForegroundColor DarkGray
+                Write-Host '        Locales\enUS.lua if the addon no longer uses them.' -ForegroundColor DarkGray
+
+                $problems++
             }
 
             if ($orphans -eq 0) {
@@ -54746,6 +54920,25 @@ function Invoke-CNCheck {
     $roots = @()
 
     try { $roots = @(Get-CNSavedVariablesRoots) } catch { $roots = @() }
+
+    # STRAY .lua FILES IN fixtures\ ARE NOT RECORDINGS.
+    #
+    # `cn.ps1 fixtures` writes exactly one file, captured.lua. Anything else
+    # under fixtures\ was put there by hand, is read by nothing, and -- as
+    # happened with a `captures.lua` that would not parse -- can look like a
+    # broken part of the addon to any tool that walks the tree.
+    $fixtureDir = Join-Path (Get-Location) 'fixtures'
+
+    if (Test-Path -LiteralPath $fixtureDir) {
+        $stray = @(Get-ChildItem -LiteralPath $fixtureDir -File -Filter '*.lua' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne 'captured.lua' })
+
+        foreach ($file in $stray) {
+            Write-Host "  WARN  fixtures\$($file.Name) is not a file this toolkit writes." -ForegroundColor Yellow
+            Write-Host '        Only fixtures\captured.lua is read by anything. Delete it.' -ForegroundColor DarkGray
+            $problems++
+        }
+    }
 
     if (Test-Path -LiteralPath $fixture) {
         $recording = [System.IO.File]::ReadAllText($fixture)

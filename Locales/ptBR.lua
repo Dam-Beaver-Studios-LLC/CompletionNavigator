@@ -32,6 +32,7 @@ CN.RegisterLocale("ptBR", {
     ["back"] = "volte",
     ["nothing actionable"] = "nada a fazer",
     ["Stop cleared"] = "Parada concluÃ­da",
+    ["Stop %d of %d cleared"] = "Parada %d de %d concluÃ­da",
     ["Route complete."] = "Rota concluÃ­da.",
     ["estimated"] = "estimado",
     ["unknown"] = "desconhecido",

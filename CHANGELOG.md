@@ -16,6 +16,36 @@ release pipeline did.
 
 ### Fixed
 
+- **A string in the addon was never translated, and the check said so for
+  four releases.** `Stop %d of %d cleared` -- the line follow mode shows when
+  you finish a stop on a multi-stop route -- was added to the canonical string
+  list in 0.45.0 and handed to no translator, so every non-English player has
+  been seeing English there. `check` printed *"1 of 46 strings have no
+  translation in any locale"* on every run since and it was scrolled past
+  every time, because it was a note. **A note nobody acts on is not a check.**
+  A string translated in NO locale now fails the build and is named in the
+  output; partial coverage stays a note, because a string in six languages
+  and not the seventh is ordinary work in progress. All ten locales now carry
+  it.
+- **The canonical string list repeated itself.** `ready` and `another zone`
+  were each listed twice from 0.45.0, so the list claimed 48 entries for 46
+  strings and every coverage figure reported against it was wrong -- including
+  the note above. Duplicates now fail.
+- **A recording that will not parse no longer reads as no recording at all.**
+  The harness loads `fixtures/captured.lua` and treated "the file is missing"
+  and "the file is broken" identically, so a corrupt one printed *"stubs are
+  UNVERIFIED"* and the run went green. The strongest test in this project
+  would have been silently absent while a file sat in the repository claiming
+  to provide it. It is now a hard failure that names the parse error.
+- **A stray file under `fixtures/` is now reported.** The toolkit writes
+  exactly one recording, `captured.lua`. Anything else there was put in by
+  hand, is read by nothing, and can look like broken addon source to any tool
+  that walks the tree.
+- **`## X-Wago-ID:` sat in the `.toc` with no value.** The packager reads that
+  header to decide whether to publish to Wago, and a blank value is a value --
+  it is being asked to upload to a project id of `""`. An absent header is
+  understood; an empty one has to be interpreted. The line is gone, and any
+  `X-` header present with no value now fails the check.
 - **A captured client recording failed the build.** `cn.ps1 fixtures` writes
   `fixtures/captured.lua` -- evidence read only by the test harness, and the
   thing that makes the stub audit possible at all. It is a `.lua` file sitting

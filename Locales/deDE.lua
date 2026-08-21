@@ -32,6 +32,7 @@ CN.RegisterLocale("deDE", {
     ["back"] = "zurÃ¼ck",
     ["nothing actionable"] = "nichts zu tun",
     ["Stop cleared"] = "Station erledigt",
+    ["Stop %d of %d cleared"] = "Station %d von %d erledigt",
     ["Route complete."] = "Route abgeschlossen.",
     ["estimated"] = "geschÃ¤tzt",
     ["unknown"] = "unbekannt",

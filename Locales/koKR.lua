@@ -28,6 +28,8 @@ CN.RegisterLocale("koKR", {
     ["turn"] = "ë°©í–¥ ì „í™˜",
     ["back"] = "ë’¤ë¡œ",
     ["nothing actionable"] = "í•  ì¼ ì—†ìŒ",
+    ["Stop cleared"] = "ì§€ì  ì™„ë£Œ",
+    ["Stop %d of %d cleared"] = "%d/%d ì§€ì  ì™„ë£Œ",
     ["estimated"] = "ì¶”ì •ì¹˜",
     ["unknown"] = "ì•Œ ìˆ˜ ì—†ìŒ",
     ["ready"] = "ì¤€ë¹„ë¨",
