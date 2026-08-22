@@ -46,6 +46,49 @@ echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
 grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
+echo "  a captured fixture is loadable Lua"
+# EVERY RECORDING THIS COMMAND EVER WROTE WAS MALFORMED.
+#
+# Get-CNLuaBlock returns the INTERIOR of a block -- correct for its other two
+# callers -- and the fixtures writer emitted `return ` followed by that, so
+# every captured.lua began `return` then a bare `["worldPosition"] = {`. It
+# never loaded. The harness treated an unparseable file exactly like a missing
+# one, printed "no recording present", and passed; `check` reported a
+# recording was backing the audit because it only regex-scanned the text. The
+# strongest test in this project had never once run.
+cat > svcapture.sv <<'SAVEDVARS'
+CompletionNavigatorDB = {
+	["account"] = {
+		["capture"] = {
+			["build"] = "9.9.9",
+			["interface"] = 120100,
+			["worldPosition"] = {
+				["continentID"] = 2444,
+				["hasGetXY"] = true,
+			},
+			["events"] = {
+				["accepted"] = 40,
+				["refused"] = {},
+			},
+		},
+	},
+}
+SAVEDVARS
+
+$PWSH -NoProfile -File ./cn.ps1 fixtures svcapture.sv > fixwrite.log 2>&1
+grep -q "wrote  fixtures" fixwrite.log \
+  || { echo "FAIL: fixtures did not write a recording"; cat fixwrite.log; exit 1; }
+
+lua5.4 -e 'local f, e = loadfile("fixtures/captured.lua"); if not f then error(e) end; local t = f(); assert(type(t) == "table", "a recording must be a table"); assert(t.interface == 120100, "and must carry what was captured")' \
+  || { echo "FAIL: the recording cn.ps1 fixtures wrote is not loadable Lua"; head -12 fixtures/captured.lua; exit 1; }
+
+$PWSH -NoProfile -File ./cn.ps1 check > fixcheck2.log 2>&1
+grep -q "All checks passed" fixcheck2.log \
+  || { echo "FAIL: check rejects a recording this toolkit just wrote"; cat fixcheck2.log; exit 1; }
+
+rm -rf fixtures svcapture.sv
+echo "    written, loadable, and accepted by check"
+
 echo "  a string with no translation anywhere blocks the release"
 # THE NOTE THAT PRINTED FOR FOUR RELEASES AND WAS SCROLLED PAST.
 #

@@ -16,6 +16,24 @@ release pipeline did.
 
 ### Fixed
 
+- **Every client recording this toolkit has ever written was malformed Lua,
+  so the stub audit had never once run.** `cn.ps1 fixtures` emitted `return `
+  followed by the *interior* of the capture table -- no braces -- producing a
+  file beginning `return` and then a bare `["worldPosition"] = {`. The block
+  extractor returns interiors on purpose, which is right for its two other
+  callers and wrong here.
+  
+  Nothing said so. The harness treated an unparseable recording exactly like
+  an absent one, printed *"no recording present, stubs are UNVERIFIED"* and
+  passed; `check` reported *"stub audit backed by a recording"* on the
+  strength of a regular expression that found a version number in the text.
+  Both statements were false for as long as the feature has existed. The
+  recording is now written with its braces, `check` requires the file to
+  actually load, and a test writes one through the real command and loads it.
+- **The audit's own achievement rule named an achievement no fixture has**,
+  so the first time it ever ran against real data it reported the stub as
+  simpler than the client. The stub was correct; the rule was not. It survived
+  because no recording had ever parsed, so the rule had never executed.
 - **A string in the addon was never translated, and the check said so for
   four releases.** `Stop %d of %d cleared` -- the line follow mode shows when
   you finish a stop on a multi-stop route -- was added to the canonical string

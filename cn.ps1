@@ -36048,6 +36048,24 @@ release pipeline did.
 
 ### Fixed
 
+- **Every client recording this toolkit has ever written was malformed Lua,
+  so the stub audit had never once run.** `cn.ps1 fixtures` emitted `return `
+  followed by the *interior* of the capture table -- no braces -- producing a
+  file beginning `return` and then a bare `["worldPosition"] = {`. The block
+  extractor returns interiors on purpose, which is right for its two other
+  callers and wrong here.
+  
+  Nothing said so. The harness treated an unparseable recording exactly like
+  an absent one, printed *"no recording present, stubs are UNVERIFIED"* and
+  passed; `check` reported *"stub audit backed by a recording"* on the
+  strength of a regular expression that found a version number in the text.
+  Both statements were false for as long as the feature has existed. The
+  recording is now written with its braces, `check` requires the file to
+  actually load, and a test writes one through the real command and loads it.
+- **The audit's own achievement rule named an achievement no fixture has**,
+  so the first time it ever ran against real data it reported the stub as
+  simpler than the client. The stub was correct; the rule was not. It survived
+  because no recording had ever parsed, so the rule had never executed.
 - **A string in the addon was never translated, and the check said so for
   four releases.** `Stop %d of %d cleared` -- the line follow mode shows when
   you finish a stop on a multi-stop route -- was added to the canonical string
@@ -47729,7 +47747,14 @@ print("\nStubs, audited against a real client:")
             return true
         end
 
-        local criteria = CN.Blizzard.GetAchievementCriteriaList(1001, 4)
+        -- AN ACHIEVEMENT THE FIXTURE ACTUALLY HAS.
+        --
+        -- This asked for id 1001, which is in no fixture in this file, so it
+        -- got an empty list and reported that the stub was simpler than
+        -- reality. The stub was fine; the rule was wrong. It went unnoticed
+        -- because no recording had ever parsed, so this audit had never once
+        -- executed against real data.
+        local criteria = CN.Blizzard.GetAchievementCriteriaList(10, 4)
 
         return criteria and criteria[1] and criteria[1].required ~= nil
     end, "real criteria carry counters and the stub's do not")
@@ -51578,6 +51603,49 @@ echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
 grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
+echo "  a captured fixture is loadable Lua"
+# EVERY RECORDING THIS COMMAND EVER WROTE WAS MALFORMED.
+#
+# Get-CNLuaBlock returns the INTERIOR of a block -- correct for its other two
+# callers -- and the fixtures writer emitted `return ` followed by that, so
+# every captured.lua began `return` then a bare `["worldPosition"] = {`. It
+# never loaded. The harness treated an unparseable file exactly like a missing
+# one, printed "no recording present", and passed; `check` reported a
+# recording was backing the audit because it only regex-scanned the text. The
+# strongest test in this project had never once run.
+cat > svcapture.sv <<'SAVEDVARS'
+CompletionNavigatorDB = {
+	["account"] = {
+		["capture"] = {
+			["build"] = "9.9.9",
+			["interface"] = 120100,
+			["worldPosition"] = {
+				["continentID"] = 2444,
+				["hasGetXY"] = true,
+			},
+			["events"] = {
+				["accepted"] = 40,
+				["refused"] = {},
+			},
+		},
+	},
+}
+SAVEDVARS
+
+$PWSH -NoProfile -File ./cn.ps1 fixtures svcapture.sv > fixwrite.log 2>&1
+grep -q "wrote  fixtures" fixwrite.log \
+  || { echo "FAIL: fixtures did not write a recording"; cat fixwrite.log; exit 1; }
+
+lua5.4 -e 'local f, e = loadfile("fixtures/captured.lua"); if not f then error(e) end; local t = f(); assert(type(t) == "table", "a recording must be a table"); assert(t.interface == 120100, "and must carry what was captured")' \
+  || { echo "FAIL: the recording cn.ps1 fixtures wrote is not loadable Lua"; head -12 fixtures/captured.lua; exit 1; }
+
+$PWSH -NoProfile -File ./cn.ps1 check > fixcheck2.log 2>&1
+grep -q "All checks passed" fixcheck2.log \
+  || { echo "FAIL: check rejects a recording this toolkit just wrote"; cat fixcheck2.log; exit 1; }
+
+rm -rf fixtures svcapture.sv
+echo "    written, loadable, and accepted by check"
+
 echo "  a string with no translation anywhere blocks the release"
 # THE NOTE THAT PRINTED FOR FOUR RELEASES AND WAS SCROLLED PAST.
 #
@@ -54944,6 +55012,9 @@ function Invoke-CNCheck {
 
     try { $roots = @(Get-CNSavedVariablesRoots) } catch { $roots = @() }
 
+    $luacForFixture = Get-Command 'luac54.exe', 'luac.exe', 'luac', 'luac5.4', 'luac5.3' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
     # STRAY .lua FILES IN fixtures\ ARE NOT RECORDINGS.
     #
     # `cn.ps1 fixtures` writes exactly one file, captured.lua. Anything else
@@ -54965,6 +55036,30 @@ function Invoke-CNCheck {
 
     if (Test-Path -LiteralPath $fixture) {
         $recording = [System.IO.File]::ReadAllText($fixture)
+
+        # DOES IT ACTUALLY LOAD?
+        #
+        # This block used to regex the file for a version number and report
+        # "stub audit backed by a recording" on the strength of finding one.
+        # Every recording ever written was malformed Lua -- the writer emitted
+        # the block's interior without its braces -- so the audit had never
+        # run, and this line said it had. A check that reads a file with a
+        # regular expression is not a check that the file is loadable.
+        if ($recording -notmatch '(?m)^return\s*\{') {
+            Write-Host '  FAIL  fixtures\captured.lua is not loadable Lua (no `return {`).' -ForegroundColor Red
+            Write-Host '        Re-run:  .\cn.ps1 fixtures' -ForegroundColor Yellow
+            $problems++
+        }
+        elseif ($luacForFixture) {
+            $parsed = Invoke-CNNative -Executable $luacForFixture.Source `
+                -Arguments @('-p', $fixture) -Quiet
+
+            if (-not $parsed.Ok) {
+                Write-Host "  FAIL  fixtures\captured.lua does not parse: $($parsed.Output -join ' ')" -ForegroundColor Red
+                Write-Host '        Re-run:  .\cn.ps1 fixtures' -ForegroundColor Yellow
+                $problems++
+            }
+        }
 
         $recordedInterface =
             if ($recording -match '\["interface"\]\s*=\s*(\d+)') { [int]$Matches[1] } else { $null }
@@ -55438,7 +55533,17 @@ function Invoke-CNFixtures {
         '-- stubs against it: a stub missing a field that reality had is a test',
         '-- failure here rather than a bug report later.',
         '',
-        ('return ' + $block.Body)
+        # BRACES. Get-CNLuaBlock returns the INTERIOR of the block -- which is
+        # what its other two callers want, and which made every recording this
+        # command has ever written begin `return` followed by a bare
+        # `["worldPosition"] = {`. That is not Lua. It never loaded, so the
+        # stub audit -- the strongest test in this project -- silently reported
+        # "no recording present" and passed for as long as the feature has
+        # existed, while `check` said a recording was backing it because it
+        # only ever regex-scanned the text.
+        'return {',
+        $block.Body,
+        '}'
     )
 
     $file = Join-Path $target 'captured.lua'

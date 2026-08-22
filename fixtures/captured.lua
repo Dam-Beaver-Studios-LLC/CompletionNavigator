@@ -1,12 +1,13 @@
 -- fixtures/captured.lua
 -- Recorded from a live World of Warcraft client by /cn capture and
--- lifted out of SavedVariables by cn.ps1 fixtures on 2026-08-21 05:46.
+-- lifted out of SavedVariables by cn.ps1 fixtures on 2026-08-22 05:41.
 --
 -- DO NOT EDIT. This is evidence, not source. The harness audits its own
 -- stubs against it: a stub missing a field that reality had is a test
 -- failure here rather than a bug report later.
 
-return 
+return {
+
 ["worldPosition"] = {
 ["continentID"] = 2444,
 ["shape"] = {
@@ -194,3 +195,4 @@ return
 },
 },
 
+}

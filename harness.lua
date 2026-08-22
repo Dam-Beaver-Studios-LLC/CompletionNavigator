@@ -7297,7 +7297,14 @@ print("\nStubs, audited against a real client:")
             return true
         end
 
-        local criteria = CN.Blizzard.GetAchievementCriteriaList(1001, 4)
+        -- AN ACHIEVEMENT THE FIXTURE ACTUALLY HAS.
+        --
+        -- This asked for id 1001, which is in no fixture in this file, so it
+        -- got an empty list and reported that the stub was simpler than
+        -- reality. The stub was fine; the rule was wrong. It went unnoticed
+        -- because no recording had ever parsed, so this audit had never once
+        -- executed against real data.
+        local criteria = CN.Blizzard.GetAchievementCriteriaList(10, 4)
 
         return criteria and criteria[1] and criteria[1].required ~= nil
     end, "real criteria carry counters and the stub's do not")
