@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.50.0'
+$script:ToolkitVersion = '0.51.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.50.0"
+CN.version     = "0.51.0"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -3793,17 +3793,35 @@ function CN.ScoreObjective(objective)
         travel = CN.unknownLocationCost
     end
 
-    local score = 0
+    -- WORTH AND COST ARE SUMMED SEPARATELY, AND ONLY WORTH IS MULTIPLIED.
+    --
+    -- Everything used to go into one running total which was then multiplied
+    -- by the focus weighting and by the learned multiplier. That total
+    -- crosses zero: travel is weighted -1 against a cost that reaches 40,
+    -- while what finishing something is worth tops out around 8. So anything
+    -- more than a few minutes away scored negative, and multiplying a
+    -- negative by 2.0 pushes it DOWN.
+    --
+    -- `/cn mode quests` therefore ranked a distant quest twenty-seven points
+    -- BELOW a distant pet -- the precise opposite of what the player asked
+    -- for -- and the learned multiplier did the same thing in reverse,
+    -- promoting the types it had decided you avoid, as long as they were far
+    -- away. Both features were not merely weak at distance; they inverted.
+    --
+    -- Worth and cost are now kept apart. A focus doubles what a thing is
+    -- worth to you. It does not double how far away it is, and it cannot
+    -- reverse the sign of anything.
+    local worth = 0
 
-    score = score + (objective.completionValue      or 1) * w.completionValue
-    score = score + (objective.unlockValue          or 0) * w.unlockValue
-    score = score + (objective.limitedTimeBonus     or 0) * w.limitedTimeBonus
+    worth = worth + (objective.completionValue      or 1) * w.completionValue
+    worth = worth + (objective.unlockValue          or 0) * w.unlockValue
+    worth = worth + (objective.limitedTimeBonus     or 0) * w.limitedTimeBonus
 
     -- A deadline the objective actually carries, weighted by how close it is.
     -- `expiresIn` is the established field name; providers that know a
     -- deadline already set it.
     if objective.expiresIn then
-        score = score + CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight
+        worth = worth + CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight
     end
     -- `objective.nearbyBonus` used to be summed here as a term of its own.
     -- Nothing ever set it. The WEIGHT is live -- it scales the batch bonus
@@ -3812,17 +3830,21 @@ function CN.ScoreObjective(objective)
 
     -- Everything else at the same place makes this stop worth more.
     if objective.hubSize and objective.hubSize > 1 then
-        score = score + math.min(CN.batchBonusCap,
+        worth = worth + math.min(CN.batchBonusCap,
             (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus
     end
-    score = score + (objective.userPreference       or 0) * w.userPreference
-    score = score + (objective.characterSuitability or 0) * w.characterSuitability
-    score = score + travel                                * w.travelCost
-    score = score + (objective.estimatedTime        or 0) * w.estimatedTime
+    worth = worth + (objective.userPreference       or 0) * w.userPreference
+    worth = worth + (objective.characterSuitability or 0) * w.characterSuitability
+
+    local cost = 0
+
+    cost = cost + travel                          * w.travelCost
+    cost = cost + (objective.estimatedTime or 0)  * w.estimatedTime
 
     if profile.types and objective.type and profile.types[objective.type] then
-        score = score * profile.types[objective.type]
+        worth = worth * profile.types[objective.type]
     end
+
 
     -- LAST, AND DELIBERATELY AFTER THE PROFILE.
     --
@@ -3849,15 +3871,29 @@ function CN.ScoreObjective(objective)
         local adjuster = CN.scoreAdjusters[CN.scoreAdjusterOrder[index]]
 
         if adjuster then
-            local adjusted = adjuster(objective, score)
+            -- ADJUSTERS SEE THE WORTH, NOT THE SIGNED TOTAL.
+            --
+            -- Every adjuster in this addon multiplies. Handing them a total
+            -- that crosses zero meant a penalty of 0.8 RAISED the score of
+            -- anything far enough away to be negative, and a preference of
+            -- 1.25 lowered it. The contract is now "here is what this is
+            -- worth; return what you think it is worth", which is what both
+            -- of them were written to express.
+            local adjusted = adjuster(objective, worth)
 
             -- An adjuster that returns nothing, or something that is not a
             -- number, is ignored rather than allowed to zero the score.
             if type(adjusted) == "number" then
-                score = adjusted
+                worth = adjusted
             end
         end
     end
+
+    local score = worth + cost
+
+    -- Kept for `/cn order`, which has to show the same arithmetic.
+    objective.scoreWorth = worth
+    objective.scoreCost  = cost
 
     -- Normalize -0.0, which formats as "-0.0" and reads like a bug.
     if score == 0 then
@@ -4538,24 +4574,38 @@ function CN.ExplainScore(objective)
     -- Both are multiplicative on the whole score rather than additive terms,
     -- so they are shown as what they are: a line saying what the running
     -- total was multiplied by, and by how much it moved the number.
-    local subtotal = 0
+    -- THE SAME SPLIT THE SCORER MAKES.
+    --
+    -- Worth is multiplied; cost is not. Explaining it any other way would put
+    -- this function back in disagreement with ScoreObjective, which is the
+    -- thing its own comment promises cannot happen.
+    local costLabels = {
+        ["getting there"]      = true,
+        ["how long it takes"]  = true,
+    }
+
+    local worth, cost = 0, 0
 
     for _, term in ipairs(terms) do
-        subtotal = subtotal + term.value
+        if costLabels[term.label] then
+            cost = cost + term.value
+        else
+            worth = worth + term.value
+        end
     end
 
     if profile.types and objective.type and profile.types[objective.type] then
         local factor = profile.types[objective.type]
 
-        local after = subtotal * factor
+        local after = worth * factor
 
         table.insert(terms, {
-            label = string.format("%s focus (everything above x%.2f)",
+            label = string.format("%s focus (what it is worth x%.2f)",
                 mode, factor),
-            value = after - subtotal,
+            value = after - worth,
         })
 
-        subtotal = after
+        worth = after
     end
 
     for index = 1, #CN.scoreAdjusterOrder do
@@ -4564,17 +4614,17 @@ function CN.ExplainScore(objective)
         local adjuster = CN.scoreAdjusters[name]
 
         if adjuster then
-            local adjusted = adjuster(objective, subtotal)
+            local adjusted = adjuster(objective, worth)
 
             if type(adjusted) == "number" then
-                if math.abs(adjusted - subtotal) > 0.0005 then
+                if math.abs(adjusted - worth) > 0.0005 then
                     table.insert(terms, {
                         label = name .. " adjustment",
-                        value = adjusted - subtotal,
+                        value = adjusted - worth,
                     })
                 end
 
-                subtotal = adjusted
+                worth = adjusted
             end
         end
     end
@@ -10037,6 +10087,29 @@ function Blizzard.GetAchievementProgress(achievementID)
     local total = GetAchievementNumCriteria(achievementID) or 0
     local done  = 0
 
+    -- A SINGLE COUNTING CRITERION IS NOT A SINGLE STEP.
+    --
+    -- "Complete 100 quests in Hallowfall" is reported by the client as ONE
+    -- criterion carrying a quantity and a requirement. Counting rows gave
+    -- 0 of 1 -- so a hundred-quest zone grind was filed as "not started, 1
+    -- to do", sorted to the front of `/cn zones` as the smallest job
+    -- available, awarded the "a small remainder is a session" bonus, and
+    -- emitted as a recommendation reading "1 of 1 left in this zone".
+    --
+    -- The quantity is right there on the same call this function already
+    -- makes; it was being discarded. When a single criterion carries a real
+    -- requirement, that requirement IS the denominator.
+    if total == 1 then
+        local _, _, criteriaCompleted, quantity, required =
+            GetAchievementCriteriaInfo(achievementID, 1)
+
+        if type(required) == "number" and required > 1 then
+            return math.min(quantity or 0, required), required
+        end
+
+        return criteriaCompleted and 1 or 0, 1
+    end
+
     for index = 1, total do
         local _, _, criteriaCompleted = GetAchievementCriteriaInfo(achievementID, index)
 
@@ -10808,6 +10881,11 @@ function Blizzard.GetReputationRemaining(factionID)
         remaining = math.max(0, needed - earned),
         standing  = data.reaction,
         name      = data.name,
+
+        -- The rank being worked toward, so a band can be reported as a band
+        -- -- "11,999 of 12,000 to Revered" -- rather than as a fraction of a
+        -- goal the client will not vouch for.
+        nextRankName = data.nextReactionName or data.nextRank,
     }
 end
 
@@ -15940,7 +16018,14 @@ CN.RegisterCandidateProvider("Toys", function()
                 zone            = seller.zone,
                 accountWide     = true,
                 completionValue = value,
-                travelCost      = (seller.mapID == playerMap) and 2 or 25,
+                -- COSTED, NOT GUESSED. This charged a flat 25 for anything
+                -- outside the current zone while holding the seller's exact
+                -- coordinates -- so a vendor ninety seconds away in the next
+                -- zone was charged twenty-five where a quest at the identical
+                -- spot was charged three. A systematic twenty-two point
+                -- penalty against exactly the collection types this file
+                -- exists to surface.
+                travelCost      = CN.TravelCost(seller.mapID, seller.x, seller.y),
                 reasons         = reasons,
             })
         end)
@@ -21106,7 +21191,14 @@ CN.RegisterCandidateProvider("Vendors", function()
                 x               = seller.x,
                 y               = seller.y,
                 completionValue = 2,
-                travelCost      = (seller.mapID == playerMap) and 2 or 25,
+                -- COSTED, NOT GUESSED. This charged a flat 25 for anything
+                -- outside the current zone while holding the seller's exact
+                -- coordinates -- so a vendor ninety seconds away in the next
+                -- zone was charged twenty-five where a quest at the identical
+                -- spot was charged three. A systematic twenty-two point
+                -- penalty against exactly the collection types this file
+                -- exists to surface.
+                travelCost      = CN.TravelCost(seller.mapID, seller.x, seller.y),
                 reasons         = reasons,
             })
         end)
@@ -22507,9 +22599,9 @@ CN.RegisterCandidateProvider("Goals", function()
                 local travel
 
                 if plan.mapID then
-                    local playerMap = select(1, CN.GetPlayerPosition())
-
-                    travel = (plan.mapID == playerMap) and 2 or 25
+                    -- Costed like everything else, rather than a flat
+                    -- penalty for "not here" while holding the coordinates.
+                    travel = CN.TravelCost(plan.mapID, plan.x, plan.y)
                 end
 
                 table.insert(candidates, CN.NewObjective({
@@ -22983,10 +23075,30 @@ builders.REPUTATION = function(goal)
     table.insert(steps, NewStep(Chase.states.NEXT, string.format(
         "%s reputation to the next rank", CN.Comma(standing.remaining))))
 
+    -- NO FRACTION, BECAUSE THIS ONE IS NOT A FRACTION OF THE GOAL.
+    --
+    -- `earned` and `needed` describe the CURRENT RANK ONLY -- how far into
+    -- Honored you are, not how far along the ladder to Exalted. Returning
+    -- them as done/total made `/cn chase` draw a full bar and print "100%"
+    -- for somebody standing at 21,000 of the 42,000 the ladder needs, and
+    -- made `Chase.All` -- which sorts by exactly that fraction -- rank a
+    -- faction one point short of Honored above an appearance genuinely eighty
+    -- percent collected.
+    --
+    -- The client will vouch for progress inside a band and not for progress
+    -- across the ladder, so the band is reported as a count, with the rank
+    -- named, and no denominator is invented for the rest. That is this
+    -- addon's standing rule, applied to the one place that was breaking it
+    -- most visibly.
     return steps, {
-        done  = standing.earned,
-        total = standing.needed,
-        unit  = "reputation",
+        done         = nil,
+        total        = nil,
+        unit         = "reputation",
+        bandEarned   = standing.earned,
+        bandNeeded   = standing.needed,
+        nextRank     = standing.nextRankName,
+        unknownTotal = "the client reports progress inside a rank, not "
+            .. "across the whole standing",
     }
 end
 
@@ -23243,6 +23355,17 @@ function Chase.Summarize(chain)
             CN.Comma(chain.progress.done or 0),
             CN.Comma(chain.progress.total),
             chain.progress.unit or "steps"))
+
+    elseif chain.progress and chain.progress.bandNeeded then
+        -- A band with the rank named, rather than a fraction of the goal
+        -- that the client will not vouch for. "11,999 of 12,000 to Revered"
+        -- is a fact; "100%" of a half-finished ladder is not.
+        table.insert(parts, string.format("%s of %s %s%s",
+            CN.Comma(chain.progress.bandEarned or 0),
+            CN.Comma(chain.progress.bandNeeded),
+            chain.progress.unit or "steps",
+            chain.progress.nextRank
+                and (" to " .. tostring(chain.progress.nextRank)) or ""))
     end
 
     local nextStep = chain.next or Chase.NextStep(chain)
@@ -23822,8 +23945,22 @@ end
 function Progress.CurrentDayKey()
     local seconds = Blizzard.GetSecondsUntilDailyReset()
 
+    -- BOTH BRANCHES ON THE SAME SCALE.
+    --
+    -- The fallback returned `20260822` where the primary returns about
+    -- `20687` -- a day index and a calendar number, two different kinds of
+    -- integer. One nil answer from the client, which happens during a loading
+    -- screen or early in a login, read as a day rollover: the player's count
+    -- for today was moved into "yesterday" mid-session and today restarted at
+    -- one. The next genuine reset then compared against a key on the wrong
+    -- scale and did it again.
+    --
+    -- Without the reset time the day boundary is unknowable, so the fallback
+    -- uses the same day-index arithmetic with no offset. It can be off by
+    -- one against the game's day; it cannot be off by six orders of
+    -- magnitude.
     if not seconds then
-        return tonumber(date("%Y%m%d"))
+        return math.floor(time() / 86400)
     end
 
     -- The reset that is coming, as an absolute time, identifies the day
@@ -24847,11 +24984,22 @@ function Follow.NextStop()
         return nil
     end
 
-    -- The route length, counted the first time there is a route to count.
-    -- Start() runs at login too, before the map API will answer, so counting
-    -- only there left the total at zero for the whole session.
-    if (Follow.startedWith or 0) == 0 and #hubs > 0 then
-        Follow.startedWith = #hubs
+    -- THE TOTAL MOVES, BECAUSE THE ROUTE DOES.
+    --
+    -- The route is rebuilt from live candidates on every call, so accepting
+    -- five quests in three new places lengthens it. A denominator frozen at
+    -- the start therefore produced "Stop 9 of 8 cleared", fired the "Route
+    -- complete" flourish at stop 8 and then again at 9, 10 and 11 while
+    -- stops remained, and left the heads-up display -- which clamps -- stuck
+    -- on "stop 8 of 8" for the rest of the session.
+    --
+    -- What the player is being told is how far through the CURRENT route
+    -- they are, so the total is what is currently there plus what has already
+    -- been cleared. It can grow; that is honest, because the work grew.
+    local total = #hubs + (Follow.completed or 0)
+
+    if total > (Follow.startedWith or 0) then
+        Follow.startedWith = total
     end
 
     for _, hub in ipairs(hubs) do
@@ -25859,6 +26007,16 @@ Session.Durations = Durations
 Session.minDurationSamples = 4
 Session.durationSampleCap  = 25
 
+-- The shortest a thing can be said to have taken once its journey is removed.
+--
+-- A floor rather than a discard, and a very small one. Discarding every
+-- sample where the journey estimate exceeded the whole elapsed span would
+-- throw away precisely the fast objectives -- biasing the learned time
+-- upward, which is the error this subtraction exists to remove. A floored
+-- sample says "the work itself was negligible next to getting there", which
+-- for a quest handed in on arrival is exactly true.
+Session.minimumWorkSeconds = 0.05
+
 -- When each objective was first put in front of the player. A completion
 -- timed from here is "how long it took once it was the thing to do", which is
 -- the number a plan needs.
@@ -25902,8 +26060,8 @@ local function Prune(force)
 
     local removed = 0
 
-    for key, at in pairs(offeredAt) do
-        if now - at > Session.offerMemorySeconds then
+    for key, record in pairs(offeredAt) do
+        if now - record.at > Session.offerMemorySeconds then
             offeredAt[key] = nil
             removed = removed + 1
         end
@@ -25916,8 +26074,8 @@ local function Prune(force)
     if offeredCount > Session.offerMemoryCap then
         local ordered = {}
 
-        for key, at in pairs(offeredAt) do
-            table.insert(ordered, { key = key, at = at })
+        for key, record in pairs(offeredAt) do
+            table.insert(ordered, { key = key, at = record.at })
         end
 
         table.sort(ordered, function(a, b) return a.at < b.at end)
@@ -25952,7 +26110,27 @@ function Session.NoteOffered(objective)
         return
     end
 
-    offeredAt[key] = Session.Now()
+    -- WHAT THE JOURNEY WAS EXPECTED TO COST, RECORDED WITH THE CLOCK.
+    --
+    -- The elapsed span between "this was recommended" and "this was finished"
+    -- contains the walk to it. The planner then ADDS a separately computed
+    -- travel leg to a sum of those spans, so the journey was counted twice --
+    -- and once per objective at a stop, which is worst exactly where the
+    -- router is trying to reward batching. Four quests six minutes away came
+    -- out at thirty-six minutes against a true twelve, reported confident.
+    --
+    -- Subtracting the addon's own estimate makes the stored number a WORK
+    -- time, which is what every consumer already assumes it is. Using the
+    -- addon's own model rather than a measurement keeps the two consistent
+    -- even where the model is imperfect: the same quantity is removed here
+    -- and added back there.
+    local travelSeconds = 0
+
+    if objective.travelCost and CN.secondsPerCostPoint then
+        travelSeconds = objective.travelCost * CN.secondsPerCostPoint
+    end
+
+    offeredAt[key] = { at = Session.Now(), travel = travelSeconds }
     offeredCount   = offeredCount + 1
 
     Prune()
@@ -25976,7 +26154,16 @@ function Session.NoteCompleted(objectiveType, id)
         return nil
     end
 
-    local elapsed = Session.Now() - started
+    local elapsed = Session.Now() - started.at
+
+    -- The journey out, which the caller will add back separately.
+    elapsed = elapsed - (started.travel or 0)
+
+    -- A floor rather than a discard: something finished faster than the model
+    -- said the journey would take is a fast objective, not a corrupt sample.
+    if elapsed < Session.minimumWorkSeconds then
+        elapsed = Session.minimumWorkSeconds
+    end
 
     -- Anything over twenty minutes was not "doing the thing", it was living
     -- your life with the thing still on the list.
@@ -26238,6 +26425,14 @@ function Session.Plan(minutes)
         -- hub's position was not advanced past, so every later hub's travel
         -- leg was costed from wherever the last ACCEPTED stop was, which is
         -- not where the player would be.
+        -- THE FIRST STOP IS NOT EXEMPT FROM THE CLOCK.
+        --
+        -- `#plan.stops > 0` meant stop one was admitted whatever it cost, so
+        -- `/cn plan 5` against a forty-five minute hub printed "1 stop, about
+        -- 45m of the 5m you have" with nothing flagging that the budget had
+        -- been blown ninefold. Taking it is still often the right call --
+        -- there may be nothing smaller -- but the player has to be told, not
+        -- shown a plan that silently is not a plan.
         if plan.seconds + seconds > budget and #plan.stops > 0 then
             plan.skipped = plan.skipped + 1
 
@@ -26269,6 +26464,9 @@ function Session.Plan(minutes)
     if plan.skipped > 0 then
         plan.skipped = #hubs - #plan.stops
     end
+
+    -- Said out loud when the only thing available does not fit.
+    plan.overran = plan.seconds > budget
 
     return plan
 end
@@ -26401,13 +26599,29 @@ CN:RegisterCommand{
                 .. " further stop(s) did not fit.|r")
         end
 
+        if plan.overran then
+            Print("|cffffff00The nearest stop is longer than the time you "
+                .. "have.|r |cff999999Nothing smaller was available, so it "
+                .. "is shown anyway -- but it will not fit.|r")
+        end
+
         if not plan.confident then
-            local rate, measured = Session.Speed()
+            -- THE COUNT MUST BE THE COUNT BEHIND THE RATE.
+            --
+            -- `Speed()` answers from one bucket; `SpeedSampleCount()` with no
+            -- argument summed all three. So the line justifying confidence in
+            -- a 62 yd/s flying median cited forty-six samples, forty of which
+            -- were on-foot readings at seven that had no part in it --
+            -- overstating the evidence sevenfold in the one place whose whole
+            -- job is to say how much evidence there is.
+            local bucket = Session.Bucket()
+
+            local rate, measured = Session.Speed(bucket)
 
             Print("|cffffff00Some of this is not measured yet.|r "
                 .. "|cff999999Travel speed: "
-                .. (measured and string.format("%.0f yd/s from %d samples",
-                        rate, Session.SpeedSampleCount())
+                .. (measured and string.format("%.0f yd/s from %d %s samples",
+                        rate, Session.SpeedSampleCount(bucket), bucket)
                     or "still learning")
                 .. ". Task times are learned from your own play, so the "
                 .. "estimate sharpens as you go rather than starting from "
@@ -32041,10 +32255,26 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
 
     local session = CN:GetModule("Session")
 
+    -- THE SPEED OF RUNNING, NOT THE SPEED YOU HAPPEN TO BE MOVING.
+    --
+    -- `Speed()` with no argument answers for the bucket the player is in
+    -- RIGHT NOW -- so asking it while airborne returned the skyriding median
+    -- and used it to divide the "run the whole way" option and both walking
+    -- legs of every flight-path route. A twenty-one thousand yard journey was
+    -- quoted at six minutes, labelled `run`, and marked confident. The true
+    -- figure on foot is fifty.
+    --
+    -- It also made the self-flown option unreachable while flying: dividing
+    -- the same distance by the same number and then adding six seconds of
+    -- takeoff can never win, so the mode this addon built a whole travel
+    -- model around never appeared in the situation it was written for.
+    --
+    -- The ground speed is asked for by name. Which bucket the player is
+    -- standing in is not a fact about how long it takes to walk somewhere.
     local runSpeed, runMeasured = 7, false
 
     if session and session.Speed then
-        runSpeed, runMeasured = session.Speed()
+        runSpeed, runMeasured = session.Speed(false)
     end
 
     runSpeed = math.max(0.5, runSpeed)
@@ -32060,6 +32290,10 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         mode    = "run",
         yards   = direct,
     }
+
+    -- What the comparison uses, which is the duration for everything except a
+    -- flight pair the player has flown before -- see the tie-break below.
+    local bestRanking = best.seconds
 
     local confident = runMeasured
 
@@ -32077,7 +32311,9 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
 
         local seconds = (direct / flySpeed) + Travel.takeoffSeconds
 
-        if seconds < best.seconds then
+        if seconds < bestRanking then
+            bestRanking = seconds
+
             best = {
                 seconds = seconds,
                 mode    = "self",
@@ -32158,7 +32394,7 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
             if walkOut and cheapestArrival
                 and (bestPossibleDiscount
                     * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
-                    < best.seconds then
+                    < bestRanking then
 
                 local origin = nodes[i]
                 local row    = spans[i]
@@ -32176,11 +32412,28 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
                         -- A pair the player has actually flown beats an
                         -- equivalent pair nobody has: same distance, one
                         -- of them proven to connect.
+                        --
+                        -- A TIE-BREAK, NOT A DISCOUNT. This used to multiply
+                        -- `seconds` itself, so the duration reported to the
+                        -- player was ten percent below the model's own
+                        -- arithmetic -- `/cn travel` printed legs that summed
+                        -- to fifty seconds more than its own headline -- and
+                        -- that shortened number flowed into scoring and into
+                        -- `/cn plan`'s budget. Every player has flown
+                        -- somewhere, so this was the common case, not an
+                        -- edge one.
+                        --
+                        -- The preference belongs in the comparison. The
+                        -- seconds are the seconds.
+                        local ranking = seconds
+
                         if Travel.IsKnownRoute(origin.id, nodes[j].id) then
-                            seconds = seconds * Travel.knownRouteBonus
+                            ranking = ranking * Travel.knownRouteBonus
                         end
 
-                        if seconds < best.seconds then
+                        if ranking < bestRanking then
+                            bestRanking = ranking
+
                             best = {
                                 seconds     = seconds,
                                 mode        = "fly",
@@ -32216,6 +32469,10 @@ end
 -- a zone". Kept as a separate function so the scoring scale and the human
 -- number never drift apart: one is derived from the other.
 Travel.secondsPerCostPoint = 30
+
+-- Published, because Session has to remove from a measured duration exactly
+-- what the planner will add back to it. One constant, one conversion.
+CN.secondsPerCostPoint = Travel.secondsPerCostPoint
 Travel.maximumCost         = 40
 
 function Travel.CostFor(mapID, x, y)
@@ -32235,9 +32492,19 @@ function Travel.CostFor(mapID, x, y)
 end
 
 -- Published so providers do not each have to decide what to do when the
--- estimate is unavailable. Falls back to what the addon did before this
--- module existed, which is a flat penalty for another zone.
-CN.fallbackZoneCost = 25
+-- estimate is unavailable.
+--
+-- IT MUST NOT BE CHEAPER THAN A JOURNEY WE CAN ACTUALLY COST.
+--
+-- This was 25 while a costed journey saturates at `maximumCost = 40`, so
+-- "I cannot work out how to get there" scored fifteen points BELOW the far
+-- side of the zone the player is standing in -- and fifteen is nearly twice
+-- the entire range of what finishing something is worth. Another continent,
+-- unreachable and unmodelled, outranked a quest two minutes away.
+--
+-- An uncostable journey is the one we know least about; it has to be the
+-- pessimistic answer, not the optimistic one.
+CN.fallbackZoneCost = 40
 
 function CN.TravelCost(mapID, x, y)
     local travel = CN:GetModule("Travel")
@@ -33203,6 +33470,10 @@ end
 -- form.
 local shownAt = {}
 
+-- Which sub-bucket each sighting was filed under, so the completion side can
+-- credit the same bucket the showing side incremented.
+local shownRefinement = {}
+
 local function Now()
     return (GetTime and GetTime()) or (time and time()) or 0
 end
@@ -33272,6 +33543,9 @@ CN.RegisterRecommendationHook("Preference", function(results)
                 -- Only quests get this. Every other type is one habit, and
                 -- six buckets that each learn nothing beat none at all.
                 local refined = Preference.Refine(objective)
+
+                shownRefinement[objectiveType .. ":" .. tostring(objective.id)]
+                    = refined
 
                 if refined ~= objectiveType then
                     local refinedRow = store[refined]
@@ -33344,6 +33618,22 @@ function Preference.Refine(objective)
     return "QUEST_SIDE"
 end
 
+-- Which sub-bucket a recorded sighting belonged to.
+--
+-- The showing side files an objective under both its plain type and its
+-- refinement; the completion side sees only a type and an id, and the id is
+-- not always the one that was recommended. So the refinement is remembered
+-- when the sighting is recorded, keyed the same way.
+function Preference.RefinedKeyFor(key, objectiveType)
+    local remembered = shownRefinement[key]
+
+    if remembered then
+        return remembered
+    end
+
+    return objectiveType
+end
+
 function Preference.NoteCompleted(objectiveType, objectiveID)
     if not Preference.IsEnabled() or not objectiveType then
         return false
@@ -33402,7 +33692,8 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
     end
 
     if (now - last) > Preference.WindowFor(objectiveType) then
-        shownAt[key] = nil
+        shownAt[key]         = nil
+        shownRefinement[key] = nil
 
         return false
     end
@@ -33414,6 +33705,34 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
     end
 
     row.acted = row.acted + 1
+
+    -- AND THE REFINED BUCKET, WHICH WAS NEVER CREDITED AT ALL.
+    --
+    -- The showing side increments both the plain type and the campaign/side
+    -- sub-bucket; this side incremented only the plain type. So the refined
+    -- rows accumulated sightings and no actions, drifted to the floor
+    -- multiplier, and the score adjuster PREFERS the refined row whenever its
+    -- multiplier is not 1 -- meaning the plain row that held the true answer
+    -- was correct and unreachable.
+    --
+    -- Measured: a player who turned in all 120 quests they were shown was
+    -- told, after an hour or two, that they "rarely act on these", and every
+    -- quest was multiplied by 0.80 permanently.
+    --
+    -- The id is not always available here (some events carry a different one
+    -- than was recommended), so the bucket is recovered from the key that was
+    -- actually matched.
+    local refined = Preference.RefinedKeyFor(key, objectiveType)
+
+    if refined and refined ~= objectiveType then
+        local store = Store()
+
+        local refinedRow = store and store[refined]
+
+        if refinedRow then
+            refinedRow.acted = (refinedRow.acted or 0) + 1
+        end
+    end
 
     Observed()
 
@@ -36406,7 +36725,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.50.0
+## Version: 0.51.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -36660,6 +36979,83 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.51.0]
+
+An audit of **whether the numbers are right** -- not whether the code runs,
+but whether the answers it gives are true. Fourteen findings. A confidently
+wrong number is worse than no number, and several of these were confidently
+wrong in the direction that made the addon's advice actively bad.
+
+### Fixed
+
+- **A focus made the thing you asked for rank LOWER, as soon as it was more
+  than a few minutes away.** Everything went into one running total which was
+  then multiplied -- and that total crosses zero, because travel is weighted
+  against a cost reaching 40 while what finishing something is worth tops out
+  around 8. Multiplying a negative number by 2.0 pushes it down. `/cn mode
+  quests` ranked a distant quest **twenty-seven points below a distant pet**.
+  The learned preference inverted the same way, promoting exactly the types it
+  had decided you avoid. Worth and cost are now kept apart: a focus doubles
+  what a thing is worth to you, and cannot reverse the sign of anything.
+- **Every task time the addon learned contained the journey, which the planner
+  then added again** -- once per objective at a stop, which is worst precisely
+  where the router is trying to reward grouping work together. Four quests six
+  minutes apart came out at **thirty-six minutes against a true twelve**,
+  reported as confident. Learned times are now the work itself.
+- **"Running the whole way" was costed at whatever speed you happened to be
+  moving.** Asked while flying, it divided by your skyriding speed: a
+  twenty-one thousand yard journey was quoted at **six minutes, labelled
+  `run`, marked confident**, where the truth on foot is fifty. It also made
+  the self-flown option unreachable while airborne -- the same divisor plus
+  six seconds of takeoff can never win.
+- **Another continent scored as CHEAPER to reach than the far side of the zone
+  you are standing in.** The fallback for a journey the addon cannot model was
+  25 while a journey it can model saturates at 40 -- so "I have no idea how to
+  get there" outranked a quest two minutes away by fifteen points, nearly
+  twice the entire range of what finishing something is worth. Vendors and
+  toys were charged a flat 25 for the next zone while holding the seller's
+  exact coordinates; they are costed properly now.
+- **A player who did everything they were shown was told they do nothing.**
+  Quests are counted under both their type and a campaign/side sub-bucket; the
+  showing side incremented both and the completion side credited only the
+  type. The sub-buckets collected sightings and never a single action, drifted
+  to the floor multiplier -- and the ranking prefers the sub-bucket. Measured:
+  120 quests offered, 120 turned in, `/cn learned` reporting **"0 of 60 acted
+  on, x0.80, you rarely act on these."**
+- **A reputation bar showed 100% for a goal half done.** Progress was reported
+  inside the current rank and presented as progress toward the goal, so
+  somebody at 21,000 of the 42,000 the ladder needs -- but one point from the
+  top of Honored -- got a full bar. It also decided the order of `/cn chase`.
+  The band is now reported as a count with the rank named, and no denominator
+  is invented for the ladder, which is the rule this addon applies everywhere
+  else.
+- **A hundred-quest zone grind was advertised as a one-step job.** The client
+  reports "complete 100 quests in X" as ONE criterion carrying a quantity;
+  counting rows gave 0 of 1, so it was filed as "not started, 1 to do", sorted
+  to the front of `/cn zones` as the smallest job available, and given the
+  bonus for a small remainder.
+- **`/cn travel` printed legs that did not sum to its own total.** The
+  preference for a flight path you have flown before was applied to the
+  duration rather than to the comparison, so the headline was ten percent
+  short of the model's own arithmetic -- and that shortened number flowed into
+  scoring and into `/cn plan`'s budget. Every player has flown somewhere, so
+  this was the ordinary case.
+- **"Stop 9 of 8 cleared."** The route is rebuilt from live candidates as you
+  go, so it grows when you accept quests -- against a total frozen when you
+  started. The completion moment fired at stop 8 and then again at 9, 10 and
+  11 while stops remained, and the heads-up display stuck on "stop 8 of 8" for
+  the rest of the session.
+- **One nil answer from the client wiped your quest count for the day.** The
+  two branches computing the day key returned numbers on different scales -- a
+  day index of about 20,687 and a calendar number of 20,260,822 -- so a single
+  miss during a loading screen read as a day rollover.
+- **`/cn plan` justified its confidence with evidence from the wrong bucket**,
+  citing forty-six speed samples for a flying median that came from six of
+  them.
+- **`/cn plan 5` would print "1 stop, about 45m"** with nothing saying the
+  budget had been blown ninefold: the first stop was admitted unconditionally.
+  It is still shown -- there may be nothing smaller -- and now it says so.
 
 ## [0.50.0]
 
@@ -39819,7 +40215,7 @@ Every step in a chain carries a state. Done steps are behind you, one step is ma
 
 It also says how long the whole thing is likely to take — as a **range**, never a figure, because task times vary by more than a third with competition, group size and luck. Where more than half the steps are kinds of thing it has never watched you do, it says *time unknown* and how many, rather than averaging its way to a number that looks like a fact.
 
-Where the game supplies a real denominator — achievement criteria, reputation standing — you get a real bar. Where it does not, you get the truth instead of a bar. An appearance has several sources and needs only one of them, so it lists them and says so rather than pretending you are "1 of 9" of the way there.
+Where the game supplies a real denominator — achievement criteria — you get a real bar. Where it does not, you get the truth instead of a bar. An appearance has several sources and needs only one of them, so it lists them and says so rather than pretending you are "1 of 9" of the way there. Reputation is reported as standing within the rank you are working on, named — *"11,999 of 12,000 to Revered"* — because the client will vouch for that and not for how far along the whole ladder you are.
 
 ## Follow the route
 
@@ -39839,7 +40235,7 @@ Off by default, and it will not fight you: it advances when a stop is **done**, 
 
 Half an hour is not the same question as "what should I do next", and it gets its own answer: the stops that fit, in walking order, with what each one costs.
 
-Travel time is **computed** from the journey you would actually make, weighing three options against each other: run it, take a flight path from the nearest point **you have discovered**, or fly it yourself — whichever is genuinely quicker. Your speed is measured from your own play, separately for running, riding and flying, because those are three different numbers and one median across them is wrong in all three. Task time is **learned** the same way. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
+Travel time is **computed** from the journey you would actually make, weighing three options against each other: run it, take a flight path from the nearest point **you have discovered**, or fly it yourself — whichever is genuinely quicker. Your speed is measured from your own play, separately for running, riding and flying, because those are three different numbers and one median across them is wrong in all three. Task time is **learned** the same way, and learned as the *work* — the journey is taken back out, because the plan adds it separately and counting it twice is how a twelve-minute stop gets quoted as thirty-six. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
 
 A journey it cannot model — another continent, reached by a portal — still refuses to invent a duration, but it now lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
@@ -39850,6 +40246,8 @@ A journey it cannot model — another continent, reached by a portal — still r
 ```
 
 Levelling, collecting, reputation, achievements, professions, everything. A focus sets the weighting **and** what is shown together, because "I'm levelling tonight" means both *prefer quests* and *stop showing me pets*.
+
+A focus raises what something is **worth to you**. It does not change how far away it is — so it moves the thing you asked for up the list at every distance, rather than only when it happens to be nearby.
 
 `/cn mode fastest` is the one that is not about a subject: it weights travel and **how long the thing itself usually takes you**, measured from your own play. A kind of objective it has never timed still contributes nothing rather than a guessed duration.
 
@@ -40232,7 +40630,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.50.0
+0.51.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -40726,8 +41124,8 @@ echo "Mutation testing $TREE"
 echo
 
 mutate "Modules/Travel.lua" \
-    "                if seconds < best.seconds then" \
-    "                if true then" \
+    "                        if ranking < bestRanking then" \
+    "                        if true then" \
     "travel always flies, even when running is quicker"
 
 mutate "Modules/Travel.lua" \
@@ -40899,8 +41297,8 @@ mutate "Modules/Inventory.lua" \
 mutate "Modules/Travel.lua" \
     "                and (bestPossibleDiscount
                     * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
-                    < best.seconds then" \
-    "                and walkOut < (best.seconds * 0.5) then" \
+                    < bestRanking then" \
+    "                and walkOut < (bestRanking * 0.5) then" \
     "the pruning bound discards a route that would have won"
 
 mutate "Modules/Travel.lua" \
@@ -40944,9 +41342,9 @@ end" \
 mutate "Modules/Travel.lua" \
     "                and (bestPossibleDiscount
                     * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
-                    < best.seconds then" \
+                    < bestRanking then" \
     "                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
-                    < best.seconds then" \
+                    < bestRanking then" \
     "the pruning bound ignores the known-route discount"
 
 mutate "Modules/Travel.lua" \
@@ -41120,6 +41518,40 @@ mutate "Modules/Session.lua" \
     "CN.RegisterCandidateDecorator(\"Session\", function(objective)
     if false then" \
     "nothing ever sets how long a thing takes"
+
+
+# The 0.51.0 audit: numbers the addon showed that were wrong.
+mutate "Scoring.lua" \
+    "        worth = worth * profile.types[objective.type]" \
+    "        worth = (worth + cost) * profile.types[objective.type] - cost" \
+    "a focus multiplies a total that crosses zero"
+
+mutate "Modules/Travel.lua" \
+    "        runSpeed, runMeasured = session.Speed(false)" \
+    "        runSpeed, runMeasured = session.Speed()" \
+    "running is costed at whatever speed you are moving now"
+
+mutate "Modules/Travel.lua" \
+    "CN.fallbackZoneCost = 40" \
+    "CN.fallbackZoneCost = 25" \
+    "another continent is cheaper than across your own zone"
+
+mutate "Modules/Session.lua" \
+    "    elapsed = elapsed - (started.travel or 0)" \
+    "    elapsed = elapsed - 0" \
+    "the journey is counted in the task time and again in the plan"
+
+mutate "Modules/Chase.lua" \
+    "        done         = nil,
+        total        = nil," \
+    "        done         = standing.earned,
+        total        = standing.needed," \
+    "progress inside a rank is shown as progress toward the goal"
+
+mutate "Modules/Preference.lua" \
+    "            refinedRow.acted = (refinedRow.acted or 0) + 1" \
+    "" \
+    "a player who does everything is recorded as doing nothing"
 
 
 echo
@@ -45771,18 +46203,37 @@ print("\nChase:")
     end
 
     assert(repChain, "a pinned reputation must produce a chain")
-    assert(repChain.progress, "reputation has a denominator, so it gets progress")
-    assert(repChain.progress.done == 1200,
-        "earned standing is measured from the rank floor, not from zero -- got "
-        .. tostring(repChain.progress.done))
-    assert(repChain.progress.total == 3000,
-        "the denominator is the width of the rank, got "
-        .. tostring(repChain.progress.total))
 
-    local fraction = chase.Fraction(repChain)
+    ------------------------------------------------------------
+    -- PROGRESS INSIDE A RANK IS NOT PROGRESS TOWARD THE GOAL.
+    --
+    -- This used to assert that reputation "has a denominator, so it gets
+    -- progress" -- and the denominator was the width of the CURRENT RANK.
+    -- So a player at 21,000 of the 42,000 the ladder to Exalted needs, but
+    -- one point from the top of Honored, was shown a full bar and "100%";
+    -- and `Chase.All`, which sorts by that fraction, ranked them above an
+    -- appearance genuinely eighty percent collected.
+    --
+    -- The client vouches for the band and not for the ladder. So the band is
+    -- reported as a count, and no denominator is invented for the rest --
+    -- which is the rule this addon applies everywhere else.
+    ------------------------------------------------------------
+    assert(repChain.progress, "reputation still reports what it knows")
 
-    assert(fraction and math.abs(fraction - 0.4) < 0.001,
-        "4200 of a 3000-6000 rank is 40%, got " .. tostring(fraction))
+    assert(repChain.progress.total == nil and repChain.progress.done == nil,
+        "reputation must not present rank progress as goal progress")
+
+    assert(repChain.progress.bandEarned == 1200
+        and repChain.progress.bandNeeded == 3000,
+        "but it must still report the band, measured from the rank floor -- "
+        .. "got " .. tostring(repChain.progress.bandEarned) .. " of "
+        .. tostring(repChain.progress.bandNeeded))
+
+    assert(repChain.progress.unknownTotal,
+        "and must say why there is no percentage")
+
+    assert(chase.Fraction(repChain) == nil,
+        "a chain with no trustworthy denominator has no fraction")
 
     -- The summary must be a sentence a player can act on, and must contain
     -- the remaining amount rather than only the total.
@@ -49076,6 +49527,8 @@ print("\nGetting there:")
 
         local brute = travel.YardsBetweenPoints(from, to) / runSpeed
 
+        local bruteRanking = brute
+
         if travel.CanFly(94) then
             brute = math.min(brute,
                 (travel.YardsBetweenPoints(from, to) / travel.SelfFlightSpeed())
@@ -49092,11 +49545,16 @@ print("\nGetting there:")
                             / flightSpeed)
                         + (travel.YardsBetweenPoints(to, arrival.point) / runSpeed)
 
+                    local rankedCandidate = candidate
+
                     if travel.IsKnownRoute(origin.id, arrival.id) then
-                        candidate = candidate * travel.knownRouteBonus
+                        rankedCandidate = rankedCandidate * travel.knownRouteBonus
                     end
 
-                    brute = math.min(brute, candidate)
+                    if rankedCandidate < bruteRanking then
+                        bruteRanking = rankedCandidate
+                        brute        = candidate
+                    end
                 end
             end
         end
@@ -49118,9 +49576,10 @@ print("\nGetting there:")
                 + (detail.flightYards / flightSpeed)
                 + (detail.runFromNode / runSpeed)
 
-            if travel.IsKnownRoute(detail.nodeID, detail.arrivalID) then
-                rebuilt = rebuilt * travel.knownRouteBonus
-            end
+            -- NO DISCOUNT HERE ANY MORE. The known-route preference is a
+            -- tie-break in the comparison, not a reduction of the duration --
+            -- which is the whole point: `/cn travel` used to print legs that
+            -- summed to fifty seconds more than its own headline.
 
             assert(math.abs(rebuilt - seconds) < 0.01,
                 "the legs shown add to " .. string.format("%.3f", rebuilt)
@@ -49224,6 +49683,8 @@ print("\nGetting there:")
 
                 local expect = travel.YardsBetweenPoints(start, finish) / runSpeed
 
+                local expectRanking = expect
+
                 for _, origin in ipairs(list) do
                     for _, arrival in ipairs(list) do
                         if origin.id ~= arrival.id then
@@ -49234,11 +49695,19 @@ print("\nGetting there:")
                                     / speed)
                                 + (travel.YardsBetweenPoints(finish, arrival.point) / runSpeed)
 
+                            -- The discount RANKS; it does not shorten. So
+                            -- the exhaustive comparison has to keep both
+                            -- numbers, exactly as the search does.
+                            local rankedTotal = total
+
                             if travel.IsKnownRoute(origin.id, arrival.id) then
-                                total = total * travel.knownRouteBonus
+                                rankedTotal = rankedTotal * travel.knownRouteBonus
                             end
 
-                            expect = math.min(expect, total)
+                            if rankedTotal < expectRanking then
+                                expectRanking = rankedTotal
+                                expect        = total
+                            end
                         end
                     end
                 end
@@ -51190,6 +51659,274 @@ print("\nEvery client function this addon calls, checked against the client:")
 
     print("  " .. #CN.apiSurface .. " client functions listed; the checker "
         .. "agrees with the client in both directions")
+end)()
+
+print("\nThe numbers the addon prints are the numbers it means:")
+
+;(function()
+    local travel  = CN:GetModule("Travel")
+    local session = CN:GetModule("Session")
+
+    ------------------------------------------------------------
+    -- 1. RUNNING IS COSTED AT RUNNING SPEED.
+    --
+    -- The estimator asked for "the speed you are moving right now", so
+    -- costing a journey while airborne divided the distance by a skyriding
+    -- median: twenty-one thousand yards was quoted at six minutes, labelled
+    -- `run`, and marked confident. On foot it is fifty. It also made the
+    -- self-flown option unreachable while flying -- same divisor, plus six
+    -- seconds of takeoff, can never win.
+    ------------------------------------------------------------
+    local samples = session.Samples()
+
+    local savedFoot   = samples.onFoot
+    local savedFlying = samples.flying
+
+    samples.onFoot = { 7, 7, 7, 7, 7 }
+    samples.flying = { 60, 60, 60, 60, 60 }
+
+    CN_TEST_FLYING = true
+
+    local seconds, _, detail =
+        travel.EstimateSeconds(94, 0.05, 0.05, 94, 0.95, 0.95)
+
+    CN_TEST_FLYING = false
+
+    assert(detail, "the journey must be costable")
+
+    if detail.mode == "run" then
+        local runYards = detail.yards
+
+        assert(math.abs(seconds - (runYards / 7)) < 1,
+            "a run estimate must divide by running speed, not by whatever "
+            .. "bucket the player is in -- " .. string.format("%.0f", seconds)
+            .. "s for " .. string.format("%.0f", runYards) .. " yards is "
+            .. string.format("%.1f", runYards / math.max(seconds, 0.001))
+            .. " yd/s")
+    end
+
+    samples.onFoot = savedFoot
+    samples.flying = savedFlying
+
+    print("  running is costed at running speed")
+
+    ------------------------------------------------------------
+    -- 2. AN UNCOSTABLE JOURNEY IS THE PESSIMISTIC ANSWER.
+    --
+    -- The fallback was 25 while a costed journey saturates at 40, so "I
+    -- cannot work out how to get there" scored fifteen points BELOW the far
+    -- side of the zone the player is standing in -- and fifteen is nearly
+    -- twice the whole range of what finishing something is worth.
+    ------------------------------------------------------------
+    assert(CN.fallbackZoneCost >= travel.maximumCost,
+        "the cost of a journey the addon cannot model (" .. CN.fallbackZoneCost
+        .. ") must not be cheaper than the most expensive one it can ("
+        .. travel.maximumCost .. ")")
+
+    print("  an uncostable journey is not cheaper than a costed one")
+
+    ------------------------------------------------------------
+    -- 3. THE JOURNEY IS COUNTED ONCE.
+    --
+    -- The learned "task time" is the span from being recommended to being
+    -- finished, which contains the walk. The planner then ADDED a separately
+    -- computed travel leg to a sum of those spans -- once per objective at a
+    -- stop, which is worst exactly where the router is trying to reward
+    -- batching. Four quests six minutes away came out at thirty-six minutes
+    -- against a true twelve, reported confident.
+    ------------------------------------------------------------
+    session.Durations()[CN.objectiveTypes.QUEST] = nil
+
+    local travelCost = 12   -- 12 cost points = six minutes at 30s each
+
+    CN_TEST_CLOCK = 200000
+
+    for index = 1, 5 do
+        local questID = 780000 + index
+
+        CN_TEST_CLOCK = 200000 + (index * 1000)
+
+        session.NoteOffered({
+            type       = CN.objectiveTypes.QUEST,
+            id         = questID,
+            travelCost = travelCost,
+        })
+
+        -- Six minutes of travel, then ninety seconds of work.
+        CN_TEST_CLOCK = CN_TEST_CLOCK + (travelCost * CN.secondsPerCostPoint) + 90
+
+        session.NoteCompleted(CN.objectiveTypes.QUEST, questID)
+    end
+
+    local typical = session.TypicalSeconds(CN.objectiveTypes.QUEST)
+
+    assert(typical,
+        "five samples must produce a typical time")
+
+    assert(math.abs(typical - 90) < 5,
+        "the learned time must be the WORK -- ninety seconds -- not the work "
+        .. "plus the journey the planner adds back separately; got "
+        .. string.format("%.0f", typical))
+
+    session.Durations()[CN.objectiveTypes.QUEST] = nil
+
+    print("  a learned task time is the work, not the work plus the journey")
+end)()
+
+print("\nA player who does everything is not told they do nothing:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SHOWING SIDE AND THE ACTING SIDE COUNTED DIFFERENT THINGS.
+    --
+    -- Quests are filed under both their plain type and a campaign/side
+    -- sub-bucket. The recommendation hook incremented BOTH; the completion
+    -- handler credited only the plain type. So the refined rows collected
+    -- sightings and never a single action, drifted to the floor multiplier --
+    -- and the score adjuster prefers the refined row whenever its multiplier
+    -- is not 1, which made the correct plain row unreachable.
+    --
+    -- A player who turned in every quest they were shown was told, within an
+    -- hour or two of play, that they "rarely act on these", and every quest
+    -- was multiplied by 0.80 for the rest of time.
+    --
+    -- Every previous test of this set the counters by hand rather than
+    -- driving the two sides against each other.
+    ------------------------------------------------------------
+    local preference = CN:GetModule("Preference")
+
+    local store = preference.Store()
+
+    for key in pairs(store) do
+        store[key] = nil
+    end
+
+    CN.Settings().learnPreferences = true
+
+    local rounds = 40
+
+    for index = 1, rounds do
+        CN_TEST_CLOCK = 100000 + (index * 60)
+
+        local questID = 770000 + index
+
+        CN.recommendationHooks["Preference"]({
+            CN.NewObjective({
+                id   = questID,
+                type = CN.objectiveTypes.QUEST,
+                name = "Quest " .. index,
+            }),
+        })
+
+        preference.NoteCompleted(CN.objectiveTypes.QUEST, questID)
+    end
+
+    for bucket, row in pairs(store) do
+        if row.shown and row.shown > 0 then
+            assert(row.acted and row.acted > 0,
+                bucket .. " was shown " .. row.shown .. " times and credited "
+                .. tostring(row.acted) .. " -- a player who acts on "
+                .. "everything must not be recorded as acting on nothing")
+
+            local ratio = row.acted / row.shown
+
+            assert(ratio > 0.5,
+                bucket .. " records a ratio of " .. string.format("%.2f", ratio)
+                .. " for a player who acted on every single sighting")
+        end
+    end
+
+    -- And the multiplier that comes out of it must not be a penalty.
+    local multiplier = preference.Multiplier(CN.objectiveTypes.QUEST)
+
+    assert(multiplier >= 1,
+        "acting on everything must not produce a penalty, got " .. multiplier)
+
+    for key in pairs(store) do
+        store[key] = nil
+    end
+
+    print("  acting on every sighting is recorded in every bucket")
+end)()
+
+print("\nA focus raises what you asked for, at every distance:")
+
+;(function()
+    ------------------------------------------------------------
+    -- MULTIPLYING A TOTAL THAT CROSSES ZERO INVERTS IT.
+    --
+    -- Worth tops out around 8; travel is weighted -1 against a cost that
+    -- reaches 40. So anything more than a few minutes away scored negative --
+    -- and `score * 2.0` on a negative number pushes it DOWN. `/cn mode
+    -- quests` ranked a distant quest twenty-seven points BELOW a distant pet.
+    -- The learned multiplier inverted the same way, promoting exactly the
+    -- types it had decided you avoid, as long as they were far off.
+    --
+    -- Every previous test of this used a near objective, where the total
+    -- happens to be positive and the arithmetic happens to work.
+    ------------------------------------------------------------
+    local saved = CN.Settings().priorityMode
+
+    local function pair(travelCost)
+        local quest = CN.NewObjective({
+            id = 1, type = CN.objectiveTypes.QUEST, name = "Quest",
+            completionValue = 3, travelCost = travelCost,
+        })
+
+        local pet = CN.NewObjective({
+            id = 2, type = CN.objectiveTypes.PET, name = "Pet",
+            completionValue = 3, travelCost = travelCost,
+        })
+
+        return CN.ScoreObjective(quest), CN.ScoreObjective(pet)
+    end
+
+    CN.Settings().priorityMode = "quests"
+
+    for _, distance in ipairs({ 0, 2, 5, 10, 20, 30, 40 }) do
+        local questScore, petScore = pair(distance)
+
+        assert(questScore > petScore,
+            "with a quest focus a quest must outrank an identical pet at "
+            .. "travel cost " .. distance .. ", got " .. questScore
+            .. " against " .. petScore)
+    end
+
+    print("  a quest focus prefers quests at every distance tested")
+
+    -- And the same for a learned multiplier, which is the other multiplying
+    -- input and inverted identically.
+    CN.Settings().priorityMode = "balanced"
+
+    CN.RegisterScoreAdjuster("InversionProbe", function(candidate, worth)
+        if candidate.type == CN.objectiveTypes.QUEST then
+            return worth * 1.25
+        end
+
+        return worth * 0.8
+    end)
+
+    for _, distance in ipairs({ 0, 5, 20, 40 }) do
+        local questScore, petScore = pair(distance)
+
+        assert(questScore > petScore,
+            "a type the player acts on must outrank one they skip at travel "
+            .. "cost " .. distance .. ", got " .. questScore .. " against "
+            .. petScore)
+    end
+
+    CN.scoreAdjusters["InversionProbe"] = nil
+
+    for index, name in ipairs(CN.scoreAdjusterOrder) do
+        if name == "InversionProbe" then
+            table.remove(CN.scoreAdjusterOrder, index)
+            break
+        end
+    end
+
+    CN.Settings().priorityMode = saved
+
+    print("  and a learned preference does too")
 end)()
 
 print("\nOff means off, and a setting you can name you can set:")

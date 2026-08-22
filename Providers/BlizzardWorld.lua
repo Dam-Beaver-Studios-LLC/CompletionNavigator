@@ -745,6 +745,11 @@ function Blizzard.GetReputationRemaining(factionID)
         remaining = math.max(0, needed - earned),
         standing  = data.reaction,
         name      = data.name,
+
+        -- The rank being worked toward, so a band can be reported as a band
+        -- -- "11,999 of 12,000 to Revered" -- rather than as a fraction of a
+        -- goal the client will not vouch for.
+        nextRankName = data.nextReactionName or data.nextRank,
     }
 end
 

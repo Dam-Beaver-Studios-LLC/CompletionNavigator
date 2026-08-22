@@ -420,9 +420,9 @@ CN.RegisterCandidateProvider("Goals", function()
                 local travel
 
                 if plan.mapID then
-                    local playerMap = select(1, CN.GetPlayerPosition())
-
-                    travel = (plan.mapID == playerMap) and 2 or 25
+                    -- Costed like everything else, rather than a flat
+                    -- penalty for "not here" while holding the coordinates.
+                    travel = CN.TravelCost(plan.mapID, plan.x, plan.y)
                 end
 
                 table.insert(candidates, CN.NewObjective({

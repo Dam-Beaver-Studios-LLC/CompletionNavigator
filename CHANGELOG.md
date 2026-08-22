@@ -7,6 +7,83 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.51.0]
+
+An audit of **whether the numbers are right** -- not whether the code runs,
+but whether the answers it gives are true. Fourteen findings. A confidently
+wrong number is worse than no number, and several of these were confidently
+wrong in the direction that made the addon's advice actively bad.
+
+### Fixed
+
+- **A focus made the thing you asked for rank LOWER, as soon as it was more
+  than a few minutes away.** Everything went into one running total which was
+  then multiplied -- and that total crosses zero, because travel is weighted
+  against a cost reaching 40 while what finishing something is worth tops out
+  around 8. Multiplying a negative number by 2.0 pushes it down. `/cn mode
+  quests` ranked a distant quest **twenty-seven points below a distant pet**.
+  The learned preference inverted the same way, promoting exactly the types it
+  had decided you avoid. Worth and cost are now kept apart: a focus doubles
+  what a thing is worth to you, and cannot reverse the sign of anything.
+- **Every task time the addon learned contained the journey, which the planner
+  then added again** -- once per objective at a stop, which is worst precisely
+  where the router is trying to reward grouping work together. Four quests six
+  minutes apart came out at **thirty-six minutes against a true twelve**,
+  reported as confident. Learned times are now the work itself.
+- **"Running the whole way" was costed at whatever speed you happened to be
+  moving.** Asked while flying, it divided by your skyriding speed: a
+  twenty-one thousand yard journey was quoted at **six minutes, labelled
+  `run`, marked confident**, where the truth on foot is fifty. It also made
+  the self-flown option unreachable while airborne -- the same divisor plus
+  six seconds of takeoff can never win.
+- **Another continent scored as CHEAPER to reach than the far side of the zone
+  you are standing in.** The fallback for a journey the addon cannot model was
+  25 while a journey it can model saturates at 40 -- so "I have no idea how to
+  get there" outranked a quest two minutes away by fifteen points, nearly
+  twice the entire range of what finishing something is worth. Vendors and
+  toys were charged a flat 25 for the next zone while holding the seller's
+  exact coordinates; they are costed properly now.
+- **A player who did everything they were shown was told they do nothing.**
+  Quests are counted under both their type and a campaign/side sub-bucket; the
+  showing side incremented both and the completion side credited only the
+  type. The sub-buckets collected sightings and never a single action, drifted
+  to the floor multiplier -- and the ranking prefers the sub-bucket. Measured:
+  120 quests offered, 120 turned in, `/cn learned` reporting **"0 of 60 acted
+  on, x0.80, you rarely act on these."**
+- **A reputation bar showed 100% for a goal half done.** Progress was reported
+  inside the current rank and presented as progress toward the goal, so
+  somebody at 21,000 of the 42,000 the ladder needs -- but one point from the
+  top of Honored -- got a full bar. It also decided the order of `/cn chase`.
+  The band is now reported as a count with the rank named, and no denominator
+  is invented for the ladder, which is the rule this addon applies everywhere
+  else.
+- **A hundred-quest zone grind was advertised as a one-step job.** The client
+  reports "complete 100 quests in X" as ONE criterion carrying a quantity;
+  counting rows gave 0 of 1, so it was filed as "not started, 1 to do", sorted
+  to the front of `/cn zones` as the smallest job available, and given the
+  bonus for a small remainder.
+- **`/cn travel` printed legs that did not sum to its own total.** The
+  preference for a flight path you have flown before was applied to the
+  duration rather than to the comparison, so the headline was ten percent
+  short of the model's own arithmetic -- and that shortened number flowed into
+  scoring and into `/cn plan`'s budget. Every player has flown somewhere, so
+  this was the ordinary case.
+- **"Stop 9 of 8 cleared."** The route is rebuilt from live candidates as you
+  go, so it grows when you accept quests -- against a total frozen when you
+  started. The completion moment fired at stop 8 and then again at 9, 10 and
+  11 while stops remained, and the heads-up display stuck on "stop 8 of 8" for
+  the rest of the session.
+- **One nil answer from the client wiped your quest count for the day.** The
+  two branches computing the day key returned numbers on different scales -- a
+  day index of about 20,687 and a calendar number of 20,260,822 -- so a single
+  miss during a loading screen read as a day rollover.
+- **`/cn plan` justified its confidence with evidence from the wrong bucket**,
+  citing forty-six speed samples for a flying median that came from six of
+  them.
+- **`/cn plan 5` would print "1 stop, about 45m"** with nothing saying the
+  budget had been blown ninefold: the first stop was admitted unconditionally.
+  It is still shown -- there may be nothing smaller -- and now it says so.
+
 ## [0.50.0]
 
 An audit of **sequences** rather than files: login to logout to login again,

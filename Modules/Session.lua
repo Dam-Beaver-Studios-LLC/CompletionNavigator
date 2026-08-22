@@ -450,6 +450,16 @@ Session.Durations = Durations
 Session.minDurationSamples = 4
 Session.durationSampleCap  = 25
 
+-- The shortest a thing can be said to have taken once its journey is removed.
+--
+-- A floor rather than a discard, and a very small one. Discarding every
+-- sample where the journey estimate exceeded the whole elapsed span would
+-- throw away precisely the fast objectives -- biasing the learned time
+-- upward, which is the error this subtraction exists to remove. A floored
+-- sample says "the work itself was negligible next to getting there", which
+-- for a quest handed in on arrival is exactly true.
+Session.minimumWorkSeconds = 0.05
+
 -- When each objective was first put in front of the player. A completion
 -- timed from here is "how long it took once it was the thing to do", which is
 -- the number a plan needs.
@@ -493,8 +503,8 @@ local function Prune(force)
 
     local removed = 0
 
-    for key, at in pairs(offeredAt) do
-        if now - at > Session.offerMemorySeconds then
+    for key, record in pairs(offeredAt) do
+        if now - record.at > Session.offerMemorySeconds then
             offeredAt[key] = nil
             removed = removed + 1
         end
@@ -507,8 +517,8 @@ local function Prune(force)
     if offeredCount > Session.offerMemoryCap then
         local ordered = {}
 
-        for key, at in pairs(offeredAt) do
-            table.insert(ordered, { key = key, at = at })
+        for key, record in pairs(offeredAt) do
+            table.insert(ordered, { key = key, at = record.at })
         end
 
         table.sort(ordered, function(a, b) return a.at < b.at end)
@@ -543,7 +553,27 @@ function Session.NoteOffered(objective)
         return
     end
 
-    offeredAt[key] = Session.Now()
+    -- WHAT THE JOURNEY WAS EXPECTED TO COST, RECORDED WITH THE CLOCK.
+    --
+    -- The elapsed span between "this was recommended" and "this was finished"
+    -- contains the walk to it. The planner then ADDS a separately computed
+    -- travel leg to a sum of those spans, so the journey was counted twice --
+    -- and once per objective at a stop, which is worst exactly where the
+    -- router is trying to reward batching. Four quests six minutes away came
+    -- out at thirty-six minutes against a true twelve, reported confident.
+    --
+    -- Subtracting the addon's own estimate makes the stored number a WORK
+    -- time, which is what every consumer already assumes it is. Using the
+    -- addon's own model rather than a measurement keeps the two consistent
+    -- even where the model is imperfect: the same quantity is removed here
+    -- and added back there.
+    local travelSeconds = 0
+
+    if objective.travelCost and CN.secondsPerCostPoint then
+        travelSeconds = objective.travelCost * CN.secondsPerCostPoint
+    end
+
+    offeredAt[key] = { at = Session.Now(), travel = travelSeconds }
     offeredCount   = offeredCount + 1
 
     Prune()
@@ -567,7 +597,16 @@ function Session.NoteCompleted(objectiveType, id)
         return nil
     end
 
-    local elapsed = Session.Now() - started
+    local elapsed = Session.Now() - started.at
+
+    -- The journey out, which the caller will add back separately.
+    elapsed = elapsed - (started.travel or 0)
+
+    -- A floor rather than a discard: something finished faster than the model
+    -- said the journey would take is a fast objective, not a corrupt sample.
+    if elapsed < Session.minimumWorkSeconds then
+        elapsed = Session.minimumWorkSeconds
+    end
 
     -- Anything over twenty minutes was not "doing the thing", it was living
     -- your life with the thing still on the list.
@@ -829,6 +868,14 @@ function Session.Plan(minutes)
         -- hub's position was not advanced past, so every later hub's travel
         -- leg was costed from wherever the last ACCEPTED stop was, which is
         -- not where the player would be.
+        -- THE FIRST STOP IS NOT EXEMPT FROM THE CLOCK.
+        --
+        -- `#plan.stops > 0` meant stop one was admitted whatever it cost, so
+        -- `/cn plan 5` against a forty-five minute hub printed "1 stop, about
+        -- 45m of the 5m you have" with nothing flagging that the budget had
+        -- been blown ninefold. Taking it is still often the right call --
+        -- there may be nothing smaller -- but the player has to be told, not
+        -- shown a plan that silently is not a plan.
         if plan.seconds + seconds > budget and #plan.stops > 0 then
             plan.skipped = plan.skipped + 1
 
@@ -860,6 +907,9 @@ function Session.Plan(minutes)
     if plan.skipped > 0 then
         plan.skipped = #hubs - #plan.stops
     end
+
+    -- Said out loud when the only thing available does not fit.
+    plan.overran = plan.seconds > budget
 
     return plan
 end
@@ -992,13 +1042,29 @@ CN:RegisterCommand{
                 .. " further stop(s) did not fit.|r")
         end
 
+        if plan.overran then
+            Print("|cffffff00The nearest stop is longer than the time you "
+                .. "have.|r |cff999999Nothing smaller was available, so it "
+                .. "is shown anyway -- but it will not fit.|r")
+        end
+
         if not plan.confident then
-            local rate, measured = Session.Speed()
+            -- THE COUNT MUST BE THE COUNT BEHIND THE RATE.
+            --
+            -- `Speed()` answers from one bucket; `SpeedSampleCount()` with no
+            -- argument summed all three. So the line justifying confidence in
+            -- a 62 yd/s flying median cited forty-six samples, forty of which
+            -- were on-foot readings at seven that had no part in it --
+            -- overstating the evidence sevenfold in the one place whose whole
+            -- job is to say how much evidence there is.
+            local bucket = Session.Bucket()
+
+            local rate, measured = Session.Speed(bucket)
 
             Print("|cffffff00Some of this is not measured yet.|r "
                 .. "|cff999999Travel speed: "
-                .. (measured and string.format("%.0f yd/s from %d samples",
-                        rate, Session.SpeedSampleCount())
+                .. (measured and string.format("%.0f yd/s from %d %s samples",
+                        rate, Session.SpeedSampleCount(bucket), bucket)
                     or "still learning")
                 .. ". Task times are learned from your own play, so the "
                 .. "estimate sharpens as you go rather than starting from "

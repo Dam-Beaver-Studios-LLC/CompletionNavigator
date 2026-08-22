@@ -175,11 +175,22 @@ function Follow.NextStop()
         return nil
     end
 
-    -- The route length, counted the first time there is a route to count.
-    -- Start() runs at login too, before the map API will answer, so counting
-    -- only there left the total at zero for the whole session.
-    if (Follow.startedWith or 0) == 0 and #hubs > 0 then
-        Follow.startedWith = #hubs
+    -- THE TOTAL MOVES, BECAUSE THE ROUTE DOES.
+    --
+    -- The route is rebuilt from live candidates on every call, so accepting
+    -- five quests in three new places lengthens it. A denominator frozen at
+    -- the start therefore produced "Stop 9 of 8 cleared", fired the "Route
+    -- complete" flourish at stop 8 and then again at 9, 10 and 11 while
+    -- stops remained, and left the heads-up display -- which clamps -- stuck
+    -- on "stop 8 of 8" for the rest of the session.
+    --
+    -- What the player is being told is how far through the CURRENT route
+    -- they are, so the total is what is currently there plus what has already
+    -- been cleared. It can grow; that is honest, because the work grew.
+    local total = #hubs + (Follow.completed or 0)
+
+    if total > (Follow.startedWith or 0) then
+        Follow.startedWith = total
     end
 
     for _, hub in ipairs(hubs) do

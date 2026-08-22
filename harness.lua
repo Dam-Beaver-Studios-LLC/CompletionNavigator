@@ -4428,18 +4428,37 @@ print("\nChase:")
     end
 
     assert(repChain, "a pinned reputation must produce a chain")
-    assert(repChain.progress, "reputation has a denominator, so it gets progress")
-    assert(repChain.progress.done == 1200,
-        "earned standing is measured from the rank floor, not from zero -- got "
-        .. tostring(repChain.progress.done))
-    assert(repChain.progress.total == 3000,
-        "the denominator is the width of the rank, got "
-        .. tostring(repChain.progress.total))
 
-    local fraction = chase.Fraction(repChain)
+    ------------------------------------------------------------
+    -- PROGRESS INSIDE A RANK IS NOT PROGRESS TOWARD THE GOAL.
+    --
+    -- This used to assert that reputation "has a denominator, so it gets
+    -- progress" -- and the denominator was the width of the CURRENT RANK.
+    -- So a player at 21,000 of the 42,000 the ladder to Exalted needs, but
+    -- one point from the top of Honored, was shown a full bar and "100%";
+    -- and `Chase.All`, which sorts by that fraction, ranked them above an
+    -- appearance genuinely eighty percent collected.
+    --
+    -- The client vouches for the band and not for the ladder. So the band is
+    -- reported as a count, and no denominator is invented for the rest --
+    -- which is the rule this addon applies everywhere else.
+    ------------------------------------------------------------
+    assert(repChain.progress, "reputation still reports what it knows")
 
-    assert(fraction and math.abs(fraction - 0.4) < 0.001,
-        "4200 of a 3000-6000 rank is 40%, got " .. tostring(fraction))
+    assert(repChain.progress.total == nil and repChain.progress.done == nil,
+        "reputation must not present rank progress as goal progress")
+
+    assert(repChain.progress.bandEarned == 1200
+        and repChain.progress.bandNeeded == 3000,
+        "but it must still report the band, measured from the rank floor -- "
+        .. "got " .. tostring(repChain.progress.bandEarned) .. " of "
+        .. tostring(repChain.progress.bandNeeded))
+
+    assert(repChain.progress.unknownTotal,
+        "and must say why there is no percentage")
+
+    assert(chase.Fraction(repChain) == nil,
+        "a chain with no trustworthy denominator has no fraction")
 
     -- The summary must be a sentence a player can act on, and must contain
     -- the remaining amount rather than only the total.
@@ -7733,6 +7752,8 @@ print("\nGetting there:")
 
         local brute = travel.YardsBetweenPoints(from, to) / runSpeed
 
+        local bruteRanking = brute
+
         if travel.CanFly(94) then
             brute = math.min(brute,
                 (travel.YardsBetweenPoints(from, to) / travel.SelfFlightSpeed())
@@ -7749,11 +7770,16 @@ print("\nGetting there:")
                             / flightSpeed)
                         + (travel.YardsBetweenPoints(to, arrival.point) / runSpeed)
 
+                    local rankedCandidate = candidate
+
                     if travel.IsKnownRoute(origin.id, arrival.id) then
-                        candidate = candidate * travel.knownRouteBonus
+                        rankedCandidate = rankedCandidate * travel.knownRouteBonus
                     end
 
-                    brute = math.min(brute, candidate)
+                    if rankedCandidate < bruteRanking then
+                        bruteRanking = rankedCandidate
+                        brute        = candidate
+                    end
                 end
             end
         end
@@ -7775,9 +7801,10 @@ print("\nGetting there:")
                 + (detail.flightYards / flightSpeed)
                 + (detail.runFromNode / runSpeed)
 
-            if travel.IsKnownRoute(detail.nodeID, detail.arrivalID) then
-                rebuilt = rebuilt * travel.knownRouteBonus
-            end
+            -- NO DISCOUNT HERE ANY MORE. The known-route preference is a
+            -- tie-break in the comparison, not a reduction of the duration --
+            -- which is the whole point: `/cn travel` used to print legs that
+            -- summed to fifty seconds more than its own headline.
 
             assert(math.abs(rebuilt - seconds) < 0.01,
                 "the legs shown add to " .. string.format("%.3f", rebuilt)
@@ -7881,6 +7908,8 @@ print("\nGetting there:")
 
                 local expect = travel.YardsBetweenPoints(start, finish) / runSpeed
 
+                local expectRanking = expect
+
                 for _, origin in ipairs(list) do
                     for _, arrival in ipairs(list) do
                         if origin.id ~= arrival.id then
@@ -7891,11 +7920,19 @@ print("\nGetting there:")
                                     / speed)
                                 + (travel.YardsBetweenPoints(finish, arrival.point) / runSpeed)
 
+                            -- The discount RANKS; it does not shorten. So
+                            -- the exhaustive comparison has to keep both
+                            -- numbers, exactly as the search does.
+                            local rankedTotal = total
+
                             if travel.IsKnownRoute(origin.id, arrival.id) then
-                                total = total * travel.knownRouteBonus
+                                rankedTotal = rankedTotal * travel.knownRouteBonus
                             end
 
-                            expect = math.min(expect, total)
+                            if rankedTotal < expectRanking then
+                                expectRanking = rankedTotal
+                                expect        = total
+                            end
                         end
                     end
                 end
@@ -9847,6 +9884,274 @@ print("\nEvery client function this addon calls, checked against the client:")
 
     print("  " .. #CN.apiSurface .. " client functions listed; the checker "
         .. "agrees with the client in both directions")
+end)()
+
+print("\nThe numbers the addon prints are the numbers it means:")
+
+;(function()
+    local travel  = CN:GetModule("Travel")
+    local session = CN:GetModule("Session")
+
+    ------------------------------------------------------------
+    -- 1. RUNNING IS COSTED AT RUNNING SPEED.
+    --
+    -- The estimator asked for "the speed you are moving right now", so
+    -- costing a journey while airborne divided the distance by a skyriding
+    -- median: twenty-one thousand yards was quoted at six minutes, labelled
+    -- `run`, and marked confident. On foot it is fifty. It also made the
+    -- self-flown option unreachable while flying -- same divisor, plus six
+    -- seconds of takeoff, can never win.
+    ------------------------------------------------------------
+    local samples = session.Samples()
+
+    local savedFoot   = samples.onFoot
+    local savedFlying = samples.flying
+
+    samples.onFoot = { 7, 7, 7, 7, 7 }
+    samples.flying = { 60, 60, 60, 60, 60 }
+
+    CN_TEST_FLYING = true
+
+    local seconds, _, detail =
+        travel.EstimateSeconds(94, 0.05, 0.05, 94, 0.95, 0.95)
+
+    CN_TEST_FLYING = false
+
+    assert(detail, "the journey must be costable")
+
+    if detail.mode == "run" then
+        local runYards = detail.yards
+
+        assert(math.abs(seconds - (runYards / 7)) < 1,
+            "a run estimate must divide by running speed, not by whatever "
+            .. "bucket the player is in -- " .. string.format("%.0f", seconds)
+            .. "s for " .. string.format("%.0f", runYards) .. " yards is "
+            .. string.format("%.1f", runYards / math.max(seconds, 0.001))
+            .. " yd/s")
+    end
+
+    samples.onFoot = savedFoot
+    samples.flying = savedFlying
+
+    print("  running is costed at running speed")
+
+    ------------------------------------------------------------
+    -- 2. AN UNCOSTABLE JOURNEY IS THE PESSIMISTIC ANSWER.
+    --
+    -- The fallback was 25 while a costed journey saturates at 40, so "I
+    -- cannot work out how to get there" scored fifteen points BELOW the far
+    -- side of the zone the player is standing in -- and fifteen is nearly
+    -- twice the whole range of what finishing something is worth.
+    ------------------------------------------------------------
+    assert(CN.fallbackZoneCost >= travel.maximumCost,
+        "the cost of a journey the addon cannot model (" .. CN.fallbackZoneCost
+        .. ") must not be cheaper than the most expensive one it can ("
+        .. travel.maximumCost .. ")")
+
+    print("  an uncostable journey is not cheaper than a costed one")
+
+    ------------------------------------------------------------
+    -- 3. THE JOURNEY IS COUNTED ONCE.
+    --
+    -- The learned "task time" is the span from being recommended to being
+    -- finished, which contains the walk. The planner then ADDED a separately
+    -- computed travel leg to a sum of those spans -- once per objective at a
+    -- stop, which is worst exactly where the router is trying to reward
+    -- batching. Four quests six minutes away came out at thirty-six minutes
+    -- against a true twelve, reported confident.
+    ------------------------------------------------------------
+    session.Durations()[CN.objectiveTypes.QUEST] = nil
+
+    local travelCost = 12   -- 12 cost points = six minutes at 30s each
+
+    CN_TEST_CLOCK = 200000
+
+    for index = 1, 5 do
+        local questID = 780000 + index
+
+        CN_TEST_CLOCK = 200000 + (index * 1000)
+
+        session.NoteOffered({
+            type       = CN.objectiveTypes.QUEST,
+            id         = questID,
+            travelCost = travelCost,
+        })
+
+        -- Six minutes of travel, then ninety seconds of work.
+        CN_TEST_CLOCK = CN_TEST_CLOCK + (travelCost * CN.secondsPerCostPoint) + 90
+
+        session.NoteCompleted(CN.objectiveTypes.QUEST, questID)
+    end
+
+    local typical = session.TypicalSeconds(CN.objectiveTypes.QUEST)
+
+    assert(typical,
+        "five samples must produce a typical time")
+
+    assert(math.abs(typical - 90) < 5,
+        "the learned time must be the WORK -- ninety seconds -- not the work "
+        .. "plus the journey the planner adds back separately; got "
+        .. string.format("%.0f", typical))
+
+    session.Durations()[CN.objectiveTypes.QUEST] = nil
+
+    print("  a learned task time is the work, not the work plus the journey")
+end)()
+
+print("\nA player who does everything is not told they do nothing:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SHOWING SIDE AND THE ACTING SIDE COUNTED DIFFERENT THINGS.
+    --
+    -- Quests are filed under both their plain type and a campaign/side
+    -- sub-bucket. The recommendation hook incremented BOTH; the completion
+    -- handler credited only the plain type. So the refined rows collected
+    -- sightings and never a single action, drifted to the floor multiplier --
+    -- and the score adjuster prefers the refined row whenever its multiplier
+    -- is not 1, which made the correct plain row unreachable.
+    --
+    -- A player who turned in every quest they were shown was told, within an
+    -- hour or two of play, that they "rarely act on these", and every quest
+    -- was multiplied by 0.80 for the rest of time.
+    --
+    -- Every previous test of this set the counters by hand rather than
+    -- driving the two sides against each other.
+    ------------------------------------------------------------
+    local preference = CN:GetModule("Preference")
+
+    local store = preference.Store()
+
+    for key in pairs(store) do
+        store[key] = nil
+    end
+
+    CN.Settings().learnPreferences = true
+
+    local rounds = 40
+
+    for index = 1, rounds do
+        CN_TEST_CLOCK = 100000 + (index * 60)
+
+        local questID = 770000 + index
+
+        CN.recommendationHooks["Preference"]({
+            CN.NewObjective({
+                id   = questID,
+                type = CN.objectiveTypes.QUEST,
+                name = "Quest " .. index,
+            }),
+        })
+
+        preference.NoteCompleted(CN.objectiveTypes.QUEST, questID)
+    end
+
+    for bucket, row in pairs(store) do
+        if row.shown and row.shown > 0 then
+            assert(row.acted and row.acted > 0,
+                bucket .. " was shown " .. row.shown .. " times and credited "
+                .. tostring(row.acted) .. " -- a player who acts on "
+                .. "everything must not be recorded as acting on nothing")
+
+            local ratio = row.acted / row.shown
+
+            assert(ratio > 0.5,
+                bucket .. " records a ratio of " .. string.format("%.2f", ratio)
+                .. " for a player who acted on every single sighting")
+        end
+    end
+
+    -- And the multiplier that comes out of it must not be a penalty.
+    local multiplier = preference.Multiplier(CN.objectiveTypes.QUEST)
+
+    assert(multiplier >= 1,
+        "acting on everything must not produce a penalty, got " .. multiplier)
+
+    for key in pairs(store) do
+        store[key] = nil
+    end
+
+    print("  acting on every sighting is recorded in every bucket")
+end)()
+
+print("\nA focus raises what you asked for, at every distance:")
+
+;(function()
+    ------------------------------------------------------------
+    -- MULTIPLYING A TOTAL THAT CROSSES ZERO INVERTS IT.
+    --
+    -- Worth tops out around 8; travel is weighted -1 against a cost that
+    -- reaches 40. So anything more than a few minutes away scored negative --
+    -- and `score * 2.0` on a negative number pushes it DOWN. `/cn mode
+    -- quests` ranked a distant quest twenty-seven points BELOW a distant pet.
+    -- The learned multiplier inverted the same way, promoting exactly the
+    -- types it had decided you avoid, as long as they were far off.
+    --
+    -- Every previous test of this used a near objective, where the total
+    -- happens to be positive and the arithmetic happens to work.
+    ------------------------------------------------------------
+    local saved = CN.Settings().priorityMode
+
+    local function pair(travelCost)
+        local quest = CN.NewObjective({
+            id = 1, type = CN.objectiveTypes.QUEST, name = "Quest",
+            completionValue = 3, travelCost = travelCost,
+        })
+
+        local pet = CN.NewObjective({
+            id = 2, type = CN.objectiveTypes.PET, name = "Pet",
+            completionValue = 3, travelCost = travelCost,
+        })
+
+        return CN.ScoreObjective(quest), CN.ScoreObjective(pet)
+    end
+
+    CN.Settings().priorityMode = "quests"
+
+    for _, distance in ipairs({ 0, 2, 5, 10, 20, 30, 40 }) do
+        local questScore, petScore = pair(distance)
+
+        assert(questScore > petScore,
+            "with a quest focus a quest must outrank an identical pet at "
+            .. "travel cost " .. distance .. ", got " .. questScore
+            .. " against " .. petScore)
+    end
+
+    print("  a quest focus prefers quests at every distance tested")
+
+    -- And the same for a learned multiplier, which is the other multiplying
+    -- input and inverted identically.
+    CN.Settings().priorityMode = "balanced"
+
+    CN.RegisterScoreAdjuster("InversionProbe", function(candidate, worth)
+        if candidate.type == CN.objectiveTypes.QUEST then
+            return worth * 1.25
+        end
+
+        return worth * 0.8
+    end)
+
+    for _, distance in ipairs({ 0, 5, 20, 40 }) do
+        local questScore, petScore = pair(distance)
+
+        assert(questScore > petScore,
+            "a type the player acts on must outrank one they skip at travel "
+            .. "cost " .. distance .. ", got " .. questScore .. " against "
+            .. petScore)
+    end
+
+    CN.scoreAdjusters["InversionProbe"] = nil
+
+    for index, name in ipairs(CN.scoreAdjusterOrder) do
+        if name == "InversionProbe" then
+            table.remove(CN.scoreAdjusterOrder, index)
+            break
+        end
+    end
+
+    CN.Settings().priorityMode = saved
+
+    print("  and a learned preference does too")
 end)()
 
 print("\nOff means off, and a setting you can name you can set:")

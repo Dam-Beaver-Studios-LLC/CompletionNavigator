@@ -908,10 +908,26 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
 
     local session = CN:GetModule("Session")
 
+    -- THE SPEED OF RUNNING, NOT THE SPEED YOU HAPPEN TO BE MOVING.
+    --
+    -- `Speed()` with no argument answers for the bucket the player is in
+    -- RIGHT NOW -- so asking it while airborne returned the skyriding median
+    -- and used it to divide the "run the whole way" option and both walking
+    -- legs of every flight-path route. A twenty-one thousand yard journey was
+    -- quoted at six minutes, labelled `run`, and marked confident. The true
+    -- figure on foot is fifty.
+    --
+    -- It also made the self-flown option unreachable while flying: dividing
+    -- the same distance by the same number and then adding six seconds of
+    -- takeoff can never win, so the mode this addon built a whole travel
+    -- model around never appeared in the situation it was written for.
+    --
+    -- The ground speed is asked for by name. Which bucket the player is
+    -- standing in is not a fact about how long it takes to walk somewhere.
     local runSpeed, runMeasured = 7, false
 
     if session and session.Speed then
-        runSpeed, runMeasured = session.Speed()
+        runSpeed, runMeasured = session.Speed(false)
     end
 
     runSpeed = math.max(0.5, runSpeed)
@@ -927,6 +943,10 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         mode    = "run",
         yards   = direct,
     }
+
+    -- What the comparison uses, which is the duration for everything except a
+    -- flight pair the player has flown before -- see the tie-break below.
+    local bestRanking = best.seconds
 
     local confident = runMeasured
 
@@ -944,7 +964,9 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
 
         local seconds = (direct / flySpeed) + Travel.takeoffSeconds
 
-        if seconds < best.seconds then
+        if seconds < bestRanking then
+            bestRanking = seconds
+
             best = {
                 seconds = seconds,
                 mode    = "self",
@@ -1025,7 +1047,7 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
             if walkOut and cheapestArrival
                 and (bestPossibleDiscount
                     * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
-                    < best.seconds then
+                    < bestRanking then
 
                 local origin = nodes[i]
                 local row    = spans[i]
@@ -1043,11 +1065,28 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
                         -- A pair the player has actually flown beats an
                         -- equivalent pair nobody has: same distance, one
                         -- of them proven to connect.
+                        --
+                        -- A TIE-BREAK, NOT A DISCOUNT. This used to multiply
+                        -- `seconds` itself, so the duration reported to the
+                        -- player was ten percent below the model's own
+                        -- arithmetic -- `/cn travel` printed legs that summed
+                        -- to fifty seconds more than its own headline -- and
+                        -- that shortened number flowed into scoring and into
+                        -- `/cn plan`'s budget. Every player has flown
+                        -- somewhere, so this was the common case, not an
+                        -- edge one.
+                        --
+                        -- The preference belongs in the comparison. The
+                        -- seconds are the seconds.
+                        local ranking = seconds
+
                         if Travel.IsKnownRoute(origin.id, nodes[j].id) then
-                            seconds = seconds * Travel.knownRouteBonus
+                            ranking = ranking * Travel.knownRouteBonus
                         end
 
-                        if seconds < best.seconds then
+                        if ranking < bestRanking then
+                            bestRanking = ranking
+
                             best = {
                                 seconds     = seconds,
                                 mode        = "fly",
@@ -1083,6 +1122,10 @@ end
 -- a zone". Kept as a separate function so the scoring scale and the human
 -- number never drift apart: one is derived from the other.
 Travel.secondsPerCostPoint = 30
+
+-- Published, because Session has to remove from a measured duration exactly
+-- what the planner will add back to it. One constant, one conversion.
+CN.secondsPerCostPoint = Travel.secondsPerCostPoint
 Travel.maximumCost         = 40
 
 function Travel.CostFor(mapID, x, y)
@@ -1102,9 +1145,19 @@ function Travel.CostFor(mapID, x, y)
 end
 
 -- Published so providers do not each have to decide what to do when the
--- estimate is unavailable. Falls back to what the addon did before this
--- module existed, which is a flat penalty for another zone.
-CN.fallbackZoneCost = 25
+-- estimate is unavailable.
+--
+-- IT MUST NOT BE CHEAPER THAN A JOURNEY WE CAN ACTUALLY COST.
+--
+-- This was 25 while a costed journey saturates at `maximumCost = 40`, so
+-- "I cannot work out how to get there" scored fifteen points BELOW the far
+-- side of the zone the player is standing in -- and fifteen is nearly twice
+-- the entire range of what finishing something is worth. Another continent,
+-- unreachable and unmodelled, outranked a quest two minutes away.
+--
+-- An uncostable journey is the one we know least about; it has to be the
+-- pessimistic answer, not the optimistic one.
+CN.fallbackZoneCost = 40
 
 function CN.TravelCost(mapID, x, y)
     local travel = CN:GetModule("Travel")

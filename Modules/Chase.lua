@@ -142,10 +142,30 @@ builders.REPUTATION = function(goal)
     table.insert(steps, NewStep(Chase.states.NEXT, string.format(
         "%s reputation to the next rank", CN.Comma(standing.remaining))))
 
+    -- NO FRACTION, BECAUSE THIS ONE IS NOT A FRACTION OF THE GOAL.
+    --
+    -- `earned` and `needed` describe the CURRENT RANK ONLY -- how far into
+    -- Honored you are, not how far along the ladder to Exalted. Returning
+    -- them as done/total made `/cn chase` draw a full bar and print "100%"
+    -- for somebody standing at 21,000 of the 42,000 the ladder needs, and
+    -- made `Chase.All` -- which sorts by exactly that fraction -- rank a
+    -- faction one point short of Honored above an appearance genuinely eighty
+    -- percent collected.
+    --
+    -- The client will vouch for progress inside a band and not for progress
+    -- across the ladder, so the band is reported as a count, with the rank
+    -- named, and no denominator is invented for the rest. That is this
+    -- addon's standing rule, applied to the one place that was breaking it
+    -- most visibly.
     return steps, {
-        done  = standing.earned,
-        total = standing.needed,
-        unit  = "reputation",
+        done         = nil,
+        total        = nil,
+        unit         = "reputation",
+        bandEarned   = standing.earned,
+        bandNeeded   = standing.needed,
+        nextRank     = standing.nextRankName,
+        unknownTotal = "the client reports progress inside a rank, not "
+            .. "across the whole standing",
     }
 end
 
@@ -402,6 +422,17 @@ function Chase.Summarize(chain)
             CN.Comma(chain.progress.done or 0),
             CN.Comma(chain.progress.total),
             chain.progress.unit or "steps"))
+
+    elseif chain.progress and chain.progress.bandNeeded then
+        -- A band with the rank named, rather than a fraction of the goal
+        -- that the client will not vouch for. "11,999 of 12,000 to Revered"
+        -- is a fact; "100%" of a half-finished ladder is not.
+        table.insert(parts, string.format("%s of %s %s%s",
+            CN.Comma(chain.progress.bandEarned or 0),
+            CN.Comma(chain.progress.bandNeeded),
+            chain.progress.unit or "steps",
+            chain.progress.nextRank
+                and (" to " .. tostring(chain.progress.nextRank)) or ""))
     end
 
     local nextStep = chain.next or Chase.NextStep(chain)

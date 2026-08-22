@@ -201,6 +201,10 @@ end
 -- form.
 local shownAt = {}
 
+-- Which sub-bucket each sighting was filed under, so the completion side can
+-- credit the same bucket the showing side incremented.
+local shownRefinement = {}
+
 local function Now()
     return (GetTime and GetTime()) or (time and time()) or 0
 end
@@ -270,6 +274,9 @@ CN.RegisterRecommendationHook("Preference", function(results)
                 -- Only quests get this. Every other type is one habit, and
                 -- six buckets that each learn nothing beat none at all.
                 local refined = Preference.Refine(objective)
+
+                shownRefinement[objectiveType .. ":" .. tostring(objective.id)]
+                    = refined
 
                 if refined ~= objectiveType then
                     local refinedRow = store[refined]
@@ -342,6 +349,22 @@ function Preference.Refine(objective)
     return "QUEST_SIDE"
 end
 
+-- Which sub-bucket a recorded sighting belonged to.
+--
+-- The showing side files an objective under both its plain type and its
+-- refinement; the completion side sees only a type and an id, and the id is
+-- not always the one that was recommended. So the refinement is remembered
+-- when the sighting is recorded, keyed the same way.
+function Preference.RefinedKeyFor(key, objectiveType)
+    local remembered = shownRefinement[key]
+
+    if remembered then
+        return remembered
+    end
+
+    return objectiveType
+end
+
 function Preference.NoteCompleted(objectiveType, objectiveID)
     if not Preference.IsEnabled() or not objectiveType then
         return false
@@ -400,7 +423,8 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
     end
 
     if (now - last) > Preference.WindowFor(objectiveType) then
-        shownAt[key] = nil
+        shownAt[key]         = nil
+        shownRefinement[key] = nil
 
         return false
     end
@@ -412,6 +436,34 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
     end
 
     row.acted = row.acted + 1
+
+    -- AND THE REFINED BUCKET, WHICH WAS NEVER CREDITED AT ALL.
+    --
+    -- The showing side increments both the plain type and the campaign/side
+    -- sub-bucket; this side incremented only the plain type. So the refined
+    -- rows accumulated sightings and no actions, drifted to the floor
+    -- multiplier, and the score adjuster PREFERS the refined row whenever its
+    -- multiplier is not 1 -- meaning the plain row that held the true answer
+    -- was correct and unreachable.
+    --
+    -- Measured: a player who turned in all 120 quests they were shown was
+    -- told, after an hour or two, that they "rarely act on these", and every
+    -- quest was multiplied by 0.80 permanently.
+    --
+    -- The id is not always available here (some events carry a different one
+    -- than was recommended), so the bucket is recovered from the key that was
+    -- actually matched.
+    local refined = Preference.RefinedKeyFor(key, objectiveType)
+
+    if refined and refined ~= objectiveType then
+        local store = Store()
+
+        local refinedRow = store and store[refined]
+
+        if refinedRow then
+            refinedRow.acted = (refinedRow.acted or 0) + 1
+        end
+    end
 
     Observed()
 

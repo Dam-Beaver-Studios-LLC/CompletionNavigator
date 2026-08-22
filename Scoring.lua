@@ -275,17 +275,35 @@ function CN.ScoreObjective(objective)
         travel = CN.unknownLocationCost
     end
 
-    local score = 0
+    -- WORTH AND COST ARE SUMMED SEPARATELY, AND ONLY WORTH IS MULTIPLIED.
+    --
+    -- Everything used to go into one running total which was then multiplied
+    -- by the focus weighting and by the learned multiplier. That total
+    -- crosses zero: travel is weighted -1 against a cost that reaches 40,
+    -- while what finishing something is worth tops out around 8. So anything
+    -- more than a few minutes away scored negative, and multiplying a
+    -- negative by 2.0 pushes it DOWN.
+    --
+    -- `/cn mode quests` therefore ranked a distant quest twenty-seven points
+    -- BELOW a distant pet -- the precise opposite of what the player asked
+    -- for -- and the learned multiplier did the same thing in reverse,
+    -- promoting the types it had decided you avoid, as long as they were far
+    -- away. Both features were not merely weak at distance; they inverted.
+    --
+    -- Worth and cost are now kept apart. A focus doubles what a thing is
+    -- worth to you. It does not double how far away it is, and it cannot
+    -- reverse the sign of anything.
+    local worth = 0
 
-    score = score + (objective.completionValue      or 1) * w.completionValue
-    score = score + (objective.unlockValue          or 0) * w.unlockValue
-    score = score + (objective.limitedTimeBonus     or 0) * w.limitedTimeBonus
+    worth = worth + (objective.completionValue      or 1) * w.completionValue
+    worth = worth + (objective.unlockValue          or 0) * w.unlockValue
+    worth = worth + (objective.limitedTimeBonus     or 0) * w.limitedTimeBonus
 
     -- A deadline the objective actually carries, weighted by how close it is.
     -- `expiresIn` is the established field name; providers that know a
     -- deadline already set it.
     if objective.expiresIn then
-        score = score + CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight
+        worth = worth + CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight
     end
     -- `objective.nearbyBonus` used to be summed here as a term of its own.
     -- Nothing ever set it. The WEIGHT is live -- it scales the batch bonus
@@ -294,17 +312,21 @@ function CN.ScoreObjective(objective)
 
     -- Everything else at the same place makes this stop worth more.
     if objective.hubSize and objective.hubSize > 1 then
-        score = score + math.min(CN.batchBonusCap,
+        worth = worth + math.min(CN.batchBonusCap,
             (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus
     end
-    score = score + (objective.userPreference       or 0) * w.userPreference
-    score = score + (objective.characterSuitability or 0) * w.characterSuitability
-    score = score + travel                                * w.travelCost
-    score = score + (objective.estimatedTime        or 0) * w.estimatedTime
+    worth = worth + (objective.userPreference       or 0) * w.userPreference
+    worth = worth + (objective.characterSuitability or 0) * w.characterSuitability
+
+    local cost = 0
+
+    cost = cost + travel                          * w.travelCost
+    cost = cost + (objective.estimatedTime or 0)  * w.estimatedTime
 
     if profile.types and objective.type and profile.types[objective.type] then
-        score = score * profile.types[objective.type]
+        worth = worth * profile.types[objective.type]
     end
+
 
     -- LAST, AND DELIBERATELY AFTER THE PROFILE.
     --
@@ -331,15 +353,29 @@ function CN.ScoreObjective(objective)
         local adjuster = CN.scoreAdjusters[CN.scoreAdjusterOrder[index]]
 
         if adjuster then
-            local adjusted = adjuster(objective, score)
+            -- ADJUSTERS SEE THE WORTH, NOT THE SIGNED TOTAL.
+            --
+            -- Every adjuster in this addon multiplies. Handing them a total
+            -- that crosses zero meant a penalty of 0.8 RAISED the score of
+            -- anything far enough away to be negative, and a preference of
+            -- 1.25 lowered it. The contract is now "here is what this is
+            -- worth; return what you think it is worth", which is what both
+            -- of them were written to express.
+            local adjusted = adjuster(objective, worth)
 
             -- An adjuster that returns nothing, or something that is not a
             -- number, is ignored rather than allowed to zero the score.
             if type(adjusted) == "number" then
-                score = adjusted
+                worth = adjusted
             end
         end
     end
+
+    local score = worth + cost
+
+    -- Kept for `/cn order`, which has to show the same arithmetic.
+    objective.scoreWorth = worth
+    objective.scoreCost  = cost
 
     -- Normalize -0.0, which formats as "-0.0" and reads like a bug.
     if score == 0 then
@@ -1020,24 +1056,38 @@ function CN.ExplainScore(objective)
     -- Both are multiplicative on the whole score rather than additive terms,
     -- so they are shown as what they are: a line saying what the running
     -- total was multiplied by, and by how much it moved the number.
-    local subtotal = 0
+    -- THE SAME SPLIT THE SCORER MAKES.
+    --
+    -- Worth is multiplied; cost is not. Explaining it any other way would put
+    -- this function back in disagreement with ScoreObjective, which is the
+    -- thing its own comment promises cannot happen.
+    local costLabels = {
+        ["getting there"]      = true,
+        ["how long it takes"]  = true,
+    }
+
+    local worth, cost = 0, 0
 
     for _, term in ipairs(terms) do
-        subtotal = subtotal + term.value
+        if costLabels[term.label] then
+            cost = cost + term.value
+        else
+            worth = worth + term.value
+        end
     end
 
     if profile.types and objective.type and profile.types[objective.type] then
         local factor = profile.types[objective.type]
 
-        local after = subtotal * factor
+        local after = worth * factor
 
         table.insert(terms, {
-            label = string.format("%s focus (everything above x%.2f)",
+            label = string.format("%s focus (what it is worth x%.2f)",
                 mode, factor),
-            value = after - subtotal,
+            value = after - worth,
         })
 
-        subtotal = after
+        worth = after
     end
 
     for index = 1, #CN.scoreAdjusterOrder do
@@ -1046,17 +1096,17 @@ function CN.ExplainScore(objective)
         local adjuster = CN.scoreAdjusters[name]
 
         if adjuster then
-            local adjusted = adjuster(objective, subtotal)
+            local adjusted = adjuster(objective, worth)
 
             if type(adjusted) == "number" then
-                if math.abs(adjusted - subtotal) > 0.0005 then
+                if math.abs(adjusted - worth) > 0.0005 then
                     table.insert(terms, {
                         label = name .. " adjustment",
-                        value = adjusted - subtotal,
+                        value = adjusted - worth,
                     })
                 end
 
-                subtotal = adjusted
+                worth = adjusted
             end
         end
     end

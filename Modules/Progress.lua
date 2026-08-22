@@ -126,8 +126,22 @@ end
 function Progress.CurrentDayKey()
     local seconds = Blizzard.GetSecondsUntilDailyReset()
 
+    -- BOTH BRANCHES ON THE SAME SCALE.
+    --
+    -- The fallback returned `20260822` where the primary returns about
+    -- `20687` -- a day index and a calendar number, two different kinds of
+    -- integer. One nil answer from the client, which happens during a loading
+    -- screen or early in a login, read as a day rollover: the player's count
+    -- for today was moved into "yesterday" mid-session and today restarted at
+    -- one. The next genuine reset then compared against a key on the wrong
+    -- scale and did it again.
+    --
+    -- Without the reset time the day boundary is unknowable, so the fallback
+    -- uses the same day-index arithmetic with no offset. It can be off by
+    -- one against the game's day; it cannot be off by six orders of
+    -- magnitude.
     if not seconds then
-        return tonumber(date("%Y%m%d"))
+        return math.floor(time() / 86400)
     end
 
     -- The reset that is coming, as an absolute time, identifies the day

@@ -21,7 +21,7 @@ Every step in a chain carries a state. Done steps are behind you, one step is ma
 
 It also says how long the whole thing is likely to take â€” as a **range**, never a figure, because task times vary by more than a third with competition, group size and luck. Where more than half the steps are kinds of thing it has never watched you do, it says *time unknown* and how many, rather than averaging its way to a number that looks like a fact.
 
-Where the game supplies a real denominator â€” achievement criteria, reputation standing â€” you get a real bar. Where it does not, you get the truth instead of a bar. An appearance has several sources and needs only one of them, so it lists them and says so rather than pretending you are "1 of 9" of the way there.
+Where the game supplies a real denominator â€” achievement criteria â€” you get a real bar. Where it does not, you get the truth instead of a bar. An appearance has several sources and needs only one of them, so it lists them and says so rather than pretending you are "1 of 9" of the way there. Reputation is reported as standing within the rank you are working on, named â€” *"11,999 of 12,000 to Revered"* â€” because the client will vouch for that and not for how far along the whole ladder you are.
 
 ## Follow the route
 
@@ -41,7 +41,7 @@ Off by default, and it will not fight you: it advances when a stop is **done**, 
 
 Half an hour is not the same question as "what should I do next", and it gets its own answer: the stops that fit, in walking order, with what each one costs.
 
-Travel time is **computed** from the journey you would actually make, weighing three options against each other: run it, take a flight path from the nearest point **you have discovered**, or fly it yourself â€” whichever is genuinely quicker. Your speed is measured from your own play, separately for running, riding and flying, because those are three different numbers and one median across them is wrong in all three. Task time is **learned** the same way. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
+Travel time is **computed** from the journey you would actually make, weighing three options against each other: run it, take a flight path from the nearest point **you have discovered**, or fly it yourself â€” whichever is genuinely quicker. Your speed is measured from your own play, separately for running, riding and flying, because those are three different numbers and one median across them is wrong in all three. Task time is **learned** the same way, and learned as the *work* â€” the journey is taken back out, because the plan adds it separately and counting it twice is how a twelve-minute stop gets quoted as thirty-six. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
 
 A journey it cannot model â€” another continent, reached by a portal â€” still refuses to invent a duration, but it now lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
@@ -52,6 +52,8 @@ A journey it cannot model â€” another continent, reached by a portal â€�
 ```
 
 Levelling, collecting, reputation, achievements, professions, everything. A focus sets the weighting **and** what is shown together, because "I'm levelling tonight" means both *prefer quests* and *stop showing me pets*.
+
+A focus raises what something is **worth to you**. It does not change how far away it is â€” so it moves the thing you asked for up the list at every distance, rather than only when it happens to be nearby.
 
 `/cn mode fastest` is the one that is not about a subject: it weights travel and **how long the thing itself usually takes you**, measured from your own play. A kind of objective it has never timed still contributes nothing rather than a guessed duration.
 

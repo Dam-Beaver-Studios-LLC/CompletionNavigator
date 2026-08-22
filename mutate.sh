@@ -64,8 +64,8 @@ echo "Mutation testing $TREE"
 echo
 
 mutate "Modules/Travel.lua" \
-    "                if seconds < best.seconds then" \
-    "                if true then" \
+    "                        if ranking < bestRanking then" \
+    "                        if true then" \
     "travel always flies, even when running is quicker"
 
 mutate "Modules/Travel.lua" \
@@ -237,8 +237,8 @@ mutate "Modules/Inventory.lua" \
 mutate "Modules/Travel.lua" \
     "                and (bestPossibleDiscount
                     * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
-                    < best.seconds then" \
-    "                and walkOut < (best.seconds * 0.5) then" \
+                    < bestRanking then" \
+    "                and walkOut < (bestRanking * 0.5) then" \
     "the pruning bound discards a route that would have won"
 
 mutate "Modules/Travel.lua" \
@@ -282,9 +282,9 @@ end" \
 mutate "Modules/Travel.lua" \
     "                and (bestPossibleDiscount
                     * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
-                    < best.seconds then" \
+                    < bestRanking then" \
     "                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
-                    < best.seconds then" \
+                    < bestRanking then" \
     "the pruning bound ignores the known-route discount"
 
 mutate "Modules/Travel.lua" \
@@ -458,6 +458,40 @@ mutate "Modules/Session.lua" \
     "CN.RegisterCandidateDecorator(\"Session\", function(objective)
     if false then" \
     "nothing ever sets how long a thing takes"
+
+
+# The 0.51.0 audit: numbers the addon showed that were wrong.
+mutate "Scoring.lua" \
+    "        worth = worth * profile.types[objective.type]" \
+    "        worth = (worth + cost) * profile.types[objective.type] - cost" \
+    "a focus multiplies a total that crosses zero"
+
+mutate "Modules/Travel.lua" \
+    "        runSpeed, runMeasured = session.Speed(false)" \
+    "        runSpeed, runMeasured = session.Speed()" \
+    "running is costed at whatever speed you are moving now"
+
+mutate "Modules/Travel.lua" \
+    "CN.fallbackZoneCost = 40" \
+    "CN.fallbackZoneCost = 25" \
+    "another continent is cheaper than across your own zone"
+
+mutate "Modules/Session.lua" \
+    "    elapsed = elapsed - (started.travel or 0)" \
+    "    elapsed = elapsed - 0" \
+    "the journey is counted in the task time and again in the plan"
+
+mutate "Modules/Chase.lua" \
+    "        done         = nil,
+        total        = nil," \
+    "        done         = standing.earned,
+        total        = standing.needed," \
+    "progress inside a rank is shown as progress toward the goal"
+
+mutate "Modules/Preference.lua" \
+    "            refinedRow.acted = (refinedRow.acted or 0) + 1" \
+    "" \
+    "a player who does everything is recorded as doing nothing"
 
 
 echo

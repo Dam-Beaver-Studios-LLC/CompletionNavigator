@@ -493,6 +493,29 @@ function Blizzard.GetAchievementProgress(achievementID)
     local total = GetAchievementNumCriteria(achievementID) or 0
     local done  = 0
 
+    -- A SINGLE COUNTING CRITERION IS NOT A SINGLE STEP.
+    --
+    -- "Complete 100 quests in Hallowfall" is reported by the client as ONE
+    -- criterion carrying a quantity and a requirement. Counting rows gave
+    -- 0 of 1 -- so a hundred-quest zone grind was filed as "not started, 1
+    -- to do", sorted to the front of `/cn zones` as the smallest job
+    -- available, awarded the "a small remainder is a session" bonus, and
+    -- emitted as a recommendation reading "1 of 1 left in this zone".
+    --
+    -- The quantity is right there on the same call this function already
+    -- makes; it was being discarded. When a single criterion carries a real
+    -- requirement, that requirement IS the denominator.
+    if total == 1 then
+        local _, _, criteriaCompleted, quantity, required =
+            GetAchievementCriteriaInfo(achievementID, 1)
+
+        if type(required) == "number" and required > 1 then
+            return math.min(quantity or 0, required), required
+        end
+
+        return criteriaCompleted and 1 or 0, 1
+    end
+
     for index = 1, total do
         local _, _, criteriaCompleted = GetAchievementCriteriaInfo(achievementID, index)
 

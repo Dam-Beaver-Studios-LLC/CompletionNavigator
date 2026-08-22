@@ -172,7 +172,14 @@ CN.RegisterCandidateProvider("Toys", function()
                 zone            = seller.zone,
                 accountWide     = true,
                 completionValue = value,
-                travelCost      = (seller.mapID == playerMap) and 2 or 25,
+                -- COSTED, NOT GUESSED. This charged a flat 25 for anything
+                -- outside the current zone while holding the seller's exact
+                -- coordinates -- so a vendor ninety seconds away in the next
+                -- zone was charged twenty-five where a quest at the identical
+                -- spot was charged three. A systematic twenty-two point
+                -- penalty against exactly the collection types this file
+                -- exists to surface.
+                travelCost      = CN.TravelCost(seller.mapID, seller.x, seller.y),
                 reasons         = reasons,
             })
         end)
