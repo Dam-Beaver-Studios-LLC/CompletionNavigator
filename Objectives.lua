@@ -36,6 +36,41 @@ CN.objectiveTypes = {
     INSTANCE    = "INSTANCE",
 }
 
+-- HOW A PERSON READS A TYPE, AS OPPOSED TO HOW THE CODE THINKS ABOUT ONE.
+--
+-- This table lived in Modules/Filters.lua, which is loaded far too late for
+-- most of the places that print a type: `/cn next`, `/cn list`, `/cn zone`,
+-- the Next and Zone tabs and the broker all showed the raw enum. The broker
+-- in particular set it as the LDB `label`, so Titan Panel and ElvUI rendered
+-- the bar as "MOUNT" where the feed's name belongs.
+--
+-- Moved here, beside the enum it names, and completed: RENOWN, VENDOR and
+-- COLLECTIBLE had no entry at all and fell through to the raw string.
+CN.typeLabels = {
+    QUEST       = "Quests",
+    ACHIEVEMENT = "Achievements",
+    REPUTATION  = "Reputations",
+    RENOWN      = "Renown",
+    PET         = "Battle pets",
+    MOUNT       = "Mounts",
+    TOY         = "Toys",
+    APPEARANCE  = "Appearances",
+    RECIPE      = "Recipes",
+    PROFESSION  = "Professions",
+    RARE        = "Rares",
+    TREASURE    = "Treasures",
+    EXPLORATION = "Exploration",
+    TITLE       = "Titles",
+    CURRENCY    = "Currencies",
+    VENDOR      = "Vendors",
+    COLLECTIBLE = "Collectibles",
+    INSTANCE    = "Dungeons & raids",
+}
+
+function CN.TypeLabel(objectiveType)
+    return CN.typeLabels[objectiveType] or tostring(objectiveType)
+end
+
 ------------------------------------------------------------
 -- STATES
 ------------------------------------------------------------
@@ -315,6 +350,28 @@ function CN.IsIgnored(objectiveType, id)
     return ignored[ObjectiveKey(objectiveType, id)] ~= nil
 end
 
+-- HIDING SOMETHING HAS TO TAKE EFFECT NOW.
+--
+-- `CN.IsIgnored` and `CN.IsDeferred` are consulted inside candidate
+-- providers, at build time -- which means the ignore list is baked into the
+-- cached candidate list, and changing it changes nothing until something
+-- unrelated happens to make a provider dirty.
+--
+-- It looked like it worked because most providers are chatty: some event
+-- rebuilds them within seconds and the row disappears. For a provider that
+-- is not -- `Mounts` waits on NEW_MOUNT_ADDED, `Sets` on a sixty-second
+-- cooldown -- clicking Ignore could go unhonoured for the rest of the
+-- session, with the thing the player just dismissed still sitting at the top
+-- of the list.
+--
+-- Urgent, with no reason given, because this is an explicit player action and
+-- an explicit player action is precisely what bypasses cooldowns.
+local function Rebuild()
+    if CN.InvalidateCandidates then
+        CN.InvalidateCandidates()
+    end
+end
+
 function CN.SetIgnored(objectiveType, id, value)
     local ignored = CN.Account("ignoredObjectives")
     local key     = ObjectiveKey(objectiveType, id)
@@ -324,6 +381,8 @@ function CN.SetIgnored(objectiveType, id, value)
     else
         ignored[key] = nil
     end
+
+    Rebuild()
 end
 
 function CN.IsDeferred(objectiveType, id)
@@ -354,6 +413,9 @@ function CN.SetDeferred(objectiveType, id, seconds)
 
     if not seconds then
         deferred[key] = nil
+
+        Rebuild()
+
         return
     end
 
@@ -361,4 +423,6 @@ function CN.SetDeferred(objectiveType, id, seconds)
         since  = time(),
         until_ = time() + seconds,
     }
+
+    Rebuild()
 end

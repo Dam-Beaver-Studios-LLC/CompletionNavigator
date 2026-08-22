@@ -74,38 +74,79 @@ function Setup.Run(onComplete)
     local results = {}
     local index   = 0
 
+    -- THE WHOLE BODY IS GUARDED, NOT JUST THE STEP.
+    --
+    -- `RunStep` was pcall'd and nothing else was -- and steps two onward run
+    -- inside `C_Timer.After` callbacks, outside the slash command's own
+    -- pcall. So a throw in the bookkeeping, in `Setup.Report`, or in
+    -- `Setup.Outstanding` stopped the chain dead AND left `Setup.running`
+    -- true, which makes `/cn setup` answer "Setup is already running." for
+    -- the rest of the session with no way back short of a reload.
     local function step()
-        index = index + 1
+        local ran, err = pcall(function()
+            index = index + 1
 
-        local entry = Setup.steps[index]
+            local entry = Setup.steps[index]
 
-        if not entry then
-            Setup.running = false
+            if not entry then
+                Setup.running = false
 
-            CN.Account("setup").completedAt = time()
+                -- COMPLETION IS RECORDED ONLY IF SOMETHING COMPLETED.
+                --
+                -- This was stamped unconditionally, so a run in which every
+                -- scan failed was remembered as a successful setup: the login
+                -- reminder stopped, `Setup.HasRun()` went true forever, and
+                -- `/cn setup check` answered "Everything the addon can read
+                -- on its own is scanned."
+                local failed = 0
 
-            Setup.Report(results)
+                for _, row in ipairs(results) do
+                    if not row.ok then
+                        failed = failed + 1
+                    end
+                end
 
-            if onComplete then
-                pcall(onComplete, results)
+                if failed < #results then
+                    CN.Account("setup").completedAt = time()
+                end
+
+                Setup.Report(results)
+
+                if onComplete then
+                    pcall(onComplete, results)
+                end
+
+                return
             end
 
-            return
-        end
+            local ok, value = Setup.RunStep(entry)
 
-        local ok, value = Setup.RunStep(entry)
+            table.insert(results, {
+                label = entry.label,
+                ok    = ok,
+                value = ok and value or nil,
+                error = (not ok) and value or nil,
+            })
 
-        table.insert(results, {
-            label = entry.label,
-            ok    = ok,
-            value = ok and value or nil,
-            error = (not ok) and value or nil,
-        })
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0, step)
+            else
+                step()
+            end
+        end)
 
-        if C_Timer and C_Timer.After then
-            C_Timer.After(0, step)
-        else
-            step()
+        if not ran then
+            Setup.running = false
+
+            local errors = CN:GetModule("Errors")
+
+            if errors and errors.Record then
+                pcall(errors.Record, "Setup.Run", tostring(err))
+            end
+
+            Print("Setup stopped after " .. index .. " of "
+                .. #Setup.steps .. " scans: " .. tostring(err))
+            Print("|cff999999/cn setup runs it again from the start.|r")
         end
     end
 
@@ -117,7 +158,7 @@ function Setup.Run(onComplete)
 end
 
 function Setup.Report(results)
-    local scanned, failed = 0, 0
+    local scanned, absent, broke = 0, 0, 0
 
     for _, result in ipairs(results) do
         if result.ok then
@@ -125,15 +166,33 @@ function Setup.Report(results)
 
             Print("  " .. result.label .. ": "
                 .. (type(result.value) == "number" and result.value or "done"))
-        else
-            failed = failed + 1
+        elseif result.error == "module not loaded" then
+            -- "UNAVAILABLE" AND "IT THREW" ARE DIFFERENT STATEMENTS.
+            --
+            -- Every failure was reported with the word "unavailable", so a
+            -- module that raised a Lua error was presented to the player as a
+            -- subsystem this client does not have -- nothing to look into,
+            -- nothing to report.
+            absent = absent + 1
 
-            Print("  " .. result.label .. ": |cffff4444" .. tostring(result.error) .. "|r")
+            Print("  " .. result.label
+                .. ": |cff999999not available on this client|r")
+        else
+            broke = broke + 1
+
+            Print("  " .. result.label .. ": |cffff4444failed: "
+                .. tostring(result.error) .. "|r")
         end
     end
 
     Print("Setup complete: " .. scanned .. " scanned"
-        .. (failed > 0 and (", " .. failed .. " unavailable") or "") .. ".")
+        .. (absent > 0 and (", " .. absent .. " unavailable") or "")
+        .. (broke > 0 and (", " .. broke .. " failed") or "") .. ".")
+
+    if broke > 0 then
+        Print("|cff999999A failure is a defect, not a missing feature. "
+            .. "|cffffff00/cn errors|r has the detail.|r")
+    end
 
     for _, line in ipairs(Setup.Outstanding()) do
         Print("|cffffff00" .. line .. "|r")

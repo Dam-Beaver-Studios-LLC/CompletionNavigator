@@ -43,6 +43,8 @@ Half an hour is not the same question as "what should I do next", and it gets it
 
 Travel time is **computed** from the journey you would actually make, weighing three options against each other: run it, take a flight path from the nearest point **you have discovered**, or fly it yourself â€” whichever is genuinely quicker. Your speed is measured from your own play, separately for running, riding and flying, because those are three different numbers and one median across them is wrong in all three. Task time is **learned** the same way, and learned as the *work* â€” the journey is taken back out, because the plan adds it separately and counting it twice is how a twelve-minute stop gets quoted as thirty-six. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
 
+The flight itself is costed through the **network**, not across it. A bird hops from flight master to flight master, so a pair at opposite ends of a continent is reached through the ones in between â€” and measuring the straight line between the two ends understates every long flight, always in the same direction. Routes are the shortest path through the flight points you have discovered, `/cn travel` prints the chain leg by leg so you can check it against your own map, and a route that needs more than one hop is never reported as measured: the connections between flight masters are inferred, and inferred is not the same as known.
+
 A journey it cannot model â€” another continent, reached by a portal â€” still refuses to invent a duration, but it lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. Where a teleport lands somewhere fixed, the whole journey is costed straight through it â€” *"hearth, then four minutes"* rather than a list to work from yourself. The three that go wherever you happen to be bound say so instead of guessing. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
 ## Aim it in one command
@@ -340,7 +342,8 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn instances` | What you are saved to, and how much of it is left |
 | `/cn drops <name>` | Which boss drops it, and whether you are locked to it |
 | `/cn learned` | What the addon has worked out about how you play |
-| `/cn travel` | How long it takes to reach the top recommendation, and by what route |
+| `/cn travel` | How long it takes to reach the top recommendation, and by what route â€” leg by leg |
+| `/cn handynotes` | What HandyNotes plugins are drawing on this map, shown rather than scored |
 | `/cn situation` | What the addon thinks you are in the middle of |
 | `/cn waiting` | Quests you have seen and never picked up, by zone |
 | `/cn orders` | Crafting orders you placed, and anything ready to collect |
@@ -378,7 +381,7 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks â€” at a realistic scale of 1,800 pets, 3,000 achievements, 2,500 recipes, 3,000 appearance sets, five full bags and a continent's worth of flight points â€” costs about **four milliseconds**, and the answer to "what next?" is served from cache in **five microseconds**.
 
-Those figures got better by making the benchmark harder. Three of the most expensive things the addon does had been measured against fixtures holding three appearance sets, three bags of items and three flight points, and at that size all three looked free. At the size the game actually produces, a rebuild cost eleven milliseconds â€” most of a frame, on every event that changes the answer. Costing a single journey has since gone from 1.48 milliseconds to 0.04, and no answer changed.
+Those figures got better by making the benchmark harder. Three of the most expensive things the addon does had been measured against fixtures holding three appearance sets, three bags of items and three flight points, and at that size all three looked free. At the size the game actually produces, a rebuild cost eleven milliseconds â€” most of a frame, on every event that changes the answer. Costing a single journey has since gone from 1.48 milliseconds to under a tenth of that, and routing it through the flight network rather than across it did not put that back.
 
 Tooltip lines are the same story: hovering an item answers from an index rather than searching everything the addon knows, so mousing across a full bag costs nothing you can feel. It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer â€” the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 

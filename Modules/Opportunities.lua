@@ -47,7 +47,20 @@ function Opportunities.Urgency(secondsLeft)
 end
 
 function Opportunities.FormatTimeLeft(seconds)
-    if not seconds or seconds <= 0 then
+    -- "UNKNOWN" AND "EXPIRED" ARE DIFFERENT ANSWERS.
+    --
+    -- `Blizzard.GetQuestTimeLeft` returns nil when the client will not say,
+    -- and this collapsed that into "expired". The sort puts unknowns LAST
+    -- using `or math.huge`, so a live world quest appeared at the bottom of a
+    -- list headed "soonest to expire", labelled expired -- contradicting
+    -- itself on the same screen.
+    --
+    -- The addon has a convention for exactly this and it is used here now.
+    if not seconds then
+        return CN.WithConfidence(nil, CN.confidence.UNKNOWN) .. " time left"
+    end
+
+    if seconds <= 0 then
         return "expired"
     end
 

@@ -242,14 +242,12 @@ mutate "Modules/Travel.lua" \
     "the pruning bound discards a route that would have won"
 
 mutate "Modules/Travel.lua" \
-    "function Travel.ForgetNodes()
-    nodeCache = {}
-    spanCache = {}
-end" \
-    "function Travel.ForgetNodes()
-    nodeCache = {}
-end" \
-    "the flight-leg distances outlive the node list they describe"
+    "    nodeCache      = {}
+    spanCache      = {}
+    neighbourCache = {}
+    pathCache      = {}" \
+    "    nodeCache      = {}" \
+    "the flight network outlives the node list it describes"
 
 mutate "Modules/Travel.lua" \
     "                                runToNode   = walkOut * runSpeed," \
@@ -369,8 +367,10 @@ mutate "Modules/Harvest.lua" \
 # The 0.49.0 audit: four features that had been silently off, and the two
 # stubs that agreed with them.
 mutate "Providers/BlizzardWorld.lua" \
-    "            _, isRaid, _, difficultyName, encounters, defeated =" \
-    "            _, isRaid, _, difficultyName, defeated, encounters =" \
+    "            _, isRaid, _, difficultyName, encounters, defeated, _,
+            journalInstanceID =" \
+    "            _, isRaid, _, difficultyName, defeated, encounters, _,
+            journalInstanceID =" \
     "lockout progress and total are read in the wrong order"
 
 mutate "Modules/Waiting.lua" \
@@ -529,6 +529,102 @@ mutate "Modules/Travel.lua" \
     "    { kind = \"spell\", id = 50977,  label = \"Death Gate\" }," \
     "a teleport loses the destination that makes it costable"
 
+
+# 0.53.0: multi-hop routing, and the state and honesty audits.
+mutate "Modules/Travel.lua" \
+    "                local flightYards = (i ~= j) and path.dist[j] or nil" \
+    "                local flightYards = (i ~= j) and Spans(continent, nodes)[i][j] or nil" \
+    "the flight leg is a straight line again instead of a route"
+
+mutate "Modules/Travel.lua" \
+    "            if not present then
+                table.insert(back, { index = i, yards = edge.yards })
+            end" \
+    "            if false then
+                table.insert(back, { index = i, yards = edge.yards })
+            end" \
+    "the flight network is directed, so an outpost has no way in"
+
+mutate "Modules/Travel.lua" \
+    "    if #usable > 0 then
+        nodeCache[continent] = usable
+    end" \
+    "    nodeCache[continent] = usable" \
+    "an empty flight-point list is remembered for the session"
+
+mutate "Objectives.lua" \
+    "local function Rebuild()
+    if CN.InvalidateCandidates then
+        CN.InvalidateCandidates()
+    end
+end" \
+    "local function Rebuild()
+end" \
+    "ignoring something does not take effect until something else changes"
+
+mutate "Scoring.lua" \
+    "            or (provider.volatile and cooled" \
+    "            or (provider.volatile and true" \
+    "a volatile provider ignores the cooldown it asked for"
+
+mutate "Modules/Errors.lua" \
+    "    if #ring == 0 then
+        return 0
+    end" \
+    "    if false then
+        return 0
+    end" \
+    "a clean session erases the previous session's error record"
+
+mutate "Modules/Achievements.lua" \
+    "        Achievements.revision = Achievements.revision + 1
+
+        DebugPrint(\"Achievement earned: \" .. tostring(achievementID))" \
+    "        DebugPrint(\"Achievement earned: \" .. tostring(achievementID))" \
+    "an earned achievement stays in the shortlist and is offered again"
+
+mutate "Modules/Rares.lua" \
+    "            elseif entry.yards and entry.yards <= Rares.clearedWithinYards then" \
+    "            elseif true then" \
+    "riding past a rare marks it cleared for this character"
+
+mutate "Providers/TomTom.lua" \
+    "        if asked and not allowed then
+            return false, \"the game does not allow a waypoint on this map\"
+        end" \
+    "        if false then
+            return false, \"the game does not allow a waypoint on this map\"
+        end" \
+    "a waypoint the client refuses is reported as set"
+
+mutate "Modules/Navigation.lua" \
+    "    if Navigation.ownsUserWaypoint and C_Map and C_Map.ClearUserWaypoint then" \
+    "    if C_Map and C_Map.ClearUserWaypoint then" \
+    "clearing waypoints deletes a pin the player placed by hand"
+
+mutate "Providers/BlizzardCollections.lua" \
+    "    if select(1, Blizzard.GetNumPets()) == 0 then" \
+    "    if true then" \
+    "the pet journal's source and type filters are widened on every scan"
+
+mutate "Providers/Blizzard.lua" \
+    "        if data.factionID and data.factionID ~= 0 then
+            return \"id:\" .. tostring(data.factionID)
+        end" \
+    "        if data.factionID then
+            return \"id:\" .. tostring(data.factionID)
+        end" \
+    "every reputation header collides on factionID zero"
+
+mutate "Providers/HandyNotes.lua" \
+    "        for name in step, state, control do" \
+    "        for name in step do" \
+    "the HandyNotes plugin iterator drops its state table"
+
+mutate "Modules/Instances.lua" \
+    "                instanceID   = saved.instanceID," \
+    "                instanceID   = saved.id," \
+    "the Adventure Guide is asked with a lockout id"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

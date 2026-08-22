@@ -310,8 +310,16 @@ function Quests.PruneRemembered()
 
     local dropped = 0
 
+    -- ACCOUNT COMPLETION, NOT THIS CHARACTER'S.
+    --
+    -- `Remembered()` is an account-wide store of WHERE a quest is, and where
+    -- a quest is does not depend on who is asking. Pruning it on
+    -- `IsCompletedByCharacter` meant one character finishing a zone deleted
+    -- the remembered locations for every other character who still had it to
+    -- do -- the same wrong-scope defect as the quest-status store, in the
+    -- other direction.
     for questID in pairs(store) do
-        if Quests.IsCompletedByCharacter(questID)
+        if Quests.IsCompletedOnAccount(questID)
             or Blizzard.IsQuestInLog(questID) then
 
             store[questID] = nil
@@ -729,17 +737,22 @@ end
 -- STATUS
 ------------------------------------------------------------
 
+-- ASKED, NOT REMEMBERED.
+--
+-- This used to write the answer into an account-wide `questStatus` table.
+-- Both fields come from a free synchronous client call, so there was nothing
+-- to gain by storing them -- and `IsQuestFlaggedCompleted` answers for the
+-- character asking, so storing it account-wide meant a main's four thousand
+-- completions were read back as every alt's. `/cn breakdown` on a fresh alt
+-- reported the main's progress, and scanning on the alt destroyed the main's
+-- record.
+--
+-- Migration 7 drops the store. The name is kept because callers want the pair
+-- of answers, and asking through one function keeps the two questions
+-- together.
 function Quests.RecordStatus(questID)
-    local characterCompleted = Quests.IsCompletedByCharacter(questID)
-    local accountCompleted   = Quests.IsCompletedOnAccount(questID)
-
-    CN.Account("questStatus")[questID] = {
-        characterCompleted = characterCompleted,
-        accountCompleted   = accountCompleted,
-        lastChecked        = time(),
-    }
-
-    return characterCompleted, accountCompleted
+    return Quests.IsCompletedByCharacter(questID),
+        Quests.IsCompletedOnAccount(questID)
 end
 
 function Quests.ScanKnown()
@@ -865,14 +878,30 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
 
         for _, prerequisiteID in ipairs(dependency.observedRequires) do
             if not Quests.IsCompletedByCharacter(prerequisiteID) then
+                local name = Quests.GetName(prerequisiteID)
+                    or ("quest " .. prerequisiteID)
+
+                -- WHERE THE EDGE CAME FROM DECIDES WHAT THE LINE CAN CLAIM.
+                --
+                -- An imported chain was never observed by this player, so
+                -- the harvest store has nothing for it and the character
+                -- count came back zero -- "seen first on 0 characters",
+                -- printed as evidence. Say which kind of edge it is.
+                if dependency.origin == "contributed" then
+                    return states.LOCKED,
+                           CN.blockReasons.LIKELY_PREREQUISITE,
+                           name .. " (from an imported chain, not from your "
+                               .. "own play)"
+                end
+
                 local characters = harvest
                     and harvest.Confidence(harvest.Store()[questID], prerequisiteID)
                     or 0
 
                 return states.LOCKED,
                        CN.blockReasons.LIKELY_PREREQUISITE,
-                       (Quests.GetName(prerequisiteID) or ("quest " .. prerequisiteID))
-                           .. " (seen first on " .. characters .. " characters)"
+                       name .. " (seen first on " .. characters
+                           .. " characters)"
             end
         end
     end
@@ -1323,7 +1352,7 @@ CN:RegisterCommand{
     name    = "queststatus",
     args    = "<questID>",
     order   = 23,
-    help    = "Show the stored quest completion state.",
+    help    = "Show this character's completion state for a quest.",
     handler = function(args)
         local questID = CN.ToID(args)
 
@@ -1332,17 +1361,11 @@ CN:RegisterCommand{
             return
         end
 
-        local status = CN.Account("questStatus")[questID]
+        local characterCompleted, accountCompleted = Quests.RecordStatus(questID)
 
-        if not status then
-            Print("No stored quest status for quest " .. questID .. ".")
-            return
-        end
-
-        Print("Stored quest " .. questID .. " status:")
-        Print("Character completion: " .. CN.YesNo(status.characterCompleted))
-        Print("Account/Warband completion: " .. CN.YesNo(status.accountCompleted))
-        Print("Last checked: " .. date("%Y-%m-%d %H:%M", status.lastChecked or 0))
+        Print("Quest " .. questID .. ", as the client answers right now:")
+        Print("Character completion: " .. CN.YesNo(characterCompleted))
+        Print("Account/Warband completion: " .. CN.YesNo(accountCompleted))
     end,
 }
 
@@ -1366,16 +1389,19 @@ CN:RegisterCommand{
     handler = function()
         Print("Discovered quests: " .. CN.CountKeys(CN.Account("discoveredQuests")))
         Print("Cached quest names: " .. CN.CountKeys(CN.Account("questMetadata")))
-        Print("Stored quest statuses: " .. CN.CountKeys(CN.Account("questStatus")))
     end,
 }
 
 CN:RegisterCommand{
     name    = "available",
     aliases = { "pickup", "offered" },
-    args    = "[zone name is not needed; uses the zone you are in]",
+    -- NO ARGUMENTS. This read "[zone name is not needed; uses the zone you
+    -- are in]" -- a note, rendered by the help printer as an argument spec,
+    -- so `/cn help` showed `/cn available [zone name is not needed; uses the
+    -- zone you are in]`. The note belongs in the help text.
     order   = 13,
-    help    = "List the quests offered here that you have not accepted.",
+    help    = "List the quests offered in the zone you are in that you have "
+        .. "not accepted.",
     handler = function()
         local mapID = select(1, CN.GetPlayerPosition())
 
@@ -1574,8 +1600,14 @@ CN:RegisterCommand{
         if record and source then
             Print("Data source: |cff999999" .. source .. "|r")
         else
+            -- `/cn setloc` records COORDINATES and nothing else, so it
+            -- cannot add the prerequisite data this line is about. Naming it
+            -- here sent the player to a command that could not solve the
+            -- stated problem.
             Print("|cff999999No prerequisite data for this quest. "
-                .. "Install AllTheThings or BtWQuests, or add a row with /cn setloc.|r")
+                .. "Install AllTheThings or BtWQuests, or let the addon "
+                .. "learn the ordering by playing -- |cffffff00/cn harvest|r"
+                .. "|cff999999 shows what it has seen so far.|r")
         end
     end,
 }

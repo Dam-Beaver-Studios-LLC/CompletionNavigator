@@ -21,7 +21,10 @@ CN.defaults = {
     version = CN.dbVersion,
 
     settings = {
-        enabled      = true,
+        -- `enabled` REMOVED. It sat here reading like a master on/off switch
+        -- and nothing anywhere read it, so setting it false did nothing at
+        -- all. A setting that is present and inert is worse than one that is
+        -- absent: it invites somebody to rely on it.
         debug        = false,
         priorityMode = "balanced",
 
@@ -67,7 +70,6 @@ CN.defaults = {
         deferredObjectives = {},
 
         questMetadata      = {},
-        questStatus        = {},
         discoveredQuests   = {},
         loremaster         = {},
         taskDurations      = {},
@@ -259,6 +261,85 @@ CN.migrations = {
     -- it under an older build, or through a version where the constant was
     -- larger, stayed large forever. Trim on the way in instead of trusting
     -- that it never happened.
+    -- 7 -> 8. `questStatus` was a per-character fact kept in an account-wide
+    -- table, which is two defects at once.
+    --
+    -- Wrong scope: `IsQuestFlaggedCompleted` answers for the character asking,
+    -- so a main that ran `/cn scanquests` wrote its own four thousand
+    -- completions into a store every alt then read as its own. `/cn breakdown`
+    -- on a fresh alt reported the main's progress. Scanning on the alt
+    -- overwrote the lot and destroyed the main's record.
+    --
+    -- And it should not have been persisted at all: both fields come from a
+    -- free synchronous client call, which is the definition of something the
+    -- addon does not need to remember. The standing rule is to persist only
+    -- what the client cannot re-supply.
+    --
+    -- So the store is asked for live now, and the old one is dropped rather
+    -- than migrated -- there is nothing in it that is worth keeping and much
+    -- of it belongs to a different character.
+    [7] = function(db)
+        db.account = db.account or {}
+
+        if type(db.account.questStatus) == "table" then
+            local count = 0
+
+            for key in pairs(db.account.questStatus) do
+                db.account.questStatus[key] = nil
+                count = count + 1
+            end
+
+            CN.DebugPrint("Dropped " .. count .. " stored quest statuses; "
+                .. "the client answers this for free, and per character.")
+        end
+
+        db.account.questStatus = nil
+
+        -- And the inert `enabled` flag, for the same reason: it was never
+        -- read, so nothing can be relying on its value.
+        if type(db.settings) == "table" then
+            db.settings.enabled = nil
+        end
+
+        -- The harvest store's `zone` is `GetMapName(record.mapID)`, which the
+        -- client answers for free -- the same duplication migrations 4 and 5
+        -- removed elsewhere. And the store itself had no ceiling, unlike
+        -- `questPins`, which migration 6 capped for exactly this reason and
+        -- whose rows are smaller.
+        local harvest = db.account.questHarvest
+
+        if type(harvest) == "table" then
+            local dropped, ids = 0, {}
+
+            for questID, record in pairs(harvest) do
+                if type(record) == "table" and record.zone ~= nil then
+                    record.zone = nil
+                    dropped = dropped + 1
+                end
+
+                table.insert(ids, questID)
+            end
+
+            local ceiling = 2000
+
+            if #ids > ceiling then
+                table.sort(ids)
+
+                for index = 1, #ids - ceiling do
+                    harvest[ids[index]] = nil
+                end
+
+                CN.DebugPrint("Trimmed " .. (#ids - ceiling)
+                    .. " harvested quests over the ceiling.")
+            end
+
+            if dropped > 0 then
+                CN.DebugPrint("Dropped " .. dropped
+                    .. " stored zone names the client derives from the map.")
+            end
+        end
+    end,
+
     [6] = function(db)
         db.account = db.account or {}
 
@@ -420,8 +501,22 @@ function CN.MarkScanned(key)
         return
     end
 
+    -- URGENT, so the provider's cooldown does not hold the scan back.
+    --
+    -- A scan is something the player asked for, and half the point of the
+    -- `urgent` flag is that an explicit request bypasses a throttle written
+    -- for background churn. Without it `/cn appearancescan` could leave the
+    -- new candidates invisible for ten seconds and the reputation, profession
+    -- and toy scans for five -- the same "scanned it and left the cache
+    -- holding the old answer" shape this function was written to fix.
     for _, name in ipairs(providers) do
-        CN.InvalidateProvider(name)
+        CN.InvalidateProvider(name, true)
+    end
+
+    -- The shortlists are built from the same stores the scan just rewrote,
+    -- and they are held behind a revision number that a scan does not move.
+    if CN.ClearShortlist then
+        CN.ClearShortlist()
     end
 end
 

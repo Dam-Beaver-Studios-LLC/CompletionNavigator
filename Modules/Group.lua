@@ -152,6 +152,21 @@ Group.deadPenalty = 0.2
 CN.RegisterScoreAdjuster("Group", function(objective, score)
     local situation = Group.Situation()
 
+    -- WHAT IS NO LONGER TRUE IS WITHDRAWN FIRST.
+    --
+    -- Both sentences below describe the player's situation at the moment of
+    -- scoring, and both used to be one-way: once stamped onto a cached
+    -- objective they stayed there through every later pass. Every pass now
+    -- starts by taking back the ones that do not apply, so the explanation
+    -- and the multiplier always agree.
+    if situation ~= "dead" then
+        CN.ClearAdjusterReason(objective, "groupDead")
+    end
+
+    if situation ~= "instanced" then
+        CN.ClearAdjusterReason(objective, "groupInstanced")
+    end
+
     if situation == "dead" then
         -- EXCEPT THE BODY.
         --
@@ -162,10 +177,13 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
             return score
         end
 
-        if objective and objective.reasons then
-            CN.AddAdjusterReason(objective, "groupDead",
-                "you are dead -- this is for after")
-        end
+        -- Unguarded on `objective.reasons`, deliberately. The guard used to
+        -- be here and not on the instanced branch below, and most providers
+        -- build objectives with no `reasons` field -- so for those the
+        -- fivefold penalty was applied with nothing on screen saying why.
+        -- `AddAdjusterReason` creates the table itself.
+        CN.AddAdjusterReason(objective, "groupDead",
+            "you are dead -- this is for after")
 
         return score * Group.deadPenalty
     end

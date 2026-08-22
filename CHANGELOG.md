@@ -7,6 +7,187 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.53.0]
+
+Multi-hop flight routing, and three audits: how state lives and dies, how the
+addon behaves when the client refuses, and whether what it prints is true.
+
+### Added
+
+- **Flight routes go through the network instead of across it.** The flight
+  leg of a journey was the straight-line distance between two flight points,
+  which is the one distance a taxi never travels: the bird hops from master to
+  master, and a pair at opposite ends of a continent is reached through the
+  ones in between. Measuring the hypotenuse understated every long flight, and
+  always in the same direction, so distant objectives were systematically
+  preferred over near ones. Routes are now the shortest path through an
+  inferred flight graph, `/cn travel` prints the chain leg by leg, and a
+  multi-hop estimate is never reported as measured -- the edge list is a
+  model, and it says so.
+- **`/cn handynotes`** lists what HandyNotes plugins are drawing on your map.
+  The function behind it has existed since 0.41.0 with no caller.
+- **`/cn rareforget`** clears the rares this character is assumed to have
+  cleared. See below for why that assumption needed an escape hatch.
+- **`/cn help flat`** prints the ungrouped listing. `ShowFullHelp` was written,
+  exported and called from nowhere.
+
+### Fixed
+
+- **Ignoring or deferring an objective did nothing until something else
+  happened.** The ignore list is read inside candidate providers, at build
+  time, so it was baked into the cached list -- and none of the four mutators
+  invalidated anything. It looked like it worked because most providers rebuild
+  on some event within seconds; for `Mounts`, which waits on a new mount, an
+  ignore could go unhonoured for the rest of the session with the dismissed row
+  still at the top of the list.
+- **Riding past a rare marked it cleared, permanently.** A vignette leaves the
+  client's list for two completely different reasons -- somebody killed it, or
+  you rode out of range -- and the addon assumed the first, with no expiry and
+  no undo. That character was then never offered that rare again. Clearing now
+  needs corroboration (the client said it was dead, or it vanished from within
+  150 yards) and expires at the weekly reset.
+- **An alt was shown its main's quest progress.** `IsQuestFlaggedCompleted`
+  answers for the character asking, and the answer was being written into an
+  account-wide store: a main that ran `/cn scanquests` wrote four thousand of
+  its own completions into a table every alt read as its own, and scanning on
+  the alt destroyed the main's record. The store is gone -- the client answers
+  this for free, per character. The remembered quest locations had the mirror
+  defect: one character finishing a zone deleted the locations for every other
+  character who still had it to do.
+- **An achievement you just earned was recommended again.** The store row was
+  deleted and the shortlist revision was not, so the provider rebuilt, got the
+  cached shortlist back, and re-emitted the completed achievement -- where it
+  stayed until something unrelated moved the revision.
+- **"You are dead -- this is for after" outlived being dead.** Adjusters stamp
+  a sentence explaining the score they returned, onto objectives that live in
+  the cache long after the situation does, and appending was the only operation
+  there was. `/cn why` told living players their recommendation was for later.
+- **Two providers rebuilt six times more often than they asked to.** `volatile`
+  was a peer of the dirty check rather than subordinate to the cooldown, so
+  `Waiting` -- which walks the mail inbox, the bags, the heirlooms and the
+  currency store -- and `Instances` each declared thirty seconds and got five.
+- **A quiet session erased the record of a bad one.** The error log was written
+  on every logout including when it was empty, so the exact sequence the
+  feature exists for -- something breaks, the player reloads before thinking to
+  look -- destroyed its own evidence.
+- **The map still showed stops you had just hidden.** The pin cache was keyed
+  on the candidate generation, and hiding an objective type deliberately does
+  not move that. `/cn zone` and the map disagreed about the same route.
+- **A pinned goal appeared twice and inflated its own hub.** Providers dedupe
+  their own lists; the aggregate concatenated them. Two copies of one objective
+  share a position exactly, so the route reported a hub of two for one real
+  stop and paid a batching bonus for a batching that does not exist.
+- **The HandyNotes integration could not work for anyone who has HandyNotes.**
+  `IteratePlugins` returns a `pairs`-style triplet and the addon captured only
+  the first value, which throws. The test stub was a single closure -- the one
+  shape under which the broken form works.
+- **The Adventure Guide was asked with the wrong id.** `GetSavedInstanceInfo`
+  returns the lockout id in slot 2 and the journal's instance id in slot 14;
+  the addon stored the first and handed it to the journal, so "which bosses are
+  left" always answered that there was no boss list. The fixture had journal
+  ids in slot 2, so the stub and the code shared one wrong belief.
+- **Your Pet Journal filters were reset every thirty seconds.** The file's own
+  comment said the source and type checks were widened "only if the scan would
+  otherwise see nothing"; the code did it on every scan, and the pet scan runs
+  on a timer. Neither checkbox has a getter, so it could not be undone. It now
+  happens only when the journal genuinely reports nothing, and says so out loud
+  when it does. The Toy Box had the same defect.
+- **"Waypoint set" was printed whether or not one was.** The provider's answer
+  was discarded and `true` returned unconditionally -- on maps the client
+  refuses waypoints on, with TomTom absent, and whenever the client would not
+  build a map point. `C_Map.CanSetUserWaypointOnMap` exists to say which maps
+  refuse and was called nowhere in the addon.
+- **Clearing waypoints deleted pins you placed by hand.** There is exactly one
+  user waypoint and it is the player's unless this addon set it; `/cn clearway`
+  and stopping follow mode both removed it unconditionally.
+- **Currencies under a collapsed header were invisible.** The list counts only
+  rows under expanded headers, exactly like the reputation list -- which the
+  addon has handled since 0.30.0. Collapse your profession group, which most
+  people have, and every currency under it vanished from `/cn currencies`,
+  `/cn clock` and the weekly-cap warnings.
+- **One collapsed reputation header collapsed them all.** Captured under
+  `factionID or index` and restored on `factionID` alone; headers carry
+  factionID 0, so they all collided.
+- **`/cn setup` recorded success when every scan had failed**, which stopped the
+  login reminder and made `/cn setup check` answer that everything was scanned.
+  A module that threw was also reported with the word "unavailable" -- a defect
+  presented as a missing feature.
+- **A repeating timer that threw produced a repeating error box.** Five
+  callbacks -- the auto-advance ticker, the session observer, follow mode's
+  tick, the world map hooks and the broker's click and tooltip -- were
+  unguarded. The broker's ran inside the host bar addon.
+- **`/cn next` told new players the addon was quests-only.** A leftover from an
+  early build, printed on the most likely first thing anyone sees, and false
+  since the second release. All four empty-state messages now come from one
+  explanation that can also distinguish "nothing to do" from "the engine
+  threw" -- which previously looked identical.
+- **`/cn where am i` could not be typed.** The dispatcher splits on the first
+  space, so a registered, documented, multi-word command was unreachable.
+- **`/cn zones` ran a different command than its help text described.** It was
+  registered as a command and, further down the same file, as an alias of
+  `/cn loremaster`; the alias loaded later and won. Registration now records
+  collisions and the test suite fails on them.
+- **The welcome window's "a bit of everything" set nothing** while printing
+  that it had -- and left every type hidden if a focus was already active.
+- **Three of the ten "weighting only" modes silently applied filters**, because
+  they exist in both tables and the preset is tried first. `/cn mode profile
+  <name>` now asks for the weighting alone.
+- **An unknown expiry was printed as "expired"**, so a live world quest sat at
+  the bottom of a list headed "soonest to expire", labelled expired.
+- **An imported quest chain was reported as observed on zero characters.** The
+  edges carried no origin, so the eligibility line asked the harvest store --
+  which has no record of an imported quest -- and printed the zero as evidence.
+- **The exploration percentage was computed against the addon's own scan** and
+  read as the world. The module's header says a real one is uncomputable; the
+  code printed one anyway. The counts remain.
+- **Raw enums were shown where a label belongs** -- `(ACHIEVEMENT)` in `/cn
+  next`, and `MOUNT` as the broker's name in Titan Panel and ElvUI.
+- **The follow-mode completion flourish fired on every stop past the end.**
+- **`CN.Guard` changed the arity of what it wrapped**, truncating at a trailing
+  nil.
+- **The bearing shim had no callers.** `CN.Mod` is documented as the mandatory
+  floored modulo and the one place that wraps an angle used two unbounded
+  `while` loops instead.
+- Nine smaller corrections: a fabricated battle-pet denominator, a hardcoded
+  English string two lines from its own translation, `/cn order` clamping
+  silently, a help entry that printed nothing, `/cn who` promising name
+  resolution for four types and supporting two, `/cn percharacter` listing four
+  of six overridable settings, a durations formatter rendering twenty-five
+  seconds as "0m", two error messages naming commands that cannot do what the
+  message says, and an inert `enabled` setting nothing had ever read.
+
+### Changed
+
+- **Persistence pruned again.** The quest-status store is gone entirely (the
+  client answers it for free), the harvest store no longer keeps a map name it
+  can derive from a map id, and it has a ceiling for the first time -- it was
+  the largest thing the addon saved and the only large store with no bound.
+  Database version 8.
+- **Reputation scope corrections apply.** Writing a faction to one scope now
+  clears the other, so a faction Blizzard moves between account-wide and
+  character-specific cannot leave a stale row winning forever.
+- The `/cn locale` report now says what it is a report about: the recurring
+  strings routed through the locale table, not every line the addon prints.
+- The Collections tab says its percentages are of the last scan.
+- `/cn warband` puts its caveat on the number rather than only on the
+  one-character case.
+
+### Testing
+
+- 81 mutations killed, none surviving, up from 67.
+- Coverage floor raised from 82% to 85%, closing a backlog item open since
+  0.31.0. `Alts` went from 49.6% to 73.5%; the TomTom and HandyNotes providers,
+  the key bindings, the minimap button and the whole window rebuilt with every
+  Blizzard template retired are now exercised.
+- The fixture audit no longer prints a count that reads as coverage when three
+  of its seven rules were skipped for want of a recording. It names them.
+- The API-surface extractor no longer harvests example code out of comments,
+  which had made one of those rules permanently unpassable.
+- The stubs for the currency list, the reputation headers, the pet and toy
+  filters, the user waypoint, the saved-instance tuple and the HandyNotes
+  iterator were all more forgiving than the client. They are not now.
+
+
 ## [0.52.0]
 
 The backlog, reconciled item by item against the shipped code rather than

@@ -35,8 +35,12 @@ local Print = CN.Print
 --   * `/cn help <word>` searches names and descriptions, because somebody
 --     who half-remembers "the one about lockouts" should not have to read a
 --     hundred and twenty lines to find `/cn instances`.
+-- The leading "" was meant to document bare `/cn`, but `Find("")` never
+-- matches a registered name, so the entry printed nothing and "the ones worth
+-- knowing" was fourteen lines, not fifteen. Bare `/cn` is documented by
+-- ShowStatus, which is what it runs.
 CN.helpEssentials = {
-    "", "next", "go", "why", "order", "plan", "follow", "zone", "nearby",
+    "next", "go", "why", "order", "list", "plan", "follow", "zone", "nearby",
     "chase", "mode", "show", "ui", "setup", "selftest",
 }
 
@@ -52,7 +56,8 @@ CN.helpGroups = {
     { title = "Deciding what to do",
       names = { "next", "why", "whyzero", "order", "urgency", "plan", "mode",
                 "show", "hidden", "unhide", "learned", "situation", "goal",
-                "goals", "ungoal", "gogoal", "chase", "closest", "now" } },
+                "goals", "ungoal", "gogoal", "chase", "closest", "now",
+                "list" } },
 
     { title = "Getting there",
       names = { "go", "travel", "nav", "navdiag", "arrow", "calibrate",
@@ -76,12 +81,12 @@ CN.helpGroups = {
       names = { "setup", "scanquests", "scanlore", "achievescan", "petscan",
                 "mountscan", "toyscan", "titlescan", "appearancescan",
                 "explorescan", "currencyscan", "repscan", "profscan",
-                "raredb", "harvestnow" } },
+                "raredb", "rareforget", "handynotes", "harvestnow" } },
 
     { title = "Setting it up",
       names = { "ui", "uistatus", "scale", "colourblind", "hud", "cues",
                 "keepfilter", "minimap", "tooltips", "broker", "alerts",
-                "locale", "welcome", "list" } },
+                "locale", "welcome" } },
 
     { title = "When something is wrong",
       names = { "selftest", "errors", "dbsize", "cache", "perf", "capture",
@@ -246,6 +251,11 @@ local function ShowFullHelp()
 end
 
 CN.ShowHelp     = ShowHelp
+
+-- `ShowFullHelp` is the flat, ungrouped listing. It was exported and never
+-- called from anywhere -- the live path is ShowHelp/ShowGrouped -- so it is
+-- wired to `/cn help flat`, which is genuinely the more useful form when
+-- somebody is searching the output rather than reading it.
 CN.ShowFullHelp = ShowFullHelp
 
 ------------------------------------------------------------
@@ -304,10 +314,39 @@ local function HandleSlashCommand(message)
 
     local definition = CN.commands[command]
 
+    -- LONGEST MATCH FIRST, SO A MULTI-WORD NAME CAN BE TYPED.
+    --
+    -- The split above takes the first whitespace-delimited word, so
+    -- `CN.commands["where am i"]` -- registered, listed in `/cn help all`,
+    -- with its own help text -- could never be reached. Typing it dispatched
+    -- to the OTHER `where` command, which reported `Usage: /cn where
+    -- <questID>`.
+    --
+    -- Tried before the arguments are handed over, and only when the whole
+    -- phrase is a registered name, so no single-word command changes
+    -- behaviour.
+    do
+        local whole = string.lower(CN.Trim(message))
+
+        if CN.commands[whole] then
+            definition = CN.commands[whole]
+            arguments  = ""
+        end
+    end
+
     if definition then
         local ok, err = pcall(definition.handler, arguments)
 
         if not ok then
+            -- Recorded as well as printed, so `/cn errors` -- which the bug
+            -- template asks for -- carries it after the player has scrolled
+            -- past the chat line.
+            local errors = CN:GetModule("Errors")
+
+            if errors and errors.Record then
+                pcall(errors.Record, "/cn " .. command, tostring(err))
+            end
+
             Print("Error in /cn " .. command .. ": " .. tostring(err))
         end
 
@@ -345,10 +384,15 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "help",
-    args    = "[all, or a word to search for]",
+    args    = "[all | flat | a word to search for]",
     order   = 2,
     help    = "The commands worth knowing; 'all' for every one.",
     handler = function(args)
+        if string.lower(CN.Trim(args or "")) == "flat" then
+            ShowFullHelp()
+            return
+        end
+
         ShowHelp(args)
     end,
 }
@@ -380,7 +424,7 @@ CN:RegisterCommand{
 CN:RegisterCommand{
     name    = "mode",
     aliases = { "focus" },
-    args    = "[leveling | collecting | reputation | achievements | professions | everything | off | <profile>]",
+    args    = "[leveling | collecting | ... | off | profile <name>]",
     order   = 4,
     help    = "Aim the addon at one kind of play.",
     handler = function(args)
@@ -400,8 +444,29 @@ CN:RegisterCommand{
             table.sort(presets)
 
             Print("|cff999999Focus: " .. table.concat(presets, ", ") .. "|r")
+
+            -- ONLY THE NAMES THAT ACTUALLY DO WEIGHTING ONLY.
+            --
+            -- `CN.modes` is tried first, so a name in BOTH tables always
+            -- applies the full preset -- filters included. Three of the ten
+            -- listed here are in both (achievements, reputation,
+            -- professions), so this line advertised three options that, when
+            -- typed, hid most objective types instead of leaving the filters
+            -- alone. The command's own output was the misleading part.
+            local weightingOnly = {}
+
+            for _, name in ipairs(CN.priorityModes) do
+                if not CN.modes[name] then
+                    table.insert(weightingOnly, name)
+                end
+            end
+
             Print("|cff999999Weighting only: "
-                .. table.concat(CN.priorityModes, ", ") .. "|r")
+                .. table.concat(weightingOnly, ", ") .. "|r")
+
+            Print("|cff999999A name in both lists applies the focus preset. "
+                .. "|cffffff00/cn mode profile <name>|r|cff999999 sets the "
+                .. "weighting and leaves your filters alone.|r")
         end
 
         if requested == "" then
@@ -444,8 +509,18 @@ CN:RegisterCommand{
             return
         end
 
+        -- AN EXPLICIT WAY TO ASK FOR THE WEIGHTING WITHOUT THE FILTERS.
+        --
+        -- Needed because three names live in both tables and `CN.modes` wins,
+        -- so those three weightings were unreachable from this command.
+        local profileOnly = requested:match("^profile%s+(%S+)$")
+
+        if profileOnly then
+            requested = profileOnly
+        end
+
         -- A focus preset: weighting and filter together.
-        if CN.modes[requested] and filters then
+        if CN.modes[requested] and filters and not profileOnly then
             local ok, preset = filters.ApplyMode(requested)
 
             if ok then

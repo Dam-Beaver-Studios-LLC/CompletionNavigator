@@ -27,6 +27,50 @@ end
 
 Harvest.Store = Store
 
+-- The map's name, derived rather than remembered.
+function Harvest.Zone(record)
+    if type(record) ~= "table" or not record.mapID then
+        return nil
+    end
+
+    return Blizzard.GetMapName(record.mapID)
+end
+
+-- A CEILING, BECAUSE THIS IS THE LARGEST THING THE ADDON SAVES.
+--
+-- Every quest accepted, turned in, or seen at login gets a permanent record,
+-- and there was no cap and no prune. Migration 6 gave `questPins` a ceiling
+-- of 600 for exactly this reason and did not touch this store, whose rows are
+-- larger. Same rule, same shape: over the ceiling, the lowest quest ids go --
+-- the oldest content, and the least likely to be what anybody is working on.
+Harvest.cap = 2000
+
+function Harvest.Prune()
+    local store = Store()
+
+    local ids = {}
+
+    for questID in pairs(store) do
+        table.insert(ids, questID)
+    end
+
+    if #ids <= Harvest.cap then
+        return 0
+    end
+
+    table.sort(ids)
+
+    local dropped = #ids - Harvest.cap
+
+    for index = 1, dropped do
+        store[ids[index]] = nil
+    end
+
+    DebugPrint("Pruned " .. dropped .. " harvested quests over the ceiling.")
+
+    return dropped
+end
+
 ------------------------------------------------------------
 -- CAPTURE
 ------------------------------------------------------------
@@ -68,9 +112,14 @@ function Harvest.Capture(questID, reason)
         set("y", math.floor(y * 10000 + 0.5) / 10000)
     end
 
-    if mapID then
-        set("zone", Blizzard.GetMapName(mapID))
-    end
+    -- ZONE IS NOT STORED. It is `GetMapName(record.mapID)`, which the client
+    -- answers for free and forever -- the same duplication migrations 4 and 5
+    -- removed from items, achievements and pets. The coordinates genuinely
+    -- are not re-suppliable after a turn-in and stay; the name of the map
+    -- they are on always is.
+    --
+    -- Read back through Harvest.Zone below, so nothing that wants it has to
+    -- know where it comes from.
 
     -- The level the character was when the quest became available is a
     -- usable lower bound on the quest's own level requirement.
@@ -113,6 +162,8 @@ function Harvest.Capture(questID, reason)
     record.reason   = record.reason or reason
 
     store[questID] = record
+
+    Harvest.Prune()
 
     if changed then
         DebugPrint("Harvested quest " .. questID
@@ -369,8 +420,10 @@ function Harvest.BuildExport(onlyLocated)
                 .. record.name:gsub('"', '\\"') .. '",')
         end
 
-        if record.zone then
-            table.insert(lines, '        -- ' .. record.zone)
+        local zone = Harvest.Zone(record)
+
+        if zone then
+            table.insert(lines, '        -- ' .. zone)
         end
 
         if record.mapID then

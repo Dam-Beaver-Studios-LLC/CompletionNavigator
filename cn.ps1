@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.52.0'
+$script:ToolkitVersion = '0.53.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.52.0"
-CN.dbVersion   = 7
+CN.version     = "0.53.0"
+CN.dbVersion   = 8
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -221,11 +221,40 @@ function CN:RegisterCommand(definition)
     definition.name  = string.lower(definition.name)
     definition.order = definition.order or 100
 
-    CN.commands[definition.name] = definition
+    -- A NAME CLAIMED TWICE IS A COMMAND THAT DOES SOMETHING ELSE.
+    --
+    -- Registration used to overwrite silently, so whichever file loaded last
+    -- won and `/cn help` went on describing the loser. `/cn zones` was
+    -- registered by Loremaster as a command and, further down the same file,
+    -- as an ALIAS of `/cn loremaster` -- so it printed the quest-completion
+    -- report while the help text, and the store page, described the zone
+    -- ranking. `/cn show` was claimed by both the window and the filters.
+    --
+    -- Recorded rather than refused: refusing would change which command wins
+    -- at load time, and the answer to a collision is to fix it, not to
+    -- reshuffle it. `/cn selftest` names them.
+    CN.commandCollisions = CN.commandCollisions or {}
+
+    local function Claim(name, kind)
+        local held = CN.commands[name]
+
+        if held and held ~= definition then
+            table.insert(CN.commandCollisions, {
+                name  = name,
+                kind  = kind,
+                from  = held.name,
+                to    = definition.name,
+            })
+        end
+
+        CN.commands[name] = definition
+    end
+
+    Claim(definition.name, "name")
 
     if definition.aliases then
         for _, alias in ipairs(definition.aliases) do
-            CN.commands[string.lower(alias)] = definition
+            Claim(string.lower(alias), "alias")
         end
     end
 
@@ -585,7 +614,10 @@ CN.defaults = {
     version = CN.dbVersion,
 
     settings = {
-        enabled      = true,
+        -- `enabled` REMOVED. It sat here reading like a master on/off switch
+        -- and nothing anywhere read it, so setting it false did nothing at
+        -- all. A setting that is present and inert is worse than one that is
+        -- absent: it invites somebody to rely on it.
         debug        = false,
         priorityMode = "balanced",
 
@@ -631,7 +663,6 @@ CN.defaults = {
         deferredObjectives = {},
 
         questMetadata      = {},
-        questStatus        = {},
         discoveredQuests   = {},
         loremaster         = {},
         taskDurations      = {},
@@ -823,6 +854,85 @@ CN.migrations = {
     -- it under an older build, or through a version where the constant was
     -- larger, stayed large forever. Trim on the way in instead of trusting
     -- that it never happened.
+    -- 7 -> 8. `questStatus` was a per-character fact kept in an account-wide
+    -- table, which is two defects at once.
+    --
+    -- Wrong scope: `IsQuestFlaggedCompleted` answers for the character asking,
+    -- so a main that ran `/cn scanquests` wrote its own four thousand
+    -- completions into a store every alt then read as its own. `/cn breakdown`
+    -- on a fresh alt reported the main's progress. Scanning on the alt
+    -- overwrote the lot and destroyed the main's record.
+    --
+    -- And it should not have been persisted at all: both fields come from a
+    -- free synchronous client call, which is the definition of something the
+    -- addon does not need to remember. The standing rule is to persist only
+    -- what the client cannot re-supply.
+    --
+    -- So the store is asked for live now, and the old one is dropped rather
+    -- than migrated -- there is nothing in it that is worth keeping and much
+    -- of it belongs to a different character.
+    [7] = function(db)
+        db.account = db.account or {}
+
+        if type(db.account.questStatus) == "table" then
+            local count = 0
+
+            for key in pairs(db.account.questStatus) do
+                db.account.questStatus[key] = nil
+                count = count + 1
+            end
+
+            CN.DebugPrint("Dropped " .. count .. " stored quest statuses; "
+                .. "the client answers this for free, and per character.")
+        end
+
+        db.account.questStatus = nil
+
+        -- And the inert `enabled` flag, for the same reason: it was never
+        -- read, so nothing can be relying on its value.
+        if type(db.settings) == "table" then
+            db.settings.enabled = nil
+        end
+
+        -- The harvest store's `zone` is `GetMapName(record.mapID)`, which the
+        -- client answers for free -- the same duplication migrations 4 and 5
+        -- removed elsewhere. And the store itself had no ceiling, unlike
+        -- `questPins`, which migration 6 capped for exactly this reason and
+        -- whose rows are smaller.
+        local harvest = db.account.questHarvest
+
+        if type(harvest) == "table" then
+            local dropped, ids = 0, {}
+
+            for questID, record in pairs(harvest) do
+                if type(record) == "table" and record.zone ~= nil then
+                    record.zone = nil
+                    dropped = dropped + 1
+                end
+
+                table.insert(ids, questID)
+            end
+
+            local ceiling = 2000
+
+            if #ids > ceiling then
+                table.sort(ids)
+
+                for index = 1, #ids - ceiling do
+                    harvest[ids[index]] = nil
+                end
+
+                CN.DebugPrint("Trimmed " .. (#ids - ceiling)
+                    .. " harvested quests over the ceiling.")
+            end
+
+            if dropped > 0 then
+                CN.DebugPrint("Dropped " .. dropped
+                    .. " stored zone names the client derives from the map.")
+            end
+        end
+    end,
+
     [6] = function(db)
         db.account = db.account or {}
 
@@ -984,8 +1094,22 @@ function CN.MarkScanned(key)
         return
     end
 
+    -- URGENT, so the provider's cooldown does not hold the scan back.
+    --
+    -- A scan is something the player asked for, and half the point of the
+    -- `urgent` flag is that an explicit request bypasses a throttle written
+    -- for background churn. Without it `/cn appearancescan` could leave the
+    -- new candidates invisible for ten seconds and the reputation, profession
+    -- and toy scans for five -- the same "scanned it and left the cache
+    -- holding the old answer" shape this function was written to fix.
     for _, name in ipairs(providers) do
-        CN.InvalidateProvider(name)
+        CN.InvalidateProvider(name, true)
+    end
+
+    -- The shortlists are built from the same stores the scan just rewrote,
+    -- and they are held behind a revision number that a scan does not move.
+    if CN.ClearShortlist then
+        CN.ClearShortlist()
     end
 end
 
@@ -1315,6 +1439,41 @@ CN.objectiveTypes = {
     INSTANCE    = "INSTANCE",
 }
 
+-- HOW A PERSON READS A TYPE, AS OPPOSED TO HOW THE CODE THINKS ABOUT ONE.
+--
+-- This table lived in Modules/Filters.lua, which is loaded far too late for
+-- most of the places that print a type: `/cn next`, `/cn list`, `/cn zone`,
+-- the Next and Zone tabs and the broker all showed the raw enum. The broker
+-- in particular set it as the LDB `label`, so Titan Panel and ElvUI rendered
+-- the bar as "MOUNT" where the feed's name belongs.
+--
+-- Moved here, beside the enum it names, and completed: RENOWN, VENDOR and
+-- COLLECTIBLE had no entry at all and fell through to the raw string.
+CN.typeLabels = {
+    QUEST       = "Quests",
+    ACHIEVEMENT = "Achievements",
+    REPUTATION  = "Reputations",
+    RENOWN      = "Renown",
+    PET         = "Battle pets",
+    MOUNT       = "Mounts",
+    TOY         = "Toys",
+    APPEARANCE  = "Appearances",
+    RECIPE      = "Recipes",
+    PROFESSION  = "Professions",
+    RARE        = "Rares",
+    TREASURE    = "Treasures",
+    EXPLORATION = "Exploration",
+    TITLE       = "Titles",
+    CURRENCY    = "Currencies",
+    VENDOR      = "Vendors",
+    COLLECTIBLE = "Collectibles",
+    INSTANCE    = "Dungeons & raids",
+}
+
+function CN.TypeLabel(objectiveType)
+    return CN.typeLabels[objectiveType] or tostring(objectiveType)
+end
+
 ------------------------------------------------------------
 -- STATES
 ------------------------------------------------------------
@@ -1594,6 +1753,28 @@ function CN.IsIgnored(objectiveType, id)
     return ignored[ObjectiveKey(objectiveType, id)] ~= nil
 end
 
+-- HIDING SOMETHING HAS TO TAKE EFFECT NOW.
+--
+-- `CN.IsIgnored` and `CN.IsDeferred` are consulted inside candidate
+-- providers, at build time -- which means the ignore list is baked into the
+-- cached candidate list, and changing it changes nothing until something
+-- unrelated happens to make a provider dirty.
+--
+-- It looked like it worked because most providers are chatty: some event
+-- rebuilds them within seconds and the row disappears. For a provider that
+-- is not -- `Mounts` waits on NEW_MOUNT_ADDED, `Sets` on a sixty-second
+-- cooldown -- clicking Ignore could go unhonoured for the rest of the
+-- session, with the thing the player just dismissed still sitting at the top
+-- of the list.
+--
+-- Urgent, with no reason given, because this is an explicit player action and
+-- an explicit player action is precisely what bypasses cooldowns.
+local function Rebuild()
+    if CN.InvalidateCandidates then
+        CN.InvalidateCandidates()
+    end
+end
+
 function CN.SetIgnored(objectiveType, id, value)
     local ignored = CN.Account("ignoredObjectives")
     local key     = ObjectiveKey(objectiveType, id)
@@ -1603,6 +1784,8 @@ function CN.SetIgnored(objectiveType, id, value)
     else
         ignored[key] = nil
     end
+
+    Rebuild()
 end
 
 function CN.IsDeferred(objectiveType, id)
@@ -1633,6 +1816,9 @@ function CN.SetDeferred(objectiveType, id, seconds)
 
     if not seconds then
         deferred[key] = nil
+
+        Rebuild()
+
         return
     end
 
@@ -1640,6 +1826,8 @@ function CN.SetDeferred(objectiveType, id, seconds)
         since  = time(),
         until_ = time() + seconds,
     }
+
+    Rebuild()
 end
 '@
 
@@ -2185,8 +2373,12 @@ local Print = CN.Print
 --   * `/cn help <word>` searches names and descriptions, because somebody
 --     who half-remembers "the one about lockouts" should not have to read a
 --     hundred and twenty lines to find `/cn instances`.
+-- The leading "" was meant to document bare `/cn`, but `Find("")` never
+-- matches a registered name, so the entry printed nothing and "the ones worth
+-- knowing" was fourteen lines, not fifteen. Bare `/cn` is documented by
+-- ShowStatus, which is what it runs.
 CN.helpEssentials = {
-    "", "next", "go", "why", "order", "plan", "follow", "zone", "nearby",
+    "next", "go", "why", "order", "list", "plan", "follow", "zone", "nearby",
     "chase", "mode", "show", "ui", "setup", "selftest",
 }
 
@@ -2202,7 +2394,8 @@ CN.helpGroups = {
     { title = "Deciding what to do",
       names = { "next", "why", "whyzero", "order", "urgency", "plan", "mode",
                 "show", "hidden", "unhide", "learned", "situation", "goal",
-                "goals", "ungoal", "gogoal", "chase", "closest", "now" } },
+                "goals", "ungoal", "gogoal", "chase", "closest", "now",
+                "list" } },
 
     { title = "Getting there",
       names = { "go", "travel", "nav", "navdiag", "arrow", "calibrate",
@@ -2226,12 +2419,12 @@ CN.helpGroups = {
       names = { "setup", "scanquests", "scanlore", "achievescan", "petscan",
                 "mountscan", "toyscan", "titlescan", "appearancescan",
                 "explorescan", "currencyscan", "repscan", "profscan",
-                "raredb", "harvestnow" } },
+                "raredb", "rareforget", "handynotes", "harvestnow" } },
 
     { title = "Setting it up",
       names = { "ui", "uistatus", "scale", "colourblind", "hud", "cues",
                 "keepfilter", "minimap", "tooltips", "broker", "alerts",
-                "locale", "welcome", "list" } },
+                "locale", "welcome" } },
 
     { title = "When something is wrong",
       names = { "selftest", "errors", "dbsize", "cache", "perf", "capture",
@@ -2396,6 +2589,11 @@ local function ShowFullHelp()
 end
 
 CN.ShowHelp     = ShowHelp
+
+-- `ShowFullHelp` is the flat, ungrouped listing. It was exported and never
+-- called from anywhere -- the live path is ShowHelp/ShowGrouped -- so it is
+-- wired to `/cn help flat`, which is genuinely the more useful form when
+-- somebody is searching the output rather than reading it.
 CN.ShowFullHelp = ShowFullHelp
 
 ------------------------------------------------------------
@@ -2454,10 +2652,39 @@ local function HandleSlashCommand(message)
 
     local definition = CN.commands[command]
 
+    -- LONGEST MATCH FIRST, SO A MULTI-WORD NAME CAN BE TYPED.
+    --
+    -- The split above takes the first whitespace-delimited word, so
+    -- `CN.commands["where am i"]` -- registered, listed in `/cn help all`,
+    -- with its own help text -- could never be reached. Typing it dispatched
+    -- to the OTHER `where` command, which reported `Usage: /cn where
+    -- <questID>`.
+    --
+    -- Tried before the arguments are handed over, and only when the whole
+    -- phrase is a registered name, so no single-word command changes
+    -- behaviour.
+    do
+        local whole = string.lower(CN.Trim(message))
+
+        if CN.commands[whole] then
+            definition = CN.commands[whole]
+            arguments  = ""
+        end
+    end
+
     if definition then
         local ok, err = pcall(definition.handler, arguments)
 
         if not ok then
+            -- Recorded as well as printed, so `/cn errors` -- which the bug
+            -- template asks for -- carries it after the player has scrolled
+            -- past the chat line.
+            local errors = CN:GetModule("Errors")
+
+            if errors and errors.Record then
+                pcall(errors.Record, "/cn " .. command, tostring(err))
+            end
+
             Print("Error in /cn " .. command .. ": " .. tostring(err))
         end
 
@@ -2495,10 +2722,15 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "help",
-    args    = "[all, or a word to search for]",
+    args    = "[all | flat | a word to search for]",
     order   = 2,
     help    = "The commands worth knowing; 'all' for every one.",
     handler = function(args)
+        if string.lower(CN.Trim(args or "")) == "flat" then
+            ShowFullHelp()
+            return
+        end
+
         ShowHelp(args)
     end,
 }
@@ -2530,7 +2762,7 @@ CN:RegisterCommand{
 CN:RegisterCommand{
     name    = "mode",
     aliases = { "focus" },
-    args    = "[leveling | collecting | reputation | achievements | professions | everything | off | <profile>]",
+    args    = "[leveling | collecting | ... | off | profile <name>]",
     order   = 4,
     help    = "Aim the addon at one kind of play.",
     handler = function(args)
@@ -2550,8 +2782,29 @@ CN:RegisterCommand{
             table.sort(presets)
 
             Print("|cff999999Focus: " .. table.concat(presets, ", ") .. "|r")
+
+            -- ONLY THE NAMES THAT ACTUALLY DO WEIGHTING ONLY.
+            --
+            -- `CN.modes` is tried first, so a name in BOTH tables always
+            -- applies the full preset -- filters included. Three of the ten
+            -- listed here are in both (achievements, reputation,
+            -- professions), so this line advertised three options that, when
+            -- typed, hid most objective types instead of leaving the filters
+            -- alone. The command's own output was the misleading part.
+            local weightingOnly = {}
+
+            for _, name in ipairs(CN.priorityModes) do
+                if not CN.modes[name] then
+                    table.insert(weightingOnly, name)
+                end
+            end
+
             Print("|cff999999Weighting only: "
-                .. table.concat(CN.priorityModes, ", ") .. "|r")
+                .. table.concat(weightingOnly, ", ") .. "|r")
+
+            Print("|cff999999A name in both lists applies the focus preset. "
+                .. "|cffffff00/cn mode profile <name>|r|cff999999 sets the "
+                .. "weighting and leaves your filters alone.|r")
         end
 
         if requested == "" then
@@ -2594,8 +2847,18 @@ CN:RegisterCommand{
             return
         end
 
+        -- AN EXPLICIT WAY TO ASK FOR THE WEIGHTING WITHOUT THE FILTERS.
+        --
+        -- Needed because three names live in both tables and `CN.modes` wins,
+        -- so those three weightings were unreachable from this command.
+        local profileOnly = requested:match("^profile%s+(%S+)$")
+
+        if profileOnly then
+            requested = profileOnly
+        end
+
         -- A focus preset: weighting and filter together.
-        if CN.modes[requested] and filters then
+        if CN.modes[requested] and filters and not profileOnly then
             local ok, preset = filters.ApplyMode(requested)
 
             if ok then
@@ -2753,11 +3016,21 @@ function CN.LocaleStats()
 
     table.sort(sample)
 
+    -- How many strings are in scope at all, so the report can say what it
+    -- is a report ABOUT rather than leaving the reader to assume it covers
+    -- everything the addon prints.
+    local total = 0
+
+    for _ in pairs(CN.localeKeys or {}) do
+        total = total + 1
+    end
+
     return {
         locale     = CN.ClientLocale(),
         translated = translated,
         missing    = missing,
         sample     = sample,
+        total      = total,
         available  = CN.locales,
     }
 end
@@ -2795,6 +3068,24 @@ CN:RegisterCommand{
         else
             Print(stats.translated .. " strings translated.")
         end
+
+        -- WHAT IS IN SCOPE, SAID PLAINLY.
+        --
+        -- `CN.localeKeys` is 33 strings and internally consistent: every key
+        -- has a call site, nothing is orphaned, and `/cn locale missing`
+        -- names exactly what fell back. What it does NOT cover is the several
+        -- hundred chat lines that never go through CN.L at all -- so a
+        -- translator who completed every key here would still be looking at a
+        -- largely English addon, and nothing on this screen said so.
+        --
+        -- Stated rather than fixed: routing every line through CN.L is a
+        -- release of its own, and a promise the addon cannot keep is worse
+        -- than a limit it admits to.
+        Print("|cff999999Scope: the " .. (stats.total or 0) .. " recurring "
+            .. "strings this addon routes through its locale table -- the "
+            .. "confidence and status words, the tab names, the counters. "
+            .. "Most one-off chat lines are still English and are not in "
+            .. "this count.|r")
 
         if args == "missing" then
             if stats.missing == 0 then
@@ -3670,10 +3961,47 @@ function CN.AddAdjusterReason(objective, key, text)
         return false
     end
 
-    objective.adjusterReasons[key] = true
+    -- The text itself, not a boolean, so it can be taken back out again --
+    -- see CN.ClearAdjusterReason.
+    objective.adjusterReasons[key] = text
     objective.reasons = objective.reasons or {}
 
     table.insert(objective.reasons, text)
+
+    return true
+end
+
+-- AND A REASON ABOUT RIGHT NOW HAS TO BE REMOVABLE.
+--
+-- Adjusters describe the player's situation -- dead, in an instance, in a
+-- group -- and stamp a sentence explaining the score they returned. The
+-- objectives they stamp it on live in the per-provider cache, which outlives
+-- the situation by a long way.
+--
+-- So: die in the open world, and every cached candidate is marked "you are
+-- dead -- this is for after". Resurrect, and the adjuster stops applying the
+-- penalty -- but the sentence stays, because appending was the only operation
+-- there was. `/cn why` then told a living player their recommendation was for
+-- later, and for a provider that rarely rebuilds it said so for hours.
+function CN.ClearAdjusterReason(objective, key)
+    if type(objective) ~= "table" or not objective.adjusterReasons then
+        return false
+    end
+
+    local text = objective.adjusterReasons[key]
+
+    if text == nil then
+        return false
+    end
+
+    objective.adjusterReasons[key] = nil
+
+    for index = #(objective.reasons or {}), 1, -1 do
+        if objective.reasons[index] == text then
+            table.remove(objective.reasons, index)
+            break
+        end
+    end
 
     return true
 end
@@ -4136,6 +4464,20 @@ local function RunProvider(name, provider)
     end
 
     if not ok then
+        -- RECORDED, NOT ONLY DEBUG-PRINTED.
+        --
+        -- `/cn errors` promises "anything that went wrong inside the addon
+        -- this session", and the Errors module's own header names a failing
+        -- candidate provider as the case it was written for -- while this,
+        -- the actual site, routed to DebugPrint, which is off by default. So
+        -- a provider that crashed contributed nothing, the list got shorter,
+        -- and `/cn errors` said nothing had gone wrong.
+        local errors = CN:GetModule("Errors")
+
+        if errors and errors.Record then
+            pcall(errors.Record, "provider:" .. name, tostring(result))
+        end
+
         CN.DebugPrint("Candidate provider " .. name .. " failed: " .. tostring(result))
     end
 
@@ -4155,6 +4497,12 @@ local function Decorate(candidates)
             local ok, err = pcall(decorator, candidates[index])
 
             if not ok then
+                local errors = CN:GetModule("Errors")
+
+                if errors and errors.Record then
+                    pcall(errors.Record, "decorator:" .. name, tostring(err))
+                end
+
                 CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
                 break
             end
@@ -4173,10 +4521,23 @@ local function RefreshProviders(force)
             or provider.cooldown == nil
             or (now - entry.builtAt) >= provider.cooldown
 
+        -- `volatile` USED TO DEFEAT `cooldown` ENTIRELY.
+        --
+        -- The volatile clause was a peer of the dirty clause rather than
+        -- subordinate to `cooled`, so a provider declaring both was rebuilt
+        -- every `candidateCacheSeconds` no matter what cooldown it asked for.
+        -- The two providers that declare both -- `Waiting`, which walks the
+        -- mail inbox, the bags, the heirlooms and the currency store, and
+        -- `Instances`, which walks every saved lockout -- each asked for
+        -- thirty seconds and got five, six times more often than declared,
+        -- for as long as the main window stayed open.
+        --
+        -- Volatile means "this goes stale on its own even when nothing tells
+        -- us". It does not mean "ignore what this provider costs".
         local stale = force
             or entry.candidates == nil
             or (entry.dirty and cooled)
-            or (provider.volatile
+            or (provider.volatile and cooled
                 and (now - entry.builtAt) >= CN.candidateCacheSeconds)
 
         if stale then
@@ -4206,14 +4567,68 @@ function CN.CollectCandidates(force)
         return aggregate.candidates
     end
 
+    -- ONE OBJECTIVE, ONE ROW.
+    --
+    -- Each provider dedupes its own list; the aggregate simply concatenated
+    -- them, so an objective two providers both know about appeared twice.
+    -- The common case is a pinned goal: `/cn goal quest 12345` for a quest
+    -- already in your log emits it from the Quests provider AND from the
+    -- Goals provider, so `/cn list` showed the same quest on two lines.
+    --
+    -- Worse than cosmetic. `BuildZoneRoute` groups stops by position, and two
+    -- copies of one objective share a position exactly -- so the hub reported
+    -- a size of two for one real stop, and the batch bonus paid out for a
+    -- batching that does not exist. `CN.FindCandidate` returned whichever
+    -- copy `pairs` happened to reach first.
+    --
+    -- Merged rather than dropped: the higher completionValue wins and the
+    -- reasons are unioned, so the pinned goal's "you asked for this" survives
+    -- onto the row the owning provider built.
     local candidates = {}
+    local byKey      = {}
 
     for name in pairs(CN.candidateProviders) do
         local list = providerCache[name] and providerCache[name].candidates
 
         if list then
             for index = 1, #list do
-                candidates[#candidates + 1] = list[index]
+                local objective = list[index]
+                local key       = objective and objective.type ~= nil
+                    and objective.id ~= nil
+                    and CN.ObjectiveKey(objective.type, objective.id)
+                    or nil
+
+                local existing = key and byKey[key]
+
+                if existing then
+                    if (objective.completionValue or 0)
+                        > (existing.completionValue or 0) then
+
+                        existing.completionValue = objective.completionValue
+                    end
+
+                    for _, reason in ipairs(objective.reasons or {}) do
+                        local seen = false
+
+                        for _, held in ipairs(existing.reasons or {}) do
+                            if held == reason then
+                                seen = true
+                                break
+                            end
+                        end
+
+                        if not seen then
+                            existing.reasons = existing.reasons or {}
+                            table.insert(existing.reasons, reason)
+                        end
+                    end
+                else
+                    if key then
+                        byKey[key] = objective
+                    end
+
+                    candidates[#candidates + 1] = objective
+                end
             end
         end
     end
@@ -4625,9 +5040,19 @@ CN:RegisterCommand{
     order   = 17,
     help    = "Why the list is in the order it is in.",
     handler = function(args)
-        local wanted = tonumber(CN.Trim(args or "")) or 3
+        local asked  = tonumber(CN.Trim(args or ""))
+        local wanted = math.max(1, math.min(5, asked or 3))
 
-        wanted = math.max(1, math.min(5, wanted))
+        -- A CAP NOBODY IS TOLD ABOUT READS AS A WRONG ANSWER.
+        --
+        -- `args = "[how many]"` implies the number is honoured; `/cn order
+        -- 20` silently gave five. Five is the right ceiling -- this prints a
+        -- full score breakdown per row -- but saying so costs one line.
+        if asked and asked > wanted then
+            CN.Print("|cff999999Showing " .. wanted .. ": the breakdown is "
+                .. "long, so this tops out there. |cffffff00/cn list "
+                .. asked .. "|r|cff999999 gives the plain ranking.|r")
+        end
 
         local results = CN.Recommend(wanted)
 
@@ -4665,6 +5090,59 @@ CN:RegisterCommand{
 -- COMMAND
 ------------------------------------------------------------
 
+-- ONE EXPLANATION FOR AN EMPTY LIST, USED BY EVERY SURFACE THAT SHOWS ONE.
+--
+-- There were four, and they disagreed. `/cn next` said "quests are the only
+-- subsystem currently online" -- a leftover from an early build that has been
+-- false since the second release and is very likely the first sentence a new
+-- player ever reads from this addon. `/cn zone` named two of eleven scans.
+-- The window named the type filter. The broker and the minimap said "Run /cn
+-- setup once" whether or not setup had run.
+--
+-- Worse, none of them could tell an empty list from a broken engine: a
+-- provider that throws contributes nothing, and nothing looks exactly like
+-- "you have done everything".
+--
+-- Returns an array of lines, most useful first.
+function CN.ExplainEmptyList()
+    local lines = {}
+
+    local filters = CN:GetModule("Filters")
+    local hidden  = filters and filters.HiddenTypeCount and filters.HiddenTypeCount() or 0
+
+    if hidden > 0 then
+        table.insert(lines, hidden .. " objective type"
+            .. (hidden == 1 and " is" or "s are")
+            .. " hidden by your filter. /cn show lists them.")
+    end
+
+    -- A FAILURE IS NOT AN EMPTY RESULT, AND MUST NOT READ AS ONE.
+    local errors = CN:GetModule("Errors")
+
+    local failures = errors and errors.Count and errors.Count() or 0
+
+    if failures > 0 then
+        table.insert(lines, failures .. " thing"
+            .. (failures == 1 and " has" or "s have")
+            .. " gone wrong inside the addon this session, which is enough "
+            .. "to empty this list. /cn errors has the detail.")
+    end
+
+    local setup = CN:GetModule("Setup")
+
+    if setup and setup.HasRun and not setup.HasRun() then
+        table.insert(lines, "Nothing has been scanned yet. /cn setup reads "
+            .. "everything the client will answer for on its own.")
+    elseif #lines == 0 then
+        table.insert(lines, "Every provider answered and none of them had "
+            .. "anything to offer, which usually means you are between "
+            .. "things: try a different zone, or /cn waiting for what is on "
+            .. "a timer.")
+    end
+
+    return lines
+end
+
 CN:RegisterCommand{
     name    = "next",
     order   = 10,
@@ -4674,7 +5152,10 @@ CN:RegisterCommand{
 
         if #results == 0 then
             CN.Print("No actionable objectives are known yet.")
-            CN.Print("The recommendation engine needs candidate providers; quests are the only subsystem currently online.")
+
+            for _, line in ipairs(CN.ExplainEmptyList()) do
+                CN.Print("|cff999999" .. line .. "|r")
+            end
             return
         end
 
@@ -4697,7 +5178,7 @@ CN:RegisterCommand{
         end
 
         CN.Print("Recommended next: " .. tostring(objective.name or objective.id)
-            .. " |cff999999(" .. tostring(objective.type) .. ")|r")
+            .. " |cff999999(" .. CN.TypeLabel(objective.type) .. ")|r")
 
         for _, line in ipairs(CN.ExplainRecommendation(objective)) do
             CN.Print(line)
@@ -4797,7 +5278,7 @@ CN:RegisterCommand{
 
         for index, objective in ipairs(results) do
             CN.Print(index .. ". " .. tostring(objective.name or objective.id)
-                .. " |cff999999[" .. tostring(objective.type)
+                .. " |cff999999[" .. CN.TypeLabel(objective.type)
                 .. " " .. string.format("%.1f", objective.priorityWeight or 0) .. "]|r")
         end
     end,
@@ -4880,7 +5361,21 @@ function CN.SetWaypoint(mapID, x, y, title)
         return false
     end
 
-    provider.SetWaypoint(mapID, x, y, title)
+    -- THE ANSWER IS THE PROVIDER'S, NOT THIS FUNCTION'S.
+    --
+    -- This called the provider, discarded whatever came back, and returned
+    -- `true`. `CN.NavigateToObjective` then printed "Waypoint set: <name>" --
+    -- on a map the client refuses waypoints on, with TomTom absent, with a
+    -- map point the client would not build. Every one of those printed a
+    -- success and produced nothing.
+    local placed, why = provider.SetWaypoint(mapID, x, y, title)
+
+    if not placed then
+        CN.Print("A waypoint could not be set"
+            .. (why and (": " .. why) or " here") .. ".")
+
+        return false
+    end
 
     CN.DebugPrint("Waypoint set via " .. tostring(name) .. ".")
 
@@ -4958,12 +5453,16 @@ function CN.NavigateToObjective(objective)
     return false
 end
 
+-- Returns whether anything was actually removed, so `/cn clearway` can stop
+-- announcing a clearance that did not happen.
 function CN.ClearWaypoints()
     local provider = CN.GetWaypointProvider()
 
     if provider and provider.ClearAll then
-        provider.ClearAll()
+        return provider.ClearAll() and true or false
     end
+
+    return false
 end
 
 ------------------------------------------------------------
@@ -5380,8 +5879,13 @@ function CN.BuildZoneRoute(mapID, startX, startY)
         end
     end
 
-    CN.currentRoute = route
-    CN.currentHubs  = orderedHubs
+    -- `CN.currentRoute` and `CN.currentHubs` were assigned here and read by
+    -- nothing -- not `/cn zone`, which uses the values it is handed, not the
+    -- map pins, not follow mode, not the window. Two globals holding a strong
+    -- reference to every objective and hub of the last route built, keeping a
+    -- superseded candidate generation alive for the rest of the session.
+    -- Removed rather than given a reader: the callers all have the route
+    -- already.
 
     -- ROUTING CHANGES THE SCORES, SO THE RANKING MUST BE REBUILT.
     --
@@ -5623,7 +6127,9 @@ function CN.StartAutoWaypointTicker()
 
     ticker = C_Timer.NewTicker(60, function()
         if CN.IsAutoWaypointEnabled() then
-            CN.AutoAdvance("ticker")
+            -- Guarded: a repeating callback that throws is a repeating
+            -- error box for as long as auto-waypoint is on.
+            CN.Guard("Routing.AutoAdvance", CN.AutoAdvance, "ticker")
         end
     end)
 end
@@ -5730,8 +6236,17 @@ CN:RegisterCommand{
 
         if #route == 0 and #skipped == 0 then
             CN.Print(zoneName .. ": nothing actionable is known here.")
-            CN.Print("Run |cffffff00/cn discoveractive|r and |cffffff00/cn repscan|r, "
-                .. "then try again.")
+
+            -- The shared explanation, not a hand-written pair of commands.
+            -- This used to name `/cn discoveractive`, which only records
+            -- quests ALREADY IN YOUR LOG and so cannot make anything new
+            -- appear here, and `/cn repscan` -- two of eleven scans, one of
+            -- them irrelevant, and no mention of `/cn setup`, which the
+            -- addon's own first-run flow calls the required first step.
+            for _, line in ipairs(CN.ExplainEmptyList()) do
+                CN.Print("|cff999999" .. line .. "|r")
+            end
+
             return
         end
 
@@ -5777,7 +6292,7 @@ CN:RegisterCommand{
                         .. stopNumber .. ". "
                         .. (verb and ("|cffffff00" .. verb .. "|r ") or "")
                         .. tostring(objective.name or objective.id)
-                        .. " |cff999999[" .. tostring(objective.type) .. "]|r")
+                        .. " |cff999999[" .. CN.TypeLabel(objective.type) .. "]|r")
 
                     shown = shown + 1
                 end
@@ -5889,8 +6404,12 @@ CN:RegisterCommand{
     order   = 13,
     help    = "Clear waypoints this addon created.",
     handler = function()
-        CN.ClearWaypoints()
-        CN.Print("Waypoints cleared.")
+        if CN.ClearWaypoints() then
+            CN.Print("Waypoints cleared.")
+        else
+            CN.Print("This addon had no waypoint set.")
+            CN.Print("|cff999999A pin you placed yourself is left alone.|r")
+        end
     end,
 }
 
@@ -6226,8 +6745,24 @@ local function BuildWindow()
     search:SetScript("OnEditFocusLost", function(self)
         local settings = CN.Settings()
 
-        if settings and settings.keepFilter and self:GetText() ~= "" then
-            UI.persistedFilter = self:GetText()
+        if settings and settings.keepFilter then
+            -- WRITTEN UNCONDITIONALLY, INCLUDING WHEN IT IS EMPTY.
+            --
+            -- The guard here used to be `self:GetText() ~= ""`, and nothing
+            -- else ever cleared `UI.persistedFilter` -- so clearing the box
+            -- did not clear the memory, and the next tab change put the old
+            -- term straight back and applied it. The player could not clear a
+            -- persisted filter except by typing a different one, which is
+            -- precisely the "a filter that persists invisibly is how a list
+            -- looks empty when it is not" case this feature's own help text
+            -- warns about.
+            local text = self:GetText()
+
+            if text == "" then
+                UI.persistedFilter = nil
+            else
+                UI.persistedFilter = text
+            end
         end
     end)
 
@@ -6666,20 +7201,15 @@ UI.RegisterTab{
         local results = CN.Recommend(12)
 
         if #results == 0 then
-            local hidden = filters and filters.HiddenTypeCount() or 0
-
             panel.title:SetText("Nothing actionable yet")
             panel.type:SetText("")
 
             -- An empty list because you filtered everything out looks exactly
-            -- like an empty list because nothing was found. Say which.
-            if hidden > 0 then
-                panel.why:SetText(hidden .. " type"
-                    .. (hidden == 1 and " is" or "s are") .. " hidden by your filter.\n"
-                    .. "Click Filter types to change it.")
-            else
-                panel.why:SetText("Run a scan from the Scans tab, or pick up a quest.")
-            end
+            -- like an empty list because nothing was found -- and both look
+            -- exactly like an engine that threw. The shared explainer says
+            -- which, and it says the same thing here as in chat.
+            panel.why:SetText(
+                table.concat(CN.ExplainEmptyList(), "\n\n"))
 
             panel.list:SetEntries({})
 
@@ -6693,7 +7223,7 @@ UI.RegisterTab{
         CN.currentRecommendation = best
 
         panel.title:SetText(tostring(best.name or best.id))
-        panel.type:SetText(tostring(best.type))
+        panel.type:SetText(CN.TypeLabel(best.type))
         panel.why:SetText("Why:\n" .. table.concat(CN.ExplainRecommendation(best), "\n"))
 
         local entries = {}
@@ -6704,7 +7234,7 @@ UI.RegisterTab{
             table.insert(entries, {
                 text = string.format("|cff999999%2d.|r %s |cff808080[%s]|r",
                     index, tostring(objective.name or objective.id),
-                    tostring(objective.type)),
+                    CN.TypeLabel(objective.type)),
 
                 tooltip = table.concat(CN.ExplainRecommendation(objective), "\n"),
 
@@ -6712,7 +7242,7 @@ UI.RegisterTab{
                     CN.currentRecommendation = objective
 
                     panel.title:SetText(tostring(objective.name or objective.id))
-                    panel.type:SetText(tostring(objective.type))
+                    panel.type:SetText(CN.TypeLabel(objective.type))
                     panel.why:SetText("Why:\n"
                         .. table.concat(CN.ExplainRecommendation(objective), "\n"))
                 end,
@@ -6786,7 +7316,7 @@ UI.RegisterTab{
             table.insert(entries, {
                 text = string.format("|cff999999%2d.|r %s |cff808080[%s]|r",
                     index, tostring(objective.name or objective.id),
-                    tostring(objective.type)),
+                    CN.TypeLabel(objective.type)),
 
                 tooltip = "Click to set a waypoint.\n"
                     .. table.concat(CN.ExplainRecommendation(objective), "\n"),
@@ -6899,8 +7429,7 @@ UI.RegisterTab{
 
         table.insert(lines, "|cff999999Database: "
             .. CN.CountKeys(CN.Account("discoveredQuests")) .. " known, "
-            .. CN.CountKeys(CN.Account("questMetadata")) .. " named, "
-            .. CN.CountKeys(CN.Account("questStatus")) .. " tracked|r")
+            .. CN.CountKeys(CN.Account("questMetadata")) .. " named|r")
         table.insert(lines, " ")
 
         local reputations = CN:GetModule("Reputations")
@@ -7706,8 +8235,16 @@ UI.RegisterTab{
 -- TAB: COLLECTIONS
 ------------------------------------------------------------
 
--- The account dashboard. Every row is "collected / known", never a
--- fabricated percentage of some total the addon cannot verify.
+-- The account dashboard. Every row is "collected / known" -- and the
+-- percentage beside it is that ratio and nothing wider.
+--
+-- The comment here used to say "never a fabricated percentage of some total
+-- the addon cannot verify" and the code fifty lines below formatted `%.1f%%`.
+-- Both halves were defensible on their own: the denominator IS the addon's
+-- own scan snapshot, which is exactly what the row says. What was missing was
+-- anything on screen saying WHEN that snapshot was taken, so a figure that
+-- silently goes stale the day the game adds collectibles read as current.
+-- The header now says so, and each row carries its scan age.
 UI.RegisterTab{
     name  = "Collections",
     order = 25,
@@ -7866,7 +8403,8 @@ UI.RegisterTab{
             end
         end
 
-        panel.header:SetText("Account completion  |cff999999(collected / known)|r")
+        panel.header:SetText("Account completion  |cff999999(collected / "
+            .. "known at the last scan -- not of everything in the game)|r")
         panel.list:SetEntries(entries)
     end,
 }
@@ -8145,14 +8683,33 @@ local function BuildMinimapButton()
 
                 GameTooltip:AddLine(reason, 0.6, 0.6, 0.6)
             end
+        elseif not ok then
+            -- An engine that threw is not an empty list, and telling the
+            -- player to run setup again when the real answer is "something
+            -- broke" sends them to the wrong place.
+            GameTooltip:AddLine("Something went wrong; /cn errors has it.",
+                0.96, 0.42, 0.38)
         else
             GameTooltip:AddLine("Nothing actionable is known yet.", 0.6, 0.6, 0.6)
-            GameTooltip:AddLine("Run /cn setup once.", 0.6, 0.6, 0.6)
+
+            -- The shared explanation rather than an unconditional "run
+            -- setup", which was shown to players who had run it and then
+            -- hidden every type with /cn show.
+            for index, line in ipairs(CN.ExplainEmptyList()) do
+                if index > 2 then
+                    break
+                end
+
+                GameTooltip:AddLine(line, 0.6, 0.6, 0.6)
+            end
         end
 
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("|cffffffffLeft-click|r open the window", 1, 1, 1)
         GameTooltip:AddLine("|cffffffffRight-click|r navigate to the next objective", 1, 1, 1)
+        -- Middle-click has started follow mode since 0.44.0 and the tooltip
+        -- -- the feature's only discovery surface -- did not mention it.
+        GameTooltip:AddLine("|cffffffffMiddle-click|r start follow mode", 1, 1, 1)
         GameTooltip:AddLine("|cffffffffDrag|r reposition this button", 1, 1, 1)
         GameTooltip:Show()
     end)
@@ -8279,7 +8836,11 @@ end
 
 CN:RegisterCommand{
     name    = "ui",
-    aliases = { "show", "window" },
+    -- "show" REMOVED. Filters registers `/cn show` and loads later in the
+    -- .toc, so this alias was already dead -- and `/cn show` being the filter
+    -- command is what the documentation says. A dead alias that reads as a
+    -- live one is a collision waiting for a load-order change.
+    aliases = { "window" },
     order   = 5,
     help    = "Open the main window.",
     handler = function()
@@ -8769,6 +9330,7 @@ CN.apiSurface = {
     "C_Container.GetContainerNumSlots",
     "C_CraftingOrders.GetClaimedOrder",
     "C_CraftingOrders.GetMyOrders",
+    "C_CurrencyInfo.ExpandCurrencyList",
     "C_CurrencyInfo.GetCurrencyInfo",
     "C_CurrencyInfo.GetCurrencyListInfo",
     "C_CurrencyInfo.GetCurrencyListLink",
@@ -8789,11 +9351,13 @@ CN.apiSurface = {
     "C_LFGList.GetAvailableActivities",
     "C_MajorFactions.GetMajorFactionData",
     "C_MajorFactions.HasMaximumRenown",
+    "C_Map.CanSetUserWaypointOnMap",
     "C_Map.ClearUserWaypoint",
     "C_Map.GetBestMapForUnit",
     "C_Map.GetMapChildrenInfo",
     "C_Map.GetMapInfo",
     "C_Map.GetPlayerMapPosition",
+    "C_Map.GetUserWaypoint",
     "C_Map.GetWorldPosFromMapPos",
     "C_Map.SetUserWaypoint",
     "C_MerchantFrame.GetItemInfo",
@@ -8851,7 +9415,6 @@ CN.apiSurface = {
     "C_TaskQuest.GetQuestZoneID",
     "C_TaskQuest.GetQuestsForPlayerByMapID",
     "C_TaxiMap.GetAllTaxiNodes",
-    "C_Thing.Method",
     "C_Timer.After",
     "C_Timer.NewTicker",
     "C_ToyBox.GetCollectedShown",
@@ -9431,14 +9994,50 @@ end
 -- The faction list only reports rows whose headers are expanded, so a
 -- complete scan has to expand everything and then put it back.
 function Blizzard.WithAllFactionsExpanded(scan)
+    -- CAPTURED AND RESTORED BY THE SAME KEY.
+    --
+    -- The capture keyed on `data.factionID or index` and the restore matched
+    -- on `data.factionID` alone, which fails in both directions depending on
+    -- what the client puts in `factionID` for a header row. A header with no
+    -- id was recorded under an index and could never be matched again, so
+    -- every collapsed header stayed permanently open after one `/cn repscan`.
+    -- A header with `factionID = 0` -- which is what the fixture itself uses
+    -- -- collided with every other header on `collapsed[0]`, so one collapsed
+    -- header made the restore collapse them ALL, including the ones the
+    -- player deliberately had open.
+    --
+    -- Keyed on the name, which headers always have and which is stable across
+    -- the index shifting that expanding causes. A row with neither an id nor
+    -- a name is not restored at all, which is the honest outcome: guessing
+    -- is what produced both failures above.
     local collapsed = {}
+
+    local function Key(data)
+        if not data then
+            return nil
+        end
+
+        if data.factionID and data.factionID ~= 0 then
+            return "id:" .. tostring(data.factionID)
+        end
+
+        if data.name and data.name ~= "" then
+            return "name:" .. tostring(data.name)
+        end
+
+        return nil
+    end
 
     if C_Reputation and C_Reputation.GetNumFactions then
         for index = C_Reputation.GetNumFactions(), 1, -1 do
             local data = Blizzard.GetFactionByIndex(index)
 
             if data and data.isCollapsed then
-                collapsed[data.factionID or index] = true
+                local key = Key(data)
+
+                if key then
+                    collapsed[key] = true
+                end
             end
         end
     end
@@ -9452,8 +10051,9 @@ function Blizzard.WithAllFactionsExpanded(scan)
     if C_Reputation and C_Reputation.CollapseFactionHeader then
         for index = Blizzard.GetNumFactions(), 1, -1 do
             local data = Blizzard.GetFactionByIndex(index)
+            local key  = Key(data)
 
-            if data and data.factionID and collapsed[data.factionID] then
+            if key and collapsed[key] then
                 C_Reputation.CollapseFactionHeader(index)
             end
         end
@@ -9595,17 +10195,47 @@ function Blizzard.WithAllPetsShown(scan)
         C_PetJournal.SetSearchFilter("")
     end
 
-    if C_PetJournal.SetAllPetSourcesChecked then
-        C_PetJournal.SetAllPetSourcesChecked(true)
-    end
-
-    if C_PetJournal.SetAllPetTypesChecked then
-        C_PetJournal.SetAllPetTypesChecked(true)
-    end
-
     if C_PetJournal.SetFilterChecked and LE_PET_JOURNAL_FILTER_COLLECTED then
         C_PetJournal.SetFilterChecked(LE_PET_JOURNAL_FILTER_COLLECTED, true)
         C_PetJournal.SetFilterChecked(LE_PET_JOURNAL_FILTER_NOT_COLLECTED, true)
+    end
+
+    -- THE COMMENT ABOVE SAID "ONLY IF THE SCAN WOULD OTHERWISE SEE NOTHING".
+    -- THE CODE DID IT UNCONDITIONALLY, EVERY TIME.
+    --
+    -- Source and type checks have no getter, so widening them cannot be
+    -- undone -- which makes an unconditional widen a permanent change to a
+    -- setting the player chose. And the pet scan runs on a thirty-second
+    -- throttle off PET_JOURNAL_LIST_UPDATE, so a player with the Pet Journal
+    -- open and filtered to, say, Drop-source Beasts had those filters wiped
+    -- twice a minute while they were using it. By an addon whose standing
+    -- rule is that it prompts and does not act.
+    --
+    -- The honest version, at last. The journal's own count answers the
+    -- question before anything is changed: with the collected filters already
+    -- widened above, a count of zero can only mean the source or type checks
+    -- are hiding everything. Only then is the widening justified -- and the
+    -- player is told, because it is not recoverable.
+    if select(1, Blizzard.GetNumPets()) == 0 then
+        local widened = false
+
+        if C_PetJournal.SetAllPetSourcesChecked then
+            C_PetJournal.SetAllPetSourcesChecked(true)
+            widened = true
+        end
+
+        if C_PetJournal.SetAllPetTypesChecked then
+            C_PetJournal.SetAllPetTypesChecked(true)
+            widened = true
+        end
+
+        if widened then
+            CN.Print("Your Pet Journal's source and type filters were hiding "
+                .. "every pet, so they were set to show everything. The "
+                .. "client does not let an addon read those checkboxes, so "
+                .. "they cannot be put back -- set them again in the journal "
+                .. "if you had them narrowed.")
+        end
     end
 
     local ok, err = pcall(scan)
@@ -9789,12 +10419,29 @@ function Blizzard.WithAllToysShown(scan)
         C_ToyBox.SetUncollectedShown(true)
     end
 
-    if C_ToyBox.SetAllSourceTypeFilters then
+    -- SAME RULE AS THE PET JOURNAL, AND FOR THE SAME REASON.
+    --
+    -- `SetAllSourceTypeFilters` has no getter either, so widening it is
+    -- permanent. It was done unconditionally and never restored. With the
+    -- collected and uncollected filters already widened above, a filtered
+    -- count of zero can only be the source-type checks, and that is the one
+    -- case where changing them beats returning an empty collection.
+    if Blizzard.GetNumToys() == 0 and C_ToyBox.SetAllSourceTypeFilters then
         C_ToyBox.SetAllSourceTypeFilters(true)
+
+        CN.Print("Your Toy Box's source filters were hiding every toy, so "
+            .. "they were set to show everything. The client does not let an "
+            .. "addon read them, so they cannot be put back.")
     end
 
     local ok, err = pcall(scan)
 
+    -- NOT A RESTORE, AND NO LONGER PRETENDING TO BE ONE.
+    --
+    -- There is no `GetFilterString`, so the search box's contents were never
+    -- captured and this line cleared it a second time. It stays -- an addon
+    -- that leaves a search string behind would hide the player's own toys --
+    -- but it is described accurately: the box is left empty, not restored.
     if C_ToyBox.SetFilterString then
         C_ToyBox.SetFilterString("")
     end
@@ -10601,6 +11248,38 @@ end
         return results
     end
 
+    -- A COLLAPSED HEADER HIDES ITS ROWS FROM THE COUNT.
+    --
+    -- `GetCurrencyListSize` counts only rows under EXPANDED headers, exactly
+    -- like the faction list. The reputation path has handled this since
+    -- 0.30.0 with `WithAllFactionsExpanded`; the currency path never did, and
+    -- there was no `ExpandCurrencyList` call anywhere in the addon. A player
+    -- who had collapsed an expansion group in their Currency tab lost every
+    -- currency underneath it from `/cn currencies`, from `/cn clock` and from
+    -- the weekly-cap warnings, with nothing on screen saying so.
+    --
+    -- Expanded, scanned, put back -- the same shape, and the same obligation:
+    -- what this addon changes to read, it changes back.
+    local collapsed = {}
+
+    if C_CurrencyInfo.ExpandCurrencyList then
+        local counted, initial = pcall(C_CurrencyInfo.GetCurrencyListSize)
+
+        if counted and type(initial) == "number" then
+            for index = initial, 1, -1 do
+                local asked, row = pcall(C_CurrencyInfo.GetCurrencyListInfo, index)
+
+                if asked and type(row) == "table" and row.isHeader
+                    and row.isHeaderExpanded == false then
+
+                    table.insert(collapsed, row.name)
+
+                    pcall(C_CurrencyInfo.ExpandCurrencyList, index, true)
+                end
+            end
+        end
+    end
+
     local ok, size = pcall(C_CurrencyInfo.GetCurrencyListSize)
 
     if not ok or type(size) ~= "number" then
@@ -10650,6 +11329,29 @@ end
                 accountWide = (info.isAccountWide
                     or info.isAccountTransferable) and true or false,
             })
+        end
+    end
+
+    -- Put the headers back the way the player had them.
+    if #collapsed > 0 and C_CurrencyInfo.ExpandCurrencyList then
+        local wanted = {}
+
+        for _, name in ipairs(collapsed) do
+            wanted[name] = true
+        end
+
+        local counted, final = pcall(C_CurrencyInfo.GetCurrencyListSize)
+
+        if counted and type(final) == "number" then
+            for index = final, 1, -1 do
+                local asked, row = pcall(C_CurrencyInfo.GetCurrencyListInfo, index)
+
+                if asked and type(row) == "table" and row.isHeader
+                    and row.name and wanted[row.name] then
+
+                    pcall(C_CurrencyInfo.ExpandCurrencyList, index, false)
+                end
+            end
         end
     end
 
@@ -11284,14 +11986,32 @@ function Blizzard.GetSavedInstances()
         -- The stub had the same belief written into its fixture comment, so
         -- the suite agreed. Eighth time in this project that a stub and the
         -- code shared one wrong assumption.
-        local gotInfo, name, id, reset, difficultyID, locked, extended,
-            _, isRaid, _, difficultyName, encounters, defeated =
+        -- TWO DIFFERENT ID SPACES, AND THE ADDON USED THE WRONG ONE.
+        --
+        -- Return #2 is the LOCKOUT id -- a large opaque save identifier. The
+        -- Encounter Journal's instance id is return #14. The addon stored #2
+        -- as `id` and then handed it to `EJ_SelectInstance` and
+        -- `EJ_GetEncounterInfoByIndex`, which have never heard of it: in game
+        -- the boss list came back empty on the first iteration and
+        -- `RemainingBosses` always answered "the Adventure Guide has no boss
+        -- list for this instance".
+        --
+        -- The fixture put Encounter Journal instance ids in slot 2, so the
+        -- stub and the code shared one wrong belief and the self-test asserted
+        -- against it. Ninth time in this project.
+        --
+        -- Both are kept now, under names that say which is which, and the
+        -- journal is asked with the journal's id.
+        local gotInfo, name, lockoutID, reset, difficultyID, locked, extended,
+            _, isRaid, _, difficultyName, encounters, defeated, _,
+            journalInstanceID =
                 pcall(GetSavedInstanceInfo, index)
 
         if gotInfo and name then
             table.insert(results, {
                 name         = name,
-                id           = id,
+                id           = lockoutID,
+                instanceID   = journalInstanceID,
                 reset        = reset,
                 difficultyID = difficultyID,
                 difficulty   = difficultyName,
@@ -11357,8 +12077,25 @@ local function WithJournal(work)
 
     -- Put it back even when the work threw, or the player's next visit to
     -- the Adventure Guide opens on whatever this addon was reading last.
-    if restoreInstance and EJ_SelectInstance then
-        pcall(EJ_SelectInstance, restoreInstance)
+    --
+    -- AND "NOTHING WAS SELECTED" IS A STATE TO RESTORE.
+    --
+    -- The restore was guarded on `restoreInstance`, and
+    -- `EJ_GetCurrentInstance` returns nil whenever the player has not opened
+    -- the Adventure Guide this session -- which is the ordinary case, since
+    -- this function refuses to run at all while the window is up. So on
+    -- virtually every real invocation nothing was restored and the player's
+    -- next visit opened on whatever this addon read last: exactly the outcome
+    -- the comment above says it exists to prevent.
+    if restoreInstance then
+        if EJ_SelectInstance then
+            pcall(EJ_SelectInstance, restoreInstance)
+        end
+    elseif EJ_ClearSearch then
+        -- Nothing was selected before, so nothing should be selected after.
+        -- Clearing the search is the only lever the client offers for that,
+        -- and it also drops the search string this addon may have set.
+        pcall(EJ_ClearSearch)
     end
 
     if not ok then
@@ -11437,6 +12174,19 @@ function Blizzard.SearchEncounterJournal(text, limit)
 
         local found = {}
 
+        -- THE SEARCH IS ASYNCHRONOUS.
+        --
+        -- `EJ_SEARCH_RESULT_UPDATE` exists because `EJ_SetSearch` does not
+        -- finish before it returns; Blizzard's own Encounter Journal listens
+        -- for it. Read in the same frame, `EJ_GetNumSearchResults` answers
+        -- zero on a cold search. The caller then memoised that zero for the
+        -- session, so a second query after the results arrived still got
+        -- nothing back.
+        --
+        -- There is no synchronous form to switch to, so the fix is on the
+        -- caching side: a zero here is "not yet", not "nothing", and is
+        -- reported as such rather than remembered. The stub answered
+        -- synchronously, so no test could reach this.
         local total = EJ_GetNumSearchResults() or 0
 
         for index = 1, math.min(total, limit) do
@@ -11716,9 +12466,12 @@ function provider.IsAvailable()
     return _G.TomTom ~= nil and _G.TomTom.AddWaypoint ~= nil
 end
 
+-- Returns true and the uid, or false and why not -- the same contract as the
+-- Blizzard provider below, so `CN.SetWaypoint` can tell the player the truth
+-- whichever one is in use.
 function provider.SetWaypoint(mapID, x, y, title)
     if not provider.IsAvailable() then
-        return
+        return false, "TomTom is not loaded"
     end
 
     local uid = _G.TomTom:AddWaypoint(mapID, x, y, {
@@ -11729,21 +12482,29 @@ function provider.SetWaypoint(mapID, x, y, title)
         crazy       = true,
     })
 
+    if not uid then
+        return false, "TomTom refused the waypoint"
+    end
+
     table.insert(active, uid)
 
-    return uid
+    return true, uid
 end
 
 function provider.ClearAll()
     if not provider.IsAvailable() then
-        return
+        return false
     end
+
+    local removed = #active
 
     for _, uid in ipairs(active) do
         pcall(_G.TomTom.RemoveWaypoint, _G.TomTom, uid)
     end
 
     active = {}
+
+    return removed > 0
 end
 
 CN.RegisterWaypointProvider("TomTom", provider, 10)
@@ -11758,28 +12519,97 @@ function blizzardProvider.IsAvailable()
     return C_Map ~= nil and C_Map.SetUserWaypoint ~= nil
 end
 
+-- WHETHER THIS ACTUALLY WORKED IS NOW REPORTED.
+--
+-- This returned nothing at all, and every early return was silent -- so
+-- `CN.SetWaypoint` discarded the result, returned `true` unconditionally, and
+-- `/cn go` printed "Waypoint set: <name>" whether or not a pin appeared.
+--
+-- And the client refuses more often than the addon assumed. User waypoints
+-- cannot be placed on dungeon and raid maps, on the cosmic and continent
+-- maps, or on several instanced maps -- `C_Map.CanSetUserWaypointOnMap`
+-- exists to say so and was called nowhere in this addon. In every one of
+-- those cases the player was told a waypoint had been set and then sent to
+-- look for an arrow that was never there.
 function blizzardProvider.SetWaypoint(mapID, x, y)
     if not blizzardProvider.IsAvailable() then
-        return
+        return false
+    end
+
+    if C_Map.CanSetUserWaypointOnMap then
+        local asked, allowed = pcall(C_Map.CanSetUserWaypointOnMap, mapID)
+
+        if asked and not allowed then
+            return false, "the game does not allow a waypoint on this map"
+        end
     end
 
     local point = UiMapPoint and UiMapPoint.CreateFromCoordinates(mapID, x, y)
 
     if not point then
-        return
+        return false, "the client would not build a map point"
     end
 
-    C_Map.SetUserWaypoint(point)
+    -- Guarded, as the identical call in Navigation.lua already was. Same API,
+    -- and it was pcall'd in one place and bare in the other.
+    local placed = pcall(C_Map.SetUserWaypoint, point)
+
+    if not placed then
+        return false, "the client refused the waypoint"
+    end
+
+    -- WHOSE PIN THIS IS.
+    --
+    -- There is exactly one user waypoint, and it belongs to the player unless
+    -- this addon put it there. Remembering that is what lets ClearAll below
+    -- refuse to delete a pin somebody placed by hand.
+    blizzardProvider.owned = { mapID = mapID, x = x, y = y }
 
     if C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then
         C_SuperTrack.SetSuperTrackedUserWaypoint(true)
     end
+
+    return true
 end
 
 function blizzardProvider.ClearAll()
-    if C_Map and C_Map.ClearUserWaypoint then
-        C_Map.ClearUserWaypoint()
+    if not C_Map or not C_Map.ClearUserWaypoint then
+        return false
     end
+
+    -- ONLY IF IT IS OURS.
+    --
+    -- `ClearUserWaypoint` removes THE user waypoint -- there is one, and it
+    -- is the player's. `/cn clearway`, stopping follow mode and every
+    -- provider switch called it unconditionally, so an addon whose standing
+    -- rule is that it does not act deleted a pin the player had placed by
+    -- hand. The TomTom provider next door has always done this correctly: it
+    -- tracks the UIDs it created and removes only those.
+    if not blizzardProvider.owned then
+        return false
+    end
+
+    -- And only if it is still the one we set. A player who has moved the pin
+    -- since owns it again.
+    if C_Map.GetUserWaypoint then
+        local asked, current = pcall(C_Map.GetUserWaypoint)
+
+        if asked and current then
+            local sameMap = current.uiMapID == blizzardProvider.owned.mapID
+
+            if not sameMap then
+                blizzardProvider.owned = nil
+
+                return false
+            end
+        end
+    end
+
+    pcall(C_Map.ClearUserWaypoint)
+
+    blizzardProvider.owned = nil
+
+    return true
 end
 
 CN.RegisterWaypointProvider("Blizzard", blizzardProvider, 20)
@@ -12209,6 +13039,8 @@ $Embedded['Providers\HandyNotes.lua'] = @'
 
 local ADDON_NAME, CN = ...
 
+local Print = CN.Print
+
 local HandyNotes = {}
 
 CN.HandyNotes = HandyNotes
@@ -12246,12 +13078,24 @@ function HandyNotes.GetPlugins()
     local iterate = root.IteratePlugins
 
     if type(iterate) == "function" then
-        local ok, iterator = pcall(iterate, root)
+        -- THE WHOLE TRIPLET, NOT JUST THE FIRST RETURN.
+        --
+        -- `IteratePlugins` is a `pairs`-style stateful iterator: it returns
+        -- `next`, the table, and the control value. Capturing only the first
+        -- and writing `for name in iterator` calls `next(nil, nil)`, which
+        -- throws "bad argument #1 to 'next' (table expected, got nil)" -- so
+        -- this integration could not work for any player who actually has
+        -- HandyNotes installed.
+        --
+        -- The stub in the test suite was a single self-contained closure,
+        -- which is the one shape that makes the broken form work. Stub more
+        -- forgiving than the client, again.
+        local ok, step, state, control = pcall(iterate, root)
 
-        if ok and type(iterator) == "function" then
+        if ok and type(step) == "function" then
             local safe = 0
 
-            for name in iterator do
+            for name in step, state, control do
                 table.insert(names, name)
 
                 safe = safe + 1
@@ -12296,15 +13140,15 @@ function HandyNotes.GetNodesOnMap(uiMapID)
         return nodes
     end
 
-    local ok, iterator = pcall(iterate, root)
+    local ok, step, state, control = pcall(iterate, root)
 
-    if not ok or type(iterator) ~= "function" then
+    if not ok or type(step) ~= "function" then
         return nodes
     end
 
     local pluginCount = 0
 
-    for name, handler in iterator do
+    for name, handler in step, state, control do
         pluginCount = pluginCount + 1
 
         if pluginCount > 50 then
@@ -12312,14 +13156,19 @@ function HandyNotes.GetNodesOnMap(uiMapID)
         end
 
         if type(handler) == "table" and type(handler.GetNodes2) == "function" then
-            local gotNodes, nodeIterator = pcall(handler.GetNodes2, handler, uiMapID, false)
+            -- Same triplet, same reason: a plugin's node iterator is also
+            -- a `pairs`-style return. This one was inside a pcall, so it
+            -- failed to a debug line instead of an error -- silently, which
+            -- is how a whole feature can be broken and look empty.
+            local gotNodes, nodeStep, nodeState, nodeControl =
+                pcall(handler.GetNodes2, handler, uiMapID, false)
 
-            if gotNodes and type(nodeIterator) == "function" then
+            if gotNodes and type(nodeStep) == "function" then
                 local safe = 0
 
                 -- HandyNotes coords pack x and y into one integer.
                 local success = pcall(function()
-                    for coord, node in nodeIterator do
+                    for coord, node in nodeStep, nodeState, nodeControl do
                         safe = safe + 1
 
                         if safe > 500 then
@@ -12391,6 +13240,64 @@ CN.RegisterQuestDataProvider("HandyNotes", {
     Describe     = HandyNotes.Describe,
     priority     = 90,
 })
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+-- `GetNodesOnMap` is seventy lines and the stated reason this file exists,
+-- and until 0.53.0 nothing called it: no provider, no command, no test. It
+-- was written, documented, shipped, and never run -- and because it sat
+-- behind a broken iterator it could not have worked if it had been.
+--
+-- Read-only and on request. HandyNotes nodes are another addon's data about
+-- the same world, so they are shown rather than folded into the ranking:
+-- this addon does not know how that plugin decides what to draw, and
+-- inheriting somebody else's opinion silently is not the same as having one.
+CN:RegisterCommand{
+    name    = "handynotes",
+    aliases = { "hn" },
+    order   = 78,
+    help    = "What HandyNotes plugins are drawing on this map.",
+    handler = function()
+        if not HandyNotes.IsAvailable() then
+            Print("HandyNotes is not installed, or has not loaded.")
+            return
+        end
+
+        Print("HandyNotes: " .. HandyNotes.Describe())
+
+        local mapID = CN.GetPlayerPosition()
+
+        if not mapID then
+            Print("|cff999999The client will not say which map you are on.|r")
+            return
+        end
+
+        local nodes = HandyNotes.GetNodesOnMap(mapID)
+
+        if #nodes == 0 then
+            Print("|cff999999No plugin is drawing anything on this map.|r")
+            return
+        end
+
+        Print(#nodes .. " node(s) on this map:")
+
+        for index, node in ipairs(nodes) do
+            if index > 20 then
+                Print("  |cff999999and " .. (#nodes - 20) .. " more|r")
+                break
+            end
+
+            Print(string.format("  %d. %s |cff999999%s at %.1f, %.1f|r",
+                index, tostring(node.label or "unnamed"),
+                tostring(node.plugin), (node.x or 0) * 100, (node.y or 0) * 100))
+        end
+
+        Print("|cff999999Shown, not scored: this is another addon's view of "
+            .. "the same world.|r")
+    end,
+}
 '@
 
 $Embedded['Modules\Quests.lua'] = @'
@@ -12706,8 +13613,16 @@ function Quests.PruneRemembered()
 
     local dropped = 0
 
+    -- ACCOUNT COMPLETION, NOT THIS CHARACTER'S.
+    --
+    -- `Remembered()` is an account-wide store of WHERE a quest is, and where
+    -- a quest is does not depend on who is asking. Pruning it on
+    -- `IsCompletedByCharacter` meant one character finishing a zone deleted
+    -- the remembered locations for every other character who still had it to
+    -- do -- the same wrong-scope defect as the quest-status store, in the
+    -- other direction.
     for questID in pairs(store) do
-        if Quests.IsCompletedByCharacter(questID)
+        if Quests.IsCompletedOnAccount(questID)
             or Blizzard.IsQuestInLog(questID) then
 
             store[questID] = nil
@@ -13125,17 +14040,22 @@ end
 -- STATUS
 ------------------------------------------------------------
 
+-- ASKED, NOT REMEMBERED.
+--
+-- This used to write the answer into an account-wide `questStatus` table.
+-- Both fields come from a free synchronous client call, so there was nothing
+-- to gain by storing them -- and `IsQuestFlaggedCompleted` answers for the
+-- character asking, so storing it account-wide meant a main's four thousand
+-- completions were read back as every alt's. `/cn breakdown` on a fresh alt
+-- reported the main's progress, and scanning on the alt destroyed the main's
+-- record.
+--
+-- Migration 7 drops the store. The name is kept because callers want the pair
+-- of answers, and asking through one function keeps the two questions
+-- together.
 function Quests.RecordStatus(questID)
-    local characterCompleted = Quests.IsCompletedByCharacter(questID)
-    local accountCompleted   = Quests.IsCompletedOnAccount(questID)
-
-    CN.Account("questStatus")[questID] = {
-        characterCompleted = characterCompleted,
-        accountCompleted   = accountCompleted,
-        lastChecked        = time(),
-    }
-
-    return characterCompleted, accountCompleted
+    return Quests.IsCompletedByCharacter(questID),
+        Quests.IsCompletedOnAccount(questID)
 end
 
 function Quests.ScanKnown()
@@ -13261,14 +14181,30 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
 
         for _, prerequisiteID in ipairs(dependency.observedRequires) do
             if not Quests.IsCompletedByCharacter(prerequisiteID) then
+                local name = Quests.GetName(prerequisiteID)
+                    or ("quest " .. prerequisiteID)
+
+                -- WHERE THE EDGE CAME FROM DECIDES WHAT THE LINE CAN CLAIM.
+                --
+                -- An imported chain was never observed by this player, so
+                -- the harvest store has nothing for it and the character
+                -- count came back zero -- "seen first on 0 characters",
+                -- printed as evidence. Say which kind of edge it is.
+                if dependency.origin == "contributed" then
+                    return states.LOCKED,
+                           CN.blockReasons.LIKELY_PREREQUISITE,
+                           name .. " (from an imported chain, not from your "
+                               .. "own play)"
+                end
+
                 local characters = harvest
                     and harvest.Confidence(harvest.Store()[questID], prerequisiteID)
                     or 0
 
                 return states.LOCKED,
                        CN.blockReasons.LIKELY_PREREQUISITE,
-                       (Quests.GetName(prerequisiteID) or ("quest " .. prerequisiteID))
-                           .. " (seen first on " .. characters .. " characters)"
+                       name .. " (seen first on " .. characters
+                           .. " characters)"
             end
         end
     end
@@ -13719,7 +14655,7 @@ CN:RegisterCommand{
     name    = "queststatus",
     args    = "<questID>",
     order   = 23,
-    help    = "Show the stored quest completion state.",
+    help    = "Show this character's completion state for a quest.",
     handler = function(args)
         local questID = CN.ToID(args)
 
@@ -13728,17 +14664,11 @@ CN:RegisterCommand{
             return
         end
 
-        local status = CN.Account("questStatus")[questID]
+        local characterCompleted, accountCompleted = Quests.RecordStatus(questID)
 
-        if not status then
-            Print("No stored quest status for quest " .. questID .. ".")
-            return
-        end
-
-        Print("Stored quest " .. questID .. " status:")
-        Print("Character completion: " .. CN.YesNo(status.characterCompleted))
-        Print("Account/Warband completion: " .. CN.YesNo(status.accountCompleted))
-        Print("Last checked: " .. date("%Y-%m-%d %H:%M", status.lastChecked or 0))
+        Print("Quest " .. questID .. ", as the client answers right now:")
+        Print("Character completion: " .. CN.YesNo(characterCompleted))
+        Print("Account/Warband completion: " .. CN.YesNo(accountCompleted))
     end,
 }
 
@@ -13762,16 +14692,19 @@ CN:RegisterCommand{
     handler = function()
         Print("Discovered quests: " .. CN.CountKeys(CN.Account("discoveredQuests")))
         Print("Cached quest names: " .. CN.CountKeys(CN.Account("questMetadata")))
-        Print("Stored quest statuses: " .. CN.CountKeys(CN.Account("questStatus")))
     end,
 }
 
 CN:RegisterCommand{
     name    = "available",
     aliases = { "pickup", "offered" },
-    args    = "[zone name is not needed; uses the zone you are in]",
+    -- NO ARGUMENTS. This read "[zone name is not needed; uses the zone you
+    -- are in]" -- a note, rendered by the help printer as an argument spec,
+    -- so `/cn help` showed `/cn available [zone name is not needed; uses the
+    -- zone you are in]`. The note belongs in the help text.
     order   = 13,
-    help    = "List the quests offered here that you have not accepted.",
+    help    = "List the quests offered in the zone you are in that you have "
+        .. "not accepted.",
     handler = function()
         local mapID = select(1, CN.GetPlayerPosition())
 
@@ -13970,8 +14903,14 @@ CN:RegisterCommand{
         if record and source then
             Print("Data source: |cff999999" .. source .. "|r")
         else
+            -- `/cn setloc` records COORDINATES and nothing else, so it
+            -- cannot add the prerequisite data this line is about. Naming it
+            -- here sent the player to a command that could not solve the
+            -- stated problem.
             Print("|cff999999No prerequisite data for this quest. "
-                .. "Install AllTheThings or BtWQuests, or add a row with /cn setloc.|r")
+                .. "Install AllTheThings or BtWQuests, or let the addon "
+                .. "learn the ordering by playing -- |cffffff00/cn harvest|r"
+                .. "|cff999999 shows what it has seen so far.|r")
         end
     end,
 }
@@ -14118,11 +15057,30 @@ function Reputations.Scan()
 
                 nameStore[data.factionID] = record.name
 
+                -- ONE SCOPE PER FACTION, AND THE OTHER ONE IS DELETED.
+                --
+                -- `Reputations.Get` returns the account record whenever one
+                -- exists, and `Scan` only ever ADDED -- so a faction Blizzard
+                -- moved from account-wide to character-specific in a patch
+                -- kept its stale account row winning forever, and every
+                -- character read whichever character last scanned it.
+                -- Blizzard has moved factions in both directions across
+                -- patches.
+                --
+                -- Writing one scope now clears the other, so the store can
+                -- never hold two answers for one faction.
                 if record.accountWide then
                     accountStore[data.factionID] = record
+
+                    if characterStore then
+                        characterStore[data.factionID] = nil
+                    end
+
                     accountWide = accountWide + 1
                 elseif characterStore then
                     characterStore[data.factionID] = record
+                    accountStore[data.factionID]   = nil
+
                     characterSpecific = characterSpecific + 1
                 end
 
@@ -14803,12 +15761,18 @@ function Achievements.Summary()
         completed   = completed,
         inProgress  = 0,
         nearlyDone  = 0,
-        pointsLeft  = 0,
     }
 
+    -- `pointsLeft` REMOVED. `record.points` has been nil since 0.36.0 --
+    -- migration 5 stripped it as something the client re-supplies -- so this
+    -- summed to zero on every client, permanently. Two other readers of the
+    -- same field were fixed at the time and this one was missed. Nothing
+    -- displayed it, so it was dead state rather than a wrong number on
+    -- screen; it is gone rather than revived, because a points total the
+    -- addon would have to rebuild from the client is a question the
+    -- Achievements panel already answers.
     for _, record in pairs(Store()) do
         counts.inProgress = counts.inProgress + 1
-        counts.pointsLeft = counts.pointsLeft + (record.points or 0)
 
         if record.criteria > 0 and record.done >= record.criteria - 2 then
             counts.nearlyDone = counts.nearlyDone + 1
@@ -14998,6 +15962,19 @@ end, { events = { "ACHIEVEMENT_EARNED", "CRITERIA_UPDATE" }, cooldown = 5 })
 CN:RegisterEvent("ACHIEVEMENT_EARNED", function(event, achievementID)
     if achievementID then
         Store()[achievementID] = nil
+
+        -- THE SHORTLIST HOLDS THE ROW THE STORE JUST RELEASED.
+        --
+        -- `CN.Shortlist` returns its held list whenever the revision matches,
+        -- and the revision moved only on a full scan or when a criteria tick
+        -- crossed the nearly-done boundary. Deleting the store row without
+        -- moving it left the shortlist holding a strong reference to an
+        -- orphaned record -- so ACHIEVEMENT_EARNED invalidated the provider,
+        -- the provider rebuilt, asked for the shortlist, got the cached one
+        -- back, and emitted the achievement the player had just earned as a
+        -- candidate again. It stayed at the top of `/cn next` until something
+        -- unrelated moved the revision.
+        Achievements.revision = Achievements.revision + 1
 
         DebugPrint("Achievement earned: " .. tostring(achievementID))
     end
@@ -17181,6 +18158,50 @@ end
 
 Harvest.Store = Store
 
+-- The map's name, derived rather than remembered.
+function Harvest.Zone(record)
+    if type(record) ~= "table" or not record.mapID then
+        return nil
+    end
+
+    return Blizzard.GetMapName(record.mapID)
+end
+
+-- A CEILING, BECAUSE THIS IS THE LARGEST THING THE ADDON SAVES.
+--
+-- Every quest accepted, turned in, or seen at login gets a permanent record,
+-- and there was no cap and no prune. Migration 6 gave `questPins` a ceiling
+-- of 600 for exactly this reason and did not touch this store, whose rows are
+-- larger. Same rule, same shape: over the ceiling, the lowest quest ids go --
+-- the oldest content, and the least likely to be what anybody is working on.
+Harvest.cap = 2000
+
+function Harvest.Prune()
+    local store = Store()
+
+    local ids = {}
+
+    for questID in pairs(store) do
+        table.insert(ids, questID)
+    end
+
+    if #ids <= Harvest.cap then
+        return 0
+    end
+
+    table.sort(ids)
+
+    local dropped = #ids - Harvest.cap
+
+    for index = 1, dropped do
+        store[ids[index]] = nil
+    end
+
+    DebugPrint("Pruned " .. dropped .. " harvested quests over the ceiling.")
+
+    return dropped
+end
+
 ------------------------------------------------------------
 -- CAPTURE
 ------------------------------------------------------------
@@ -17222,9 +18243,14 @@ function Harvest.Capture(questID, reason)
         set("y", math.floor(y * 10000 + 0.5) / 10000)
     end
 
-    if mapID then
-        set("zone", Blizzard.GetMapName(mapID))
-    end
+    -- ZONE IS NOT STORED. It is `GetMapName(record.mapID)`, which the client
+    -- answers for free and forever -- the same duplication migrations 4 and 5
+    -- removed from items, achievements and pets. The coordinates genuinely
+    -- are not re-suppliable after a turn-in and stay; the name of the map
+    -- they are on always is.
+    --
+    -- Read back through Harvest.Zone below, so nothing that wants it has to
+    -- know where it comes from.
 
     -- The level the character was when the quest became available is a
     -- usable lower bound on the quest's own level requirement.
@@ -17267,6 +18293,8 @@ function Harvest.Capture(questID, reason)
     record.reason   = record.reason or reason
 
     store[questID] = record
+
+    Harvest.Prune()
 
     if changed then
         DebugPrint("Harvested quest " .. questID
@@ -17523,8 +18551,10 @@ function Harvest.BuildExport(onlyLocated)
                 .. record.name:gsub('"', '\\"') .. '",')
         end
 
-        if record.zone then
-            table.insert(lines, '        -- ' .. record.zone)
+        local zone = Harvest.Zone(record)
+
+        if zone then
+            table.insert(lines, '        -- ' .. zone)
         end
 
         if record.mapID then
@@ -17868,7 +18898,20 @@ function Opportunities.Urgency(secondsLeft)
 end
 
 function Opportunities.FormatTimeLeft(seconds)
-    if not seconds or seconds <= 0 then
+    -- "UNKNOWN" AND "EXPIRED" ARE DIFFERENT ANSWERS.
+    --
+    -- `Blizzard.GetQuestTimeLeft` returns nil when the client will not say,
+    -- and this collapsed that into "expired". The sort puts unknowns LAST
+    -- using `or math.huge`, so a live world quest appeared at the bottom of a
+    -- list headed "soonest to expire", labelled expired -- contradicting
+    -- itself on the same screen.
+    --
+    -- The addon has a convention for exactly this and it is used here now.
+    if not seconds then
+        return CN.WithConfidence(nil, CN.confidence.UNKNOWN) .. " time left"
+    end
+
+    if seconds <= 0 then
         return "expired"
     end
 
@@ -18416,12 +19459,24 @@ CN:RegisterCommand{
 
         local coverage = Warband.Coverage()
 
-        Print("Combined coverage: " .. coverage.professions .. " professions, "
+        -- THE CAVEAT BELONGS ON THE NUMBER, NOT ONLY ON THE ONE-CHARACTER
+        -- CASE.
+        --
+        -- `CN.Characters()` holds the characters that have logged in with
+        -- this addon installed, which for most people is a fraction of the
+        -- account. With three of ten alts seen the figure was printed as
+        -- plain fact and only the `#rows == 1` case was hedged.
+        Print("Combined coverage across the " .. #rows .. " character"
+            .. (#rows == 1 and "" or "s") .. " this addon has seen: "
+            .. coverage.professions .. " professions, "
             .. coverage.recipes .. " recipes, " .. coverage.titles .. " titles.")
 
         if #rows == 1 then
             Print("|cffffff00Only one character has been seen. Log in on your alts "
                 .. "with the addon loaded to make these comparisons useful.|r")
+        else
+            Print("|cff999999An alt that has never logged in with the addon "
+                .. "loaded is not in this total.|r")
         end
     end,
 }
@@ -18435,7 +19490,14 @@ CN:RegisterCommand{
         local kind, value = args:match("^(%S+)%s+(.+)$")
 
         if not kind or not value then
-            Print("Usage: /cn who <rep, recipe, title or profession> <id or name>")
+            -- NAMES RESOLVE FOR TWO OF THE FOUR, AND THE USAGE LINE SAID
+            -- FOUR. `RECIPE` and `PROFESSION` have no resolver, so a name
+            -- there fell through to "Could not resolve" -- which reads as
+            -- "that recipe does not exist" rather than "give me the id".
+            Print("Usage: /cn who <rep|title> <id or name>")
+            Print("|cff999999       /cn who <recipe|profession> <id>|r")
+            Print("|cff999999Recipes and professions are looked up by id "
+                .. "only; |cffffff00/cn recipes|r|cff999999 lists yours.|r")
             return
         end
 
@@ -18474,7 +19536,17 @@ CN:RegisterCommand{
         end
 
         if not id then
-            Print("Could not resolve: " .. value)
+            if objectiveType == types.RECIPE
+                or objectiveType == types.PROFESSION then
+
+                Print("Recipes and professions are looked up by id, not by "
+                    .. "name: " .. value)
+                Print("|cff999999|cffffff00/cn recipes|r|cff999999 lists the "
+                    .. "ones this addon knows about, with their ids.|r")
+            else
+                Print("Could not resolve: " .. value)
+            end
+
             return
         end
 
@@ -18639,6 +19711,65 @@ end
 -- "cleared by this character" rather than presented as fact.
 local lastSeenGuids = {}
 
+-- HOW CLOSE YOU HAVE TO HAVE BEEN FOR "IT VANISHED" TO MEAN "IT DIED".
+--
+-- `GetVignettes` returns what is IN RANGE, and a vignette leaves that list
+-- for two completely different reasons: somebody killed it, or you rode away
+-- from it. The old code could not tell them apart and assumed the first, so
+-- riding past a rare marked it cleared -- permanently, with no expiry and no
+-- command to undo it. The addon then refused to ever offer that rare to that
+-- character again, which is the worst possible failure for a module whose job
+-- is to say a rare is up.
+--
+-- A vignette that goes out of range does so at the edge of the range. One
+-- that dies does so wherever it was standing, which for a player who killed
+-- it is close. This is still inference, but it is inference that distinguishes
+-- the two cases instead of collapsing them.
+Rares.clearedWithinYards = 150
+
+-- AND THE INFERENCE EXPIRES.
+--
+-- Some rares are once per character and some are daily or weekly, and the
+-- client does not say which. Remembering forever is right for the first group
+-- and permanently wrong for the second; remembering until the weekly reset is
+-- approximately right for both, and self-corrects either way.
+Rares.rememberSeconds = 7 * 24 * 60 * 60
+
+local function ClearedUntil()
+    local seconds = Blizzard.GetSecondsUntilWeeklyReset
+        and Blizzard.GetSecondsUntilWeeklyReset()
+
+    if type(seconds) == "number" and seconds > 0 then
+        return time() + seconds
+    end
+
+    return time() + Rares.rememberSeconds
+end
+
+-- Recorded when the client itself says the vignette is dead, which needs no
+-- inference at all, and when one vanishes from close range.
+function Rares.NoteCleared(vignetteID, name)
+    local kills = CharacterKills()
+
+    if not kills or not vignetteID then
+        return false
+    end
+
+    kills[vignetteID] = ClearedUntil()
+
+    DebugPrint("Marking cleared: " .. tostring(name or vignetteID))
+
+    return true
+end
+
+-- The sighting set, so a test can put the module in the state a real
+-- VIGNETTE_MINIMAP_UPDATED would have left it in and then drive the real
+-- comparison. Writing to `lastSeenGuids` from outside is the alternative, and
+-- a test that reaches around the module proves nothing about the module.
+function Rares.SetLastSeen(seen)
+    lastSeenGuids = seen or {}
+end
+
 function Rares.NoteDisappearances(currentGuids)
     local kills = CharacterKills()
 
@@ -18648,9 +19779,14 @@ function Rares.NoteDisappearances(currentGuids)
 
     for guid, entry in pairs(lastSeenGuids) do
         if not currentGuids[guid] and entry.vignetteID then
-            kills[entry.vignetteID] = time()
-
-            DebugPrint("Vignette gone, marking cleared: " .. tostring(entry.name))
+            if entry.wasDead then
+                Rares.NoteCleared(entry.vignetteID, entry.name)
+            elseif entry.yards and entry.yards <= Rares.clearedWithinYards then
+                Rares.NoteCleared(entry.vignetteID, entry.name)
+            else
+                DebugPrint("Vignette out of range, not marking cleared: "
+                    .. tostring(entry.name))
+            end
         end
     end
 end
@@ -18658,7 +19794,48 @@ end
 function Rares.IsClearedByCharacter(vignetteID)
     local kills = CharacterKills()
 
-    return kills and kills[vignetteID] ~= nil
+    if not kills then
+        return false
+    end
+
+    local entry = kills[vignetteID]
+
+    if entry == nil then
+        return false
+    end
+
+    -- MIGRATED IN PLACE. Entries written before 0.53.0 hold the time the
+    -- vignette vanished rather than the time the memory expires, and most of
+    -- them are the false positives described above. Treating a bare timestamp
+    -- as "expires one week after it was written" retires them without a
+    -- migration step and without discarding a genuine recent kill.
+    local expires = type(entry) == "number" and entry or 0
+
+    if expires < time() then
+        kills[vignetteID] = nil
+
+        return false
+    end
+
+    return true
+end
+
+-- The player's own escape hatch, because inference that cannot be corrected
+-- is just a wrong answer with a longer life.
+function Rares.ForgetCleared()
+    local kills = CharacterKills()
+
+    if not kills then
+        return 0
+    end
+
+    local count = CN.CountKeys(kills)
+
+    for key in pairs(kills) do
+        kills[key] = nil
+    end
+
+    return count
 end
 
 ------------------------------------------------------------
@@ -18797,13 +19974,30 @@ local function OnVignetteUpdate()
 
     Rares.NoteDisappearances(currentGuids)
 
-    -- Rebuild the seen set for the next comparison.
+    -- Rebuild the seen set for the next comparison, carrying the two facts
+    -- that let the next comparison tell a kill from a departure: whether the
+    -- client had already flagged it dead, and how far away it was.
     local nextSeen = {}
 
-    for _, vignette in ipairs(Rares.GetActive(mapID)) do
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+    local travel = CN:GetModule("Travel")
+
+    for _, vignette in ipairs(Blizzard.GetVignettes(mapID)) do
+        local yards
+
+        if travel and travel.YardsBetween and playerMap and playerX
+            and vignette.mapID and vignette.x then
+
+            yards = travel.YardsBetween(playerMap, playerX, playerY,
+                vignette.mapID, vignette.x, vignette.y)
+        end
+
         nextSeen[vignette.guid] = {
             vignetteID = vignette.vignetteID,
             name       = vignette.name,
+            wasDead    = vignette.isDead and true or false,
+            yards      = yards,
         }
     end
 
@@ -18850,6 +20044,28 @@ CN:RegisterCommand{
         end
 
         Print("|cffffff00/cn rare <number>|r to set a waypoint.")
+        Print("|cff999999\"already cleared\" is inferred from a vignette that "
+            .. "vanished while you were next to it, and it expires at the "
+            .. "weekly reset. /cn rareforget clears it now.|r")
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "rareforget",
+    order   = 77,
+    help    = "Forget which rares this character is assumed to have cleared.",
+    handler = function()
+        local count = Rares.ForgetCleared()
+
+        if count == 0 then
+            Print("Nothing was being treated as cleared on this character.")
+            return
+        end
+
+        Print(count .. " cleared for this character, forgotten. They will be "
+            .. "offered again.")
+
+        CN.InvalidateCandidates()
     end,
 }
 
@@ -19329,6 +20545,17 @@ function Breakdown.Report(categoryName)
                 result.order = category.order
 
                 table.insert(rows, result)
+            elseif not ok then
+                -- A category that throws was dropped with no trace, so if
+                -- every one of them threw the report said "Nothing to report
+                -- yet. Run the scans first." -- which sends the player to do
+                -- work that will not help.
+                local errors = CN:GetModule("Errors")
+
+                if errors and errors.Record then
+                    pcall(errors.Record, "breakdown:" .. tostring(category.name),
+                        tostring(result))
+                end
             end
         end
     end
@@ -19469,7 +20696,14 @@ Breakdown.Register{
             total     = counts.total,
             remaining = counts.total - counts.completed,
             reasons   = reasons,
-            action    = counts.total == 0 and "/cn achievescan"
+            -- SCAN STATE IS NOT THE LIVE TOTAL.
+            --
+            -- `counts.total` comes from the client, so it is never zero and
+            -- this branch could never fire: a player who has never scanned
+            -- saw a healthy "1200 / 3400 (35.3%)" with no in-progress rows and
+            -- no prompt to scan. The scan is what fills `inProgress`, so that
+            -- is what says whether it has run.
+            action    = counts.inProgress == 0 and "/cn achievescan"
                 or (counts.nearlyDone > 0 and "/cn closest" or nil),
         }
     end,
@@ -19579,11 +20813,22 @@ Breakdown.Register{
     report = function()
         local discovered = CN.CountKeys(CN.Account("discoveredQuests"))
 
+        -- ASKED OF THE CLIENT, FOR THIS CHARACTER.
+        --
+        -- This counted an account-wide `questStatus` store whose
+        -- `characterCompleted` flag belonged to whichever character last
+        -- scanned, so a fresh alt was shown the main's progress. The client
+        -- answers per character, for free, and `discoveredQuests` is the set
+        -- worth asking about.
+        local quests = CN:GetModule("Quests")
+
         local completed = 0
 
-        for _, status in pairs(CN.Account("questStatus")) do
-            if status.characterCompleted then
-                completed = completed + 1
+        if quests and quests.IsCompletedByCharacter then
+            for questID in pairs(CN.Account("discoveredQuests")) do
+                if quests.IsCompletedByCharacter(questID) then
+                    completed = completed + 1
+                end
             end
         end
 
@@ -19936,8 +21181,18 @@ CN:RegisterCommand{
         Print("Exploration: " .. counts.complete .. " / " .. counts.zones .. " zones")
 
         if counts.criteria > 0 then
-            Print(string.format("Subzones discovered: %d / %d (%.1f%%)",
-                counts.done, counts.criteria, counts.done / counts.criteria * 100))
+            -- NO PERCENTAGE. This file's own header says a genuine "percent
+            -- explored" is uncomputable and that "78% explored is not
+            -- [useful]" -- and then printed one, computed against the sum of
+            -- criteria in the achievements this addon happens to have stored.
+            -- Not the world; not even every zone, since a zone with no
+            -- exploration achievement contributes nothing to either side.
+            -- A player reads "73.0%" as the world.
+            --
+            -- The raw counts are honest and are what remains.
+            Print(string.format("Subzones discovered: %d of %d in the "
+                .. "exploration achievements this addon has scanned",
+                counts.done, counts.criteria))
         end
 
         local here = Exploration.ForCurrentZone()
@@ -20142,29 +21397,13 @@ function Filters.TypeOrder()
     }
 end
 
--- Friendly names, because "APPEARANCE" is how the code thinks and not how a
--- person reads a checkbox.
-Filters.typeLabels = {
-    QUEST       = "Quests",
-    ACHIEVEMENT = "Achievements",
-    REPUTATION  = "Reputations",
-    PET         = "Battle pets",
-    MOUNT       = "Mounts",
-    TOY         = "Toys",
-    APPEARANCE  = "Appearances",
-    RECIPE      = "Recipes",
-    PROFESSION  = "Professions",
-    RARE        = "Rares",
-    TREASURE    = "Treasures",
-    EXPLORATION = "Exploration",
-    TITLE       = "Titles",
-    CURRENCY    = "Currencies",
-    INSTANCE    = "Dungeons & raids",
-}
+-- Friendly names live in Objectives.lua now, beside the enum they name, so
+-- that everything which prints a type can reach them -- most of the places
+-- that do load long before this file. These two are kept as the names the
+-- rest of this module already uses.
+Filters.typeLabels = CN.typeLabels
 
-function Filters.TypeLabel(objectiveType)
-    return Filters.typeLabels[objectiveType] or tostring(objectiveType)
-end
+Filters.TypeLabel = CN.TypeLabel
 
 -- Accepts what a person would actually type.
 function Filters.ResolveType(text)
@@ -20374,6 +21613,12 @@ function Filters.Restore(key)
         removed = true
     end
 
+    -- Same reason as CN.SetIgnored: the list a provider built is the list the
+    -- player sees, and un-hiding something has to rebuild it.
+    if removed and CN.InvalidateCandidates then
+        CN.InvalidateCandidates()
+    end
+
     return removed
 end
 
@@ -20389,6 +21634,10 @@ function Filters.RestoreAll()
 
     for key in pairs(deferred) do
         deferred[key] = nil
+    end
+
+    if count > 0 and CN.InvalidateCandidates then
+        CN.InvalidateCandidates()
     end
 
     return count
@@ -20778,7 +22027,21 @@ CN:RegisterCommand{
 
         Print("Settings for " .. tostring(CN.characterKey or "this character") .. ":")
 
-        for _, key in ipairs({ "priorityMode", "autoWaypoint", "arrow", "tooltips" }) do
+        -- EVERY OVERRIDABLE SETTING, NOT A HAND-COPIED FOUR OF THEM.
+        --
+        -- `CN.characterOverridable` also carries `mapPins` and `follow`, and
+        -- the rejection branch above already enumerates the whole table -- so
+        -- overriding `mapPins` was accepted and then never listed, and the
+        -- status view gave no sign it existed.
+        local overridable = {}
+
+        for key in pairs(CN.characterOverridable or {}) do
+            table.insert(overridable, key)
+        end
+
+        table.sort(overridable)
+
+        for _, key in ipairs(overridable) do
             local overridden = CN.IsOverridden(key)
 
             Print("  " .. key .. " = " .. tostring(settings[key])
@@ -21392,10 +22655,17 @@ local function PetLines(lines, itemID)
     end
 
     count = count or 0
-    limit = limit or 3
 
-    if count > 0 then
+    -- NO FABRICATED DENOMINATOR.
+    --
+    -- `limit or 3` invented the cap when neither the store nor the client
+    -- supplied it, and then printed "collected 2 of 3" as though the 3 had
+    -- been read from somewhere. Three is the right number today; it is still
+    -- a made-up total in a module that refuses them everywhere else.
+    if count > 0 and limit and limit > 0 then
         Add(lines, "Battle pet: collected " .. count .. " of " .. limit, GREEN)
+    elseif count > 0 then
+        Add(lines, "Battle pet: collected " .. count, GREEN)
     else
         Add(lines, "Battle pet: not collected", RED)
     end
@@ -21874,38 +23144,79 @@ function Setup.Run(onComplete)
     local results = {}
     local index   = 0
 
+    -- THE WHOLE BODY IS GUARDED, NOT JUST THE STEP.
+    --
+    -- `RunStep` was pcall'd and nothing else was -- and steps two onward run
+    -- inside `C_Timer.After` callbacks, outside the slash command's own
+    -- pcall. So a throw in the bookkeeping, in `Setup.Report`, or in
+    -- `Setup.Outstanding` stopped the chain dead AND left `Setup.running`
+    -- true, which makes `/cn setup` answer "Setup is already running." for
+    -- the rest of the session with no way back short of a reload.
     local function step()
-        index = index + 1
+        local ran, err = pcall(function()
+            index = index + 1
 
-        local entry = Setup.steps[index]
+            local entry = Setup.steps[index]
 
-        if not entry then
-            Setup.running = false
+            if not entry then
+                Setup.running = false
 
-            CN.Account("setup").completedAt = time()
+                -- COMPLETION IS RECORDED ONLY IF SOMETHING COMPLETED.
+                --
+                -- This was stamped unconditionally, so a run in which every
+                -- scan failed was remembered as a successful setup: the login
+                -- reminder stopped, `Setup.HasRun()` went true forever, and
+                -- `/cn setup check` answered "Everything the addon can read
+                -- on its own is scanned."
+                local failed = 0
 
-            Setup.Report(results)
+                for _, row in ipairs(results) do
+                    if not row.ok then
+                        failed = failed + 1
+                    end
+                end
 
-            if onComplete then
-                pcall(onComplete, results)
+                if failed < #results then
+                    CN.Account("setup").completedAt = time()
+                end
+
+                Setup.Report(results)
+
+                if onComplete then
+                    pcall(onComplete, results)
+                end
+
+                return
             end
 
-            return
-        end
+            local ok, value = Setup.RunStep(entry)
 
-        local ok, value = Setup.RunStep(entry)
+            table.insert(results, {
+                label = entry.label,
+                ok    = ok,
+                value = ok and value or nil,
+                error = (not ok) and value or nil,
+            })
 
-        table.insert(results, {
-            label = entry.label,
-            ok    = ok,
-            value = ok and value or nil,
-            error = (not ok) and value or nil,
-        })
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0, step)
+            else
+                step()
+            end
+        end)
 
-        if C_Timer and C_Timer.After then
-            C_Timer.After(0, step)
-        else
-            step()
+        if not ran then
+            Setup.running = false
+
+            local errors = CN:GetModule("Errors")
+
+            if errors and errors.Record then
+                pcall(errors.Record, "Setup.Run", tostring(err))
+            end
+
+            Print("Setup stopped after " .. index .. " of "
+                .. #Setup.steps .. " scans: " .. tostring(err))
+            Print("|cff999999/cn setup runs it again from the start.|r")
         end
     end
 
@@ -21917,7 +23228,7 @@ function Setup.Run(onComplete)
 end
 
 function Setup.Report(results)
-    local scanned, failed = 0, 0
+    local scanned, absent, broke = 0, 0, 0
 
     for _, result in ipairs(results) do
         if result.ok then
@@ -21925,15 +23236,33 @@ function Setup.Report(results)
 
             Print("  " .. result.label .. ": "
                 .. (type(result.value) == "number" and result.value or "done"))
-        else
-            failed = failed + 1
+        elseif result.error == "module not loaded" then
+            -- "UNAVAILABLE" AND "IT THREW" ARE DIFFERENT STATEMENTS.
+            --
+            -- Every failure was reported with the word "unavailable", so a
+            -- module that raised a Lua error was presented to the player as a
+            -- subsystem this client does not have -- nothing to look into,
+            -- nothing to report.
+            absent = absent + 1
 
-            Print("  " .. result.label .. ": |cffff4444" .. tostring(result.error) .. "|r")
+            Print("  " .. result.label
+                .. ": |cff999999not available on this client|r")
+        else
+            broke = broke + 1
+
+            Print("  " .. result.label .. ": |cffff4444failed: "
+                .. tostring(result.error) .. "|r")
         end
     end
 
     Print("Setup complete: " .. scanned .. " scanned"
-        .. (failed > 0 and (", " .. failed .. " unavailable") or "") .. ".")
+        .. (absent > 0 and (", " .. absent .. " unavailable") or "")
+        .. (broke > 0 and (", " .. broke .. " failed") or "") .. ".")
+
+    if broke > 0 then
+        Print("|cff999999A failure is a defect, not a missing feature. "
+            .. "|cffffff00/cn errors|r has the detail.|r")
+    end
 
     for _, line in ipairs(Setup.Outstanding()) do
         Print("|cffffff00" .. line .. "|r")
@@ -24559,7 +25888,10 @@ CN:RegisterCommand{
 
         if #rows == 0 then
             Print("No unfinished zone achievements are recorded yet.")
-            Print("|cff999999Run |cffffff00/cn loremaster scan|r"
+            -- `/cn loremaster scan` is not a command. `loremaster` treats
+            -- any argument that is not `all` or `zone` as a NAME FILTER, so
+            -- that line sent the player to "Nothing matched."
+            Print("|cff999999Run |cffffff00/cn scanlore|r"
                 .. "|cff999999 to read them from the game.|r")
             return
         end
@@ -24670,7 +26002,12 @@ end
 
 CN:RegisterCommand{
     name    = "loremaster",
-    aliases = { "lore", "zones" },
+    -- "zones" REMOVED. It was registered as its own command 120 lines up --
+    -- "Which zone to work on next, and why" -- and this alias, loading later,
+    -- overwrote it. So `/cn zones` printed the quest-completion-by-zone
+    -- report while `/cn help` and the store page both described the zone
+    -- ranking, and the real command was reachable only as `/cn nextzone`.
+    aliases = { "lore" },
     args    = "[all, zone, or a name to filter]",
     order   = 12,
     help    = "Quest completion by zone, continent and expansion.",
@@ -24949,6 +26286,12 @@ function Follow.NextStop()
 
     if total > (Follow.startedWith or 0) then
         Follow.startedWith = total
+
+        -- The route grew, so it is no longer a finished route: the
+        -- completion moment is available again.
+        if total > (Follow.completed or 0) then
+            Follow.celebrated = false
+        end
     end
 
     for _, hub in ipairs(hubs) do
@@ -24991,6 +26334,12 @@ end
 Follow.completed = 0
 Follow.startedWith = 0
 
+-- Whether this route has already had its completion moment. Reset when a
+-- route starts, and when the total grows past what was already cleared --
+-- because a route that has more stops in it than it did is not a route that
+-- has been finished.
+Follow.celebrated = false
+
 -- How long to wait before searching again when the last search found nothing
 -- routable here. A forced advance -- the player asking -- ignores it.
 Follow.emptySearchSeconds = 15
@@ -25019,7 +26368,16 @@ function Follow.NoteStopCleared()
     -- A COMPLETION MOMENT, when there is genuinely nothing left. The route
     -- finishing is the only thing this addon does that is worth a small
     -- flourish, and it happens rarely enough to stay one.
-    if total > 0 and Follow.completed >= total then
+    -- ONCE PER ROUTE, NOT ONCE PER STOP PAST THE END.
+    --
+    -- `completed >= total` is true for every clear after the last one, so a
+    -- route whose total shrank -- or a player who cleared something outside
+    -- the counted set -- got the flourish again on every stop. 0.50.0 fixed
+    -- the "Stop 9 of 8" half of this by letting the total grow; the
+    -- celebration half was left firing repeatedly.
+    if total > 0 and Follow.completed >= total and not Follow.celebrated then
+        Follow.celebrated = true
+
         Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r " .. total .. " stops, "
             .. "everything on it done.")
 
@@ -25324,7 +26682,8 @@ function Follow.Start()
 
     Follow.active = true
 
-    Follow.completed = 0
+    Follow.completed  = 0
+    Follow.celebrated = false
 
     -- How many stops there were when the route started, so progress can be
     -- reported as a fraction rather than as a running count that means
@@ -25364,7 +26723,11 @@ function Follow.Start()
     Follow.Redraw()
 
     if C_Timer and C_Timer.NewTicker and not ticker then
-        ticker = C_Timer.NewTicker(Follow.recheckSeconds, Tick)
+        -- Guarded, for the reason spelled out on Session's ticker: a
+        -- repeating callback that throws is a repeating error box.
+        ticker = C_Timer.NewTicker(Follow.recheckSeconds, function()
+            CN.Guard("Follow.Tick", Tick)
+        end)
     end
 
     return true
@@ -26450,9 +27813,18 @@ function Session.Plan(minutes)
     return plan
 end
 
+-- SHORT IS NOT FREE.
+--
+-- Rounded to whole minutes, a twenty-five second stop rendered as "0m" in
+-- `/cn plan` and `/cn travel`, which reads as costing nothing rather than as
+-- costing very little. Under a minute is reported in seconds.
 function Session.FormatDuration(seconds)
     if not seconds or seconds <= 0 then
         return "0m"
+    end
+
+    if seconds < 60 then
+        return math.max(1, math.floor(seconds + 0.5)) .. "s"
     end
 
     local minutes = math.floor(seconds / 60 + 0.5)
@@ -26509,7 +27881,14 @@ CN:OnLogin(function()
     Session.Observe()
 
     if C_Timer and C_Timer.NewTicker and not ticker then
-        ticker = C_Timer.NewTicker(10, Session.Observe)
+        -- GUARDED. A C_Timer callback that throws goes to the client's own
+        -- error handler, and a REPEATING ticker means a repeating error box:
+        -- one bad observation and the player gets a popup every ten seconds
+        -- for the rest of the session. Navigation's ticker has been guarded
+        -- since 0.34.0; the four others were not.
+        ticker = C_Timer.NewTicker(10, function()
+            CN.Guard("Session.Observe", Session.Observe)
+        end)
     end
 end)
 
@@ -26559,10 +27938,16 @@ CN:RegisterCommand{
             return
         end
 
+        -- THE SUM OF NUMBERS TOO UNCERTAIN TO SHOW IS NOT A CERTAIN NUMBER.
+        --
+        -- Each individual stop below refuses to print a duration it is not
+        -- confident in, and this headline printed their total as a plain
+        -- figure regardless. One convention, both lines.
         Print(string.format("%d stop%s, about %s of the %dm you have:",
             #plan.stops,
             #plan.stops == 1 and "" or "s",
-            Session.FormatDuration(plan.seconds),
+            CN.WithConfidence(Session.FormatDuration(plan.seconds),
+                CN.ConfidenceFor(plan.confident)),
             plan.minutes))
 
         for index, stop in ipairs(plan.stops) do
@@ -27507,12 +28892,27 @@ function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing, 
     local relative = bearing - (facing * (sign or Navigation.FacingSign()))
 
     -- Normalize to (-pi, pi] so "how far off am I" is a small number.
-    while relative > math.pi do
-        relative = relative - (2 * math.pi)
-    end
+    --
+    -- THROUGH THE SHIM, WHICH IS WHAT THE SHIM IS FOR.
+    --
+    -- Core.lua defines `CN.Mod` as the floored modulo -- "if a construct
+    -- means two things, the addon uses neither directly; it uses one of
+    -- these" -- and then the one place in the addon that wraps an angle did
+    -- it with two unbounded `while` loops instead. So the rule was enforced
+    -- nowhere and the shim had no call sites at all, which is how a
+    -- compatibility guard quietly stops being one.
+    --
+    -- The loops were also unbounded: a non-finite bearing spins the client.
+    -- This is O(1) and it cannot.
+    local full = 2 * math.pi
 
-    while relative <= -math.pi do
-        relative = relative + (2 * math.pi)
+    relative = CN.Mod(relative + math.pi, full) - math.pi
+
+    -- CN.Mod's range is [0, full), so the line above lands in [-pi, pi).
+    -- The addon's convention is (-pi, pi] -- exactly antipodal must read as
+    -- "behind you", not "behind you, negative".
+    if relative == -math.pi then
+        relative = math.pi
     end
 
     return relative
@@ -28553,6 +29953,25 @@ function provider.IsAvailable()
 end
 
 function provider.SetWaypoint(mapID, x, y, title)
+    -- THE MAP MAY REFUSE, AND THE ARROW IS NOT THE WHOLE ANSWER.
+    --
+    -- The native provider draws its own arrow, which works anywhere -- but it
+    -- also drops the client's user waypoint, and the client will not place one
+    -- on a dungeon, raid, cosmic or continent map. `CanSetUserWaypointOnMap`
+    -- says which, and was called nowhere in this addon.
+    --
+    -- The arrow is still worth having on those maps, so this does not refuse
+    -- outright; it simply does not claim a map pin it could not place.
+    local allowed = true
+
+    if C_Map and C_Map.CanSetUserWaypointOnMap then
+        local asked, answer = pcall(C_Map.CanSetUserWaypointOnMap, mapID)
+
+        if asked and not answer then
+            allowed = false
+        end
+    end
+
     target = {
         mapID = mapID,
         x     = x,
@@ -28565,42 +29984,79 @@ function provider.SetWaypoint(mapID, x, y, title)
     Navigation.ResetCalibration()
     Navigation.ResetMotion()
 
+    -- SMOOTHING BELONGS TO A DESTINATION, NOT TO THE ARROW.
+    --
+    -- `Blank` -- the only thing that resets the smoothed bearing and distance
+    -- -- ran from `Navigation.Clear` and only when an arrow already existed.
+    -- Changing target without clearing first, which is what `/cn go`, the
+    -- route's auto-advance and a map-pin click all do, left the previous
+    -- destination's smoothed values in place. The snap thresholds hid the
+    -- large jumps, so what remained was the confusing case: a new target
+    -- within 89 degrees and 79 yards was eased into over several ticks,
+    -- showing a bearing and a distance belonging to neither destination.
+    Navigation.ResetSmoothing()
+    Navigation.ResetDistanceSmoothing()
+
     BuildArrow()
     Navigation.StartTicker()
     Refresh()
 
     -- Also drop a map pin, so the destination is visible on the world map and
     -- not only in front of the player.
-    if C_Map.SetUserWaypoint and UiMapPoint and UiMapPoint.CreateFromCoordinates then
+    if allowed and C_Map.SetUserWaypoint and UiMapPoint
+        and UiMapPoint.CreateFromCoordinates then
+
         local ok = pcall(function()
             C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(mapID, x, y))
         end)
 
-        if ok and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then
-            pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+        if ok then
+            -- Remembered so Clear can tell this addon's pin from one the
+            -- player placed by hand.
+            Navigation.ownsUserWaypoint = true
+
+            if C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then
+                pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+            end
         end
+    end
+
+    if not allowed then
+        return true, "the arrow is set; the game does not allow a map pin here"
     end
 
     return true
 end
 
 function provider.ClearAll()
-    Navigation.Clear()
+    return Navigation.Clear()
 end
 
 function Navigation.Clear()
+    local had = target ~= nil or Navigation.ownsUserWaypoint
+
     target = nil
 
     if arrow then
-        Blank()
         arrow:Hide()
     end
 
+    -- Unconditionally, not only when an arrow was built: the smoothed values
+    -- are state about a destination and the destination is gone either way.
+    Blank()
+
     Navigation.StopTicker()
 
-    if C_Map and C_Map.ClearUserWaypoint then
+    -- ONLY OUR OWN PIN. `ClearUserWaypoint` removes THE user waypoint, and
+    -- there is one. Stopping follow mode used to delete a pin the player had
+    -- placed by hand.
+    if Navigation.ownsUserWaypoint and C_Map and C_Map.ClearUserWaypoint then
         pcall(C_Map.ClearUserWaypoint)
     end
+
+    Navigation.ownsUserWaypoint = nil
+
+    return had and true or false
 end
 
 -- Priority 5: ahead of TomTom's 10. The addon is self-contained now, and a
@@ -29096,18 +30552,33 @@ function MapPins.InvalidateCache()
     cache.hubs       = nil
 end
 
-local function CandidateGeneration()
-    if not CN.GetCandidateCacheState then
-        return 0
+-- EVERYTHING THE ROUTE DEPENDS ON, NOT JUST THE CANDIDATES.
+--
+-- `BuildZoneRoute` applies the objective-type filter when it picks the stops,
+-- so the hub set is a function of that filter as well as of the candidate
+-- list. `SetTypeEnabled` deliberately does not rebuild providers -- it bumps
+-- `CN.typeFilterGeneration` instead -- so the candidate generation did not
+-- move and this cache did not notice.
+--
+-- The result was two views of one route disagreeing on screen: `/cn zone`
+-- honoured `/cn show only quests` and the map, reopened a second later, still
+-- drew the pet and appearance stops the player had just hidden.
+local function RouteGeneration()
+    local generation = 0
+
+    if CN.GetCandidateCacheState then
+        local ok, state = pcall(CN.GetCandidateCacheState)
+
+        if ok and state then
+            generation = state.generation or 0
+        end
     end
 
-    local ok, state = pcall(CN.GetCandidateCacheState)
-
-    if ok and state then
-        return state.generation or 0
-    end
-
-    return 0
+    -- The ranking generation is deliberately NOT part of this key:
+    -- `BuildZoneRoute` bumps it itself, so including it would mean the cache
+    -- never matched and the route was rebuilt on every map pan -- which is
+    -- the cost this cache exists to avoid.
+    return generation .. ":" .. tostring(CN.typeFilterGeneration or 0)
 end
 
 -- Building a zone route means collecting and scoring every candidate, so it
@@ -29118,7 +30589,7 @@ function MapPins.HubsForMap(mapID, force)
         return nil
     end
 
-    local generation = CandidateGeneration()
+    local generation = RouteGeneration()
 
     if not force
         and cache.mapID == mapID
@@ -29381,19 +30852,22 @@ function MapPins.Install()
         return false
     end
 
+    -- GUARDED, because these are hooks on a frame the player opens
+    -- constantly and shares with every other addon they run. An unguarded
+    -- throw here is an error box every time the world map opens.
     map:HookScript("OnShow", function()
-        MapPins.Refresh()
+        CN.Guard("MapPins.Refresh", MapPins.Refresh)
     end)
 
     map:HookScript("OnHide", function()
-        MapPins.Clear()
+        CN.Guard("MapPins.Clear", MapPins.Clear)
     end)
 
     -- Panning to a different zone is a map change, not a redraw, so the
     -- route must be rebuilt for the map now on screen.
     if map.RegisterCallback and map.OnMapChanged then
         pcall(map.RegisterCallback, map, "WorldMapOnMapChanged", function()
-            MapPins.Refresh()
+            CN.Guard("MapPins.Refresh", MapPins.Refresh)
         end)
     end
 
@@ -29533,7 +31007,7 @@ local function CurrentText(results)
 
     local objective = results[1]
 
-    return tostring(objective.name or objective.id), tostring(objective.type)
+    return tostring(objective.name or objective.id), CN.TypeLabel(objective.type)
 end
 
 Broker.CurrentText = CurrentText
@@ -29568,9 +31042,17 @@ function Broker.Install()
         text  = "Completion Navigator",
         icon  = CN.MEDIA_PATH .. "Logo",
 
+        -- GUARDED, both of them. `Broker.CurrentText` forty lines up already
+        -- wraps `CN.Recommend`; the click and tooltip handlers did not -- and
+        -- these run inside the host bar addon, so a throw here breaks Titan
+        -- Panel's or ElvUI's tooltip rather than this addon's.
         OnClick = function(_, button)
             if button == "RightButton" then
-                local results = CN.Recommend(1)
+                local asked, results = pcall(CN.Recommend, 1)
+
+                if not asked then
+                    results = nil
+                end
 
                 if results and results[1] then
                     CN.NavigateToObjective(results[1])
@@ -29591,11 +31073,25 @@ function Broker.Install()
 
             tooltip:AddLine("Completion Navigator")
 
-            local results = CN.Recommend(3)
+            local asked, results = pcall(CN.Recommend, 3)
+
+            if not asked then
+                tooltip:AddLine("Something went wrong; /cn errors has it.",
+                    0.96, 0.42, 0.38)
+                return
+            end
 
             if not results or #results == 0 then
                 tooltip:AddLine("Nothing actionable yet.", 0.6, 0.6, 0.6)
-                tooltip:AddLine("Run /cn setup once.", 0.6, 0.6, 0.6)
+
+                for index, line in ipairs(CN.ExplainEmptyList()) do
+                    if index > 2 then
+                        break
+                    end
+
+                    tooltip:AddLine(line, 0.6, 0.6, 0.6)
+                end
+
                 return
             end
 
@@ -29979,6 +31475,21 @@ Group.deadPenalty = 0.2
 CN.RegisterScoreAdjuster("Group", function(objective, score)
     local situation = Group.Situation()
 
+    -- WHAT IS NO LONGER TRUE IS WITHDRAWN FIRST.
+    --
+    -- Both sentences below describe the player's situation at the moment of
+    -- scoring, and both used to be one-way: once stamped onto a cached
+    -- objective they stayed there through every later pass. Every pass now
+    -- starts by taking back the ones that do not apply, so the explanation
+    -- and the multiplier always agree.
+    if situation ~= "dead" then
+        CN.ClearAdjusterReason(objective, "groupDead")
+    end
+
+    if situation ~= "instanced" then
+        CN.ClearAdjusterReason(objective, "groupInstanced")
+    end
+
     if situation == "dead" then
         -- EXCEPT THE BODY.
         --
@@ -29989,10 +31500,13 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
             return score
         end
 
-        if objective and objective.reasons then
-            CN.AddAdjusterReason(objective, "groupDead",
-                "you are dead -- this is for after")
-        end
+        -- Unguarded on `objective.reasons`, deliberately. The guard used to
+        -- be here and not on the instanced branch below, and most providers
+        -- build objectives with no `reasons` field -- so for those the
+        -- fivefold penalty was applied with nothing on screen saying why.
+        -- `AddAdjusterReason` creates the table itself.
+        CN.AddAdjusterReason(objective, "groupDead",
+            "you are dead -- this is for after")
 
         return score * Group.deadPenalty
     end
@@ -30725,7 +32239,12 @@ CN:RegisterCommand{
 
             for index, row in ipairs(nearly) do
                 if index > 8 then
-                    Print("  |cff999999... and " .. (#nearly - 8) .. " more|r")
+                    -- Translated, like the identical phrase nine lines below.
+                    -- Hardcoded English two lines from a CN.L lookup of the
+                    -- same words is how a locale file ends up complete and
+                    -- the addon still English.
+                    Print("  |cff999999"
+                        .. string.format(CN.L["%d more"], #nearly - 8) .. "|r")
                     break
                 end
 
@@ -31681,9 +33200,15 @@ local nodeCache = {}
 -- continent and thrown away with the node list.
 local spanCache = {}
 
+-- The flight network, and the shortest way through it. See THE NETWORK below.
+local neighbourCache = {}
+local pathCache      = {}
+
 function Travel.ForgetNodes()
-    nodeCache = {}
-    spanCache = {}
+    nodeCache      = {}
+    spanCache      = {}
+    neighbourCache = {}
+    pathCache      = {}
 end
 
 -- Only nodes you can actually use. An undiscovered flight master is not a
@@ -31754,7 +33279,21 @@ function Travel.KnownNodes(mapID)
         end
     end
 
-    nodeCache[continent] = usable
+    -- AN EMPTY LIST IS NOT AN ANSWER, SO IT IS NOT REMEMBERED.
+    --
+    -- `C_TaxiMap.GetAllTaxiNodes` answers usefully only while the client has
+    -- the taxi map's data to hand, and every node here needs
+    -- `Travel.WorldPoint`, which refuses during a loading screen. The one
+    -- event that clears this cache -- PLAYER_ENTERING_WORLD -- is a loading
+    -- screen, so the very next query was the one most likely to get nothing.
+    --
+    -- Caching that nothing meant every flight-based estimate on the continent
+    -- degraded to "run there" for the rest of the session. `Travel.WorldPoint`
+    -- and `Navigation.MapScale` both already refuse to remember a miss, with
+    -- comments saying why; this derived list did it anyway.
+    if #usable > 0 then
+        nodeCache[continent] = usable
+    end
 
     return usable, continent
 end
@@ -31783,6 +33322,224 @@ local function Spans(continent, nodes)
     spanCache[continent] = spans
 
     return spans
+end
+
+------------------------------------------------------------
+-- THE NETWORK
+------------------------------------------------------------
+
+-- A FLIGHT IS NOT A STRAIGHT LINE, AND SOME JOURNEYS NEED TWO HOPS.
+--
+-- Until now the flight leg of a route was the straight-line distance between
+-- the two flight points, which is the one distance a taxi never travels. The
+-- network is a graph: the bird hops from master to master, and a pair at
+-- opposite ends of a continent is reached by going through the ones in
+-- between. Measuring the hypotenuse understated every long flight -- always
+-- in the same direction, so the addon systematically recommended distant
+-- objectives over near ones.
+--
+-- It also let the addon cost a pairing that does not connect at all. An
+-- island node with no route to the mainland was quoted as a short flight
+-- because the two points happen to be close together on the map.
+--
+-- The client does not publish the edge list -- `GetAllTaxiNodes` gives
+-- positions and reachability, not who connects to whom -- so the edges are
+-- inferred: a flight master connects to the ones near it, plus its nearest
+-- few regardless of distance so that a sparse region is not cut off from the
+-- rest of the continent. That is a model, and it is marked as one: a
+-- multi-hop estimate is never reported as confident.
+--
+-- What it is not is a guess in the direction of optimism. Every path length
+-- this produces is at least the straight line it replaces, so the estimate
+-- moved from "certainly too short" to "approximately right".
+Travel.hopYards = 4000
+
+-- Plus the nearest few whatever the distance, so that a lone outpost still
+-- joins the graph rather than becoming unreachable and silently dropping out
+-- of every route.
+Travel.minimumNeighbours = 4
+
+-- No real continent has a flight chain anywhere near this long. It exists so
+-- that a malformed graph cannot spin a loop.
+Travel.maximumHops = 32
+
+local function Neighbours(continent, nodes)
+    if neighbourCache[continent] then
+        return neighbourCache[continent]
+    end
+
+    local spans = Spans(continent, nodes)
+    local out   = {}
+
+    for i = 1, #nodes do
+        local ranked = {}
+
+        for j = 1, #nodes do
+            local yards = (i ~= j) and spans[i] and spans[i][j]
+
+            if yards then
+                table.insert(ranked, { index = j, yards = yards })
+            end
+        end
+
+        -- Ties broken on index so the graph is the same graph every time it
+        -- is built. A route that changes between two identical calls is not
+        -- a route the player can be told about.
+        table.sort(ranked, function(a, b)
+            if a.yards == b.yards then
+                return a.index < b.index
+            end
+
+            return a.yards < b.yards
+        end)
+
+        local list = {}
+
+        for rank, entry in ipairs(ranked) do
+            if entry.yards <= Travel.hopYards
+                or rank <= Travel.minimumNeighbours then
+
+                table.insert(list, entry)
+            else
+                -- Ascending, so nothing further can qualify on either test.
+                break
+            end
+        end
+
+        out[i] = list
+    end
+
+    -- AND THE GRAPH IS UNDIRECTED, BECAUSE FLIGHT PATHS ARE.
+    --
+    -- Built one node at a time, `minimumNeighbours` is a rule about who each
+    -- node reaches OUT to, and that is not the same as who reaches it. A lone
+    -- outpost picks its four nearest and every one of them is close enough to
+    -- fill its own four from the crowd nearby -- so the outpost had a way out
+    -- and no way in, and Dijkstra from anywhere on the mainland simply never
+    -- reached it. It vanished from every route, silently, which is the exact
+    -- failure `minimumNeighbours` was written to prevent.
+    for i = 1, #nodes do
+        for _, edge in ipairs(out[i]) do
+            local back    = out[edge.index]
+            local present = false
+
+            for _, other in ipairs(back) do
+                if other.index == i then
+                    present = true
+                    break
+                end
+            end
+
+            if not present then
+                table.insert(back, { index = i, yards = edge.yards })
+            end
+        end
+    end
+
+    neighbourCache[continent] = out
+
+    return out
+end
+
+-- Dijkstra from one flight point to every other, cached per origin.
+--
+-- Per origin rather than all-pairs: the search below prunes most origins
+-- before it ever asks, and paying for a full Floyd-Warshall on sixty nodes at
+-- the first estimate of a session would be a visible hitch for answers that
+-- are mostly never needed. What is computed is kept, and thrown away with the
+-- node list it was derived from.
+local function ShortestFrom(continent, nodes, source)
+    local cache = pathCache[continent]
+
+    if not cache then
+        cache = {}
+        pathCache[continent] = cache
+    end
+
+    if cache[source] then
+        return cache[source]
+    end
+
+    local neighbours = Neighbours(continent, nodes)
+    local count      = #nodes
+    local dist, prev, settled = {}, {}, {}
+
+    dist[source] = 0
+
+    for _ = 1, count do
+        local pick, pickDist
+
+        for index = 1, count do
+            if not settled[index] and dist[index]
+                and (not pickDist or dist[index] < pickDist) then
+
+                pick, pickDist = index, dist[index]
+            end
+        end
+
+        if not pick then
+            -- Everything reachable has been settled. What is left is a
+            -- separate component, and stays unreachable -- which is the
+            -- honest answer for it.
+            break
+        end
+
+        settled[pick] = true
+
+        for _, edge in ipairs(neighbours[pick] or {}) do
+            local through = pickDist + edge.yards
+
+            if not dist[edge.index] or through < dist[edge.index] then
+                dist[edge.index] = through
+                prev[edge.index] = pick
+            end
+        end
+    end
+
+    local result = { dist = dist, prev = prev }
+
+    cache[source] = result
+
+    return result
+end
+
+-- The hops themselves, so `/cn travel` can print the chain rather than a
+-- single number the player cannot check.
+function Travel.LegsBetween(nodes, path, source, target)
+    if not path or not path.dist or not path.dist[target] then
+        return nil
+    end
+
+    local chain, at, guard = {}, target, 0
+
+    while at and guard <= Travel.maximumHops do
+        table.insert(chain, 1, at)
+
+        if at == source then
+            break
+        end
+
+        at    = path.prev[at]
+        guard = guard + 1
+    end
+
+    if chain[1] ~= source then
+        return nil
+    end
+
+    local legs = {}
+
+    for step = 1, #chain - 1 do
+        local a, b = chain[step], chain[step + 1]
+
+        table.insert(legs, {
+            from  = nodes[a] and nodes[a].name,
+            to    = nodes[b] and nodes[b].name,
+            yards = (path.dist[b] or 0) - (path.dist[a] or 0),
+        })
+    end
+
+    return legs
 end
 
 -- Nearest known flight point to a world point, and how far it is.
@@ -32511,8 +34268,6 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         -- hand.
         local flightSpeed, flightMeasured = Travel.FlightSpeed()
 
-        local spans = Spans(continent, nodes)
-
         local originSeconds, arrivalSeconds = {}, {}
 
         -- The cheapest either end can possibly be. Used to abandon an origin
@@ -32563,10 +34318,17 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
                     < bestRanking then
 
                 local origin = nodes[i]
-                local row    = spans[i]
+
+                -- THE WAY THE BIRD ACTUALLY GOES.
+                --
+                -- `spans` is still what the graph is built from, but the
+                -- flight leg is now the shortest path through that graph
+                -- rather than the straight line across it. A pair with no
+                -- path between them has no entry and is not offered.
+                local path = ShortestFrom(continent, nodes, i)
 
                 for j = 1, #nodes do
-                    local flightYards = row and row[j]
+                    local flightYards = (i ~= j) and path.dist[j] or nil
                     local walkIn      = arrivalSeconds[j]
 
                     if flightYards and walkIn then
@@ -32616,11 +34378,23 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
                                 -- ask a further question about the route.
                                 nodeID      = origin.id,
                                 arrivalID   = nodes[j].id,
+
+                                -- The chain itself. One entry means the
+                                -- ordinary direct hop; more means the route
+                                -- goes through flight masters in between,
+                                -- and the player is told which.
+                                legs        = Travel.LegsBetween(
+                                                  nodes, path, i, j),
                             }
 
+                            best.hops = best.legs and #best.legs or 1
+
                             -- A flight estimate is only as good as the
-                            -- flight speed behind it.
+                            -- flight speed behind it -- and a multi-hop
+                            -- route rests on an inferred edge list as well,
+                            -- which is a model and not a measurement.
                             confident = runMeasured and flightMeasured
+                                and best.hops <= 1
                         end
                     end
                 end
@@ -32869,7 +34643,9 @@ CN:RegisterCommand{
             speed, measured
                 and ("|cff999999from " .. Travel.FlightSampleCount()
                     .. " of your own flights|r")
-                or "|cff999999estimated -- take a flight path and it will be measured|r"))
+                or (CN.WithConfidence("", CN.confidence.ESTIMATED)
+                    .. " |cff999999-- take a flight path and it will be "
+                    .. "measured|r")))
 
         if not continent then
             Print("|cff999999The client will not say which continent this is.|r")
@@ -32904,6 +34680,24 @@ CN:RegisterCommand{
                 detail.runToNode, tostring(detail.node), detail.flightYards,
                 detail.runFromNode, detail.yards))
 
+            -- THE CHAIN, NOT JUST ITS ENDS.
+            --
+            -- A two-hop route printed as a single "in the air" figure looks
+            -- like a straight line the player can check against the map and
+            -- find wrong. Printed as its legs it is checkable, which is the
+            -- point of the whole breakdown.
+            local legs = detail.legs or {}
+
+            if #legs > 1 then
+                Print(string.format("  |cff999999%d legs:|r", #legs))
+
+                for index, leg in ipairs(legs) do
+                    Print(string.format("    |cff999999%d. %s to %s, %.0f yd|r",
+                        index, tostring(leg.from), tostring(leg.to),
+                        leg.yards or 0))
+                end
+            end
+
             Print(string.format("  |cff999999running the whole way: %s|r",
                 session and session.FormatDuration
                     and session.FormatDuration(detail.yards / math.max(0.5, runSpeed))
@@ -32914,7 +34708,9 @@ CN:RegisterCommand{
             Print(string.format(
                 "  |cff999999%.0f yd direct at %.0f yd/s%s|r",
                 detail.yards, flySpeed,
-                flyMeasured and "" or " |cff999999(estimated)|r"))
+                flyMeasured and ""
+                    or (" " .. CN.WithConfidence("",
+                        CN.confidence.ESTIMATED))))
         elseif detail and detail.mode == "elsewhere" then
             Print("|cff999999That is on another continent. Portals and boats "
                 .. "are not modelled, so no time is claimed -- but here is "
@@ -33015,7 +34811,13 @@ function Instances.Lockouts()
 
             table.insert(lockouts, {
                 name         = saved.name,
+
+                -- Two ids, deliberately both carried and deliberately named
+                -- differently: `id` is the lockout save, `instanceID` is the
+                -- Encounter Journal's. Handing the first to the journal is
+                -- the defect this pair exists to make impossible.
                 id           = saved.id,
+                instanceID   = saved.instanceID,
                 difficulty   = saved.difficulty,
                 difficultyID = saved.difficultyID,
                 raid         = saved.raid,
@@ -33086,7 +34888,13 @@ function Instances.RemainingBosses(lockout)
         return {}, "the client did not name this instance"
     end
 
-    local encounters = Blizzard.GetInstanceEncounters(lockout.id)
+    -- The JOURNAL's id, not the lockout id. See GetSavedInstances.
+    if not lockout.instanceID then
+        return {}, "the client did not give an Adventure Guide id for this "
+            .. "instance"
+    end
+
+    local encounters = Blizzard.GetInstanceEncounters(lockout.instanceID)
 
     if #encounters == 0 then
         return {}, "the Adventure Guide has no boss list for this instance"
@@ -33129,7 +34937,18 @@ function Instances.WhereDoesItDrop(name)
 
     local results = Blizzard.SearchEncounterJournal(name, 6)
 
-    dropCache[name] = results
+    -- A ZERO IS "NOT YET", NOT "NOTHING".
+    --
+    -- The journal's search is asynchronous, so the first query for a name
+    -- reliably returns nothing. Caching that made the emptiness permanent for
+    -- the session: every later ask returned the memoised zero and the search
+    -- that had by then completed was never read.
+    --
+    -- Only an answer is remembered. The cost of asking again is one search
+    -- the player triggered themselves.
+    if #results > 0 then
+        dropCache[name] = results
+    end
 
     return results
 end
@@ -33651,11 +35470,102 @@ local shownAt = {}
 -- credit the same bucket the showing side incremented.
 local shownRefinement = {}
 
+-- BOUNDED, THE SAME WAY SESSION'S OFFER MEMORY IS.
+--
+-- `shownAt` gained an entry per distinct objective ever put in front of the
+-- player and lost one only on a successful action or on the expired branch,
+-- so anything shown and never acted on stayed forever. `shownRefinement` was
+-- worse: the success path cleared `shownAt[key]` and left the refinement
+-- entry behind unconditionally -- and that is the table the fallback match
+-- loop runs a `string.sub` over on every NEW_PET_ADDED, NEW_MOUNT_ADDED and
+-- NEW_TOY_ADDED.
+--
+-- Session next door carries the identical structure with an expiry and a cap
+-- and a comment calling the unbounded version "a slow leak I shipped in
+-- 0.28.0". The same shape was reintroduced here. Same two bounds, same
+-- hysteresis, same reason.
+local shownCount = 0
+
+Preference.sightingCap     = 400
+Preference.sightingSeconds = 1800
+Preference.sightingSlack   = 0.25
+
+-- Removing a sighting means removing it from both tables. Every path that
+-- used to touch only one of them is why this is a function.
+local function Forget(key)
+    if shownAt[key] ~= nil then
+        shownCount = shownCount - 1
+    end
+
+    shownAt[key]         = nil
+    shownRefinement[key] = nil
+end
+
+Preference.Forget = Forget
+
 local function Now()
     return (GetTime and GetTime()) or (time and time()) or 0
 end
 
 Preference.Now = Now
+
+-- Overshoot by a quarter, then sweep back to the cap -- pruning on every
+-- insert would walk four hundred entries per recommendation, which is the
+-- trade Session already refused to make.
+function Preference.Prune(force)
+    local trigger = Preference.sightingCap * (1 + Preference.sightingSlack)
+
+    if not force and shownCount <= trigger then
+        return 0
+    end
+
+    local now     = Now()
+    local removed = 0
+
+    for key, at in pairs(shownAt) do
+        if (now - at) > Preference.sightingSeconds then
+            Forget(key)
+            removed = removed + 1
+        end
+    end
+
+    if shownCount > Preference.sightingCap then
+        local ordered = {}
+
+        for key, at in pairs(shownAt) do
+            table.insert(ordered, { key = key, at = at })
+        end
+
+        table.sort(ordered, function(a, b)
+            if a.at == b.at then
+                return a.key < b.key
+            end
+
+            return a.at < b.at
+        end)
+
+        for index = 1, shownCount - Preference.sightingCap do
+            if ordered[index] then
+                Forget(ordered[index].key)
+                removed = removed + 1
+            end
+        end
+    end
+
+    -- A refinement entry with no sighting behind it is unreachable, and this
+    -- is the table the fallback loop walks.
+    for key in pairs(shownRefinement) do
+        if shownAt[key] == nil then
+            shownRefinement[key] = nil
+        end
+    end
+
+    return removed
+end
+
+function Preference.SightingCount()
+    return shownCount
+end
 
 -- Hung on the recommendation hook rather than a decorator, deliberately.
 -- Duration learning made exactly this mistake in 0.28.0 and timed all two
@@ -33721,8 +35631,13 @@ CN.RegisterRecommendationHook("Preference", function(results)
                 -- six buckets that each learn nothing beat none at all.
                 local refined = Preference.Refine(objective)
 
-                shownRefinement[objectiveType .. ":" .. tostring(objective.id)]
-                    = refined
+                -- Keyed on `key`, which is what `shownAt` is keyed on and
+                -- what the completion side matches against. It used to
+                -- rebuild the string from the type and id, which is the same
+                -- thing only while `objective.preferenceKey` has not been set
+                -- to something else -- and a refinement filed under a key
+                -- nothing looks up is a refinement that never credits.
+                shownRefinement[key] = refined
 
                 if refined ~= objectiveType then
                     local refinedRow = store[refined]
@@ -33761,7 +35676,13 @@ CN.RegisterRecommendationHook("Preference", function(results)
                     Preference.Decay()
                 end
 
+                if shownAt[key] == nil then
+                    shownCount = shownCount + 1
+                end
+
                 shownAt[key] = now
+
+                Preference.Prune()
             end
         end
     end
@@ -33869,8 +35790,7 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
     end
 
     if (now - last) > Preference.WindowFor(objectiveType) then
-        shownAt[key]         = nil
-        shownRefinement[key] = nil
+        Forget(key)
 
         return false
     end
@@ -33913,7 +35833,9 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
 
     Observed()
 
-    shownAt[key] = nil
+    -- BOTH TABLES. Clearing only `shownAt` here is what left an entry in
+    -- `shownRefinement` for every objective the player ever acted on.
+    Forget(key)
 
     CN.InvalidateRanking()
 
@@ -35791,8 +37713,20 @@ function Contribute.Import(text)
 
         store[questID] = prerequisites
 
+        -- TAGGED WITH WHERE IT CAME FROM.
+        --
+        -- The command promises that `/cn why` "will say the chain came from a
+        -- contribution rather than from curated data", and it did not: an
+        -- imported edge was indistinguishable from a locally observed one, so
+        -- the eligibility checker formatted it as "seen first on N
+        -- characters" -- with N read from the harvest store, which has no
+        -- record of an imported quest and therefore answered zero. The player
+        -- was told the addon had watched the ordering hold on ZERO
+        -- characters, which is both a false provenance claim and nonsense as
+        -- evidence.
         CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
             observedRequires = prerequisites,
+            origin           = "contributed",
         })
     end
 
@@ -35822,6 +37756,7 @@ CN:OnLogin(function()
     for questID, prerequisites in pairs(store) do
         CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
             observedRequires = prerequisites,
+            origin           = "contributed",
         })
     end
 end)
@@ -35972,8 +37907,18 @@ Welcome.choices = {
 function Welcome.Choose(mode)
     Welcome.MarkSeen()
 
-    if not mode or mode == "everything" then
-        return true, "everything"
+    -- "A BIT OF EVERYTHING" SET NOTHING, AND SAID IT HAD.
+    --
+    -- This short-circuited before `ApplyMode`, so the click handler printed
+    -- "Focus set to everything" while `/cn mode` reported no focus and `/cn
+    -- mode off` answered "No focus was set, so nothing changed." Worse: with
+    -- a focus already active -- from an earlier `/cn mode collecting`, say --
+    -- picking "a bit of everything" left thirteen types hidden and told the
+    -- player the focus was now everything.
+    --
+    -- `CN.modes.everything` exists and does exactly the right thing.
+    if not mode then
+        mode = "everything"
     end
 
     local filters = CN:GetModule("Filters")
@@ -36614,6 +38559,15 @@ CN:RegisterCommand{
             .. CN.YesNo(settings.keepFilter))
 
         if not settings.keepFilter then
+            -- Turning it off forgets what it was holding. Leaving the term
+            -- behind means turning the setting back on later silently applies
+            -- a filter the player typed in another session.
+            local ui = CN:GetModule("UI")
+
+            if ui then
+                ui.persistedFilter = nil
+            end
+
             Print("|cff999999Off is the safer default: a filter that persists "
                 .. "invisibly is how a list looks empty when it is not.|r")
         end
@@ -36746,8 +38700,24 @@ end
 -- Wraps a call so a failure is recorded rather than swallowed. Returns the
 -- same thing pcall does, so it is a drop-in replacement at every site that
 -- currently discards the error.
+local function Pack(...)
+    return select("#", ...), { ... }
+end
+
 function Errors.Guard(context, fn, ...)
-    local results = { pcall(fn, ...) }
+    -- COUNTED, NOT MEASURED WITH `#`.
+    --
+    -- This was `local results = { pcall(fn, ...) }` followed by
+    -- `CN.Unpack(results)`, which truncates at the first nil: a wrapped
+    -- function returning `value, nil` came back as one value, so a "drop-in
+    -- replacement" silently changed the arity of whatever it wrapped. `#` on
+    -- a table with holes is undefined in both interpreters -- 5.1 and 5.4
+    -- happen to agree on the cases here, which is precisely the kind of
+    -- agreement this project has learned not to rest on.
+    --
+    -- `table.pack` does not exist in 5.1, so the count is taken with
+    -- `select("#", ...)` inside a varargs helper, which does.
+    local count, results = Pack(pcall(fn, ...))
 
     if not results[1] then
         Errors.Record(context, results[2])
@@ -36759,7 +38729,7 @@ function Errors.Guard(context, fn, ...)
     -- outside the one file that gets audited for exactly this class of
     -- mistake. Equivalent today; the point is that there is one place to fix
     -- it when it is not.
-    return CN.Unpack(results)
+    return CN.Unpack(results, 1, count)
 end
 
 CN.Guard = Errors.Guard
@@ -36783,6 +38753,21 @@ local function Stored()
 end
 
 function Errors.Persist()
+    -- A CLEAN SESSION MUST NOT ERASE THE RECORD OF A BAD ONE.
+    --
+    -- This ran unconditionally on logout, including when nothing had gone
+    -- wrong -- so the sequence the feature exists for destroyed its own
+    -- evidence: something breaks, the player reloads before thinking to look,
+    -- and the reload's empty ring overwrites the record. `/cn errors` then
+    -- says nothing has gone wrong, which is true of the last four seconds and
+    -- false of the thing the player wanted to report.
+    --
+    -- Players reload several times an hour. An empty ring is not news, so it
+    -- is not written.
+    if #ring == 0 then
+        return 0
+    end
+
     local stored = Stored()
 
     for key in pairs(stored) do
@@ -36838,6 +38823,34 @@ CN:RegisterCommand{
             return
         end
 
+        -- EVENT NAMES THE CLIENT REFUSED.
+        --
+        -- `CN.RegisterWithClient` has recorded these since 0.49.0, with a
+        -- comment saying they are kept "so /cn errors can name it". Nothing
+        -- read the table. The secondary path -- recording into this module's
+        -- ring -- cannot fire for the sixty-odd files that load before this
+        -- one, which includes Travel, the very file whose invented
+        -- `NEW_TAXI_NODE` the whole mechanism was written for. A bad event
+        -- name today would reproduce the original symptom exactly: silent,
+        -- and findable only by reading the source.
+        --
+        -- Printed first and unconditionally, because a handler that never
+        -- runs is the failure most likely to be mistaken for "there is just
+        -- nothing to do".
+        local rejected = 0
+
+        for event, why in pairs(CN.rejectedEvents or {}) do
+            if rejected == 0 then
+                Print("|cfff56b61The client refused to register these "
+                    .. "events, so nothing listening for them ever runs:|r")
+            end
+
+            rejected = rejected + 1
+
+            Print("  |cfff56b61" .. tostring(event) .. "|r")
+            Print("    |cff999999" .. tostring(why) .. "|r")
+        end
+
         if #ring == 0 then
             local previous = Errors.Previous()
 
@@ -36854,6 +38867,11 @@ CN:RegisterCommand{
                 Errors.ForgetPrevious()
 
                 Print("|cff999999Shown once, then forgotten.|r")
+                return
+            end
+
+            if rejected > 0 then
+                Print("Nothing else has gone wrong this session.")
                 return
             end
 
@@ -36908,7 +38926,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.52.0
+## Version: 0.53.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -37162,6 +39180,187 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.53.0]
+
+Multi-hop flight routing, and three audits: how state lives and dies, how the
+addon behaves when the client refuses, and whether what it prints is true.
+
+### Added
+
+- **Flight routes go through the network instead of across it.** The flight
+  leg of a journey was the straight-line distance between two flight points,
+  which is the one distance a taxi never travels: the bird hops from master to
+  master, and a pair at opposite ends of a continent is reached through the
+  ones in between. Measuring the hypotenuse understated every long flight, and
+  always in the same direction, so distant objectives were systematically
+  preferred over near ones. Routes are now the shortest path through an
+  inferred flight graph, `/cn travel` prints the chain leg by leg, and a
+  multi-hop estimate is never reported as measured -- the edge list is a
+  model, and it says so.
+- **`/cn handynotes`** lists what HandyNotes plugins are drawing on your map.
+  The function behind it has existed since 0.41.0 with no caller.
+- **`/cn rareforget`** clears the rares this character is assumed to have
+  cleared. See below for why that assumption needed an escape hatch.
+- **`/cn help flat`** prints the ungrouped listing. `ShowFullHelp` was written,
+  exported and called from nowhere.
+
+### Fixed
+
+- **Ignoring or deferring an objective did nothing until something else
+  happened.** The ignore list is read inside candidate providers, at build
+  time, so it was baked into the cached list -- and none of the four mutators
+  invalidated anything. It looked like it worked because most providers rebuild
+  on some event within seconds; for `Mounts`, which waits on a new mount, an
+  ignore could go unhonoured for the rest of the session with the dismissed row
+  still at the top of the list.
+- **Riding past a rare marked it cleared, permanently.** A vignette leaves the
+  client's list for two completely different reasons -- somebody killed it, or
+  you rode out of range -- and the addon assumed the first, with no expiry and
+  no undo. That character was then never offered that rare again. Clearing now
+  needs corroboration (the client said it was dead, or it vanished from within
+  150 yards) and expires at the weekly reset.
+- **An alt was shown its main's quest progress.** `IsQuestFlaggedCompleted`
+  answers for the character asking, and the answer was being written into an
+  account-wide store: a main that ran `/cn scanquests` wrote four thousand of
+  its own completions into a table every alt read as its own, and scanning on
+  the alt destroyed the main's record. The store is gone -- the client answers
+  this for free, per character. The remembered quest locations had the mirror
+  defect: one character finishing a zone deleted the locations for every other
+  character who still had it to do.
+- **An achievement you just earned was recommended again.** The store row was
+  deleted and the shortlist revision was not, so the provider rebuilt, got the
+  cached shortlist back, and re-emitted the completed achievement -- where it
+  stayed until something unrelated moved the revision.
+- **"You are dead -- this is for after" outlived being dead.** Adjusters stamp
+  a sentence explaining the score they returned, onto objectives that live in
+  the cache long after the situation does, and appending was the only operation
+  there was. `/cn why` told living players their recommendation was for later.
+- **Two providers rebuilt six times more often than they asked to.** `volatile`
+  was a peer of the dirty check rather than subordinate to the cooldown, so
+  `Waiting` -- which walks the mail inbox, the bags, the heirlooms and the
+  currency store -- and `Instances` each declared thirty seconds and got five.
+- **A quiet session erased the record of a bad one.** The error log was written
+  on every logout including when it was empty, so the exact sequence the
+  feature exists for -- something breaks, the player reloads before thinking to
+  look -- destroyed its own evidence.
+- **The map still showed stops you had just hidden.** The pin cache was keyed
+  on the candidate generation, and hiding an objective type deliberately does
+  not move that. `/cn zone` and the map disagreed about the same route.
+- **A pinned goal appeared twice and inflated its own hub.** Providers dedupe
+  their own lists; the aggregate concatenated them. Two copies of one objective
+  share a position exactly, so the route reported a hub of two for one real
+  stop and paid a batching bonus for a batching that does not exist.
+- **The HandyNotes integration could not work for anyone who has HandyNotes.**
+  `IteratePlugins` returns a `pairs`-style triplet and the addon captured only
+  the first value, which throws. The test stub was a single closure -- the one
+  shape under which the broken form works.
+- **The Adventure Guide was asked with the wrong id.** `GetSavedInstanceInfo`
+  returns the lockout id in slot 2 and the journal's instance id in slot 14;
+  the addon stored the first and handed it to the journal, so "which bosses are
+  left" always answered that there was no boss list. The fixture had journal
+  ids in slot 2, so the stub and the code shared one wrong belief.
+- **Your Pet Journal filters were reset every thirty seconds.** The file's own
+  comment said the source and type checks were widened "only if the scan would
+  otherwise see nothing"; the code did it on every scan, and the pet scan runs
+  on a timer. Neither checkbox has a getter, so it could not be undone. It now
+  happens only when the journal genuinely reports nothing, and says so out loud
+  when it does. The Toy Box had the same defect.
+- **"Waypoint set" was printed whether or not one was.** The provider's answer
+  was discarded and `true` returned unconditionally -- on maps the client
+  refuses waypoints on, with TomTom absent, and whenever the client would not
+  build a map point. `C_Map.CanSetUserWaypointOnMap` exists to say which maps
+  refuse and was called nowhere in the addon.
+- **Clearing waypoints deleted pins you placed by hand.** There is exactly one
+  user waypoint and it is the player's unless this addon set it; `/cn clearway`
+  and stopping follow mode both removed it unconditionally.
+- **Currencies under a collapsed header were invisible.** The list counts only
+  rows under expanded headers, exactly like the reputation list -- which the
+  addon has handled since 0.30.0. Collapse your profession group, which most
+  people have, and every currency under it vanished from `/cn currencies`,
+  `/cn clock` and the weekly-cap warnings.
+- **One collapsed reputation header collapsed them all.** Captured under
+  `factionID or index` and restored on `factionID` alone; headers carry
+  factionID 0, so they all collided.
+- **`/cn setup` recorded success when every scan had failed**, which stopped the
+  login reminder and made `/cn setup check` answer that everything was scanned.
+  A module that threw was also reported with the word "unavailable" -- a defect
+  presented as a missing feature.
+- **A repeating timer that threw produced a repeating error box.** Five
+  callbacks -- the auto-advance ticker, the session observer, follow mode's
+  tick, the world map hooks and the broker's click and tooltip -- were
+  unguarded. The broker's ran inside the host bar addon.
+- **`/cn next` told new players the addon was quests-only.** A leftover from an
+  early build, printed on the most likely first thing anyone sees, and false
+  since the second release. All four empty-state messages now come from one
+  explanation that can also distinguish "nothing to do" from "the engine
+  threw" -- which previously looked identical.
+- **`/cn where am i` could not be typed.** The dispatcher splits on the first
+  space, so a registered, documented, multi-word command was unreachable.
+- **`/cn zones` ran a different command than its help text described.** It was
+  registered as a command and, further down the same file, as an alias of
+  `/cn loremaster`; the alias loaded later and won. Registration now records
+  collisions and the test suite fails on them.
+- **The welcome window's "a bit of everything" set nothing** while printing
+  that it had -- and left every type hidden if a focus was already active.
+- **Three of the ten "weighting only" modes silently applied filters**, because
+  they exist in both tables and the preset is tried first. `/cn mode profile
+  <name>` now asks for the weighting alone.
+- **An unknown expiry was printed as "expired"**, so a live world quest sat at
+  the bottom of a list headed "soonest to expire", labelled expired.
+- **An imported quest chain was reported as observed on zero characters.** The
+  edges carried no origin, so the eligibility line asked the harvest store --
+  which has no record of an imported quest -- and printed the zero as evidence.
+- **The exploration percentage was computed against the addon's own scan** and
+  read as the world. The module's header says a real one is uncomputable; the
+  code printed one anyway. The counts remain.
+- **Raw enums were shown where a label belongs** -- `(ACHIEVEMENT)` in `/cn
+  next`, and `MOUNT` as the broker's name in Titan Panel and ElvUI.
+- **The follow-mode completion flourish fired on every stop past the end.**
+- **`CN.Guard` changed the arity of what it wrapped**, truncating at a trailing
+  nil.
+- **The bearing shim had no callers.** `CN.Mod` is documented as the mandatory
+  floored modulo and the one place that wraps an angle used two unbounded
+  `while` loops instead.
+- Nine smaller corrections: a fabricated battle-pet denominator, a hardcoded
+  English string two lines from its own translation, `/cn order` clamping
+  silently, a help entry that printed nothing, `/cn who` promising name
+  resolution for four types and supporting two, `/cn percharacter` listing four
+  of six overridable settings, a durations formatter rendering twenty-five
+  seconds as "0m", two error messages naming commands that cannot do what the
+  message says, and an inert `enabled` setting nothing had ever read.
+
+### Changed
+
+- **Persistence pruned again.** The quest-status store is gone entirely (the
+  client answers it for free), the harvest store no longer keeps a map name it
+  can derive from a map id, and it has a ceiling for the first time -- it was
+  the largest thing the addon saved and the only large store with no bound.
+  Database version 8.
+- **Reputation scope corrections apply.** Writing a faction to one scope now
+  clears the other, so a faction Blizzard moves between account-wide and
+  character-specific cannot leave a stale row winning forever.
+- The `/cn locale` report now says what it is a report about: the recurring
+  strings routed through the locale table, not every line the addon prints.
+- The Collections tab says its percentages are of the last scan.
+- `/cn warband` puts its caveat on the number rather than only on the
+  one-character case.
+
+### Testing
+
+- 81 mutations killed, none surviving, up from 67.
+- Coverage floor raised from 82% to 85%, closing a backlog item open since
+  0.31.0. `Alts` went from 49.6% to 73.5%; the TomTom and HandyNotes providers,
+  the key bindings, the minimap button and the whole window rebuilt with every
+  Blizzard template retired are now exercised.
+- The fixture audit no longer prints a count that reads as coverage when three
+  of its seven rules were skipped for want of a recording. It names them.
+- The API-surface extractor no longer harvests example code out of comments,
+  which had made one of those rules permanently unpassable.
+- The stubs for the currency list, the reputation headers, the pet and toy
+  filters, the user waypoint, the saved-instance tuple and the HandyNotes
+  iterator were all more forgiving than the client. They are not now.
+
 
 ## [0.52.0]
 
@@ -40576,6 +42775,8 @@ Half an hour is not the same question as "what should I do next", and it gets it
 
 Travel time is **computed** from the journey you would actually make, weighing three options against each other: run it, take a flight path from the nearest point **you have discovered**, or fly it yourself — whichever is genuinely quicker. Your speed is measured from your own play, separately for running, riding and flying, because those are three different numbers and one median across them is wrong in all three. Task time is **learned** the same way, and learned as the *work* — the journey is taken back out, because the plan adds it separately and counting it twice is how a twelve-minute stop gets quoted as thirty-six. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
 
+The flight itself is costed through the **network**, not across it. A bird hops from flight master to flight master, so a pair at opposite ends of a continent is reached through the ones in between — and measuring the straight line between the two ends understates every long flight, always in the same direction. Routes are the shortest path through the flight points you have discovered, `/cn travel` prints the chain leg by leg so you can check it against your own map, and a route that needs more than one hop is never reported as measured: the connections between flight masters are inferred, and inferred is not the same as known.
+
 A journey it cannot model — another continent, reached by a portal — still refuses to invent a duration, but it lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. Where a teleport lands somewhere fixed, the whole journey is costed straight through it — *"hearth, then four minutes"* rather than a list to work from yourself. The three that go wherever you happen to be bound say so instead of guessing. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
 ## Aim it in one command
@@ -40873,7 +43074,8 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn instances` | What you are saved to, and how much of it is left |
 | `/cn drops <name>` | Which boss drops it, and whether you are locked to it |
 | `/cn learned` | What the addon has worked out about how you play |
-| `/cn travel` | How long it takes to reach the top recommendation, and by what route |
+| `/cn travel` | How long it takes to reach the top recommendation, and by what route — leg by leg |
+| `/cn handynotes` | What HandyNotes plugins are drawing on this map, shown rather than scored |
 | `/cn situation` | What the addon thinks you are in the middle of |
 | `/cn waiting` | Quests you have seen and never picked up, by zone |
 | `/cn orders` | Crafting orders you placed, and anything ready to collect |
@@ -40911,7 +43113,7 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks — at a realistic scale of 1,800 pets, 3,000 achievements, 2,500 recipes, 3,000 appearance sets, five full bags and a continent's worth of flight points — costs about **four milliseconds**, and the answer to "what next?" is served from cache in **five microseconds**.
 
-Those figures got better by making the benchmark harder. Three of the most expensive things the addon does had been measured against fixtures holding three appearance sets, three bags of items and three flight points, and at that size all three looked free. At the size the game actually produces, a rebuild cost eleven milliseconds — most of a frame, on every event that changes the answer. Costing a single journey has since gone from 1.48 milliseconds to 0.04, and no answer changed.
+Those figures got better by making the benchmark harder. Three of the most expensive things the addon does had been measured against fixtures holding three appearance sets, three bags of items and three flight points, and at that size all three looked free. At the size the game actually produces, a rebuild cost eleven milliseconds — most of a frame, on every event that changes the answer. Costing a single journey has since gone from 1.48 milliseconds to under a tenth of that, and routing it through the flight network rather than across it did not put that back.
 
 Tooltip lines are the same story: hovering an item answers from an index rather than searching everything the addon knows, so mousing across a full bag costs nothing you can feel. It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer — the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 
@@ -40970,7 +43172,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.52.0
+0.53.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -41224,7 +43426,7 @@ jobs:
       - name: Coverage
         continue-on-error: true
         timeout-minutes: 6
-        run: bash coverage.sh . 82
+        run: bash coverage.sh . 85
 
       # The packager SKIPS the CurseForge upload silently when CF_API_KEY is
       # missing -- the build still goes green and no file appears. Fail here
@@ -41642,14 +43844,12 @@ mutate "Modules/Travel.lua" \
     "the pruning bound discards a route that would have won"
 
 mutate "Modules/Travel.lua" \
-    "function Travel.ForgetNodes()
-    nodeCache = {}
-    spanCache = {}
-end" \
-    "function Travel.ForgetNodes()
-    nodeCache = {}
-end" \
-    "the flight-leg distances outlive the node list they describe"
+    "    nodeCache      = {}
+    spanCache      = {}
+    neighbourCache = {}
+    pathCache      = {}" \
+    "    nodeCache      = {}" \
+    "the flight network outlives the node list it describes"
 
 mutate "Modules/Travel.lua" \
     "                                runToNode   = walkOut * runSpeed," \
@@ -41769,8 +43969,10 @@ mutate "Modules/Harvest.lua" \
 # The 0.49.0 audit: four features that had been silently off, and the two
 # stubs that agreed with them.
 mutate "Providers/BlizzardWorld.lua" \
-    "            _, isRaid, _, difficultyName, encounters, defeated =" \
-    "            _, isRaid, _, difficultyName, defeated, encounters =" \
+    "            _, isRaid, _, difficultyName, encounters, defeated, _,
+            journalInstanceID =" \
+    "            _, isRaid, _, difficultyName, defeated, encounters, _,
+            journalInstanceID =" \
     "lockout progress and total are read in the wrong order"
 
 mutate "Modules/Waiting.lua" \
@@ -41929,6 +44131,102 @@ mutate "Modules/Travel.lua" \
     "    { kind = \"spell\", id = 50977,  label = \"Death Gate\" }," \
     "a teleport loses the destination that makes it costable"
 
+
+# 0.53.0: multi-hop routing, and the state and honesty audits.
+mutate "Modules/Travel.lua" \
+    "                local flightYards = (i ~= j) and path.dist[j] or nil" \
+    "                local flightYards = (i ~= j) and Spans(continent, nodes)[i][j] or nil" \
+    "the flight leg is a straight line again instead of a route"
+
+mutate "Modules/Travel.lua" \
+    "            if not present then
+                table.insert(back, { index = i, yards = edge.yards })
+            end" \
+    "            if false then
+                table.insert(back, { index = i, yards = edge.yards })
+            end" \
+    "the flight network is directed, so an outpost has no way in"
+
+mutate "Modules/Travel.lua" \
+    "    if #usable > 0 then
+        nodeCache[continent] = usable
+    end" \
+    "    nodeCache[continent] = usable" \
+    "an empty flight-point list is remembered for the session"
+
+mutate "Objectives.lua" \
+    "local function Rebuild()
+    if CN.InvalidateCandidates then
+        CN.InvalidateCandidates()
+    end
+end" \
+    "local function Rebuild()
+end" \
+    "ignoring something does not take effect until something else changes"
+
+mutate "Scoring.lua" \
+    "            or (provider.volatile and cooled" \
+    "            or (provider.volatile and true" \
+    "a volatile provider ignores the cooldown it asked for"
+
+mutate "Modules/Errors.lua" \
+    "    if #ring == 0 then
+        return 0
+    end" \
+    "    if false then
+        return 0
+    end" \
+    "a clean session erases the previous session's error record"
+
+mutate "Modules/Achievements.lua" \
+    "        Achievements.revision = Achievements.revision + 1
+
+        DebugPrint(\"Achievement earned: \" .. tostring(achievementID))" \
+    "        DebugPrint(\"Achievement earned: \" .. tostring(achievementID))" \
+    "an earned achievement stays in the shortlist and is offered again"
+
+mutate "Modules/Rares.lua" \
+    "            elseif entry.yards and entry.yards <= Rares.clearedWithinYards then" \
+    "            elseif true then" \
+    "riding past a rare marks it cleared for this character"
+
+mutate "Providers/TomTom.lua" \
+    "        if asked and not allowed then
+            return false, \"the game does not allow a waypoint on this map\"
+        end" \
+    "        if false then
+            return false, \"the game does not allow a waypoint on this map\"
+        end" \
+    "a waypoint the client refuses is reported as set"
+
+mutate "Modules/Navigation.lua" \
+    "    if Navigation.ownsUserWaypoint and C_Map and C_Map.ClearUserWaypoint then" \
+    "    if C_Map and C_Map.ClearUserWaypoint then" \
+    "clearing waypoints deletes a pin the player placed by hand"
+
+mutate "Providers/BlizzardCollections.lua" \
+    "    if select(1, Blizzard.GetNumPets()) == 0 then" \
+    "    if true then" \
+    "the pet journal's source and type filters are widened on every scan"
+
+mutate "Providers/Blizzard.lua" \
+    "        if data.factionID and data.factionID ~= 0 then
+            return \"id:\" .. tostring(data.factionID)
+        end" \
+    "        if data.factionID then
+            return \"id:\" .. tostring(data.factionID)
+        end" \
+    "every reputation header collides on factionID zero"
+
+mutate "Providers/HandyNotes.lua" \
+    "        for name in step, state, control do" \
+    "        for name in step do" \
+    "the HandyNotes plugin iterator drops its state table"
+
+mutate "Modules/Instances.lua" \
+    "                instanceID   = saved.instanceID," \
+    "                instanceID   = saved.id," \
+    "the Adventure Guide is asked with a lockout id"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -42308,7 +44606,17 @@ UIParent     = Frame()
 SlashCmdList = {}
 
 -- WoW exposes these as globals.
-time    = os.time
+--
+-- `time` is offsettable, because several caches in the addon are throttled on
+-- WALL-CLOCK seconds and a suite that cannot move the wall clock cannot test
+-- a throttle at all. `CN_TEST_TIME_OFFSET` is added to every reading, so a
+-- test can say "and now it is thirty-one seconds later" without sleeping.
+CN_TEST_TIME_OFFSET = 0
+
+time    = function(...)
+    return os.time(...) + CN_TEST_TIME_OFFSET
+end
+
 date    = os.date
 
 -- Millisecond profiler. Present in the client, absent in plain Lua, so the
@@ -42508,8 +44816,33 @@ C_Map = {
         return F.mapTree[id] or { name = "Map" .. tostring(id), mapType = 3 }
     end,
     GetMapChildrenInfo   = function(id) return F.mapChildren[id] or {} end,
-    SetUserWaypoint      = function() end,
-    ClearUserWaypoint    = function() end,
+    -- THE USER WAYPOINT IS STATE, AND THERE IS EXACTLY ONE OF IT.
+    --
+    -- These were two no-ops, so nothing could tell the difference between an
+    -- addon that set a pin and one that did not, or between clearing its own
+    -- pin and deleting one the player placed by hand. Modelled as the single
+    -- slot the client actually has.
+    SetUserWaypoint      = function(point)
+        CN_TEST_USER_WAYPOINT = point
+        return true
+    end,
+    GetUserWaypoint      = function() return CN_TEST_USER_WAYPOINT end,
+    ClearUserWaypoint    = function()
+        CN_TEST_USER_WAYPOINT = nil
+        return true
+    end,
+    -- Refused on dungeon, raid, cosmic and continent maps in the real client.
+    -- Modelled with a switch so a test can reach the refusal, which the addon
+    -- never asked about until 0.53.0.
+    CanSetUserWaypointOnMap = function(mapID)
+        if CN_TEST_WAYPOINT_BANNED_MAPS
+            and CN_TEST_WAYPOINT_BANNED_MAPS[mapID] then
+
+            return false
+        end
+
+        return true
+    end,
     -- NOT A SQUARE, because no zone in the game is one.
     --
     -- This stub was a flat 1000x1000 yard square for eight releases, which
@@ -42871,8 +45204,20 @@ CN_TEST_ON_TAXI = false
 -- shape a hand-written stub gets subtly wrong. /cn capture records the real
 -- one and the fixture audit at the end of this file compares them.
 CN_TEST_SAVED_INSTANCES = {
-    -- name, id, reset, difficultyID, locked, extended, _, isRaid, _,
-    -- difficultyName, numEncounters, encounterProgress
+    -- name, lockoutID, reset, difficultyID, locked, extended, _, isRaid, _,
+    -- difficultyName, numEncounters, encounterProgress, extendDisabled,
+    -- instanceID
+    --
+    -- TWO ID SPACES, AND THE FIXTURE USED TO CONFLATE THEM. Slot 2 held
+    -- 1273 and 1274, which are the ENCOUNTER JOURNAL instance ids -- the
+    -- same numbers CN_TEST_EJ_INSTANCES is keyed by. So the addon handing
+    -- slot 2 to EJ_SelectInstance worked here and could never work in game,
+    -- where slot 2 is an opaque lockout save id.
+    --
+    -- Slot 2 now holds a realistic lockout id and slot 14 the journal id, so
+    -- the two can never be confused again: code that reaches for the wrong
+    -- one gets an id the journal has never heard of, exactly as it would in
+    -- game.
     --
     -- TOTAL FIRST, THEN PROGRESS. This comment used to read "defeated,
     -- encounters" and the rows were written in that order, matching a bug in
@@ -42881,10 +45226,10 @@ CN_TEST_SAVED_INSTANCES = {
     -- `complete` went true, and the Instances provider returned nothing at
     -- all. The stub and the code shared one wrong belief and the suite
     -- agreed with both.
-    { "Nerub-ar Palace", 1273, 3 * 86400, 14, true, false, false, true,
-      false, "Normal", 8, 6 },
-    { "Ara-Kara, City of Echoes", 1274, 86400, 23, true, false, false, false,
-      false, "Mythic", 4, 4 },
+    { "Nerub-ar Palace", 2147483001, 3 * 86400, 14, true, false, false, true,
+      false, "Normal", 8, 6, false, 1273 },
+    { "Ara-Kara, City of Echoes", 2147483002, 86400, 23, true, false, false,
+      false, false, "Mythic", 4, 4, false, 1274 },
     -- Saved to it, but nothing killed in it yet. The client lists these, and
     -- they are NOT a next action: an untouched lockout is a decision about
     -- the evening, not spent effort that expires.
@@ -42894,8 +45239,8 @@ CN_TEST_SAVED_INSTANCES = {
     -- one -- the first version of this row had eight bosses and was being
     -- dropped for being too long, so the rule could have been deleted
     -- entirely and the suite would have agreed.
-    { "Liberation of Undermine", 1296, 5 * 86400, 14, true, false, false, true,
-      false, "Normal", 3, 0 },
+    { "Liberation of Undermine", 2147483003, 5 * 86400, 14, true, false, false,
+      true, false, "Normal", 3, 0, false, 1296 },
 }
 
 function GetNumSavedInstances()
@@ -42910,7 +45255,7 @@ function GetSavedInstanceInfo(index)
     end
 
     return row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8],
-        row[9], row[10], row[11], row[12]
+        row[9], row[10], row[11], row[12], row[13], row[14]
 end
 
 -- THE ADVENTURE GUIDE, INCLUDING THE PART THAT MAKES IT DANGEROUS.
@@ -43003,6 +45348,10 @@ end
 
 function EJ_ClearSearch()
     CN_TEST_EJ_SEARCH = nil
+
+    -- Clearing the search drops the selection too, which is what makes it the
+    -- only lever for restoring "nothing was selected".
+    CN_TEST_EJ_SELECTED = nil
 end
 
 function EJ_GetNumSearchResults()
@@ -43275,6 +45624,16 @@ for i, label in ipairs(standings) do
     _G["FACTION_STANDING_LABEL" .. i] = label
 end
 
+-- A HEADER WITH factionID = 0, WHICH IS WHAT THE CLIENT GIVES.
+--
+-- The addon captured collapsed headers under `data.factionID or index` and
+-- restored on `data.factionID` alone, so every header collided on
+-- `collapsed[0]`: one collapsed header made the restore collapse them all.
+-- The fixture had exactly one header, never collapsed, so neither half of
+-- that could show.
+--
+-- Two headers now, one of them collapsed, and both with id 0 -- which is the
+-- shape that broke it.
 local factions = {
     { factionID = 0,    name = "The War Within", isHeader = true,  isCollapsed = false },
     { factionID = 2600, name = "The Severed Threads", reaction = 5,
@@ -43287,7 +45646,12 @@ local factions = {
       currentStanding = 5000, currentReactionThreshold = 4000, nextReactionThreshold = 9000 },
     { factionID = 946,  name = "Honor Hold", reaction = 8, isHeader = true, isHeaderWithRep = true,
       currentStanding = 43000, currentReactionThreshold = 42000, nextReactionThreshold = 43000 },
+    { factionID = 0,    name = "Legacy", isHeader = true, isCollapsed = true },
 }
+
+function CN_TEST_Factions()
+    return factions
+end
 
 local accountWideFactions = { [2600] = true, [2590] = true }
 local majorFactions       = { [2600] = true, [2590] = true }
@@ -43308,8 +45672,27 @@ C_Reputation = {
     IsMajorFaction          = function(id) return majorFactions[id] == true end,
     IsFactionParagon        = function(id) return paragonFactions[id] == true end,
     GetFactionParagonInfo   = function(id) return 7500, 10000, 80001, true end,
-    ExpandAllFactionHeaders = function() expandCalls = expandCalls + 1 end,
-    CollapseFactionHeader   = function() collapseCalls = collapseCalls + 1 end,
+    -- NOT PURE COUNTERS. These used to increment and change nothing, so the
+    -- round trip -- and the index shifting a real expand causes -- went
+    -- untested. They now move the state the addon reads back.
+    ExpandAllFactionHeaders = function()
+        expandCalls = expandCalls + 1
+
+        for _, faction in ipairs(factions) do
+            if faction.isHeader then
+                faction.isCollapsed = false
+            end
+        end
+    end,
+    CollapseFactionHeader   = function(index)
+        collapseCalls = collapseCalls + 1
+
+        local faction = factions[index]
+
+        if faction and faction.isHeader then
+            faction.isCollapsed = true
+        end
+    end,
 }
 
 C_MajorFactions = {
@@ -43404,8 +45787,19 @@ C_PetJournal = {
     -- standing rule is that it prompts and does not act.
     GetSearchFilter          = function() return CN_TEST_PET_FILTERS.search or "" end,
     SetSearchFilter          = function(text) CN_TEST_PET_FILTERS.search = text end,
-    SetAllPetSourcesChecked  = function() CN_TEST_PET_FILTERS.sources = true end,
-    SetAllPetTypesChecked    = function() CN_TEST_PET_FILTERS.types = true end,
+    -- Counted as well as recorded, so a test can assert the addon did NOT
+    -- reach for these -- which is the property that matters, since neither
+    -- has a getter and neither can be undone.
+    SetAllPetSourcesChecked  = function()
+        CN_TEST_PET_FILTERS.sources = true
+        CN_TEST_PET_FILTERS.sourceWidens =
+            (CN_TEST_PET_FILTERS.sourceWidens or 0) + 1
+    end,
+    SetAllPetTypesChecked    = function()
+        CN_TEST_PET_FILTERS.types = true
+        CN_TEST_PET_FILTERS.typeWidens =
+            (CN_TEST_PET_FILTERS.typeWidens or 0) + 1
+    end,
 
     IsFilterChecked = function(which)
         if which == LE_PET_JOURNAL_FILTER_COLLECTED then
@@ -43471,7 +45865,12 @@ C_ToyBox = {
     SetFilterString         = function() end,
     SetCollectedShown       = function() end,
     SetUncollectedShown     = function() end,
-    SetAllSourceTypeFilters = function() end,
+    -- COUNTED, NOT DISCARDED. This was `function() end`, so a suite that
+    -- could not observe the call could not notice that the addon made it
+    -- unconditionally and never put it back.
+    SetAllSourceTypeFilters = function()
+        CN_TEST_TOY_SOURCES_WIDENED = (CN_TEST_TOY_SOURCES_WIDENED or 0) + 1
+    end,
     GetNumFilteredToys      = function() return #toys end,
     GetToyFromIndex         = function(i) return toys[i] and toys[i].itemID or nil end,
     GetToyInfo              = function(itemID)
@@ -43867,24 +46266,29 @@ end
 ------------------------------------------------------------
 
 HandyNotes = {
+    -- SHAPED LIKE THE REAL ONE, WHICH IS A `pairs`-STYLE TRIPLET.
+    --
+    -- This used to be a single self-contained closure. HandyNotes returns
+    -- `next, self.plugins, nil` -- three values -- and a self-contained
+    -- closure is the one shape under which `pcall(iterate, root)` capturing
+    -- only the first return still works. So the addon's HandyNotes
+    -- integration was broken for every real player and green in the suite.
+    --
+    -- Returning the triplet means a caller that drops the state table gets
+    -- the same error here that the client gives: next(nil, nil).
     IteratePlugins = function(self)
-        local delivered = false
-        return function()
-            if delivered then return nil end
-            delivered = true
-            return "HandyNotes_Treasures", {
+        return next, {
+            HandyNotes_Treasures = {
                 GetNodes2 = function(_, mapID, minimap)
-                    if mapID ~= 94 then return function() return nil end end
-                    local sent = false
-                    return function()
-                        if sent then return nil end
-                        sent = true
-                        -- HandyNotes packs x,y into one integer.
-                        return 45006200, { label = "Hidden Cache" }
+                    if mapID ~= 94 then
+                        return next, {}, nil
                     end
+
+                    -- HandyNotes packs x,y into one integer.
+                    return next, { [45006200] = { label = "Hidden Cache" } }, nil
                 end,
-            }
-        end
+            },
+        }, nil
     end,
 }
 
@@ -43903,50 +46307,113 @@ HandyNotes = {
 -- Ninth time a stub and the code shared one wrong belief. The id is kept
 -- alongside the row for the LINK function to return, which is how the client
 -- actually supplies it.
-local currencyIDs = { 3008, 2245, 1602, 3009 }
-
-local currencyList = {
-    { name = "Valorstones", quantity = 2000, maxQuantity = 2000,
-      quantityEarnedThisWeek = 0, maxWeeklyQuantity = 0, totalEarned = 5000 },
-    { name = "Flightstones", quantity = 400, maxQuantity = 2000,
-      quantityEarnedThisWeek = 300, maxWeeklyQuantity = 1000, totalEarned = 900 },
-    { name = "Conquest", quantity = 0, maxQuantity = 0,
+-- HEADERS THAT ACTUALLY COLLAPSE.
+--
+-- `GetCurrencyListSize` counts only rows under EXPANDED headers -- exactly
+-- like the faction list. The stub had one header, at the END of the list,
+-- permanently open, so nothing under a collapsed header ever existed to be
+-- lost and the addon's failure to expand the list was invisible.
+--
+-- Modelled properly: a full list, a visible view derived from it, and an
+-- `ExpandCurrencyList` that changes which rows the other two functions can
+-- see. A collapsed group at the FRONT, so the index shifting is real.
+CN_TEST_CURRENCY_ROWS = {
+    { isHeader = true, name = "Player", isHeaderExpanded = true },
+    { name = "Valorstones", currencyID = 3008, quantity = 2000,
+      maxQuantity = 2000, quantityEarnedThisWeek = 0, maxWeeklyQuantity = 0,
+      totalEarned = 5000 },
+    { name = "Flightstones", currencyID = 2245, quantity = 400,
+      maxQuantity = 2000, quantityEarnedThisWeek = 300,
+      maxWeeklyQuantity = 1000, totalEarned = 900 },
+    { isHeader = true, name = "Player vs. Player", isHeaderExpanded = true },
+    { name = "Conquest", currencyID = 1602, quantity = 0, maxQuantity = 0,
       quantityEarnedThisWeek = 0, maxWeeklyQuantity = 1350, totalEarned = 0 },
     -- Weekly profession knowledge: the thing `/cn clock` calls the most
     -- permanently missable in the game, and which it has never once listed.
-    { name = "Alchemy Knowledge", quantity = 1, maxQuantity = 0,
-      quantityEarnedThisWeek = 1, maxWeeklyQuantity = 3, totalEarned = 1 },
-    { isHeader = true, name = "Header Row" },
+    -- Deliberately under a header the player has COLLAPSED, which is the
+    -- ordinary state of the profession group for most people.
+    { isHeader = true, name = "Professions", isHeaderExpanded = false },
+    { name = "Alchemy Knowledge", currencyID = 3009, quantity = 1,
+      maxQuantity = 0, quantityEarnedThisWeek = 1, maxWeeklyQuantity = 3,
+      totalEarned = 1 },
 }
+
+-- What the client would actually list, given the current header states.
+local function CurrencyVisible()
+    local visible = {}
+    local showing = true
+
+    for _, row in ipairs(CN_TEST_CURRENCY_ROWS) do
+        if row.isHeader then
+            showing = row.isHeaderExpanded ~= false
+
+            table.insert(visible, row)
+        elseif showing then
+            table.insert(visible, row)
+        end
+    end
+
+    return visible
+end
+
+CN_TEST_CurrencyVisible = CurrencyVisible
 
 local currencyByID = {}
 
-for index, id in ipairs(currencyIDs) do
-    local row = {}
+for _, row in ipairs(CN_TEST_CURRENCY_ROWS) do
+    if row.currencyID then
+        local copy = {}
 
-    for key, value in pairs(currencyList[index]) do
-        row[key] = value
+        for key, value in pairs(row) do
+            copy[key] = value
+        end
+
+        currencyByID[row.currencyID] = copy
     end
-
-    row.currencyID = id
-
-    currencyByID[id] = row
 end
 
 C_CurrencyInfo = {
-    GetCurrencyListSize = function() return #currencyList end,
-    GetCurrencyListInfo = function(i) return currencyList[i] end,
+    GetCurrencyListSize = function() return #CurrencyVisible() end,
 
-    -- The only place the client will tell you which currency a row is.
-    GetCurrencyListLink = function(i)
-        local id = currencyIDs[i]
+    -- CurrencyDisplayInfo carries no currencyID, so the row the addon sees
+    -- must not have one. A copy is handed out with the id stripped, which is
+    -- what the client does.
+    GetCurrencyListInfo = function(i)
+        local row = CurrencyVisible()[i]
 
-        if not id then
+        if not row then
             return nil
         end
 
-        return "|cffffffff|Hcurrency:" .. id .. "|h["
-            .. currencyList[i].name .. "]|h|r"
+        local view = {}
+
+        for key, value in pairs(row) do
+            view[key] = value
+        end
+
+        view.currencyID = nil
+
+        return view
+    end,
+
+    -- The only place the client will tell you which currency a row is.
+    GetCurrencyListLink = function(i)
+        local row = CurrencyVisible()[i]
+
+        if not row or not row.currencyID then
+            return nil
+        end
+
+        return "|cffffffff|Hcurrency:" .. row.currencyID .. "|h["
+            .. row.name .. "]|h|r"
+    end,
+
+    ExpandCurrencyList = function(index, expand)
+        local row = CurrencyVisible()[index]
+
+        if row and row.isHeader then
+            row.isHeaderExpanded = expand and true or false
+        end
     end,
     GetCurrencyInfo     = function(id)
         return currencyByID[id]
@@ -44388,6 +46855,103 @@ assert(type(CompletionNavigator_NextObjective) == "function", "keybinding entry 
 assert(type(CompletionNavigator_Navigate) == "function", "keybinding entry point missing")
 assert(db.settings.minimap and db.settings.minimap.angle, "minimap settings must persist")
 
+------------------------------------------------------------
+-- THE BINDINGS AND THE MINIMAP BUTTON MUST ACTUALLY DO SOMETHING.
+--
+-- Every one of these is a function `Bindings.xml` names, so a keystroke lands
+-- straight in it with no other code in between. The suite asserted only that
+-- they EXIST -- which is the same shape as the API census: a name that
+-- resolves proves nothing about what happens when it is called.
+------------------------------------------------------------
+do
+    local errors = CN:GetModule("Errors")
+
+    errors.Clear()
+
+    for _, entry in ipairs({
+        { "ToggleUI",     CompletionNavigator_ToggleUI },
+        { "NextObjective", CompletionNavigator_NextObjective },
+        { "Navigate",     CompletionNavigator_Navigate },
+        { "ToggleFollow", CompletionNavigator_ToggleFollow },
+        { "Plan",         CompletionNavigator_Plan },
+        { "ToggleHud",    CompletionNavigator_ToggleHud },
+    }) do
+        assert(type(entry[2]) == "function",
+            "Bindings.xml names " .. entry[1] .. " and it must exist")
+
+        local ok, err = pcall(entry[2])
+
+        assert(ok, "pressing the " .. entry[1] .. " key must not error: "
+            .. tostring(err))
+    end
+
+    -- ToggleUI was called an even number of times above only by accident, so
+    -- put the window back deliberately.
+    if CN.UI.IsShown and CN.UI.IsShown() then
+        CN.UI.Toggle()
+    end
+
+    -- Undo the two that changed state.
+    if CN:GetModule("Follow").active then
+        CN.HandleSlashCommand("follow")
+    end
+
+    assert(errors.Count() == 0,
+        "and none of them may record a failure; " .. errors.Count() .. " did")
+
+    ------------------------------------------------------------
+    -- THE MINIMAP BUTTON, INCLUDING THE MIDDLE CLICK NOTHING DOCUMENTED.
+    ------------------------------------------------------------
+    local button = _G.CompletionNavigatorMinimapButton
+
+    assert(button, "the minimap button must be published as a global, or "
+        .. "nothing can reach it")
+
+    for _, click in ipairs({ "LeftButton", "RightButton", "MiddleButton" }) do
+        local ok, err = pcall(button:GetScript("OnClick"), button, click)
+
+        assert(ok, click .. " on the minimap button must not error: "
+            .. tostring(err))
+    end
+
+    if CN.UI.IsShown and CN.UI.IsShown() then
+        CN.UI.Toggle()
+    end
+
+    if CN:GetModule("Follow").active then
+        CN.HandleSlashCommand("follow")
+    end
+
+    -- Hover, which is where the recommendation is shown, and the drag that
+    -- moves the button around the minimap.
+    assert(pcall(button:GetScript("OnEnter"), button),
+        "hovering the minimap button must not error")
+
+    assert(pcall(button:GetScript("OnLeave"), button),
+        "nor must leaving it")
+
+    local angleBefore = db.settings.minimap.angle
+
+    assert(pcall(button:GetScript("OnDragStart"), button),
+        "starting a drag must not error")
+
+    local update = button:GetScript("OnUpdate")
+
+    if update then
+        assert(pcall(update, button), "and the drag's per-frame update must "
+            .. "not error either")
+    end
+
+    assert(pcall(button:GetScript("OnDragStop"), button),
+        "nor must releasing it")
+
+    assert(type(db.settings.minimap.angle) == "number",
+        "and the button's position stays a number after a drag, was "
+        .. tostring(angleBefore))
+
+    print("  6 key bindings and 3 minimap clicks all reach real code")
+end
+
 -- Scoped: Lua caps a function at 200 locals and this file
 -- outgrew it. Each self-contained section gets its own scope.
 do
@@ -44651,6 +47215,66 @@ assert(currencies[2245].capped == false, "a currency below max must not be cappe
 assert(currencies[2245].weeklyRemaining == 700,
     "weekly remaining must be max minus earned, got "
     .. tostring(currencies[2245].weeklyRemaining))
+
+-- AND THE ONE UNDER A COLLAPSED HEADER.
+--
+-- `GetCurrencyListSize` counts only rows under expanded headers. The
+-- reputation path expands, scans and restores; the currency path did not, so
+-- a player who had collapsed their profession group -- which is most people
+-- -- lost every currency under it from `/cn currencies`, `/cn clock` and the
+-- weekly-cap warnings, silently. The fixture's only header used to sit at the
+-- end of the list and was never collapsed, so nothing could be lost.
+assert(currencies[3009],
+    "a currency under a header the player collapsed must still be found; "
+    .. "the list has to be expanded to read it")
+
+-- And put back exactly as it was found.
+for _, row in ipairs(CN_TEST_CURRENCY_ROWS) do
+    if row.isHeader and row.name == "Professions" then
+        assert(row.isHeaderExpanded == false,
+            "a header the player had collapsed must be collapsed again after "
+            .. "the scan")
+    end
+
+    if row.isHeader and row.name == "Player" then
+        assert(row.isHeaderExpanded ~= false,
+            "and one they had open must be left open")
+    end
+end
+
+print("  a collapsed header is expanded to read it, then collapsed again")
+
+-- THE SAME PROPERTY, FOR THE REPUTATION LIST.
+--
+-- Same shape, older code, and the capture and restore keyed on different
+-- things: `data.factionID or index` going in, `data.factionID` coming out.
+-- Headers carry factionID 0, so every one of them collided on `collapsed[0]`
+-- -- one collapsed header collapsed them all on the way back.
+do
+    local reputations = CN:GetModule("Reputations")
+
+    assert(reputations, "the reputation module must be loaded")
+
+    reputations.Scan()
+
+    local open, shut = 0, 0
+
+    for _, faction in ipairs(CN_TEST_Factions()) do
+        if faction.isHeader then
+            if faction.isCollapsed then
+                shut = shut + 1
+            else
+                open = open + 1
+            end
+        end
+    end
+
+    assert(shut == 1 and open >= 1,
+        "exactly the header the player had collapsed must be collapsed after "
+        .. "a scan; got " .. shut .. " collapsed and " .. open .. " open")
+
+    print("  and reputation headers are restored one by one, not all at once")
+end
 
 print("\nRares and treasures:")
 
@@ -45266,6 +47890,88 @@ assert(select(2, CN.GetWaypointProvider()) == "Native",
     "resetting the preference must return to native navigation")
 
 print("  TomTom provider exercised and released")
+
+------------------------------------------------------------
+-- "WAYPOINT SET" MUST MEAN A WAYPOINT WAS SET.
+--
+-- `CN.SetWaypoint` called the provider, threw the answer away, and returned
+-- true. So `/cn go` printed "Waypoint set: <name>" with TomTom absent, on maps
+-- the client refuses waypoints on, and whenever the client would not build a
+-- map point -- a success message and no arrow.
+--
+-- `C_Map.CanSetUserWaypointOnMap` says which maps refuse, and was called
+-- nowhere in this addon until 0.53.0.
+------------------------------------------------------------
+do
+    CN_TEST_USER_WAYPOINT = nil
+
+    assert(CN.SetWaypoint(94, 0.4, 0.4, "Allowed"),
+        "an ordinary zone must still accept a waypoint")
+
+    assert(CN_TEST_USER_WAYPOINT and CN_TEST_USER_WAYPOINT.uiMapID == 94,
+        "and the map pin must actually reach the client")
+
+    -- A dungeon map. The native provider's arrow still works there, so it
+    -- still succeeds -- but it must not plant a pin the client refuses.
+    CN.ClearWaypoints()
+
+    CN_TEST_USER_WAYPOINT = nil
+
+    CN_TEST_WAYPOINT_BANNED_MAPS = { [2213] = true }
+
+    local placed, note = CN.SetWaypoint(2213, 0.4, 0.4, "Dungeon")
+
+    assert(placed, "the arrow works on a dungeon map, so this still succeeds")
+
+    assert(CN_TEST_USER_WAYPOINT == nil,
+        "but no map pin may be planted where the client refuses one")
+
+    CN_TEST_WAYPOINT_BANNED_MAPS = nil
+
+    -- And the provider that has nothing but the pin must refuse outright.
+    local blizzard = CN.waypointProviders and CN.waypointProviders["Blizzard"]
+
+    assert(blizzard, "the Blizzard map-pin provider must be registered")
+
+    CN_TEST_WAYPOINT_BANNED_MAPS = { [2213] = true }
+
+    assert(blizzard.SetWaypoint(2213, 0.4, 0.4, "Dungeon") == false,
+        "a provider whose only output is the pin must report the refusal "
+        .. "rather than let the caller announce a success")
+
+    CN_TEST_WAYPOINT_BANNED_MAPS = nil
+
+    print("  no map pin is claimed where the client refuses one")
+
+    ------------------------------------------------------------
+    -- AND CLEARING MUST NOT DELETE THE PLAYER'S OWN PIN.
+    --
+    -- There is exactly one user waypoint and it belongs to the player unless
+    -- this addon put it there. `/cn clearway`, stopping follow mode and every
+    -- provider switch called ClearUserWaypoint unconditionally.
+    ------------------------------------------------------------
+    CN.ClearWaypoints()
+
+    CN_TEST_USER_WAYPOINT = UiMapPoint.CreateFromCoordinates(94, 0.9, 0.9)
+
+    assert(CN.ClearWaypoints() == false,
+        "clearing must refuse when this addon did not set the pin")
+
+    assert(CN_TEST_USER_WAYPOINT ~= nil,
+        "and the player's own waypoint must survive it")
+
+    -- Its own, on the other hand, it removes.
+    CN_TEST_USER_WAYPOINT = nil
+
+    CN.SetWaypoint(94, 0.4, 0.4, "Ours")
+
+    assert(CN.ClearWaypoints() == true,
+        "but a pin this addon set must be cleared")
+
+    assert(CN_TEST_USER_WAYPOINT == nil, "and actually removed")
+
+    print("  a pin the player placed by hand is not deleted")
+end
 
 print("\nGreat Vault:")
 
@@ -46343,6 +49049,68 @@ print("\nMap pins:")
 
     assert(first and first:IsShown(), "the first pin must be visible")
 
+    ------------------------------------------------------------
+    -- AND EVERY SCRIPT ON THE PIN MUST DO SOMETHING.
+    --
+    -- A pin the player can see, hover and click is three code paths, and only
+    -- the drawing of it had ever run. Clicking one is a waypoint -- the whole
+    -- reason the pins are there -- and it went untested.
+    ------------------------------------------------------------
+    assert(pcall(first:GetScript("OnEnter"), first),
+        "hovering a map pin must not error")
+
+    assert(pcall(first:GetScript("OnLeave"), first),
+        "nor must leaving it")
+
+    do
+        local realSet, asked = CN.SetWaypoint, nil
+
+        CN.SetWaypoint = function(mapID, x, y, title)
+            asked = { mapID = mapID, x = x, y = y, title = title }
+            return true
+        end
+
+        assert(pcall(first:GetScript("OnClick"), first),
+            "clicking a map pin must not error")
+
+        CN.SetWaypoint = realSet
+
+        assert(asked and asked.mapID,
+            "and it must actually set a waypoint -- that is what the pin is "
+            .. "for")
+
+        assert(asked.title and asked.title ~= "",
+            "with something to call the destination: " .. tostring(asked.title))
+    end
+
+    -- A busy zone shrinks its pins rather than dropping them, because
+    -- dropping stops silently misrepresents the route.
+    assert(pins.PinSize(1, 40) < pins.PinSize(1, 3),
+        "more than a dozen pins on one map get smaller, not fewer")
+
+    assert(pins.PinSize(nil, nil) > 0,
+        "and a pin with nothing known about it still has a size")
+
+    -- The tooltip text is capped, and says how many it did not show.
+    do
+        local many = { objectives = {} }
+
+        for index = 1, 14 do
+            table.insert(many.objectives, { name = "Thing " .. index })
+        end
+
+        local capped = pins.DescribeLines(many)
+
+        assert(#capped == 9,
+            "eight lines and a count, got " .. #capped)
+
+        assert(capped[9]:find("6 more"),
+            "and the count must be the real remainder: " .. capped[9])
+
+        assert(#pins.DescribeLines(nil) == 0,
+            "and no pin is no lines rather than an error")
+    end
+
     -- Placing a SHORTER route must hide the surplus rather than leave stale
     -- pins from the previous map on screen.
     pins.Place({ laid[1] }, canvas)
@@ -46694,6 +49462,64 @@ print("\nChase:")
     assert(mountChain.progress == nil,
         "a mount whose source is prose has no denominator")
     assert(chase.Fraction(mountChain) == nil, "and therefore no bar")
+
+    -- A QUEST GOAL, WHICH IS THE ONE CHAIN BUILT FROM PREREQUISITES.
+    --
+    -- The QUEST builder is the only one that walks `CN.GetPrerequisites`, and
+    -- it is the shape most players will actually chase: a quest they can see
+    -- but cannot start yet. Never executed until 0.53.0.
+    goalStore.Clear()
+    goalStore.Add(CN.objectiveTypes.QUEST, 900500)
+
+    local realPrerequisites = CN.GetPrerequisites
+
+    CN.GetPrerequisites = function(questID)
+        if questID == 900500 then
+            return { 900501, 900502, 900503 }
+        end
+
+        return {}
+    end
+
+    local realComplete = CN.IsQuestComplete
+
+    CN.IsQuestComplete = function(questID)
+        return questID == 900501
+    end
+
+    local questChain = chase.Chain(goalStore.List()[1])
+
+    CN.GetPrerequisites = realPrerequisites
+    CN.IsQuestComplete  = realComplete
+
+    assert(#questChain.steps == 3,
+        "one step per prerequisite, got " .. #questChain.steps)
+
+    local questDone, questNext = 0, 0
+
+    for _, step in ipairs(questChain.steps) do
+        if step.state == chase.states.DONE then questDone = questDone + 1 end
+        if step.state == chase.states.NEXT then questNext = questNext + 1 end
+    end
+
+    assert(questDone == 1, "the finished prerequisite is marked done")
+    assert(questNext == 1,
+        "and exactly one of the rest is the next thing to do, got " .. questNext)
+
+    assert(questChain.progress and questChain.progress.total == 3
+        and questChain.progress.done == 1,
+        "a quest chain IS countable, so it carries a real denominator")
+
+    -- A quest with nothing known before it is not a chain, and must not be
+    -- dressed up as one.
+    goalStore.Clear()
+    goalStore.Add(CN.objectiveTypes.QUEST, 900600)
+
+    local bare = chase.Chain(goalStore.List()[1])
+
+    assert(#bare.steps == 0 or bare.progress == nil,
+        "a quest with no known prerequisites has no plan to show, and "
+        .. "inventing one would be worse than saying so")
 
     -- ORDERING. The least-finished measurable goal comes first; finished
     -- goals sink.
@@ -47606,9 +50432,90 @@ print("\nAlts:")
     assert(type(verdict) == "string" and #verdict > 0,
         "there is always a plain-language answer")
 
+    ------------------------------------------------------------
+    -- GROUPING, AND THE THRESHOLD THAT DECIDES A LOADING SCREEN.
+    --
+    -- `ByCharacter` and `Verdict` are the two functions that turn a list of
+    -- assignments into the one sentence the player actually reads, and
+    -- neither was exercised beyond "returns a string". The ordering rule --
+    -- most reasons first, then freshest data -- and the two-reason minimum
+    -- are the whole judgement of this module.
+    ------------------------------------------------------------
+    warband.WhoShould = function(objectiveType)
+        if objectiveType == CN.objectiveTypes.REPUTATION then
+            return "Manyreasons-Testrealm", "Revered", "highest standing"
+        end
+
+        if objectiveType == CN.objectiveTypes.RECIPE then
+            return "Manyreasons-Testrealm", "knows it", "has the profession"
+        end
+
+        if objectiveType == CN.objectiveTypes.PROFESSION then
+            return "Onereason-Testrealm", "has it", "only one who does"
+        end
+
+        return nil
+    end
+
+    CN.db.characters["Manyreasons-Testrealm"] = {
+        name = "Manyreasons", realm = "Testrealm", class = "MAGE",
+        level = 80, lastSeen = time() - 3600,
+    }
+
+    CN.db.characters["Onereason-Testrealm"] = {
+        name = "Onereason", realm = "Testrealm", class = "ROGUE",
+        level = 80, lastSeen = time() - (2 * 86400),
+    }
+
+    local grouped = alts.ByCharacter()
+
+    assert(#grouped >= 1, "assignments must group by character")
+
+    for index = 2, #grouped do
+        assert(#grouped[index - 1].items >= #grouped[index].items,
+            "the strongest case must come first: " .. #grouped[index - 1].items
+            .. " reasons ranked above " .. #grouped[index].items)
+    end
+
+    -- The verdict refuses a switch below the threshold, and says why.
+    local realMinimum = alts.minimumReasons
+
+    alts.minimumReasons = 99
+
+    local refusedVerdict, why = alts.Verdict()
+
+    assert(refusedVerdict == nil and why:find("not enough"),
+        "below the threshold the answer is no, and it says what the "
+        .. "threshold was for: " .. tostring(why))
+
+    alts.minimumReasons = 1
+
+    local chosen, sentence = alts.Verdict()
+
+    assert(chosen and sentence:find("could do"),
+        "and above it, one character is named")
+
+    alts.minimumReasons = realMinimum
+
+    CN.db.characters["Manyreasons-Testrealm"] = nil
+    CN.db.characters["Onereason-Testrealm"]   = nil
+
+    -- And with nothing to do, the answer is not a shrug.
+    warband.WhoShould = function() return nil end
+
+
+    local none, settled = alts.Verdict()
+
+    warband.WhoShould = realWhoShould
+
+    assert(none == nil and settled:find("right one"),
+        "with nothing assignable the answer is that you are already on the "
+        .. "right character, not an empty list")
+
     CN.HandleSlashCommand("alts")
 
-    print("  " .. #real .. " assignment(s); account-wide correctly ignored")
+    print("  " .. #real .. " assignment(s); account-wide correctly ignored, "
+        .. "grouping and threshold checked")
 end)()
 
 print("\nFollow stays out of a fight:")
@@ -49167,10 +52074,23 @@ print("\nDungeons and raids:")
     CN_TEST_EJ_SELECTED = 1274
     CN_TEST_EJ_OPEN     = false
 
+    -- `id` is the lockout id and `instanceID` is the journal's, and the
+    -- journal must be asked with the journal's. A lockout table carrying only
+    -- the first is exactly what the addon used to hand to EJ_SelectInstance.
     local bosses = instances.RemainingBosses({
-        id = 1273, name = "Nerub-ar Palace", defeated = 0,
+        id = 2147483001, instanceID = 1273, name = "Nerub-ar Palace",
+        defeated = 0, encounters = 8, remaining = 8,
+    })
+
+    local noJournalID, noJournalNote = instances.RemainingBosses({
+        id = 2147483001, name = "Nerub-ar Palace", defeated = 0,
         encounters = 8, remaining = 8,
     })
+
+    assert(#noJournalID == 0 and noJournalNote
+        and noJournalNote:find("Adventure Guide id"),
+        "without a journal id the answer is an admission, not a lockout id "
+        .. "handed to an API that has never heard of it")
 
     assert(#bosses == 8, "every boss must be named when none are dead, got " .. #bosses)
     assert(bosses[1].name == "Ulgrax the Devourer", "in journal order")
@@ -49625,10 +52545,24 @@ print("\nStubs, audited against a real client:")
         end
     end
 
-    local audited, complaints = 0, {}
+    local audited, complaints, unverified = 0, {}, {}
 
+    -- "SKIPPED" AND "AUDITED" ARE DIFFERENT NUMBERS, AND ONLY ONE WAS PRINTED.
+    --
+    -- A field absent from the recording made this return silently, and the
+    -- summary line then named a count that read as coverage. The shipped
+    -- recording is from 0.46.0 and carries neither `events` nor `apiSurface`
+    -- -- the two strongest rules in the audit -- so four of eight ran and the
+    -- line said "4 stubs match what the client actually returned", which is
+    -- true and reads as complete.
+    --
+    -- This is the same trap the check one level up congratulates itself on
+    -- having closed ("a file that exists and will not parse is not 'no
+    -- recording'"). A rule that did not run is not a rule that passed.
     local function require(field, condition, complaint)
         if real[field] == nil or (type(real[field]) == "table" and real[field].skipped) then
+            table.insert(unverified, field)
+
             return
         end
 
@@ -49747,9 +52681,1023 @@ print("\nStubs, audited against a real client:")
     assert(#complaints == 0,
         #complaints .. " stub(s) are simpler than the client they stand in for")
 
-    print("  " .. audited .. " stubs match what the client actually returned")
+    for _, field in ipairs(unverified) do
+        print("    UNVERIFIED: the recording carries no " .. field)
+    end
+
+    print("  " .. audited .. " of " .. (audited + #unverified)
+        .. " stub rules ran against what the client actually returned"
+        .. (#unverified > 0
+            and (" -- " .. #unverified .. " could not be checked")
+            or ""))
 end)()
 
+
+print("\nWhat 0.53.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    local travel = CN:GetModule("Travel")
+
+    ------------------------------------------------------------
+    -- THE PARTS OF THE TRAVEL MODEL THAT ONLY RUN WHEN SOMETHING IS WRONG.
+    --
+    -- Every one of these is a refusal path -- no map, no continent, no
+    -- nodes, a client that will not convert coordinates -- and a refusal path
+    -- that has never run is a refusal path nobody knows the shape of. This is
+    -- also the module where a wrong refusal is most expensive: it silently
+    -- degrades every recommendation's travel cost.
+    ------------------------------------------------------------
+    assert(travel.WorldPoint(nil, 0.5, 0.5) == nil, "no map, no point")
+    assert(travel.WorldPoint(94, nil, 0.5) == nil, "no coordinates, no point")
+
+    assert(travel.YardsBetweenPoints(nil, nil) == nil,
+        "two points that do not exist are not a distance")
+
+    assert(travel.YardsBetweenPoints({ continent = 1, x = 0, y = 0 },
+        { continent = 2, x = 0, y = 0 }) == nil,
+        "and two continents apart is not a distance either -- a straight "
+        .. "line across an ocean is meaningless, not merely imprecise")
+
+    -- A map with no continent above it.
+    assert(travel.ContinentFor(nil) == nil, "no map, no continent")
+
+    local orphan = 987654
+
+    assert(travel.ContinentFor(orphan) == nil,
+        "a map the client does not know has no continent")
+
+    assert(#(travel.KnownNodes(orphan)) == 0,
+        "and therefore no flight points")
+
+    -- The nearest-node search, which is the one piece of the model that runs
+    -- on every single travel estimate.
+    assert(travel.NearestNode(nil, {}) == nil, "no point, no nearest node")
+
+    local nodes = travel.KnownNodes(94)
+
+    assert(#nodes > 0, "the fixture continent must have nodes")
+
+    local here = travel.WorldPoint(94, 0.5, 0.5)
+
+    local nearest, nodeYards = travel.NearestNode(here, nodes)
+
+    assert(nearest and nodeYards and nodeYards >= 0,
+        "and a real point finds one, with a distance")
+
+    assert(travel.NearestNode(here, nil) == nil,
+        "an empty node list has no nearest member, which is not an error")
+
+    -- A client that refuses every coordinate conversion, which is what a
+    -- loading screen looks like from in here.
+    local realConvert = C_Map.GetWorldPosFromMapPos
+
+    C_Map.GetWorldPosFromMapPos = function() return nil, nil end
+
+    travel.ForgetWorldPoints()
+    travel.ForgetNodes()
+
+    assert(travel.WorldPoint(94, 0.11, 0.11) == nil,
+        "during a loading screen no point converts")
+
+    assert(select(1, travel.EstimateSeconds(94, 0.1, 0.1, 94, 0.9, 0.9)) == nil,
+        "so no journey can be costed, and the answer is nil rather than a "
+        .. "fabricated number")
+
+    C_Map.GetWorldPosFromMapPos = realConvert
+
+    travel.ForgetWorldPoints()
+    travel.ForgetNodes()
+
+    assert(travel.WorldPoint(94, 0.11, 0.11) ~= nil,
+        "and the refusal must NOT have been cached")
+
+    -- The world-point cache is bounded, and the bound is reachable.
+    local cap = travel.worldPointCap
+
+    travel.ForgetWorldPoints()
+
+    for index = 1, cap + 10 do
+        travel.WorldPoint(94, (index % 1000) / 1000, ((index * 7) % 997) / 1000)
+    end
+
+    assert(travel.WorldPoint(94, 0.5, 0.5) ~= nil,
+        "the cache empties itself at the ceiling and keeps working")
+
+    travel.ForgetWorldPoints()
+    travel.ForgetNodes()
+
+    print("  the travel model's refusal paths all refuse, and none is cached")
+end)()
+
+;(function()
+    local travel = CN:GetModule("Travel")
+
+    ------------------------------------------------------------
+    -- AN EMPTY FLIGHT-POINT LIST IS NOT AN ANSWER.
+    --
+    -- `GetAllTaxiNodes` answers usefully only while the client has the taxi
+    -- map's data, and every node also needs a world position, which the
+    -- client refuses during a loading screen -- which is when the cache is
+    -- cleared. Remembering the resulting nothing degraded every flight
+    -- estimate on the continent to "run there" for the rest of the session.
+    ------------------------------------------------------------
+    do
+        local saved = CN_TEST_TAXI_NODES[1941]
+
+        travel.ForgetNodes()
+
+        CN_TEST_TAXI_NODES[1941] = {}
+
+        assert(#travel.KnownNodes(94) == 0,
+            "with no nodes the client can offer, the list is empty")
+
+        CN_TEST_TAXI_NODES[1941] = saved
+
+        assert(#travel.KnownNodes(94) > 0,
+            "and the emptiness must NOT have been cached: the next query, "
+            .. "once the client will answer, has to see the nodes")
+
+        travel.ForgetNodes()
+
+        print("  an empty flight-point list is not remembered")
+    end
+
+    ------------------------------------------------------------
+    -- AND NO FLIGHT POINT IS REACHED ONLY OUTWARD.
+    --
+    -- Built one node at a time, the neighbour rule is about who each node
+    -- reaches OUT to. A lone outpost picked its nearest four and every one of
+    -- them filled its own four from the crowd nearby -- so the outpost had a
+    -- way out and no way in, Dijkstra from the mainland never reached it, and
+    -- it vanished from every route silently.
+    ------------------------------------------------------------
+    do
+        local saved     = CN_TEST_TAXI_NODES[1941]
+        local savedSpan = CN_TEST_MAP_SPAN
+
+        CN_TEST_SetMapSpan({ 90000, 90000 })
+
+        local scattered = {}
+
+        for index = 1, 12 do
+            table.insert(scattered, {
+                nodeID = 800 + index,
+                name   = "Cluster " .. index,
+                state  = 1,
+                position = {
+                    x = 0.02 + ((index % 4) * 0.012),
+                    y = 0.02 + ((index % 3) * 0.014),
+                },
+            })
+        end
+
+        table.insert(scattered, {
+            nodeID = 899, name = "Lone Outpost", state = 1,
+            position = { x = 0.97, y = 0.97 },
+        })
+
+        CN_TEST_TAXI_NODES[1941] = scattered
+
+        travel.ForgetNodes()
+
+        travel.FlightMemory()[94] = false
+
+        -- Standing in the cluster, going to the outpost. The only sensible
+        -- answer is a flight that ARRIVES at the outpost.
+        local _, _, detail =
+            travel.EstimateSeconds(94, 0.021, 0.021, 94, 0.971, 0.971)
+
+        assert(detail and detail.mode == "fly",
+            "a flight point at the far end of a continent must still be "
+            .. "reachable; got " .. tostring(detail and detail.mode))
+
+        assert(detail.arrival == "Lone Outpost",
+            "and the route must land there, not somewhere near it; got "
+            .. tostring(detail.arrival))
+
+        travel.FlightMemory()[94] = nil
+
+        CN_TEST_SetMapSpan(savedSpan)
+
+        CN_TEST_TAXI_NODES[1941] = saved
+
+        travel.ForgetNodes()
+
+        print("  an isolated flight point is reachable, not merely reaching")
+    end
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- HIDING SOMETHING TAKES EFFECT NOW.
+    --
+    -- `CN.IsIgnored` is consulted inside candidate providers, at build time,
+    -- so the ignore list is baked into the cached list. Without an explicit
+    -- invalidation, clicking Ignore changed nothing until some unrelated
+    -- event happened to make that provider dirty -- which for `Mounts` or
+    -- `Sets` can be the rest of the session.
+    ------------------------------------------------------------
+    local errorsBefore = CN.Recommend(1)
+
+    assert(errorsBefore and errorsBefore[1], "something must be recommended to ignore")
+
+    local target = errorsBefore[1]
+
+    CN.SetIgnored(target.type, target.id, true)
+
+    local after = CN.Recommend(1)
+
+    local stillThere = after and after[1]
+        and after[1].type == target.type
+        and after[1].id == target.id
+
+    assert(not stillThere,
+        "ignoring the top recommendation must remove it from the very next "
+        .. "call, with nothing else happening in between")
+
+    -- And putting it back must be just as immediate.
+    local filterModule = CN:GetModule("Filters")
+
+    filterModule.Restore(CN.ObjectiveKey(target.type, target.id))
+
+    local restored, found = CN.Recommend(25), false
+
+    for _, objective in ipairs(restored) do
+        if objective.type == target.type and objective.id == target.id then
+            found = true
+        end
+    end
+
+    assert(found, "and un-hiding it must bring it back just as immediately")
+
+    print("  ignoring and un-hiding take effect on the next call")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- `volatile` DOES NOT DEFEAT `cooldown`.
+    --
+    -- The volatile clause was a peer of the dirty clause rather than
+    -- subordinate to `cooled`, so a provider declaring both rebuilt every
+    -- five seconds whatever cooldown it asked for. `Waiting` and `Instances`
+    -- each asked for thirty and got five -- six times more often than
+    -- declared, for as long as the window stayed open.
+    ------------------------------------------------------------
+    local builds = 0
+
+    CN.RegisterCandidateProvider("MutationVolatile", function()
+        builds = builds + 1
+        return {}
+    end, { volatile = true, cooldown = 30 })
+
+    CN.CollectCandidates(true)
+
+    local baseline = builds
+
+    -- Ten seconds later: past `candidateCacheSeconds`, well inside the
+    -- cooldown the provider asked for.
+    CN_TEST_TIME_OFFSET = CN_TEST_TIME_OFFSET + 10
+
+    CN.CollectCandidates()
+
+    assert(builds == baseline,
+        "a provider that asked for a thirty-second cooldown must not rebuild "
+        .. "after ten, however volatile it is")
+
+    -- Past the cooldown, it must rebuild -- volatile still means volatile.
+    CN_TEST_TIME_OFFSET = CN_TEST_TIME_OFFSET + 25
+
+    CN.CollectCandidates()
+
+    assert(builds > baseline,
+        "but once the cooldown has passed, a volatile provider must go stale "
+        .. "on its own")
+
+    CN.candidateProviders["MutationVolatile"] = nil
+
+    CN_TEST_TIME_OFFSET = 0
+
+    CN.CollectCandidates(true)
+
+    print("  a volatile provider still honours the cooldown it declared")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CLEAN SESSION DOES NOT ERASE A BAD ONE.
+    --
+    -- `Persist` ran unconditionally on logout, so the sequence the feature
+    -- exists for destroyed its own evidence: something breaks, the player
+    -- reloads before thinking to look, and the reload's empty ring overwrites
+    -- the record. Players reload several times an hour.
+    ------------------------------------------------------------
+    local errors = CN:GetModule("Errors")
+
+    errors.Clear()
+    errors.ForgetPrevious()
+
+    errors.Record("MutationContext", "something went wrong")
+
+    errors.Persist()
+
+    assert(#errors.Previous() == 1, "a real error must be persisted")
+
+    -- A fresh, clean session, then a reload.
+    errors.Clear()
+
+    errors.Persist()
+
+    assert(#errors.Previous() == 1,
+        "a session in which nothing went wrong must leave the previous "
+        .. "session's record alone")
+
+    errors.ForgetPrevious()
+
+    print("  a quiet session does not overwrite the last loud one")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN EARNED ACHIEVEMENT LEAVES THE SHORTLIST.
+    --
+    -- `CN.Shortlist` returns its held list whenever the revision matches, and
+    -- the revision moved only on a full scan. Deleting the store row without
+    -- moving it left the shortlist holding an orphaned record -- so the same
+    -- event that invalidated the provider caused it to re-emit the
+    -- achievement the player had just earned.
+    ------------------------------------------------------------
+    local achievements = CN:GetModule("Achievements")
+
+    local store = achievements.Store()
+
+    local id, record = next(store)
+
+    assert(id, "the fixture must have an achievement in progress")
+
+    local revisionBefore = achievements.revision
+
+    for _, dispatch in ipairs(CN.eventTable["ACHIEVEMENT_EARNED"] or {}) do
+        dispatch("ACHIEVEMENT_EARNED", id)
+    end
+
+    assert(store[id] == nil, "the store row goes")
+
+    assert(achievements.revision ~= revisionBefore,
+        "and the shortlist revision must move with it, or the shortlist "
+        .. "keeps serving the record the store just released")
+
+    store[id] = record
+
+    print("  earning an achievement moves the shortlist revision")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- RIDING PAST A RARE IS NOT KILLING IT.
+    --
+    -- `GetVignettes` returns what is IN RANGE, and a vignette leaves that
+    -- list for two different reasons: somebody killed it, or you rode away.
+    -- The old code assumed the first, permanently, with no expiry and no
+    -- undo -- so riding past a rare meant this character was never offered it
+    -- again.
+    ------------------------------------------------------------
+    local raresModule = CN:GetModule("Rares")
+
+    raresModule.ForgetCleared()
+
+    raresModule.NoteDisappearances({})
+
+    -- Seen at four hundred yards, then gone: that is the edge of vignette
+    -- range, not a kill.
+    raresModule.NoteDisappearances({})
+
+    local far = { guid = "far-1", vignetteID = 777001, name = "Far Rare",
+                  wasDead = false, yards = 400 }
+
+    local near = { guid = "near-1", vignetteID = 777002, name = "Near Rare",
+                   wasDead = false, yards = 20 }
+
+    -- Drive it through the module's own state rather than around it.
+    raresModule.SetLastSeen({ [far.guid] = far, [near.guid] = near })
+
+    raresModule.NoteDisappearances({})
+
+    assert(not raresModule.IsClearedByCharacter(777001),
+        "a rare that vanished from four hundred yards away went out of "
+        .. "range; it was not killed")
+
+    assert(raresModule.IsClearedByCharacter(777002),
+        "one that vanished from twenty yards away almost certainly was")
+
+    raresModule.ForgetCleared()
+
+    assert(not raresModule.IsClearedByCharacter(777002),
+        "and the player can take it back, because inference that cannot be "
+        .. "corrected is a wrong answer with a longer life")
+
+    print("  a rare is cleared by proximity, not by disappearance")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE HANDYNOTES ITERATOR IS A TRIPLET.
+    --
+    -- `IteratePlugins` returns `next, self.plugins, nil`. Capturing only the
+    -- first and writing `for name in iterator` calls `next(nil, nil)`, which
+    -- throws -- so this integration could not work for any player who has
+    -- HandyNotes installed. The old stub was a self-contained closure, the
+    -- one shape under which the broken form works.
+    ------------------------------------------------------------
+    local handynotes = CN.HandyNotes
+
+    assert(handynotes, "the HandyNotes provider must be reachable")
+
+    local plugins = handynotes.GetPlugins()
+
+    assert(#plugins == 1 and plugins[1] == "HandyNotes_Treasures",
+        "the plugin list must come back from a pairs-style iterator; got "
+        .. #plugins)
+
+    local nodes = handynotes.GetNodesOnMap(94)
+
+    assert(#nodes == 1 and nodes[1].label == "Hidden Cache",
+        "and so must a plugin's nodes -- seventy lines that had no caller "
+        .. "and could not have worked if they had; got " .. #nodes)
+
+    print("  HandyNotes plugins and their nodes are actually readable")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- CLEARING DOES NOT DELETE THE PLAYER'S OWN PIN.
+    --
+    -- There is exactly one user waypoint and it belongs to the player unless
+    -- this addon put it there. `/cn clearway`, stopping follow mode and every
+    -- provider switch called ClearUserWaypoint unconditionally.
+    ------------------------------------------------------------
+    CN.ClearWaypoints()
+
+    CN_TEST_USER_WAYPOINT = UiMapPoint.CreateFromCoordinates(94, 0.77, 0.77)
+
+    assert(CN.ClearWaypoints() == false,
+        "a pin this addon did not set must not be cleared")
+
+    assert(CN_TEST_USER_WAYPOINT ~= nil, "and must still be there")
+
+    CN_TEST_USER_WAYPOINT = nil
+
+    print("  and a hand-placed pin survives /cn clearway")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- BOTH WAYPOINT PROVIDERS, ON THEIR FAILURE PATHS.
+    --
+    -- The Blizzard map-pin provider is the fallback every player without
+    -- TomTom lands on, and its refusal paths -- absent API, a map point the
+    -- client will not build, a map that forbids waypoints -- were the least
+    -- covered lines in the addon. They are also the ones that used to return
+    -- silently and let the caller announce a success.
+    ------------------------------------------------------------
+    local blizzard = CN.waypointProviders["Blizzard"]
+    local tomtom   = CN.waypointProviders["TomTom"]
+
+    assert(blizzard and tomtom, "both providers must be registered")
+
+    assert(blizzard.IsAvailable(), "the map API is present in the harness")
+
+    -- A client that will not build a map point.
+    local realCreate = UiMapPoint.CreateFromCoordinates
+
+    UiMapPoint.CreateFromCoordinates = function() return nil end
+
+    local legsBuilt, why = blizzard.SetWaypoint(94, 0.3, 0.3, "No Point")
+
+    assert(legsBuilt == false and why and why:find("map point"),
+        "a client that will not build a map point must be reported, not "
+        .. "swallowed: " .. tostring(why))
+
+    UiMapPoint.CreateFromCoordinates = realCreate
+
+    -- The whole API gone -- an older client, or a broken one.
+    local realSet = C_Map.SetUserWaypoint
+
+    C_Map.SetUserWaypoint = nil
+
+    assert(blizzard.IsAvailable() == false,
+        "with no SetUserWaypoint the provider is not available")
+
+    assert(blizzard.SetWaypoint(94, 0.3, 0.3, "Gone") == false,
+        "and it refuses rather than erroring")
+
+    C_Map.SetUserWaypoint = realSet
+
+    -- Clearing with nothing of ours set.
+    CN_TEST_USER_WAYPOINT = nil
+
+    assert(blizzard.ClearAll() == false,
+        "clearing when this addon owns nothing removes nothing")
+
+    -- And the round trip.
+    assert(blizzard.SetWaypoint(94, 0.3, 0.3, "Ours") == true,
+        "an ordinary map still works")
+
+    assert(blizzard.ClearAll() == true, "and its own pin is removed")
+
+    -- TOMTOM, INCLUDING THE CASE WHERE IT REFUSES.
+    local realTomTom = _G.TomTom
+
+    _G.TomTom = nil
+
+    assert(tomtom.IsAvailable() == false, "no TomTom, no TomTom provider")
+
+    local asked, absent = tomtom.SetWaypoint(94, 0.3, 0.3, "Nowhere")
+
+    assert(asked == false and absent and absent:find("TomTom"),
+        "and it says which addon is missing rather than returning nil")
+
+    assert(tomtom.ClearAll() == false, "clearing is a no-op, reported as one")
+
+    _G.TomTom = realTomTom
+
+    -- TomTom present but refusing the waypoint.
+    local realAdd = _G.TomTom.AddWaypoint
+
+    _G.TomTom.AddWaypoint = function() return nil end
+
+    local refusedWaypoint, reason = tomtom.SetWaypoint(94, 0.3, 0.3, "Refused")
+
+    assert(refusedWaypoint == false and reason and reason:find("refused"),
+        "a TomTom that returns no uid has not set a waypoint")
+
+    _G.TomTom.AddWaypoint = realAdd
+
+    local placed, uid = tomtom.SetWaypoint(94, 0.3, 0.3, "Real")
+
+    assert(placed == true and uid, "and a real one comes back with its uid")
+
+    assert(tomtom.ClearAll() == true, "which it then removes")
+
+    assert(tomtom.ClearAll() == false,
+        "and removing nothing twice is reported honestly")
+
+    print("  both waypoint providers exercised on their refusal paths")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- HANDYNOTES WHEN IT IS NOT THERE, AND WHEN IT IS BROKEN.
+    ------------------------------------------------------------
+    local handynotes = CN.HandyNotes
+
+    local real = _G.HandyNotes
+
+    _G.HandyNotes = nil
+
+    assert(handynotes.IsAvailable() == false, "absent means absent")
+    assert(#handynotes.GetPlugins() == 0, "and no plugins")
+    assert(#handynotes.GetNodesOnMap(94) == 0, "and no nodes")
+    assert(handynotes.Describe() == "not installed", "and it says so")
+
+    -- Present, but with no plugin registry at all -- an older HandyNotes, or
+    -- one that has not finished loading.
+    _G.HandyNotes = { IteratePlugins = nil, plugins = nil }
+
+    assert(handynotes.Describe() == "loaded, no plugins registered",
+        "a HandyNotes with nothing registered is described accurately")
+
+    -- Present, with the registry as a plain table rather than an iterator.
+    _G.HandyNotes = { plugins = { Alpha = {}, Beta = {} } }
+
+    local fallback = handynotes.GetPlugins()
+
+    assert(#fallback == 2 and fallback[1] == "Alpha",
+        "the plain-table fallback still finds them, sorted")
+
+    assert(handynotes.Describe():find("2 plugins"),
+        "and the description names how many")
+
+    -- A plugin whose node iterator throws must cost the plugin, not the call.
+    _G.HandyNotes = {
+        IteratePlugins = function()
+            return next, {
+                Broken = {
+                    GetNodes2 = function() error("plugin exploded") end,
+                },
+            }, nil
+        end,
+    }
+
+    assert(#handynotes.GetNodesOnMap(94) == 0,
+        "a plugin that throws contributes nothing and does not take the "
+        .. "addon down with it")
+
+    _G.HandyNotes = real
+
+    assert(handynotes.IsAvailable(), "and the real stub is back")
+
+    print("  HandyNotes absent, empty, plain-table and broken all handled")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- RESOLVING A COLLECTIBLE BY NAME, WHICH IS HOW PEOPLE TYPE.
+    --
+    -- `/cn toy Test Toy` has to turn words into an item id, and the addon's
+    -- rule -- shortest matching name wins, because a substring match against
+    -- a long name is usually the wrong row -- had never been executed.
+    ------------------------------------------------------------
+    local toysModule = CN:GetModule("Toys")
+
+    assert(toysModule, "the Toys module must load")
+
+    toysModule.Scan()
+
+    local counts = toysModule.Summary()
+
+    assert(counts.known >= 2, "the fixture's toys are read, got " .. counts.known)
+    assert(counts.collected + counts.missing == counts.known,
+        "and every one is either collected or not")
+
+    assert(toysModule.Resolve("500") == 500, "a bare id resolves to itself")
+
+    assert(toysModule.Resolve("Test Toy") == 500,
+        "and a full name resolves to its id")
+
+    assert(toysModule.Resolve("toy") ~= nil,
+        "a substring matches something")
+
+    assert(toysModule.Resolve("") == nil, "an empty string resolves to nothing")
+    assert(toysModule.Resolve(nil) == nil, "and so does nothing at all")
+
+    assert(toysModule.Resolve("no such toy anywhere") == nil,
+        "a name nothing matches resolves to nil rather than to whatever "
+        .. "happened to be first")
+
+    -- An id the player's client does not have is not a resolution either.
+    assert(toysModule.Resolve("999999") == nil,
+        "an id with no record behind it is not a match")
+
+    -- THE ELIGIBILITY LINE, which is what `/cn why` prints for a toy.
+    local checker = CN.eligibilityCheckers
+        and CN.eligibilityCheckers[CN.objectiveTypes.TOY]
+
+    if checker then
+        local state, reason = checker(500)
+
+        assert(state and reason,
+            "a toy the addon knows about has a state and a sentence")
+
+        local unknownState, unknownReason = checker(999999)
+
+        assert(unknownState == CN.objectiveStates.UNKNOWN
+            and unknownReason and unknownReason:find("toyscan"),
+            "and one it does not know says which scan would tell it: "
+            .. tostring(unknownReason))
+    end
+
+    -- With the toy box gone entirely, a scan is a no-op rather than an error.
+    local realToyBox = C_ToyBox
+
+    C_ToyBox = nil
+
+    local seen, gotCollected, gotMissing = toysModule.Scan()
+
+    assert(seen == 0 and gotCollected == 0 and gotMissing == 0,
+        "no toy box, nothing scanned, and no error")
+
+    C_ToyBox = realToyBox
+
+    print("  toys resolve by id and by name, shortest match winning")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CLIENT WRAPPER, WITH THE CLIENT TAKEN AWAY.
+    --
+    -- Providers/Blizzard.lua is the layer every other file asks its questions
+    -- through, and every function in it is a guard around an API that may not
+    -- exist on this client, may return nil, or may throw. Those guards are
+    -- what stop a renamed API from becoming a Lua error popup -- and the
+    -- failure branches had never been executed, because the harness defines
+    -- everything the addon calls.
+    ------------------------------------------------------------
+    local Blizzard = CN.Blizzard
+
+    local saved = {}
+
+    local function Remove(name)
+        saved[name] = _G[name]
+        _G[name] = nil
+    end
+
+    local function Restore()
+        for name, value in pairs(saved) do
+            _G[name] = value
+        end
+
+        saved = {}
+    end
+
+    -- Quest completion, with both APIs gone.
+    Remove("C_QuestLog")
+
+    assert(Blizzard.IsQuestCompletedByCharacter(1234) == false,
+        "no quest API means 'not completed', not an error")
+
+    assert(Blizzard.IsQuestInLog(1234) == false, "and nothing is in the log")
+    assert(Blizzard.IsQuestReadyForTurnIn(1234) == false,
+        "and nothing is ready to hand in")
+    assert(Blizzard.IsQuestComplete(1234) == false,
+        "and nothing is complete")
+
+    assert(Blizzard.GetQuestTitle(1234) == nil,
+        "and no quest has a title")
+
+    assert(#Blizzard.GetQuestLogEntries() == 0,
+        "and the log is empty rather than nil")
+
+    local doneCount, totalCount = Blizzard.GetQuestObjectiveProgress(1234)
+
+    assert(doneCount == 0 and totalCount == 0,
+        "and objective progress is zero of zero rather than nil arithmetic")
+
+    assert(#Blizzard.GetCountingObjectives(1234) == 0,
+        "and nothing counts")
+
+    Restore()
+
+    -- The account-wide completion API, which older clients do not have.
+    local realAccount = C_QuestLog.IsQuestFlaggedCompletedOnAccount
+
+    C_QuestLog.IsQuestFlaggedCompletedOnAccount = nil
+
+    assert(Blizzard.HasAccountQuestAPI() == false,
+        "a client without the Warband API says so")
+
+    assert(Blizzard.IsQuestCompletedOnAccount(1234) == false,
+        "and answers false rather than guessing from the character")
+
+    C_QuestLog.IsQuestFlaggedCompletedOnAccount = realAccount
+
+    -- Map POIs, with the POI API gone.
+    Remove("C_QuestLog")
+    Remove("C_TaskQuest")
+
+    assert(Blizzard.GetQuestPOIOnMap(1234, 94) == nil,
+        "no POI API, no POI")
+
+    assert(#Blizzard.GetQuestPOIsOnMap(94) == 0,
+        "and no pins on the map")
+
+    -- The waypoint search falls back to "the map you are on, with no
+    -- coordinates", which is a real and useful answer: it is how a zone gets
+    -- named for a quest whose blip the client will not draw.
+    local fallbackMap, fallbackX = Blizzard.GetQuestWaypoint(1234)
+
+    assert(fallbackX == nil,
+        "with no POI API there are no coordinates to invent")
+
+    assert(fallbackMap == nil or type(fallbackMap) == "number",
+        "and what comes back is a map or nothing, never a guess")
+
+    assert(Blizzard.GetQuestWaypoint(nil) == nil,
+        "and no quest is no waypoint")
+
+    assert(Blizzard.GetQuestZone(1234) == nil,
+        "and no zone for one either")
+
+    Restore()
+
+    -- Reputations, with the whole namespace gone.
+    Remove("C_Reputation")
+    Remove("C_MajorFactions")
+
+    assert(Blizzard.GetNumFactions() == 0, "no reputation API, no factions")
+    assert(Blizzard.GetFactionByIndex(1) == nil, "and none by index")
+    assert(Blizzard.GetFactionByID(2600) == nil, "and none by id")
+    assert(Blizzard.IsAccountWideReputation(2600) == false,
+        "and nothing is account-wide")
+    assert(Blizzard.IsMajorFaction(2600) == false,
+        "and nothing is a major faction")
+    assert(Blizzard.GetMajorFactionData(2600) == nil, "with no renown data")
+    assert(Blizzard.HasMaximumRenown(2600) == false, "and no maximum")
+    assert(Blizzard.IsFactionParagon(2600) == false, "and no paragon")
+    assert(Blizzard.GetParagonInfo(2600) == nil, "and no paragon numbers")
+
+    -- And the expand/restore wrapper must still run its inner work, because
+    -- refusing to scan because the collapse API is missing would lose the
+    -- whole reputation feature on a client that simply reads differently.
+    local ran = false
+
+    Blizzard.WithAllFactionsExpanded(function() ran = true end)
+
+    assert(ran,
+        "the scan still runs when the client cannot expand headers; the "
+        .. "headers are a convenience, the standings are the point")
+
+    Restore()
+
+    -- Professions returns a fixed-slot tuple with holes in it, which is the
+    -- shape `ipairs` silently truncates.
+    local realProfessions = GetProfessions
+
+    GetProfessions = function() return nil, 2, nil, nil, 5 end
+
+    local professions = Blizzard.GetProfessions()
+
+    assert(type(professions) == "table",
+        "a tuple full of holes still produces a table")
+
+    GetProfessions = nil
+
+    assert(type(Blizzard.GetProfessions()) == "table",
+        "and no API at all produces an empty one rather than nil")
+
+    GetProfessions = realProfessions
+
+    print("  the client wrapper degrades on every API it wraps")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- PREREQUISITES, AND THE ORDER OF AUTHORITY BETWEEN THEIR SOURCES.
+    --
+    -- `CN.GetPrerequisites` merges four sources -- a curated record, this
+    -- account's own observations, the shipped community table, and chains
+    -- imported by hand -- deduplicating as it goes and adding them in
+    -- descending order of how much they should be believed. That ordering is
+    -- the whole design of the function and nothing exercised it.
+    ------------------------------------------------------------
+    local quests = CN:GetModule("Quests")
+
+    local realRecord = quests.GetRecord
+
+    quests.GetRecord = function(questID)
+        if questID == 999001 then
+            return { requires = { 111, 222 } }, "curated"
+        end
+
+        return nil
+    end
+
+    CN.Account("questHarvest")[999001] = { observedRequires = { 222, 333 } }
+    CN.Account("contributed")[999001]  = { 444 }
+
+    local ordered = CN.GetPrerequisites(999001)
+
+    assert(#ordered == 4,
+        "four distinct prerequisites across three sources, got " .. #ordered)
+
+    assert(ordered[1] == 111 and ordered[2] == 222,
+        "curated data comes first")
+
+    assert(ordered[3] == 333,
+        "then what this account observed for itself")
+
+    assert(ordered[4] == 444,
+        "then what somebody else contributed -- the weakest source, added "
+        .. "last, which is the order of authority")
+
+    -- 222 appears in two sources and must appear once.
+    local occurrences = 0
+
+    for _, id in ipairs(ordered) do
+        if id == 222 then occurrences = occurrences + 1 end
+    end
+
+    assert(occurrences == 1, "a prerequisite two sources agree on is one "
+        .. "prerequisite, not two")
+
+    -- A quest nothing knows about has no prerequisites, rather than an error.
+    assert(#CN.GetPrerequisites(999002) == 0,
+        "an unknown quest has no prerequisites")
+
+    CN.Account("questHarvest")[999001] = nil
+    CN.Account("contributed")[999001]  = nil
+
+    quests.GetRecord = realRecord
+
+    -- AND THE MODULE-ABSENT PATH, which is what every one of these guards is
+    -- for: an addon that loads without one of its own modules must degrade,
+    -- not throw.
+    local realGet = CN.GetModule
+
+    CN.GetModule = function(self, name)
+        if name == "Quests" then
+            return nil
+        end
+
+        return realGet(self, name)
+    end
+
+    assert(#CN.GetPrerequisites(999001) == 0,
+        "with the Quests module gone, prerequisites are empty rather than an "
+        .. "error")
+
+    assert(CN.IsQuestComplete(999001) == false,
+        "and completion is false rather than an error")
+
+    CN.GetModule = realGet
+
+    print("  prerequisites merge four sources in order of authority")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ROUTE'S PROGRESS COUNTER, AND THE ONE MOMENT WORTH A FLOURISH.
+    --
+    -- `Follow.NoteStopCleared` is what the player sees as they walk a route,
+    -- and the "Route complete" branch is the only celebratory thing this
+    -- addon does. Neither was executed by any test -- and the counter has a
+    -- history: a denominator frozen at the start produced "Stop 9 of 8
+    -- cleared" and fired the flourish four times while stops remained.
+    ------------------------------------------------------------
+    local follow = CN:GetModule("Follow")
+
+    local followSettings = CN.Settings()
+
+    local realCues = followSettings.cues
+
+    -- Cues off is the default, and off must mean off.
+    followSettings.cues = nil
+
+    assert(follow.Cue("stop") == false,
+        "with cues off, nothing is played -- unsolicited noise is the most "
+        .. "intrusive thing an addon can do")
+
+    followSettings.cues = true
+
+    assert(follow.Cue("stop") == true, "with cues on, the stop moment fires")
+    assert(follow.Cue("arrival") == true, "so does arrival")
+    assert(follow.Cue() == true, "and the default moment is the route")
+    assert(follow.Celebrate() == true, "which is what Celebrate plays")
+
+    -- An unknown moment must not error; it simply has no sound.
+    assert(follow.Cue("nonsense") == true,
+        "an unrecognised moment is a no-op, not a failure")
+
+    -- THE COUNTER.
+    follow.completed   = 0
+    follow.startedWith = 3
+    follow.celebrated  = false
+
+    assert(follow.NoteStopCleared() == 1, "clearing counts")
+    assert(follow.NoteStopCleared() == 2, "and counts again")
+
+    local flourishBefore = #output
+
+    assert(follow.NoteStopCleared() == 3, "and reaches the total")
+
+    local celebrated = false
+
+    for index = flourishBefore + 1, #output do
+        if output[index]:find("stops, everything on it done") then
+            celebrated = true
+        end
+    end
+
+    assert(celebrated,
+        "reaching the end of a route is the one moment this addon marks")
+
+    -- And it must not fire again past the end.
+    local past = #output
+
+    follow.NoteStopCleared()
+
+    for index = past + 1, #output do
+        assert(not output[index]:find("stops, everything on it done"),
+            "the flourish fires once, not on every stop past the total")
+    end
+
+    -- With no total known, the message is the short form rather than an
+    -- invented denominator.
+    follow.completed   = 0
+    follow.startedWith = 0
+    follow.celebrated  = false
+
+    local unknown = #output
+
+    follow.NoteStopCleared()
+
+    local named = false
+
+    for index = unknown + 1, #output do
+        if output[index]:find("of") and output[index]:find("cleared") then
+            named = true
+        end
+    end
+
+    assert(not named,
+        "with no total, the addon does not invent one to count against")
+
+    followSettings.cues      = realCues
+    follow.completed   = 0
+    follow.startedWith = 0
+    follow.celebrated  = false
+
+    print("  route progress counts up, and the flourish fires exactly once")
+end)()
 
 print("\nGetting there:")
 
@@ -49863,6 +53811,79 @@ print("\nGetting there:")
     -- number. With enough nodes spread widely enough that the pruning
     -- actually fires.
     ------------------------------------------------------------
+    -- THE SAME MODEL, WRITTEN A SECOND TIME AND A DIFFERENT WAY.
+    --
+    -- 0.53.0 made the flight leg the shortest path through the flight network
+    -- rather than the straight line across it, so an exhaustive comparison
+    -- that measures node-to-node distance directly no longer describes the
+    -- thing under test -- it describes the model the addon replaced.
+    --
+    -- This rebuilds the network from the addon's published rule (hopYards,
+    -- minimumNeighbours) and solves it with Floyd-Warshall, which shares no
+    -- code and no shape with the addon's cached per-origin Dijkstra. Two
+    -- independent solvers of the same graph must agree, and a graph the two
+    -- disagree about is a defect in one of them.
+    local function NetworkDistances(list)
+        local sourceCount = #list
+        local dist  = {}
+
+        for i = 1, sourceCount do
+            dist[i] = {}
+            dist[i][i] = 0
+        end
+
+        for i = 1, sourceCount do
+            local rankedSources = {}
+
+            for j = 1, sourceCount do
+                if i ~= j then
+                    table.insert(rankedSources, {
+                        index = j,
+                        yards = travel.YardsBetweenPoints(
+                            list[i].point, list[j].point),
+                    })
+                end
+            end
+
+            table.sort(rankedSources, function(a, right)
+                if a.yards == right.yards then
+                    return a.index < right.index
+                end
+
+                return a.yards < right.yards
+            end)
+
+            for rank, entry in ipairs(rankedSources) do
+                if entry.yards <= travel.hopYards
+                    or rank <= travel.minimumNeighbours then
+
+                    -- Undirected: a flight path connects both ways, so an
+                    -- edge either node claims is an edge.
+                    dist[i][entry.index] = entry.yards
+                    dist[entry.index][i] = entry.yards
+                end
+            end
+        end
+
+        for k = 1, sourceCount do
+            for i = 1, sourceCount do
+                local ik = dist[i][k]
+
+                if ik then
+                    for j = 1, sourceCount do
+                        local kj = dist[k][j]
+
+                        if kj and (not dist[i][j] or (ik + kj) < dist[i][j]) then
+                            dist[i][j] = ik + kj
+                        end
+                    end
+                end
+            end
+        end
+
+        return dist
+    end
+
     do
         local saved = CN_TEST_TAXI_NODES[1941]
 
@@ -49928,14 +53949,17 @@ print("\nGetting there:")
                     + travel.takeoffSeconds)
         end
 
-        for _, origin in ipairs(nodeList) do
-            for _, arrival in ipairs(nodeList) do
-                if origin.id ~= arrival.id then
+        local bruteNetwork = NetworkDistances(nodeList)
+
+        for i, origin in ipairs(nodeList) do
+            for j, arrival in ipairs(nodeList) do
+                local through = (i ~= j) and bruteNetwork[i][j] or nil
+
+                if origin.id ~= arrival.id and through then
                     local candidate =
                         (travel.YardsBetweenPoints(from, origin.point) / runSpeed)
                         + travel.flightOverheadSeconds
-                        + (travel.YardsBetweenPoints(origin.point, arrival.point)
-                            / flightSpeed)
+                        + (through / flightSpeed)
                         + (travel.YardsBetweenPoints(to, arrival.point) / runSpeed)
 
                     local rankedCandidate = candidate
@@ -50027,6 +54051,165 @@ print("\nGetting there:")
         print("  a long walk to the right flight point is not pruned away")
 
         ------------------------------------------------------------
+        -- SOME JOURNEYS NEED TWO HOPS, AND THE CHAIN MUST BE PRINTABLE.
+        --
+        -- Backlog item 5. A straight line between the two ends of a chain of
+        -- flight masters is not the distance a taxi flies, and until 0.53.0
+        -- that was the number every long flight was costed with -- wrong
+        -- always in the same direction, so distant objectives were
+        -- systematically preferred over near ones.
+        --
+        -- A chain of flight masters in an L, spaced further apart than the
+        -- direct-connection radius so that the network is a chain rather
+        -- than a clique. The straight line from one end to the other cuts
+        -- the corner; the bird does not.
+        ------------------------------------------------------------
+        do
+            local spanBefore = CN_TEST_MAP_SPAN
+
+            CN_TEST_SetMapSpan({ 40000, 40000 })
+
+            local chain = {}
+
+            for step = 0, 6 do
+                table.insert(chain, {
+                    nodeID = 70 + step,
+                    name   = "Chain " .. (step + 1),
+                    state  = 1,
+                    position = { x = 0.05, y = 0.05 + (step * 0.15) },
+                })
+            end
+
+            table.insert(chain, {
+                nodeID = 77, name = "Chain 8", state = 1,
+                position = { x = 0.35, y = 0.95 },
+            })
+
+            CN_TEST_TAXI_NODES[1941] = chain
+
+            travel.ForgetNodes()
+
+            travel.FlightMemory()[94] = false
+
+            local hopped, hopConfident, hopDetail =
+                travel.EstimateSeconds(94, 0.05, 0.04, 94, 0.36, 0.96)
+
+            assert(hopDetail and hopDetail.mode == "fly",
+                "the chain case must decide on a flight, got "
+                .. tostring(hopDetail and hopDetail.mode))
+
+            assert(hopDetail.hops and hopDetail.hops >= 2,
+                "and it must take more than one hop, got "
+                .. tostring(hopDetail.hops))
+
+            assert(hopDetail.legs and #hopDetail.legs == hopDetail.hops,
+                "and every hop must be printable as a leg")
+
+            -- The legs are what the player is shown. If they do not add up to
+            -- the distance the estimate was built from, the breakdown is
+            -- decoration.
+            local summed = 0
+
+            for _, leg in ipairs(hopDetail.legs) do
+                assert(leg.from and leg.to,
+                    "a leg with no ends is not a leg")
+
+                summed = summed + (leg.yards or 0)
+            end
+
+            assert(math.abs(summed - hopDetail.flightYards) < 0.001,
+                "the legs sum to " .. string.format("%.3f", summed)
+                .. " but the flight is " .. string.format("%.3f",
+                    hopDetail.flightYards))
+
+            -- And the path must be longer than the line it replaces, which is
+            -- the entire reason for the change.
+            local straight = travel.YardsBetweenPoints(
+                travel.WorldPoint(94, 0.05, 0.05),
+                travel.WorldPoint(94, 0.35, 0.95))
+
+            assert(hopDetail.flightYards > straight,
+                "a route through the network cannot be shorter than the "
+                .. "straight line it replaces")
+
+            -- A multi-hop route rests on an inferred edge list, so it is
+            -- never reported as measured however good the speed data is.
+            assert(hopConfident == false,
+                "a multi-hop estimate must not be reported as confident")
+
+            assert(hopped > 0, "and it must still be a duration")
+
+            travel.FlightMemory()[94] = nil
+
+            CN_TEST_SetMapSpan(spanBefore)
+
+            print("  " .. hopDetail.hops .. " hops through the flight network, "
+                .. "and the legs add up to the flight")
+        end
+
+        ------------------------------------------------------------
+        -- AND NO FLIGHT POINT MAY BE CUT OFF FROM THE REST.
+        --
+        -- The edge list is inferred, so a rule that only connected nodes
+        -- within a fixed radius would strand every isolated outpost -- it
+        -- would drop out of the graph, out of every route, and out of the
+        -- addon's answers, silently. `minimumNeighbours` exists to prevent
+        -- exactly that, and this is the property it is there for.
+        ------------------------------------------------------------
+        do
+            local spanBefore = CN_TEST_MAP_SPAN
+
+            CN_TEST_SetMapSpan({ 90000, 90000 })
+
+            local scattered = {}
+
+            for index = 1, 24 do
+                table.insert(scattered, {
+                    nodeID = 600 + index,
+                    name   = "Scattered " .. index,
+                    state  = 1,
+                    position = {
+                        x = 0.03 + (((index * 5) % 17) * 0.055),
+                        y = 0.03 + (((index * 3) % 13) * 0.072),
+                    },
+                })
+            end
+
+            -- One deliberately far from everything else.
+            table.insert(scattered, {
+                nodeID = 699, name = "Lone Outpost", state = 1,
+                position = { x = 0.99, y = 0.99 },
+            })
+
+            CN_TEST_TAXI_NODES[1941] = scattered
+
+            travel.ForgetNodes()
+
+            local list = travel.KnownNodes(94)
+
+            assert(#list >= 20, "the connectivity case needs a spread "
+                .. "continent, got " .. #list)
+
+            local reach = NetworkDistances(list)
+
+            local unreachable = 0
+
+            for index = 1, #list do
+                if not reach[1][index] then
+                    unreachable = unreachable + 1
+                end
+            end
+
+            assert(unreachable == 0,
+                unreachable .. " flight points have no route to them at all")
+
+            CN_TEST_SetMapSpan(spanBefore)
+
+            print("  every flight point on a spread continent is reachable "
+                .. "from every other")
+        end
+
+        ------------------------------------------------------------
         -- THE WHOLE PROPERTY, SWEPT, WITH THE DISCOUNT LIVE.
         --
         -- The single hand-placed case above tests one geometry, and the
@@ -50078,14 +54261,17 @@ print("\nGetting there:")
 
                 local expectRanking = expect
 
-                for _, origin in ipairs(list) do
-                    for _, arrival in ipairs(list) do
-                        if origin.id ~= arrival.id then
+                local sweepNetwork = NetworkDistances(list)
+
+                for i, origin in ipairs(list) do
+                    for j, arrival in ipairs(list) do
+                        local through = (i ~= j) and sweepNetwork[i][j] or nil
+
+                        if origin.id ~= arrival.id and through then
                             local total =
                                 (travel.YardsBetweenPoints(start, origin.point) / runSpeed)
                                 + travel.flightOverheadSeconds
-                                + (travel.YardsBetweenPoints(origin.point, arrival.point)
-                                    / speed)
+                                + (through / speed)
                                 + (travel.YardsBetweenPoints(finish, arrival.point) / runSpeed)
 
                             -- The discount RANKS; it does not shorten. So
@@ -50497,9 +54683,81 @@ print("\nContributed chains:")
     assert(imported100.requires == nil,
         "and must never be able to present itself as curated data")
 
-    assert(contribute.Forget() == 2, "and it can all be thrown away")
+    ------------------------------------------------------------
+    -- AND `/cn why` MUST SAY WHERE THE CHAIN CAME FROM.
+    --
+    -- The import command promises exactly that, and it was not true: an
+    -- imported edge was indistinguishable from a locally observed one, so the
+    -- eligibility checker formatted it as "seen first on N characters" with N
+    -- read from the harvest store -- which has no record of an imported quest
+    -- and therefore answered zero. The player was told the addon had watched
+    -- the ordering hold on ZERO characters.
+    ------------------------------------------------------------
+    assert(imported100.origin == "contributed",
+        "an imported edge must carry where it came from")
 
-    print("  malformed imports refused, good ones land as observations")
+    -- Drive it through the eligibility checker, which is what `/cn why`
+    -- prints, rather than asserting on the field alone.
+    local checker = CN.eligibilityCheckers
+        and CN.eligibilityCheckers[CN.objectiveTypes.QUEST]
+
+    if checker then
+        local _, _, detail = checker(100)
+
+        assert(detail == nil or not detail:find("0 characters"),
+            "a chain nobody here observed must not be reported as observed "
+            .. "on zero characters: " .. tostring(detail))
+
+        if detail then
+            assert(detail:find("imported"),
+                "it must say the chain was imported: " .. detail)
+        end
+    end
+
+    ------------------------------------------------------------
+    -- AND WHAT THIS ACCOUNT HAS LEARNED MUST BE EXPORTABLE.
+    --
+    -- The other half of the feature. `Build` reads the harvest store and
+    -- produces the one line a player is asked to paste; nothing had ever run
+    -- it, so the format it emits had never been checked against the parser
+    -- that has to read it back.
+    ------------------------------------------------------------
+    local contributeHarvest = CN:GetModule("Harvest")
+
+    local store = contributeHarvest.Store()
+
+    store[900001] = {
+        observed = {
+            [900010] = { seen = 9, characters = { a = true, b = true, c = true } },
+        },
+    }
+
+    local export, buildErr, chains = contribute.Build()
+
+    if export then
+        assert(chains and chains > 0, "something must be exportable")
+
+        assert(export:find("^" .. contribute.formatVersion),
+            "the export must be stamped with its format version")
+
+        -- The parser and the writer are two halves of one format, and the
+        -- only way to know they agree is to hand one the other's output.
+        local roundTrip, roundErr = contribute.Parse(export)
+
+        assert(roundTrip,
+            "what Build writes, Parse must read: " .. tostring(roundErr))
+    else
+        assert(buildErr, "and when there is nothing to share it says why")
+    end
+
+    store[900001] = nil
+
+    CN.HandleSlashCommand("contribute")
+
+    assert(contribute.Forget() >= 2, "and it can all be thrown away")
+
+    print("  malformed imports refused, good ones land as observations, and "
+        .. "the export round-trips")
 end)()
 
 print("\nOne grammar for uncertainty:")
@@ -50603,7 +54861,111 @@ print("\nErrors are kept where the player can find them:")
     assert(fine == true, "a successful guard succeeds")
     assert(errors.Count() == 0, "and records nothing")
 
-    print("  caught, deduplicated, bounded and clearable")
+    ------------------------------------------------------------
+    -- AND THE GUARD MUST NOT CHANGE THE ARITY OF WHAT IT WRAPS.
+    --
+    -- `{ pcall(fn, ...) }` measured with `#` truncates at the first nil, so a
+    -- wrapped function returning `value, nil` came back as one value. `#` on
+    -- a table with holes is undefined in both interpreters; they happen to
+    -- agree on the cases here, which is the kind of agreement this project
+    -- has learned not to rest on.
+    ------------------------------------------------------------
+    local gotToy, first, second, third =
+        errors.Guard("arity", function() return "a", nil, "c" end)
+
+    assert(gotToy == true, "the guard still reports success first")
+    assert(first == "a" and second == nil and third == "c",
+        "and every return survives, holes included: got "
+        .. tostring(first) .. ", " .. tostring(second) .. ", "
+        .. tostring(third))
+
+    local trailing = { errors.Guard("trailing",
+        function() return "value", nil end) }
+
+    assert(trailing[1] == true and trailing[2] == "value",
+        "a trailing nil must not swallow the value in front of it")
+
+    ------------------------------------------------------------
+    -- AND `/cn errors` MUST PRINT WHAT IT HOLDS.
+    --
+    -- The command is what the bug template asks people to paste, and every
+    -- branch of it -- this session, the previous one, the events the client
+    -- refused -- was unexecuted.
+    ------------------------------------------------------------
+    errors.Clear()
+    errors.ForgetPrevious()
+
+    -- Nothing at all.
+    local quietAt = #output
+
+    CN.HandleSlashCommand("errors")
+
+    local saidQuiet = false
+
+    for index = quietAt + 1, #output do
+        if output[index]:find("Nothing has gone wrong") then saidQuiet = true end
+    end
+
+    assert(saidQuiet, "with nothing recorded, it says so")
+
+    -- This session.
+    errors.Record("a failing provider", "it exploded")
+
+    local liveAt = #output
+
+    CN.HandleSlashCommand("errors")
+
+    local named = false
+
+    for index = liveAt + 1, #output do
+        if output[index]:find("a failing provider") then named = true end
+    end
+
+    assert(named, "and it names what failed")
+
+    -- The previous session, shown once and then forgotten.
+    errors.Persist()
+    errors.Clear()
+
+    local previousAt = #output
+
+    CN.HandleSlashCommand("errors")
+
+    local fromLast = false
+
+    for index = previousAt + 1, #output do
+        if output[index]:find("From the previous one") then fromLast = true end
+    end
+
+    assert(fromLast, "the previous session's record is offered")
+
+    assert(#errors.Previous() == 0,
+        "and shown once, then forgotten -- otherwise it follows the player "
+        .. "around forever")
+
+    -- Events the client refused, which is the failure most likely to be
+    -- mistaken for "there is just nothing to do".
+    CN.rejectedEvents["MADE_UP_EVENT"] = "no such event"
+
+    local refusedAt = #output
+
+    CN.HandleSlashCommand("errors")
+
+    local sawRefusal = false
+
+    for index = refusedAt + 1, #output do
+        if output[index]:find("MADE_UP_EVENT") then sawRefusal = true end
+    end
+
+    assert(sawRefusal,
+        "an event the client refused must be named: a handler that never "
+        .. "runs is silent in every other way")
+
+    CN.rejectedEvents["MADE_UP_EVENT"] = nil
+
+    CN.HandleSlashCommand("errors clear")
+
+    print("  caught, deduplicated, bounded, clearable, and printed")
 end)()
 
 print("\nThe things that make it legible:")
@@ -51094,7 +55456,85 @@ print("\nWhat you are already carrying:")
     assert(bagOffered[44001].travelCost == 0,
         "an item in your bag costs nothing to reach")
 
-    print("  bags read, and an accepted starter is not offered twice")
+    ------------------------------------------------------------
+    -- A COLLECTIBLE IN A BAG IS THE CHEAPEST ACTION IN THE GAME.
+    --
+    -- A mount, a pet or a toy the player is carrying and has not learned is
+    -- zero yards away. `UncollectedItems` is the function that finds them --
+    -- three branches, all of them written and none of them ever executed,
+    -- because no bag in the fixture held a collectible.
+    ------------------------------------------------------------
+    CN_TEST_BAGS[1] = {
+        -- Item 800 teaches mount 2, which the fixture leaves uncollected.
+        { itemID = 800, stackCount = 1 },
+        -- Item 801 is a caged pet, species 101.
+        { itemID = 801, stackCount = 1 },
+        -- Item 501 is a toy the player does not own.
+        { itemID = 501, stackCount = 1 },
+        -- And 500 they DO own, which must not be offered.
+        { itemID = 500, stackCount = 1 },
+    }
+
+    inventory.Forget()
+
+    local carried = inventory.UncollectedItems()
+
+    local kinds = {}
+
+    for _, item in ipairs(carried) do
+        kinds[item.kind] = (kinds[item.kind] or 0) + 1
+    end
+
+    assert(kinds[CN.objectiveTypes.MOUNT],
+        "an uncollected mount in a bag must be found")
+
+    assert(kinds[CN.objectiveTypes.TOY],
+        "so must an uncollected toy")
+
+    for _, item in ipairs(carried) do
+        assert(item.itemID ~= 500,
+            "and a toy the player already owns must not be: telling somebody "
+            .. "to learn what they have is the one answer worse than silence")
+    end
+
+    ------------------------------------------------------------
+    -- AND COUNTING WHAT IS CARRIED.
+    --
+    -- `Inventory.Count` is what turns "go and do that quest" into "ten more".
+    -- It has three fallbacks -- C_Item, the old global, and giving up -- and
+    -- none had been run.
+    ------------------------------------------------------------
+    assert(inventory.Count(nil) == 0, "no item, no count")
+
+    local realCItem = C_Item
+
+    C_Item = { GetItemCount = function() return 7 end }
+
+    assert(inventory.Count(60002) == 7, "the modern API answers first")
+
+    C_Item = nil
+
+    local realGlobal = GetItemCount
+
+    GetItemCount = function() return 3 end
+
+    assert(inventory.Count(60002) == 3,
+        "and the old global is the fallback, not a crash")
+
+    GetItemCount = nil
+
+    assert(inventory.Count(60002) == 0,
+        "with neither, the answer is zero rather than an error")
+
+    GetItemCount = realGlobal
+    C_Item       = realCItem
+
+    CN_TEST_BAGS[1] = nil
+
+    inventory.Forget()
+
+    print("  bags read, an accepted starter is not offered twice, and a "
+        .. "carried collectible is found")
 end)()
 
 print("\nThings with a clock on them:")
@@ -51674,7 +56114,91 @@ print("\nAppearance sets:")
     assert(setCandidates[1].reasons[1]:find("4 of 5"),
         "carrying the real denominator: " .. setCandidates[1].reasons[1])
 
-    print("  " .. #all .. " sets read, one within two pieces, the finished one left alone")
+    ------------------------------------------------------------
+    -- THE GUILD AND THE QUEUE LIST, WHICH ARE READ-ONLY ON PURPOSE.
+    --
+    -- Two APIs the addon reads and must never act on: an addon that puts
+    -- somebody in a group-finder queue is an addon that will one day do it
+    -- mid-raid. Both were written, both are guarded at every step, and
+    -- neither had been executed -- so the guards were untested and the
+    -- feature could have been silently off.
+    ------------------------------------------------------------
+    local realIsInGuild = IsInGuild
+    local realGuildInfo = GetGuildInfo
+    local realLFG       = C_LFGList
+
+    IsInGuild = nil
+
+    assert(sets.Guild() == nil,
+        "a client with no guild API is not a client with no guild -- but "
+        .. "either way there is nothing to report")
+
+    IsInGuild = function() return false end
+
+    assert(sets.Guild() == nil, "and a player in no guild has no guild")
+
+    IsInGuild   = function() return true end
+    GetGuildInfo = function() return "Test Guild", "Officer", 1 end
+
+    local guild = sets.Guild()
+
+    assert(guild and guild.name == "Test Guild" and guild.rank == "Officer",
+        "a player in a guild gets their guild and their rank")
+
+    -- An API that exists and throws, which is the case a bare call misses.
+    GetGuildInfo = function() error("guild API exploded") end
+
+    local survived = sets.Guild()
+
+    assert(survived and survived.name == nil,
+        "a guild API that throws costs the name, not the call")
+
+    IsInGuild    = realIsInGuild
+    GetGuildInfo = realGuildInfo
+
+    -- THE QUEUES.
+    C_LFGList = nil
+
+    local noQueues, answered = sets.Queues()
+
+    assert(#noQueues == 0 and answered == false,
+        "with no group finder API the answer is 'cannot say', not 'nothing "
+        .. "available'")
+
+    C_LFGList = {
+        GetAvailableActivities = function() return { 11, 12, 13 } end,
+        GetActivityInfoTable   = function(id)
+            if id == 13 then
+                -- The client sometimes answers with nothing useful.
+                return nil
+            end
+
+            return { fullName = "Activity " .. id, maxNumPlayers = 5 }
+        end,
+    }
+
+    local queues, ok = sets.Queues()
+
+    assert(ok ~= false, "with the API present it answers")
+    assert(#queues == 2,
+        "an activity the client will not describe is dropped, not invented: "
+        .. "got " .. #queues)
+
+    assert(queues[1].name == "Activity 11" and queues[1].maxPlayers == 5,
+        "and the ones it will describe carry their real numbers")
+
+    -- An API that throws must cost the list, not the session.
+    C_LFGList.GetAvailableActivities = function() error("LFG exploded") end
+
+    local threw, reported = sets.Queues()
+
+    assert(#threw == 0 and reported == false,
+        "a group finder that throws is reported as unreadable")
+
+    C_LFGList = realLFG
+
+    print("  " .. #all .. " sets read, one within two pieces, the finished "
+        .. "one left alone, guild and queues read without acting")
 end)()
 
 
@@ -51758,7 +56282,68 @@ print("\nThe curated data accessors:")
     assert(Static.GetQuestTurnIn(77001) == nil,
         "and a row without one says nothing rather than guessing")
 
-    print("  class, race, faction, level and turn-in all read back correctly")
+    ------------------------------------------------------------
+    -- AND THE OTHER FOUR CURATED TABLES, PLUS THE COMMUNITY ONE.
+    --
+    -- Recipes, vendors, rares and treasures each have a registration function
+    -- and a shipped-data file that is currently empty, so the registrars were
+    -- never called and `Static.Count()` -- the number `/cn dbsize` prints --
+    -- had never been computed. A registrar nothing has run is a registrar
+    -- that will be wrong the day somebody fills the table in.
+    ------------------------------------------------------------
+    Static.RegisterRecipe(88001, { itemID = 88001, profession = "Alchemy" })
+    Static.RegisterVendor(88002, { name = "Test Vendor", mapID = 2112 })
+    Static.RegisterRare(88003, { name = "Test Rare", mapID = 2112 })
+    Static.RegisterTreasure(88004, { name = "Test Treasure", mapID = 2112 })
+
+    local quests, recipes, staticVendors, staticRares, treasures = Static.Count()
+
+    assert(quests > 0, "the quest rows registered above are counted")
+    assert(recipes >= 1 and staticVendors >= 1 and staticRares >= 1 and treasures >= 1,
+        "and so is every other table: " .. recipes .. ", " .. staticVendors
+        .. ", " .. staticRares .. ", " .. treasures)
+
+    -- Registration refuses what it cannot use, rather than storing a shape
+    -- that will fail at read time.
+    Static.RegisterQuest(nil, { name = "No id" })
+    Static.RegisterQuest(88005, nil)
+
+    assert(Static.GetQuest(88005) == nil,
+        "a row with no record is not a row")
+
+    ------------------------------------------------------------
+    -- THE COMMUNITY TABLE, which is the weakest of the three prerequisite
+    -- sources and must stay separate from the curated one.
+    ------------------------------------------------------------
+    local communityBefore = Static.CommunityCount()
+
+    local added = Static.RegisterCommunity({
+        [88010] = { requires = { 88011, 88012 } },
+        -- Refused: no prerequisites is not a chain.
+        [88013] = { requires = "not a table" },
+        [88014] = {},
+    })
+
+    assert(added == 1,
+        "only the well-formed row is taken, got " .. tostring(added))
+
+    assert(Static.CommunityCount() == communityBefore + 1,
+        "and the count moves by exactly that much")
+
+    local community = Static.GetCommunity(88010)
+
+    assert(community and #community.requires == 2,
+        "with its prerequisites intact")
+
+    assert(Static.GetCommunity(88013) == nil,
+        "and the refused rows are absent rather than half-stored")
+
+    -- Community data must never surface as a curated quest record.
+    assert(Static.GetQuest(88010) == nil,
+        "a contributed chain is not curated data and must not answer as it")
+
+    print("  class, race, faction, level and turn-in all read back correctly, "
+        .. "and all five tables count")
 end)()
 
 print("\nWhat is on a clock, in detail:")
@@ -51872,12 +56457,83 @@ print("\nCrafting orders, and a decision that could go stale:")
 
     assert(#withClaim == 2, "something finished and waiting is also an action")
 
+    ------------------------------------------------------------
+    -- AND THE COMMAND THAT SHOWS THEM.
+    --
+    -- `/cn orders` is the surface a player actually uses, and every line of
+    -- it -- the "you have not opened the order frame yet" case, the empty
+    -- case and the list itself -- was unexecuted. The first of those is the
+    -- one that matters: "the client has not handed us your orders" and "you
+    -- have no orders" are different sentences, and an addon that says the
+    -- second when it means the first sends the player to check a window that
+    -- is already correct.
+    ------------------------------------------------------------
+    local listedAt = #output
+
+    CN.HandleSlashCommand("orders")
+
+    local listed = false
+
+    for index = listedAt + 1, #output do
+        if output[index]:find("Flask") then listed = true end
+    end
+
+    assert(listed, "the order list must name the orders")
+
+    -- No orders at all.
+    C_CraftingOrders.GetMyOrders = function() return {} end
+
+    local emptyAt = #output
+
+    CN.HandleSlashCommand("orders")
+
+    local saidEmpty = false
+
+    for index = emptyAt + 1, #output do
+        if output[index]:find("No orders outstanding") then saidEmpty = true end
+    end
+
+    assert(saidEmpty, "an empty list is reported as empty")
+
+    -- The API present but refusing to answer, which is the state listedAt the
+    -- player has opened the crafting order frame this session.
+    C_CraftingOrders.GetMyOrders = function() return nil end
+
+    local unknownAt = #output
+
+    CN.HandleSlashCommand("orders")
+
+    local saidUnknown = false
+
+    for index = unknownAt + 1, #output do
+        if output[index]:find("Nothing known yet") then saidUnknown = true end
+    end
+
+    assert(saidUnknown,
+        "and 'the client has not told us' must not be reported as 'you have "
+        .. "none' -- they send the player to different places")
+
+    -- Delve progress: an API that exists but exposes nothing useful is the
+    -- interesting case, because it is the one that looks like support.
+    local realDelves = C_DelvesUI
+
+    C_DelvesUI = {}
+
+    local answered, detail = orders.DelveProgressAvailable()
+
+    assert(answered == false and detail and detail:find("Great Vault"),
+        "an API with no progress function must say where the credit does "
+        .. "come from, not merely fail")
+
+    C_DelvesUI = realDelves
+
     C_CraftingOrders = nil
 
     assert(#CN.candidateProviders["Orders"].fn() == 0,
         "and none of it survives the API going away")
 
-    print("  orders read, only the expiring one recommended")
+    print("  orders read, only the expiring one recommended, and the "
+        .. "command's three states are distinct")
 end)()
 
 
@@ -52854,7 +57510,53 @@ print("\nFeatures that were wired to nothing:")
         .. "and restored only the search box, permanently resetting a "
         .. "setting the player chose")
 
-    print("  the pet journal is left as it was found")
+    -- AND THE ONES THAT CANNOT BE PUT BACK ARE NOT TOUCHED AT ALL.
+    --
+    -- `SetAllPetSourcesChecked` and `SetAllPetTypesChecked` have no getter,
+    -- so calling them is a permanent change to a setting the player chose.
+    -- The file's own comment said they were widened "only if the scan would
+    -- otherwise see nothing"; the code did it on every scan, and the pet scan
+    -- runs on a thirty-second throttle. The stub recorded the call and no
+    -- test looked, so a written-down rule went unenforced for six releases.
+    CN_TEST_PET_FILTERS = { collected = false, uncollected = true }
+
+    CN.Blizzard.WithAllPetsShown(function() end)
+
+    assert((CN_TEST_PET_FILTERS.sourceWidens or 0) == 0
+        and (CN_TEST_PET_FILTERS.typeWidens or 0) == 0,
+        "a scan that can see pets must not touch the source and type checks; "
+        .. "they cannot be read back, so widening them is permanent")
+
+    -- Unless the player's own filters hide everything, which is the one case
+    -- where changing them beats reporting an empty collection -- and it is
+    -- announced, because it cannot be undone.
+    local realNumPets = C_PetJournal.GetNumPets
+
+    C_PetJournal.GetNumPets = function() return 0, 0 end
+
+    CN_TEST_PET_FILTERS = { collected = false, uncollected = true }
+
+    CN.Blizzard.WithAllPetsShown(function() end)
+
+    assert((CN_TEST_PET_FILTERS.sourceWidens or 0) == 1
+        and (CN_TEST_PET_FILTERS.typeWidens or 0) == 1,
+        "but when the journal reports nothing at all, widening is the only "
+        .. "way to answer")
+
+    C_PetJournal.GetNumPets = realNumPets
+
+    print("  the pet journal is left as it was found, filters included")
+
+    -- 5. The toy box, same rule, same reason.
+    CN_TEST_TOY_SOURCES_WIDENED = 0
+
+    CN.Blizzard.WithAllToysShown(function() end)
+
+    assert(CN_TEST_TOY_SOURCES_WIDENED == 0,
+        "a toy scan that can see toys must not widen the source filters "
+        .. "either; SetAllSourceTypeFilters has no getter")
+
+    print("  and so is the toy box")
 end)()
 
 print("\nTwo things that only break on the second use:")
@@ -53580,6 +58282,94 @@ print("\nEvery tab builds:")
 
     print("  " .. #UI.tabs .. " tabs built and refreshed, " .. withLists
         .. " of them with lists")
+
+    ------------------------------------------------------------
+    -- AND ALL OF IT AGAIN WITH EVERY TEMPLATE RETIRED.
+    --
+    -- Blizzard renames and retires XML templates between expansions, and a
+    -- missing template makes `CreateFrame` throw. `SafeCreateFrame` exists so
+    -- that takes one frame's styling rather than the whole window -- and
+    -- neither it nor `PaintPanel`, the hand-drawn replacement it falls back
+    -- to, had ever been executed: the harness stub accepts any template, so
+    -- the failure branch was unreachable and the fallback was three hundred
+    -- lines of untested code that only ever runs on the day a patch breaks
+    -- the addon.
+    ------------------------------------------------------------
+    local realCreateFrame = CreateFrame
+
+    CreateFrame = function(frameType, name, parent, template)
+        if template then
+            error("no such template: " .. tostring(template), 0)
+        end
+
+        return realCreateFrame(frameType, name, parent)
+    end
+
+    -- Prove the guard actually catches it, rather than the window happening
+    -- to ask for no templates.
+    local plain, templated = UI.SafeCreateFrame("Frame", nil, UIParent,
+        "SomeRetiredTemplate")
+
+    assert(plain and templated == false,
+        "a retired template must degrade to a plain frame, not throw")
+
+    for _, tab in ipairs(UI.tabs) do
+        tab.panel = nil
+    end
+
+    UI.window = nil
+
+    errors.Clear()
+
+    UI.Toggle()
+
+    for index = 1, #UI.tabs do
+        UI.SelectTab(index)
+        UI.Refresh()
+    end
+
+    for _, entry in ipairs(errors.All()) do
+        print("  BROKEN WITHOUT TEMPLATES: " .. entry.context
+            .. " -- " .. entry.message)
+    end
+
+    assert(errors.Count() == 0,
+        "the whole window must build with every template retired; "
+        .. errors.Count() .. " failure(s)")
+
+    -- The window still has to be usable, not merely non-throwing.
+    local rebuilt = 0
+
+    for _, tab in ipairs(UI.tabs) do
+        if tab.panel and tab.panel.list then
+            rebuilt = rebuilt + 1
+        end
+    end
+
+    assert(rebuilt >= 8,
+        "and its lists must still be there, got " .. rebuilt)
+
+    -- Position round trip, which is the other thing the frame layer owns.
+    UI.SavePosition()
+
+    assert(CN.Settings().window and CN.Settings().window.point,
+        "the window position must be saved")
+
+    UI.RestorePosition()
+
+    UI.RebuildTabs()
+
+    UI.Toggle()
+
+    CreateFrame = realCreateFrame
+
+    for _, tab in ipairs(UI.tabs) do
+        tab.panel = nil
+    end
+
+    UI.window = nil
+
+    print("  and all " .. #UI.tabs .. " again with every template retired")
 end)()
 
 
@@ -53759,6 +58549,60 @@ print("\nHelp that names commands which exist:")
         .. " of them in the catch-all group"
         .. (#ungrouped > 0 and (" (" .. table.concat(ungrouped, ", ") .. ")")
             or ""))
+
+    ------------------------------------------------------------
+    -- AND NO NAME MAY BE CLAIMED TWICE.
+    --
+    -- Registration overwrote silently, so whichever file loaded last won and
+    -- `/cn help` went on describing the loser. `/cn zones` was a command and,
+    -- further down the same file, an ALIAS of `/cn loremaster` -- so it ran
+    -- the quest-completion report while the help text and the store page both
+    -- described the zone ranking.
+    ------------------------------------------------------------
+    local collisions = {}
+
+    for _, clash in ipairs(CN.commandCollisions or {}) do
+        table.insert(collisions, clash.name .. " (" .. clash.kind
+            .. ": " .. clash.from .. " lost it to " .. clash.to .. ")")
+    end
+
+    assert(#collisions == 0,
+        "a command name claimed twice runs one thing and documents another: "
+        .. table.concat(collisions, "; "))
+
+    print("  and no name or alias is claimed twice")
+
+    ------------------------------------------------------------
+    -- AND A MULTI-WORD NAME MUST BE REACHABLE.
+    ------------------------------------------------------------
+    do
+        local multiword = {}
+
+        for _, definition in ipairs(CN.commandList) do
+            if definition.name:find("%s") then
+                table.insert(multiword, definition.name)
+            end
+        end
+
+        for _, name in ipairs(multiword) do
+            local reached
+
+            local realHandler = CN.commands[name].handler
+
+            CN.commands[name].handler = function() reached = true end
+
+            CN.HandleSlashCommand(name)
+
+            CN.commands[name].handler = realHandler
+
+            assert(reached,
+                "/cn " .. name .. " is registered and listed in help but the "
+                .. "dispatcher splits on the first space, so it can never be "
+                .. "reached")
+        end
+
+        print("  " .. #multiword .. " multi-word command(s) reachable as typed")
+    end
 
     -- THE RATCHET.
     --

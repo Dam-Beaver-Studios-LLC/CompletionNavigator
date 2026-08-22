@@ -84,6 +84,17 @@ function Breakdown.Report(categoryName)
                 result.order = category.order
 
                 table.insert(rows, result)
+            elseif not ok then
+                -- A category that throws was dropped with no trace, so if
+                -- every one of them threw the report said "Nothing to report
+                -- yet. Run the scans first." -- which sends the player to do
+                -- work that will not help.
+                local errors = CN:GetModule("Errors")
+
+                if errors and errors.Record then
+                    pcall(errors.Record, "breakdown:" .. tostring(category.name),
+                        tostring(result))
+                end
             end
         end
     end
@@ -224,7 +235,14 @@ Breakdown.Register{
             total     = counts.total,
             remaining = counts.total - counts.completed,
             reasons   = reasons,
-            action    = counts.total == 0 and "/cn achievescan"
+            -- SCAN STATE IS NOT THE LIVE TOTAL.
+            --
+            -- `counts.total` comes from the client, so it is never zero and
+            -- this branch could never fire: a player who has never scanned
+            -- saw a healthy "1200 / 3400 (35.3%)" with no in-progress rows and
+            -- no prompt to scan. The scan is what fills `inProgress`, so that
+            -- is what says whether it has run.
+            action    = counts.inProgress == 0 and "/cn achievescan"
                 or (counts.nearlyDone > 0 and "/cn closest" or nil),
         }
     end,
@@ -334,11 +352,22 @@ Breakdown.Register{
     report = function()
         local discovered = CN.CountKeys(CN.Account("discoveredQuests"))
 
+        -- ASKED OF THE CLIENT, FOR THIS CHARACTER.
+        --
+        -- This counted an account-wide `questStatus` store whose
+        -- `characterCompleted` flag belonged to whichever character last
+        -- scanned, so a fresh alt was shown the main's progress. The client
+        -- answers per character, for free, and `discoveredQuests` is the set
+        -- worth asking about.
+        local quests = CN:GetModule("Quests")
+
         local completed = 0
 
-        for _, status in pairs(CN.Account("questStatus")) do
-            if status.characterCompleted then
-                completed = completed + 1
+        if quests and quests.IsCompletedByCharacter then
+            for questID in pairs(CN.Account("discoveredQuests")) do
+                if quests.IsCompletedByCharacter(questID) then
+                    completed = completed + 1
+                end
             end
         end
 

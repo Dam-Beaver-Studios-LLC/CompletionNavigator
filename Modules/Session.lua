@@ -914,9 +914,18 @@ function Session.Plan(minutes)
     return plan
 end
 
+-- SHORT IS NOT FREE.
+--
+-- Rounded to whole minutes, a twenty-five second stop rendered as "0m" in
+-- `/cn plan` and `/cn travel`, which reads as costing nothing rather than as
+-- costing very little. Under a minute is reported in seconds.
 function Session.FormatDuration(seconds)
     if not seconds or seconds <= 0 then
         return "0m"
+    end
+
+    if seconds < 60 then
+        return math.max(1, math.floor(seconds + 0.5)) .. "s"
     end
 
     local minutes = math.floor(seconds / 60 + 0.5)
@@ -973,7 +982,14 @@ CN:OnLogin(function()
     Session.Observe()
 
     if C_Timer and C_Timer.NewTicker and not ticker then
-        ticker = C_Timer.NewTicker(10, Session.Observe)
+        -- GUARDED. A C_Timer callback that throws goes to the client's own
+        -- error handler, and a REPEATING ticker means a repeating error box:
+        -- one bad observation and the player gets a popup every ten seconds
+        -- for the rest of the session. Navigation's ticker has been guarded
+        -- since 0.34.0; the four others were not.
+        ticker = C_Timer.NewTicker(10, function()
+            CN.Guard("Session.Observe", Session.Observe)
+        end)
     end
 end)
 
@@ -1023,10 +1039,16 @@ CN:RegisterCommand{
             return
         end
 
+        -- THE SUM OF NUMBERS TOO UNCERTAIN TO SHOW IS NOT A CERTAIN NUMBER.
+        --
+        -- Each individual stop below refuses to print a duration it is not
+        -- confident in, and this headline printed their total as a plain
+        -- figure regardless. One convention, both lines.
         Print(string.format("%d stop%s, about %s of the %dm you have:",
             #plan.stops,
             #plan.stops == 1 and "" or "s",
-            Session.FormatDuration(plan.seconds),
+            CN.WithConfidence(Session.FormatDuration(plan.seconds),
+                CN.ConfidenceFor(plan.confident)),
             plan.minutes))
 
         for index, stop in ipairs(plan.stops) do

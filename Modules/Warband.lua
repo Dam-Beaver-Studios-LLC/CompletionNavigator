@@ -265,12 +265,24 @@ CN:RegisterCommand{
 
         local coverage = Warband.Coverage()
 
-        Print("Combined coverage: " .. coverage.professions .. " professions, "
+        -- THE CAVEAT BELONGS ON THE NUMBER, NOT ONLY ON THE ONE-CHARACTER
+        -- CASE.
+        --
+        -- `CN.Characters()` holds the characters that have logged in with
+        -- this addon installed, which for most people is a fraction of the
+        -- account. With three of ten alts seen the figure was printed as
+        -- plain fact and only the `#rows == 1` case was hedged.
+        Print("Combined coverage across the " .. #rows .. " character"
+            .. (#rows == 1 and "" or "s") .. " this addon has seen: "
+            .. coverage.professions .. " professions, "
             .. coverage.recipes .. " recipes, " .. coverage.titles .. " titles.")
 
         if #rows == 1 then
             Print("|cffffff00Only one character has been seen. Log in on your alts "
                 .. "with the addon loaded to make these comparisons useful.|r")
+        else
+            Print("|cff999999An alt that has never logged in with the addon "
+                .. "loaded is not in this total.|r")
         end
     end,
 }
@@ -284,7 +296,14 @@ CN:RegisterCommand{
         local kind, value = args:match("^(%S+)%s+(.+)$")
 
         if not kind or not value then
-            Print("Usage: /cn who <rep, recipe, title or profession> <id or name>")
+            -- NAMES RESOLVE FOR TWO OF THE FOUR, AND THE USAGE LINE SAID
+            -- FOUR. `RECIPE` and `PROFESSION` have no resolver, so a name
+            -- there fell through to "Could not resolve" -- which reads as
+            -- "that recipe does not exist" rather than "give me the id".
+            Print("Usage: /cn who <rep|title> <id or name>")
+            Print("|cff999999       /cn who <recipe|profession> <id>|r")
+            Print("|cff999999Recipes and professions are looked up by id "
+                .. "only; |cffffff00/cn recipes|r|cff999999 lists yours.|r")
             return
         end
 
@@ -323,7 +342,17 @@ CN:RegisterCommand{
         end
 
         if not id then
-            Print("Could not resolve: " .. value)
+            if objectiveType == types.RECIPE
+                or objectiveType == types.PROFESSION then
+
+                Print("Recipes and professions are looked up by id, not by "
+                    .. "name: " .. value)
+                Print("|cff999999|cffffff00/cn recipes|r|cff999999 lists the "
+                    .. "ones this addon knows about, with their ids.|r")
+            else
+                Print("Could not resolve: " .. value)
+            end
+
             return
         end
 

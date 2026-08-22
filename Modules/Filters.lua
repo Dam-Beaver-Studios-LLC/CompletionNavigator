@@ -167,29 +167,13 @@ function Filters.TypeOrder()
     }
 end
 
--- Friendly names, because "APPEARANCE" is how the code thinks and not how a
--- person reads a checkbox.
-Filters.typeLabels = {
-    QUEST       = "Quests",
-    ACHIEVEMENT = "Achievements",
-    REPUTATION  = "Reputations",
-    PET         = "Battle pets",
-    MOUNT       = "Mounts",
-    TOY         = "Toys",
-    APPEARANCE  = "Appearances",
-    RECIPE      = "Recipes",
-    PROFESSION  = "Professions",
-    RARE        = "Rares",
-    TREASURE    = "Treasures",
-    EXPLORATION = "Exploration",
-    TITLE       = "Titles",
-    CURRENCY    = "Currencies",
-    INSTANCE    = "Dungeons & raids",
-}
+-- Friendly names live in Objectives.lua now, beside the enum they name, so
+-- that everything which prints a type can reach them -- most of the places
+-- that do load long before this file. These two are kept as the names the
+-- rest of this module already uses.
+Filters.typeLabels = CN.typeLabels
 
-function Filters.TypeLabel(objectiveType)
-    return Filters.typeLabels[objectiveType] or tostring(objectiveType)
-end
+Filters.TypeLabel = CN.TypeLabel
 
 -- Accepts what a person would actually type.
 function Filters.ResolveType(text)
@@ -399,6 +383,12 @@ function Filters.Restore(key)
         removed = true
     end
 
+    -- Same reason as CN.SetIgnored: the list a provider built is the list the
+    -- player sees, and un-hiding something has to rebuild it.
+    if removed and CN.InvalidateCandidates then
+        CN.InvalidateCandidates()
+    end
+
     return removed
 end
 
@@ -414,6 +404,10 @@ function Filters.RestoreAll()
 
     for key in pairs(deferred) do
         deferred[key] = nil
+    end
+
+    if count > 0 and CN.InvalidateCandidates then
+        CN.InvalidateCandidates()
     end
 
     return count
@@ -803,7 +797,21 @@ CN:RegisterCommand{
 
         Print("Settings for " .. tostring(CN.characterKey or "this character") .. ":")
 
-        for _, key in ipairs({ "priorityMode", "autoWaypoint", "arrow", "tooltips" }) do
+        -- EVERY OVERRIDABLE SETTING, NOT A HAND-COPIED FOUR OF THEM.
+        --
+        -- `CN.characterOverridable` also carries `mapPins` and `follow`, and
+        -- the rejection branch above already enumerates the whole table -- so
+        -- overriding `mapPins` was accepted and then never listed, and the
+        -- status view gave no sign it existed.
+        local overridable = {}
+
+        for key in pairs(CN.characterOverridable or {}) do
+            table.insert(overridable, key)
+        end
+
+        table.sort(overridable)
+
+        for _, key in ipairs(overridable) do
             local overridden = CN.IsOverridden(key)
 
             Print("  " .. key .. " = " .. tostring(settings[key])

@@ -84,8 +84,18 @@ Welcome.choices = {
 function Welcome.Choose(mode)
     Welcome.MarkSeen()
 
-    if not mode or mode == "everything" then
-        return true, "everything"
+    -- "A BIT OF EVERYTHING" SET NOTHING, AND SAID IT HAD.
+    --
+    -- This short-circuited before `ApplyMode`, so the click handler printed
+    -- "Focus set to everything" while `/cn mode` reported no focus and `/cn
+    -- mode off` answered "No focus was set, so nothing changed." Worse: with
+    -- a focus already active -- from an earlier `/cn mode collecting`, say --
+    -- picking "a bit of everything" left thirteen types hidden and told the
+    -- player the focus was now everything.
+    --
+    -- `CN.modes.everything` exists and does exactly the right thing.
+    if not mode then
+        mode = "everything"
     end
 
     local filters = CN:GetModule("Filters")

@@ -166,8 +166,20 @@ function Contribute.Import(text)
 
         store[questID] = prerequisites
 
+        -- TAGGED WITH WHERE IT CAME FROM.
+        --
+        -- The command promises that `/cn why` "will say the chain came from a
+        -- contribution rather than from curated data", and it did not: an
+        -- imported edge was indistinguishable from a locally observed one, so
+        -- the eligibility checker formatted it as "seen first on N
+        -- characters" -- with N read from the harvest store, which has no
+        -- record of an imported quest and therefore answered zero. The player
+        -- was told the addon had watched the ordering hold on ZERO
+        -- characters, which is both a false provenance claim and nonsense as
+        -- evidence.
         CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
             observedRequires = prerequisites,
+            origin           = "contributed",
         })
     end
 
@@ -197,6 +209,7 @@ CN:OnLogin(function()
     for questID, prerequisites in pairs(store) do
         CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
             observedRequires = prerequisites,
+            origin           = "contributed",
         })
     end
 end)

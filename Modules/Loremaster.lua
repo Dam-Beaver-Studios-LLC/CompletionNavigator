@@ -449,7 +449,10 @@ CN:RegisterCommand{
 
         if #rows == 0 then
             Print("No unfinished zone achievements are recorded yet.")
-            Print("|cff999999Run |cffffff00/cn loremaster scan|r"
+            -- `/cn loremaster scan` is not a command. `loremaster` treats
+            -- any argument that is not `all` or `zone` as a NAME FILTER, so
+            -- that line sent the player to "Nothing matched."
+            Print("|cff999999Run |cffffff00/cn scanlore|r"
                 .. "|cff999999 to read them from the game.|r")
             return
         end
@@ -560,7 +563,12 @@ end
 
 CN:RegisterCommand{
     name    = "loremaster",
-    aliases = { "lore", "zones" },
+    -- "zones" REMOVED. It was registered as its own command 120 lines up --
+    -- "Which zone to work on next, and why" -- and this alias, loading later,
+    -- overwrote it. So `/cn zones` printed the quest-completion-by-zone
+    -- report while `/cn help` and the store page both described the zone
+    -- ranking, and the real command was reachable only as `/cn nextzone`.
+    aliases = { "lore" },
     args    = "[all, zone, or a name to filter]",
     order   = 12,
     help    = "Quest completion by zone, continent and expansion.",

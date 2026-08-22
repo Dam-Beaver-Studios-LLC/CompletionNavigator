@@ -47,7 +47,7 @@ local function CurrentText(results)
 
     local objective = results[1]
 
-    return tostring(objective.name or objective.id), tostring(objective.type)
+    return tostring(objective.name or objective.id), CN.TypeLabel(objective.type)
 end
 
 Broker.CurrentText = CurrentText
@@ -82,9 +82,17 @@ function Broker.Install()
         text  = "Completion Navigator",
         icon  = CN.MEDIA_PATH .. "Logo",
 
+        -- GUARDED, both of them. `Broker.CurrentText` forty lines up already
+        -- wraps `CN.Recommend`; the click and tooltip handlers did not -- and
+        -- these run inside the host bar addon, so a throw here breaks Titan
+        -- Panel's or ElvUI's tooltip rather than this addon's.
         OnClick = function(_, button)
             if button == "RightButton" then
-                local results = CN.Recommend(1)
+                local asked, results = pcall(CN.Recommend, 1)
+
+                if not asked then
+                    results = nil
+                end
 
                 if results and results[1] then
                     CN.NavigateToObjective(results[1])
@@ -105,11 +113,25 @@ function Broker.Install()
 
             tooltip:AddLine("Completion Navigator")
 
-            local results = CN.Recommend(3)
+            local asked, results = pcall(CN.Recommend, 3)
+
+            if not asked then
+                tooltip:AddLine("Something went wrong; /cn errors has it.",
+                    0.96, 0.42, 0.38)
+                return
+            end
 
             if not results or #results == 0 then
                 tooltip:AddLine("Nothing actionable yet.", 0.6, 0.6, 0.6)
-                tooltip:AddLine("Run /cn setup once.", 0.6, 0.6, 0.6)
+
+                for index, line in ipairs(CN.ExplainEmptyList()) do
+                    if index > 2 then
+                        break
+                    end
+
+                    tooltip:AddLine(line, 0.6, 0.6, 0.6)
+                end
+
                 return
             end
 

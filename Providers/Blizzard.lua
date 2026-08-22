@@ -464,14 +464,50 @@ end
 -- The faction list only reports rows whose headers are expanded, so a
 -- complete scan has to expand everything and then put it back.
 function Blizzard.WithAllFactionsExpanded(scan)
+    -- CAPTURED AND RESTORED BY THE SAME KEY.
+    --
+    -- The capture keyed on `data.factionID or index` and the restore matched
+    -- on `data.factionID` alone, which fails in both directions depending on
+    -- what the client puts in `factionID` for a header row. A header with no
+    -- id was recorded under an index and could never be matched again, so
+    -- every collapsed header stayed permanently open after one `/cn repscan`.
+    -- A header with `factionID = 0` -- which is what the fixture itself uses
+    -- -- collided with every other header on `collapsed[0]`, so one collapsed
+    -- header made the restore collapse them ALL, including the ones the
+    -- player deliberately had open.
+    --
+    -- Keyed on the name, which headers always have and which is stable across
+    -- the index shifting that expanding causes. A row with neither an id nor
+    -- a name is not restored at all, which is the honest outcome: guessing
+    -- is what produced both failures above.
     local collapsed = {}
+
+    local function Key(data)
+        if not data then
+            return nil
+        end
+
+        if data.factionID and data.factionID ~= 0 then
+            return "id:" .. tostring(data.factionID)
+        end
+
+        if data.name and data.name ~= "" then
+            return "name:" .. tostring(data.name)
+        end
+
+        return nil
+    end
 
     if C_Reputation and C_Reputation.GetNumFactions then
         for index = C_Reputation.GetNumFactions(), 1, -1 do
             local data = Blizzard.GetFactionByIndex(index)
 
             if data and data.isCollapsed then
-                collapsed[data.factionID or index] = true
+                local key = Key(data)
+
+                if key then
+                    collapsed[key] = true
+                end
             end
         end
     end
@@ -485,8 +521,9 @@ function Blizzard.WithAllFactionsExpanded(scan)
     if C_Reputation and C_Reputation.CollapseFactionHeader then
         for index = Blizzard.GetNumFactions(), 1, -1 do
             local data = Blizzard.GetFactionByIndex(index)
+            local key  = Key(data)
 
-            if data and data.factionID and collapsed[data.factionID] then
+            if key and collapsed[key] then
                 C_Reputation.CollapseFactionHeader(index)
             end
         end

@@ -178,12 +178,27 @@ function Navigation.RelativeBearing(playerX, playerY, targetX, targetY, facing, 
     local relative = bearing - (facing * (sign or Navigation.FacingSign()))
 
     -- Normalize to (-pi, pi] so "how far off am I" is a small number.
-    while relative > math.pi do
-        relative = relative - (2 * math.pi)
-    end
+    --
+    -- THROUGH THE SHIM, WHICH IS WHAT THE SHIM IS FOR.
+    --
+    -- Core.lua defines `CN.Mod` as the floored modulo -- "if a construct
+    -- means two things, the addon uses neither directly; it uses one of
+    -- these" -- and then the one place in the addon that wraps an angle did
+    -- it with two unbounded `while` loops instead. So the rule was enforced
+    -- nowhere and the shim had no call sites at all, which is how a
+    -- compatibility guard quietly stops being one.
+    --
+    -- The loops were also unbounded: a non-finite bearing spins the client.
+    -- This is O(1) and it cannot.
+    local full = 2 * math.pi
 
-    while relative <= -math.pi do
-        relative = relative + (2 * math.pi)
+    relative = CN.Mod(relative + math.pi, full) - math.pi
+
+    -- CN.Mod's range is [0, full), so the line above lands in [-pi, pi).
+    -- The addon's convention is (-pi, pi] -- exactly antipodal must read as
+    -- "behind you", not "behind you, negative".
+    if relative == -math.pi then
+        relative = math.pi
     end
 
     return relative
@@ -1224,6 +1239,25 @@ function provider.IsAvailable()
 end
 
 function provider.SetWaypoint(mapID, x, y, title)
+    -- THE MAP MAY REFUSE, AND THE ARROW IS NOT THE WHOLE ANSWER.
+    --
+    -- The native provider draws its own arrow, which works anywhere -- but it
+    -- also drops the client's user waypoint, and the client will not place one
+    -- on a dungeon, raid, cosmic or continent map. `CanSetUserWaypointOnMap`
+    -- says which, and was called nowhere in this addon.
+    --
+    -- The arrow is still worth having on those maps, so this does not refuse
+    -- outright; it simply does not claim a map pin it could not place.
+    local allowed = true
+
+    if C_Map and C_Map.CanSetUserWaypointOnMap then
+        local asked, answer = pcall(C_Map.CanSetUserWaypointOnMap, mapID)
+
+        if asked and not answer then
+            allowed = false
+        end
+    end
+
     target = {
         mapID = mapID,
         x     = x,
@@ -1236,42 +1270,79 @@ function provider.SetWaypoint(mapID, x, y, title)
     Navigation.ResetCalibration()
     Navigation.ResetMotion()
 
+    -- SMOOTHING BELONGS TO A DESTINATION, NOT TO THE ARROW.
+    --
+    -- `Blank` -- the only thing that resets the smoothed bearing and distance
+    -- -- ran from `Navigation.Clear` and only when an arrow already existed.
+    -- Changing target without clearing first, which is what `/cn go`, the
+    -- route's auto-advance and a map-pin click all do, left the previous
+    -- destination's smoothed values in place. The snap thresholds hid the
+    -- large jumps, so what remained was the confusing case: a new target
+    -- within 89 degrees and 79 yards was eased into over several ticks,
+    -- showing a bearing and a distance belonging to neither destination.
+    Navigation.ResetSmoothing()
+    Navigation.ResetDistanceSmoothing()
+
     BuildArrow()
     Navigation.StartTicker()
     Refresh()
 
     -- Also drop a map pin, so the destination is visible on the world map and
     -- not only in front of the player.
-    if C_Map.SetUserWaypoint and UiMapPoint and UiMapPoint.CreateFromCoordinates then
+    if allowed and C_Map.SetUserWaypoint and UiMapPoint
+        and UiMapPoint.CreateFromCoordinates then
+
         local ok = pcall(function()
             C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(mapID, x, y))
         end)
 
-        if ok and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then
-            pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+        if ok then
+            -- Remembered so Clear can tell this addon's pin from one the
+            -- player placed by hand.
+            Navigation.ownsUserWaypoint = true
+
+            if C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then
+                pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+            end
         end
+    end
+
+    if not allowed then
+        return true, "the arrow is set; the game does not allow a map pin here"
     end
 
     return true
 end
 
 function provider.ClearAll()
-    Navigation.Clear()
+    return Navigation.Clear()
 end
 
 function Navigation.Clear()
+    local had = target ~= nil or Navigation.ownsUserWaypoint
+
     target = nil
 
     if arrow then
-        Blank()
         arrow:Hide()
     end
 
+    -- Unconditionally, not only when an arrow was built: the smoothed values
+    -- are state about a destination and the destination is gone either way.
+    Blank()
+
     Navigation.StopTicker()
 
-    if C_Map and C_Map.ClearUserWaypoint then
+    -- ONLY OUR OWN PIN. `ClearUserWaypoint` removes THE user waypoint, and
+    -- there is one. Stopping follow mode used to delete a pin the player had
+    -- placed by hand.
+    if Navigation.ownsUserWaypoint and C_Map and C_Map.ClearUserWaypoint then
         pcall(C_Map.ClearUserWaypoint)
     end
+
+    Navigation.ownsUserWaypoint = nil
+
+    return had and true or false
 end
 
 -- Priority 5: ahead of TomTom's 10. The addon is self-contained now, and a

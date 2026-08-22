@@ -445,6 +445,15 @@ CN:RegisterCommand{
             .. CN.YesNo(settings.keepFilter))
 
         if not settings.keepFilter then
+            -- Turning it off forgets what it was holding. Leaving the term
+            -- behind means turning the setting back on later silently applies
+            -- a filter the player typed in another session.
+            local ui = CN:GetModule("UI")
+
+            if ui then
+                ui.persistedFilter = nil
+            end
+
             Print("|cff999999Off is the safer default: a filter that persists "
                 .. "invisibly is how a list looks empty when it is not.|r")
         end

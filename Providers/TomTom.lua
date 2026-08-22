@@ -14,9 +14,12 @@ function provider.IsAvailable()
     return _G.TomTom ~= nil and _G.TomTom.AddWaypoint ~= nil
 end
 
+-- Returns true and the uid, or false and why not -- the same contract as the
+-- Blizzard provider below, so `CN.SetWaypoint` can tell the player the truth
+-- whichever one is in use.
 function provider.SetWaypoint(mapID, x, y, title)
     if not provider.IsAvailable() then
-        return
+        return false, "TomTom is not loaded"
     end
 
     local uid = _G.TomTom:AddWaypoint(mapID, x, y, {
@@ -27,21 +30,29 @@ function provider.SetWaypoint(mapID, x, y, title)
         crazy       = true,
     })
 
+    if not uid then
+        return false, "TomTom refused the waypoint"
+    end
+
     table.insert(active, uid)
 
-    return uid
+    return true, uid
 end
 
 function provider.ClearAll()
     if not provider.IsAvailable() then
-        return
+        return false
     end
+
+    local removed = #active
 
     for _, uid in ipairs(active) do
         pcall(_G.TomTom.RemoveWaypoint, _G.TomTom, uid)
     end
 
     active = {}
+
+    return removed > 0
 end
 
 CN.RegisterWaypointProvider("TomTom", provider, 10)
@@ -56,28 +67,97 @@ function blizzardProvider.IsAvailable()
     return C_Map ~= nil and C_Map.SetUserWaypoint ~= nil
 end
 
+-- WHETHER THIS ACTUALLY WORKED IS NOW REPORTED.
+--
+-- This returned nothing at all, and every early return was silent -- so
+-- `CN.SetWaypoint` discarded the result, returned `true` unconditionally, and
+-- `/cn go` printed "Waypoint set: <name>" whether or not a pin appeared.
+--
+-- And the client refuses more often than the addon assumed. User waypoints
+-- cannot be placed on dungeon and raid maps, on the cosmic and continent
+-- maps, or on several instanced maps -- `C_Map.CanSetUserWaypointOnMap`
+-- exists to say so and was called nowhere in this addon. In every one of
+-- those cases the player was told a waypoint had been set and then sent to
+-- look for an arrow that was never there.
 function blizzardProvider.SetWaypoint(mapID, x, y)
     if not blizzardProvider.IsAvailable() then
-        return
+        return false
+    end
+
+    if C_Map.CanSetUserWaypointOnMap then
+        local asked, allowed = pcall(C_Map.CanSetUserWaypointOnMap, mapID)
+
+        if asked and not allowed then
+            return false, "the game does not allow a waypoint on this map"
+        end
     end
 
     local point = UiMapPoint and UiMapPoint.CreateFromCoordinates(mapID, x, y)
 
     if not point then
-        return
+        return false, "the client would not build a map point"
     end
 
-    C_Map.SetUserWaypoint(point)
+    -- Guarded, as the identical call in Navigation.lua already was. Same API,
+    -- and it was pcall'd in one place and bare in the other.
+    local placed = pcall(C_Map.SetUserWaypoint, point)
+
+    if not placed then
+        return false, "the client refused the waypoint"
+    end
+
+    -- WHOSE PIN THIS IS.
+    --
+    -- There is exactly one user waypoint, and it belongs to the player unless
+    -- this addon put it there. Remembering that is what lets ClearAll below
+    -- refuse to delete a pin somebody placed by hand.
+    blizzardProvider.owned = { mapID = mapID, x = x, y = y }
 
     if C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then
         C_SuperTrack.SetSuperTrackedUserWaypoint(true)
     end
+
+    return true
 end
 
 function blizzardProvider.ClearAll()
-    if C_Map and C_Map.ClearUserWaypoint then
-        C_Map.ClearUserWaypoint()
+    if not C_Map or not C_Map.ClearUserWaypoint then
+        return false
     end
+
+    -- ONLY IF IT IS OURS.
+    --
+    -- `ClearUserWaypoint` removes THE user waypoint -- there is one, and it
+    -- is the player's. `/cn clearway`, stopping follow mode and every
+    -- provider switch called it unconditionally, so an addon whose standing
+    -- rule is that it does not act deleted a pin the player had placed by
+    -- hand. The TomTom provider next door has always done this correctly: it
+    -- tracks the UIDs it created and removes only those.
+    if not blizzardProvider.owned then
+        return false
+    end
+
+    -- And only if it is still the one we set. A player who has moved the pin
+    -- since owns it again.
+    if C_Map.GetUserWaypoint then
+        local asked, current = pcall(C_Map.GetUserWaypoint)
+
+        if asked and current then
+            local sameMap = current.uiMapID == blizzardProvider.owned.mapID
+
+            if not sameMap then
+                blizzardProvider.owned = nil
+
+                return false
+            end
+        end
+    end
+
+    pcall(C_Map.ClearUserWaypoint)
+
+    blizzardProvider.owned = nil
+
+    return true
 end
 
 CN.RegisterWaypointProvider("Blizzard", blizzardProvider, 20)

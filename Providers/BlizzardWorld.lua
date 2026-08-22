@@ -539,6 +539,38 @@ end
         return results
     end
 
+    -- A COLLAPSED HEADER HIDES ITS ROWS FROM THE COUNT.
+    --
+    -- `GetCurrencyListSize` counts only rows under EXPANDED headers, exactly
+    -- like the faction list. The reputation path has handled this since
+    -- 0.30.0 with `WithAllFactionsExpanded`; the currency path never did, and
+    -- there was no `ExpandCurrencyList` call anywhere in the addon. A player
+    -- who had collapsed an expansion group in their Currency tab lost every
+    -- currency underneath it from `/cn currencies`, from `/cn clock` and from
+    -- the weekly-cap warnings, with nothing on screen saying so.
+    --
+    -- Expanded, scanned, put back -- the same shape, and the same obligation:
+    -- what this addon changes to read, it changes back.
+    local collapsed = {}
+
+    if C_CurrencyInfo.ExpandCurrencyList then
+        local counted, initial = pcall(C_CurrencyInfo.GetCurrencyListSize)
+
+        if counted and type(initial) == "number" then
+            for index = initial, 1, -1 do
+                local asked, row = pcall(C_CurrencyInfo.GetCurrencyListInfo, index)
+
+                if asked and type(row) == "table" and row.isHeader
+                    and row.isHeaderExpanded == false then
+
+                    table.insert(collapsed, row.name)
+
+                    pcall(C_CurrencyInfo.ExpandCurrencyList, index, true)
+                end
+            end
+        end
+    end
+
     local ok, size = pcall(C_CurrencyInfo.GetCurrencyListSize)
 
     if not ok or type(size) ~= "number" then
@@ -588,6 +620,29 @@ end
                 accountWide = (info.isAccountWide
                     or info.isAccountTransferable) and true or false,
             })
+        end
+    end
+
+    -- Put the headers back the way the player had them.
+    if #collapsed > 0 and C_CurrencyInfo.ExpandCurrencyList then
+        local wanted = {}
+
+        for _, name in ipairs(collapsed) do
+            wanted[name] = true
+        end
+
+        local counted, final = pcall(C_CurrencyInfo.GetCurrencyListSize)
+
+        if counted and type(final) == "number" then
+            for index = final, 1, -1 do
+                local asked, row = pcall(C_CurrencyInfo.GetCurrencyListInfo, index)
+
+                if asked and type(row) == "table" and row.isHeader
+                    and row.name and wanted[row.name] then
+
+                    pcall(C_CurrencyInfo.ExpandCurrencyList, index, false)
+                end
+            end
         end
     end
 
@@ -1222,14 +1277,32 @@ function Blizzard.GetSavedInstances()
         -- The stub had the same belief written into its fixture comment, so
         -- the suite agreed. Eighth time in this project that a stub and the
         -- code shared one wrong assumption.
-        local gotInfo, name, id, reset, difficultyID, locked, extended,
-            _, isRaid, _, difficultyName, encounters, defeated =
+        -- TWO DIFFERENT ID SPACES, AND THE ADDON USED THE WRONG ONE.
+        --
+        -- Return #2 is the LOCKOUT id -- a large opaque save identifier. The
+        -- Encounter Journal's instance id is return #14. The addon stored #2
+        -- as `id` and then handed it to `EJ_SelectInstance` and
+        -- `EJ_GetEncounterInfoByIndex`, which have never heard of it: in game
+        -- the boss list came back empty on the first iteration and
+        -- `RemainingBosses` always answered "the Adventure Guide has no boss
+        -- list for this instance".
+        --
+        -- The fixture put Encounter Journal instance ids in slot 2, so the
+        -- stub and the code shared one wrong belief and the self-test asserted
+        -- against it. Ninth time in this project.
+        --
+        -- Both are kept now, under names that say which is which, and the
+        -- journal is asked with the journal's id.
+        local gotInfo, name, lockoutID, reset, difficultyID, locked, extended,
+            _, isRaid, _, difficultyName, encounters, defeated, _,
+            journalInstanceID =
                 pcall(GetSavedInstanceInfo, index)
 
         if gotInfo and name then
             table.insert(results, {
                 name         = name,
-                id           = id,
+                id           = lockoutID,
+                instanceID   = journalInstanceID,
                 reset        = reset,
                 difficultyID = difficultyID,
                 difficulty   = difficultyName,
@@ -1295,8 +1368,25 @@ local function WithJournal(work)
 
     -- Put it back even when the work threw, or the player's next visit to
     -- the Adventure Guide opens on whatever this addon was reading last.
-    if restoreInstance and EJ_SelectInstance then
-        pcall(EJ_SelectInstance, restoreInstance)
+    --
+    -- AND "NOTHING WAS SELECTED" IS A STATE TO RESTORE.
+    --
+    -- The restore was guarded on `restoreInstance`, and
+    -- `EJ_GetCurrentInstance` returns nil whenever the player has not opened
+    -- the Adventure Guide this session -- which is the ordinary case, since
+    -- this function refuses to run at all while the window is up. So on
+    -- virtually every real invocation nothing was restored and the player's
+    -- next visit opened on whatever this addon read last: exactly the outcome
+    -- the comment above says it exists to prevent.
+    if restoreInstance then
+        if EJ_SelectInstance then
+            pcall(EJ_SelectInstance, restoreInstance)
+        end
+    elseif EJ_ClearSearch then
+        -- Nothing was selected before, so nothing should be selected after.
+        -- Clearing the search is the only lever the client offers for that,
+        -- and it also drops the search string this addon may have set.
+        pcall(EJ_ClearSearch)
     end
 
     if not ok then
@@ -1375,6 +1465,19 @@ function Blizzard.SearchEncounterJournal(text, limit)
 
         local found = {}
 
+        -- THE SEARCH IS ASYNCHRONOUS.
+        --
+        -- `EJ_SEARCH_RESULT_UPDATE` exists because `EJ_SetSearch` does not
+        -- finish before it returns; Blizzard's own Encounter Journal listens
+        -- for it. Read in the same frame, `EJ_GetNumSearchResults` answers
+        -- zero on a cold search. The caller then memoised that zero for the
+        -- session, so a second query after the results arrived still got
+        -- nothing back.
+        --
+        -- There is no synchronous form to switch to, so the fix is on the
+        -- caching side: a zero here is "not yet", not "nothing", and is
+        -- reported as such rather than remembered. The stub answered
+        -- synchronously, so no test could reach this.
         local total = EJ_GetNumSearchResults() or 0
 
         for index = 1, math.min(total, limit) do

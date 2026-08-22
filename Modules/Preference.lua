@@ -205,11 +205,102 @@ local shownAt = {}
 -- credit the same bucket the showing side incremented.
 local shownRefinement = {}
 
+-- BOUNDED, THE SAME WAY SESSION'S OFFER MEMORY IS.
+--
+-- `shownAt` gained an entry per distinct objective ever put in front of the
+-- player and lost one only on a successful action or on the expired branch,
+-- so anything shown and never acted on stayed forever. `shownRefinement` was
+-- worse: the success path cleared `shownAt[key]` and left the refinement
+-- entry behind unconditionally -- and that is the table the fallback match
+-- loop runs a `string.sub` over on every NEW_PET_ADDED, NEW_MOUNT_ADDED and
+-- NEW_TOY_ADDED.
+--
+-- Session next door carries the identical structure with an expiry and a cap
+-- and a comment calling the unbounded version "a slow leak I shipped in
+-- 0.28.0". The same shape was reintroduced here. Same two bounds, same
+-- hysteresis, same reason.
+local shownCount = 0
+
+Preference.sightingCap     = 400
+Preference.sightingSeconds = 1800
+Preference.sightingSlack   = 0.25
+
+-- Removing a sighting means removing it from both tables. Every path that
+-- used to touch only one of them is why this is a function.
+local function Forget(key)
+    if shownAt[key] ~= nil then
+        shownCount = shownCount - 1
+    end
+
+    shownAt[key]         = nil
+    shownRefinement[key] = nil
+end
+
+Preference.Forget = Forget
+
 local function Now()
     return (GetTime and GetTime()) or (time and time()) or 0
 end
 
 Preference.Now = Now
+
+-- Overshoot by a quarter, then sweep back to the cap -- pruning on every
+-- insert would walk four hundred entries per recommendation, which is the
+-- trade Session already refused to make.
+function Preference.Prune(force)
+    local trigger = Preference.sightingCap * (1 + Preference.sightingSlack)
+
+    if not force and shownCount <= trigger then
+        return 0
+    end
+
+    local now     = Now()
+    local removed = 0
+
+    for key, at in pairs(shownAt) do
+        if (now - at) > Preference.sightingSeconds then
+            Forget(key)
+            removed = removed + 1
+        end
+    end
+
+    if shownCount > Preference.sightingCap then
+        local ordered = {}
+
+        for key, at in pairs(shownAt) do
+            table.insert(ordered, { key = key, at = at })
+        end
+
+        table.sort(ordered, function(a, b)
+            if a.at == b.at then
+                return a.key < b.key
+            end
+
+            return a.at < b.at
+        end)
+
+        for index = 1, shownCount - Preference.sightingCap do
+            if ordered[index] then
+                Forget(ordered[index].key)
+                removed = removed + 1
+            end
+        end
+    end
+
+    -- A refinement entry with no sighting behind it is unreachable, and this
+    -- is the table the fallback loop walks.
+    for key in pairs(shownRefinement) do
+        if shownAt[key] == nil then
+            shownRefinement[key] = nil
+        end
+    end
+
+    return removed
+end
+
+function Preference.SightingCount()
+    return shownCount
+end
 
 -- Hung on the recommendation hook rather than a decorator, deliberately.
 -- Duration learning made exactly this mistake in 0.28.0 and timed all two
@@ -275,8 +366,13 @@ CN.RegisterRecommendationHook("Preference", function(results)
                 -- six buckets that each learn nothing beat none at all.
                 local refined = Preference.Refine(objective)
 
-                shownRefinement[objectiveType .. ":" .. tostring(objective.id)]
-                    = refined
+                -- Keyed on `key`, which is what `shownAt` is keyed on and
+                -- what the completion side matches against. It used to
+                -- rebuild the string from the type and id, which is the same
+                -- thing only while `objective.preferenceKey` has not been set
+                -- to something else -- and a refinement filed under a key
+                -- nothing looks up is a refinement that never credits.
+                shownRefinement[key] = refined
 
                 if refined ~= objectiveType then
                     local refinedRow = store[refined]
@@ -315,7 +411,13 @@ CN.RegisterRecommendationHook("Preference", function(results)
                     Preference.Decay()
                 end
 
+                if shownAt[key] == nil then
+                    shownCount = shownCount + 1
+                end
+
                 shownAt[key] = now
+
+                Preference.Prune()
             end
         end
     end
@@ -423,8 +525,7 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
     end
 
     if (now - last) > Preference.WindowFor(objectiveType) then
-        shownAt[key]         = nil
-        shownRefinement[key] = nil
+        Forget(key)
 
         return false
     end
@@ -467,7 +568,9 @@ function Preference.NoteCompleted(objectiveType, objectiveID)
 
     Observed()
 
-    shownAt[key] = nil
+    -- BOTH TABLES. Clearing only `shownAt` here is what left an entry in
+    -- `shownRefinement` for every objective the player ever acted on.
+    Forget(key)
 
     CN.InvalidateRanking()
 

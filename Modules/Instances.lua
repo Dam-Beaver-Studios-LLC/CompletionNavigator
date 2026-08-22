@@ -59,7 +59,13 @@ function Instances.Lockouts()
 
             table.insert(lockouts, {
                 name         = saved.name,
+
+                -- Two ids, deliberately both carried and deliberately named
+                -- differently: `id` is the lockout save, `instanceID` is the
+                -- Encounter Journal's. Handing the first to the journal is
+                -- the defect this pair exists to make impossible.
                 id           = saved.id,
+                instanceID   = saved.instanceID,
                 difficulty   = saved.difficulty,
                 difficultyID = saved.difficultyID,
                 raid         = saved.raid,
@@ -130,7 +136,13 @@ function Instances.RemainingBosses(lockout)
         return {}, "the client did not name this instance"
     end
 
-    local encounters = Blizzard.GetInstanceEncounters(lockout.id)
+    -- The JOURNAL's id, not the lockout id. See GetSavedInstances.
+    if not lockout.instanceID then
+        return {}, "the client did not give an Adventure Guide id for this "
+            .. "instance"
+    end
+
+    local encounters = Blizzard.GetInstanceEncounters(lockout.instanceID)
 
     if #encounters == 0 then
         return {}, "the Adventure Guide has no boss list for this instance"
@@ -173,7 +185,18 @@ function Instances.WhereDoesItDrop(name)
 
     local results = Blizzard.SearchEncounterJournal(name, 6)
 
-    dropCache[name] = results
+    -- A ZERO IS "NOT YET", NOT "NOTHING".
+    --
+    -- The journal's search is asynchronous, so the first query for a name
+    -- reliably returns nothing. Caching that made the emptiness permanent for
+    -- the session: every later ask returned the memoised zero and the search
+    -- that had by then completed was never read.
+    --
+    -- Only an answer is remembered. The cost of asking again is one search
+    -- the player triggered themselves.
+    if #results > 0 then
+        dropCache[name] = results
+    end
 
     return results
 end

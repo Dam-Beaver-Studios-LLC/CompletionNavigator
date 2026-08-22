@@ -124,11 +124,21 @@ function CN.LocaleStats()
 
     table.sort(sample)
 
+    -- How many strings are in scope at all, so the report can say what it
+    -- is a report ABOUT rather than leaving the reader to assume it covers
+    -- everything the addon prints.
+    local total = 0
+
+    for _ in pairs(CN.localeKeys or {}) do
+        total = total + 1
+    end
+
     return {
         locale     = CN.ClientLocale(),
         translated = translated,
         missing    = missing,
         sample     = sample,
+        total      = total,
         available  = CN.locales,
     }
 end
@@ -166,6 +176,24 @@ CN:RegisterCommand{
         else
             Print(stats.translated .. " strings translated.")
         end
+
+        -- WHAT IS IN SCOPE, SAID PLAINLY.
+        --
+        -- `CN.localeKeys` is 33 strings and internally consistent: every key
+        -- has a call site, nothing is orphaned, and `/cn locale missing`
+        -- names exactly what fell back. What it does NOT cover is the several
+        -- hundred chat lines that never go through CN.L at all -- so a
+        -- translator who completed every key here would still be looking at a
+        -- largely English addon, and nothing on this screen said so.
+        --
+        -- Stated rather than fixed: routing every line through CN.L is a
+        -- release of its own, and a promise the addon cannot keep is worse
+        -- than a limit it admits to.
+        Print("|cff999999Scope: the " .. (stats.total or 0) .. " recurring "
+            .. "strings this addon routes through its locale table -- the "
+            .. "confidence and status words, the tab names, the counters. "
+            .. "Most one-off chat lines are still English and are not in "
+            .. "this count.|r")
 
         if args == "missing" then
             if stats.missing == 0 then

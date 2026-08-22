@@ -274,18 +274,33 @@ function MapPins.InvalidateCache()
     cache.hubs       = nil
 end
 
-local function CandidateGeneration()
-    if not CN.GetCandidateCacheState then
-        return 0
+-- EVERYTHING THE ROUTE DEPENDS ON, NOT JUST THE CANDIDATES.
+--
+-- `BuildZoneRoute` applies the objective-type filter when it picks the stops,
+-- so the hub set is a function of that filter as well as of the candidate
+-- list. `SetTypeEnabled` deliberately does not rebuild providers -- it bumps
+-- `CN.typeFilterGeneration` instead -- so the candidate generation did not
+-- move and this cache did not notice.
+--
+-- The result was two views of one route disagreeing on screen: `/cn zone`
+-- honoured `/cn show only quests` and the map, reopened a second later, still
+-- drew the pet and appearance stops the player had just hidden.
+local function RouteGeneration()
+    local generation = 0
+
+    if CN.GetCandidateCacheState then
+        local ok, state = pcall(CN.GetCandidateCacheState)
+
+        if ok and state then
+            generation = state.generation or 0
+        end
     end
 
-    local ok, state = pcall(CN.GetCandidateCacheState)
-
-    if ok and state then
-        return state.generation or 0
-    end
-
-    return 0
+    -- The ranking generation is deliberately NOT part of this key:
+    -- `BuildZoneRoute` bumps it itself, so including it would mean the cache
+    -- never matched and the route was rebuilt on every map pan -- which is
+    -- the cost this cache exists to avoid.
+    return generation .. ":" .. tostring(CN.typeFilterGeneration or 0)
 end
 
 -- Building a zone route means collecting and scoring every candidate, so it
@@ -296,7 +311,7 @@ function MapPins.HubsForMap(mapID, force)
         return nil
     end
 
-    local generation = CandidateGeneration()
+    local generation = RouteGeneration()
 
     if not force
         and cache.mapID == mapID
@@ -559,19 +574,22 @@ function MapPins.Install()
         return false
     end
 
+    -- GUARDED, because these are hooks on a frame the player opens
+    -- constantly and shares with every other addon they run. An unguarded
+    -- throw here is an error box every time the world map opens.
     map:HookScript("OnShow", function()
-        MapPins.Refresh()
+        CN.Guard("MapPins.Refresh", MapPins.Refresh)
     end)
 
     map:HookScript("OnHide", function()
-        MapPins.Clear()
+        CN.Guard("MapPins.Clear", MapPins.Clear)
     end)
 
     -- Panning to a different zone is a map change, not a redraw, so the
     -- route must be rebuilt for the map now on screen.
     if map.RegisterCallback and map.OnMapChanged then
         pcall(map.RegisterCallback, map, "WorldMapOnMapChanged", function()
-            MapPins.Refresh()
+            CN.Guard("MapPins.Refresh", MapPins.Refresh)
         end)
     end
 

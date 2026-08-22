@@ -75,17 +75,47 @@ function Blizzard.WithAllPetsShown(scan)
         C_PetJournal.SetSearchFilter("")
     end
 
-    if C_PetJournal.SetAllPetSourcesChecked then
-        C_PetJournal.SetAllPetSourcesChecked(true)
-    end
-
-    if C_PetJournal.SetAllPetTypesChecked then
-        C_PetJournal.SetAllPetTypesChecked(true)
-    end
-
     if C_PetJournal.SetFilterChecked and LE_PET_JOURNAL_FILTER_COLLECTED then
         C_PetJournal.SetFilterChecked(LE_PET_JOURNAL_FILTER_COLLECTED, true)
         C_PetJournal.SetFilterChecked(LE_PET_JOURNAL_FILTER_NOT_COLLECTED, true)
+    end
+
+    -- THE COMMENT ABOVE SAID "ONLY IF THE SCAN WOULD OTHERWISE SEE NOTHING".
+    -- THE CODE DID IT UNCONDITIONALLY, EVERY TIME.
+    --
+    -- Source and type checks have no getter, so widening them cannot be
+    -- undone -- which makes an unconditional widen a permanent change to a
+    -- setting the player chose. And the pet scan runs on a thirty-second
+    -- throttle off PET_JOURNAL_LIST_UPDATE, so a player with the Pet Journal
+    -- open and filtered to, say, Drop-source Beasts had those filters wiped
+    -- twice a minute while they were using it. By an addon whose standing
+    -- rule is that it prompts and does not act.
+    --
+    -- The honest version, at last. The journal's own count answers the
+    -- question before anything is changed: with the collected filters already
+    -- widened above, a count of zero can only mean the source or type checks
+    -- are hiding everything. Only then is the widening justified -- and the
+    -- player is told, because it is not recoverable.
+    if select(1, Blizzard.GetNumPets()) == 0 then
+        local widened = false
+
+        if C_PetJournal.SetAllPetSourcesChecked then
+            C_PetJournal.SetAllPetSourcesChecked(true)
+            widened = true
+        end
+
+        if C_PetJournal.SetAllPetTypesChecked then
+            C_PetJournal.SetAllPetTypesChecked(true)
+            widened = true
+        end
+
+        if widened then
+            CN.Print("Your Pet Journal's source and type filters were hiding "
+                .. "every pet, so they were set to show everything. The "
+                .. "client does not let an addon read those checkboxes, so "
+                .. "they cannot be put back -- set them again in the journal "
+                .. "if you had them narrowed.")
+        end
     end
 
     local ok, err = pcall(scan)
@@ -269,12 +299,29 @@ function Blizzard.WithAllToysShown(scan)
         C_ToyBox.SetUncollectedShown(true)
     end
 
-    if C_ToyBox.SetAllSourceTypeFilters then
+    -- SAME RULE AS THE PET JOURNAL, AND FOR THE SAME REASON.
+    --
+    -- `SetAllSourceTypeFilters` has no getter either, so widening it is
+    -- permanent. It was done unconditionally and never restored. With the
+    -- collected and uncollected filters already widened above, a filtered
+    -- count of zero can only be the source-type checks, and that is the one
+    -- case where changing them beats returning an empty collection.
+    if Blizzard.GetNumToys() == 0 and C_ToyBox.SetAllSourceTypeFilters then
         C_ToyBox.SetAllSourceTypeFilters(true)
+
+        CN.Print("Your Toy Box's source filters were hiding every toy, so "
+            .. "they were set to show everything. The client does not let an "
+            .. "addon read them, so they cannot be put back.")
     end
 
     local ok, err = pcall(scan)
 
+    -- NOT A RESTORE, AND NO LONGER PRETENDING TO BE ONE.
+    --
+    -- There is no `GetFilterString`, so the search box's contents were never
+    -- captured and this line cleared it a second time. It stays -- an addon
+    -- that leaves a search string behind would hide the player's own toys --
+    -- but it is described accurately: the box is left empty, not restored.
     if C_ToyBox.SetFilterString then
         C_ToyBox.SetFilterString("")
     end

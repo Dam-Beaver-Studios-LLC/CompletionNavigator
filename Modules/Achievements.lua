@@ -169,12 +169,18 @@ function Achievements.Summary()
         completed   = completed,
         inProgress  = 0,
         nearlyDone  = 0,
-        pointsLeft  = 0,
     }
 
+    -- `pointsLeft` REMOVED. `record.points` has been nil since 0.36.0 --
+    -- migration 5 stripped it as something the client re-supplies -- so this
+    -- summed to zero on every client, permanently. Two other readers of the
+    -- same field were fixed at the time and this one was missed. Nothing
+    -- displayed it, so it was dead state rather than a wrong number on
+    -- screen; it is gone rather than revived, because a points total the
+    -- addon would have to rebuild from the client is a question the
+    -- Achievements panel already answers.
     for _, record in pairs(Store()) do
         counts.inProgress = counts.inProgress + 1
-        counts.pointsLeft = counts.pointsLeft + (record.points or 0)
 
         if record.criteria > 0 and record.done >= record.criteria - 2 then
             counts.nearlyDone = counts.nearlyDone + 1
@@ -364,6 +370,19 @@ end, { events = { "ACHIEVEMENT_EARNED", "CRITERIA_UPDATE" }, cooldown = 5 })
 CN:RegisterEvent("ACHIEVEMENT_EARNED", function(event, achievementID)
     if achievementID then
         Store()[achievementID] = nil
+
+        -- THE SHORTLIST HOLDS THE ROW THE STORE JUST RELEASED.
+        --
+        -- `CN.Shortlist` returns its held list whenever the revision matches,
+        -- and the revision moved only on a full scan or when a criteria tick
+        -- crossed the nearly-done boundary. Deleting the store row without
+        -- moving it left the shortlist holding a strong reference to an
+        -- orphaned record -- so ACHIEVEMENT_EARNED invalidated the provider,
+        -- the provider rebuilt, asked for the shortlist, got the cached one
+        -- back, and emitted the achievement the player had just earned as a
+        -- candidate again. It stayed at the top of `/cn next` until something
+        -- unrelated moved the revision.
+        Achievements.revision = Achievements.revision + 1
 
         DebugPrint("Achievement earned: " .. tostring(achievementID))
     end

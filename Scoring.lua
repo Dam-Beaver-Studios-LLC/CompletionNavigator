@@ -235,10 +235,47 @@ function CN.AddAdjusterReason(objective, key, text)
         return false
     end
 
-    objective.adjusterReasons[key] = true
+    -- The text itself, not a boolean, so it can be taken back out again --
+    -- see CN.ClearAdjusterReason.
+    objective.adjusterReasons[key] = text
     objective.reasons = objective.reasons or {}
 
     table.insert(objective.reasons, text)
+
+    return true
+end
+
+-- AND A REASON ABOUT RIGHT NOW HAS TO BE REMOVABLE.
+--
+-- Adjusters describe the player's situation -- dead, in an instance, in a
+-- group -- and stamp a sentence explaining the score they returned. The
+-- objectives they stamp it on live in the per-provider cache, which outlives
+-- the situation by a long way.
+--
+-- So: die in the open world, and every cached candidate is marked "you are
+-- dead -- this is for after". Resurrect, and the adjuster stops applying the
+-- penalty -- but the sentence stays, because appending was the only operation
+-- there was. `/cn why` then told a living player their recommendation was for
+-- later, and for a provider that rarely rebuilds it said so for hours.
+function CN.ClearAdjusterReason(objective, key)
+    if type(objective) ~= "table" or not objective.adjusterReasons then
+        return false
+    end
+
+    local text = objective.adjusterReasons[key]
+
+    if text == nil then
+        return false
+    end
+
+    objective.adjusterReasons[key] = nil
+
+    for index = #(objective.reasons or {}), 1, -1 do
+        if objective.reasons[index] == text then
+            table.remove(objective.reasons, index)
+            break
+        end
+    end
 
     return true
 end
@@ -701,6 +738,20 @@ local function RunProvider(name, provider)
     end
 
     if not ok then
+        -- RECORDED, NOT ONLY DEBUG-PRINTED.
+        --
+        -- `/cn errors` promises "anything that went wrong inside the addon
+        -- this session", and the Errors module's own header names a failing
+        -- candidate provider as the case it was written for -- while this,
+        -- the actual site, routed to DebugPrint, which is off by default. So
+        -- a provider that crashed contributed nothing, the list got shorter,
+        -- and `/cn errors` said nothing had gone wrong.
+        local errors = CN:GetModule("Errors")
+
+        if errors and errors.Record then
+            pcall(errors.Record, "provider:" .. name, tostring(result))
+        end
+
         CN.DebugPrint("Candidate provider " .. name .. " failed: " .. tostring(result))
     end
 
@@ -720,6 +771,12 @@ local function Decorate(candidates)
             local ok, err = pcall(decorator, candidates[index])
 
             if not ok then
+                local errors = CN:GetModule("Errors")
+
+                if errors and errors.Record then
+                    pcall(errors.Record, "decorator:" .. name, tostring(err))
+                end
+
                 CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
                 break
             end
@@ -738,10 +795,23 @@ local function RefreshProviders(force)
             or provider.cooldown == nil
             or (now - entry.builtAt) >= provider.cooldown
 
+        -- `volatile` USED TO DEFEAT `cooldown` ENTIRELY.
+        --
+        -- The volatile clause was a peer of the dirty clause rather than
+        -- subordinate to `cooled`, so a provider declaring both was rebuilt
+        -- every `candidateCacheSeconds` no matter what cooldown it asked for.
+        -- The two providers that declare both -- `Waiting`, which walks the
+        -- mail inbox, the bags, the heirlooms and the currency store, and
+        -- `Instances`, which walks every saved lockout -- each asked for
+        -- thirty seconds and got five, six times more often than declared,
+        -- for as long as the main window stayed open.
+        --
+        -- Volatile means "this goes stale on its own even when nothing tells
+        -- us". It does not mean "ignore what this provider costs".
         local stale = force
             or entry.candidates == nil
             or (entry.dirty and cooled)
-            or (provider.volatile
+            or (provider.volatile and cooled
                 and (now - entry.builtAt) >= CN.candidateCacheSeconds)
 
         if stale then
@@ -771,14 +841,68 @@ function CN.CollectCandidates(force)
         return aggregate.candidates
     end
 
+    -- ONE OBJECTIVE, ONE ROW.
+    --
+    -- Each provider dedupes its own list; the aggregate simply concatenated
+    -- them, so an objective two providers both know about appeared twice.
+    -- The common case is a pinned goal: `/cn goal quest 12345` for a quest
+    -- already in your log emits it from the Quests provider AND from the
+    -- Goals provider, so `/cn list` showed the same quest on two lines.
+    --
+    -- Worse than cosmetic. `BuildZoneRoute` groups stops by position, and two
+    -- copies of one objective share a position exactly -- so the hub reported
+    -- a size of two for one real stop, and the batch bonus paid out for a
+    -- batching that does not exist. `CN.FindCandidate` returned whichever
+    -- copy `pairs` happened to reach first.
+    --
+    -- Merged rather than dropped: the higher completionValue wins and the
+    -- reasons are unioned, so the pinned goal's "you asked for this" survives
+    -- onto the row the owning provider built.
     local candidates = {}
+    local byKey      = {}
 
     for name in pairs(CN.candidateProviders) do
         local list = providerCache[name] and providerCache[name].candidates
 
         if list then
             for index = 1, #list do
-                candidates[#candidates + 1] = list[index]
+                local objective = list[index]
+                local key       = objective and objective.type ~= nil
+                    and objective.id ~= nil
+                    and CN.ObjectiveKey(objective.type, objective.id)
+                    or nil
+
+                local existing = key and byKey[key]
+
+                if existing then
+                    if (objective.completionValue or 0)
+                        > (existing.completionValue or 0) then
+
+                        existing.completionValue = objective.completionValue
+                    end
+
+                    for _, reason in ipairs(objective.reasons or {}) do
+                        local seen = false
+
+                        for _, held in ipairs(existing.reasons or {}) do
+                            if held == reason then
+                                seen = true
+                                break
+                            end
+                        end
+
+                        if not seen then
+                            existing.reasons = existing.reasons or {}
+                            table.insert(existing.reasons, reason)
+                        end
+                    end
+                else
+                    if key then
+                        byKey[key] = objective
+                    end
+
+                    candidates[#candidates + 1] = objective
+                end
             end
         end
     end
@@ -1190,9 +1314,19 @@ CN:RegisterCommand{
     order   = 17,
     help    = "Why the list is in the order it is in.",
     handler = function(args)
-        local wanted = tonumber(CN.Trim(args or "")) or 3
+        local asked  = tonumber(CN.Trim(args or ""))
+        local wanted = math.max(1, math.min(5, asked or 3))
 
-        wanted = math.max(1, math.min(5, wanted))
+        -- A CAP NOBODY IS TOLD ABOUT READS AS A WRONG ANSWER.
+        --
+        -- `args = "[how many]"` implies the number is honoured; `/cn order
+        -- 20` silently gave five. Five is the right ceiling -- this prints a
+        -- full score breakdown per row -- but saying so costs one line.
+        if asked and asked > wanted then
+            CN.Print("|cff999999Showing " .. wanted .. ": the breakdown is "
+                .. "long, so this tops out there. |cffffff00/cn list "
+                .. asked .. "|r|cff999999 gives the plain ranking.|r")
+        end
 
         local results = CN.Recommend(wanted)
 
@@ -1230,6 +1364,59 @@ CN:RegisterCommand{
 -- COMMAND
 ------------------------------------------------------------
 
+-- ONE EXPLANATION FOR AN EMPTY LIST, USED BY EVERY SURFACE THAT SHOWS ONE.
+--
+-- There were four, and they disagreed. `/cn next` said "quests are the only
+-- subsystem currently online" -- a leftover from an early build that has been
+-- false since the second release and is very likely the first sentence a new
+-- player ever reads from this addon. `/cn zone` named two of eleven scans.
+-- The window named the type filter. The broker and the minimap said "Run /cn
+-- setup once" whether or not setup had run.
+--
+-- Worse, none of them could tell an empty list from a broken engine: a
+-- provider that throws contributes nothing, and nothing looks exactly like
+-- "you have done everything".
+--
+-- Returns an array of lines, most useful first.
+function CN.ExplainEmptyList()
+    local lines = {}
+
+    local filters = CN:GetModule("Filters")
+    local hidden  = filters and filters.HiddenTypeCount and filters.HiddenTypeCount() or 0
+
+    if hidden > 0 then
+        table.insert(lines, hidden .. " objective type"
+            .. (hidden == 1 and " is" or "s are")
+            .. " hidden by your filter. /cn show lists them.")
+    end
+
+    -- A FAILURE IS NOT AN EMPTY RESULT, AND MUST NOT READ AS ONE.
+    local errors = CN:GetModule("Errors")
+
+    local failures = errors and errors.Count and errors.Count() or 0
+
+    if failures > 0 then
+        table.insert(lines, failures .. " thing"
+            .. (failures == 1 and " has" or "s have")
+            .. " gone wrong inside the addon this session, which is enough "
+            .. "to empty this list. /cn errors has the detail.")
+    end
+
+    local setup = CN:GetModule("Setup")
+
+    if setup and setup.HasRun and not setup.HasRun() then
+        table.insert(lines, "Nothing has been scanned yet. /cn setup reads "
+            .. "everything the client will answer for on its own.")
+    elseif #lines == 0 then
+        table.insert(lines, "Every provider answered and none of them had "
+            .. "anything to offer, which usually means you are between "
+            .. "things: try a different zone, or /cn waiting for what is on "
+            .. "a timer.")
+    end
+
+    return lines
+end
+
 CN:RegisterCommand{
     name    = "next",
     order   = 10,
@@ -1239,7 +1426,10 @@ CN:RegisterCommand{
 
         if #results == 0 then
             CN.Print("No actionable objectives are known yet.")
-            CN.Print("The recommendation engine needs candidate providers; quests are the only subsystem currently online.")
+
+            for _, line in ipairs(CN.ExplainEmptyList()) do
+                CN.Print("|cff999999" .. line .. "|r")
+            end
             return
         end
 
@@ -1262,7 +1452,7 @@ CN:RegisterCommand{
         end
 
         CN.Print("Recommended next: " .. tostring(objective.name or objective.id)
-            .. " |cff999999(" .. tostring(objective.type) .. ")|r")
+            .. " |cff999999(" .. CN.TypeLabel(objective.type) .. ")|r")
 
         for _, line in ipairs(CN.ExplainRecommendation(objective)) do
             CN.Print(line)
@@ -1362,7 +1552,7 @@ CN:RegisterCommand{
 
         for index, objective in ipairs(results) do
             CN.Print(index .. ". " .. tostring(objective.name or objective.id)
-                .. " |cff999999[" .. tostring(objective.type)
+                .. " |cff999999[" .. CN.TypeLabel(objective.type)
                 .. " " .. string.format("%.1f", objective.priorityWeight or 0) .. "]|r")
         end
     end,

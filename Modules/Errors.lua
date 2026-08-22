@@ -100,8 +100,24 @@ end
 -- Wraps a call so a failure is recorded rather than swallowed. Returns the
 -- same thing pcall does, so it is a drop-in replacement at every site that
 -- currently discards the error.
+local function Pack(...)
+    return select("#", ...), { ... }
+end
+
 function Errors.Guard(context, fn, ...)
-    local results = { pcall(fn, ...) }
+    -- COUNTED, NOT MEASURED WITH `#`.
+    --
+    -- This was `local results = { pcall(fn, ...) }` followed by
+    -- `CN.Unpack(results)`, which truncates at the first nil: a wrapped
+    -- function returning `value, nil` came back as one value, so a "drop-in
+    -- replacement" silently changed the arity of whatever it wrapped. `#` on
+    -- a table with holes is undefined in both interpreters -- 5.1 and 5.4
+    -- happen to agree on the cases here, which is precisely the kind of
+    -- agreement this project has learned not to rest on.
+    --
+    -- `table.pack` does not exist in 5.1, so the count is taken with
+    -- `select("#", ...)` inside a varargs helper, which does.
+    local count, results = Pack(pcall(fn, ...))
 
     if not results[1] then
         Errors.Record(context, results[2])
@@ -113,7 +129,7 @@ function Errors.Guard(context, fn, ...)
     -- outside the one file that gets audited for exactly this class of
     -- mistake. Equivalent today; the point is that there is one place to fix
     -- it when it is not.
-    return CN.Unpack(results)
+    return CN.Unpack(results, 1, count)
 end
 
 CN.Guard = Errors.Guard
@@ -137,6 +153,21 @@ local function Stored()
 end
 
 function Errors.Persist()
+    -- A CLEAN SESSION MUST NOT ERASE THE RECORD OF A BAD ONE.
+    --
+    -- This ran unconditionally on logout, including when nothing had gone
+    -- wrong -- so the sequence the feature exists for destroyed its own
+    -- evidence: something breaks, the player reloads before thinking to look,
+    -- and the reload's empty ring overwrites the record. `/cn errors` then
+    -- says nothing has gone wrong, which is true of the last four seconds and
+    -- false of the thing the player wanted to report.
+    --
+    -- Players reload several times an hour. An empty ring is not news, so it
+    -- is not written.
+    if #ring == 0 then
+        return 0
+    end
+
     local stored = Stored()
 
     for key in pairs(stored) do
@@ -192,6 +223,34 @@ CN:RegisterCommand{
             return
         end
 
+        -- EVENT NAMES THE CLIENT REFUSED.
+        --
+        -- `CN.RegisterWithClient` has recorded these since 0.49.0, with a
+        -- comment saying they are kept "so /cn errors can name it". Nothing
+        -- read the table. The secondary path -- recording into this module's
+        -- ring -- cannot fire for the sixty-odd files that load before this
+        -- one, which includes Travel, the very file whose invented
+        -- `NEW_TAXI_NODE` the whole mechanism was written for. A bad event
+        -- name today would reproduce the original symptom exactly: silent,
+        -- and findable only by reading the source.
+        --
+        -- Printed first and unconditionally, because a handler that never
+        -- runs is the failure most likely to be mistaken for "there is just
+        -- nothing to do".
+        local rejected = 0
+
+        for event, why in pairs(CN.rejectedEvents or {}) do
+            if rejected == 0 then
+                Print("|cfff56b61The client refused to register these "
+                    .. "events, so nothing listening for them ever runs:|r")
+            end
+
+            rejected = rejected + 1
+
+            Print("  |cfff56b61" .. tostring(event) .. "|r")
+            Print("    |cff999999" .. tostring(why) .. "|r")
+        end
+
         if #ring == 0 then
             local previous = Errors.Previous()
 
@@ -208,6 +267,11 @@ CN:RegisterCommand{
                 Errors.ForgetPrevious()
 
                 Print("|cff999999Shown once, then forgotten.|r")
+                return
+            end
+
+            if rejected > 0 then
+                Print("Nothing else has gone wrong this session.")
                 return
             end
 

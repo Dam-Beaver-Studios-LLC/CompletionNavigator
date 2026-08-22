@@ -228,8 +228,18 @@ CN:RegisterCommand{
         Print("Exploration: " .. counts.complete .. " / " .. counts.zones .. " zones")
 
         if counts.criteria > 0 then
-            Print(string.format("Subzones discovered: %d / %d (%.1f%%)",
-                counts.done, counts.criteria, counts.done / counts.criteria * 100))
+            -- NO PERCENTAGE. This file's own header says a genuine "percent
+            -- explored" is uncomputable and that "78% explored is not
+            -- [useful]" -- and then printed one, computed against the sum of
+            -- criteria in the achievements this addon happens to have stored.
+            -- Not the world; not even every zone, since a zone with no
+            -- exploration achievement contributes nothing to either side.
+            -- A player reads "73.0%" as the world.
+            --
+            -- The raw counts are honest and are what remains.
+            Print(string.format("Subzones discovered: %d of %d in the "
+                .. "exploration achievements this addon has scanned",
+                counts.done, counts.criteria))
         end
 
         local here = Exploration.ForCurrentZone()

@@ -191,6 +191,12 @@ function Follow.NextStop()
 
     if total > (Follow.startedWith or 0) then
         Follow.startedWith = total
+
+        -- The route grew, so it is no longer a finished route: the
+        -- completion moment is available again.
+        if total > (Follow.completed or 0) then
+            Follow.celebrated = false
+        end
     end
 
     for _, hub in ipairs(hubs) do
@@ -233,6 +239,12 @@ end
 Follow.completed = 0
 Follow.startedWith = 0
 
+-- Whether this route has already had its completion moment. Reset when a
+-- route starts, and when the total grows past what was already cleared --
+-- because a route that has more stops in it than it did is not a route that
+-- has been finished.
+Follow.celebrated = false
+
 -- How long to wait before searching again when the last search found nothing
 -- routable here. A forced advance -- the player asking -- ignores it.
 Follow.emptySearchSeconds = 15
@@ -261,7 +273,16 @@ function Follow.NoteStopCleared()
     -- A COMPLETION MOMENT, when there is genuinely nothing left. The route
     -- finishing is the only thing this addon does that is worth a small
     -- flourish, and it happens rarely enough to stay one.
-    if total > 0 and Follow.completed >= total then
+    -- ONCE PER ROUTE, NOT ONCE PER STOP PAST THE END.
+    --
+    -- `completed >= total` is true for every clear after the last one, so a
+    -- route whose total shrank -- or a player who cleared something outside
+    -- the counted set -- got the flourish again on every stop. 0.50.0 fixed
+    -- the "Stop 9 of 8" half of this by letting the total grow; the
+    -- celebration half was left firing repeatedly.
+    if total > 0 and Follow.completed >= total and not Follow.celebrated then
+        Follow.celebrated = true
+
         Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r " .. total .. " stops, "
             .. "everything on it done.")
 
@@ -566,7 +587,8 @@ function Follow.Start()
 
     Follow.active = true
 
-    Follow.completed = 0
+    Follow.completed  = 0
+    Follow.celebrated = false
 
     -- How many stops there were when the route started, so progress can be
     -- reported as a fraction rather than as a running count that means
@@ -606,7 +628,11 @@ function Follow.Start()
     Follow.Redraw()
 
     if C_Timer and C_Timer.NewTicker and not ticker then
-        ticker = C_Timer.NewTicker(Follow.recheckSeconds, Tick)
+        -- Guarded, for the reason spelled out on Session's ticker: a
+        -- repeating callback that throws is a repeating error box.
+        ticker = C_Timer.NewTicker(Follow.recheckSeconds, function()
+            CN.Guard("Follow.Tick", Tick)
+        end)
     end
 
     return true

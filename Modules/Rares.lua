@@ -135,6 +135,65 @@ end
 -- "cleared by this character" rather than presented as fact.
 local lastSeenGuids = {}
 
+-- HOW CLOSE YOU HAVE TO HAVE BEEN FOR "IT VANISHED" TO MEAN "IT DIED".
+--
+-- `GetVignettes` returns what is IN RANGE, and a vignette leaves that list
+-- for two completely different reasons: somebody killed it, or you rode away
+-- from it. The old code could not tell them apart and assumed the first, so
+-- riding past a rare marked it cleared -- permanently, with no expiry and no
+-- command to undo it. The addon then refused to ever offer that rare to that
+-- character again, which is the worst possible failure for a module whose job
+-- is to say a rare is up.
+--
+-- A vignette that goes out of range does so at the edge of the range. One
+-- that dies does so wherever it was standing, which for a player who killed
+-- it is close. This is still inference, but it is inference that distinguishes
+-- the two cases instead of collapsing them.
+Rares.clearedWithinYards = 150
+
+-- AND THE INFERENCE EXPIRES.
+--
+-- Some rares are once per character and some are daily or weekly, and the
+-- client does not say which. Remembering forever is right for the first group
+-- and permanently wrong for the second; remembering until the weekly reset is
+-- approximately right for both, and self-corrects either way.
+Rares.rememberSeconds = 7 * 24 * 60 * 60
+
+local function ClearedUntil()
+    local seconds = Blizzard.GetSecondsUntilWeeklyReset
+        and Blizzard.GetSecondsUntilWeeklyReset()
+
+    if type(seconds) == "number" and seconds > 0 then
+        return time() + seconds
+    end
+
+    return time() + Rares.rememberSeconds
+end
+
+-- Recorded when the client itself says the vignette is dead, which needs no
+-- inference at all, and when one vanishes from close range.
+function Rares.NoteCleared(vignetteID, name)
+    local kills = CharacterKills()
+
+    if not kills or not vignetteID then
+        return false
+    end
+
+    kills[vignetteID] = ClearedUntil()
+
+    DebugPrint("Marking cleared: " .. tostring(name or vignetteID))
+
+    return true
+end
+
+-- The sighting set, so a test can put the module in the state a real
+-- VIGNETTE_MINIMAP_UPDATED would have left it in and then drive the real
+-- comparison. Writing to `lastSeenGuids` from outside is the alternative, and
+-- a test that reaches around the module proves nothing about the module.
+function Rares.SetLastSeen(seen)
+    lastSeenGuids = seen or {}
+end
+
 function Rares.NoteDisappearances(currentGuids)
     local kills = CharacterKills()
 
@@ -144,9 +203,14 @@ function Rares.NoteDisappearances(currentGuids)
 
     for guid, entry in pairs(lastSeenGuids) do
         if not currentGuids[guid] and entry.vignetteID then
-            kills[entry.vignetteID] = time()
-
-            DebugPrint("Vignette gone, marking cleared: " .. tostring(entry.name))
+            if entry.wasDead then
+                Rares.NoteCleared(entry.vignetteID, entry.name)
+            elseif entry.yards and entry.yards <= Rares.clearedWithinYards then
+                Rares.NoteCleared(entry.vignetteID, entry.name)
+            else
+                DebugPrint("Vignette out of range, not marking cleared: "
+                    .. tostring(entry.name))
+            end
         end
     end
 end
@@ -154,7 +218,48 @@ end
 function Rares.IsClearedByCharacter(vignetteID)
     local kills = CharacterKills()
 
-    return kills and kills[vignetteID] ~= nil
+    if not kills then
+        return false
+    end
+
+    local entry = kills[vignetteID]
+
+    if entry == nil then
+        return false
+    end
+
+    -- MIGRATED IN PLACE. Entries written before 0.53.0 hold the time the
+    -- vignette vanished rather than the time the memory expires, and most of
+    -- them are the false positives described above. Treating a bare timestamp
+    -- as "expires one week after it was written" retires them without a
+    -- migration step and without discarding a genuine recent kill.
+    local expires = type(entry) == "number" and entry or 0
+
+    if expires < time() then
+        kills[vignetteID] = nil
+
+        return false
+    end
+
+    return true
+end
+
+-- The player's own escape hatch, because inference that cannot be corrected
+-- is just a wrong answer with a longer life.
+function Rares.ForgetCleared()
+    local kills = CharacterKills()
+
+    if not kills then
+        return 0
+    end
+
+    local count = CN.CountKeys(kills)
+
+    for key in pairs(kills) do
+        kills[key] = nil
+    end
+
+    return count
 end
 
 ------------------------------------------------------------
@@ -293,13 +398,30 @@ local function OnVignetteUpdate()
 
     Rares.NoteDisappearances(currentGuids)
 
-    -- Rebuild the seen set for the next comparison.
+    -- Rebuild the seen set for the next comparison, carrying the two facts
+    -- that let the next comparison tell a kill from a departure: whether the
+    -- client had already flagged it dead, and how far away it was.
     local nextSeen = {}
 
-    for _, vignette in ipairs(Rares.GetActive(mapID)) do
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+    local travel = CN:GetModule("Travel")
+
+    for _, vignette in ipairs(Blizzard.GetVignettes(mapID)) do
+        local yards
+
+        if travel and travel.YardsBetween and playerMap and playerX
+            and vignette.mapID and vignette.x then
+
+            yards = travel.YardsBetween(playerMap, playerX, playerY,
+                vignette.mapID, vignette.x, vignette.y)
+        end
+
         nextSeen[vignette.guid] = {
             vignetteID = vignette.vignetteID,
             name       = vignette.name,
+            wasDead    = vignette.isDead and true or false,
+            yards      = yards,
         }
     end
 
@@ -346,6 +468,28 @@ CN:RegisterCommand{
         end
 
         Print("|cffffff00/cn rare <number>|r to set a waypoint.")
+        Print("|cff999999\"already cleared\" is inferred from a vignette that "
+            .. "vanished while you were next to it, and it expires at the "
+            .. "weekly reset. /cn rareforget clears it now.|r")
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "rareforget",
+    order   = 77,
+    help    = "Forget which rares this character is assumed to have cleared.",
+    handler = function()
+        local count = Rares.ForgetCleared()
+
+        if count == 0 then
+            Print("Nothing was being treated as cleared on this character.")
+            return
+        end
+
+        Print(count .. " cleared for this character, forgotten. They will be "
+            .. "offered again.")
+
+        CN.InvalidateCandidates()
     end,
 }
 

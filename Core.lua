@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.52.0"
-CN.dbVersion   = 7
+CN.version     = "0.53.0"
+CN.dbVersion   = 8
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -118,11 +118,40 @@ function CN:RegisterCommand(definition)
     definition.name  = string.lower(definition.name)
     definition.order = definition.order or 100
 
-    CN.commands[definition.name] = definition
+    -- A NAME CLAIMED TWICE IS A COMMAND THAT DOES SOMETHING ELSE.
+    --
+    -- Registration used to overwrite silently, so whichever file loaded last
+    -- won and `/cn help` went on describing the loser. `/cn zones` was
+    -- registered by Loremaster as a command and, further down the same file,
+    -- as an ALIAS of `/cn loremaster` -- so it printed the quest-completion
+    -- report while the help text, and the store page, described the zone
+    -- ranking. `/cn show` was claimed by both the window and the filters.
+    --
+    -- Recorded rather than refused: refusing would change which command wins
+    -- at load time, and the answer to a collision is to fix it, not to
+    -- reshuffle it. `/cn selftest` names them.
+    CN.commandCollisions = CN.commandCollisions or {}
+
+    local function Claim(name, kind)
+        local held = CN.commands[name]
+
+        if held and held ~= definition then
+            table.insert(CN.commandCollisions, {
+                name  = name,
+                kind  = kind,
+                from  = held.name,
+                to    = definition.name,
+            })
+        end
+
+        CN.commands[name] = definition
+    end
+
+    Claim(definition.name, "name")
 
     if definition.aliases then
         for _, alias in ipairs(definition.aliases) do
-            CN.commands[string.lower(alias)] = definition
+            Claim(string.lower(alias), "alias")
         end
     end
 

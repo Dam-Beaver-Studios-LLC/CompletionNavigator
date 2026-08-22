@@ -302,8 +302,24 @@ local function BuildWindow()
     search:SetScript("OnEditFocusLost", function(self)
         local settings = CN.Settings()
 
-        if settings and settings.keepFilter and self:GetText() ~= "" then
-            UI.persistedFilter = self:GetText()
+        if settings and settings.keepFilter then
+            -- WRITTEN UNCONDITIONALLY, INCLUDING WHEN IT IS EMPTY.
+            --
+            -- The guard here used to be `self:GetText() ~= ""`, and nothing
+            -- else ever cleared `UI.persistedFilter` -- so clearing the box
+            -- did not clear the memory, and the next tab change put the old
+            -- term straight back and applied it. The player could not clear a
+            -- persisted filter except by typing a different one, which is
+            -- precisely the "a filter that persists invisibly is how a list
+            -- looks empty when it is not" case this feature's own help text
+            -- warns about.
+            local text = self:GetText()
+
+            if text == "" then
+                UI.persistedFilter = nil
+            else
+                UI.persistedFilter = text
+            end
         end
     end)
 
@@ -742,20 +758,15 @@ UI.RegisterTab{
         local results = CN.Recommend(12)
 
         if #results == 0 then
-            local hidden = filters and filters.HiddenTypeCount() or 0
-
             panel.title:SetText("Nothing actionable yet")
             panel.type:SetText("")
 
             -- An empty list because you filtered everything out looks exactly
-            -- like an empty list because nothing was found. Say which.
-            if hidden > 0 then
-                panel.why:SetText(hidden .. " type"
-                    .. (hidden == 1 and " is" or "s are") .. " hidden by your filter.\n"
-                    .. "Click Filter types to change it.")
-            else
-                panel.why:SetText("Run a scan from the Scans tab, or pick up a quest.")
-            end
+            -- like an empty list because nothing was found -- and both look
+            -- exactly like an engine that threw. The shared explainer says
+            -- which, and it says the same thing here as in chat.
+            panel.why:SetText(
+                table.concat(CN.ExplainEmptyList(), "\n\n"))
 
             panel.list:SetEntries({})
 
@@ -769,7 +780,7 @@ UI.RegisterTab{
         CN.currentRecommendation = best
 
         panel.title:SetText(tostring(best.name or best.id))
-        panel.type:SetText(tostring(best.type))
+        panel.type:SetText(CN.TypeLabel(best.type))
         panel.why:SetText("Why:\n" .. table.concat(CN.ExplainRecommendation(best), "\n"))
 
         local entries = {}
@@ -780,7 +791,7 @@ UI.RegisterTab{
             table.insert(entries, {
                 text = string.format("|cff999999%2d.|r %s |cff808080[%s]|r",
                     index, tostring(objective.name or objective.id),
-                    tostring(objective.type)),
+                    CN.TypeLabel(objective.type)),
 
                 tooltip = table.concat(CN.ExplainRecommendation(objective), "\n"),
 
@@ -788,7 +799,7 @@ UI.RegisterTab{
                     CN.currentRecommendation = objective
 
                     panel.title:SetText(tostring(objective.name or objective.id))
-                    panel.type:SetText(tostring(objective.type))
+                    panel.type:SetText(CN.TypeLabel(objective.type))
                     panel.why:SetText("Why:\n"
                         .. table.concat(CN.ExplainRecommendation(objective), "\n"))
                 end,
@@ -862,7 +873,7 @@ UI.RegisterTab{
             table.insert(entries, {
                 text = string.format("|cff999999%2d.|r %s |cff808080[%s]|r",
                     index, tostring(objective.name or objective.id),
-                    tostring(objective.type)),
+                    CN.TypeLabel(objective.type)),
 
                 tooltip = "Click to set a waypoint.\n"
                     .. table.concat(CN.ExplainRecommendation(objective), "\n"),
@@ -975,8 +986,7 @@ UI.RegisterTab{
 
         table.insert(lines, "|cff999999Database: "
             .. CN.CountKeys(CN.Account("discoveredQuests")) .. " known, "
-            .. CN.CountKeys(CN.Account("questMetadata")) .. " named, "
-            .. CN.CountKeys(CN.Account("questStatus")) .. " tracked|r")
+            .. CN.CountKeys(CN.Account("questMetadata")) .. " named|r")
         table.insert(lines, " ")
 
         local reputations = CN:GetModule("Reputations")
@@ -1782,8 +1792,16 @@ UI.RegisterTab{
 -- TAB: COLLECTIONS
 ------------------------------------------------------------
 
--- The account dashboard. Every row is "collected / known", never a
--- fabricated percentage of some total the addon cannot verify.
+-- The account dashboard. Every row is "collected / known" -- and the
+-- percentage beside it is that ratio and nothing wider.
+--
+-- The comment here used to say "never a fabricated percentage of some total
+-- the addon cannot verify" and the code fifty lines below formatted `%.1f%%`.
+-- Both halves were defensible on their own: the denominator IS the addon's
+-- own scan snapshot, which is exactly what the row says. What was missing was
+-- anything on screen saying WHEN that snapshot was taken, so a figure that
+-- silently goes stale the day the game adds collectibles read as current.
+-- The header now says so, and each row carries its scan age.
 UI.RegisterTab{
     name  = "Collections",
     order = 25,
@@ -1942,7 +1960,8 @@ UI.RegisterTab{
             end
         end
 
-        panel.header:SetText("Account completion  |cff999999(collected / known)|r")
+        panel.header:SetText("Account completion  |cff999999(collected / "
+            .. "known at the last scan -- not of everything in the game)|r")
         panel.list:SetEntries(entries)
     end,
 }
@@ -2221,14 +2240,33 @@ local function BuildMinimapButton()
 
                 GameTooltip:AddLine(reason, 0.6, 0.6, 0.6)
             end
+        elseif not ok then
+            -- An engine that threw is not an empty list, and telling the
+            -- player to run setup again when the real answer is "something
+            -- broke" sends them to the wrong place.
+            GameTooltip:AddLine("Something went wrong; /cn errors has it.",
+                0.96, 0.42, 0.38)
         else
             GameTooltip:AddLine("Nothing actionable is known yet.", 0.6, 0.6, 0.6)
-            GameTooltip:AddLine("Run /cn setup once.", 0.6, 0.6, 0.6)
+
+            -- The shared explanation rather than an unconditional "run
+            -- setup", which was shown to players who had run it and then
+            -- hidden every type with /cn show.
+            for index, line in ipairs(CN.ExplainEmptyList()) do
+                if index > 2 then
+                    break
+                end
+
+                GameTooltip:AddLine(line, 0.6, 0.6, 0.6)
+            end
         end
 
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("|cffffffffLeft-click|r open the window", 1, 1, 1)
         GameTooltip:AddLine("|cffffffffRight-click|r navigate to the next objective", 1, 1, 1)
+        -- Middle-click has started follow mode since 0.44.0 and the tooltip
+        -- -- the feature's only discovery surface -- did not mention it.
+        GameTooltip:AddLine("|cffffffffMiddle-click|r start follow mode", 1, 1, 1)
         GameTooltip:AddLine("|cffffffffDrag|r reposition this button", 1, 1, 1)
         GameTooltip:Show()
     end)
@@ -2355,7 +2393,11 @@ end
 
 CN:RegisterCommand{
     name    = "ui",
-    aliases = { "show", "window" },
+    -- "show" REMOVED. Filters registers `/cn show` and loads later in the
+    -- .toc, so this alias was already dead -- and `/cn show` being the filter
+    -- command is what the documentation says. A dead alias that reads as a
+    -- live one is a collision waiting for a load-order change.
+    aliases = { "window" },
     order   = 5,
     help    = "Open the main window.",
     handler = function()

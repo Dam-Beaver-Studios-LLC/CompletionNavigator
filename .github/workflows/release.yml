@@ -248,7 +248,7 @@ jobs:
       - name: Coverage
         continue-on-error: true
         timeout-minutes: 6
-        run: bash coverage.sh . 82
+        run: bash coverage.sh . 85
 
       # The packager SKIPS the CurseForge upload silently when CF_API_KEY is
       # missing -- the build still goes green and no file appears. Fail here

@@ -136,11 +136,30 @@ function Reputations.Scan()
 
                 nameStore[data.factionID] = record.name
 
+                -- ONE SCOPE PER FACTION, AND THE OTHER ONE IS DELETED.
+                --
+                -- `Reputations.Get` returns the account record whenever one
+                -- exists, and `Scan` only ever ADDED -- so a faction Blizzard
+                -- moved from account-wide to character-specific in a patch
+                -- kept its stale account row winning forever, and every
+                -- character read whichever character last scanned it.
+                -- Blizzard has moved factions in both directions across
+                -- patches.
+                --
+                -- Writing one scope now clears the other, so the store can
+                -- never hold two answers for one faction.
                 if record.accountWide then
                     accountStore[data.factionID] = record
+
+                    if characterStore then
+                        characterStore[data.factionID] = nil
+                    end
+
                     accountWide = accountWide + 1
                 elseif characterStore then
                     characterStore[data.factionID] = record
+                    accountStore[data.factionID]   = nil
+
                     characterSpecific = characterSpecific + 1
                 end
 

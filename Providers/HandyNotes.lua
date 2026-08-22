@@ -13,6 +13,8 @@
 
 local ADDON_NAME, CN = ...
 
+local Print = CN.Print
+
 local HandyNotes = {}
 
 CN.HandyNotes = HandyNotes
@@ -50,12 +52,24 @@ function HandyNotes.GetPlugins()
     local iterate = root.IteratePlugins
 
     if type(iterate) == "function" then
-        local ok, iterator = pcall(iterate, root)
+        -- THE WHOLE TRIPLET, NOT JUST THE FIRST RETURN.
+        --
+        -- `IteratePlugins` is a `pairs`-style stateful iterator: it returns
+        -- `next`, the table, and the control value. Capturing only the first
+        -- and writing `for name in iterator` calls `next(nil, nil)`, which
+        -- throws "bad argument #1 to 'next' (table expected, got nil)" -- so
+        -- this integration could not work for any player who actually has
+        -- HandyNotes installed.
+        --
+        -- The stub in the test suite was a single self-contained closure,
+        -- which is the one shape that makes the broken form work. Stub more
+        -- forgiving than the client, again.
+        local ok, step, state, control = pcall(iterate, root)
 
-        if ok and type(iterator) == "function" then
+        if ok and type(step) == "function" then
             local safe = 0
 
-            for name in iterator do
+            for name in step, state, control do
                 table.insert(names, name)
 
                 safe = safe + 1
@@ -100,15 +114,15 @@ function HandyNotes.GetNodesOnMap(uiMapID)
         return nodes
     end
 
-    local ok, iterator = pcall(iterate, root)
+    local ok, step, state, control = pcall(iterate, root)
 
-    if not ok or type(iterator) ~= "function" then
+    if not ok or type(step) ~= "function" then
         return nodes
     end
 
     local pluginCount = 0
 
-    for name, handler in iterator do
+    for name, handler in step, state, control do
         pluginCount = pluginCount + 1
 
         if pluginCount > 50 then
@@ -116,14 +130,19 @@ function HandyNotes.GetNodesOnMap(uiMapID)
         end
 
         if type(handler) == "table" and type(handler.GetNodes2) == "function" then
-            local gotNodes, nodeIterator = pcall(handler.GetNodes2, handler, uiMapID, false)
+            -- Same triplet, same reason: a plugin's node iterator is also
+            -- a `pairs`-style return. This one was inside a pcall, so it
+            -- failed to a debug line instead of an error -- silently, which
+            -- is how a whole feature can be broken and look empty.
+            local gotNodes, nodeStep, nodeState, nodeControl =
+                pcall(handler.GetNodes2, handler, uiMapID, false)
 
-            if gotNodes and type(nodeIterator) == "function" then
+            if gotNodes and type(nodeStep) == "function" then
                 local safe = 0
 
                 -- HandyNotes coords pack x and y into one integer.
                 local success = pcall(function()
-                    for coord, node in nodeIterator do
+                    for coord, node in nodeStep, nodeState, nodeControl do
                         safe = safe + 1
 
                         if safe > 500 then
@@ -195,3 +214,61 @@ CN.RegisterQuestDataProvider("HandyNotes", {
     Describe     = HandyNotes.Describe,
     priority     = 90,
 })
+
+------------------------------------------------------------
+-- COMMAND
+------------------------------------------------------------
+
+-- `GetNodesOnMap` is seventy lines and the stated reason this file exists,
+-- and until 0.53.0 nothing called it: no provider, no command, no test. It
+-- was written, documented, shipped, and never run -- and because it sat
+-- behind a broken iterator it could not have worked if it had been.
+--
+-- Read-only and on request. HandyNotes nodes are another addon's data about
+-- the same world, so they are shown rather than folded into the ranking:
+-- this addon does not know how that plugin decides what to draw, and
+-- inheriting somebody else's opinion silently is not the same as having one.
+CN:RegisterCommand{
+    name    = "handynotes",
+    aliases = { "hn" },
+    order   = 78,
+    help    = "What HandyNotes plugins are drawing on this map.",
+    handler = function()
+        if not HandyNotes.IsAvailable() then
+            Print("HandyNotes is not installed, or has not loaded.")
+            return
+        end
+
+        Print("HandyNotes: " .. HandyNotes.Describe())
+
+        local mapID = CN.GetPlayerPosition()
+
+        if not mapID then
+            Print("|cff999999The client will not say which map you are on.|r")
+            return
+        end
+
+        local nodes = HandyNotes.GetNodesOnMap(mapID)
+
+        if #nodes == 0 then
+            Print("|cff999999No plugin is drawing anything on this map.|r")
+            return
+        end
+
+        Print(#nodes .. " node(s) on this map:")
+
+        for index, node in ipairs(nodes) do
+            if index > 20 then
+                Print("  |cff999999and " .. (#nodes - 20) .. " more|r")
+                break
+            end
+
+            Print(string.format("  %d. %s |cff999999%s at %.1f, %.1f|r",
+                index, tostring(node.label or "unnamed"),
+                tostring(node.plugin), (node.x or 0) * 100, (node.y or 0) * 100))
+        end
+
+        Print("|cff999999Shown, not scored: this is another addon's view of "
+            .. "the same world.|r")
+    end,
+}

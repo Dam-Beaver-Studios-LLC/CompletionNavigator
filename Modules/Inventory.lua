@@ -535,7 +535,12 @@ CN:RegisterCommand{
 
             for index, row in ipairs(nearly) do
                 if index > 8 then
-                    Print("  |cff999999... and " .. (#nearly - 8) .. " more|r")
+                    -- Translated, like the identical phrase nine lines below.
+                    -- Hardcoded English two lines from a CN.L lookup of the
+                    -- same words is how a locale file ends up complete and
+                    -- the addon still English.
+                    Print("  |cff999999"
+                        .. string.format(CN.L["%d more"], #nearly - 8) .. "|r")
                     break
                 end
 

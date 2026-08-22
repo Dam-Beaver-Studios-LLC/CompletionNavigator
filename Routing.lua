@@ -73,7 +73,21 @@ function CN.SetWaypoint(mapID, x, y, title)
         return false
     end
 
-    provider.SetWaypoint(mapID, x, y, title)
+    -- THE ANSWER IS THE PROVIDER'S, NOT THIS FUNCTION'S.
+    --
+    -- This called the provider, discarded whatever came back, and returned
+    -- `true`. `CN.NavigateToObjective` then printed "Waypoint set: <name>" --
+    -- on a map the client refuses waypoints on, with TomTom absent, with a
+    -- map point the client would not build. Every one of those printed a
+    -- success and produced nothing.
+    local placed, why = provider.SetWaypoint(mapID, x, y, title)
+
+    if not placed then
+        CN.Print("A waypoint could not be set"
+            .. (why and (": " .. why) or " here") .. ".")
+
+        return false
+    end
 
     CN.DebugPrint("Waypoint set via " .. tostring(name) .. ".")
 
@@ -151,12 +165,16 @@ function CN.NavigateToObjective(objective)
     return false
 end
 
+-- Returns whether anything was actually removed, so `/cn clearway` can stop
+-- announcing a clearance that did not happen.
 function CN.ClearWaypoints()
     local provider = CN.GetWaypointProvider()
 
     if provider and provider.ClearAll then
-        provider.ClearAll()
+        return provider.ClearAll() and true or false
     end
+
+    return false
 end
 
 ------------------------------------------------------------
@@ -573,8 +591,13 @@ function CN.BuildZoneRoute(mapID, startX, startY)
         end
     end
 
-    CN.currentRoute = route
-    CN.currentHubs  = orderedHubs
+    -- `CN.currentRoute` and `CN.currentHubs` were assigned here and read by
+    -- nothing -- not `/cn zone`, which uses the values it is handed, not the
+    -- map pins, not follow mode, not the window. Two globals holding a strong
+    -- reference to every objective and hub of the last route built, keeping a
+    -- superseded candidate generation alive for the rest of the session.
+    -- Removed rather than given a reader: the callers all have the route
+    -- already.
 
     -- ROUTING CHANGES THE SCORES, SO THE RANKING MUST BE REBUILT.
     --
@@ -816,7 +839,9 @@ function CN.StartAutoWaypointTicker()
 
     ticker = C_Timer.NewTicker(60, function()
         if CN.IsAutoWaypointEnabled() then
-            CN.AutoAdvance("ticker")
+            -- Guarded: a repeating callback that throws is a repeating
+            -- error box for as long as auto-waypoint is on.
+            CN.Guard("Routing.AutoAdvance", CN.AutoAdvance, "ticker")
         end
     end)
 end
@@ -923,8 +948,17 @@ CN:RegisterCommand{
 
         if #route == 0 and #skipped == 0 then
             CN.Print(zoneName .. ": nothing actionable is known here.")
-            CN.Print("Run |cffffff00/cn discoveractive|r and |cffffff00/cn repscan|r, "
-                .. "then try again.")
+
+            -- The shared explanation, not a hand-written pair of commands.
+            -- This used to name `/cn discoveractive`, which only records
+            -- quests ALREADY IN YOUR LOG and so cannot make anything new
+            -- appear here, and `/cn repscan` -- two of eleven scans, one of
+            -- them irrelevant, and no mention of `/cn setup`, which the
+            -- addon's own first-run flow calls the required first step.
+            for _, line in ipairs(CN.ExplainEmptyList()) do
+                CN.Print("|cff999999" .. line .. "|r")
+            end
+
             return
         end
 
@@ -970,7 +1004,7 @@ CN:RegisterCommand{
                         .. stopNumber .. ". "
                         .. (verb and ("|cffffff00" .. verb .. "|r ") or "")
                         .. tostring(objective.name or objective.id)
-                        .. " |cff999999[" .. tostring(objective.type) .. "]|r")
+                        .. " |cff999999[" .. CN.TypeLabel(objective.type) .. "]|r")
 
                     shown = shown + 1
                 end
@@ -1082,8 +1116,12 @@ CN:RegisterCommand{
     order   = 13,
     help    = "Clear waypoints this addon created.",
     handler = function()
-        CN.ClearWaypoints()
-        CN.Print("Waypoints cleared.")
+        if CN.ClearWaypoints() then
+            CN.Print("Waypoints cleared.")
+        else
+            CN.Print("This addon had no waypoint set.")
+            CN.Print("|cff999999A pin you placed yourself is left alone.|r")
+        end
     end,
 }
 

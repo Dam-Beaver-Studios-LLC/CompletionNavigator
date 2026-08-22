@@ -204,9 +204,15 @@ local nodeCache = {}
 -- continent and thrown away with the node list.
 local spanCache = {}
 
+-- The flight network, and the shortest way through it. See THE NETWORK below.
+local neighbourCache = {}
+local pathCache      = {}
+
 function Travel.ForgetNodes()
-    nodeCache = {}
-    spanCache = {}
+    nodeCache      = {}
+    spanCache      = {}
+    neighbourCache = {}
+    pathCache      = {}
 end
 
 -- Only nodes you can actually use. An undiscovered flight master is not a
@@ -277,7 +283,21 @@ function Travel.KnownNodes(mapID)
         end
     end
 
-    nodeCache[continent] = usable
+    -- AN EMPTY LIST IS NOT AN ANSWER, SO IT IS NOT REMEMBERED.
+    --
+    -- `C_TaxiMap.GetAllTaxiNodes` answers usefully only while the client has
+    -- the taxi map's data to hand, and every node here needs
+    -- `Travel.WorldPoint`, which refuses during a loading screen. The one
+    -- event that clears this cache -- PLAYER_ENTERING_WORLD -- is a loading
+    -- screen, so the very next query was the one most likely to get nothing.
+    --
+    -- Caching that nothing meant every flight-based estimate on the continent
+    -- degraded to "run there" for the rest of the session. `Travel.WorldPoint`
+    -- and `Navigation.MapScale` both already refuse to remember a miss, with
+    -- comments saying why; this derived list did it anyway.
+    if #usable > 0 then
+        nodeCache[continent] = usable
+    end
 
     return usable, continent
 end
@@ -306,6 +326,224 @@ local function Spans(continent, nodes)
     spanCache[continent] = spans
 
     return spans
+end
+
+------------------------------------------------------------
+-- THE NETWORK
+------------------------------------------------------------
+
+-- A FLIGHT IS NOT A STRAIGHT LINE, AND SOME JOURNEYS NEED TWO HOPS.
+--
+-- Until now the flight leg of a route was the straight-line distance between
+-- the two flight points, which is the one distance a taxi never travels. The
+-- network is a graph: the bird hops from master to master, and a pair at
+-- opposite ends of a continent is reached by going through the ones in
+-- between. Measuring the hypotenuse understated every long flight -- always
+-- in the same direction, so the addon systematically recommended distant
+-- objectives over near ones.
+--
+-- It also let the addon cost a pairing that does not connect at all. An
+-- island node with no route to the mainland was quoted as a short flight
+-- because the two points happen to be close together on the map.
+--
+-- The client does not publish the edge list -- `GetAllTaxiNodes` gives
+-- positions and reachability, not who connects to whom -- so the edges are
+-- inferred: a flight master connects to the ones near it, plus its nearest
+-- few regardless of distance so that a sparse region is not cut off from the
+-- rest of the continent. That is a model, and it is marked as one: a
+-- multi-hop estimate is never reported as confident.
+--
+-- What it is not is a guess in the direction of optimism. Every path length
+-- this produces is at least the straight line it replaces, so the estimate
+-- moved from "certainly too short" to "approximately right".
+Travel.hopYards = 4000
+
+-- Plus the nearest few whatever the distance, so that a lone outpost still
+-- joins the graph rather than becoming unreachable and silently dropping out
+-- of every route.
+Travel.minimumNeighbours = 4
+
+-- No real continent has a flight chain anywhere near this long. It exists so
+-- that a malformed graph cannot spin a loop.
+Travel.maximumHops = 32
+
+local function Neighbours(continent, nodes)
+    if neighbourCache[continent] then
+        return neighbourCache[continent]
+    end
+
+    local spans = Spans(continent, nodes)
+    local out   = {}
+
+    for i = 1, #nodes do
+        local ranked = {}
+
+        for j = 1, #nodes do
+            local yards = (i ~= j) and spans[i] and spans[i][j]
+
+            if yards then
+                table.insert(ranked, { index = j, yards = yards })
+            end
+        end
+
+        -- Ties broken on index so the graph is the same graph every time it
+        -- is built. A route that changes between two identical calls is not
+        -- a route the player can be told about.
+        table.sort(ranked, function(a, b)
+            if a.yards == b.yards then
+                return a.index < b.index
+            end
+
+            return a.yards < b.yards
+        end)
+
+        local list = {}
+
+        for rank, entry in ipairs(ranked) do
+            if entry.yards <= Travel.hopYards
+                or rank <= Travel.minimumNeighbours then
+
+                table.insert(list, entry)
+            else
+                -- Ascending, so nothing further can qualify on either test.
+                break
+            end
+        end
+
+        out[i] = list
+    end
+
+    -- AND THE GRAPH IS UNDIRECTED, BECAUSE FLIGHT PATHS ARE.
+    --
+    -- Built one node at a time, `minimumNeighbours` is a rule about who each
+    -- node reaches OUT to, and that is not the same as who reaches it. A lone
+    -- outpost picks its four nearest and every one of them is close enough to
+    -- fill its own four from the crowd nearby -- so the outpost had a way out
+    -- and no way in, and Dijkstra from anywhere on the mainland simply never
+    -- reached it. It vanished from every route, silently, which is the exact
+    -- failure `minimumNeighbours` was written to prevent.
+    for i = 1, #nodes do
+        for _, edge in ipairs(out[i]) do
+            local back    = out[edge.index]
+            local present = false
+
+            for _, other in ipairs(back) do
+                if other.index == i then
+                    present = true
+                    break
+                end
+            end
+
+            if not present then
+                table.insert(back, { index = i, yards = edge.yards })
+            end
+        end
+    end
+
+    neighbourCache[continent] = out
+
+    return out
+end
+
+-- Dijkstra from one flight point to every other, cached per origin.
+--
+-- Per origin rather than all-pairs: the search below prunes most origins
+-- before it ever asks, and paying for a full Floyd-Warshall on sixty nodes at
+-- the first estimate of a session would be a visible hitch for answers that
+-- are mostly never needed. What is computed is kept, and thrown away with the
+-- node list it was derived from.
+local function ShortestFrom(continent, nodes, source)
+    local cache = pathCache[continent]
+
+    if not cache then
+        cache = {}
+        pathCache[continent] = cache
+    end
+
+    if cache[source] then
+        return cache[source]
+    end
+
+    local neighbours = Neighbours(continent, nodes)
+    local count      = #nodes
+    local dist, prev, settled = {}, {}, {}
+
+    dist[source] = 0
+
+    for _ = 1, count do
+        local pick, pickDist
+
+        for index = 1, count do
+            if not settled[index] and dist[index]
+                and (not pickDist or dist[index] < pickDist) then
+
+                pick, pickDist = index, dist[index]
+            end
+        end
+
+        if not pick then
+            -- Everything reachable has been settled. What is left is a
+            -- separate component, and stays unreachable -- which is the
+            -- honest answer for it.
+            break
+        end
+
+        settled[pick] = true
+
+        for _, edge in ipairs(neighbours[pick] or {}) do
+            local through = pickDist + edge.yards
+
+            if not dist[edge.index] or through < dist[edge.index] then
+                dist[edge.index] = through
+                prev[edge.index] = pick
+            end
+        end
+    end
+
+    local result = { dist = dist, prev = prev }
+
+    cache[source] = result
+
+    return result
+end
+
+-- The hops themselves, so `/cn travel` can print the chain rather than a
+-- single number the player cannot check.
+function Travel.LegsBetween(nodes, path, source, target)
+    if not path or not path.dist or not path.dist[target] then
+        return nil
+    end
+
+    local chain, at, guard = {}, target, 0
+
+    while at and guard <= Travel.maximumHops do
+        table.insert(chain, 1, at)
+
+        if at == source then
+            break
+        end
+
+        at    = path.prev[at]
+        guard = guard + 1
+    end
+
+    if chain[1] ~= source then
+        return nil
+    end
+
+    local legs = {}
+
+    for step = 1, #chain - 1 do
+        local a, b = chain[step], chain[step + 1]
+
+        table.insert(legs, {
+            from  = nodes[a] and nodes[a].name,
+            to    = nodes[b] and nodes[b].name,
+            yards = (path.dist[b] or 0) - (path.dist[a] or 0),
+        })
+    end
+
+    return legs
 end
 
 -- Nearest known flight point to a world point, and how far it is.
@@ -1034,8 +1272,6 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         -- hand.
         local flightSpeed, flightMeasured = Travel.FlightSpeed()
 
-        local spans = Spans(continent, nodes)
-
         local originSeconds, arrivalSeconds = {}, {}
 
         -- The cheapest either end can possibly be. Used to abandon an origin
@@ -1086,10 +1322,17 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
                     < bestRanking then
 
                 local origin = nodes[i]
-                local row    = spans[i]
+
+                -- THE WAY THE BIRD ACTUALLY GOES.
+                --
+                -- `spans` is still what the graph is built from, but the
+                -- flight leg is now the shortest path through that graph
+                -- rather than the straight line across it. A pair with no
+                -- path between them has no entry and is not offered.
+                local path = ShortestFrom(continent, nodes, i)
 
                 for j = 1, #nodes do
-                    local flightYards = row and row[j]
+                    local flightYards = (i ~= j) and path.dist[j] or nil
                     local walkIn      = arrivalSeconds[j]
 
                     if flightYards and walkIn then
@@ -1139,11 +1382,23 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
                                 -- ask a further question about the route.
                                 nodeID      = origin.id,
                                 arrivalID   = nodes[j].id,
+
+                                -- The chain itself. One entry means the
+                                -- ordinary direct hop; more means the route
+                                -- goes through flight masters in between,
+                                -- and the player is told which.
+                                legs        = Travel.LegsBetween(
+                                                  nodes, path, i, j),
                             }
 
+                            best.hops = best.legs and #best.legs or 1
+
                             -- A flight estimate is only as good as the
-                            -- flight speed behind it.
+                            -- flight speed behind it -- and a multi-hop
+                            -- route rests on an inferred edge list as well,
+                            -- which is a model and not a measurement.
                             confident = runMeasured and flightMeasured
+                                and best.hops <= 1
                         end
                     end
                 end
@@ -1392,7 +1647,9 @@ CN:RegisterCommand{
             speed, measured
                 and ("|cff999999from " .. Travel.FlightSampleCount()
                     .. " of your own flights|r")
-                or "|cff999999estimated -- take a flight path and it will be measured|r"))
+                or (CN.WithConfidence("", CN.confidence.ESTIMATED)
+                    .. " |cff999999-- take a flight path and it will be "
+                    .. "measured|r")))
 
         if not continent then
             Print("|cff999999The client will not say which continent this is.|r")
@@ -1427,6 +1684,24 @@ CN:RegisterCommand{
                 detail.runToNode, tostring(detail.node), detail.flightYards,
                 detail.runFromNode, detail.yards))
 
+            -- THE CHAIN, NOT JUST ITS ENDS.
+            --
+            -- A two-hop route printed as a single "in the air" figure looks
+            -- like a straight line the player can check against the map and
+            -- find wrong. Printed as its legs it is checkable, which is the
+            -- point of the whole breakdown.
+            local legs = detail.legs or {}
+
+            if #legs > 1 then
+                Print(string.format("  |cff999999%d legs:|r", #legs))
+
+                for index, leg in ipairs(legs) do
+                    Print(string.format("    |cff999999%d. %s to %s, %.0f yd|r",
+                        index, tostring(leg.from), tostring(leg.to),
+                        leg.yards or 0))
+                end
+            end
+
             Print(string.format("  |cff999999running the whole way: %s|r",
                 session and session.FormatDuration
                     and session.FormatDuration(detail.yards / math.max(0.5, runSpeed))
@@ -1437,7 +1712,9 @@ CN:RegisterCommand{
             Print(string.format(
                 "  |cff999999%.0f yd direct at %.0f yd/s%s|r",
                 detail.yards, flySpeed,
-                flyMeasured and "" or " |cff999999(estimated)|r"))
+                flyMeasured and ""
+                    or (" " .. CN.WithConfidence("",
+                        CN.confidence.ESTIMATED))))
         elseif detail and detail.mode == "elsewhere" then
             Print("|cff999999That is on another continent. Portals and boats "
                 .. "are not modelled, so no time is claimed -- but here is "

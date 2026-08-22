@@ -119,10 +119,17 @@ local function PetLines(lines, itemID)
     end
 
     count = count or 0
-    limit = limit or 3
 
-    if count > 0 then
+    -- NO FABRICATED DENOMINATOR.
+    --
+    -- `limit or 3` invented the cap when neither the store nor the client
+    -- supplied it, and then printed "collected 2 of 3" as though the 3 had
+    -- been read from somewhere. Three is the right number today; it is still
+    -- a made-up total in a module that refuses them everywhere else.
+    if count > 0 and limit and limit > 0 then
         Add(lines, "Battle pet: collected " .. count .. " of " .. limit, GREEN)
+    elseif count > 0 then
+        Add(lines, "Battle pet: collected " .. count, GREEN)
     else
         Add(lines, "Battle pet: not collected", RED)
     end
