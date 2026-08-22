@@ -153,11 +153,20 @@ function Waiting.Knowledge()
 
     local currencies = CN:GetModule("Currencies")
 
-    if not currencies or not currencies.Store then
+    -- `CharacterStore`, not `Store`. There has never been a Currencies.Store,
+    -- so this guard was false on every client and the whole KNOWLEDGE section
+    -- of `/cn clock` -- plus its candidates -- has never once produced a row,
+    -- in a file whose header calls weekly profession knowledge "the most
+    -- permanently missable thing in modern professions".
+    --
+    -- Nothing caught it because an empty knowledge list and a knowledge list
+    -- that cannot be built look identical from outside, and the suite only
+    -- asserted that `/cn clock` did not error.
+    if not currencies or not currencies.CharacterStore then
         return rows
     end
 
-    for currencyID, record in pairs(currencies.Store()) do
+    for currencyID, record in pairs(currencies.CharacterStore() or {}) do
         if record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0
             and (record.weeklyRemaining or 0) > 0 then
 

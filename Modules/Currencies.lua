@@ -109,6 +109,19 @@ function Currencies.Capped(character)
                 name       = NameStore()[currencyID],
                 quantity   = record.quantity,
                 maximum    = record.maxQuantity,
+
+                -- CARRIED THROUGH, WHICH IT WAS NOT.
+                --
+                -- The candidate provider reads `accountWide` off these rows
+                -- under a long comment explaining that ignoring the flag was
+                -- "the exact mistake the Warband work exists to prevent" --
+                -- and this function, the only thing that builds those rows,
+                -- never copied it. The flag was read from the client
+                -- correctly, stored correctly, and dropped here. So a
+                -- Warband currency capped on your main was still recommended
+                -- on every alt, which is precisely the behaviour 0.43.0
+                -- claimed to have fixed.
+                accountWide = record.accountWide and true or false,
             })
         end
     end

@@ -18,6 +18,7 @@ ignore:
   - harness.lua
   - bench.lua
   - pstest.sh
+  - cisim.sh
   - coverage.sh
   - mutate.sh
   # Recordings of a live client, read only by the harness. Shipping a player

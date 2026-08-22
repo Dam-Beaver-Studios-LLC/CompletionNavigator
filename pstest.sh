@@ -46,6 +46,24 @@ echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
 grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
+echo "  the release workflow's own steps, run here"
+# FOUR RELEASES WERE TAGGED, PUSHED, AND NEVER PUBLISHED.
+#
+# Each died at a different workflow step, and each was reproducible in seconds
+# on this machine. Everything below ran EQUIVALENTS -- luacheck against the
+# build tree, the harness against the build tree -- while the runner runs
+# `luacheck .` and `lua5.4 harness.lua .` against a scaffolded tree from the
+# repository root. That difference is where all four failures lived.
+#
+# cisim.sh extracts each `run:` block from the workflow and executes it. It is
+# run here so that no release can be cut without the workflow having been
+# executed at least once against the tree being released.
+if [ -x /home/claude/cn/cisim.sh ]; then
+  /home/claude/cn/cisim.sh "$SRC" > cisim.log 2>&1 \
+    || { echo "FAIL: a workflow step fails; this release would not publish"; tail -30 cisim.log; exit 1; }
+  echo "    $(grep -c 'ok    ' cisim.log) workflow steps executed against a scaffolded tree"
+fi
+
 echo "  a captured fixture is loadable Lua"
 # EVERY RECORDING THIS COMMAND EVER WROTE WAS MALFORMED.
 #

@@ -893,7 +893,14 @@ end
 
 Quests.Overrides = Overrides
 
-function Quests.SetLocation(questID, mapID, x, y)
+-- `source` says where the coordinates came from: nil or "manual" for a
+-- player typing them, "offered" for a quest giver's gossip, "available" for a
+-- map pin. Two callers have always passed it and this function has always
+-- ignored it -- the parameter was not even declared -- so `/cn where`
+-- attributed machine-learned coordinates to the player, and the block comment
+-- above describing this store as "coordinates the player supplied by hand"
+-- was false in both directions.
+function Quests.SetLocation(questID, mapID, x, y, source)
     if not questID or not mapID or not x or not y then
         return false
     end
@@ -907,10 +914,11 @@ function Quests.SetLocation(questID, mapID, x, y)
     end
 
     Overrides()[questID] = {
-        mapID = mapID,
-        x     = x,
-        y     = y,
-        setAt = time(),
+        mapID  = mapID,
+        x      = x,
+        y      = y,
+        setAt  = time(),
+        source = source,
     }
 
     return true
@@ -928,7 +936,7 @@ function Quests.GetLocation(questID)
     local override = Overrides()[questID]
 
     if override and override.mapID and override.x and override.y then
-        return override.mapID, override.x, override.y, "manual"
+        return override.mapID, override.x, override.y, override.source or "manual"
     end
 
     local staticMap, staticX, staticY = CN.Static.GetQuestLocation(questID)

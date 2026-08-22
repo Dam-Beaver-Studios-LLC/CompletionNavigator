@@ -76,12 +76,25 @@ function Professions.Scan()
     for _, line in ipairs(lines) do
         local existing = store[line.skillLineID]
 
+        -- WHAT WAS CAPTURED SURVIVES THE RESCAN.
+        --
+        -- This rebuilt the row wholesale and carried over only
+        -- `recipesSeen`, so opening your Alchemy window (which records how
+        -- many recipes you know of how many there are) and then logging out
+        -- lost both numbers -- Scan runs on every login. The display branches
+        -- on `recipesSeen` alone, so it then printed "(nil of nil recipes)".
+        --
+        -- Rank and name come from the client and are refreshed; the recipe
+        -- counts come from a window the player has to open and cannot be.
         store[line.skillLineID] = {
-            skillLineID = line.skillLineID,
-            name        = line.name,
-            rank        = line.rank,
-            maxRank     = line.maxRank,
-            recipesSeen = existing and existing.recipesSeen or false,
+            skillLineID  = line.skillLineID,
+            name         = line.name,
+            rank         = line.rank,
+            maxRank      = line.maxRank,
+            recipesSeen  = existing and existing.recipesSeen or false,
+            recipeTotal  = existing and existing.recipeTotal or nil,
+            recipeKnown  = existing and existing.recipeKnown or nil,
+            recipesAt    = existing and existing.recipesAt or nil,
         }
     end
 

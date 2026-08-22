@@ -123,6 +123,8 @@ function Goals.Add(objectiveType, id)
     -- when their provider builds them. Force a full rebuild so the new
     -- weighting takes effect immediately rather than whenever something
     -- happens to go stale.
+    Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
+
     CN.InvalidateCandidates()
 
     return true, name
@@ -141,6 +143,8 @@ function Goals.Remove(objectiveType, id)
 
     store[key] = nil
 
+    Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
+
     CN.InvalidateCandidates()
 
     return true, name
@@ -154,6 +158,8 @@ function Goals.Clear()
     for key in pairs(store) do
         store[key] = nil
     end
+
+    Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
 
     CN.InvalidateCandidates()
 
@@ -415,6 +421,35 @@ end, { events = { "ZONE_CHANGED_NEW_AREA" }, cooldown = 2 })
 -- Anything that leads to a goal is worth more than it would be otherwise.
 -- "Leads to" is deliberately narrow -- three relationships the addon can
 -- actually establish, rather than a guess dressed up as a plan.
+-- Which maps hold an unfinished goal. Rebuilt when the goal list changes,
+-- not when a candidate asks.
+local goalZones, goalZoneGeneration = nil, -1
+
+local function GoalZones()
+    local generation = Goals.zoneGeneration or 0
+
+    if goalZones and goalZoneGeneration == generation then
+        return goalZones
+    end
+
+    local zones = {}
+
+    for _, goal in ipairs(Goals.List()) do
+        local ok, plan = pcall(Goals.Plan, goal)
+
+        if ok and plan and plan.mapID and not plan.done then
+            zones[plan.mapID] = true
+        end
+    end
+
+    goalZones           = zones
+    goalZoneGeneration  = generation
+
+    return zones
+end
+
+Goals.zoneGeneration = 0
+
 function Goals.Decorate(objective)
     if type(objective) ~= "table" or not objective.type or not objective.id then
         return objective
@@ -463,17 +498,27 @@ function Goals.Decorate(objective)
 
     -- 3. It is in the same zone as a located goal. Weak, and weighted weakly:
     --    being in the right place is worth something, but it is not progress.
+    --
+    -- THE ZONES ARE WORKED OUT ONCE, NOT ONCE PER OBJECTIVE.
+    --
+    -- This looped every pinned goal and called Goals.Plan inside the
+    -- decorator, and the decorator runs once per candidate. Goals.Plan asks
+    -- the client for a map name, a vendor location, incomplete criteria and a
+    -- Warband verdict -- so ten goals against a few hundred candidates was
+    -- thousands of client calls per rebuild, on the path a 0.4x refactor
+    -- restructured specifically to stop doing work per objective.
+    --
+    -- The answer only changes when the goals do, which the invalidation
+    -- below already announces.
     if objective.mapID then
-        for _, goal in ipairs(Goals.List()) do
-            local plan = Goals.Plan(goal)
+        local zones = GoalZones()
 
-            if plan.mapID == objective.mapID and not plan.done then
-                objective.userPreference = (objective.userPreference or 0) + 2
-                objective.reasons = objective.reasons or {}
-                table.insert(objective.reasons, "in the same zone as a goal")
+        if zones[objective.mapID] then
+            objective.userPreference = (objective.userPreference or 0) + 2
+            objective.reasons = objective.reasons or {}
+            table.insert(objective.reasons, "in the same zone as a goal")
 
-                return objective
-            end
+            return objective
         end
     end
 

@@ -366,6 +366,53 @@ mutate "Modules/Harvest.lua" \
     "the harvest summary counts a field nothing writes"
 
 
+# The 0.49.0 audit: four features that had been silently off, and the two
+# stubs that agreed with them.
+mutate "Providers/BlizzardWorld.lua" \
+    "            _, isRaid, _, difficultyName, encounters, defeated =" \
+    "            _, isRaid, _, difficultyName, defeated, encounters =" \
+    "lockout progress and total are read in the wrong order"
+
+mutate "Modules/Waiting.lua" \
+    "    if not currencies or not currencies.CharacterStore then
+        return rows
+    end" \
+    "    if not currencies or not currencies.Store then
+        return rows
+    end" \
+    "weekly profession knowledge is never listed"
+
+mutate "Modules/Currencies.lua" \
+    "                accountWide = record.accountWide and true or false," \
+    "" \
+    "a Warband currency loses its flag on the way out of the query"
+
+mutate "Modules/Professions.lua" \
+    "            recipeTotal  = existing and existing.recipeTotal or nil," \
+    "            recipeTotal  = nil," \
+    "recipe counts are discarded on every login"
+
+mutate "Providers/BlizzardCollections.lua" \
+    "        if gotCollected then
+            collected = wasCollected and true or false
+        end" \
+    "        collected = gotCollected and wasCollected or nil" \
+    "a journal filter the player turned off is left on"
+
+mutate "Providers/BtWQuests.lua" \
+    "    for index = 1, 3 do
+        local candidate = candidates[index]" \
+    "    for index, candidate in ipairs(candidates) do" \
+    "the BtWQuests database fallbacks are unreachable"
+
+mutate "Modules/Filters.lua" \
+    "    if not settings.mode then
+        settings.modePrevious = {" \
+    "    if true then
+        settings.modePrevious = {" \
+    "switching focus overwrites what off would restore"
+
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

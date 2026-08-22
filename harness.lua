@@ -704,9 +704,17 @@ CN_TEST_ON_TAXI = false
 -- one and the fixture audit at the end of this file compares them.
 CN_TEST_SAVED_INSTANCES = {
     -- name, id, reset, difficultyID, locked, extended, _, isRaid, _,
-    -- difficultyName, defeated, encounters
+    -- difficultyName, numEncounters, encounterProgress
+    --
+    -- TOTAL FIRST, THEN PROGRESS. This comment used to read "defeated,
+    -- encounters" and the rows were written in that order, matching a bug in
+    -- the addon rather than the client -- so a raid six bosses into eight
+    -- came back as eight defeated out of six, `remaining` clamped to zero,
+    -- `complete` went true, and the Instances provider returned nothing at
+    -- all. The stub and the code shared one wrong belief and the suite
+    -- agreed with both.
     { "Nerub-ar Palace", 1273, 3 * 86400, 14, true, false, false, true,
-      false, "Normal", 6, 8 },
+      false, "Normal", 8, 6 },
     { "Ara-Kara, City of Echoes", 1274, 86400, 23, true, false, false, false,
       false, "Mythic", 4, 4 },
     -- Saved to it, but nothing killed in it yet. The client lists these, and
@@ -719,7 +727,7 @@ CN_TEST_SAVED_INSTANCES = {
     -- dropped for being too long, so the rule could have been deleted
     -- entirely and the suite would have agreed.
     { "Liberation of Undermine", 1296, 5 * 86400, 14, true, false, false, true,
-      false, "Normal", 0, 3 },
+      false, "Normal", 3, 0 },
 }
 
 function GetNumSavedInstances()
@@ -1177,6 +1185,11 @@ local petSpecies = {
     { speciesID = 102, name = "Gone Forever",   petType = 3, isWild = false, canBattle = false, owned = false, count = 0, obtainable = false },
 }
 
+LE_PET_JOURNAL_FILTER_COLLECTED     = 1
+LE_PET_JOURNAL_FILTER_NOT_COLLECTED = 2
+
+CN_TEST_PET_FILTERS = { collected = true, uncollected = true, search = "" }
+
 C_PetJournal = {
     -- The journal knows every pet's name. The addon stopped keeping its own
     -- copy in 0.36.0, so this is now the only source -- and a stub that did
@@ -1191,10 +1204,34 @@ C_PetJournal = {
         return nil
     end,
 
-    GetSearchFilter          = function() return "" end,
-    SetSearchFilter          = function() end,
-    SetAllPetSourcesChecked  = function() end,
-    SetAllPetTypesChecked    = function() end,
+    -- FILTERS THE SCAN CHANGES, AND MUST PUT BACK.
+    --
+    -- The stub used to accept every Set* call and answer no Get*, so a scan
+    -- that widened the player's journal and never restored it looked
+    -- identical to one that did. It was the second: a player with their
+    -- journal filtered to uncollected wild pets had it silently reset to show
+    -- everything, permanently, by running /cn setup once. The addon's
+    -- standing rule is that it prompts and does not act.
+    GetSearchFilter          = function() return CN_TEST_PET_FILTERS.search or "" end,
+    SetSearchFilter          = function(text) CN_TEST_PET_FILTERS.search = text end,
+    SetAllPetSourcesChecked  = function() CN_TEST_PET_FILTERS.sources = true end,
+    SetAllPetTypesChecked    = function() CN_TEST_PET_FILTERS.types = true end,
+
+    IsFilterChecked = function(which)
+        if which == LE_PET_JOURNAL_FILTER_COLLECTED then
+            return CN_TEST_PET_FILTERS.collected
+        end
+
+        return CN_TEST_PET_FILTERS.uncollected
+    end,
+
+    SetFilterChecked = function(which, value)
+        if which == LE_PET_JOURNAL_FILTER_COLLECTED then
+            CN_TEST_PET_FILTERS.collected = value
+        else
+            CN_TEST_PET_FILTERS.uncollected = value
+        end
+    end,
     GetNumPets               = function() return #petSpecies, 1 end,
     GetPetInfoByIndex        = function(i)
         local p = petSpecies[i]
@@ -1665,24 +1702,64 @@ HandyNotes = {
 -- CURRENCY STUBS
 ------------------------------------------------------------
 
+-- THE LIST ROW HAS NO ID IN IT.
+--
+-- CurrencyDisplayInfo -- what GetCurrencyListInfo returns -- carries names,
+-- quantities and flags and no currencyID. This stub put one in every row, so
+-- the addon's `info.currencyID` read looked correct here and was nil on every
+-- real client: the character currency store has always been empty and
+-- `/cn currencies` has always said "no currency data yet".
+--
+-- Ninth time a stub and the code shared one wrong belief. The id is kept
+-- alongside the row for the LINK function to return, which is how the client
+-- actually supplies it.
+local currencyIDs = { 3008, 2245, 1602, 3009 }
+
 local currencyList = {
-    { currencyID = 3008, name = "Valorstones", quantity = 2000, maxQuantity = 2000,
+    { name = "Valorstones", quantity = 2000, maxQuantity = 2000,
       quantityEarnedThisWeek = 0, maxWeeklyQuantity = 0, totalEarned = 5000 },
-    { currencyID = 2245, name = "Flightstones", quantity = 400, maxQuantity = 2000,
+    { name = "Flightstones", quantity = 400, maxQuantity = 2000,
       quantityEarnedThisWeek = 300, maxWeeklyQuantity = 1000, totalEarned = 900 },
-    { currencyID = 1602, name = "Conquest", quantity = 0, maxQuantity = 0,
+    { name = "Conquest", quantity = 0, maxQuantity = 0,
       quantityEarnedThisWeek = 0, maxWeeklyQuantity = 1350, totalEarned = 0 },
+    -- Weekly profession knowledge: the thing `/cn clock` calls the most
+    -- permanently missable in the game, and which it has never once listed.
+    { name = "Alchemy Knowledge", quantity = 1, maxQuantity = 0,
+      quantityEarnedThisWeek = 1, maxWeeklyQuantity = 3, totalEarned = 1 },
     { isHeader = true, name = "Header Row" },
 }
+
+local currencyByID = {}
+
+for index, id in ipairs(currencyIDs) do
+    local row = {}
+
+    for key, value in pairs(currencyList[index]) do
+        row[key] = value
+    end
+
+    row.currencyID = id
+
+    currencyByID[id] = row
+end
 
 C_CurrencyInfo = {
     GetCurrencyListSize = function() return #currencyList end,
     GetCurrencyListInfo = function(i) return currencyList[i] end,
-    GetCurrencyInfo     = function(id)
-        for _, c in ipairs(currencyList) do
-            if c.currencyID == id then return c end
+
+    -- The only place the client will tell you which currency a row is.
+    GetCurrencyListLink = function(i)
+        local id = currencyIDs[i]
+
+        if not id then
+            return nil
         end
-        return nil
+
+        return "|cffffffff|Hcurrency:" .. id .. "|h["
+            .. currencyList[i].name .. "]|h|r"
+    end,
+    GetCurrencyInfo     = function(id)
+        return currencyByID[id]
     end,
 }
 
@@ -2374,7 +2451,11 @@ local currencies = profileNow.currencies or {}
 print("  tracked = " .. count(currencies))
 print("  capped  = " .. tostring(currencies[3008] and currencies[3008].capped))
 
-assert(count(currencies) == 3, "header rows must be skipped, got " .. count(currencies))
+-- Four real currencies and one header. The count is asserted because it is
+-- also the proof that the id was recovered from the LINK: a row whose id
+-- cannot be resolved is dropped by the scan, so this number falling is how a
+-- broken id lookup announces itself.
+assert(count(currencies) == 4, "header rows must be skipped, got " .. count(currencies))
 assert(currencies[3008].capped == true, "a currency at max must be flagged capped")
 assert(currencies[2245].capped == false, "a currency below max must not be capped")
 assert(currencies[2245].weeklyRemaining == 700,
@@ -6751,6 +6832,39 @@ print("\nDungeons and raids:")
         .. palace.remaining .. " bosses left in the raid")
 
     ------------------------------------------------------------
+    -- AND A PART-FINISHED LOCKOUT MUST ACTUALLY BE RECOMMENDED.
+    --
+    -- This module's whole premise is that a lockout you are part-way through
+    -- is the cheapest progress in the game -- spent effort with an expiry on
+    -- it -- and it has never produced a single candidate, because the two
+    -- counts came back reversed and every lockout therefore looked complete.
+    -- The suite asserted which lockouts were EXCLUDED and never once that any
+    -- were included.
+    ------------------------------------------------------------
+    local produced = CN.candidateProviders["Instances"].fn()
+
+    assert(#produced > 0,
+        "a raid six bosses into eight is the cheapest thing on the list and "
+        .. "must be offered; the provider returned nothing")
+
+    local raidRow
+
+    for _, candidate in ipairs(produced) do
+        if tostring(candidate.name):find("Nerub-ar", 1, true) then
+            raidRow = candidate
+        end
+    end
+
+    assert(raidRow, "and specifically the part-finished raid")
+
+    local raidReason = table.concat(raidRow.reasons or {}, " ")
+
+    assert(raidReason:find("2", 1, true),
+        "and its reason must say what is actually left, got " .. raidReason)
+
+    print("  and the part-finished raid is offered: " .. raidRow.name)
+
+    ------------------------------------------------------------
     -- A CLEARED LOCKOUT IS NOT AN OBJECTIVE.
     ------------------------------------------------------------
     local instanceCandidates = CN.candidateProviders["Instances"].fn()
@@ -6871,7 +6985,9 @@ print("\nDungeons and raids:")
         "and it must say where the player's lockout stands: " .. tostring(step.note))
 
     -- CLEARED MEANS BLOCKED, NOT "GO AND DO IT".
-    CN_TEST_SAVED_INSTANCES[1][11] = 8
+    -- Position 12 is the PROGRESS; clearing it means setting progress to the
+    -- total, not the total to the progress.
+    CN_TEST_SAVED_INSTANCES[1][12] = 8
 
     local cleared = chase.Chain({
         type = CN.objectiveTypes.MOUNT,
@@ -6889,7 +7005,7 @@ print("\nDungeons and raids:")
     assert(blockedStep.note and blockedStep.note:find("resets in"),
         "and must say when it opens again")
 
-    CN_TEST_SAVED_INSTANCES[1][11] = 6
+    CN_TEST_SAVED_INSTANCES[1][12] = 6
 
     print("  a chase for a raid drop names the boss, and says when it is locked")
 end)()
@@ -9661,6 +9777,184 @@ print("\nEvery client function this addon calls, checked against the client:")
 
     print("  " .. #CN.apiSurface .. " client functions listed; the checker "
         .. "agrees with the client in both directions")
+end)()
+
+print("\nFeatures that were wired to nothing:")
+
+;(function()
+    ------------------------------------------------------------
+    -- FOUR THINGS THAT WERE OFF, AND NOTHING SAID SO.
+    --
+    -- Each of these is a feature the addon documented at length, shipped, and
+    -- never ran: a guard on a function that does not exist, a field dropped
+    -- on the way out of a query, a value discarded on every login, and a
+    -- restore that restored one of four things. None of them errored. That is
+    -- the shape of every serious defect this project has had.
+    ------------------------------------------------------------
+    local coin       = CN:GetModule("Currencies")
+    local waiting    = CN:GetModule("Waiting")
+    local professions = CN:GetModule("Professions")
+
+    -- 1. Weekly profession knowledge.
+    local store = coin.CharacterStore()
+
+    store[3000] = {
+        currencyID        = 3000,
+        maxWeeklyQuantity = 3,
+        weeklyRemaining   = 2,
+        quantity          = 1,
+    }
+
+    CN_TEST_CURRENCY_NAMES = CN_TEST_CURRENCY_NAMES or {}
+    CN_TEST_CURRENCY_NAMES[3000] = "Alchemy Knowledge"
+
+    local knowledge = waiting.Knowledge()
+
+    assert(#knowledge > 0,
+        "a knowledge currency with a weekly cap left must appear in the "
+        .. "clock; the guard tested a function that has never existed, so "
+        .. "this list has always been empty")
+
+    print("  weekly knowledge is found: " .. tostring(knowledge[1].name))
+
+    -- 2. Warband flag survives the capped query.
+    store[3001] = {
+        currencyID  = 3001,
+        capped      = true,
+        quantity    = 100,
+        maxQuantity = 100,
+        accountWide = true,
+    }
+
+    local capped
+
+    for _, row in ipairs(coin.Capped()) do
+        if row.currencyID == 3001 then capped = row end
+    end
+
+    assert(capped and capped.accountWide == true,
+        "the Warband flag must survive the query that builds the row -- the "
+        .. "provider reads it and this function never copied it")
+
+    print("  a Warband currency is still flagged as one after the query")
+
+    store[3000] = nil
+    store[3001] = nil
+
+    -- 3. Recipe counts survive a rescan.
+    local shelf = professions.CharacterStore()
+
+    local seeded = false
+
+    for _, row in pairs(shelf) do
+        if not seeded then
+            row.recipesSeen = true
+            row.recipeKnown = 40
+            row.recipeTotal = 250
+            seeded = true
+        end
+    end
+
+    assert(seeded, "the fixture must have a profession to seed")
+
+    professions.Scan()
+
+    local kept
+
+    for _, row in pairs(shelf) do
+        if row.recipesSeen then kept = row break end
+    end
+
+    assert(kept and kept.recipeKnown == 40 and kept.recipeTotal == 250,
+        "recipe counts captured from an open profession window must survive "
+        .. "the login rescan, or the display prints '(nil of nil recipes)'")
+
+    print("  recipe counts survive a rescan")
+
+    -- 4. Journal filters are put back.
+    CN_TEST_PET_FILTERS = { collected = false, uncollected = true }
+
+    CN.Blizzard.WithAllPetsShown(function() end)
+
+    assert(CN_TEST_PET_FILTERS.collected == false
+        and CN_TEST_PET_FILTERS.uncollected == true,
+        "a scan must put the player's journal filters back; it widened them "
+        .. "and restored only the search box, permanently resetting a "
+        .. "setting the player chose")
+
+    print("  the pet journal is left as it was found")
+end)()
+
+print("\nTwo things that only break on the second use:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A FOCUS SWITCHED TWICE MUST STILL BE UNDOABLE.
+    --
+    -- `/cn mode` captured the state to return to on EVERY application, so
+    -- going from one focus straight to another overwrote the player's real
+    -- settings with the first focus's settings. `/cn mode off` then restored
+    -- the previous PRESET while printing "previous filters and weighting
+    -- restored" and recording no active mode -- leaving no single command
+    -- that got you back.
+    ------------------------------------------------------------
+    local modes = CN:GetModule("Filters")
+
+    local live = CN.Settings()
+
+    live.mode         = nil
+    live.modePrevious = nil
+    live.priorityMode = "balanced"
+
+    modes.EnableAllTypes()
+
+    modes.SetTypeEnabled(CN.objectiveTypes.PET, false)
+
+    local hiddenBefore = not modes.IsTypeEnabled(CN.objectiveTypes.PET)
+
+    assert(hiddenBefore, "the fixture must start with something hidden")
+
+    modes.ApplyMode("leveling")
+    modes.ApplyMode("collecting")
+    modes.ClearMode()
+
+    assert(live.priorityMode == "balanced",
+        "after two focuses and an off, the weighting must be what it was "
+        .. "before the FIRST one, got " .. tostring(live.priorityMode))
+
+    assert(not modes.IsTypeEnabled(CN.objectiveTypes.PET),
+        "and what the player had hidden themselves must come back hidden")
+
+    modes.EnableAllTypes()
+
+    live.mode         = nil
+    live.modePrevious = nil
+
+    print("  two focuses and an off returns to the state before either")
+
+    ------------------------------------------------------------
+    -- AND A LIST WHOSE FIRST SLOT IS NIL STILL HAS A SECOND.
+    --
+    -- The BtWQuests probe walked three possible database locations with
+    -- ipairs. The first is nil whenever the global is absent -- the normal
+    -- case on recent versions -- so ipairs stopped immediately and the two
+    -- fallbacks it exists to provide were unreachable in exactly the
+    -- situation they were written for. The interpreters do not even agree on
+    -- the length of such a list: 5.4 says two, the game's 5.1 says zero.
+    ------------------------------------------------------------
+    _G.BtWQuestsDatabase = nil
+
+    _G.BtWQuests = { Database = { [1] = { name = "A Chain" } } }
+
+    assert(CN.BtWQuests.IsAvailable(),
+        "a database in the second slot must be found when the first is nil")
+
+    _G.BtWQuests = nil
+
+    assert(not CN.BtWQuests.IsAvailable(),
+        "and no database at all is still unavailable")
+
+    print("  a database in the second slot is found when the first is nil")
 end)()
 
 print("\nCode that nothing calls:")

@@ -1,0 +1,203 @@
+#!/bin/bash
+# cisim.sh -- run the release workflow's own steps, locally, before tagging.
+#
+# WHY THIS EXISTS.
+#
+# Four consecutive releases were tagged, pushed, reported as published, and
+# never reached CurseForge. Each died at a different step of the GitHub
+# workflow -- the .toc audit, then Lint, then the offline harness -- and each
+# was discovered only by pushing a tag, waiting, and reading a web page. Every
+# one of them was reproducible in seconds on this machine, and nothing here
+# ran them.
+#
+# The local suite ran *equivalents* of those steps: `luacheck build/...`,
+# `lua5.4 harness.lua build/...`. The workflow runs `luacheck .` and
+# `lua5.4 harness.lua .` against a SCAFFOLDED TREE, from the repository root,
+# with whatever else happens to be in the working directory. Those are not the
+# same command in the same place, and the difference is exactly where all four
+# failures lived.
+#
+# So this does not re-implement the workflow. It EXTRACTS each `run:` block
+# from .github/workflows/release.yml and executes it, in a scaffolded tree, in
+# order, stopping at the first non-zero exit -- the same way the runner does.
+#
+# Usage:  ./cisim.sh [path-to-cn.ps1]
+set -u
+
+SRC=${1:-/home/claude/cn/out/cn.ps1}
+PWSH=/opt/pwsh/pwsh
+
+WORK=$(mktemp -d)
+
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT
+
+echo "CI simulation :: $(basename "$SRC")"
+
+cp "$SRC" "$WORK/cn.ps1"
+cd "$WORK" || exit 1
+
+$PWSH -NoProfile -File ./cn.ps1 init > init.log 2>&1 || {
+    echo "  FAIL  scaffold failed"; cat init.log; exit 1; }
+
+# The runner checks the repository out with LF endings -- .gitattributes
+# normalizes on the way in. The scaffold writes CRLF, and comparing CRLF text
+# with grep -qxF reports every file in the addon as missing from the .toc.
+# Simulating the workflow without simulating the checkout tests nothing.
+find . -type f \( -name '*.lua' -o -name '*.toc' -o -name '*.xml' \
+    -o -name '*.md' -o -name '*.sh' -o -name '.pkgmeta' -o -name '*.yml' \) \
+    -exec sed -i 's/\r$//' {} \; 2>/dev/null
+
+# THE RECORDING GOES IN TOO.
+#
+# The repository has one, and the step that finally exposed the broken
+# fixtures writer was the offline harness reading it. A simulation of a
+# repository that omits the file the repository actually contains is a
+# simulation of a different repository.
+if [ -f /home/claude/cn/build/fixtures/captured.lua ]; then
+    mkdir -p fixtures
+    cp /home/claude/cn/build/fixtures/captured.lua fixtures/captured.lua
+fi
+
+# A git repository, because a step asks git what tag points at HEAD.
+git init -q -b main . 2>/dev/null
+git config user.email ci@example.com
+git config user.name CI
+git add -A >/dev/null 2>&1
+git commit -qm "ci simulation" >/dev/null 2>&1
+git tag v0.0.0-cisim 2>/dev/null
+
+export GITHUB_REF="refs/tags/v0.0.0-cisim"
+export GITHUB_REF_NAME="v0.0.0-cisim"
+export CF_API_KEY="cisim-placeholder"
+
+# Extract every `run:` block from the workflow, with the step name that owns
+# it, and execute them in order.
+python3 - <<'EXTRACT'
+import re, os
+
+text = open('.github/workflows/release.yml', encoding='utf-8').read()
+
+lines = text.split('\n')
+
+steps = []
+name = None
+i = 0
+
+while i < len(lines):
+    line = lines[i]
+
+    match = re.match(r'^\s*-\s+name:\s*(.+?)\s*$', line)
+
+    if match:
+        name = match.group(1)
+        i += 1
+        continue
+
+    # `run: |` opens a block; `run: something` is a one-liner.
+    block = re.match(r'^(\s*)run:\s*\|\s*$', line)
+
+    if block:
+        indent = len(block.group(1))
+        body = []
+        i += 1
+
+        while i < len(lines):
+            nxt = lines[i]
+
+            if nxt.strip() == '':
+                body.append('')
+                i += 1
+                continue
+
+            if len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+
+            body.append(nxt)
+            i += 1
+
+        # Strip the common indent.
+        trim = min((len(b) - len(b.lstrip()) for b in body if b.strip()),
+                   default=0)
+
+        steps.append((name, '\n'.join(b[trim:] for b in body)))
+        continue
+
+    inline = re.match(r'^\s*run:\s*(\S.*?)\s*$', line)
+
+    if inline:
+        steps.append((name, inline.group(1)))
+
+    i += 1
+
+with open('.cisim-steps', 'w', encoding='utf-8') as fh:
+    for index, (label, body) in enumerate(steps):
+        fh.write('=== %d\t%s\n' % (index, label or '(unnamed)'))
+        fh.write(body)
+        fh.write('\n=== end\n')
+
+print('  %d run-steps extracted' % len(steps))
+EXTRACT
+
+[ -f .cisim-steps ] || { echo "  FAIL  could not read the workflow"; exit 1; }
+
+# Steps that cannot be simulated here, with the reason stated rather than
+# silently skipped. A skip nobody can see is how a step stops being checked.
+SKIP_PATTERN='^(Fetch tags|Verify a tag points at HEAD)$'
+
+status=0
+ran=0
+skipped=0
+
+label=""
+body=""
+collecting=0
+
+while IFS= read -r line; do
+    case "$line" in
+        "=== end")
+            collecting=0
+
+            if [[ "$label" =~ $SKIP_PATTERN ]]; then
+                echo "  skip  $label  (needs the real tag push)"
+                skipped=$((skipped + 1))
+            else
+                printf '  ....  %s\r' "$label"
+
+                if bash -c "$body" > step.log 2>&1; then
+                    printf '  ok    %s\n' "$label"
+                    ran=$((ran + 1))
+                else
+                    printf '  FAIL  %s\n' "$label"
+                    echo ''
+                    sed 's/^/        /' step.log | tail -25
+                    status=1
+                    break
+                fi
+            fi
+
+            label=""
+            body=""
+            ;;
+        "=== "*)
+            label=$(printf '%s' "$line" | cut -f2)
+            collecting=1
+            body=""
+            ;;
+        *)
+            if [ "$collecting" -eq 1 ]; then
+                body="$body$line"$'\n'
+            fi
+            ;;
+    esac
+done < .cisim-steps
+
+echo ""
+
+if [ "$status" -eq 0 ]; then
+    echo "Every simulated workflow step passed. ($ran ran, $skipped skipped)"
+else
+    echo "A workflow step failed HERE, which means it would fail on the runner."
+fi
+
+exit $status

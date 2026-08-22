@@ -279,6 +279,22 @@ end)
 -- Only near-complete achievements become candidates. A zero-progress
 -- achievement is a project, not a next action, and flooding the
 -- recommendation list with thousands of them would bury everything else.
+-- The criteria line always; the points line only when the client will say.
+local function PointReasons(achievementID, remaining, criteria)
+    local reasons = {
+        remaining .. " of " .. criteria .. " criteria left",
+    }
+
+    local points = Blizzard.GetAchievementPoints
+        and Blizzard.GetAchievementPoints(achievementID)
+
+    if type(points) == "number" and points > 0 then
+        table.insert(reasons, points .. " achievement points")
+    end
+
+    return reasons
+end
+
 CN.RegisterCandidateProvider("Achievements", function()
     -- Iterates the shortlist, not the store. At retail scale that is a dozen
     -- rows instead of three thousand, and the three thousand were being
@@ -320,10 +336,19 @@ CN.RegisterCandidateProvider("Achievements", function()
                 name            = NameOf(achievementID, record),
                 accountWide     = true,
                 completionValue = value,
-                reasons         = {
-                    remaining .. " of " .. record.criteria .. " criteria left",
-                    tostring(record.points or 0) .. " achievement points",
-                },
+                -- POINTS ARE READ LIVE, OR NOT MENTIONED.
+                --
+                -- `record.points` has been nil since 0.36.0 stopped storing
+                -- it -- this file says so in a comment a hundred lines below,
+                -- where two other readers were fixed. This one was missed,
+                -- and `or 0` turned an absent number into a confident false
+                -- statement: every near-complete achievement in the addon has
+                -- been reporting "0 achievement points".
+                --
+                -- Silence beats a wrong number. That is the same rule this
+                -- addon applies to every denominator it cannot vouch for.
+                reasons         = PointReasons(achievementID, remaining,
+                    record.criteria),
             })
         end)
 

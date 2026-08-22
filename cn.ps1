@@ -47,6 +47,10 @@ param(
     [string] $Email,
     [switch] $Force,
 
+    # Retrying a release whose build failed: delete the tag, here and on the
+    # remote, and cut it again. Distinct from -Force, which overrides checks.
+    [switch] $Retag,
+
     # `ci -Watch` follows a run to completion instead of the author
     # re-running the command every thirty seconds, which is how an
     # unauthenticated API budget of sixty an hour gets spent in ten minutes.
@@ -69,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.48.1'
+$script:ToolkitVersion = '0.49.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -117,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.48.1"
+CN.version     = "0.49.0"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -8724,6 +8728,7 @@ CN.apiSurface = {
     "C_CraftingOrders.GetMyOrders",
     "C_CurrencyInfo.GetCurrencyInfo",
     "C_CurrencyInfo.GetCurrencyListInfo",
+    "C_CurrencyInfo.GetCurrencyListLink",
     "C_CurrencyInfo.GetCurrencyListSize",
     "C_DateAndTime.GetCurrentCalendarTime",
     "C_DateAndTime.GetSecondsUntilWeeklyReset",
@@ -8760,6 +8765,7 @@ CN.apiSurface = {
     "C_PetJournal.GetPetInfoByItemID",
     "C_PetJournal.GetPetInfoBySpeciesID",
     "C_PetJournal.GetSearchFilter",
+    "C_PetJournal.IsFilterChecked",
     "C_PetJournal.SetAllPetSourcesChecked",
     "C_PetJournal.SetAllPetTypesChecked",
     "C_PetJournal.SetFilterChecked",
@@ -8804,10 +8810,12 @@ CN.apiSurface = {
     "C_Thing.Method",
     "C_Timer.After",
     "C_Timer.NewTicker",
+    "C_ToyBox.GetCollectedShown",
     "C_ToyBox.GetNumFilteredToys",
     "C_ToyBox.GetNumToys",
     "C_ToyBox.GetToyFromIndex",
     "C_ToyBox.GetToyInfo",
+    "C_ToyBox.GetUncollectedShown",
     "C_ToyBox.SetAllSourceTypeFilters",
     "C_ToyBox.SetCollectedShown",
     "C_ToyBox.SetFilterString",
@@ -9489,12 +9497,54 @@ local Blizzard = CN.Blizzard
 
 -- The pet journal reports only what the player's current filters allow, so
 -- any complete scan must widen the filters and then put them back.
+--
+-- IT PUT BACK THE SEARCH BOX AND NOTHING ELSE.
+--
+-- The comment above has said "and then put them back" since this was
+-- written, and the code restored one of the four things it changed. A player
+-- with their journal filtered to, say, uncollected wild pets ran `/cn setup`
+-- once and had it silently reset to show everything -- permanently, with no
+-- undo, and with no message saying so. That is the addon reaching into the
+-- player's interface and changing a setting they chose, which is the one
+-- thing this project's standing rule forbids outright: it prompts, it does
+-- not act.
+--
+-- Restoring the checkbox states needs to read them first, and the client
+-- will only answer for the two collected filters -- there is no getter for
+-- source or type checks. So those are widened only if the scan would
+-- otherwise see nothing, and are restored to "all checked", which is the
+-- journal's own default and the state the overwhelming majority of players
+-- are in. Stated here rather than hidden, because it is the one place this
+-- file cannot be exact.
 function Blizzard.WithAllPetsShown(scan)
     if not C_PetJournal then
         return
     end
 
     local search = C_PetJournal.GetSearchFilter and C_PetJournal.GetSearchFilter() or ""
+
+    local collected, uncollected
+
+    if C_PetJournal.IsFilterChecked and LE_PET_JOURNAL_FILTER_COLLECTED then
+        local gotCollected, wasCollected =
+            pcall(C_PetJournal.IsFilterChecked, LE_PET_JOURNAL_FILTER_COLLECTED)
+
+        local gotUncollected, wasUncollected =
+            pcall(C_PetJournal.IsFilterChecked, LE_PET_JOURNAL_FILTER_NOT_COLLECTED)
+
+        -- EXPLICIT IFS. `got and was or nil` cannot express false: when the
+        -- filter is off, `false or nil` is nil, the restore is skipped, and
+        -- the filter the player turned off stays on. That is the whole bug
+        -- this block exists to fix, reintroduced by the idiom -- and it is
+        -- the second time this exact and/or trap has shipped in this addon.
+        if gotCollected then
+            collected = wasCollected and true or false
+        end
+
+        if gotUncollected then
+            uncollected = wasUncollected and true or false
+        end
+    end
 
     if C_PetJournal.SetSearchFilter then
         C_PetJournal.SetSearchFilter("")
@@ -9515,8 +9565,21 @@ function Blizzard.WithAllPetsShown(scan)
 
     local ok, err = pcall(scan)
 
-    if C_PetJournal.SetSearchFilter and search ~= "" then
-        C_PetJournal.SetSearchFilter(search)
+    -- Put back everything that was read, whether the scan threw or not.
+    if C_PetJournal.SetSearchFilter then
+        C_PetJournal.SetSearchFilter(search or "")
+    end
+
+    if C_PetJournal.SetFilterChecked and LE_PET_JOURNAL_FILTER_COLLECTED then
+        if collected ~= nil then
+            pcall(C_PetJournal.SetFilterChecked,
+                LE_PET_JOURNAL_FILTER_COLLECTED, collected)
+        end
+
+        if uncollected ~= nil then
+            pcall(C_PetJournal.SetFilterChecked,
+                LE_PET_JOURNAL_FILTER_NOT_COLLECTED, uncollected)
+        end
     end
 
     if not ok then
@@ -9642,10 +9705,31 @@ end
 -- TOYS
 ------------------------------------------------------------
 
--- Same filter problem as the pet journal.
+-- Same filter problem as the pet journal, and until 0.49.0 the same failure
+-- to put anything back -- this one restored nothing at all, not even the
+-- search string it cleared.
 function Blizzard.WithAllToysShown(scan)
     if not C_ToyBox then
         return
+    end
+
+    local collected, uncollected
+
+    -- Explicit, for the reason spelled out in WithAllPetsShown above.
+    if C_ToyBox.GetCollectedShown then
+        local got, was = pcall(C_ToyBox.GetCollectedShown)
+
+        if got then
+            collected = was and true or false
+        end
+    end
+
+    if C_ToyBox.GetUncollectedShown then
+        local got, was = pcall(C_ToyBox.GetUncollectedShown)
+
+        if got then
+            uncollected = was and true or false
+        end
     end
 
     if C_ToyBox.SetFilterString then
@@ -9665,6 +9749,18 @@ function Blizzard.WithAllToysShown(scan)
     end
 
     local ok, err = pcall(scan)
+
+    if C_ToyBox.SetFilterString then
+        C_ToyBox.SetFilterString("")
+    end
+
+    if collected ~= nil and C_ToyBox.SetCollectedShown then
+        pcall(C_ToyBox.SetCollectedShown, collected)
+    end
+
+    if uncollected ~= nil and C_ToyBox.SetUncollectedShown then
+        pcall(C_ToyBox.SetUncollectedShown, uncollected)
+    end
 
     if not ok then
         error(err, 0)
@@ -10283,8 +10379,12 @@ function Blizzard.GetTodaysEvents()
             -- than a guessed week.
             local endsIn
 
-            if type(event.endTime) == "table" and event.endTime.monthDay
-                and C_DateAndTime and C_DateAndTime.GetSecondsUntilWeeklyReset then
+            -- Gated on the end time itself, which is all this block reads.
+            -- It used to also require C_DateAndTime.GetSecondsUntilWeeklyReset
+            -- -- a function it never calls -- so on any build lacking that
+            -- unrelated API every calendar event silently lost its deadline,
+            -- and with it the urgency weighting and the "ends in" line.
+            if type(event.endTime) == "table" and event.endTime.monthDay then
 
                 local finish = event.endTime
 
@@ -10407,6 +10507,28 @@ end
 function Blizzard.GetCurrencyList()
     local results = {}
 
+-- The currency id for a row of the currency list.
+--
+-- GetCurrencyListInfo returns a display record with no id in it. The link is
+-- the only thing that carries one, and it has to be dug out of the hyperlink
+-- -- `|Hcurrency:2245|h[Flightstones]|h` -- because the client offers no
+-- direct accessor. Guarded and pcall'd at every step: this runs once per
+-- currency on every scan, and a client that will not produce a link should
+-- cost the row, not the scan.
+local function CurrencyIDFromList(index)
+    if not C_CurrencyInfo or not C_CurrencyInfo.GetCurrencyListLink then
+        return nil
+    end
+
+    local ok, link = pcall(C_CurrencyInfo.GetCurrencyListLink, index)
+
+    if not ok or type(link) ~= "string" then
+        return nil
+    end
+
+    return tonumber(string.match(link, "currency:(%d+)"))
+end
+
     if not C_CurrencyInfo or not C_CurrencyInfo.GetCurrencyListSize then
         return results
     end
@@ -10420,9 +10542,25 @@ function Blizzard.GetCurrencyList()
     for index = 1, size do
         local gotInfo, info = pcall(C_CurrencyInfo.GetCurrencyListInfo, index)
 
+
         if gotInfo and type(info) == "table" and not info.isHeader and info.name then
+            -- THE LIST ROW DOES NOT CARRY AN ID.
+            --
+            -- CurrencyDisplayInfo -- what GetCurrencyListInfo returns -- has
+            -- a name, quantities and flags and NO currencyID. Reading one
+            -- gave nil for every row, and Currencies.Scan drops any row
+            -- without an id, so the character currency store has always been
+            -- empty and `/cn currencies` has always said "no currency data
+            -- yet". The stub returned fixture tables that did carry the
+            -- field, so the suite never saw it.
+            --
+            -- The id comes from the list LINK. Kept tolerant of a client that
+            -- does supply it directly, because being wrong in that direction
+            -- costs nothing.
+            local currencyID = info.currencyID or CurrencyIDFromList(index)
+
             table.insert(results, {
-                currencyID   = info.currencyID,
+                currencyID   = currencyID,
                 name         = info.name,
                 quantity     = info.quantity or 0,
                 maxQuantity  = info.maxQuantity or 0,
@@ -11060,8 +11198,21 @@ function Blizzard.GetSavedInstances()
     end
 
     for index = 1, count do
+        -- POSITION 11 IS THE TOTAL AND 12 IS THE PROGRESS, NOT THE REVERSE.
+        --
+        -- The client returns ... difficultyName, numEncounters,
+        -- encounterProgress. This read them the other way round, so a raid
+        -- with six of eight bosses down came back as defeated=8, encounters=6
+        -- -- which made `remaining` clamp to zero, `complete` true, and the
+        -- provider return NOTHING. The Instances module's whole stated purpose
+        -- is that a part-finished lockout is the cheapest progress in the
+        -- game, and it has never once produced a candidate.
+        --
+        -- The stub had the same belief written into its fixture comment, so
+        -- the suite agreed. Eighth time in this project that a stub and the
+        -- code shared one wrong assumption.
         local gotInfo, name, id, reset, difficultyID, locked, extended,
-            _, isRaid, _, difficultyName, defeated, encounters =
+            _, isRaid, _, difficultyName, encounters, defeated =
                 pcall(GetSavedInstanceInfo, index)
 
         if gotInfo and name then
@@ -11700,7 +11851,15 @@ function ATT.GetQuestData(questID)
                 end
             end
 
-            if data.lvl == nil and type(group.lvl) == "number" then
+            -- FIRST WINS, like every other field in this loop.
+            --
+            -- The guard tested `data.lvl`, which nothing in this file ever
+            -- assigns, so it was always true and the LAST matching group won
+            -- -- alone among the six fields merged here, all of which use
+            -- `if not data.<field>`. Two ATT groups with different level
+            -- requirements produced whichever happened to be iterated last,
+            -- and that feeds the "too low level" block reason.
+            if data.requiresLevel == nil and type(group.lvl) == "number" then
                 data.requiresLevel = group.lvl
             end
         end
@@ -11779,7 +11938,21 @@ local function Database()
         _G.BtWQuests and _G.BtWQuests.database,
     }
 
-    for index, candidate in ipairs(candidates) do
+    -- A NUMERIC LOOP, NOT ipairs.
+    --
+    -- The first slot is nil whenever the global is absent -- which the
+    -- comment above says is the normal case on recent versions -- and ipairs
+    -- stops at the first nil. So the two fallbacks this list exists to
+    -- provide were unreachable in exactly the situation they were written
+    -- for, and the provider reported BtWQuests as unavailable to anyone
+    -- running a version that had moved it.
+    --
+    -- The interpreters do not even agree on how long the list is: 5.4 says
+    -- two, the game's 5.1 says zero. BlizzardWorld.lua already avoids this
+    -- with a numeric loop and a comment naming "the same nil-hole problem".
+    for index = 1, 3 do
+        local candidate = candidates[index]
+
         if type(candidate) == "table" then
             if #probeNotes == 0 then
                 table.insert(probeNotes, "database slot " .. index)
@@ -13043,7 +13216,14 @@ end
 
 Quests.Overrides = Overrides
 
-function Quests.SetLocation(questID, mapID, x, y)
+-- `source` says where the coordinates came from: nil or "manual" for a
+-- player typing them, "offered" for a quest giver's gossip, "available" for a
+-- map pin. Two callers have always passed it and this function has always
+-- ignored it -- the parameter was not even declared -- so `/cn where`
+-- attributed machine-learned coordinates to the player, and the block comment
+-- above describing this store as "coordinates the player supplied by hand"
+-- was false in both directions.
+function Quests.SetLocation(questID, mapID, x, y, source)
     if not questID or not mapID or not x or not y then
         return false
     end
@@ -13057,10 +13237,11 @@ function Quests.SetLocation(questID, mapID, x, y)
     end
 
     Overrides()[questID] = {
-        mapID = mapID,
-        x     = x,
-        y     = y,
-        setAt = time(),
+        mapID  = mapID,
+        x      = x,
+        y      = y,
+        setAt  = time(),
+        source = source,
     }
 
     return true
@@ -13078,7 +13259,7 @@ function Quests.GetLocation(questID)
     local override = Overrides()[questID]
 
     if override and override.mapID and override.x and override.y then
-        return override.mapID, override.x, override.y, "manual"
+        return override.mapID, override.x, override.y, override.source or "manual"
     end
 
     local staticMap, staticX, staticY = CN.Static.GetQuestLocation(questID)
@@ -14636,6 +14817,22 @@ end)
 -- Only near-complete achievements become candidates. A zero-progress
 -- achievement is a project, not a next action, and flooding the
 -- recommendation list with thousands of them would bury everything else.
+-- The criteria line always; the points line only when the client will say.
+local function PointReasons(achievementID, remaining, criteria)
+    local reasons = {
+        remaining .. " of " .. criteria .. " criteria left",
+    }
+
+    local points = Blizzard.GetAchievementPoints
+        and Blizzard.GetAchievementPoints(achievementID)
+
+    if type(points) == "number" and points > 0 then
+        table.insert(reasons, points .. " achievement points")
+    end
+
+    return reasons
+end
+
 CN.RegisterCandidateProvider("Achievements", function()
     -- Iterates the shortlist, not the store. At retail scale that is a dozen
     -- rows instead of three thousand, and the three thousand were being
@@ -14677,10 +14874,19 @@ CN.RegisterCandidateProvider("Achievements", function()
                 name            = NameOf(achievementID, record),
                 accountWide     = true,
                 completionValue = value,
-                reasons         = {
-                    remaining .. " of " .. record.criteria .. " criteria left",
-                    tostring(record.points or 0) .. " achievement points",
-                },
+                -- POINTS ARE READ LIVE, OR NOT MENTIONED.
+                --
+                -- `record.points` has been nil since 0.36.0 stopped storing
+                -- it -- this file says so in a comment a hundred lines below,
+                -- where two other readers were fixed. This one was missed,
+                -- and `or 0` turned an absent number into a confident false
+                -- statement: every near-complete achievement in the addon has
+                -- been reporting "0 achievement points".
+                --
+                -- Silence beats a wrong number. That is the same rule this
+                -- addon applies to every denominator it cannot vouch for.
+                reasons         = PointReasons(achievementID, remaining,
+                    record.criteria),
             })
         end)
 
@@ -16334,12 +16540,25 @@ function Professions.Scan()
     for _, line in ipairs(lines) do
         local existing = store[line.skillLineID]
 
+        -- WHAT WAS CAPTURED SURVIVES THE RESCAN.
+        --
+        -- This rebuilt the row wholesale and carried over only
+        -- `recipesSeen`, so opening your Alchemy window (which records how
+        -- many recipes you know of how many there are) and then logging out
+        -- lost both numbers -- Scan runs on every login. The display branches
+        -- on `recipesSeen` alone, so it then printed "(nil of nil recipes)".
+        --
+        -- Rank and name come from the client and are refreshed; the recipe
+        -- counts come from a window the player has to open and cannot be.
         store[line.skillLineID] = {
-            skillLineID = line.skillLineID,
-            name        = line.name,
-            rank        = line.rank,
-            maxRank     = line.maxRank,
-            recipesSeen = existing and existing.recipesSeen or false,
+            skillLineID  = line.skillLineID,
+            name         = line.name,
+            rank         = line.rank,
+            maxRank      = line.maxRank,
+            recipesSeen  = existing and existing.recipesSeen or false,
+            recipeTotal  = existing and existing.recipeTotal or nil,
+            recipeKnown  = existing and existing.recipeKnown or nil,
+            recipesAt    = existing and existing.recipesAt or nil,
         }
     end
 
@@ -16925,7 +17144,12 @@ function Harvest.Capture(questID, reason)
 
             if external.requires then
                 record.requires  = external.requires
-                record.requiredBy = external.providers
+
+                -- `requiresFrom`: which addons answered. It was written as
+                -- `requiredBy`, a name meaning the opposite -- the quests
+                -- this one unlocks -- and read by nothing, so the misnomer
+                -- had no effect beyond misleading the next reader.
+                record.requiresFrom = external.providers
                 changed = true
             end
         end
@@ -17217,12 +17441,22 @@ function Harvest.BuildExport(onlyLocated)
         -- threshold stays a comment for a human to confirm. The distinction
         -- survives into the exported file, so curation never has to guess
         -- which lines were inferred.
+        --
+        -- `observedRequires`, NOT `requires`. Two things were wrong with
+        -- writing it as `requires`. It emitted the key a second time in the
+        -- same table constructor, so a quest that had both a provider answer
+        -- and three-character agreement lost the provider's list entirely --
+        -- Lua keeps the last assignment. And it is exactly the door
+        -- PublishConfident closes thirty lines above, in a comment calling it
+        -- "inference masquerading as authority": the runtime path was fixed
+        -- and the export path -- the one that actually ships inference to
+        -- other players -- still wrote it under the curated name.
         local confident = Harvest.ConfidentPrerequisites(record.questID)
 
         if #confident > 0 then
             table.insert(lines, "        -- observed on "
                 .. Harvest.confidenceThreshold .. "+ characters")
-            table.insert(lines, "        requires  = { "
+            table.insert(lines, "        observedRequires = { "
                 .. table.concat(confident, ", ") .. " },")
         end
 
@@ -18680,6 +18914,19 @@ function Currencies.Capped(character)
                 name       = NameStore()[currencyID],
                 quantity   = record.quantity,
                 maximum    = record.maxQuantity,
+
+                -- CARRIED THROUGH, WHICH IT WAS NOT.
+                --
+                -- The candidate provider reads `accountWide` off these rows
+                -- under a long comment explaining that ignoring the flag was
+                -- "the exact mistake the Warband work exists to prevent" --
+                -- and this function, the only thing that builds those rows,
+                -- never copied it. The flag was read from the client
+                -- correctly, stored correctly, and dropped here. So a
+                -- Warband currency capped on your main was still recommended
+                -- on every alt, which is precisely the behaviour 0.43.0
+                -- claimed to have fixed.
+                accountWide = record.accountWide and true or false,
             })
         end
     end
@@ -20194,14 +20441,29 @@ function Filters.ApplyMode(name)
 
     -- Remember what to go back to. One level deep on purpose: an undo stack
     -- for a display preference is a feature nobody asked for.
-    settings.modePrevious = {
-        profile = settings.priorityMode,
-        hidden  = {},
-    }
+    --
+    -- BUT ONLY IF THERE IS NOT ALREADY A MODE ON.
+    --
+    -- This captured unconditionally, so switching from one focus straight to
+    -- another overwrote the player's real settings with the FIRST focus's
+    -- settings. `/cn mode leveling`, then `/cn mode collecting`, then
+    -- `/cn mode off` left you in the levelling filter -- thirteen types
+    -- hidden -- while printing "Previous filters and weighting restored" and
+    -- recording no active mode. There was then no single command that got you
+    -- back.
+    --
+    -- One level deep means one level: the state before the first focus, kept
+    -- until a focus is actually cleared.
+    if not settings.mode then
+        settings.modePrevious = {
+            profile = settings.priorityMode,
+            hidden  = {},
+        }
 
-    for _, objectiveType in ipairs(Filters.TypeOrder()) do
-        if not Filters.IsTypeEnabled(objectiveType) then
-            table.insert(settings.modePrevious.hidden, objectiveType)
+        for _, objectiveType in ipairs(Filters.TypeOrder()) do
+            if not Filters.IsTypeEnabled(objectiveType) then
+                table.insert(settings.modePrevious.hidden, objectiveType)
+            end
         end
     end
 
@@ -21832,6 +22094,8 @@ function Goals.Add(objectiveType, id)
     -- when their provider builds them. Force a full rebuild so the new
     -- weighting takes effect immediately rather than whenever something
     -- happens to go stale.
+    Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
+
     CN.InvalidateCandidates()
 
     return true, name
@@ -21850,6 +22114,8 @@ function Goals.Remove(objectiveType, id)
 
     store[key] = nil
 
+    Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
+
     CN.InvalidateCandidates()
 
     return true, name
@@ -21863,6 +22129,8 @@ function Goals.Clear()
     for key in pairs(store) do
         store[key] = nil
     end
+
+    Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
 
     CN.InvalidateCandidates()
 
@@ -22124,6 +22392,35 @@ end, { events = { "ZONE_CHANGED_NEW_AREA" }, cooldown = 2 })
 -- Anything that leads to a goal is worth more than it would be otherwise.
 -- "Leads to" is deliberately narrow -- three relationships the addon can
 -- actually establish, rather than a guess dressed up as a plan.
+-- Which maps hold an unfinished goal. Rebuilt when the goal list changes,
+-- not when a candidate asks.
+local goalZones, goalZoneGeneration = nil, -1
+
+local function GoalZones()
+    local generation = Goals.zoneGeneration or 0
+
+    if goalZones and goalZoneGeneration == generation then
+        return goalZones
+    end
+
+    local zones = {}
+
+    for _, goal in ipairs(Goals.List()) do
+        local ok, plan = pcall(Goals.Plan, goal)
+
+        if ok and plan and plan.mapID and not plan.done then
+            zones[plan.mapID] = true
+        end
+    end
+
+    goalZones           = zones
+    goalZoneGeneration  = generation
+
+    return zones
+end
+
+Goals.zoneGeneration = 0
+
 function Goals.Decorate(objective)
     if type(objective) ~= "table" or not objective.type or not objective.id then
         return objective
@@ -22172,17 +22469,27 @@ function Goals.Decorate(objective)
 
     -- 3. It is in the same zone as a located goal. Weak, and weighted weakly:
     --    being in the right place is worth something, but it is not progress.
+    --
+    -- THE ZONES ARE WORKED OUT ONCE, NOT ONCE PER OBJECTIVE.
+    --
+    -- This looped every pinned goal and called Goals.Plan inside the
+    -- decorator, and the decorator runs once per candidate. Goals.Plan asks
+    -- the client for a map name, a vendor location, incomplete criteria and a
+    -- Warband verdict -- so ten goals against a few hundred candidates was
+    -- thousands of client calls per rebuild, on the path a 0.4x refactor
+    -- restructured specifically to stop doing work per objective.
+    --
+    -- The answer only changes when the goals do, which the invalidation
+    -- below already announces.
     if objective.mapID then
-        for _, goal in ipairs(Goals.List()) do
-            local plan = Goals.Plan(goal)
+        local zones = GoalZones()
 
-            if plan.mapID == objective.mapID and not plan.done then
-                objective.userPreference = (objective.userPreference or 0) + 2
-                objective.reasons = objective.reasons or {}
-                table.insert(objective.reasons, "in the same zone as a goal")
+        if zones[objective.mapID] then
+            objective.userPreference = (objective.userPreference or 0) + 2
+            objective.reasons = objective.reasons or {}
+            table.insert(objective.reasons, "in the same zone as a goal")
 
-                return objective
-            end
+            return objective
         end
     end
 
@@ -26175,7 +26482,12 @@ end
 
 CN:RegisterCommand{
     name    = "alts",
-    aliases = { "who", "warband" },
+    -- No aliases. `who` and `warband` were declared here and both are real
+    -- commands registered by Modules/Warband.lua, which loads later and
+    -- overwrote them -- so these two entries have never resolved to anything
+    -- in this file, while the help listed all three side by side as if they
+    -- were different answers.
+    aliases = { "alt", "characters" },
     order   = 12,
     help    = "Which character should be doing what, and whether to switch.",
     handler = function()
@@ -28743,10 +29055,19 @@ Broker.available = false
 
 local dataObject
 
-local function CurrentText()
-    local ok, results = pcall(CN.Recommend, 1)
+-- `results` may be supplied by a caller that already has them. The
+-- recommendation hook does, and re-asking from inside it is re-entering the
+-- function that fired the hook -- which recursed until pcall stopped it and
+-- cost seventy times the budget for one refresh. A performance budget caught
+-- it before it shipped.
+local function CurrentText(results)
+    if not results then
+        local ok, fetched = pcall(CN.Recommend, 1)
 
-    if not ok or not results or not results[1] then
+        results = ok and fetched or nil
+    end
+
+    if not results or not results[1] then
         return "Completion Navigator", "nothing actionable"
     end
 
@@ -28757,12 +29078,12 @@ end
 
 Broker.CurrentText = CurrentText
 
-function Broker.Refresh()
+function Broker.Refresh(results)
     if not dataObject then
         return
     end
 
-    local name, kind = CurrentText()
+    local name, kind = CurrentText(results)
 
     dataObject.text  = name
     dataObject.value = name
@@ -29003,6 +29324,42 @@ CN:RegisterCommand{
             .. "and the feed appears automatically when one of them is present.|r")
     end,
 }
+
+------------------------------------------------------------
+-- KEEPING IT CURRENT
+------------------------------------------------------------
+
+-- REFRESHED WHEN THE ANSWER CHANGES, WHICH IT NEVER WAS.
+--
+-- `Broker.Refresh` had exactly one caller: `Install`, from a login hook that
+-- runs before the collection scans in their own login hooks have populated
+-- anything. So the feed was built from an empty database, almost always
+-- settled on "nothing actionable", and then never changed again for the whole
+-- session -- in a module whose header calls it "the addon's answer to 'what
+-- next?' displayed permanently".
+--
+-- A recommendation hook is the right place: it fires exactly when the list is
+-- recomputed, which is the only time this text can be stale.
+if CN.RegisterRecommendationHook then
+    CN.RegisterRecommendationHook("Broker", function(results)
+        if Broker.available then
+            pcall(Broker.Refresh, results)
+        end
+    end)
+end
+
+-- And once shortly after login, because a player who opens no window and
+-- asks for nothing should still see a real answer rather than the placeholder
+-- the feed was created with.
+CN:OnLogin(function()
+    if C_Timer and C_Timer.After then
+        C_Timer.After(10, function()
+            if Broker.available then
+                pcall(Broker.Refresh)
+            end
+        end)
+    end
+end)
 
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
@@ -29988,11 +30345,20 @@ function Waiting.Knowledge()
 
     local currencies = CN:GetModule("Currencies")
 
-    if not currencies or not currencies.Store then
+    -- `CharacterStore`, not `Store`. There has never been a Currencies.Store,
+    -- so this guard was false on every client and the whole KNOWLEDGE section
+    -- of `/cn clock` -- plus its candidates -- has never once produced a row,
+    -- in a file whose header calls weekly profession knowledge "the most
+    -- permanently missable thing in modern professions".
+    --
+    -- Nothing caught it because an empty knowledge list and a knowledge list
+    -- that cannot be built look identical from outside, and the suite only
+    -- asserted that `/cn clock` did not error.
+    if not currencies or not currencies.CharacterStore then
         return rows
     end
 
-    for currencyID, record in pairs(currencies.Store()) do
+    for currencyID, record in pairs(currencies.CharacterStore() or {}) do
         if record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0
             and (record.weeklyRemaining or 0) > 0 then
 
@@ -35018,6 +35384,15 @@ function Welcome.Show()
     if built then
         built:Show()
 
+        -- SHOWN COUNTS AS SEEN.
+        --
+        -- This marked the window seen only on the button handlers, so a
+        -- player who read it and closed it -- or ignored it -- got it again
+        -- on every login, against this file's own promise that "it does not
+        -- run again. Ever." Answering the question is a choice; being asked
+        -- twice is not.
+        Welcome.MarkSeen()
+
         return true
     end
 
@@ -35040,8 +35415,15 @@ CN:OnLogin(function()
 
     -- After the login chatter, and after the setup reminder has had its turn.
     -- Two things talking at once on a first login is worse than either alone.
+    --
+    -- FOURTEEN SECONDS, NOT EIGHT. The setup reminder is also scheduled at
+    -- eight, and because this module loads first its timer fired FIRST -- the
+    -- exact opposite of what the sentence above promised, and the player got
+    -- the modal with two lines of setup reminder appearing underneath it.
+    -- A comment describing an ordering that the code leaves to load order is
+    -- not an ordering.
     if C_Timer and C_Timer.After then
-        C_Timer.After(8, function()
+        C_Timer.After(14, function()
             if not Welcome.HasSeen() then
                 Welcome.Show()
             end
@@ -35784,7 +36166,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.48.1
+## Version: 0.49.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -36038,6 +36420,110 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.49.0]
+
+A third end-to-end audit, over the subsystems the first two did not reach.
+Twenty findings. **Six of them were whole features that had never once run**
+-- written, documented at length, shipped, and silently off, in every case
+because the failure was indistinguishable from an empty result.
+
+Plus the thing that made the last four releases painful: the release workflow
+now runs *here*, before a tag is cut.
+
+### Fixed
+
+- **Dungeon and raid lockouts have never produced a single recommendation.**
+  The client reports the number of bosses and then how many you have killed;
+  the addon read those two the other way round. A raid six bosses into eight
+  came back as eight of six, so "remaining" clamped to zero, the lockout
+  looked cleared, and the provider returned nothing. This module exists on the
+  premise that a part-finished lockout is the cheapest progress in the game --
+  spent effort with an expiry on it -- and it has never offered one. The test
+  fixture had the same reversal written into its own comment, so the suite
+  agreed with the bug.
+- **Weekly profession knowledge has never appeared in `/cn clock`.** The
+  lookup guarded on a function that does not exist and never has, so it
+  returned an empty list on every client -- for the thing the file's own
+  header calls "the most permanently missable in modern professions". An empty
+  list and a list that cannot be built look identical from outside.
+- **The addon was resetting your pet journal and toy box filters and not
+  putting them back.** A scan has to widen the filters to see everything, and
+  the comment above it has always said "and then put them back" -- it restored
+  the search box and nothing else; the toy box restored nothing at all. Filter
+  your journal to uncollected wild pets, run `/cn setup` once, and it was
+  silently reset to show everything, permanently, with no message. That is the
+  addon changing a setting you chose, which this project's standing rule
+  forbids outright.
+- **Your currencies have never been recorded.** The row the client returns for
+  the currency list carries no id -- it has to be read from the row's link --
+  and the addon read a field that is not there. Every row was dropped,
+  `/cn currencies` has always said "no currency data yet", and the currency
+  provider has always been empty. The stub returned rows that *did* carry the
+  field, which is the ninth time in this project a stub and the code have
+  shared one wrong belief.
+- **A Warband currency capped on one character was still recommended on every
+  other one** -- the exact mistake the Warband work exists to prevent, and
+  which 0.43.0 recorded as fixed. The flag was read from the client correctly,
+  stored correctly, and then dropped by the one function that builds the rows
+  the provider reads.
+- **The LibDataBroker feed was frozen at login.** Its refresh had exactly one
+  caller, inside its own installer, which runs before the collection scans
+  have populated anything -- so it was built from an empty database, settled
+  on "nothing actionable", and never changed again for the rest of the
+  session. It now updates whenever the recommendation list does.
+- **Recipe counts were discarded on every login**, so opening a profession
+  window to record them and then logging out produced "(nil of nil recipes)".
+- **`/cn mode off` did not undo the mode.** Switching focus twice overwrote
+  the saved state with the *first* focus's state, so `off` restored a preset
+  rather than what you had -- while printing that your previous filters were
+  restored, and leaving no single command to get back.
+- **Near-complete achievements all reported "0 achievement points."** The
+  field stopped being stored in 0.36.0; two other readers were updated and
+  this one was missed, where `or 0` turned an absent number into a confident
+  false statement. Points are now read live, or not mentioned.
+- **`/cn export` wrote the same key twice** for any quest with both a provider
+  answer and observed agreement, so Lua kept the second and the curated list
+  was destroyed on the way into shipped data. It also wrote inference under
+  the name reserved for curated fact -- the door the runtime path had already
+  closed, still open on the path that actually ships data to other players.
+- **BtWQuests was reported unavailable to anyone whose version had moved its
+  database.** The probe walked three possible locations with `ipairs`, and the
+  first is nil in exactly the case the other two exist for. The two
+  interpreters do not even agree on the length of such a list.
+- **`/cn where` attributed machine-learned coordinates to you.** Two callers
+  pass where a location came from; the function did not declare the parameter.
+- **The first-run window appeared on the same tick as the setup reminder**,
+  in the order its own comment says must not happen, and reappeared on every
+  login for anyone who read it without clicking a button.
+- Two more: an ATT merge that took the last answer where every neighbouring
+  field takes the first, and a calendar deadline gated on an unrelated
+  function -- which silently dropped the urgency weighting from every world
+  event on any client lacking it.
+
+### Changed
+
+- **The release workflow's own steps now run before a tag is cut.** Four
+  consecutive releases were tagged, pushed, reported as published and never
+  reached CurseForge, each failing at a different step -- and every one of
+  them was reproducible in seconds locally. What the local suite ran were
+  *equivalents*: the linter against one directory, the harness against
+  another. The workflow runs them against a scaffolded tree from the
+  repository root, and that difference is where all four failures lived. The
+  build now extracts each step from the workflow file and executes it, in a
+  scaffolded tree, with the client recording in place -- eleven of the
+  thirteen, the two skipped being the ones that need a real tag push.
+- **Retrying a failed release is one word.** A release whose build fails
+  leaves its tag behind, so the retry is refused -- which happened four times,
+  each time answered by two git commands typed by hand from a message that had
+  scrolled past. `release <version> -Retag` replaces the tag and cuts it again.
+- **The goal-zone rule is worked out once per rebuild** instead of once per
+  goal per candidate, where it was making thousands of client calls on the
+  path a previous release restructured specifically to stop doing work per
+  objective.
+- Dead weight removed: an achievement-category table written on every scan and
+  read by nothing, a field whose name meant the opposite of its contents, and
+  two command aliases that a later module had already taken.
 
 ## [0.48.1]
 
@@ -38989,6 +39475,7 @@ ignore:
   - harness.lua
   - bench.lua
   - pstest.sh
+  - cisim.sh
   - coverage.sh
   - mutate.sh
   # Recordings of a live client, read only by the harness. Shipping a player
@@ -39214,13 +39701,15 @@ It also knows how close you are, in things rather than in percent. *One more fea
 
 Nothing is used, learned, moved or sold on your behalf. It reads.
 
+The same rule covers your interface. A full pet or toy scan has to widen the journal's filters to see everything you own — and it puts them back exactly as it found them, including the ones you had switched off.
+
 ## Things with a clock on them
 
 ```
 /cn clock
 ```
 
-Mail about to expire **with something attached** — expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Weekly profession knowledge, which is the most permanently missable thing in the game. Heirlooms.
+Weekly profession knowledge, which is the most permanently missable thing in the game — a week not collected does not come back. Mail about to expire **with something attached** — expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Weekly profession knowledge, which is the most permanently missable thing in the game. Heirlooms.
 
 ## Sets, not just pieces
 
@@ -39393,6 +39882,7 @@ There is a benchmark in the repository, and the numbers above come out of it rat
 - On a fresh install it asks you to run one scan, and keeps asking until you have — an addon that knows nothing about your collections should say so rather than quietly looking thin. Once scanned, it never mentions it again.
 - Nothing is taken over without being asked. Auto-advancing the waypoint and rare alerts are off by default.
 - No external server, no account required, no data leaves your machine.
+- The release build runs the addon's whole test suite — on Lua 5.4 and on the game's own Lua 5.1 — plus a mutation pass that checks the tests would actually notice if the code were wrong, and a stub audit that compares the test doubles against a recording from a real client. A build that fails any of it is not published.
 
 Completion Navigator is a product of **Dam Beaver Studios, LLC**. Authored by **Travis A. Bryan I**. Bug reports and feature requests are welcome on the issue tracker.
 '@
@@ -39434,7 +39924,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.48.1
+0.49.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -40228,6 +40718,53 @@ mutate "Modules/Harvest.lua" \
             counts.withGuesses = counts.withGuesses + 1
         end" \
     "the harvest summary counts a field nothing writes"
+
+
+# The 0.49.0 audit: four features that had been silently off, and the two
+# stubs that agreed with them.
+mutate "Providers/BlizzardWorld.lua" \
+    "            _, isRaid, _, difficultyName, encounters, defeated =" \
+    "            _, isRaid, _, difficultyName, defeated, encounters =" \
+    "lockout progress and total are read in the wrong order"
+
+mutate "Modules/Waiting.lua" \
+    "    if not currencies or not currencies.CharacterStore then
+        return rows
+    end" \
+    "    if not currencies or not currencies.Store then
+        return rows
+    end" \
+    "weekly profession knowledge is never listed"
+
+mutate "Modules/Currencies.lua" \
+    "                accountWide = record.accountWide and true or false," \
+    "" \
+    "a Warband currency loses its flag on the way out of the query"
+
+mutate "Modules/Professions.lua" \
+    "            recipeTotal  = existing and existing.recipeTotal or nil," \
+    "            recipeTotal  = nil," \
+    "recipe counts are discarded on every login"
+
+mutate "Providers/BlizzardCollections.lua" \
+    "        if gotCollected then
+            collected = wasCollected and true or false
+        end" \
+    "        collected = gotCollected and wasCollected or nil" \
+    "a journal filter the player turned off is left on"
+
+mutate "Providers/BtWQuests.lua" \
+    "    for index = 1, 3 do
+        local candidate = candidates[index]" \
+    "    for index, candidate in ipairs(candidates) do" \
+    "the BtWQuests database fallbacks are unreachable"
+
+mutate "Modules/Filters.lua" \
+    "    if not settings.mode then
+        settings.modePrevious = {" \
+    "    if true then
+        settings.modePrevious = {" \
+    "switching focus overwrites what off would restore"
 
 
 echo
@@ -41154,9 +41691,17 @@ CN_TEST_ON_TAXI = false
 -- one and the fixture audit at the end of this file compares them.
 CN_TEST_SAVED_INSTANCES = {
     -- name, id, reset, difficultyID, locked, extended, _, isRaid, _,
-    -- difficultyName, defeated, encounters
+    -- difficultyName, numEncounters, encounterProgress
+    --
+    -- TOTAL FIRST, THEN PROGRESS. This comment used to read "defeated,
+    -- encounters" and the rows were written in that order, matching a bug in
+    -- the addon rather than the client -- so a raid six bosses into eight
+    -- came back as eight defeated out of six, `remaining` clamped to zero,
+    -- `complete` went true, and the Instances provider returned nothing at
+    -- all. The stub and the code shared one wrong belief and the suite
+    -- agreed with both.
     { "Nerub-ar Palace", 1273, 3 * 86400, 14, true, false, false, true,
-      false, "Normal", 6, 8 },
+      false, "Normal", 8, 6 },
     { "Ara-Kara, City of Echoes", 1274, 86400, 23, true, false, false, false,
       false, "Mythic", 4, 4 },
     -- Saved to it, but nothing killed in it yet. The client lists these, and
@@ -41169,7 +41714,7 @@ CN_TEST_SAVED_INSTANCES = {
     -- dropped for being too long, so the rule could have been deleted
     -- entirely and the suite would have agreed.
     { "Liberation of Undermine", 1296, 5 * 86400, 14, true, false, false, true,
-      false, "Normal", 0, 3 },
+      false, "Normal", 3, 0 },
 }
 
 function GetNumSavedInstances()
@@ -41627,6 +42172,11 @@ local petSpecies = {
     { speciesID = 102, name = "Gone Forever",   petType = 3, isWild = false, canBattle = false, owned = false, count = 0, obtainable = false },
 }
 
+LE_PET_JOURNAL_FILTER_COLLECTED     = 1
+LE_PET_JOURNAL_FILTER_NOT_COLLECTED = 2
+
+CN_TEST_PET_FILTERS = { collected = true, uncollected = true, search = "" }
+
 C_PetJournal = {
     -- The journal knows every pet's name. The addon stopped keeping its own
     -- copy in 0.36.0, so this is now the only source -- and a stub that did
@@ -41641,10 +42191,34 @@ C_PetJournal = {
         return nil
     end,
 
-    GetSearchFilter          = function() return "" end,
-    SetSearchFilter          = function() end,
-    SetAllPetSourcesChecked  = function() end,
-    SetAllPetTypesChecked    = function() end,
+    -- FILTERS THE SCAN CHANGES, AND MUST PUT BACK.
+    --
+    -- The stub used to accept every Set* call and answer no Get*, so a scan
+    -- that widened the player's journal and never restored it looked
+    -- identical to one that did. It was the second: a player with their
+    -- journal filtered to uncollected wild pets had it silently reset to show
+    -- everything, permanently, by running /cn setup once. The addon's
+    -- standing rule is that it prompts and does not act.
+    GetSearchFilter          = function() return CN_TEST_PET_FILTERS.search or "" end,
+    SetSearchFilter          = function(text) CN_TEST_PET_FILTERS.search = text end,
+    SetAllPetSourcesChecked  = function() CN_TEST_PET_FILTERS.sources = true end,
+    SetAllPetTypesChecked    = function() CN_TEST_PET_FILTERS.types = true end,
+
+    IsFilterChecked = function(which)
+        if which == LE_PET_JOURNAL_FILTER_COLLECTED then
+            return CN_TEST_PET_FILTERS.collected
+        end
+
+        return CN_TEST_PET_FILTERS.uncollected
+    end,
+
+    SetFilterChecked = function(which, value)
+        if which == LE_PET_JOURNAL_FILTER_COLLECTED then
+            CN_TEST_PET_FILTERS.collected = value
+        else
+            CN_TEST_PET_FILTERS.uncollected = value
+        end
+    end,
     GetNumPets               = function() return #petSpecies, 1 end,
     GetPetInfoByIndex        = function(i)
         local p = petSpecies[i]
@@ -42115,24 +42689,64 @@ HandyNotes = {
 -- CURRENCY STUBS
 ------------------------------------------------------------
 
+-- THE LIST ROW HAS NO ID IN IT.
+--
+-- CurrencyDisplayInfo -- what GetCurrencyListInfo returns -- carries names,
+-- quantities and flags and no currencyID. This stub put one in every row, so
+-- the addon's `info.currencyID` read looked correct here and was nil on every
+-- real client: the character currency store has always been empty and
+-- `/cn currencies` has always said "no currency data yet".
+--
+-- Ninth time a stub and the code shared one wrong belief. The id is kept
+-- alongside the row for the LINK function to return, which is how the client
+-- actually supplies it.
+local currencyIDs = { 3008, 2245, 1602, 3009 }
+
 local currencyList = {
-    { currencyID = 3008, name = "Valorstones", quantity = 2000, maxQuantity = 2000,
+    { name = "Valorstones", quantity = 2000, maxQuantity = 2000,
       quantityEarnedThisWeek = 0, maxWeeklyQuantity = 0, totalEarned = 5000 },
-    { currencyID = 2245, name = "Flightstones", quantity = 400, maxQuantity = 2000,
+    { name = "Flightstones", quantity = 400, maxQuantity = 2000,
       quantityEarnedThisWeek = 300, maxWeeklyQuantity = 1000, totalEarned = 900 },
-    { currencyID = 1602, name = "Conquest", quantity = 0, maxQuantity = 0,
+    { name = "Conquest", quantity = 0, maxQuantity = 0,
       quantityEarnedThisWeek = 0, maxWeeklyQuantity = 1350, totalEarned = 0 },
+    -- Weekly profession knowledge: the thing `/cn clock` calls the most
+    -- permanently missable in the game, and which it has never once listed.
+    { name = "Alchemy Knowledge", quantity = 1, maxQuantity = 0,
+      quantityEarnedThisWeek = 1, maxWeeklyQuantity = 3, totalEarned = 1 },
     { isHeader = true, name = "Header Row" },
 }
+
+local currencyByID = {}
+
+for index, id in ipairs(currencyIDs) do
+    local row = {}
+
+    for key, value in pairs(currencyList[index]) do
+        row[key] = value
+    end
+
+    row.currencyID = id
+
+    currencyByID[id] = row
+end
 
 C_CurrencyInfo = {
     GetCurrencyListSize = function() return #currencyList end,
     GetCurrencyListInfo = function(i) return currencyList[i] end,
-    GetCurrencyInfo     = function(id)
-        for _, c in ipairs(currencyList) do
-            if c.currencyID == id then return c end
+
+    -- The only place the client will tell you which currency a row is.
+    GetCurrencyListLink = function(i)
+        local id = currencyIDs[i]
+
+        if not id then
+            return nil
         end
-        return nil
+
+        return "|cffffffff|Hcurrency:" .. id .. "|h["
+            .. currencyList[i].name .. "]|h|r"
+    end,
+    GetCurrencyInfo     = function(id)
+        return currencyByID[id]
     end,
 }
 
@@ -42824,7 +43438,11 @@ local currencies = profileNow.currencies or {}
 print("  tracked = " .. count(currencies))
 print("  capped  = " .. tostring(currencies[3008] and currencies[3008].capped))
 
-assert(count(currencies) == 3, "header rows must be skipped, got " .. count(currencies))
+-- Four real currencies and one header. The count is asserted because it is
+-- also the proof that the id was recovered from the LINK: a row whose id
+-- cannot be resolved is dropped by the scan, so this number falling is how a
+-- broken id lookup announces itself.
+assert(count(currencies) == 4, "header rows must be skipped, got " .. count(currencies))
 assert(currencies[3008].capped == true, "a currency at max must be flagged capped")
 assert(currencies[2245].capped == false, "a currency below max must not be capped")
 assert(currencies[2245].weeklyRemaining == 700,
@@ -47201,6 +47819,39 @@ print("\nDungeons and raids:")
         .. palace.remaining .. " bosses left in the raid")
 
     ------------------------------------------------------------
+    -- AND A PART-FINISHED LOCKOUT MUST ACTUALLY BE RECOMMENDED.
+    --
+    -- This module's whole premise is that a lockout you are part-way through
+    -- is the cheapest progress in the game -- spent effort with an expiry on
+    -- it -- and it has never produced a single candidate, because the two
+    -- counts came back reversed and every lockout therefore looked complete.
+    -- The suite asserted which lockouts were EXCLUDED and never once that any
+    -- were included.
+    ------------------------------------------------------------
+    local produced = CN.candidateProviders["Instances"].fn()
+
+    assert(#produced > 0,
+        "a raid six bosses into eight is the cheapest thing on the list and "
+        .. "must be offered; the provider returned nothing")
+
+    local raidRow
+
+    for _, candidate in ipairs(produced) do
+        if tostring(candidate.name):find("Nerub-ar", 1, true) then
+            raidRow = candidate
+        end
+    end
+
+    assert(raidRow, "and specifically the part-finished raid")
+
+    local raidReason = table.concat(raidRow.reasons or {}, " ")
+
+    assert(raidReason:find("2", 1, true),
+        "and its reason must say what is actually left, got " .. raidReason)
+
+    print("  and the part-finished raid is offered: " .. raidRow.name)
+
+    ------------------------------------------------------------
     -- A CLEARED LOCKOUT IS NOT AN OBJECTIVE.
     ------------------------------------------------------------
     local instanceCandidates = CN.candidateProviders["Instances"].fn()
@@ -47321,7 +47972,9 @@ print("\nDungeons and raids:")
         "and it must say where the player's lockout stands: " .. tostring(step.note))
 
     -- CLEARED MEANS BLOCKED, NOT "GO AND DO IT".
-    CN_TEST_SAVED_INSTANCES[1][11] = 8
+    -- Position 12 is the PROGRESS; clearing it means setting progress to the
+    -- total, not the total to the progress.
+    CN_TEST_SAVED_INSTANCES[1][12] = 8
 
     local cleared = chase.Chain({
         type = CN.objectiveTypes.MOUNT,
@@ -47339,7 +47992,7 @@ print("\nDungeons and raids:")
     assert(blockedStep.note and blockedStep.note:find("resets in"),
         "and must say when it opens again")
 
-    CN_TEST_SAVED_INSTANCES[1][11] = 6
+    CN_TEST_SAVED_INSTANCES[1][12] = 6
 
     print("  a chase for a raid drop names the boss, and says when it is locked")
 end)()
@@ -50113,6 +50766,184 @@ print("\nEvery client function this addon calls, checked against the client:")
         .. "agrees with the client in both directions")
 end)()
 
+print("\nFeatures that were wired to nothing:")
+
+;(function()
+    ------------------------------------------------------------
+    -- FOUR THINGS THAT WERE OFF, AND NOTHING SAID SO.
+    --
+    -- Each of these is a feature the addon documented at length, shipped, and
+    -- never ran: a guard on a function that does not exist, a field dropped
+    -- on the way out of a query, a value discarded on every login, and a
+    -- restore that restored one of four things. None of them errored. That is
+    -- the shape of every serious defect this project has had.
+    ------------------------------------------------------------
+    local coin       = CN:GetModule("Currencies")
+    local waiting    = CN:GetModule("Waiting")
+    local professions = CN:GetModule("Professions")
+
+    -- 1. Weekly profession knowledge.
+    local store = coin.CharacterStore()
+
+    store[3000] = {
+        currencyID        = 3000,
+        maxWeeklyQuantity = 3,
+        weeklyRemaining   = 2,
+        quantity          = 1,
+    }
+
+    CN_TEST_CURRENCY_NAMES = CN_TEST_CURRENCY_NAMES or {}
+    CN_TEST_CURRENCY_NAMES[3000] = "Alchemy Knowledge"
+
+    local knowledge = waiting.Knowledge()
+
+    assert(#knowledge > 0,
+        "a knowledge currency with a weekly cap left must appear in the "
+        .. "clock; the guard tested a function that has never existed, so "
+        .. "this list has always been empty")
+
+    print("  weekly knowledge is found: " .. tostring(knowledge[1].name))
+
+    -- 2. Warband flag survives the capped query.
+    store[3001] = {
+        currencyID  = 3001,
+        capped      = true,
+        quantity    = 100,
+        maxQuantity = 100,
+        accountWide = true,
+    }
+
+    local capped
+
+    for _, row in ipairs(coin.Capped()) do
+        if row.currencyID == 3001 then capped = row end
+    end
+
+    assert(capped and capped.accountWide == true,
+        "the Warband flag must survive the query that builds the row -- the "
+        .. "provider reads it and this function never copied it")
+
+    print("  a Warband currency is still flagged as one after the query")
+
+    store[3000] = nil
+    store[3001] = nil
+
+    -- 3. Recipe counts survive a rescan.
+    local shelf = professions.CharacterStore()
+
+    local seeded = false
+
+    for _, row in pairs(shelf) do
+        if not seeded then
+            row.recipesSeen = true
+            row.recipeKnown = 40
+            row.recipeTotal = 250
+            seeded = true
+        end
+    end
+
+    assert(seeded, "the fixture must have a profession to seed")
+
+    professions.Scan()
+
+    local kept
+
+    for _, row in pairs(shelf) do
+        if row.recipesSeen then kept = row break end
+    end
+
+    assert(kept and kept.recipeKnown == 40 and kept.recipeTotal == 250,
+        "recipe counts captured from an open profession window must survive "
+        .. "the login rescan, or the display prints '(nil of nil recipes)'")
+
+    print("  recipe counts survive a rescan")
+
+    -- 4. Journal filters are put back.
+    CN_TEST_PET_FILTERS = { collected = false, uncollected = true }
+
+    CN.Blizzard.WithAllPetsShown(function() end)
+
+    assert(CN_TEST_PET_FILTERS.collected == false
+        and CN_TEST_PET_FILTERS.uncollected == true,
+        "a scan must put the player's journal filters back; it widened them "
+        .. "and restored only the search box, permanently resetting a "
+        .. "setting the player chose")
+
+    print("  the pet journal is left as it was found")
+end)()
+
+print("\nTwo things that only break on the second use:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A FOCUS SWITCHED TWICE MUST STILL BE UNDOABLE.
+    --
+    -- `/cn mode` captured the state to return to on EVERY application, so
+    -- going from one focus straight to another overwrote the player's real
+    -- settings with the first focus's settings. `/cn mode off` then restored
+    -- the previous PRESET while printing "previous filters and weighting
+    -- restored" and recording no active mode -- leaving no single command
+    -- that got you back.
+    ------------------------------------------------------------
+    local modes = CN:GetModule("Filters")
+
+    local live = CN.Settings()
+
+    live.mode         = nil
+    live.modePrevious = nil
+    live.priorityMode = "balanced"
+
+    modes.EnableAllTypes()
+
+    modes.SetTypeEnabled(CN.objectiveTypes.PET, false)
+
+    local hiddenBefore = not modes.IsTypeEnabled(CN.objectiveTypes.PET)
+
+    assert(hiddenBefore, "the fixture must start with something hidden")
+
+    modes.ApplyMode("leveling")
+    modes.ApplyMode("collecting")
+    modes.ClearMode()
+
+    assert(live.priorityMode == "balanced",
+        "after two focuses and an off, the weighting must be what it was "
+        .. "before the FIRST one, got " .. tostring(live.priorityMode))
+
+    assert(not modes.IsTypeEnabled(CN.objectiveTypes.PET),
+        "and what the player had hidden themselves must come back hidden")
+
+    modes.EnableAllTypes()
+
+    live.mode         = nil
+    live.modePrevious = nil
+
+    print("  two focuses and an off returns to the state before either")
+
+    ------------------------------------------------------------
+    -- AND A LIST WHOSE FIRST SLOT IS NIL STILL HAS A SECOND.
+    --
+    -- The BtWQuests probe walked three possible database locations with
+    -- ipairs. The first is nil whenever the global is absent -- the normal
+    -- case on recent versions -- so ipairs stopped immediately and the two
+    -- fallbacks it exists to provide were unreachable in exactly the
+    -- situation they were written for. The interpreters do not even agree on
+    -- the length of such a list: 5.4 says two, the game's 5.1 says zero.
+    ------------------------------------------------------------
+    _G.BtWQuestsDatabase = nil
+
+    _G.BtWQuests = { Database = { [1] = { name = "A Chain" } } }
+
+    assert(CN.BtWQuests.IsAvailable(),
+        "a database in the second slot must be found when the first is nil")
+
+    _G.BtWQuests = nil
+
+    assert(not CN.BtWQuests.IsAvailable(),
+        "and no database at all is still unavailable")
+
+    print("  a database in the second slot is found when the first is nil")
+end)()
+
 print("\nCode that nothing calls:")
 
 ;(function()
@@ -51603,6 +52434,24 @@ echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
 grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
+echo "  the release workflow's own steps, run here"
+# FOUR RELEASES WERE TAGGED, PUSHED, AND NEVER PUBLISHED.
+#
+# Each died at a different workflow step, and each was reproducible in seconds
+# on this machine. Everything below ran EQUIVALENTS -- luacheck against the
+# build tree, the harness against the build tree -- while the runner runs
+# `luacheck .` and `lua5.4 harness.lua .` against a scaffolded tree from the
+# repository root. That difference is where all four failures lived.
+#
+# cisim.sh extracts each `run:` block from the workflow and executes it. It is
+# run here so that no release can be cut without the workflow having been
+# executed at least once against the tree being released.
+if [ -x /home/claude/cn/cisim.sh ]; then
+  /home/claude/cn/cisim.sh "$SRC" > cisim.log 2>&1 \
+    || { echo "FAIL: a workflow step fails; this release would not publish"; tail -30 cisim.log; exit 1; }
+  echo "    $(grep -c 'ok    ' cisim.log) workflow steps executed against a scaffolded tree"
+fi
+
 echo "  a captured fixture is loadable Lua"
 # EVERY RECORDING THIS COMMAND EVER WROTE WAS MALFORMED.
 #
@@ -52341,6 +53190,212 @@ grep -q "Pushed v$VERSION" strictrelease.log \
 
 echo "ALL POWERSHELL CHECKS PASSED"
 rm -rf "$WORK" "$(dirname "$REMOTE")"
+'@
+
+$Embedded['cisim.sh'] = @'
+#!/bin/bash
+# cisim.sh -- run the release workflow's own steps, locally, before tagging.
+#
+# WHY THIS EXISTS.
+#
+# Four consecutive releases were tagged, pushed, reported as published, and
+# never reached CurseForge. Each died at a different step of the GitHub
+# workflow -- the .toc audit, then Lint, then the offline harness -- and each
+# was discovered only by pushing a tag, waiting, and reading a web page. Every
+# one of them was reproducible in seconds on this machine, and nothing here
+# ran them.
+#
+# The local suite ran *equivalents* of those steps: `luacheck build/...`,
+# `lua5.4 harness.lua build/...`. The workflow runs `luacheck .` and
+# `lua5.4 harness.lua .` against a SCAFFOLDED TREE, from the repository root,
+# with whatever else happens to be in the working directory. Those are not the
+# same command in the same place, and the difference is exactly where all four
+# failures lived.
+#
+# So this does not re-implement the workflow. It EXTRACTS each `run:` block
+# from .github/workflows/release.yml and executes it, in a scaffolded tree, in
+# order, stopping at the first non-zero exit -- the same way the runner does.
+#
+# Usage:  ./cisim.sh [path-to-cn.ps1]
+set -u
+
+SRC=${1:-/home/claude/cn/out/cn.ps1}
+PWSH=/opt/pwsh/pwsh
+
+WORK=$(mktemp -d)
+
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT
+
+echo "CI simulation :: $(basename "$SRC")"
+
+cp "$SRC" "$WORK/cn.ps1"
+cd "$WORK" || exit 1
+
+$PWSH -NoProfile -File ./cn.ps1 init > init.log 2>&1 || {
+    echo "  FAIL  scaffold failed"; cat init.log; exit 1; }
+
+# The runner checks the repository out with LF endings -- .gitattributes
+# normalizes on the way in. The scaffold writes CRLF, and comparing CRLF text
+# with grep -qxF reports every file in the addon as missing from the .toc.
+# Simulating the workflow without simulating the checkout tests nothing.
+find . -type f \( -name '*.lua' -o -name '*.toc' -o -name '*.xml' \
+    -o -name '*.md' -o -name '*.sh' -o -name '.pkgmeta' -o -name '*.yml' \) \
+    -exec sed -i 's/\r$//' {} \; 2>/dev/null
+
+# THE RECORDING GOES IN TOO.
+#
+# The repository has one, and the step that finally exposed the broken
+# fixtures writer was the offline harness reading it. A simulation of a
+# repository that omits the file the repository actually contains is a
+# simulation of a different repository.
+if [ -f /home/claude/cn/build/fixtures/captured.lua ]; then
+    mkdir -p fixtures
+    cp /home/claude/cn/build/fixtures/captured.lua fixtures/captured.lua
+fi
+
+# A git repository, because a step asks git what tag points at HEAD.
+git init -q -b main . 2>/dev/null
+git config user.email ci@example.com
+git config user.name CI
+git add -A >/dev/null 2>&1
+git commit -qm "ci simulation" >/dev/null 2>&1
+git tag v0.0.0-cisim 2>/dev/null
+
+export GITHUB_REF="refs/tags/v0.0.0-cisim"
+export GITHUB_REF_NAME="v0.0.0-cisim"
+export CF_API_KEY="cisim-placeholder"
+
+# Extract every `run:` block from the workflow, with the step name that owns
+# it, and execute them in order.
+python3 - <<'EXTRACT'
+import re, os
+
+text = open('.github/workflows/release.yml', encoding='utf-8').read()
+
+lines = text.split('\n')
+
+steps = []
+name = None
+i = 0
+
+while i < len(lines):
+    line = lines[i]
+
+    match = re.match(r'^\s*-\s+name:\s*(.+?)\s*$', line)
+
+    if match:
+        name = match.group(1)
+        i += 1
+        continue
+
+    # `run: |` opens a block; `run: something` is a one-liner.
+    block = re.match(r'^(\s*)run:\s*\|\s*$', line)
+
+    if block:
+        indent = len(block.group(1))
+        body = []
+        i += 1
+
+        while i < len(lines):
+            nxt = lines[i]
+
+            if nxt.strip() == '':
+                body.append('')
+                i += 1
+                continue
+
+            if len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+
+            body.append(nxt)
+            i += 1
+
+        # Strip the common indent.
+        trim = min((len(b) - len(b.lstrip()) for b in body if b.strip()),
+                   default=0)
+
+        steps.append((name, '\n'.join(b[trim:] for b in body)))
+        continue
+
+    inline = re.match(r'^\s*run:\s*(\S.*?)\s*$', line)
+
+    if inline:
+        steps.append((name, inline.group(1)))
+
+    i += 1
+
+with open('.cisim-steps', 'w', encoding='utf-8') as fh:
+    for index, (label, body) in enumerate(steps):
+        fh.write('=== %d\t%s\n' % (index, label or '(unnamed)'))
+        fh.write(body)
+        fh.write('\n=== end\n')
+
+print('  %d run-steps extracted' % len(steps))
+EXTRACT
+
+[ -f .cisim-steps ] || { echo "  FAIL  could not read the workflow"; exit 1; }
+
+# Steps that cannot be simulated here, with the reason stated rather than
+# silently skipped. A skip nobody can see is how a step stops being checked.
+SKIP_PATTERN='^(Fetch tags|Verify a tag points at HEAD)$'
+
+status=0
+ran=0
+skipped=0
+
+label=""
+body=""
+collecting=0
+
+while IFS= read -r line; do
+    case "$line" in
+        "=== end")
+            collecting=0
+
+            if [[ "$label" =~ $SKIP_PATTERN ]]; then
+                echo "  skip  $label  (needs the real tag push)"
+                skipped=$((skipped + 1))
+            else
+                printf '  ....  %s\r' "$label"
+
+                if bash -c "$body" > step.log 2>&1; then
+                    printf '  ok    %s\n' "$label"
+                    ran=$((ran + 1))
+                else
+                    printf '  FAIL  %s\n' "$label"
+                    echo ''
+                    sed 's/^/        /' step.log | tail -25
+                    status=1
+                    break
+                fi
+            fi
+
+            label=""
+            body=""
+            ;;
+        "=== "*)
+            label=$(printf '%s' "$line" | cut -f2)
+            collecting=1
+            body=""
+            ;;
+        *)
+            if [ "$collecting" -eq 1 ]; then
+                body="$body$line"$'\n'
+            fi
+            ;;
+    esac
+done < .cisim-steps
+
+echo ""
+
+if [ "$status" -eq 0 ]; then
+    echo "Every simulated workflow step passed. ($ran ran, $skipped skipped)"
+else
+    echo "A workflow step failed HERE, which means it would fail on the runner."
+fi
+
+exit $status
 '@
 
 $EmbeddedBinary = [ordered]@{}
@@ -55840,14 +56895,34 @@ function Invoke-CNRelease {
     try {
         $existing = @((Invoke-CNGit @('tag', '--list', "v$new") -Quiet).Output)
 
-        if ($existing.Count -gt 0 -and -not $Force) {
+        if ($existing.Count -gt 0 -and -not $Force -and -not $Retag) {
             Write-Host "ERROR  Tag v$new already exists." -ForegroundColor Red
             Write-Host ''
-            Write-Host '  Nothing has been changed. To replace it:' -ForegroundColor DarkGray
-            Write-Host "    git tag -d v$new" -ForegroundColor Yellow
-            Write-Host "    git push --delete origin v$new" -ForegroundColor Yellow
-            Write-Host '  Or release the next version instead.' -ForegroundColor DarkGray
+
+            # THE COMMON CASE IS A FAILED BUILD, NOT A MISTAKE.
+            #
+            # A release whose workflow fails leaves the tag behind, so the
+            # retry -- the whole point of fixing whatever failed -- is refused
+            # by this guard. That happened four times in a row, and each time
+            # the answer was two git commands typed by hand from a message
+            # that scrolled past. Retrying a failed release is the normal
+            # path; it should be one word, not a recipe.
+            Write-Host '  If the last attempt failed and you are retrying, re-run with:' -ForegroundColor DarkGray
+            Write-Host "    .\cn.ps1 release $new -Retag" -ForegroundColor Yellow
+            Write-Host ''
+            Write-Host '  That deletes the tag here and on the remote, then releases again.' -ForegroundColor DarkGray
+            Write-Host '  Nothing has been changed.' -ForegroundColor DarkGray
             return
+        }
+
+        if ($existing.Count -gt 0 -and $Retag) {
+            Write-Host "Replacing tag v$new." -ForegroundColor Yellow
+
+            Invoke-CNGit @('tag', '-d', "v$new") -Quiet | Out-Null
+
+            # The remote tag may not exist -- the push may be what failed --
+            # so a failure here is expected and not worth stopping for.
+            Invoke-CNGit @('push', '--delete', 'origin', "v$new") -Quiet | Out-Null
         }
     }
     finally {

@@ -233,7 +233,12 @@ end
 
 CN:RegisterCommand{
     name    = "alts",
-    aliases = { "who", "warband" },
+    -- No aliases. `who` and `warband` were declared here and both are real
+    -- commands registered by Modules/Warband.lua, which loads later and
+    -- overwrote them -- so these two entries have never resolved to anything
+    -- in this file, while the help listed all three side by side as if they
+    -- were different answers.
+    aliases = { "alt", "characters" },
     order   = 12,
     help    = "Which character should be doing what, and whether to switch.",
     handler = function()

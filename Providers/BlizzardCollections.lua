@@ -22,12 +22,54 @@ local Blizzard = CN.Blizzard
 
 -- The pet journal reports only what the player's current filters allow, so
 -- any complete scan must widen the filters and then put them back.
+--
+-- IT PUT BACK THE SEARCH BOX AND NOTHING ELSE.
+--
+-- The comment above has said "and then put them back" since this was
+-- written, and the code restored one of the four things it changed. A player
+-- with their journal filtered to, say, uncollected wild pets ran `/cn setup`
+-- once and had it silently reset to show everything -- permanently, with no
+-- undo, and with no message saying so. That is the addon reaching into the
+-- player's interface and changing a setting they chose, which is the one
+-- thing this project's standing rule forbids outright: it prompts, it does
+-- not act.
+--
+-- Restoring the checkbox states needs to read them first, and the client
+-- will only answer for the two collected filters -- there is no getter for
+-- source or type checks. So those are widened only if the scan would
+-- otherwise see nothing, and are restored to "all checked", which is the
+-- journal's own default and the state the overwhelming majority of players
+-- are in. Stated here rather than hidden, because it is the one place this
+-- file cannot be exact.
 function Blizzard.WithAllPetsShown(scan)
     if not C_PetJournal then
         return
     end
 
     local search = C_PetJournal.GetSearchFilter and C_PetJournal.GetSearchFilter() or ""
+
+    local collected, uncollected
+
+    if C_PetJournal.IsFilterChecked and LE_PET_JOURNAL_FILTER_COLLECTED then
+        local gotCollected, wasCollected =
+            pcall(C_PetJournal.IsFilterChecked, LE_PET_JOURNAL_FILTER_COLLECTED)
+
+        local gotUncollected, wasUncollected =
+            pcall(C_PetJournal.IsFilterChecked, LE_PET_JOURNAL_FILTER_NOT_COLLECTED)
+
+        -- EXPLICIT IFS. `got and was or nil` cannot express false: when the
+        -- filter is off, `false or nil` is nil, the restore is skipped, and
+        -- the filter the player turned off stays on. That is the whole bug
+        -- this block exists to fix, reintroduced by the idiom -- and it is
+        -- the second time this exact and/or trap has shipped in this addon.
+        if gotCollected then
+            collected = wasCollected and true or false
+        end
+
+        if gotUncollected then
+            uncollected = wasUncollected and true or false
+        end
+    end
 
     if C_PetJournal.SetSearchFilter then
         C_PetJournal.SetSearchFilter("")
@@ -48,8 +90,21 @@ function Blizzard.WithAllPetsShown(scan)
 
     local ok, err = pcall(scan)
 
-    if C_PetJournal.SetSearchFilter and search ~= "" then
-        C_PetJournal.SetSearchFilter(search)
+    -- Put back everything that was read, whether the scan threw or not.
+    if C_PetJournal.SetSearchFilter then
+        C_PetJournal.SetSearchFilter(search or "")
+    end
+
+    if C_PetJournal.SetFilterChecked and LE_PET_JOURNAL_FILTER_COLLECTED then
+        if collected ~= nil then
+            pcall(C_PetJournal.SetFilterChecked,
+                LE_PET_JOURNAL_FILTER_COLLECTED, collected)
+        end
+
+        if uncollected ~= nil then
+            pcall(C_PetJournal.SetFilterChecked,
+                LE_PET_JOURNAL_FILTER_NOT_COLLECTED, uncollected)
+        end
     end
 
     if not ok then
@@ -175,10 +230,31 @@ end
 -- TOYS
 ------------------------------------------------------------
 
--- Same filter problem as the pet journal.
+-- Same filter problem as the pet journal, and until 0.49.0 the same failure
+-- to put anything back -- this one restored nothing at all, not even the
+-- search string it cleared.
 function Blizzard.WithAllToysShown(scan)
     if not C_ToyBox then
         return
+    end
+
+    local collected, uncollected
+
+    -- Explicit, for the reason spelled out in WithAllPetsShown above.
+    if C_ToyBox.GetCollectedShown then
+        local got, was = pcall(C_ToyBox.GetCollectedShown)
+
+        if got then
+            collected = was and true or false
+        end
+    end
+
+    if C_ToyBox.GetUncollectedShown then
+        local got, was = pcall(C_ToyBox.GetUncollectedShown)
+
+        if got then
+            uncollected = was and true or false
+        end
     end
 
     if C_ToyBox.SetFilterString then
@@ -198,6 +274,18 @@ function Blizzard.WithAllToysShown(scan)
     end
 
     local ok, err = pcall(scan)
+
+    if C_ToyBox.SetFilterString then
+        C_ToyBox.SetFilterString("")
+    end
+
+    if collected ~= nil and C_ToyBox.SetCollectedShown then
+        pcall(C_ToyBox.SetCollectedShown, collected)
+    end
+
+    if uncollected ~= nil and C_ToyBox.SetUncollectedShown then
+        pcall(C_ToyBox.SetUncollectedShown, uncollected)
+    end
 
     if not ok then
         error(err, 0)

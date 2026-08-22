@@ -574,14 +574,29 @@ function Filters.ApplyMode(name)
 
     -- Remember what to go back to. One level deep on purpose: an undo stack
     -- for a display preference is a feature nobody asked for.
-    settings.modePrevious = {
-        profile = settings.priorityMode,
-        hidden  = {},
-    }
+    --
+    -- BUT ONLY IF THERE IS NOT ALREADY A MODE ON.
+    --
+    -- This captured unconditionally, so switching from one focus straight to
+    -- another overwrote the player's real settings with the FIRST focus's
+    -- settings. `/cn mode leveling`, then `/cn mode collecting`, then
+    -- `/cn mode off` left you in the levelling filter -- thirteen types
+    -- hidden -- while printing "Previous filters and weighting restored" and
+    -- recording no active mode. There was then no single command that got you
+    -- back.
+    --
+    -- One level deep means one level: the state before the first focus, kept
+    -- until a focus is actually cleared.
+    if not settings.mode then
+        settings.modePrevious = {
+            profile = settings.priorityMode,
+            hidden  = {},
+        }
 
-    for _, objectiveType in ipairs(Filters.TypeOrder()) do
-        if not Filters.IsTypeEnabled(objectiveType) then
-            table.insert(settings.modePrevious.hidden, objectiveType)
+        for _, objectiveType in ipairs(Filters.TypeOrder()) do
+            if not Filters.IsTypeEnabled(objectiveType) then
+                table.insert(settings.modePrevious.hidden, objectiveType)
+            end
         end
     end
 

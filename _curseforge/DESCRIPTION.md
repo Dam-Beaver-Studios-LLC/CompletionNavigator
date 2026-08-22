@@ -211,13 +211,15 @@ It also knows how close you are, in things rather than in percent. *One more fea
 
 Nothing is used, learned, moved or sold on your behalf. It reads.
 
+The same rule covers your interface. A full pet or toy scan has to widen the journal's filters to see everything you own â€” and it puts them back exactly as it found them, including the ones you had switched off.
+
 ## Things with a clock on them
 
 ```
 /cn clock
 ```
 
-Mail about to expire **with something attached** â€” expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Weekly profession knowledge, which is the most permanently missable thing in the game. Heirlooms.
+Weekly profession knowledge, which is the most permanently missable thing in the game â€” a week not collected does not come back. Mail about to expire **with something attached** â€” expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Weekly profession knowledge, which is the most permanently missable thing in the game. Heirlooms.
 
 ## Sets, not just pieces
 
@@ -390,5 +392,6 @@ There is a benchmark in the repository, and the numbers above come out of it rat
 - On a fresh install it asks you to run one scan, and keeps asking until you have â€” an addon that knows nothing about your collections should say so rather than quietly looking thin. Once scanned, it never mentions it again.
 - Nothing is taken over without being asked. Auto-advancing the waypoint and rare alerts are off by default.
 - No external server, no account required, no data leaves your machine.
+- The release build runs the addon's whole test suite â€” on Lua 5.4 and on the game's own Lua 5.1 â€” plus a mutation pass that checks the tests would actually notice if the code were wrong, and a stub audit that compares the test doubles against a recording from a real client. A build that fails any of it is not published.
 
 Completion Navigator is a product of **Dam Beaver Studios, LLC**. Authored by **Travis A. Bryan I**. Bug reports and feature requests are welcome on the issue tracker.

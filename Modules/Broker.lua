@@ -29,10 +29,19 @@ Broker.available = false
 
 local dataObject
 
-local function CurrentText()
-    local ok, results = pcall(CN.Recommend, 1)
+-- `results` may be supplied by a caller that already has them. The
+-- recommendation hook does, and re-asking from inside it is re-entering the
+-- function that fired the hook -- which recursed until pcall stopped it and
+-- cost seventy times the budget for one refresh. A performance budget caught
+-- it before it shipped.
+local function CurrentText(results)
+    if not results then
+        local ok, fetched = pcall(CN.Recommend, 1)
 
-    if not ok or not results or not results[1] then
+        results = ok and fetched or nil
+    end
+
+    if not results or not results[1] then
         return "Completion Navigator", "nothing actionable"
     end
 
@@ -43,12 +52,12 @@ end
 
 Broker.CurrentText = CurrentText
 
-function Broker.Refresh()
+function Broker.Refresh(results)
     if not dataObject then
         return
     end
 
-    local name, kind = CurrentText()
+    local name, kind = CurrentText(results)
 
     dataObject.text  = name
     dataObject.value = name
@@ -289,5 +298,41 @@ CN:RegisterCommand{
             .. "and the feed appears automatically when one of them is present.|r")
     end,
 }
+
+------------------------------------------------------------
+-- KEEPING IT CURRENT
+------------------------------------------------------------
+
+-- REFRESHED WHEN THE ANSWER CHANGES, WHICH IT NEVER WAS.
+--
+-- `Broker.Refresh` had exactly one caller: `Install`, from a login hook that
+-- runs before the collection scans in their own login hooks have populated
+-- anything. So the feed was built from an empty database, almost always
+-- settled on "nothing actionable", and then never changed again for the whole
+-- session -- in a module whose header calls it "the addon's answer to 'what
+-- next?' displayed permanently".
+--
+-- A recommendation hook is the right place: it fires exactly when the list is
+-- recomputed, which is the only time this text can be stale.
+if CN.RegisterRecommendationHook then
+    CN.RegisterRecommendationHook("Broker", function(results)
+        if Broker.available then
+            pcall(Broker.Refresh, results)
+        end
+    end)
+end
+
+-- And once shortly after login, because a player who opens no window and
+-- asks for nothing should still see a real answer rather than the placeholder
+-- the feed was created with.
+CN:OnLogin(function()
+    if C_Timer and C_Timer.After then
+        C_Timer.After(10, function()
+            if Broker.available then
+                pcall(Broker.Refresh)
+            end
+        end)
+    end
+end)
 
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.

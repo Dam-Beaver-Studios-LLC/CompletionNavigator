@@ -219,6 +219,15 @@ function Welcome.Show()
     if built then
         built:Show()
 
+        -- SHOWN COUNTS AS SEEN.
+        --
+        -- This marked the window seen only on the button handlers, so a
+        -- player who read it and closed it -- or ignored it -- got it again
+        -- on every login, against this file's own promise that "it does not
+        -- run again. Ever." Answering the question is a choice; being asked
+        -- twice is not.
+        Welcome.MarkSeen()
+
         return true
     end
 
@@ -241,8 +250,15 @@ CN:OnLogin(function()
 
     -- After the login chatter, and after the setup reminder has had its turn.
     -- Two things talking at once on a first login is worse than either alone.
+    --
+    -- FOURTEEN SECONDS, NOT EIGHT. The setup reminder is also scheduled at
+    -- eight, and because this module loads first its timer fired FIRST -- the
+    -- exact opposite of what the sentence above promised, and the player got
+    -- the modal with two lines of setup reminder appearing underneath it.
+    -- A comment describing an ordering that the code leaves to load order is
+    -- not an ordering.
     if C_Timer and C_Timer.After then
-        C_Timer.After(8, function()
+        C_Timer.After(14, function()
             if not Welcome.HasSeen() then
                 Welcome.Show()
             end

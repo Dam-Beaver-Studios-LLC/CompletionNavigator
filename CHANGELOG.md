@@ -7,6 +7,110 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.49.0]
+
+A third end-to-end audit, over the subsystems the first two did not reach.
+Twenty findings. **Six of them were whole features that had never once run**
+-- written, documented at length, shipped, and silently off, in every case
+because the failure was indistinguishable from an empty result.
+
+Plus the thing that made the last four releases painful: the release workflow
+now runs *here*, before a tag is cut.
+
+### Fixed
+
+- **Dungeon and raid lockouts have never produced a single recommendation.**
+  The client reports the number of bosses and then how many you have killed;
+  the addon read those two the other way round. A raid six bosses into eight
+  came back as eight of six, so "remaining" clamped to zero, the lockout
+  looked cleared, and the provider returned nothing. This module exists on the
+  premise that a part-finished lockout is the cheapest progress in the game --
+  spent effort with an expiry on it -- and it has never offered one. The test
+  fixture had the same reversal written into its own comment, so the suite
+  agreed with the bug.
+- **Weekly profession knowledge has never appeared in `/cn clock`.** The
+  lookup guarded on a function that does not exist and never has, so it
+  returned an empty list on every client -- for the thing the file's own
+  header calls "the most permanently missable in modern professions". An empty
+  list and a list that cannot be built look identical from outside.
+- **The addon was resetting your pet journal and toy box filters and not
+  putting them back.** A scan has to widen the filters to see everything, and
+  the comment above it has always said "and then put them back" -- it restored
+  the search box and nothing else; the toy box restored nothing at all. Filter
+  your journal to uncollected wild pets, run `/cn setup` once, and it was
+  silently reset to show everything, permanently, with no message. That is the
+  addon changing a setting you chose, which this project's standing rule
+  forbids outright.
+- **Your currencies have never been recorded.** The row the client returns for
+  the currency list carries no id -- it has to be read from the row's link --
+  and the addon read a field that is not there. Every row was dropped,
+  `/cn currencies` has always said "no currency data yet", and the currency
+  provider has always been empty. The stub returned rows that *did* carry the
+  field, which is the ninth time in this project a stub and the code have
+  shared one wrong belief.
+- **A Warband currency capped on one character was still recommended on every
+  other one** -- the exact mistake the Warband work exists to prevent, and
+  which 0.43.0 recorded as fixed. The flag was read from the client correctly,
+  stored correctly, and then dropped by the one function that builds the rows
+  the provider reads.
+- **The LibDataBroker feed was frozen at login.** Its refresh had exactly one
+  caller, inside its own installer, which runs before the collection scans
+  have populated anything -- so it was built from an empty database, settled
+  on "nothing actionable", and never changed again for the rest of the
+  session. It now updates whenever the recommendation list does.
+- **Recipe counts were discarded on every login**, so opening a profession
+  window to record them and then logging out produced "(nil of nil recipes)".
+- **`/cn mode off` did not undo the mode.** Switching focus twice overwrote
+  the saved state with the *first* focus's state, so `off` restored a preset
+  rather than what you had -- while printing that your previous filters were
+  restored, and leaving no single command to get back.
+- **Near-complete achievements all reported "0 achievement points."** The
+  field stopped being stored in 0.36.0; two other readers were updated and
+  this one was missed, where `or 0` turned an absent number into a confident
+  false statement. Points are now read live, or not mentioned.
+- **`/cn export` wrote the same key twice** for any quest with both a provider
+  answer and observed agreement, so Lua kept the second and the curated list
+  was destroyed on the way into shipped data. It also wrote inference under
+  the name reserved for curated fact -- the door the runtime path had already
+  closed, still open on the path that actually ships data to other players.
+- **BtWQuests was reported unavailable to anyone whose version had moved its
+  database.** The probe walked three possible locations with `ipairs`, and the
+  first is nil in exactly the case the other two exist for. The two
+  interpreters do not even agree on the length of such a list.
+- **`/cn where` attributed machine-learned coordinates to you.** Two callers
+  pass where a location came from; the function did not declare the parameter.
+- **The first-run window appeared on the same tick as the setup reminder**,
+  in the order its own comment says must not happen, and reappeared on every
+  login for anyone who read it without clicking a button.
+- Two more: an ATT merge that took the last answer where every neighbouring
+  field takes the first, and a calendar deadline gated on an unrelated
+  function -- which silently dropped the urgency weighting from every world
+  event on any client lacking it.
+
+### Changed
+
+- **The release workflow's own steps now run before a tag is cut.** Four
+  consecutive releases were tagged, pushed, reported as published and never
+  reached CurseForge, each failing at a different step -- and every one of
+  them was reproducible in seconds locally. What the local suite ran were
+  *equivalents*: the linter against one directory, the harness against
+  another. The workflow runs them against a scaffolded tree from the
+  repository root, and that difference is where all four failures lived. The
+  build now extracts each step from the workflow file and executes it, in a
+  scaffolded tree, with the client recording in place -- eleven of the
+  thirteen, the two skipped being the ones that need a real tag push.
+- **Retrying a failed release is one word.** A release whose build fails
+  leaves its tag behind, so the retry is refused -- which happened four times,
+  each time answered by two git commands typed by hand from a message that had
+  scrolled past. `release <version> -Retag` replaces the tag and cuts it again.
+- **The goal-zone rule is worked out once per rebuild** instead of once per
+  goal per candidate, where it was making thousands of client calls on the
+  path a previous release restructured specifically to stop doing work per
+  objective.
+- Dead weight removed: an achievement-category table written on every scan and
+  read by nothing, a field whose name meant the opposite of its contents, and
+  two command aliases that a later module had already taken.
+
 ## [0.48.1]
 
 **0.46.0, 0.47.0 and 0.48.0 were tagged, pushed, and never published.** The

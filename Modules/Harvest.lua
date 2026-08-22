@@ -98,7 +98,12 @@ function Harvest.Capture(questID, reason)
 
             if external.requires then
                 record.requires  = external.requires
-                record.requiredBy = external.providers
+
+                -- `requiresFrom`: which addons answered. It was written as
+                -- `requiredBy`, a name meaning the opposite -- the quests
+                -- this one unlocks -- and read by nothing, so the misnomer
+                -- had no effect beyond misleading the next reader.
+                record.requiresFrom = external.providers
                 changed = true
             end
         end
@@ -390,12 +395,22 @@ function Harvest.BuildExport(onlyLocated)
         -- threshold stays a comment for a human to confirm. The distinction
         -- survives into the exported file, so curation never has to guess
         -- which lines were inferred.
+        --
+        -- `observedRequires`, NOT `requires`. Two things were wrong with
+        -- writing it as `requires`. It emitted the key a second time in the
+        -- same table constructor, so a quest that had both a provider answer
+        -- and three-character agreement lost the provider's list entirely --
+        -- Lua keeps the last assignment. And it is exactly the door
+        -- PublishConfident closes thirty lines above, in a comment calling it
+        -- "inference masquerading as authority": the runtime path was fixed
+        -- and the export path -- the one that actually ships inference to
+        -- other players -- still wrote it under the curated name.
         local confident = Harvest.ConfidentPrerequisites(record.questID)
 
         if #confident > 0 then
             table.insert(lines, "        -- observed on "
                 .. Harvest.confidenceThreshold .. "+ characters")
-            table.insert(lines, "        requires  = { "
+            table.insert(lines, "        observedRequires = { "
                 .. table.concat(confident, ", ") .. " },")
         end
 

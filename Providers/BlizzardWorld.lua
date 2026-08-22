@@ -385,8 +385,12 @@ function Blizzard.GetTodaysEvents()
             -- than a guessed week.
             local endsIn
 
-            if type(event.endTime) == "table" and event.endTime.monthDay
-                and C_DateAndTime and C_DateAndTime.GetSecondsUntilWeeklyReset then
+            -- Gated on the end time itself, which is all this block reads.
+            -- It used to also require C_DateAndTime.GetSecondsUntilWeeklyReset
+            -- -- a function it never calls -- so on any build lacking that
+            -- unrelated API every calendar event silently lost its deadline,
+            -- and with it the urgency weighting and the "ends in" line.
+            if type(event.endTime) == "table" and event.endTime.monthDay then
 
                 local finish = event.endTime
 
@@ -509,6 +513,28 @@ end
 function Blizzard.GetCurrencyList()
     local results = {}
 
+-- The currency id for a row of the currency list.
+--
+-- GetCurrencyListInfo returns a display record with no id in it. The link is
+-- the only thing that carries one, and it has to be dug out of the hyperlink
+-- -- `|Hcurrency:2245|h[Flightstones]|h` -- because the client offers no
+-- direct accessor. Guarded and pcall'd at every step: this runs once per
+-- currency on every scan, and a client that will not produce a link should
+-- cost the row, not the scan.
+local function CurrencyIDFromList(index)
+    if not C_CurrencyInfo or not C_CurrencyInfo.GetCurrencyListLink then
+        return nil
+    end
+
+    local ok, link = pcall(C_CurrencyInfo.GetCurrencyListLink, index)
+
+    if not ok or type(link) ~= "string" then
+        return nil
+    end
+
+    return tonumber(string.match(link, "currency:(%d+)"))
+end
+
     if not C_CurrencyInfo or not C_CurrencyInfo.GetCurrencyListSize then
         return results
     end
@@ -522,9 +548,25 @@ function Blizzard.GetCurrencyList()
     for index = 1, size do
         local gotInfo, info = pcall(C_CurrencyInfo.GetCurrencyListInfo, index)
 
+
         if gotInfo and type(info) == "table" and not info.isHeader and info.name then
+            -- THE LIST ROW DOES NOT CARRY AN ID.
+            --
+            -- CurrencyDisplayInfo -- what GetCurrencyListInfo returns -- has
+            -- a name, quantities and flags and NO currencyID. Reading one
+            -- gave nil for every row, and Currencies.Scan drops any row
+            -- without an id, so the character currency store has always been
+            -- empty and `/cn currencies` has always said "no currency data
+            -- yet". The stub returned fixture tables that did carry the
+            -- field, so the suite never saw it.
+            --
+            -- The id comes from the list LINK. Kept tolerant of a client that
+            -- does supply it directly, because being wrong in that direction
+            -- costs nothing.
+            local currencyID = info.currencyID or CurrencyIDFromList(index)
+
             table.insert(results, {
-                currencyID   = info.currencyID,
+                currencyID   = currencyID,
                 name         = info.name,
                 quantity     = info.quantity or 0,
                 maxQuantity  = info.maxQuantity or 0,
@@ -1162,8 +1204,21 @@ function Blizzard.GetSavedInstances()
     end
 
     for index = 1, count do
+        -- POSITION 11 IS THE TOTAL AND 12 IS THE PROGRESS, NOT THE REVERSE.
+        --
+        -- The client returns ... difficultyName, numEncounters,
+        -- encounterProgress. This read them the other way round, so a raid
+        -- with six of eight bosses down came back as defeated=8, encounters=6
+        -- -- which made `remaining` clamp to zero, `complete` true, and the
+        -- provider return NOTHING. The Instances module's whole stated purpose
+        -- is that a part-finished lockout is the cheapest progress in the
+        -- game, and it has never once produced a candidate.
+        --
+        -- The stub had the same belief written into its fixture comment, so
+        -- the suite agreed. Eighth time in this project that a stub and the
+        -- code shared one wrong assumption.
         local gotInfo, name, id, reset, difficultyID, locked, extended,
-            _, isRaid, _, difficultyName, defeated, encounters =
+            _, isRaid, _, difficultyName, encounters, defeated =
                 pcall(GetSavedInstanceInfo, index)
 
         if gotInfo and name then

@@ -28,7 +28,21 @@ local function Database()
         _G.BtWQuests and _G.BtWQuests.database,
     }
 
-    for index, candidate in ipairs(candidates) do
+    -- A NUMERIC LOOP, NOT ipairs.
+    --
+    -- The first slot is nil whenever the global is absent -- which the
+    -- comment above says is the normal case on recent versions -- and ipairs
+    -- stops at the first nil. So the two fallbacks this list exists to
+    -- provide were unreachable in exactly the situation they were written
+    -- for, and the provider reported BtWQuests as unavailable to anyone
+    -- running a version that had moved it.
+    --
+    -- The interpreters do not even agree on how long the list is: 5.4 says
+    -- two, the game's 5.1 says zero. BlizzardWorld.lua already avoids this
+    -- with a numeric loop and a comment naming "the same nil-hole problem".
+    for index = 1, 3 do
+        local candidate = candidates[index]
+
         if type(candidate) == "table" then
             if #probeNotes == 0 then
                 table.insert(probeNotes, "database slot " .. index)

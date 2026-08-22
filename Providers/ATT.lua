@@ -136,7 +136,15 @@ function ATT.GetQuestData(questID)
                 end
             end
 
-            if data.lvl == nil and type(group.lvl) == "number" then
+            -- FIRST WINS, like every other field in this loop.
+            --
+            -- The guard tested `data.lvl`, which nothing in this file ever
+            -- assigns, so it was always true and the LAST matching group won
+            -- -- alone among the six fields merged here, all of which use
+            -- `if not data.<field>`. Two ATT groups with different level
+            -- requirements produced whichever happened to be iterated last,
+            -- and that feeds the "too low level" block reason.
+            if data.requiresLevel == nil and type(group.lvl) == "number" then
                 data.requiresLevel = group.lvl
             end
         end
