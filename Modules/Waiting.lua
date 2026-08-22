@@ -312,16 +312,16 @@ CN:RegisterCommand{
     name    = "clock",
     aliases = { "expiring" },
     order   = 29,
-    help    = "Everything with a deadline that is not a quest.",
+    help    = "Everything on a weekly or daily timer: vault, caps, lockouts.",
     handler = function()
         local said = false
 
         local mail, readable = Waiting.Mail()
 
         if not readable then
-            Print("|cff999999Mail cannot be read in this client.|r")
+            Print("|cff8a8f96Mail cannot be read in this client.|r")
         elseif #mail == 0 then
-            Print("|cff999999No mail, or the mailbox has not been opened this "
+            Print("|cff8a8f96No mail, or the mailbox has not been opened this "
                 .. "session -- the client only hands the addon the inbox once "
                 .. "you have looked at it.|r")
         else
@@ -329,13 +329,13 @@ CN:RegisterCommand{
 
             for index, entry in ipairs(mail) do
                 if index > 5 then
-                    Print("  |cff999999... and " .. (#mail - 5) .. " more|r")
+                    Print("  |cff8a8f96... and " .. (#mail - 5) .. " more|r")
                     break
                 end
 
-                local colour = entry.expiring and "|cfff56b61" or "|cff999999"
+                local colour = entry.expiring and "|cffe2564c" or "|cff8a8f96"
 
-                Print(string.format("  %s%.1f days|r %s |cff999999from %s|r",
+                Print(string.format("  %s%.1f days|r %s |cff8a8f96from %s|r",
                     colour, entry.daysLeft or 0,
                     tostring(entry.subject or "(no subject)"),
                     tostring(entry.sender or "?")))
@@ -348,7 +348,7 @@ CN:RegisterCommand{
 
         if keystone then
             Print("Keystone: " .. (keystone.name or "unknown")
-                .. " |cffffff00+" .. keystone.level .. "|r")
+                .. " |cffffc74f+" .. keystone.level .. "|r")
 
             said = true
         end
@@ -356,7 +356,7 @@ CN:RegisterCommand{
         local knowledge = Waiting.Knowledge()
 
         for _, row in ipairs(knowledge) do
-            Print(row.name .. ": |cffffff00" .. row.remaining
+            Print(row.name .. ": |cffffc74f" .. row.remaining
                 .. "|r of " .. row.cap .. " still collectable this week")
 
             said = true

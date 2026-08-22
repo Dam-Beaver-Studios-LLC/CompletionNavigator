@@ -146,7 +146,7 @@ function Setup.Run(onComplete)
 
             Print("Setup stopped after " .. index .. " of "
                 .. #Setup.steps .. " scans: " .. tostring(err))
-            Print("|cff999999/cn setup runs it again from the start.|r")
+            Print("|cff8a8f96/cn setup runs it again from the start.|r")
         end
     end
 
@@ -176,11 +176,11 @@ function Setup.Report(results)
             absent = absent + 1
 
             Print("  " .. result.label
-                .. ": |cff999999not available on this client|r")
+                .. ": |cff8a8f96not available on this client|r")
         else
             broke = broke + 1
 
-            Print("  " .. result.label .. ": |cffff4444failed: "
+            Print("  " .. result.label .. ": |cffe2564cfailed: "
                 .. tostring(result.error) .. "|r")
         end
     end
@@ -190,15 +190,15 @@ function Setup.Report(results)
         .. (broke > 0 and (", " .. broke .. " failed") or "") .. ".")
 
     if broke > 0 then
-        Print("|cff999999A failure is a defect, not a missing feature. "
-            .. "|cffffff00/cn errors|r has the detail.|r")
+        Print("|cff8a8f96A failure is a defect, not a missing feature. "
+            .. "|cffffc74f/cn errors|r has the detail.|r")
     end
 
     for _, line in ipairs(Setup.Outstanding()) do
-        Print("|cffffff00" .. line .. "|r")
+        Print("|cffffc74f" .. line .. "|r")
     end
 
-    Print("Now try |cffffff00/cn next|r.")
+    Print("Now try |cffffc74f/cn next|r.")
 end
 
 ------------------------------------------------------------
@@ -242,10 +242,78 @@ function Setup.Outstanding()
     return lines
 end
 
+-- PER STEP, NOT ONE FLAG FOR ELEVEN OF THEM.
+--
+-- `HasRun` was a single account-wide `completedAt` stamp that only
+-- `Setup.Run` ever set, and it was wrong in four separate ways at once:
+--
+--   * Four of the eleven scans run themselves at login. The reminder still
+--     told a player nothing had been scanned while the addon was reading
+--     their reputations, currencies, titles and professions.
+--   * The Collections tab's "Scan everything" button runs six of them and
+--     did not satisfy the flag, so a player who used the window instead of
+--     chat was nagged forever.
+--   * `Appearances` has no refresh path at all -- no event, no login hook --
+--     so after the first setup it silently rotted.
+--   * And the nag could not say WHICH scans were missing, because it did not
+--     know.
+--
+-- A stamp per step answers all four, and lets the reminder name what it
+-- actually wants.
+local function Steps()
+    local record = CN.Account("setup")
+
+    record.steps = record.steps or {}
+
+    return record.steps
+end
+
+Setup.Steps = Steps
+
+-- Called by every path that completes a scan, including the window's buttons
+-- and the modules that scan themselves at login.
+function CN.NoteSetupStep(key)
+    if type(key) ~= "string" then
+        return false
+    end
+
+    Steps()[string.lower(key)] = time()
+
+    return true
+end
+
+function Setup.StepDone(key)
+    return Steps()[string.lower(tostring(key))] ~= nil
+end
+
+-- What has never been read. The reminder's whole content.
+--
+-- Named for the scans, distinct from `Setup.Outstanding` above, which is
+-- about the two subsystems no scan can ever reach.
+function Setup.NeverScanned()
+    local missing = {}
+
+    for _, step in ipairs(Setup.steps) do
+        if not Setup.StepDone(step.key)
+            and not Setup.StepDone(step.module) then
+
+            table.insert(missing, step.label)
+        end
+    end
+
+    return missing
+end
+
 function Setup.HasRun()
     local record = CN.Account("setup")
 
-    return (record and record.completedAt) and true or false
+    -- The old flag still counts, so an existing install is not told to run
+    -- setup again for want of stamps it could not have written.
+    if record and record.completedAt then
+        return true
+    end
+
+    return #Setup.NeverScanned() == 0
 end
 
 ------------------------------------------------------------
@@ -271,8 +339,35 @@ function Setup.RemindIfNeeded()
         return false
     end
 
-    Print("Completion Navigator has not scanned your collections yet.")
-    Print("Type |cffffff00/cn setup|r once and it will know what you have.")
+    -- NAMES WHAT IS ACTUALLY MISSING.
+    --
+    -- This said "has not scanned your collections yet" while four subsystems
+    -- had scanned themselves eight seconds earlier and `/cn reps`, `/cn
+    -- currencies`, `/cn titles` and `/cn professions` were all answering with
+    -- real data. The addon was telling a new player it was blind while it was
+    -- looking straight at them.
+    local missing = Setup.NeverScanned()
+
+    if #missing == 0 then
+        return false
+    end
+
+    local named = missing
+
+    if #named > 4 then
+        named = { missing[1], missing[2], missing[3],
+                  (#missing - 3) .. " more" }
+    end
+
+    CN.PrintBlock(
+        #missing .. " thing" .. (#missing == 1 and "" or "s")
+            .. " here " .. (#missing == 1 and "has" or "have")
+            .. " never been read: "
+            .. CN.Muted(string.lower(table.concat(named, ", "))),
+        {
+            CN.Accent("/cn setup") .. CN.Muted(" reads all of them, once, and "
+                .. "takes a few seconds."),
+        })
 
     local account = CN.Account("setup")
 
@@ -318,7 +413,7 @@ function Setup.RemindOutstanding()
     Print("Completion Navigator cannot see everything yet:")
 
     for _, line in ipairs(lines) do
-        Print("  |cffffff00" .. line .. "|r")
+        Print("  |cffffc74f" .. line .. "|r")
     end
 
     return true
@@ -357,7 +452,7 @@ CN:RegisterCommand{
             -- different question from "go and look again", and answering the
             -- first by doing the second is why people stop asking.
             if not Setup.HasRun() then
-                Print("Not scanned yet. Type |cffffff00/cn setup|r.")
+                Print("Not scanned yet. Type |cffffc74f/cn setup|r.")
                 return
             end
 
@@ -371,7 +466,7 @@ CN:RegisterCommand{
             Print("Still outside what the addon can read on its own:")
 
             for _, line in ipairs(lines) do
-                Print("  |cffffff00" .. line .. "|r")
+                Print("  |cffffc74f" .. line .. "|r")
             end
 
             return

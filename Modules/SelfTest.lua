@@ -647,21 +647,21 @@ CN:RegisterCommand{
             if check.area ~= area then
                 area = check.area
 
-                Print("|cffffd100" .. area .. "|r")
+                Print("|cffffc74f" .. area .. "|r")
             end
 
             local colour = "|cff73b873"
 
             if check.status == FAIL then
-                colour = "|cfff56b61"
+                colour = "|cffe2564c"
             elseif check.status == SKIP then
-                colour = "|cff999999"
+                colour = "|cff8a8f96"
             end
 
             Print(string.format("  %s%-4s|r %s", colour, check.status, check.name))
 
             if check.detail then
-                Print("        |cff999999" .. check.detail .. "|r")
+                Print("        |cff8a8f96" .. check.detail .. "|r")
             end
         end
 
@@ -669,7 +669,7 @@ CN:RegisterCommand{
             rows.passed, rows.failed, rows.skipped))
 
         if rows.failed > 0 then
-            Print("|cffffff00A failure above is a real defect. Copy this "
+            Print("|cffffc74fA failure above is a real defect. Copy this "
                 .. "output into a bug report -- it says more than any "
                 .. "description could.|r")
         end

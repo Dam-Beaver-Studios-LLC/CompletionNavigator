@@ -18,10 +18,16 @@ local Print      = CN.Print
 local DebugPrint = CN.DebugPrint
 local Blizzard   = CN.Blizzard
 
-local GREEN  = { 0.4, 1.0, 0.4 }
-local RED    = { 1.0, 0.4, 0.4 }
-local YELLOW = { 1.0, 0.85, 0.3 }
-local GREY   = { 0.6, 0.6, 0.6 }
+-- THE SAME PALETTE AS EVERYTHING ELSE, IN THE SHAPE A TOOLTIP WANTS.
+--
+-- These were four hand-written triples, of which exactly one matched the hex
+-- codes the rest of the addon used for the same four meanings. A player
+-- hovering an item saw a slightly different green from the one in the window
+-- for "collected", and nothing in the code said which was right.
+local GREEN  = CN.RGB.GOOD
+local RED    = CN.RGB.BAD
+local YELLOW = CN.RGB.WARN
+local GREY   = CN.RGB.MUTED
 
 local HEADER = "Completion Navigator"
 
@@ -520,10 +526,10 @@ CN:RegisterCommand{
         end
 
         Print("Tooltip lines: " .. CN.YesNo(settings.tooltips ~= false))
-        Print("|cff999999Backend: " .. tostring(Tooltips.backend) .. "|r")
+        Print("|cff8a8f96Backend: " .. tostring(Tooltips.backend) .. "|r")
 
         if Tooltips.backend == "none" then
-            Print("|cff999999No tooltip API resolved, so nothing will be added.|r")
+            Print("|cff8a8f96No tooltip API resolved, so nothing will be added.|r")
         end
     end,
 }

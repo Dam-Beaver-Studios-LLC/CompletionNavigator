@@ -309,29 +309,29 @@ CN:RegisterCommand{
         local summary = Progress.Summary()
 
         if summary.lifetime then
-            Print("|cffffd100" .. CN.Comma(summary.lifetime)
+            Print("|cffffc74f" .. CN.Comma(summary.lifetime)
                 .. "|r quests completed on this character.")
         else
             Print("The client will not report a lifetime total right now.")
         end
 
-        Print("Today: |cffffff00" .. summary.today .. "|r"
-            .. (summary.best > 0 and ("   |cff999999best day: "
+        Print("Today: |cffffc74f" .. summary.today .. "|r"
+            .. (summary.best > 0 and ("   |cff8a8f96best day: "
                 .. summary.best .. "|r") or ""))
 
         if summary.session > 0 then
-            local line = "This session: |cffffff00" .. summary.session .. "|r"
+            local line = "This session: |cffffc74f" .. summary.session .. "|r"
 
             if summary.perHour then
                 line = line .. string.format(
-                    "   |cff999999%.0f per hour|r", summary.perHour)
+                    "   |cff8a8f96%.0f per hour|r", summary.perHour)
             end
 
             Print(line)
         end
 
         if summary.previous then
-            Print("|cff999999Previous day: " .. summary.previous .. "|r")
+            Print("|cff8a8f96Previous day: " .. summary.previous .. "|r")
         end
     end,
 }

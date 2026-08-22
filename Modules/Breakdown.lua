@@ -425,14 +425,14 @@ local function PrintRow(row)
     local percentage = Percentage(row.collected, row.total)
 
     if percentage then
-        Print(string.format("|cffffd100%s|r  %d / %d  (%.1f%%)",
+        Print(string.format("|cffffc74f%s|r  %d / %d  (%.1f%%)",
             row.name, row.collected, row.total, percentage))
     else
-        Print(string.format("|cffffd100%s|r  %d collected",
+        Print(string.format("|cffffc74f%s|r  %d collected",
             row.name, row.collected or 0))
 
         if row.unknownTotal then
-            Print("    |cff999999no percentage: " .. row.unknownTotal .. "|r")
+            Print("    |cff8a8f96no percentage: " .. row.unknownTotal .. "|r")
         end
     end
 
@@ -441,7 +441,7 @@ local function PrintRow(row)
     end
 
     if row.action then
-        Print("    |cffffff00-> " .. row.action .. "|r")
+        Print("    |cffffc74f-> " .. row.action .. "|r")
     end
 end
 
@@ -481,7 +481,7 @@ CN:RegisterCommand{
         end
 
         if not requested then
-            Print("|cff999999/cn breakdown <category> for one at a time.|r")
+            Print("|cff8a8f96/cn breakdown <category> for one at a time.|r")
         end
     end,
 }

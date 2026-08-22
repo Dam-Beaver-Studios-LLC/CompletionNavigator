@@ -466,7 +466,7 @@ CN:RegisterCommand{
         local closest = Achievements.Closest(5)
 
         for _, record in ipairs(closest) do
-            Print("  " .. NameOf(record.achievementID or 0, record) .. " |cff999999("
+            Print("  " .. NameOf(record.achievementID or 0, record) .. " |cff8a8f96("
                 .. record.done .. "/" .. record.criteria .. ")|r")
         end
     end,
@@ -503,7 +503,7 @@ CN:RegisterCommand{
                 or Blizzard.GetAchievementPoints(record.achievementID)
 
             Print(index .. ". " .. NameOf(record.achievementID or 0, record)
-                .. " |cff999999(" .. record.done .. "/" .. record.criteria
+                .. " |cff8a8f96(" .. record.done .. "/" .. record.criteria
                 .. (points and (", " .. points .. " points") or "")
                 .. ")|r")
         end

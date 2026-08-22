@@ -285,11 +285,11 @@ CN:RegisterCommand{
         local capped = Currencies.Capped()
 
         if #capped > 0 then
-            Print("|cffff4444At cap (" .. #capped .. ") - spend these:|r")
+            Print("|cffe2564cAt cap (" .. #capped .. ") - spend these:|r")
 
             for _, currency in ipairs(capped) do
                 Print("  " .. tostring(currency.name)
-                    .. " |cff999999" .. currency.quantity
+                    .. " |cff8a8f96" .. currency.quantity
                     .. " / " .. currency.maximum .. "|r")
             end
         end
@@ -303,7 +303,7 @@ CN:RegisterCommand{
                 local currency = weekly[index]
 
                 Print("  " .. tostring(currency.name)
-                    .. " |cff999999" .. currency.earned .. " / " .. currency.maximum
+                    .. " |cff8a8f96" .. currency.earned .. " / " .. currency.maximum
                     .. ", " .. currency.remaining .. " left this week|r")
             end
         end

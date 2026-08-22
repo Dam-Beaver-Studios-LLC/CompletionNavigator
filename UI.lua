@@ -40,7 +40,26 @@ UI.ROW_HEIGHT   = 20
 local Print = CN.Print
 
 local WINDOW_WIDTH  = 560
-local WINDOW_HEIGHT = 440
+local WINDOW_HEIGHT = 480
+
+-- THE TAB STRIP AND THE FILTER BOX WERE DRAWN ON TOP OF EACH OTHER.
+--
+-- The search box sat at TOPRIGHT -30, -26 and occupied the band 26 to 46
+-- pixels down. The tab row started at -30 and is 22 tall, so it occupied 30
+-- to 52. With the eleven registered tabs, seven fit on the first row and the
+-- last two of them -- Zone and Warband -- were drawn underneath the filter
+-- box and its label, in the default configuration, on every install.
+--
+-- The wrap test could not have known: it measured against the window's width
+-- and the search box is not a tab.
+--
+-- Fixed by giving each its own band rather than by making the wrap cleverer.
+-- The search row owns the top; the tabs start below it; the window grows by
+-- the forty pixels that costs so the lists keep their depth.
+local SEARCH_TOP     = -26
+local TAB_STRIP_TOP  = -54
+local TAB_ROW_HEIGHT = 26
+local TAB_MARGIN     = 24
 
 local window, minimapButton
 
@@ -132,6 +151,26 @@ function UI.RegisterTab(definition)
     end
 end
 
+-- WHERE EACH TAB GOES NEXT.
+--
+-- Named per tab rather than as one global pointer at `/cn help`, because
+-- "what else is there" has a different answer on the Collections tab than on
+-- the Journey tab, and the useful moment to answer it is while somebody is
+-- looking at one of them.
+UI.tabFooters = {
+    Next        = "/cn why  Â·  /cn order  Â·  /cn plan 30",
+    Journey     = "/cn zones  Â·  /cn elsewhere  Â·  /cn loremaster",
+    Zone        = "/cn zone  Â·  /cn follow  Â·  /cn unpicked",
+    Now         = "/cn clock  Â·  /cn rares  Â·  /cn vault",
+    Goals       = "/cn goal <type> <name>  Â·  /cn chase  Â·  /cn gogoal",
+    Warband     = "/cn alts  Â·  /cn who <type> <name>  Â·  /cn recipes",
+    Vault       = "/cn vault  Â·  /cn instances  Â·  /cn clock",
+    Collections = "/cn breakdown  Â·  /cn closest  Â·  /cn drops <name>",
+    Remaining   = "/cn breakdown  Â·  /cn progress  Â·  /cn whyzero",
+    Scans       = "/cn setup  Â·  /cn dbsize  Â·  /cn providers",
+    Settings    = "/cn selftest  Â·  /cn errors  Â·  /cn perf",
+}
+
 ------------------------------------------------------------
 -- SCROLLING LIST
 ------------------------------------------------------------
@@ -141,7 +180,59 @@ end
 -- BUTTON HELPERS
 ------------------------------------------------------------
 
-local function AddButton(parent, text, width, onClick)
+-- FADED IN AND OUT.
+--
+-- Nothing in the addon faded: the window, the arrow and the two world frames
+-- all appeared and vanished between one frame and the next. A hundred and
+-- fifty milliseconds is below the threshold at which anybody would call it an
+-- animation, and above the one at which a window stops feeling like it was
+-- pasted onto the screen. `UIFrameFadeIn` and `UIFrameFadeOut` are stock
+-- globals with no library behind them.
+local function FadeIn(frame, seconds)
+    if not frame then
+        return
+    end
+
+    if UIFrameFadeIn then
+        frame:SetAlpha(0)
+        frame:Show()
+
+        pcall(UIFrameFadeIn, frame, seconds or 0.15, 0, 1)
+
+        return
+    end
+
+    frame:Show()
+end
+
+UI.FadeIn = FadeIn
+
+-- TOOLTIPS ON THE CONTROLS THEMSELVES.
+--
+-- The minimap button had an excellent one. Not one of the window's
+-- twenty-five buttons or six checkboxes had any, so "Re-route", "Next step",
+-- "Rescan zones", "Filter types" and the priority cycler all had to be
+-- guessed at. This is the difference between a window a new player explores
+-- and one they close.
+local function AttachTooltip(frame, tooltip)
+    if not frame or not tooltip or not GameTooltip then
+        return
+    end
+
+    frame:SetScript("OnEnter", function(hovered)
+        GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
+        GameTooltip:SetText(tooltip, 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+
+    frame:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+end
+
+UI.AttachTooltip = AttachTooltip
+
+local function AddButton(parent, text, width, onClick, tooltip)
     local button, templated = SafeCreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
 
     button:SetSize(width or 110, 22)
@@ -162,13 +253,17 @@ local function AddButton(parent, text, width, onClick)
     button:SetText(text)
     button:SetScript("OnClick", onClick)
 
+    AttachTooltip(button, tooltip)
+
     return button
 end
 
-local function AddCheckbox(parent, text, getter, setter)
+local function AddCheckbox(parent, text, getter, setter, tooltip)
     local check = SafeCreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
 
     check:SetSize(24, 24)
+
+    check.cnTooltip = tooltip
 
     if check.Text then
         check.Text:SetText(text)
@@ -186,6 +281,8 @@ local function AddCheckbox(parent, text, getter, setter)
     check.Refresh = function()
         check:SetChecked(getter() and true or false)
     end
+
+    AttachTooltip(check, tooltip)
 
     return check
 end
@@ -226,7 +323,11 @@ local function BuildWindow()
     window:Hide()
 
     if templated and window.TitleText then
-        window.TitleText:SetText("Completion Navigator")
+        -- The version, where somebody looking for it would look. It used to
+        -- appear in exactly one place a player might find: the bottom right
+        -- of the Settings tab, in grey, at ten points.
+        window.TitleText:SetText("Completion Navigator "
+            .. CN.Muted("v" .. tostring(CN.version)))
     else
         PaintPanel(window)
 
@@ -241,7 +342,11 @@ local function BuildWindow()
 
         local title = titleBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         title:SetPoint("LEFT", 10, 0)
-        title:SetText("Completion Navigator")
+        -- The fallback title, which must say the same thing as the
+        -- templated one above -- these were two separate literals and could
+        -- silently drift.
+        title:SetText("Completion Navigator "
+            .. CN.Muted("v" .. tostring(CN.version)))
 
         local close = CreateFrame("Button", nil, window)
         close:SetSize(22, 22)
@@ -277,7 +382,7 @@ local function BuildWindow()
     local search = CreateFrame("EditBox", nil, window, "InputBoxTemplate")
 
     search:SetSize(160, 20)
-    search:SetPoint("TOPRIGHT", -30, -26)
+    search:SetPoint("TOPRIGHT", -30, SEARCH_TOP)
     search:SetAutoFocus(false)
     search:SetMaxLetters(40)
 
@@ -334,8 +439,20 @@ local function BuildWindow()
     window.body:SetPoint("TOPLEFT", 10, -58)
     window.body:SetPoint("BOTTOMRIGHT", -10, 34)
 
-    window.footer = window:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    -- A ROUTE FROM THE WINDOW TO THE HUNDRED AND TWENTY COMMANDS.
+    --
+    -- This said "/cn help for the full command list" and that was the entire
+    -- bridge: eleven tabs on one side, a hundred and twenty-five commands on
+    -- the other, and one line pointing at a wall of text.
+    --
+    -- Each tab names the two or three commands that go deeper from THAT tab,
+    -- at the moment they are relevant, which surfaces about twenty-five
+    -- buried commands for the cost of one fontstring.
+    window.footer = window:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+    window.footer:SetTextColor(CN.Rgb("MUTED"))
     window.footer:SetPoint("BOTTOMLEFT", 14, 14)
+    window.footer:SetPoint("BOTTOMRIGHT", -14, 14)
+    window.footer:SetJustifyH("LEFT")
     window.footer:SetText("/cn help for the full command list")
 
     UI.RebuildTabs()
@@ -414,7 +531,7 @@ function UI.RebuildTabs()
         -- Wrap to a new row rather than running off the edge. Tabs are a
         -- registry, so the count grows as modules are added and a fixed
         -- single row would eventually overflow silently.
-        if previous and (rowWidth + buttonWidth + 4) > (WINDOW_WIDTH - 24) then
+        if previous and (rowWidth + buttonWidth + 4) > (WINDOW_WIDTH - TAB_MARGIN) then
             row      = row + 1
             rowWidth = 0
             previous = nil
@@ -423,7 +540,8 @@ function UI.RebuildTabs()
         if previous then
             button:SetPoint("LEFT", previous, "RIGHT", 4, 0)
         else
-            button:SetPoint("TOPLEFT", 12, -30 - (row * 26))
+            button:SetPoint("TOPLEFT", CN.SPACE.M,
+                TAB_STRIP_TOP - (row * TAB_ROW_HEIGHT))
         end
 
         rowWidth = rowWidth + buttonWidth + 4
@@ -440,11 +558,14 @@ function UI.RebuildTabs()
     -- Push the body down so a second row of tabs does not overlap it.
     if window.body then
         window.body:ClearAllPoints()
-        window.body:SetPoint("TOPLEFT", 10, -58 - (row * 26))
-        window.body:SetPoint("BOTTOMRIGHT", -10, 34)
+        window.body:SetPoint("TOPLEFT", CN.SPACE.S,
+            TAB_STRIP_TOP - TAB_ROW_HEIGHT - (row * TAB_ROW_HEIGHT))
+        window.body:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 34)
     end
 
-    UI.SelectTab(UI.selectedTab or 1)
+    UI.SelectTab(UI.selectedTab
+        or (CN.Settings() and CN.Settings().selectedTab)
+        or 1)
 end
 
 function UI.SelectTab(index)
@@ -455,6 +576,20 @@ function UI.SelectTab(index)
     end
 
     UI.selectedTab = index
+
+    -- Persisted, so the window reopens where it was left. It always opened on
+    -- the first tab, which for a player who lives in Collections meant one
+    -- extra click every single time.
+    if CN.Settings() then
+        CN.Settings().selectedTab = index
+    end
+
+    if window.footer then
+        local deeper = UI.tabFooters[tab.name]
+
+        window.footer:SetText(deeper
+            or "/cn help for the full command list")
+    end
 
     -- The filter belongs to the tab being left. Clear the box unless the
     -- player has asked for it to follow them, in which case it is put back
@@ -473,12 +608,31 @@ function UI.SelectTab(index)
         window.search:SetText("")
     end
 
+    -- THE SELECTED TAB WAS DRAWN AS A DISABLED BUTTON.
+    --
+    -- `SetEnabled(false)` on `UIPanelButtonTemplate` greys the text and dims
+    -- the art, and in every other piece of interface anywhere, greyed means
+    -- unavailable. So the tab the player was looking at was the one that
+    -- looked broken and the ten they could go to looked live -- the single
+    -- most damaging affordance error in the window, and it shipped for
+    -- eleven releases.
+    --
+    -- Selection is marked instead: a two-pixel rule in the brand blue along
+    -- the bottom edge, which is how a tab has said "you are here" since long
+    -- before this addon. The button stays enabled, so it still highlights on
+    -- hover and clicking it is a harmless refresh.
     for buttonIndex, button in ipairs(window.tabButtons) do
-        if buttonIndex == index then
-            button:SetEnabled(false)
-        else
-            button:SetEnabled(true)
+        if not button.selectMark then
+            button.selectMark = button:CreateTexture(nil, "OVERLAY")
+            button.selectMark:SetHeight(2)
+            button.selectMark:SetPoint("BOTTOMLEFT", 2, 1)
+            button.selectMark:SetPoint("BOTTOMRIGHT", -2, 1)
+            button.selectMark:SetColorTexture(CN.Rgb("BRAND"))
         end
+
+        button.selectMark:SetShown(buttonIndex == index)
+
+        button:SetEnabled(true)
     end
 
     for _, other in ipairs(UI.tabs) do
@@ -600,20 +754,20 @@ function UI.Toggle()
     end
 
     UI.RestorePosition()
-    window:Show()
+    FadeIn(window)
     UI.Refresh()
 
     -- If the frame refuses to show, say so. Silence here is what makes a
     -- missing window look like a command that did nothing.
     if not window:IsShown() then
-        Print("The window could not be shown. Run |cffffff00/cn uistatus|r.")
+        Print("The window could not be shown. Run |cffffc74f/cn uistatus|r.")
     end
 end
 
 function UI.Show()
     BuildWindow()
     UI.RestorePosition()
-    window:Show()
+    FadeIn(window)
     UI.Refresh()
 end
 
@@ -721,7 +875,7 @@ UI.RegisterTab{
             local entries = {}
 
             table.insert(entries, {
-                text = "|cffffff00Show everything|r",
+                text = "|cffffc74fShow everything|r",
                 onClick = function()
                     filters.EnableAllTypes()
                     UI.Refresh()
@@ -732,8 +886,8 @@ UI.RegisterTab{
                 local enabled = filters.IsTypeEnabled(objectiveType)
 
                 table.insert(entries, {
-                    text = (enabled and "|cff00ff00[x]|r " or "|cff666666[ ]|r ")
-                        .. (enabled and "" or "|cff808080")
+                    text = (enabled and "|cff73b873[x]|r " or "|cff5a5f66[ ]|r ")
+                        .. (enabled and "" or "|cff8a8f96")
                         .. filters.TypeLabel(objectiveType)
                         .. (enabled and "" or "|r"),
 
@@ -780,7 +934,7 @@ UI.RegisterTab{
         CN.currentRecommendation = best
 
         panel.title:SetText(tostring(best.name or best.id))
-        panel.type:SetText(CN.TypeLabel(best.type))
+        panel.type:SetText(CN.TypeBadge(best.type))
         panel.why:SetText("Why:\n" .. table.concat(CN.ExplainRecommendation(best), "\n"))
 
         local entries = {}
@@ -789,9 +943,9 @@ UI.RegisterTab{
             local objective = results[index]
 
             table.insert(entries, {
-                text = string.format("|cff999999%2d.|r %s |cff808080[%s]|r",
+                text = string.format("|cff8a8f96%2d.|r %s |cff8a8f96[%s]|r",
                     index, tostring(objective.name or objective.id),
-                    CN.TypeLabel(objective.type)),
+                    CN.TypeBadge(objective.type)),
 
                 tooltip = table.concat(CN.ExplainRecommendation(objective), "\n"),
 
@@ -799,7 +953,7 @@ UI.RegisterTab{
                     CN.currentRecommendation = objective
 
                     panel.title:SetText(tostring(objective.name or objective.id))
-                    panel.type:SetText(CN.TypeLabel(objective.type))
+                    panel.type:SetText(CN.TypeBadge(objective.type))
                     panel.why:SetText("Why:\n"
                         .. table.concat(CN.ExplainRecommendation(objective), "\n"))
                 end,
@@ -871,9 +1025,9 @@ UI.RegisterTab{
 
         for index, objective in ipairs(route) do
             table.insert(entries, {
-                text = string.format("|cff999999%2d.|r %s |cff808080[%s]|r",
+                text = string.format("|cff8a8f96%2d.|r %s |cff8a8f96[%s]|r",
                     index, tostring(objective.name or objective.id),
-                    CN.TypeLabel(objective.type)),
+                    CN.TypeBadge(objective.type)),
 
                 tooltip = "Click to set a waypoint.\n"
                     .. table.concat(CN.ExplainRecommendation(objective), "\n"),
@@ -887,7 +1041,7 @@ UI.RegisterTab{
 
         for _, objective in ipairs(skipped) do
             table.insert(entries, {
-                text = "|cff808080     " .. tostring(objective.name or objective.id)
+                text = "|cff8a8f96     " .. tostring(objective.name or objective.id)
                     .. " (no coordinates)|r",
             })
         end
@@ -919,7 +1073,7 @@ UI.RegisterTab{
                 local scanned        = module.ScanKnown()
 
                 Print("Quests: " .. seen .. " in your log, "
-                    .. "|cffffff00" .. module.AvailableCount() .. "|r "
+                    .. "|cffffc74f" .. module.AvailableCount() .. "|r "
                     .. "available to pick up nearby.")
 
                 CN.DebugPrint(recorded .. " newly recorded, "
@@ -952,7 +1106,7 @@ UI.RegisterTab{
         -- a player reads the top line and stops.
         local questModule = CN:GetModule("Quests")
 
-        table.insert(lines, "|cffffd100Quests|r")
+        table.insert(lines, "|cffffc74fQuests|r")
 
         -- The number he actually wanted back, first.
         local progressModule = CN:GetModule("Progress")
@@ -961,14 +1115,14 @@ UI.RegisterTab{
             local summary = progressModule.Summary()
 
             if summary.lifetime then
-                table.insert(lines, "Completed: |cffffd100"
+                table.insert(lines, "Completed: |cffffc74f"
                     .. CN.Comma(summary.lifetime) .. "|r")
             end
 
-            local todayLine = "Today: |cffffff00" .. summary.today .. "|r"
+            local todayLine = "Today: |cffffc74f" .. summary.today .. "|r"
 
             if summary.best > 0 then
-                todayLine = todayLine .. "   |cff999999best "
+                todayLine = todayLine .. "   |cff8a8f96best "
                     .. summary.best .. "|r"
             end
 
@@ -979,12 +1133,12 @@ UI.RegisterTab{
             local available = questModule.AvailableCount()
 
             table.insert(lines, "Available to pick up nearby: "
-                .. (available > 0 and "|cffffff00" or "|cff999999")
+                .. (available > 0 and "|cffffc74f" or "|cff8a8f96")
                 .. available .. "|r")
             table.insert(lines, "In your log: " .. #CN.Blizzard.GetQuestLogEntries())
         end
 
-        table.insert(lines, "|cff999999Database: "
+        table.insert(lines, "|cff8a8f96Database: "
             .. CN.CountKeys(CN.Account("discoveredQuests")) .. " known, "
             .. CN.CountKeys(CN.Account("questMetadata")) .. " named|r")
         table.insert(lines, " ")
@@ -994,7 +1148,7 @@ UI.RegisterTab{
         if reputations then
             local counts = reputations.Summary()
 
-            table.insert(lines, "|cffffd100Reputations|r")
+            table.insert(lines, "|cffffc74fReputations|r")
             table.insert(lines, "Account-wide: " .. counts.account)
             table.insert(lines, "Character-specific: " .. counts.character)
             table.insert(lines, "Renown: " .. counts.renown
@@ -1002,14 +1156,14 @@ UI.RegisterTab{
             table.insert(lines, "Exalted: " .. counts.exalted)
 
             if counts.paragonPending > 0 then
-                table.insert(lines, "|cff00ff00Paragon rewards waiting: "
+                table.insert(lines, "|cff73b873Paragon rewards waiting: "
                     .. counts.paragonPending .. "|r")
             end
 
             table.insert(lines, " ")
         end
 
-        table.insert(lines, "|cffffd100Warband|r")
+        table.insert(lines, "|cffffc74fWarband|r")
         table.insert(lines, "Known characters: " .. CN.GetCharacterCount())
 
         panel.status:SetText(table.concat(lines, "\n"))
@@ -1080,7 +1234,7 @@ UI.RegisterTab{
 
             for _, event in ipairs(opportunities.GetActiveEvents()) do
                 table.insert(entries, {
-                    text = "|cffffd100EVENT|r  " .. tostring(event.title),
+                    text = "|cffffc74fEVENT|r  " .. tostring(event.title),
                 })
             end
 
@@ -1088,7 +1242,7 @@ UI.RegisterTab{
 
             for _, worldQuest in ipairs(worldQuests) do
                 table.insert(entries, {
-                    text = string.format("|cff33ff99WQ|r     %s  |cff999999%s%s|r",
+                    text = string.format("|cff5dd2fbWQ|r     %s  |cff8a8f96%s%s|r",
                         tostring(worldQuest.name),
                         opportunities.FormatTimeLeft(worldQuest.secondsLeft),
                         worldQuest.tagName and (", " .. worldQuest.tagName) or ""),
@@ -1116,7 +1270,7 @@ UI.RegisterTab{
         if rares then
             for _, vignette in ipairs(rares.GetActive()) do
                 table.insert(entries, {
-                    text = string.format("|cffff8040%s|r  %s",
+                    text = string.format("|cffffc74f%s|r  %s",
                         vignette.kind == "TREASURE" and "CHEST " or "RARE  ",
                         tostring(vignette.name)),
 
@@ -1143,16 +1297,16 @@ UI.RegisterTab{
         if currencies then
             for _, currency in ipairs(currencies.Capped()) do
                 table.insert(entries, {
-                    text = "|cffff4444CAP|r    " .. tostring(currency.name)
-                        .. " |cff999999" .. currency.quantity
+                    text = "|cffe2564cCAP|r    " .. tostring(currency.name)
+                        .. " |cff8a8f96" .. currency.quantity
                         .. " / " .. currency.maximum .. " -- spend it|r",
                 })
             end
 
             for _, currency in ipairs(currencies.WeeklyUnfilled()) do
                 table.insert(entries, {
-                    text = "|cff999999WEEK|r   " .. tostring(currency.name)
-                        .. " |cff999999" .. currency.remaining .. " left this week|r",
+                    text = "|cff8a8f96WEEK|r   " .. tostring(currency.name)
+                        .. " |cff8a8f96" .. currency.remaining .. " left this week|r",
                 })
             end
         end
@@ -1160,7 +1314,7 @@ UI.RegisterTab{
         if #entries == 0 then
             table.insert(entries, { text = "Nothing is expiring nearby." })
             table.insert(entries, {
-                text = "|cff999999World quests and rares only appear for your current map.|r",
+                text = "|cff8a8f96World quests and rares only appear for your current map.|r",
             })
         end
 
@@ -1206,20 +1360,23 @@ UI.RegisterTab{
         local coverage = module.Coverage()
 
         panel.header:SetText(string.format(
-            "%d character%s  |cff999999combined: %d professions, %d recipes, %d titles|r",
+            "%d character%s  |cff8a8f96combined: %d professions, %d recipes, %d titles|r",
             #rows, #rows == 1 and "" or "s",
             coverage.professions, coverage.recipes, coverage.titles))
 
         local entries = {}
 
         for _, row in ipairs(rows) do
-            local marker = row.isCurrent and "|cff00ff00>|r " or "  "
-
             table.insert(entries, {
-                text = marker .. row.key
-                    .. string.format("  |cff999999%s %s%s|r",
-                        tostring(row.level), tostring(row.class or "?"),
-                        row.faction and (" " .. row.faction) or ""),
+                -- `selected` is a texture on the row since 0.54.0; it used to
+                -- be a green ">" prepended to the label, which shifted every
+                -- other row's text by two glyphs.
+                selected = row.isCurrent and true or false,
+
+                text = row.key
+                    .. CN.Aside(tostring(row.level) .. " "
+                        .. tostring(row.class or "?")
+                        .. (row.faction and (" " .. row.faction) or "")),
 
                 tooltip = string.format(
                     "professions %d\nrecipes %d\ntitles %d\nreputations %d",
@@ -1227,7 +1384,7 @@ UI.RegisterTab{
             })
 
             table.insert(entries, {
-                text = "      |cff999999professions " .. row.professions
+                text = "      |cff8a8f96professions " .. row.professions
                     .. ", recipes " .. row.recipes
                     .. ", titles " .. row.titles
                     .. ", reputations " .. row.reputations .. "|r",
@@ -1237,7 +1394,7 @@ UI.RegisterTab{
         panel.list:SetEntries(entries)
 
         if #rows == 1 then
-            panel.note:SetText("|cffffff00Only one character has been seen. "
+            panel.note:SetText("|cffffc74fOnly one character has been seen. "
                 .. "Log in on your alts with the addon loaded to make these "
                 .. "comparisons useful.|r")
         else
@@ -1286,7 +1443,7 @@ UI.RegisterTab{
         if #rows == 0 then
             panel.header:SetText("No Great Vault progress yet")
             panel.list:SetEntries({})
-            panel.note:SetText("|cff999999The client reports vault progress once you "
+            panel.note:SetText("|cff8a8f96The client reports vault progress once you "
                 .. "have completed at least one qualifying activity this week.|r")
             return
         end
@@ -1295,14 +1452,14 @@ UI.RegisterTab{
 
         panel.header:SetText(summary.unlocked .. " reward"
             .. (summary.unlocked == 1 and "" or "s") .. " unlocked"
-            .. (summary.resetsIn and ("  |cff999999resets in "
+            .. (summary.resetsIn and ("  |cff8a8f96resets in "
                 .. vault.FormatReset(summary.resetsIn) .. "|r") or ""))
 
         local entries = {}
 
         if summary.claimable then
             table.insert(entries, {
-                text = "|cff00ff00A reward is waiting to be collected.|r",
+                text = "|cff73b873A reward is waiting to be collected.|r",
             })
         end
 
@@ -1319,9 +1476,9 @@ UI.RegisterTab{
 
             for _, tier in ipairs(row.tiers) do
                 table.insert(entries, {
-                    text = "        |cff999999" .. tier.threshold .. ": "
+                    text = "        |cff8a8f96" .. tier.threshold .. ": "
                         .. (tier.unlocked
-                            and ("|cff00ff00unlocked" .. (tier.level and tier.level > 0
+                            and ("|cff73b873unlocked" .. (tier.level and tier.level > 0
                                 and (" (item level " .. tier.level .. ")") or "") .. "|r")
                             or "locked")
                         .. "|r",
@@ -1332,11 +1489,11 @@ UI.RegisterTab{
         panel.list:SetEntries(entries)
 
         if summary.closest then
-            panel.note:SetText("|cffffff00Closest: " .. summary.closest.label
+            panel.note:SetText("|cffffc74fClosest: " .. summary.closest.label
                 .. " -- " .. summary.closest.remaining .. " more, "
                 .. (vault.rowActions[summary.closest.row] or "keep going") .. ".|r")
         else
-            panel.note:SetText("|cff999999Every row is capped. You choose one item "
+            panel.note:SetText("|cff8a8f96Every row is capped. You choose one item "
                 .. "from everything unlocked.|r")
         end
     end,
@@ -1408,11 +1565,11 @@ UI.RegisterTab{
         local list = goals.List()
 
         panel.header:SetText(#list .. " goal" .. (#list == 1 and "" or "s")
-            .. " |cff999999of " .. goals.limit .. "|r")
+            .. " |cff8a8f96of " .. goals.limit .. "|r")
 
         if #list == 0 then
             panel.list:SetEntries({})
-            panel.note:SetText("|cffffff00Nothing pinned. Use |r/cn goal <type> <id>|cffffff00 "
+            panel.note:SetText("|cffffc74fNothing pinned. Use |r/cn goal <type> <id>|cffffc74f "
                 .. "to pin something to work toward. A goal becomes actionable even "
                 .. "when nothing else would surface it, and anything leading to it "
                 .. "ranks higher.|r")
@@ -1447,9 +1604,9 @@ UI.RegisterTab{
         local stateColor = {
             DONE    = "|cff73b873",
             NEXT    = "|cff5dd2fb",
-            BLOCKED = "|cfff56b61",
-            TODO    = "|cffcccccc",
-            NOTE    = "|cff999999",
+            BLOCKED = "|cffe2564c",
+            TODO    = "|cffc8ccd2",
+            NOTE    = "|cff8a8f96",
         }
 
         for _, goal in ipairs(list) do
@@ -1466,18 +1623,22 @@ UI.RegisterTab{
             local progressText = ""
 
             if chain.done then
-                progressText = " |cff73b873done|r"
+                progressText = CN.Good("done")
             elseif fraction then
-                progressText = string.format(" |cff5dd2fb%d%%|r",
-                    math.floor(fraction * 100 + 0.5))
+                progressText = CN.Brand(string.format("%d%%",
+                    math.floor(fraction * 100 + 0.5)))
             end
 
             table.insert(entries, {
-                text = (isSelected and "|cff00ff00>|r " or "  ")
-                    .. (chain.done and "|cff999999" or "|cffffff00")
-                    .. tostring(goal.name) .. "|r"
-                    .. " |cff999999(" .. tostring(goal.type) .. ")|r"
-                    .. progressText,
+                selected = isSelected,
+
+                text = (chain.done and CN.Muted(tostring(goal.name))
+                        or CN.Accent(tostring(goal.name)))
+                    .. CN.Aside(CN.TypeBadge(goal.type)),
+
+                value = progressText,
+
+                fraction = fraction,
 
                 tooltip = chase and chase.Summarize(chain) or tostring(goal.name),
 
@@ -1492,11 +1653,13 @@ UI.RegisterTab{
             -- readable.
             if isSelected then
                 if fraction then
+                    -- The bar is a texture on the row now, not a run of
+                    -- equals signs whose pixel width changed as it filled.
                     table.insert(entries, {
-                        text = "      |cff5dd2fb" .. CN.ProgressBar(fraction, 24)
-                            .. "|r |cff999999" .. CN.Comma(chain.progress.done)
+                        text     = "    " .. CN.Muted(CN.Comma(chain.progress.done)
                             .. " / " .. CN.Comma(chain.progress.total)
-                            .. " " .. tostring(chain.progress.unit) .. "|r",
+                            .. " " .. tostring(chain.progress.unit)),
+                        fraction = fraction,
                     })
                 end
 
@@ -1505,13 +1668,13 @@ UI.RegisterTab{
                 for _, step in ipairs(chain.steps) do
                     if shown >= 15 then
                         table.insert(entries, {
-                            text = "      |cff999999... and "
+                            text = "      |cff8a8f96... and "
                                 .. (#chain.steps - shown) .. " more|r",
                         })
                         break
                     end
 
-                    local colour = stateColor[step.state] or "|cffcccccc"
+                    local colour = stateColor[step.state] or "|cffc8ccd2"
 
                     local marker = "  "
 
@@ -1530,7 +1693,7 @@ UI.RegisterTab{
 
                 if chain.character then
                     table.insert(entries, {
-                        text = "      |cff999999Best character: "
+                        text = "      |cff8a8f96Best character: "
                             .. tostring(chain.character) .. "|r",
                     })
                 end
@@ -1542,7 +1705,7 @@ UI.RegisterTab{
         local selectedChain = chase and chase.Chain(panel.selected)
 
         if selectedChain then
-            panel.note:SetText("|cff999999" .. chase.Summarize(selectedChain) .. "|r")
+            panel.note:SetText("|cff8a8f96" .. chase.Summarize(selectedChain) .. "|r")
         else
             panel.note:SetText("")
         end
@@ -1619,7 +1782,7 @@ UI.RegisterTab{
             local summary = progress.Summary()
 
             panel.header:SetText(summary.lifetime
-                and ("|cffffd100" .. CN.Comma(summary.lifetime)
+                and ("|cffffc74f" .. CN.Comma(summary.lifetime)
                     .. "|r quests completed")
                 or "Quest progress")
 
@@ -1638,7 +1801,7 @@ UI.RegisterTab{
                 table.insert(parts, "best day " .. summary.best)
             end
 
-            panel.sub:SetText("|cff999999" .. table.concat(parts, "   ") .. "|r")
+            panel.sub:SetText("|cff8a8f96" .. table.concat(parts, "   ") .. "|r")
         else
             panel.header:SetText("Quest progress")
             panel.sub:SetText("")
@@ -1662,7 +1825,7 @@ UI.RegisterTab{
                 end
 
                 table.insert(entries, {
-                    text = "|cffffd100Here|r  " .. tostring(zone.name) .. bar,
+                    text = "|cffffc74fHere|r  " .. tostring(zone.name) .. bar,
                 })
             end
 
@@ -1670,7 +1833,7 @@ UI.RegisterTab{
 
             if #split.story > 0 or #split.side > 0 then
                 table.insert(entries, {
-                    text = "      |cff999999" .. #split.story
+                    text = "      |cff8a8f96" .. #split.story
                         .. " story, " .. #split.side
                         .. " side quests available here|r",
                 })
@@ -1680,11 +1843,11 @@ UI.RegisterTab{
 
             if #closest > 0 then
                 table.insert(entries, { text = " " })
-                table.insert(entries, { text = "|cffffd100Closest to finished|r" })
+                table.insert(entries, { text = "|cffffc74fClosest to finished|r" })
 
                 for _, entry in ipairs(closest) do
                     table.insert(entries, {
-                        text = "  |cffffff00" .. tostring(entry.name) .. "|r"
+                        text = "  |cffffc74f" .. tostring(entry.name) .. "|r"
                             .. " |cff5dd2fb"
                             .. CN.ProgressBar(entry.fraction, 14) .. "|r "
                             .. entry.done .. "/" .. entry.criteria,
@@ -1697,7 +1860,7 @@ UI.RegisterTab{
 
         if #entries == 0 then
             table.insert(entries, {
-                text = "|cff999999No zone achievements scanned yet. "
+                text = "|cff8a8f96No zone achievements scanned yet. "
                     .. "Press Rescan zones.|r",
             })
         end
@@ -1747,25 +1910,35 @@ UI.RegisterTab{
         for _, row in ipairs(module.Report()) do
             local headline
 
+            -- PADDING REMOVED, COLUMN ADDED. `%-14s` in a proportional font
+            -- is not a column; the list row has a right-aligned value slot
+            -- and a progress bar, which is what this was trying to be.
+            local value, fraction
+
+            headline = CN.Accent(row.name)
+
             if row.total and row.total > 0 then
-                headline = string.format("|cffffd100%-14s|r %6d / %-6d  |cff999999%.1f%%|r",
-                    row.name, row.collected or 0, row.total,
-                    (row.collected or 0) / row.total * 100)
+                fraction = (row.collected or 0) / row.total
+
+                value = CN.Body((row.collected or 0) .. " / " .. row.total)
+                    .. "  " .. CN.Muted(string.format("%.1f%%", fraction * 100))
             else
-                headline = string.format("|cffffd100%-14s|r %6d collected",
-                    row.name, row.collected or 0)
+                value = CN.Body((row.collected or 0) .. " collected")
             end
 
             table.insert(entries, {
-                text    = headline,
-                tooltip = row.unknownTotal
+                text     = headline,
+                value    = value,
+                fraction = fraction,
+                tooltip  = row.unknownTotal
                     and ("No percentage is shown because " .. row.unknownTotal .. ".")
                     or nil,
             })
 
             if row.unknownTotal then
                 table.insert(entries, {
-                    text = "      |cff808080no percentage: " .. row.unknownTotal .. "|r",
+                    text = "      " .. CN.Muted("no percentage: "
+                        .. row.unknownTotal),
                 })
             end
 
@@ -1775,7 +1948,7 @@ UI.RegisterTab{
 
             if row.action then
                 table.insert(entries, {
-                    text = "      |cffffff00-> " .. row.action .. "|r",
+                    text = "      |cffffc74f-> " .. row.action .. "|r",
                 })
             end
         end
@@ -1817,54 +1990,106 @@ UI.RegisterTab{
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
 
-        panel.scanAll = AddButton(panel, "Scan everything", 140, function()
-            Print("Scanning all collections; this takes a moment.")
+        -- A WORKING STATE, BECAUSE THIS FREEZES THE CLIENT.
+        --
+        -- The button printed "this takes a moment", ran six synchronous
+        -- scans, and printed "complete" -- and because chat does not flush
+        -- mid-frame, both lines appeared together when the client unfroze.
+        -- From the player's side: click, the game stops, the game starts, two
+        -- messages arrive at once. Nothing on screen ever said it was working.
+        --
+        -- `C_Timer.After(0, ...)` lets the frame paint the disabled state
+        -- first, which is the whole difference.
+        local function RunScans(button, label, work)
+            button:SetEnabled(false)
+            button:SetText("Working" .. CN.DOT .. CN.DOT .. CN.DOT)
 
-            for _, moduleName in ipairs({ "Pets", "Mounts", "Toys", "Appearances",
-                                          "Titles", "Professions" }) do
-                local module = CN:GetModule(moduleName)
+            local function finish()
+                work()
 
-                if module and module.Scan then
-                    pcall(module.Scan)
-                end
+                button:SetText(label)
+                button:SetEnabled(true)
+
+                UI.Refresh()
             end
 
-            Print("Collection scan complete.")
-            UI.Refresh()
-        end)
-        panel.scanAll:SetPoint("BOTTOMLEFT", 8, 8)
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0, finish)
+            else
+                finish()
+            end
+        end
+
+        panel.scanAll = AddButton(panel, "Scan everything", 140, function()
+            RunScans(panel.scanAll, "Scan everything", function()
+                local scanned = 0
+
+                for _, moduleName in ipairs({ "Pets", "Mounts", "Toys",
+                                              "Appearances", "Titles",
+                                              "Professions" }) do
+                    local module = CN:GetModule(moduleName)
+
+                    if module and module.Scan then
+                        if pcall(module.Scan) then
+                            scanned = scanned + 1
+
+                            if CN.NoteSetupStep then
+                                CN.NoteSetupStep(moduleName)
+                            end
+                        end
+                    end
+                end
+
+                Print("Read " .. scanned .. " collections.")
+            end)
+        end, "Read your pets, mounts, toys, appearances, titles and "
+            .. "professions from the game. Takes a few seconds and freezes "
+            .. "the client while it runs.")
+
+        panel.scanAll:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
 
         panel.achieve = AddButton(panel, "Scan achievements", 150, function()
-            local module = CN:GetModule("Achievements")
+            RunScans(panel.achieve, "Scan achievements", function()
+                local module = CN:GetModule("Achievements")
 
-            if module then
-                Print("Scanning achievements; this takes a moment.")
+                if not module then
+                    return
+                end
 
                 local scanned, completed = module.Scan()
 
-                Print("Scanned " .. scanned .. ", completed " .. completed .. ".")
-            end
+                if CN.NoteSetupStep then
+                    CN.NoteSetupStep("Achievements")
+                end
 
-            UI.Refresh()
-        end)
-        panel.achieve:SetPoint("LEFT", panel.scanAll, "RIGHT", 6, 0)
+                Print("Read " .. CN.Comma(scanned) .. " achievements, "
+                    .. CN.Comma(completed) .. " of them done.")
+            end)
+        end, "Read the achievement tree, so the addon can say which ones you "
+            .. "are close to finishing.")
+
+        panel.achieve:SetPoint("LEFT", panel.scanAll, "RIGHT", CN.SPACE.S, 0)
     end,
 
     refresh = function(panel)
         local entries = {}
 
         local function row(label, collected, total, note)
-            local text
-
             if total and total > 0 then
-                text = string.format("%-16s %6d / %-6d  |cff999999%.1f%%|r",
-                    label, collected, total, collected / total * 100)
-            else
-                text = string.format("%-16s %6s        |cff999999%s|r",
-                    label, "-", note or "not scanned")
-            end
+                local fraction = collected / total
 
-            table.insert(entries, { text = text })
+                table.insert(entries, {
+                    text     = label,
+                    value    = CN.Body(collected .. " / " .. total) .. "  "
+                        .. CN.Muted(string.format("%.1f%%", fraction * 100)),
+                    fraction = fraction,
+                })
+            else
+                table.insert(entries, {
+                    text  = label,
+                    value = CN.Muted(note or "not scanned"),
+                })
+            end
         end
 
         local pets = CN:GetModule("Pets")
@@ -1915,8 +2140,10 @@ UI.RegisterTab{
             local counts = reputations.Summary()
 
             table.insert(entries, {
-                text = string.format("%-16s %6d account-wide, %d character-specific",
-                    "Reputations", counts.account, counts.character),
+                text  = "Reputations",
+                value = CN.Body(counts.account) .. CN.Muted(" account-wide")
+                    .. CN.Muted(", ") .. CN.Body(counts.character)
+                    .. CN.Muted(" this character"),
             })
         end
 
@@ -1926,8 +2153,9 @@ UI.RegisterTab{
 
         if quests then
             table.insert(entries, {
-                text = string.format("%-16s %6d discovered",
-                    "Quests", CN.CountKeys(CN.Account("discoveredQuests"))),
+                text  = "Quests",
+                value = CN.Body(CN.CountKeys(CN.Account("discoveredQuests")))
+                    .. CN.Muted(" discovered"),
             })
         end
 
@@ -1936,13 +2164,14 @@ UI.RegisterTab{
         if professions then
             for _, record in ipairs(professions.Summary()) do
                 local note = record.recipesSeen
-                    and (record.recipeKnown .. " of " .. record.recipeTotal .. " recipes")
-                    or "|cffffff00open its window once|r"
+                    and CN.Muted(record.recipeKnown .. " of "
+                        .. record.recipeTotal .. " recipes")
+                    or CN.Accent("open its window once")
 
                 table.insert(entries, {
-                    text = string.format("%-16s %6s / %-6s  |cff999999%s|r",
-                        record.name or "?", tostring(record.rank),
-                        tostring(record.maxRank), note),
+                    text  = record.name or "?",
+                    value = CN.Body(tostring(record.rank) .. " / "
+                        .. tostring(record.maxRank)) .. "  " .. note,
                 })
             end
 
@@ -1951,7 +2180,7 @@ UI.RegisterTab{
             if #waiting > 0 then
                 table.insert(entries, { text = " " })
                 table.insert(entries, {
-                    text = "|cffffff00Recipes need the profession window open: "
+                    text = "|cffffc74fRecipes need the profession window open: "
                         .. table.concat(waiting, ", ") .. "|r",
                     tooltip = "The client only exposes a recipe list while that "
                         .. "profession's window is open. Open each one once and "
@@ -1960,7 +2189,7 @@ UI.RegisterTab{
             end
         end
 
-        panel.header:SetText("Account completion  |cff999999(collected / "
+        panel.header:SetText("Account completion  |cff8a8f96(collected / "
             .. "known at the last scan -- not of everything in the game)|r")
         panel.list:SetEntries(entries)
     end,
@@ -1975,12 +2204,108 @@ UI.RegisterTab{
     order = 40,
 
     build = function(panel)
-        panel.modeLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-        panel.modeLabel:SetPoint("TOPLEFT", 8, -12)
+        -- TWO COLUMNS, GROUPED BY WHAT THE SETTING IS ABOUT.
+        --
+        -- Twenty-one settings existed and seven were reachable here. The
+        -- thirteen that were not included BOTH accessibility controls -- text
+        -- scale and colourblind arrow labelling -- so the players who most
+        -- need a larger interface were the least likely to find it, since the
+        -- only way in was `/cn scale 1.4` typed into chat.
+        --
+        -- Grouped by subject, and every group is a heading and a stack, so
+        -- the panel reads as a settings page rather than as a column of
+        -- checkboxes in registration order.
+        local LEFT   = CN.SPACE.M
+        local COLUMN = 268
 
-        -- A cycling button instead of a dropdown: dropdown templates have
-        -- been renamed twice in recent expansions, this has not.
-        panel.modeButton = AddButton(panel, "balanced", 160, function()
+        local function Heading(text, anchor, column)
+            local head = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+
+            head:SetTextColor(CN.Rgb("ACCENT"))
+            head:SetText(text)
+
+            if anchor then
+                head:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -CN.SPACE.L)
+            else
+                head:SetPoint("TOPLEFT", column or LEFT, -CN.SPACE.M)
+            end
+
+            return head
+        end
+
+        local function Under(frame, anchor, gap)
+            frame:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -(gap or CN.SPACE.S))
+
+            return frame
+        end
+
+        ------------------------------------------------------------
+        -- WHAT THE ADDON IS AIMING AT
+        ------------------------------------------------------------
+        panel.focusHead = Heading("What you are playing for")
+
+        panel.focusButton = AddButton(panel, "Everything", 170, function()
+            local filters = CN:GetModule("Filters")
+
+            if not filters then
+                return
+            end
+
+            -- Cycles the FOCUS presets, which is the thing the welcome screen
+            -- sets and the thing that hides objective types. The window used
+            -- to expose the other one -- the weighting profile -- under the
+            -- label "Priority mode", so a player who chose Collecting at
+            -- first run had thirteen types hidden and found no control here
+            -- that said so.
+            local names = {}
+
+            for name in pairs(CN.modes) do
+                table.insert(names, name)
+            end
+
+            table.sort(names)
+
+            local current = select(1, filters.CurrentMode())
+
+            local index = 0
+
+            for position, name in ipairs(names) do
+                if name == current then
+                    index = position
+                    break
+                end
+            end
+
+            filters.ApplyMode(names[(index % #names) + 1])
+
+            UI.Refresh()
+        end, "A focus weights the ranking AND hides the kinds of thing you "
+            .. "are not chasing. Click to cycle.")
+
+        Under(panel.focusButton, panel.focusHead, CN.SPACE.XS)
+
+        panel.focusClear = AddButton(panel, "Clear focus", 120, function()
+            local filters = CN:GetModule("Filters")
+
+            if filters then
+                filters.ClearMode()
+            end
+
+            UI.Refresh()
+        end, "Puts back the filters and the weighting you had before the "
+            .. "focus was set.")
+
+        panel.focusClear:SetPoint("LEFT", panel.focusButton, "RIGHT", CN.SPACE.S, 0)
+
+        panel.focusNote = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.focusNote:SetTextColor(CN.Rgb("MUTED"))
+        panel.focusNote:SetWidth(COLUMN - CN.SPACE.M)
+        panel.focusNote:SetJustifyH("LEFT")
+        Under(panel.focusNote, panel.focusButton, CN.SPACE.XS)
+
+        panel.weightHead = Heading("Ranking weight", panel.focusNote)
+
+        panel.modeButton = AddButton(panel, "balanced", 170, function()
             local settings = CN.Settings()
             local modes    = CN.priorityModes
 
@@ -1995,47 +2320,51 @@ UI.RegisterTab{
 
             settings.priorityMode = modes[(currentIndex % #modes) + 1]
 
+            CN.InvalidateCandidates("mode")
+
             UI.Refresh()
-        end)
-        panel.modeButton:SetPoint("TOPLEFT", panel.modeLabel, "BOTTOMLEFT", 0, -6)
+        end, "How the ranking trades travel time against how much a thing is "
+            .. "worth. Does not hide anything. Click to cycle.")
 
-        panel.modeHelp = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
-        panel.modeHelp:SetPoint("LEFT", panel.modeButton, "RIGHT", 8, 0)
-        panel.modeHelp:SetText("Click to cycle")
+        Under(panel.modeButton, panel.weightHead, CN.SPACE.XS)
 
-        panel.debug = AddCheckbox(panel, "Debug output",
-            function() return CN.Settings().debug end,
-            function(value) CN.Settings().debug = value end)
-        panel.debug:SetPoint("TOPLEFT", panel.modeButton, "BOTTOMLEFT", 0, -16)
+        panel.learn = AddCheckbox(panel, "Learn from what I actually do",
+            function()
+                local preference = CN:GetModule("Preference")
 
-        panel.auto = AddCheckbox(panel, "Auto-advance waypoint as I finish things",
-            function() return CN.IsAutoWaypointEnabled() end,
+                return preference and preference.IsEnabled()
+            end,
             function(value)
-                CN.Settings().autoWaypoint = value
+                local preference = CN:GetModule("Preference")
 
-                if value then
-                    CN.StartAutoWaypointTicker()
-                    CN.AutoAdvance("settings", true)
-                else
-                    CN.StopAutoWaypointTicker()
+                if preference then
+                    preference.SetEnabled(value)
                 end
-            end)
-        panel.auto:SetPoint("TOPLEFT", panel.debug, "BOTTOMLEFT", 0, -6)
+            end,
+            "Quietly ranks the kinds of thing you act on above the kinds you "
+            .. "skip. /cn learned shows what it has noticed and undoes it.")
 
-        panel.minimap = AddCheckbox(panel, "Show minimap button",
+        Under(panel.learn, panel.modeButton, CN.SPACE.M)
+
+        ------------------------------------------------------------
+        -- WHAT IT DRAWS
+        ------------------------------------------------------------
+        panel.screenHead = Heading("On screen", nil, COLUMN)
+        panel.screenHead:ClearAllPoints()
+        panel.screenHead:SetPoint("TOPLEFT", COLUMN, -CN.SPACE.M)
+
+        panel.minimap = AddCheckbox(panel, "Minimap button",
             function() return not CN.Settings().minimap.hide end,
             function(value)
                 CN.Settings().minimap.hide = not value
                 UI.UpdateMinimapButton()
-            end)
-        panel.minimap:SetPoint("TOPLEFT", panel.auto, "BOTTOMLEFT", 0, -6)
+            end,
+            "Left-click opens this window, right-click navigates to the next "
+            .. "objective, middle-click starts follow mode.")
 
-        panel.tooltips = AddCheckbox(panel, "Add lines to item and unit tooltips",
-            function() return CN.Settings().tooltips ~= false end,
-            function(value) CN.Settings().tooltips = value end)
-        panel.tooltips:SetPoint("TOPLEFT", panel.minimap, "BOTTOMLEFT", 0, -6)
+        Under(panel.minimap, panel.screenHead, CN.SPACE.XS)
 
-        panel.arrow = AddCheckbox(panel, "Show the navigation arrow",
+        panel.arrow = AddCheckbox(panel, "Navigation arrow",
             function()
                 local nav = CN:GetModule("Navigation")
                 return nav and nav.IsArrowEnabled()
@@ -2053,10 +2382,13 @@ UI.RegisterTab{
                         nav.Clear()
                     end
                 end
-            end)
-        panel.arrow:SetPoint("TOPLEFT", panel.tooltips, "BOTTOMLEFT", 0, -6)
+            end,
+            "Only appears once something is being tracked, so it is never in "
+            .. "the way when you are not navigating.")
 
-        panel.pins = AddCheckbox(panel, "Show route pins on the world map",
+        Under(panel.arrow, panel.minimap, CN.SPACE.XS)
+
+        panel.pins = AddCheckbox(panel, "Route pins on the world map",
             function()
                 local pins = CN:GetModule("MapPins")
                 return pins and pins.IsEnabled()
@@ -2067,17 +2399,122 @@ UI.RegisterTab{
                 if pins then
                     pins.SetEnabled(value)
                 end
-            end)
-        panel.pins:SetPoint("TOPLEFT", panel.arrow, "BOTTOMLEFT", 0, -6)
+            end,
+            "Numbered stops for the zone you are looking at, brightest first.")
 
+        Under(panel.pins, panel.arrow, CN.SPACE.XS)
+
+        panel.tooltips = AddCheckbox(panel, "Lines on item and unit tooltips",
+            function() return CN.Settings().tooltips ~= false end,
+            function(value) CN.Settings().tooltips = value end,
+            "Only where there is something to say -- most items have nothing.")
+
+        Under(panel.tooltips, panel.pins, CN.SPACE.XS)
+
+        panel.hud = AddCheckbox(panel, "Heads-up line",
+            function()
+                local hud = CN:GetModule("Hud")
+                return hud and hud.IsEnabled()
+            end,
+            function(value)
+                local hud = CN:GetModule("Hud")
+
+                if hud then
+                    hud.SetEnabled(value)
+                end
+            end,
+            "A small always-on line showing the current stop. Off by default.")
+
+        Under(panel.hud, panel.tooltips, CN.SPACE.XS)
+
+        panel.cues = AddCheckbox(panel, "Sound when I clear a stop",
+            function() return CN.Settings().cues and true or false end,
+            function(value)
+                CN.Settings().cues = value or nil
+            end,
+            "A quiet tap on arriving and clearing a stop, and a flourish when "
+            .. "a route finishes. Off by default.")
+
+        Under(panel.cues, panel.hud, CN.SPACE.XS)
+
+        ------------------------------------------------------------
+        -- ACCESSIBILITY -- BOTH OF THESE WERE SLASH-ONLY.
+        ------------------------------------------------------------
+        panel.accessHead = Heading("Easier to read", panel.cues)
+
+        panel.scale = AddButton(panel, "Size 1.0", 120, function()
+            local hud = CN:GetModule("Hud")
+
+            if not hud then
+                return
+            end
+
+            local steps = { 0.9, 1.0, 1.1, 1.25, 1.5 }
+
+            local current = hud.Scale and hud.Scale() or 1
+
+            local index = 1
+
+            for position, value in ipairs(steps) do
+                if math.abs(value - current) < 0.001 then
+                    index = position
+                    break
+                end
+            end
+
+            hud.SetScale(steps[(index % #steps) + 1])
+
+            UI.Refresh()
+        end, "How large everything this addon draws is -- the window, the "
+            .. "arrow, the heads-up line. Click to cycle.")
+
+        Under(panel.scale, panel.accessHead, CN.SPACE.XS)
+
+        panel.colourblind = AddCheckbox(panel, "Label the arrow in words too",
+            function()
+                local hud = CN:GetModule("Hud")
+                return hud and hud.IsColourblind()
+            end,
+            function(value)
+                local hud = CN:GetModule("Hud")
+
+                if hud then
+                    hud.SetColourblind(value)
+                end
+            end,
+            "Writes ahead, veer or turn round beside the arrow, and switches "
+            .. "its colours to a palette that separates by lightness rather "
+            .. "than by hue.")
+
+        Under(panel.colourblind, panel.scale, CN.SPACE.XS)
+
+        panel.keepFilter = AddCheckbox(panel, "Keep the filter box across tabs",
+            function() return CN.Settings().keepFilter and true or false end,
+            function(value)
+                CN.Settings().keepFilter = value or nil
+
+                if not value then
+                    UI.persistedFilter = nil
+                end
+            end,
+            "Off is safer: a filter that persists invisibly is how a list "
+            .. "looks empty when it is not.")
+
+        Under(panel.keepFilter, panel.colourblind, CN.SPACE.XS)
+
+        ------------------------------------------------------------
+        -- THE REST
+        ------------------------------------------------------------
         panel.setup = AddButton(panel, "Scan everything now", 180, function()
             local setup = CN:GetModule("Setup")
 
             if setup then
                 setup.Run()
             end
-        end)
-        panel.setup:SetPoint("TOPLEFT", panel.pins, "BOTTOMLEFT", 0, -12)
+        end, "Reads everything the client will answer for on its own. A few "
+            .. "seconds, once.")
+
+        panel.setup:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M + 26)
 
         panel.reset = AddButton(panel, "Reset window position", 180, function()
             CN.Settings().window = nil
@@ -2086,27 +2523,73 @@ UI.RegisterTab{
                 window:ClearAllPoints()
                 window:SetPoint("CENTER")
             end
-        end)
-        panel.reset:SetPoint("BOTTOMLEFT", 8, 8)
+        end, "Puts the window back in the middle of the screen.")
 
-        panel.about = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
-        panel.about:SetPoint("BOTTOMRIGHT", -8, 14)
+        panel.reset:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
+
+        panel.debug = AddCheckbox(panel, "Debug output",
+            function() return CN.Settings().debug end,
+            function(value) CN.Settings().debug = value end,
+            "Prints what the addon is doing internally. For bug reports.")
+
+        panel.debug:SetPoint("BOTTOMLEFT", COLUMN, CN.SPACE.M)
+
+        panel.about = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.about:SetTextColor(CN.Rgb("MUTED"))
+        panel.about:SetPoint("BOTTOMRIGHT", -CN.SPACE.M, CN.SPACE.M)
+        panel.about:SetJustifyH("RIGHT")
     end,
 
     refresh = function(panel)
         local settings = CN.Settings()
 
-        panel.modeLabel:SetText("Priority mode")
+        local filters = CN:GetModule("Filters")
+
+        local active
+
+        if filters and filters.CurrentMode then
+            active = select(2, filters.CurrentMode())
+        end
+
+        panel.focusButton:SetText(active and active.label or "None")
+
+        -- SAYS WHAT THE FOCUS IS DOING TO THE LIST.
+        --
+        -- A focus hides objective types, and nothing in the window ever said
+        -- how many -- so a player who picked "Collecting" at first run had
+        -- thirteen kinds of thing silently missing and no way to find out
+        -- from here.
+        local hidden = filters and filters.HiddenTypeCount
+            and filters.HiddenTypeCount() or 0
+
+        if active then
+            panel.focusNote:SetText(active.note
+                .. (hidden > 0 and ("  " .. CN.DOT .. "  hiding " .. hidden
+                    .. " of " .. #filters.TypeOrder() .. " kinds") or ""))
+        elseif hidden > 0 then
+            panel.focusNote:SetText("No focus set. " .. hidden .. " kind"
+                .. (hidden == 1 and " is" or "s are")
+                .. " hidden by your own choices.")
+        else
+            panel.focusNote:SetText("No focus set: everything is in the list.")
+        end
+
         panel.modeButton:SetText(tostring(settings.priorityMode))
 
-        panel.debug.Refresh()
-        panel.auto.Refresh()
-        panel.minimap.Refresh()
-        panel.tooltips.Refresh()
-        panel.arrow.Refresh()
-        panel.pins.Refresh()
+        local hud = CN:GetModule("Hud")
 
-        panel.about:SetText("Completion Navigator v" .. CN.version)
+        panel.scale:SetText(string.format("Size %.2g",
+            (hud and hud.Scale and hud.Scale()) or 1))
+
+        for _, control in ipairs({ panel.learn, panel.minimap, panel.arrow,
+                                   panel.pins, panel.tooltips, panel.hud,
+                                   panel.cues, panel.colourblind,
+                                   panel.keepFilter, panel.debug }) do
+            control.Refresh()
+        end
+
+        panel.about:SetText("Completion Navigator v" .. CN.version
+            .. "  " .. CN.DOT .. "  Dam Beaver Studios, LLC")
     end,
 }
 
@@ -2262,12 +2745,12 @@ local function BuildMinimapButton()
         end
 
         GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("|cffffffffLeft-click|r open the window", 1, 1, 1)
-        GameTooltip:AddLine("|cffffffffRight-click|r navigate to the next objective", 1, 1, 1)
+        GameTooltip:AddLine("|cfff2f4f6Left-click|r open the window", 1, 1, 1)
+        GameTooltip:AddLine("|cfff2f4f6Right-click|r navigate to the next objective", 1, 1, 1)
         -- Middle-click has started follow mode since 0.44.0 and the tooltip
         -- -- the feature's only discovery surface -- did not mention it.
-        GameTooltip:AddLine("|cffffffffMiddle-click|r start follow mode", 1, 1, 1)
-        GameTooltip:AddLine("|cffffffffDrag|r reposition this button", 1, 1, 1)
+        GameTooltip:AddLine("|cfff2f4f6Middle-click|r start follow mode", 1, 1, 1)
+        GameTooltip:AddLine("|cfff2f4f6Drag|r reposition this button", 1, 1, 1)
         GameTooltip:Show()
     end)
 
@@ -2367,8 +2850,8 @@ CN:OnLogin(function()
     if not settings.seenWelcome then
         settings.seenWelcome = true
 
-        Print("Click the |cffffff00map icon on your minimap|r to open the window, "
-            .. "or type |cffffff00/cn ui|r.")
+        Print("Click the |cffffc74fmap icon on your minimap|r to open the window, "
+            .. "or type |cffffc74f/cn ui|r.")
         Print("Right-click that icon to navigate straight to the next objective.")
     end
 end)
@@ -2411,7 +2894,7 @@ CN:RegisterCommand{
     help    = "Diagnose the window and minimap button.",
     handler = function()
         Print("UI diagnostics:")
-        Print("Window object: " .. (CompletionNavigatorFrame and "created" or "|cffff4444not created|r"))
+        Print("Window object: " .. (CompletionNavigatorFrame and "created" or "|cffe2564cnot created|r"))
 
         if CompletionNavigatorFrame then
             Print("  shown: " .. tostring(CompletionNavigatorFrame:IsShown()))
@@ -2426,7 +2909,7 @@ CN:RegisterCommand{
         end
 
         Print("Minimap button: "
-            .. (CompletionNavigatorMinimapButton and "created" or "|cffff4444not created|r"))
+            .. (CompletionNavigatorMinimapButton and "created" or "|cffe2564cnot created|r"))
 
         if CompletionNavigatorMinimapButton then
             Print("  shown: " .. tostring(CompletionNavigatorMinimapButton:IsShown()))

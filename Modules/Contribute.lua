@@ -240,13 +240,13 @@ CN:RegisterCommand{
             local ok, err, count, added = Contribute.Import(rest)
 
             if not ok then
-                Print("|cfff56b61Not imported:|r " .. tostring(err))
+                Print("|cffe2564cNot imported:|r " .. tostring(err))
                 return
             end
 
             Print("Imported " .. count .. " chain(s), " .. added .. " new.")
-            Print("|cff999999They are recorded as observations, not as facts: "
-                .. "|cffffff00/cn why|r will say the chain came from a "
+            Print("|cff8a8f96They are recorded as observations, not as facts: "
+                .. "|cffffc74f/cn why|r will say the chain came from a "
                 .. "contribution rather than from curated data.|r")
             return
         end
@@ -255,13 +255,13 @@ CN:RegisterCommand{
 
         if not export then
             Print("Nothing to contribute yet.")
-            Print("|cff999999" .. tostring(err) .. "|r")
+            Print("|cff8a8f96" .. tostring(err) .. "|r")
             return
         end
 
         Print(count .. " chain(s) ready to share. This text and nothing else:")
-        Print("|cffffff00" .. export .. "|r")
-        Print("|cff999999It contains quest IDs and orderings. No character "
+        Print("|cffffc74f" .. export .. "|r")
+        Print("|cff8a8f96It contains quest IDs and orderings. No character "
             .. "name, no realm, no timestamps, no coordinates -- read it "
             .. "before you send it, which is rather the point of a format you "
             .. "can read.|r")

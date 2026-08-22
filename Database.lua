@@ -261,6 +261,80 @@ CN.migrations = {
     -- it under an older build, or through a version where the constant was
     -- larger, stayed large forever. Trim on the way in instead of trusting
     -- that it never happened.
+    -- 8 -> 9. Three stores change shape, all of them for speed and all of
+    -- them measured.
+    --
+    -- `ignoredObjectives` and `deferredObjectives` were keyed on a "TYPE:id"
+    -- string, and the two functions that read them are called twice per
+    -- candidate -- four thousand times each per rebuild at retail scale. So
+    -- the moment a player used Ignore once, every rebuild built eight
+    -- thousand strings to look up a table with one row in it: +2.2 ms per
+    -- rebuild, a 53% increase, for exactly the people the feature is for.
+    -- Nested by type, the lookup is two hash indexes and no string at all.
+    --
+    -- `flightRoutes` was keyed the same way and read once per surviving pair
+    -- inside the travel search -- about a thousand times per journey estimate
+    -- on a real continent. Node ids are integers, so the pair packs into one
+    -- number exactly.
+    [8] = function(db)
+        db.account = db.account or {}
+
+        for _, name in ipairs({ "ignoredObjectives", "deferredObjectives" }) do
+            local store = db.account[name]
+
+            if type(store) == "table" then
+                local nested, moved = {}, 0
+
+                for key, entry in pairs(store) do
+                    -- Already nested (a type name maps to a table of ids)
+                    -- is left alone, so re-running is harmless.
+                    local objectiveType, id =
+                        string.match(tostring(key), "^(.-):(.+)$")
+
+                    if objectiveType and id then
+                        nested[objectiveType] = nested[objectiveType] or {}
+                        nested[objectiveType][tonumber(id) or id] = entry
+                        moved = moved + 1
+                    else
+                        nested[key] = entry
+                    end
+                end
+
+                db.account[name] = nested
+
+                if moved > 0 then
+                    CN.DebugPrint("Renested " .. moved .. " row(s) in "
+                        .. name .. ".")
+                end
+            end
+        end
+
+        local routes = db.account.flightRoutes
+
+        if type(routes) == "table" then
+            local packed, moved = {}, 0
+
+            local stride = 1000000
+
+            for key, count in pairs(routes) do
+                local from, to = string.match(tostring(key), "^(%d+):(%d+)$")
+
+                if from and to then
+                    packed[(tonumber(from) * stride) + tonumber(to)] = count
+                    moved = moved + 1
+                else
+                    packed[key] = count
+                end
+            end
+
+            db.account.flightRoutes = packed
+
+            if moved > 0 then
+                CN.DebugPrint("Repacked " .. moved .. " flight route key(s).")
+            end
+        end
+    end,
+
     -- 7 -> 8. `questStatus` was a per-character fact kept in an account-wide
     -- table, which is two defects at once.
     --
@@ -427,6 +501,14 @@ function CN.InitializeDatabase()
 
     CN.db = CompletionNavigatorDB
 
+    -- The ignore and defer stores are held as file-locals in Objectives.lua
+    -- so the hottest pair of functions in the addon does not do a table
+    -- lookup and two `or {}` assignments per call. The table identity changes
+    -- here, so the references have to be renewed here.
+    if CN.RefreshFilterStores then
+        CN.RefreshFilterStores()
+    end
+
     DebugPrint("Database initialized (schema version " .. tostring(CN.db.version) .. ").")
 end
 
@@ -488,6 +570,14 @@ CN.scanProviders = {
 -- the right place to tell the candidate caches they are stale.
 function CN.MarkScanned(key)
     CN.Account("collectionScans")[key] = time()
+
+    -- Every scan in the addon already routes through here, so this is where
+    -- the setup record learns that a step is done -- rather than only the
+    -- eleven-step run knowing, which is what made the login reminder tell
+    -- players nothing had been scanned while four subsystems were answering.
+    if CN.NoteSetupStep then
+        CN.NoteSetupStep(key)
+    end
 
     -- Scoring.lua loads after this file, so these may not exist yet at load
     -- time. They always do by the time a scan can run.
@@ -608,8 +698,8 @@ CN:RegisterCommand{
     handler = function()
         local rows, total = CN.DatabaseSizes()
 
-        Print(string.format("Saved data: |cffffd100%.0f KB|r", total / 1024))
-        Print("|cff999999Rewritten in full every time you log out.|r")
+        Print(string.format("Saved data: |cffffc74f%.0f KB|r", total / 1024))
+        Print("|cff8a8f96Rewritten in full every time you log out.|r")
 
         -- DISK IS NOT MEMORY, AND ONLY ONE OF THEM WAS BEING MEASURED.
         --
@@ -625,9 +715,9 @@ CN:RegisterCommand{
                     pcall(GetAddOnMemoryUsage, "CompletionNavigator")
 
                 if gotMemory and kilobytes then
-                    Print(string.format("In memory: |cffffd100%.0f KB|r",
+                    Print(string.format("In memory: |cffffc74f%.0f KB|r",
                         kilobytes))
-                    Print("|cff999999Indexes, caches and frames. Freed when "
+                    Print("|cff8a8f96Indexes, caches and frames. Freed when "
                         .. "you log out; not written anywhere.|r")
                 end
             end
@@ -637,7 +727,7 @@ CN:RegisterCommand{
 
         for _, row in ipairs(rows) do
             if row.bytes > 4096 and shown < 12 then
-                Print(string.format("  %-20s %6.0f KB  |cff999999%d rows|r",
+                Print(string.format("  %-20s %6.0f KB  |cff8a8f96%d rows|r",
                     row.name, row.bytes / 1024, row.count))
 
                 shown = shown + 1
@@ -645,7 +735,7 @@ CN:RegisterCommand{
         end
 
         if shown == 0 then
-            Print("|cff999999Nothing large enough to itemise.|r")
+            Print("|cff8a8f96Nothing large enough to itemise.|r")
         end
     end,
 }

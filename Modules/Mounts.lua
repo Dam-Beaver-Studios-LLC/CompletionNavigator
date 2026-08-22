@@ -310,7 +310,7 @@ CN:RegisterCommand{
 
         local record = Store()[mountID]
 
-        Print(record.name .. " |cff999999(" .. mountID .. ")|r")
+        Print(record.name .. " |cff8a8f96(" .. mountID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected))
 
         if record.source and record.source ~= "" then
@@ -319,7 +319,7 @@ CN:RegisterCommand{
 
         if record.isFactionSpecific then
             Print("Faction: " .. (FACTION_NAMES[record.faction] or "unknown")
-                .. (Mounts.IsUsableByCharacter(record) and "" or " |cffff4444(not this character)|r"))
+                .. (Mounts.IsUsableByCharacter(record) and "" or " |cffe2564c(not this character)|r"))
         end
     end,
 }

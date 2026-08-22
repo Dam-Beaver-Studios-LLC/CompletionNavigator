@@ -47,7 +47,7 @@ local function CurrentText(results)
 
     local objective = results[1]
 
-    return tostring(objective.name or objective.id), CN.TypeLabel(objective.type)
+    return tostring(objective.name or objective.id), CN.TypeBadge(objective.type)
 end
 
 Broker.CurrentText = CurrentText
@@ -212,9 +212,9 @@ end
 function Broker.Announce(vignette)
     announced[vignette.vignetteID] = time()
 
-    Print("|cff5DD2FBRare up:|r " .. tostring(vignette.name or "unknown")
+    Print("|cff5dd2fbRare up:|r " .. tostring(vignette.name or "unknown")
         .. (vignette.x and vignette.y
-            and string.format(" |cff999999%.1f, %.1f|r",
+            and string.format(" |cff8a8f96%.1f, %.1f|r",
                 vignette.x * 100, vignette.y * 100)
             or ""))
 
@@ -293,7 +293,7 @@ CN:RegisterCommand{
         Print("Rare alerts: " .. CN.YesNo(Broker.AlertsEnabled()))
 
         if Broker.AlertsEnabled() then
-            Print("|cff999999Announced once each, only for rares you have not "
+            Print("|cff8a8f96Announced once each, only for rares you have not "
                 .. "already cleared, and reset when you change zone.|r")
         end
     end,
@@ -308,14 +308,14 @@ CN:RegisterCommand{
             local name = CurrentText()
 
             Print("LibDataBroker feed: " .. CN.YesNo(true))
-            Print("Currently showing: |cffffff00" .. tostring(name) .. "|r")
-            Print("|cff999999Add it from your display addon: Titan Panel, "
+            Print("Currently showing: |cffffc74f" .. tostring(name) .. "|r")
+            Print("|cff8a8f96Add it from your display addon: Titan Panel, "
                 .. "ElvUI datatexts, ChocolateBar.|r")
             return
         end
 
         Print("LibDataBroker feed: " .. CN.YesNo(false))
-        Print("|cff999999LibDataBroker is not installed, which is fine -- it is "
+        Print("|cff8a8f96LibDataBroker is not installed, which is fine -- it is "
             .. "optional. Display addons like Titan Panel and ElvUI ship it, "
             .. "and the feed appears automatically when one of them is present.|r")
     end,

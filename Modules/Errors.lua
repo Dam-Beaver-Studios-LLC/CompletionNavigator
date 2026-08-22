@@ -241,14 +241,14 @@ CN:RegisterCommand{
 
         for event, why in pairs(CN.rejectedEvents or {}) do
             if rejected == 0 then
-                Print("|cfff56b61The client refused to register these "
+                Print("|cffe2564cThe client refused to register these "
                     .. "events, so nothing listening for them ever runs:|r")
             end
 
             rejected = rejected + 1
 
-            Print("  |cfff56b61" .. tostring(event) .. "|r")
-            Print("    |cff999999" .. tostring(why) .. "|r")
+            Print("  |cffe2564c" .. tostring(event) .. "|r")
+            Print("    |cff8a8f96" .. tostring(why) .. "|r")
         end
 
         if #ring == 0 then
@@ -258,15 +258,15 @@ CN:RegisterCommand{
                 Print("Nothing this session. From the previous one:")
 
                 for _, entry in ipairs(previous) do
-                    Print("  |cfff56b61" .. tostring(entry.context) .. "|r"
+                    Print("  |cffe2564c" .. tostring(entry.context) .. "|r"
                         .. ((entry.count or 1) > 1
-                            and (" |cffffff00x" .. entry.count .. "|r") or ""))
-                    Print("    |cff999999" .. tostring(entry.message) .. "|r")
+                            and (" |cffffc74fx" .. entry.count .. "|r") or ""))
+                    Print("    |cff8a8f96" .. tostring(entry.message) .. "|r")
                 end
 
                 Errors.ForgetPrevious()
 
-                Print("|cff999999Shown once, then forgotten.|r")
+                Print("|cff8a8f96Shown once, then forgotten.|r")
                 return
             end
 
@@ -276,7 +276,7 @@ CN:RegisterCommand{
             end
 
             Print("Nothing has gone wrong this session.")
-            Print("|cff999999Errors inside the addon are caught so they "
+            Print("|cff8a8f96Errors inside the addon are caught so they "
                 .. "cannot break your session -- which is also why they would "
                 .. "otherwise be invisible. They are recorded here instead.|r")
             return
@@ -285,13 +285,13 @@ CN:RegisterCommand{
         Print(#ring .. " error(s) recorded this session:")
 
         for _, entry in ipairs(ring) do
-            Print("  |cfff56b61" .. entry.context .. "|r"
-                .. (entry.count > 1 and (" |cffffff00x" .. entry.count .. "|r") or ""))
-            Print("    |cff999999" .. entry.message .. "|r")
+            Print("  |cffe2564c" .. entry.context .. "|r"
+                .. (entry.count > 1 and (" |cffffc74fx" .. entry.count .. "|r") or ""))
+            Print("    |cff8a8f96" .. entry.message .. "|r")
         end
 
-        Print("|cff999999Paste this into a bug report along with "
-            .. "|cffffff00/cn selftest|r output.|r")
+        Print("|cff8a8f96Paste this into a bug report along with "
+            .. "|cffffc74f/cn selftest|r output.|r")
     end,
 }
 

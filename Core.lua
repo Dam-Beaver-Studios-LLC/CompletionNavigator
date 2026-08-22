@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.53.0"
-CN.dbVersion   = 8
+CN.version     = "0.54.0"
+CN.dbVersion   = 9
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -41,11 +41,39 @@ CN.logoutHooks = {}   -- functions run on PLAYER_LOGOUT
 -- OUTPUT
 ------------------------------------------------------------
 
-local PREFIX       = "|cff33ff99Completion Navigator|r: "
-local DEBUG_PREFIX = "|cff999999Completion Navigator Debug|r: "
+-- THE ADDON'S NAME ONCE PER ANSWER, NOT ONCE PER LINE.
+--
+-- Every line went out with "Completion Navigator: " in front of it, and this
+-- addon answers in blocks: `/cn next` is four to six lines, `/cn help` is
+-- twenty, `/cn uistatus` is twelve. Twenty-two characters of chrome per line
+-- turned every answer into a wall of the addon's own name, in a chat frame
+-- the player is also using for the game.
+--
+-- The headline carries the name. Continuations are indented under it, which
+-- is what a block of related lines has looked like in every medium for four
+-- hundred years, and costs three characters instead of twenty-two.
+local PREFIX       = "|cff5dd2fbCompletion Navigator|r: "
+local CONTINUATION = "   "
+local DEBUG_PREFIX = "|cff8a8f96Completion Navigator Debug|r: "
 
 function CN.Print(message)
     DEFAULT_CHAT_FRAME:AddMessage(PREFIX .. tostring(message))
+end
+
+-- A continuation of the line above: same answer, no repeated identity.
+function CN.PrintLine(message)
+    DEFAULT_CHAT_FRAME:AddMessage(CONTINUATION .. tostring(message))
+end
+
+-- The common shape: one headline and its detail. Saves every caller from
+-- deciding which of the two to use, and makes the block structure visible in
+-- the source as well as on screen.
+function CN.PrintBlock(headline, lines)
+    CN.Print(headline)
+
+    for _, line in ipairs(lines or {}) do
+        CN.PrintLine(line)
+    end
 end
 
 function CN.DebugPrint(message)
@@ -59,11 +87,14 @@ local DebugPrint = CN.DebugPrint
 
 -- Colorized yes/no used throughout the completion output.
 function CN.YesNo(value)
+    -- Sentence case, not shouting. "YES" beside sentence-case labels was the
+    -- loudest thing in the addon's output and it was answering the smallest
+    -- questions.
     if value then
-        return "|cff00ff00YES|r"
+        return CN.Good("yes")
     end
 
-    return "|cffff4444NO|r"
+    return CN.Bad("no")
 end
 
 ------------------------------------------------------------
@@ -330,11 +361,11 @@ function CN.WithConfidence(text, level)
     -- CN.L is not available while Core.lua is loading, so the lookup happens
     -- here at call time rather than at file scope.
     if level == CN.confidence.UNKNOWN or text == nil then
-        return "|cff999999" .. CN.L["unknown"] .. "|r"
+        return "|cff8a8f96" .. CN.L["unknown"] .. "|r"
     end
 
     if level == CN.confidence.ESTIMATED then
-        return text .. " |cff999999(" .. CN.L["estimated"] .. ")|r"
+        return text .. " |cff8a8f96(" .. CN.L["estimated"] .. ")|r"
     end
 
     return text

@@ -219,7 +219,7 @@ CN:RegisterCommand{
 
         if not mine then
             Print("Nothing known yet.")
-            Print("|cff999999The game only hands the addon your order list "
+            Print("|cff8a8f96The game only hands the addon your order list "
                 .. "once you have opened the order frame this session. It is "
                 .. "not asked to open on your behalf.|r")
             return
@@ -236,12 +236,12 @@ CN:RegisterCommand{
                 local line = "  " .. tostring(order.itemName or order.itemID)
 
                 if order.crafter then
-                    line = line .. " |cff999999claimed by "
+                    line = line .. " |cff8a8f96claimed by "
                         .. order.crafter .. "|r"
                 end
 
                 if order.expiresIn then
-                    line = line .. " |cffffff00expires in "
+                    line = line .. " |cffffc74fexpires in "
                         .. ((session and session.FormatDuration
                             and session.FormatDuration(order.expiresIn))
                             or "soon") .. "|r"

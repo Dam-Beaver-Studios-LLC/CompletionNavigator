@@ -412,7 +412,11 @@ CN:RegisterEvent("QUEST_TURNED_IN", function()
 end)
 
 CN:RegisterCommand{
-    name    = "waiting",
+    -- RENAMED. "Waiting" reads as "waiting on a timer", which is what
+    -- `/cn now` and `/cn clock` do -- three commands about deadlines, and
+    -- this one is not about deadlines at all.
+    name    = "unpicked",
+    aliases = { "waiting" },
     args    = "[zone name]",
     order   = 23,
     help    = "Quests you have walked past and never picked up, by zone.",
@@ -423,7 +427,7 @@ CN:RegisterCommand{
 
         if #zones == 0 then
             Print("Nothing remembered yet.")
-            Print("|cff999999The addon records quest starts as it sees them. "
+            Print("|cff8a8f96The addon records quest starts as it sees them. "
                 .. "Walk through a zone once and it can tell you what you "
                 .. "left behind in it.|r")
             return
@@ -436,7 +440,7 @@ CN:RegisterCommand{
 
                     for index, entry in ipairs(Quests.RememberedInZone(zone.mapID)) do
                         if index > 20 then
-                            Print("  |cff999999... and more|r")
+                            Print("  |cff8a8f96... and more|r")
                             break
                         end
 
@@ -456,7 +460,7 @@ CN:RegisterCommand{
 
         for index, zone in ipairs(zones) do
             if index > 12 then
-                Print("  |cff999999... and " .. (#zones - 12) .. " more zones|r")
+                Print("  |cff8a8f96... and " .. (#zones - 12) .. " more zones|r")
                 break
             end
 
@@ -464,7 +468,7 @@ CN:RegisterCommand{
                 tostring(zone.name or zone.mapID), zone.count))
         end
 
-        Print("|cff999999This is what the addon has actually seen, not every "
+        Print("|cff8a8f96This is what the addon has actually seen, not every "
             .. "quest in the game -- the client only lists pins for the map "
             .. "you are looking at.|r")
     end,
@@ -684,6 +688,74 @@ function Quests.AvailableCount(mapID)
     return #Quests.AvailableOnMap(mapID)
 end
 
+------------------------------------------------------------
+-- SAYING SO WHEN IT IS WORTH SAYING
+------------------------------------------------------------
+
+-- THE ADDON KNEW AND SAID NOTHING.
+--
+-- Walking into a zone with seven unpicked quests in it is the single most
+-- common moment at which "what should I do next?" has an obvious answer, and
+-- the addon computed that number on arrival and kept it to itself until
+-- somebody thought to type `/cn zone`.
+--
+-- This is a prompt, not an action: it names a number and a command. It does
+-- not accept a quest, move a waypoint, or open anything.
+--
+-- Bounded three ways, because a line that appears too often is a line people
+-- turn off: once per zone per session, only when there are enough of them to
+-- be worth a detour, and never while the player is busy.
+Quests.arrivalMinimum = 3
+
+local announcedZones = {}
+
+function Quests.ForgetArrivals()
+    announcedZones = {}
+end
+
+function Quests.AnnounceArrival(mapID)
+    mapID = mapID or CN.GetPlayerPosition()
+
+    if not mapID or announcedZones[mapID] then
+        return false
+    end
+
+    -- In a fight, on a boat, or mid-flight is not a moment for a suggestion.
+    if InCombatLockdown and InCombatLockdown() then
+        return false
+    end
+
+    local available = Quests.AvailableOnMap(mapID)
+
+    announcedZones[mapID] = true
+
+    if #available < Quests.arrivalMinimum then
+        return false
+    end
+
+    local zone = Blizzard.GetMapName(mapID) or "This zone"
+
+    CN.PrintBlock(zone .. ": " .. CN.Brand(#available)
+        .. " quest" .. (#available == 1 and "" or "s")
+        .. " here you have not picked up",
+        {
+            CN.Accent("/cn zone")
+                .. CN.Muted(" routes them, nearest first."),
+        })
+
+    return true
+end
+
+CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
+    -- Delayed: the map is not reliable in the frame the event fires, and the
+    -- quest pins arrive after it.
+    if C_Timer and C_Timer.After then
+        C_Timer.After(3, function()
+            pcall(Quests.AnnounceArrival)
+        end)
+    end
+end)
+
 function Quests.DiscoverActive()
     local entries = Blizzard.GetQuestLogEntries()
 
@@ -770,6 +842,13 @@ function Quests.ScanKnown()
         if accountCompleted then
             onAccount = onAccount + 1
         end
+    end
+
+    -- The only setup step that does not go through `CN.MarkScanned`, because
+    -- it scans nothing collectible -- but the setup record still has to know
+    -- it ran, or the login reminder asks for it forever.
+    if CN.NoteSetupStep then
+        CN.NoteSetupStep("quests")
     end
 
     return scanned, byCharacter, onAccount
@@ -1291,7 +1370,7 @@ CN:RegisterCommand{
         if Blizzard.HasAccountQuestAPI() then
             Print("Account/Warband completion: " .. CN.YesNo(accountCompleted))
         else
-            Print("Account/Warband completion: |cffffff00API unavailable|r")
+            Print("Account/Warband completion: |cffffc74fAPI unavailable|r")
         end
 
         local state, reason, detail = CN.Explain(CN.objectiveTypes.QUEST, questID)
@@ -1318,7 +1397,7 @@ CN:RegisterCommand{
 
         if cached and cached.name then
             Print("Cached quest " .. questID .. ": " .. cached.name
-                .. " |cff999999[" .. tostring(cached.source) .. "]|r")
+                .. " |cff8a8f96[" .. tostring(cached.source) .. "]|r")
         else
             Print("No cached metadata for quest " .. questID .. ".")
         end
@@ -1409,7 +1488,7 @@ CN:RegisterCommand{
 
         if #available == 0 then
             Print("Nothing here is offering you a quest you have not taken.")
-            Print("|cff999999That counts quest starts the map is showing. A "
+            Print("|cff8a8f96That counts quest starts the map is showing. A "
                 .. "giver you have not walked past yet is not on the map, so "
                 .. "it is not counted.|r")
             return
@@ -1434,29 +1513,29 @@ CN:RegisterCommand{
             local where = ""
 
             if poi.x and poi.y then
-                where = string.format(" |cff999999(%.1f, %.1f)|r",
+                where = string.format(" |cff8a8f96(%.1f, %.1f)|r",
                     poi.x * 100, poi.y * 100)
             end
 
-            Print("  |cffffff00" .. title .. "|r" .. where)
+            Print("  |cffffc74f" .. title .. "|r" .. where)
         end
 
         if #near > 0 and #zone > 0 then
-            Print("|cff999999Plus " .. #zone
+            Print("|cff8a8f96Plus " .. #zone
                 .. " further out in this zone.|r")
         end
 
         local tasks = Quests.TasksOnMap(mapID)
 
         if #tasks > 0 then
-            Print("|cff999999Also " .. #tasks .. " world quest"
+            Print("|cff8a8f96Also " .. #tasks .. " world quest"
                 .. (#tasks == 1 and "" or "s")
                 .. " or bonus objective in this zone -- no giver to talk "
                 .. "to.|r")
         end
 
-        Print("|cff999999These are in your recommendations and in |r/cn zone"
-            .. "|cff999999 too.|r")
+        Print("|cff8a8f96These are in your recommendations and in |r/cn zone"
+            .. "|cff8a8f96 too.|r")
     end,
 }
 
@@ -1490,7 +1569,7 @@ CN:RegisterCommand{
             .. report.counts.offered .. " remembered from conversations.")
 
         if report.counts.start == 0 and report.counts.offered == 0 then
-            Print("|cffffff00If you can see an exclamation mark from here, the "
+            Print("|cffffc74fIf you can see an exclamation mark from here, the "
                 .. "client has not published that pin to any of the maps "
                 .. "above. Talk to the NPC once and it will be remembered.|r")
         end
@@ -1507,7 +1586,7 @@ CN:RegisterCommand{
         local available = Quests.AvailableCount()
 
         Print("Quests: " .. seen .. " in your log, "
-            .. "|cffffff00" .. available .. "|r available to pick up nearby.")
+            .. "|cffffc74f" .. available .. "|r available to pick up nearby.")
 
         DebugPrint(recorded .. " newly recorded in the database.")
     end,
@@ -1532,12 +1611,12 @@ CN:RegisterCommand{
             .. (Quests.GetName(questID, true) or "unknown name"))
 
         if mapID and x and y then
-            Print(string.format("Location: map %d at %.1f, %.1f |cff999999[%s]|r",
+            Print(string.format("Location: map %d at %.1f, %.1f |cff8a8f96[%s]|r",
                 mapID, x * 100, y * 100, tostring(source)))
         elseif mapID then
-            Print("Map " .. mapID .. " |cffffff00(no coordinates)|r")
+            Print("Map " .. mapID .. " |cffffc74f(no coordinates)|r")
         else
-            Print("|cffff4444No location is known.|r")
+            Print("|cffe2564cNo location is known.|r")
         end
 
         Print("In your quest log: " .. CN.YesNo(Blizzard.IsQuestInLog(questID)))
@@ -1561,7 +1640,7 @@ CN:RegisterCommand{
         if not questID or not mapID or not x or not y then
             Print("Usage: /cn setloc <questID> <mapID> <x> <y>")
             Print("Coordinates may be 0-1 or 0-100. Find the map ID with "
-                .. "|cffffff00/cn where|r or /dump C_Map.GetBestMapForUnit(\"player\")")
+                .. "|cffffc74f/cn where|r or /dump C_Map.GetBestMapForUnit(\"player\")")
             return
         end
 
@@ -1575,14 +1654,45 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "why",
-    args    = "<questID>",
+    args    = "[questID]",
     order   = 27,
-    help    = "Explain why a quest is not available.",
+    help    = "Why the current recommendation, or why a quest is not offered.",
     handler = function(args)
         local questID = CN.ToID(args)
 
         if not questID then
-            Print("Usage: /cn why <questID>")
+            -- BARE `/cn why` ANSWERS THE OBVIOUS READING OF THE WORD.
+            --
+            -- It used to print a usage line. "Why" reads as "why did you
+            -- recommend that", and the addon computes exactly that -- it
+            -- prints it inline under `/cn next` and had no way to ask for it
+            -- again afterwards. Meanwhile the command called `why` answered a
+            -- different question entirely.
+            --
+            -- Both now, split on whether there is an id.
+            local objective = CN.currentRecommendation
+
+            if not objective then
+                local results = CN.Recommend(1)
+
+                objective = results and results[1]
+            end
+
+            if not objective then
+                CN.PrintBlock("Nothing is being recommended, so there is "
+                    .. "nothing to explain.", CN.ExplainEmptyList())
+
+                return
+            end
+
+            CN.PrintBlock(
+                "Why " .. CN.Primary(tostring(objective.name or objective.id))
+                    .. CN.Aside(CN.TypeBadge(objective.type)),
+                CN.ExplainRecommendation(objective))
+
+            CN.PrintLine(CN.Accent("/cn why <questID>")
+                .. CN.Muted(" answers why a quest is not offered to you."))
+
             return
         end
 
@@ -1598,16 +1708,16 @@ CN:RegisterCommand{
         local record, source = Quests.GetRecord(questID)
 
         if record and source then
-            Print("Data source: |cff999999" .. source .. "|r")
+            Print("Data source: |cff8a8f96" .. source .. "|r")
         else
             -- `/cn setloc` records COORDINATES and nothing else, so it
             -- cannot add the prerequisite data this line is about. Naming it
             -- here sent the player to a command that could not solve the
             -- stated problem.
-            Print("|cff999999No prerequisite data for this quest. "
+            Print("|cff8a8f96No prerequisite data for this quest. "
                 .. "Install AllTheThings or BtWQuests, or let the addon "
-                .. "learn the ordering by playing -- |cffffff00/cn harvest|r"
-                .. "|cff999999 shows what it has seen so far.|r")
+                .. "learn the ordering by playing -- |cffffc74f/cn harvest|r"
+                .. "|cff8a8f96 shows what it has seen so far.|r")
         end
     end,
 }

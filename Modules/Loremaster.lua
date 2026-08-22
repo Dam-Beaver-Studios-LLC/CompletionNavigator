@@ -452,24 +452,24 @@ CN:RegisterCommand{
             -- `/cn loremaster scan` is not a command. `loremaster` treats
             -- any argument that is not `all` or `zone` as a NAME FILTER, so
             -- that line sent the player to "Nothing matched."
-            Print("|cff999999Run |cffffff00/cn scanlore|r"
-                .. "|cff999999 to read them from the game.|r")
+            Print("|cff8a8f96Run |cffffc74f/cn scanlore|r"
+                .. "|cff8a8f96 to read them from the game.|r")
             return
         end
 
         Print("Zones worth doing next:")
 
         for index, row in ipairs(rows) do
-            Print(string.format("  %d. %s%s|r  |cff999999%d/%d|r",
+            Print(string.format("  %d. %s%s|r  |cff8a8f96%d/%d|r",
                 index,
-                row.here and "|cff5dd2fb" or "|cffffff00",
+                row.here and "|cff5dd2fb" or "|cffffc74f",
                 tostring(row.name),
                 row.done, row.criteria))
 
-            Print("     |cff999999" .. table.concat(row.reasons, "; ") .. "|r")
+            Print("     |cff8a8f96" .. table.concat(row.reasons, "; ") .. "|r")
         end
 
-        Print("|cff999999Ordered by what is cheapest to finish, not by size. "
+        Print("|cff8a8f96Ordered by what is cheapest to finish, not by size. "
             .. "Zones you have not started are included -- an earlier version "
             .. "left them out entirely.|r")
     end,
@@ -557,7 +557,7 @@ local function PrintAchievement(entry, indent)
     end
 
     Print((indent or "  ")
-        .. (entry.completed and "|cff73b873" or "|cffffff00")
+        .. (entry.completed and "|cff73b873" or "|cffffc74f")
         .. tostring(entry.name) .. "|r" .. bar)
 end
 
@@ -591,8 +591,8 @@ CN:RegisterCommand{
             local split = Loremaster.SplitZoneWork()
 
             if #split.story > 0 or #split.side > 0 then
-                Print("Available here: |cffffff00" .. #split.story
-                    .. "|r story, |cffffff00" .. #split.side .. "|r side.")
+                Print("Available here: |cffffc74f" .. #split.story
+                    .. "|r story, |cffffc74f" .. #split.side .. "|r side.")
             end
 
             if args ~= "" then
@@ -605,7 +605,7 @@ CN:RegisterCommand{
                 PrintAchievement(entry)
             end
 
-            Print("|cff999999/cn loremaster all|r lists everything by expansion.")
+            Print("|cff8a8f96/cn loremaster all|r lists everything by expansion.")
 
             return
         end
@@ -620,7 +620,7 @@ CN:RegisterCommand{
 
         for _, key in ipairs(order) do
             if not filter or string.find(string.lower(key), filter, 1, true) then
-                Print("|cffffd100" .. key .. "|r")
+                Print("|cffffc74f" .. key .. "|r")
 
                 for _, entry in ipairs(groups[key]) do
                     PrintAchievement(entry, "    ")
@@ -630,7 +630,7 @@ CN:RegisterCommand{
         end
 
         if shown == 0 then
-            Print("Nothing matched. Try |cffffff00/cn loremaster all|r.")
+            Print("Nothing matched. Try |cffffc74f/cn loremaster all|r.")
         end
     end,
 }

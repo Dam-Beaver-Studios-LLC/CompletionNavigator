@@ -4,6 +4,8 @@ Most completion addons answer **"what am I missing?"** and hand you a list of se
 
 It reads what you have already earned across your Warband, works out what is reachable now, ranks it, groups the nearby pieces together, and routes you through them.
 
+Type `/cn` and it answers. Everything else is optional.
+
 ---
 
 ## Chase something
@@ -11,7 +13,7 @@ It reads what you have already earned across your Warband, works out what is rea
 Pin a mount, an appearance, an achievement, a reputation â€” anything you are working toward â€” and the addon lays out the path:
 
 ```
-/cn chase rep 2600
+/cn chase rep Severed Threads
 ```
 
 > The Severed Threads â€” 1,200 of 3,000 reputation, next: 1,800 to the next rank
@@ -201,7 +203,7 @@ Reading the game's Adventure Guide changes what it is displaying, so the addon w
 
 The addon notices which kinds of objective you go and do, and leans that way. The guardrails matter more than the learning: nothing moves until a type has been shown 25 times, the adjustment is clamped so a type you skip gets quieter but never silent, and every adjusted line **says on the line** that it was adjusted. The counters decay, so it tracks how you play now rather than how you played in June. A focus you set with `/cn mode` always beats a habit it inferred.
 
-`/cn learned reset` forgets it. `/cn learned off` switches it off. Hiding a type outright is still `/cn show`.
+`/cn learned reset` forgets it. `/cn learned off` switches it off. Hiding a type outright is still `/cn types`.
 
 ## It looks in your bags
 
@@ -236,7 +238,7 @@ Collecting appearances is done by set â€” nobody wants *one more shoulder*,
 ## Where to go when this zone is done
 
 ```
-/cn nearby
+/cn elsewhere
 ```
 
 What is worth doing outside this zone, ordered by **how long it takes to get there** rather than how far away it is â€” a flight point changes that answer, and a mountain range changes it the other way.
@@ -270,7 +272,7 @@ Dead, and it says so before anything else. In a dungeon with four other people, 
 ## Quests you walked past
 
 ```
-/cn waiting
+/cn unpicked
 ```
 
 The game only lists quest pins for the map you are looking at, so "what is waiting three zones away" used to be unanswerable. It still cannot enumerate a zone it has never seen â€” but it remembers every quest start it *has* seen, by zone, which covers everywhere you have actually been.
@@ -284,7 +286,9 @@ A scale for everything it draws, and a colourblind mode that changes the arrow's
 /cn colourblind
 ```
 
-An optional one-line heads-up display (`/cn hud`), a filter box in the window, keybindings for the things you do often, and an entry in the game's own options list rather than only inside a window you have to know how to open.
+Both of those are in the Settings tab now, along with everything else the addon can be told â€” grouped by what the setting is about rather than by the order it was written, and every control says what it does when you hover it. They used to be typing-only, which is the sharpest version of an accessibility problem: the people who most need a larger interface are the least likely to find `/cn scale 1.4` in a hundred-line help listing.
+
+An optional one-line heads-up display, a filter box in the window, keybindings for the things you do often, and a real entry in the game's own options list rather than only inside a window you have to know how to open.
 
 ## When something goes wrong
 
@@ -345,14 +349,14 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn travel` | How long it takes to reach the top recommendation, and by what route â€” leg by leg |
 | `/cn handynotes` | What HandyNotes plugins are drawing on this map, shown rather than scored |
 | `/cn situation` | What the addon thinks you are in the middle of |
-| `/cn waiting` | Quests you have seen and never picked up, by zone |
+| `/cn unpicked` | Quests you have seen and never picked up, by zone |
 | `/cn orders` | Crafting orders you placed, and anything ready to collect |
 | `/cn hud` | A small always-on line showing the next thing |
 | `/cn errors` | Anything that went wrong inside the addon this session |
 | `/cn contribute` | Share the quest chains your play has taught it |
 | `/cn bags` | What is in your bags that you could act on now |
 | `/cn clock` | Everything with a deadline that is not a quest |
-| `/cn nearby` | What is worth doing outside this zone, and how far away it is |
+| `/cn elsewhere` | What is worth doing in other zones, and how far away it is |
 | `/cn order` | Why the list is in the order it is in |
 | `/cn urgency` | What a deadline is worth, at every distance from it |
 | `/cn sets` | Appearance sets nearly finished, and your guild |
@@ -366,7 +370,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn pins` | Route pins on the world map â€” `on`, `off`, `refresh` |
 | `/cn go` | Navigate to the top recommendation |
 | `/cn why <id>` | Why this is recommended, and what is blocking it |
-| `/cn show` | Choose which kinds of objective appear |
+| `/cn types` | Choose which kinds of objective appear |
 | `/cn goal <type> <id>` | Pin a goal and weight everything toward it |
 | `/cn vault` | Great Vault progress |
 | `/cn breakdown` | Collection totals by category |
@@ -381,7 +385,9 @@ There is a window (`/cn ui`), a minimap button, tooltip lines on items and NPCs,
 
 An addon that watches this much of the game can easily cost more than it gives back. This one is measured, not assumed: a full rebuild of everything it tracks â€” at a realistic scale of 1,800 pets, 3,000 achievements, 2,500 recipes, 3,000 appearance sets, five full bags and a continent's worth of flight points â€” costs about **four milliseconds**, and the answer to "what next?" is served from cache in **five microseconds**.
 
-Those figures got better by making the benchmark harder. Three of the most expensive things the addon does had been measured against fixtures holding three appearance sets, three bags of items and three flight points, and at that size all three looked free. At the size the game actually produces, a rebuild cost eleven milliseconds â€” most of a frame, on every event that changes the answer. Costing a single journey has since gone from 1.48 milliseconds to under a tenth of that, and routing it through the flight network rather than across it did not put that back.
+Those figures got better by making the benchmark harder, repeatedly. The most expensive things the addon does had been measured against fixtures holding three appearance sets, three bags and three flight points, and at that size they all looked free. The most recent round found the same trap in a subtler form: the benchmark's sixty flight points were clustered into one corner of the map so they would not disturb any test's answer, and a corner cluster is precisely the shape the route search's pruning rejects without looking â€” so it was measuring a square the search never walks.
+
+Spread across a continent, as they really are, two travel budgets turned out to be over their stated ceilings while the benchmark reported them at a fifth of it. And the zone router â€” which runs every two seconds while you have the Zone tab open â€” cost thirty-three milliseconds and several megabytes of garbage at the size a busy evening actually produces, because it rebuilt the whole route for every pair of stops it considered. It builds nothing now: reversing a segment changes exactly two edges, so the comparison is four distances. Same routes, a fortieth of the work.
 
 Tooltip lines are the same story: hovering an item answers from an index rather than searching everything the addon knows, so mousing across a full bag costs nothing you can feel. It gets there by not doing the same work twice. Counting the quests you have completed, for instance, asks the game once and remembers the answer â€” the alternative is rebuilding a list of every quest you have ever finished each time the window redraws, which on a long-lived character is thousands of entries to display one number. Providers keep shortlists of the handful of rows that could actually be actionable, rather than re-examining thousands on every update. Nothing is rebuilt because a timer fired; it is rebuilt because something you did changed the answer.
 

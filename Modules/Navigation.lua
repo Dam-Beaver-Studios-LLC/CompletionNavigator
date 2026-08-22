@@ -350,6 +350,16 @@ local function BuildArrow()
     arrow.distance:SetPoint("TOP", arrow.label, "BOTTOM", 0, -2)
     arrow.distance:SetJustifyH("CENTER")
 
+    -- OUTLINED, BECAUSE THIS IS DRAWN OVER THE GAME WORLD.
+    --
+    -- Both of these were bare font objects with the standard one-pixel drop
+    -- shadow, which is enough over a dark UI panel and is not enough over
+    -- Northrend snow, Uldum sand, Bastion's marble or a spell effect. The
+    -- distance is the number a player reads WHILE RUNNING, which is exactly
+    -- when the background is moving and unpredictable.
+    CN.Outline(arrow.label, 12, "BODY")
+    CN.Outline(arrow.distance, 17, "PRIMARY")
+
     arrow:SetScript("OnDragStart", function(self)
         self:StartMoving()
     end)
@@ -382,11 +392,19 @@ Navigation.BuildArrow = BuildArrow
 -- The texture is greyscale for exactly this reason: tinting is a multiply, so
 -- a pre-coloured blue arrow could never turn amber, and the bearing feedback
 -- would be lost to make one screenshot prettier.
+-- Derived from the addon's palette rather than restating its numbers. The
+-- three that mean something -- on course, turn a bit, wrong way -- are the
+-- brand blue, the accent gold and the bad red, which is what they always
+-- were; writing them out again is how the two drifted apart in the first
+-- place.
 Navigation.colors = {
-    ON_COURSE = { 0.365, 0.824, 0.984 },   -- #5DD2FB, the logo's marker blue
-    DRIFTING  = { 1.000, 0.780, 0.310 },   -- the logo's gold, for "turn a bit"
-    AWAY      = { 0.960, 0.420, 0.380 },   -- you are walking the wrong way
-    UNKNOWN   = { 0.600, 0.640, 0.680 },   -- no bearing available
+    ON_COURSE = CN.RGB.BRAND,
+    DRIFTING  = CN.RGB.ACCENT,
+    AWAY      = CN.RGB.BAD,
+
+    -- Not a palette role: this is the absence of a bearing, and it must not
+    -- read as any of the three states.
+    UNKNOWN   = { 0.600, 0.640, 0.680 },
 }
 
 -- THE PALETTE ITSELF, NOT ONLY A LABEL BESIDE IT.
@@ -977,13 +995,13 @@ local function Refresh()
     if state.state == "WRONG_MAP" then
         arrow.texture:SetRotation(0)
         arrow.texture:SetVertexColor(Navigation.BearingColor(nil))
-        arrow.distance:SetText("|cff999999" .. (state.zone or CN.L["another zone"]) .. "|r")
+        arrow.distance:SetText("|cff8a8f96" .. (state.zone or CN.L["another zone"]) .. "|r")
         return
     end
 
     if state.state == "NO_POSITION" then
         arrow.texture:SetVertexColor(Navigation.BearingColor(nil))
-        arrow.distance:SetText("|cff999999" .. CN.L["no position"] .. "|r")
+        arrow.distance:SetText("|cff8a8f96" .. CN.L["no position"] .. "|r")
         return
     end
 
@@ -1010,7 +1028,7 @@ local function Refresh()
     local hud = CN:GetModule("Hud")
 
     if hud and hud.IsColourblind() then
-        distanceText = distanceText .. " |cffffffff"
+        distanceText = distanceText .. " |cfff2f4f6"
             .. hud.BearingWord(state.relative) .. "|r"
     end
 
@@ -1062,7 +1080,7 @@ function Navigation.Arrive()
 
         if now and now ~= reached then
             Print(string.format(CN.L["Now heading to: %s"],
-                "|cffffff00" .. now .. "|r"))
+                "|cffffc74f" .. now .. "|r"))
         end
     else
         Navigation.Clear()
@@ -1216,12 +1234,12 @@ CN:RegisterCommand{
         Print("Arrow diagnosis:")
 
         for _, row in ipairs(report) do
-            Print(string.format("  |cff999999%-18s|r %s", row.label, row.value))
+            Print(string.format("  |cff8a8f96%-18s|r %s", row.label, row.value))
         end
 
         if not target then
-            Print("|cff999999Set one with |cffffff00/cn go|r"
-                .. "|cff999999 and run this again.|r")
+            Print("|cff8a8f96Set one with |cffffc74f/cn go|r"
+                .. "|cff8a8f96 and run this again.|r")
         end
     end,
 }
@@ -1438,7 +1456,7 @@ CN:RegisterCommand{
         end
 
         if not target then
-            Print("|cff999999Nothing is being tracked. |cffffff00/cn go|r "
+            Print("|cff8a8f96Nothing is being tracked. |cffffc74f/cn go|r "
                 .. "points it at something.|r")
         end
     end,
@@ -1454,7 +1472,7 @@ CN:RegisterCommand{
         Navigation.ResetCalibration()
 
         Print("Arrow direction flipped and remembered.")
-        Print("|cff999999Whether GetPlayerFacing counts clockwise or "
+        Print("|cff8a8f96Whether GetPlayerFacing counts clockwise or "
             .. "counter-clockwise is a client convention, so the addon "
             .. "normally works this out on its own by watching whether "
             .. "following the arrow shortens the distance.|r")
@@ -1476,11 +1494,11 @@ CN:RegisterCommand{
 
             if not ok then
                 Print("Not a navigation provider: " .. args)
-                Print("|cff999999Choose auto, native, tomtom or blizzard.|r")
+                Print("|cff8a8f96Choose auto, native, tomtom or blizzard.|r")
                 return
             end
 
-            Print("Navigation provider: |cffffff00" .. tostring(resolved) .. "|r")
+            Print("Navigation provider: |cffffc74f" .. tostring(resolved) .. "|r")
         end
 
         local preference = Navigation.Preference()
@@ -1500,7 +1518,7 @@ CN:RegisterCommand{
                 and candidate.IsAvailable()
 
             Print("  " .. entry.name .. " " .. CN.YesNo(available)
-                .. " |cff999999priority " .. entry.priority .. "|r")
+                .. " |cff8a8f96priority " .. entry.priority .. "|r")
         end
     end,
 }
@@ -1528,14 +1546,14 @@ CN:RegisterCommand{
 
         local state = Navigation.Compute()
 
-        Print("Tracking: |cffffff00" .. tostring(target.title) .. "|r in "
+        Print("Tracking: |cffffc74f" .. tostring(target.title) .. "|r in "
             .. tostring(target.zone))
 
         if state and state.state == "WRONG_MAP" then
-            Print("  |cff999999It is in another zone.|r")
+            Print("  |cff8a8f96It is in another zone.|r")
         elseif state then
             Print("  " .. Navigation.FormatDistance(state.yards)
-                .. (state.relative and string.format(" |cff999999%d degrees off|r",
+                .. (state.relative and string.format(" |cff8a8f96%d degrees off|r",
                     math.floor(math.abs(math.deg(state.relative)) + 0.5)) or ""))
         end
     end,

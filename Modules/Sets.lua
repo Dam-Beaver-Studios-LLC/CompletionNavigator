@@ -282,27 +282,27 @@ CN:RegisterCommand{
         local rows, readable, examined = Sets.All()
 
         if not readable then
-            Print("|cff999999This client does not expose appearance sets.|r")
+            Print("|cff8a8f96This client does not expose appearance sets.|r")
         else
             local nearly = Sets.NearlyComplete()
 
             Print(#rows .. " sets read"
                 .. (examined and examined >= Sets.scanCap
-                    and (" |cff999999(capped at " .. Sets.scanCap
+                    and (" |cff8a8f96(capped at " .. Sets.scanCap
                         .. "; there are more)|r") or "") .. ".")
 
             if #nearly == 0 then
-                Print("|cff999999None of them is within two pieces.|r")
+                Print("|cff8a8f96None of them is within two pieces.|r")
             else
                 Print("Nearly finished:")
 
                 for index, set in ipairs(nearly) do
                     if index > 10 then
-                        Print("  |cff999999... and " .. (#nearly - 10) .. " more|r")
+                        Print("  |cff8a8f96... and " .. (#nearly - 10) .. " more|r")
                         break
                     end
 
-                    Print(string.format("  |cffffff00%d left|r %s |cff999999(%d/%d)|r",
+                    Print(string.format("  |cffffc74f%d left|r %s |cff8a8f96(%d/%d)|r",
                         set.missing, tostring(set.name or set.setID),
                         set.collected, set.total))
                 end
@@ -312,15 +312,15 @@ CN:RegisterCommand{
         local guild = Sets.Guild()
 
         if guild then
-            Print("Guild: |cffffff00" .. tostring(guild.name or "?") .. "|r"
-                .. (guild.rank and (" |cff999999" .. guild.rank .. "|r") or ""))
+            Print("Guild: |cffffc74f" .. tostring(guild.name or "?") .. "|r"
+                .. (guild.rank and (" |cff8a8f96" .. guild.rank .. "|r") or ""))
         end
 
         local queues, queueReadable = Sets.Queues()
 
         if queueReadable and #queues > 0 then
             Print(#queues .. " activities you are eligible to queue for.")
-            Print("|cff999999The addon reads that list. It does not queue you "
+            Print("|cff8a8f96The addon reads that list. It does not queue you "
                 .. "for anything.|r")
         end
     end,

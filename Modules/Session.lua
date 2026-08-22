@@ -1016,8 +1016,8 @@ CN:RegisterCommand{
 
             Print("Planning " .. minutes .. " minutes -- "
                 .. (measured
-                    and ("|cff999999your usual session on this character|r")
-                    or ("|cff999999a default; play a few sessions and this "
+                    and ("|cff8a8f96your usual session on this character|r")
+                    or ("|cff8a8f96a default; play a few sessions and this "
                         .. "becomes your own figure|r")))
         end
 
@@ -1029,7 +1029,7 @@ CN:RegisterCommand{
             -- when the second is true is how an addon earns a reputation for
             -- not paying attention.
             Print(plan.notice or "Not while you are in the middle of that.")
-            Print("|cff999999The plan is waiting; ask again when you are back "
+            Print("|cff8a8f96The plan is waiting; ask again when you are back "
                 .. "in the world.|r")
             return
         end
@@ -1052,7 +1052,7 @@ CN:RegisterCommand{
             plan.minutes))
 
         for index, stop in ipairs(plan.stops) do
-            Print(string.format("  %d. |cffffff00%s|r |cff999999%s|r",
+            Print(string.format("  %d. |cffffc74f%s|r |cff8a8f96%s|r",
                 index,
                 tostring(stop.summary or "stop"),
                 stop.confident and Session.FormatDuration(stop.seconds)
@@ -1060,13 +1060,13 @@ CN:RegisterCommand{
         end
 
         if plan.skipped > 0 then
-            Print("|cff999999" .. plan.skipped
+            Print("|cff8a8f96" .. plan.skipped
                 .. " further stop(s) did not fit.|r")
         end
 
         if plan.overran then
-            Print("|cffffff00The nearest stop is longer than the time you "
-                .. "have.|r |cff999999Nothing smaller was available, so it "
+            Print("|cffffc74fThe nearest stop is longer than the time you "
+                .. "have.|r |cff8a8f96Nothing smaller was available, so it "
                 .. "is shown anyway -- but it will not fit.|r")
         end
 
@@ -1083,8 +1083,8 @@ CN:RegisterCommand{
 
             local rate, measured = Session.Speed(bucket)
 
-            Print("|cffffff00Some of this is not measured yet.|r "
-                .. "|cff999999Travel speed: "
+            Print("|cffffc74fSome of this is not measured yet.|r "
+                .. "|cff8a8f96Travel speed: "
                 .. (measured and string.format("%.0f yd/s from %d %s samples",
                         rate, Session.SpeedSampleCount(bucket), bucket)
                     or "still learning")

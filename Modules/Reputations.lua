@@ -546,7 +546,7 @@ CN:RegisterCommand{
         Print("Character-specific: " .. characterSpecific)
 
         if paragon > 0 then
-            Print("Paragon rewards waiting: |cff00ff00" .. paragon .. "|r")
+            Print("Paragon rewards waiting: |cff73b873" .. paragon .. "|r")
         end
     end,
 }
@@ -570,7 +570,7 @@ CN:RegisterCommand{
         Print("Exalted: " .. counts.exalted)
 
         if counts.paragonPending > 0 then
-            Print("Paragon rewards waiting: |cff00ff00" .. counts.paragonPending .. "|r")
+            Print("Paragon rewards waiting: |cff73b873" .. counts.paragonPending .. "|r")
         end
     end,
 }
@@ -601,22 +601,22 @@ CN:RegisterCommand{
             return
         end
 
-        Print(record.name .. " |cff999999(" .. factionID .. ")|r")
+        Print(record.name .. " |cff8a8f96(" .. factionID .. ")|r")
         Print("Standing: " .. tostring(record.standing)
             .. " - " .. tostring(record.current) .. "/" .. tostring(record.maximum))
         Print("Scope: " .. (record.accountWide
-            and "|cff00ff00account-wide (Warband)|r"
-            or "|cffffff00character-specific|r"))
+            and "|cff73b873account-wide (Warband)|r"
+            or "|cffffc74fcharacter-specific|r"))
 
         if record.kind == "RENOWN" then
             Print("Renown: " .. tostring(record.renown)
-                .. (record.maxedOut and " |cff00ff00(maximum)|r" or ""))
+                .. (record.maxedOut and " |cff73b873(maximum)|r" or ""))
         end
 
         if record.paragon then
             Print("Paragon: " .. tostring(record.paragon.value)
                 .. "/" .. tostring(record.paragon.threshold)
-                .. (record.paragon.pending and " |cff00ff00REWARD READY|r" or ""))
+                .. (record.paragon.pending and " |cff73b873REWARD READY|r" or ""))
         end
 
         if scope == "character" then
@@ -629,7 +629,7 @@ CN:RegisterCommand{
         end
 
         if matches and #matches > 1 then
-            Print("|cff999999" .. (#matches - 1) .. " other name match(es); use the ID to be exact.|r")
+            Print("|cff8a8f96" .. (#matches - 1) .. " other name match(es); use the ID to be exact.|r")
         end
     end,
 }
@@ -644,7 +644,7 @@ CN:RegisterCommand{
         local function report(store, scopeLabel)
             for factionID, record in pairs(store) do
                 if record.paragon and record.paragon.pending then
-                    Print(record.name .. " |cff999999(" .. scopeLabel .. ")|r"
+                    Print(record.name .. " |cff8a8f96(" .. scopeLabel .. ")|r"
                         .. " - reward ready")
                     found = found + 1
                 end

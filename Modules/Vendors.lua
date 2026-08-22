@@ -388,7 +388,7 @@ CN:RegisterCommand{
 
         if counts.vendors == 0 then
             Print("No vendors recorded yet.")
-            Print("|cff999999Open a merchant window and the addon records "
+            Print("|cff8a8f96Open a merchant window and the addon records "
                 .. "what they sell and where they stand.|r")
             return
         end
@@ -415,7 +415,7 @@ CN:RegisterCommand{
 
         if not itemID or #sellers == 0 then
             Print("Nothing recorded matches: " .. args)
-            Print("|cff999999Only vendors you have opened are known.|r")
+            Print("|cff8a8f96Only vendors you have opened are known.|r")
             return
         end
 
@@ -423,12 +423,12 @@ CN:RegisterCommand{
 
         for index, seller in ipairs(sellers) do
             Print("  " .. index .. ". " .. tostring(seller.name)
-                .. (seller.zone and (" |cff999999in " .. seller.zone .. "|r") or "")
-                .. (seller.x and string.format(" |cff999999%.1f, %.1f|r",
+                .. (seller.zone and (" |cff8a8f96in " .. seller.zone .. "|r") or "")
+                .. (seller.x and string.format(" |cff8a8f96%.1f, %.1f|r",
                     seller.x * 100, seller.y * 100) or ""))
         end
 
-        Print("|cffffff00/cn tovendor " .. itemID .. "|r to set a waypoint.")
+        Print("|cffffc74f/cn tovendor " .. itemID .. "|r to set a waypoint.")
     end,
 }
 

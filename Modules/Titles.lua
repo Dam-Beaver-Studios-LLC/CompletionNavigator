@@ -255,7 +255,7 @@ CN:RegisterCommand{
             return
         end
 
-        Print(NameStore()[titleID] .. " |cff999999(" .. titleID .. ")|r")
+        Print(NameStore()[titleID] .. " |cff8a8f96(" .. titleID .. ")|r")
 
         local holders = Titles.WhoHas(titleID)
 

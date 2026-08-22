@@ -187,32 +187,19 @@ end
 -- you discover one, which is rare and which the client announces.
 local nodeCache = {}
 
--- THE DISTANCE BETWEEN TWO FLIGHT POINTS DOES NOT CHANGE.
---
--- The pair search below tries every origin against every arrival, which is
--- the right search -- nearest-to-you and nearest-to-target are frequently not
--- the best route together. What was wrong was recomputing the flight leg of
--- every pair on every journey estimate.
---
--- It was invisible for the same reason the appearance-set scan was: the
--- fixture had three flight points in it. A levelled character has sixty on a
--- continent, and sixty squared is three and a half thousand distance
--- computations for one objective's travel cost. Measured with a realistic
--- fixture, a single estimate cost 1.5 ms and a cold rebuild 11.4.
---
--- Two nodes do not move relative to each other, so this is computed once per
--- continent and thrown away with the node list.
-local spanCache = {}
-
 -- The flight network, and the shortest way through it. See THE NETWORK below.
 local neighbourCache = {}
 local pathCache      = {}
 
 function Travel.ForgetNodes()
     nodeCache      = {}
-    spanCache      = {}
     neighbourCache = {}
     pathCache      = {}
+
+    -- Every costed journey was costed through this network, so it goes too.
+    if Travel.ForgetCosts then
+        Travel.ForgetCosts()
+    end
 end
 
 -- Only nodes you can actually use. An undiscovered flight master is not a
@@ -302,32 +289,6 @@ function Travel.KnownNodes(mapID)
     return usable, continent
 end
 
--- The flight leg of every pair, computed once. Indexed by position in the
--- node list rather than by node id, because the list is what the search
--- walks and an integer index costs nothing to look up.
-local function Spans(continent, nodes)
-    if spanCache[continent] then
-        return spanCache[continent]
-    end
-
-    local spans = {}
-
-    for i = 1, #nodes do
-        spans[i] = {}
-
-        for j = 1, #nodes do
-            if i ~= j then
-                spans[i][j] =
-                    Travel.YardsBetweenPoints(nodes[i].point, nodes[j].point)
-            end
-        end
-    end
-
-    spanCache[continent] = spans
-
-    return spans
-end
-
 ------------------------------------------------------------
 -- THE NETWORK
 ------------------------------------------------------------
@@ -372,45 +333,103 @@ local function Neighbours(continent, nodes)
         return neighbourCache[continent]
     end
 
-    local spans = Spans(continent, nodes)
+    -- BUILT WITHOUT SORTING EVERYTHING FIRST.
+    --
+    -- The original built, for every node, a table of ALL n-1 edges -- one
+    -- freshly allocated row each -- sorted the whole thing, and then threw
+    -- away everything past the threshold. On a sixty-node continent that is
+    -- three and a half thousand allocations and sixty sorts to keep a few
+    -- hundred edges, and it ran again after every loading screen. Measured at
+    -- 4.9 ms, which was most of the cold graph cost.
+    --
+    -- What is actually needed is two things: every edge within `hopYards`,
+    -- and the nearest `minimumNeighbours` whatever the distance. The first is
+    -- one pass with no sort at all. The second is a fixed four-slot insertion,
+    -- which is a sort of four elements rather than of fifty-nine.
+    --
+    -- `Spans` is gone with it: since the flight leg became a path rather than
+    -- a straight line it was read exactly once per continent, here, and then
+    -- retained for the session -- sixty tables and three and a half thousand
+    -- numbers kept for nothing.
+    local count = #nodes
     local out   = {}
 
-    for i = 1, #nodes do
-        local ranked = {}
+    -- The shortest edge leaving each node, which is the cheapest any flight
+    -- from it can possibly be. Used to tighten the search's pruning bound.
+    local minOutgoing = {}
 
-        for j = 1, #nodes do
-            local yards = (i ~= j) and spans[i] and spans[i][j]
+    local keep = Travel.minimumNeighbours
 
-            if yards then
-                table.insert(ranked, { index = j, yards = yards })
+    for i = 1, count do
+        local list = {}
+        local held = {}
+
+        -- The `keep` nearest, as a small insertion-sorted array.
+        local nearIndex, nearYards = {}, {}
+        local nearCount = 0
+
+        local shortest
+
+        for j = 1, count do
+            if i ~= j then
+                local yards = Travel.YardsBetweenPoints(
+                    nodes[i].point, nodes[j].point)
+
+                if yards then
+                    if not shortest or yards < shortest then
+                        shortest = yards
+                    end
+
+                    if yards <= Travel.hopYards then
+                        held[j] = true
+
+                        table.insert(list, { index = j, yards = yards })
+                    else
+                        -- Not close enough to connect on distance, so it is a
+                        -- candidate for the nearest-few rule instead.
+                        local slot = nearCount + 1
+
+                        while slot > 1 and nearYards[slot - 1] > yards do
+                            nearYards[slot] = nearYards[slot - 1]
+                            nearIndex[slot] = nearIndex[slot - 1]
+                            slot = slot - 1
+                        end
+
+                        if slot <= keep then
+                            nearYards[slot] = yards
+                            nearIndex[slot] = j
+
+                            if nearCount < keep then
+                                nearCount = nearCount + 1
+                            end
+                        end
+                    end
+                end
             end
         end
 
-        -- Ties broken on index so the graph is the same graph every time it
-        -- is built. A route that changes between two identical calls is not
-        -- a route the player can be told about.
-        table.sort(ranked, function(a, b)
-            if a.yards == b.yards then
-                return a.index < b.index
-            end
+        -- Top up to `keep` edges from the nearest-few list, in order, without
+        -- duplicating anything the distance rule already took.
+        local taken = #list
 
-            return a.yards < b.yards
-        end)
-
-        local list = {}
-
-        for rank, entry in ipairs(ranked) do
-            if entry.yards <= Travel.hopYards
-                or rank <= Travel.minimumNeighbours then
-
-                table.insert(list, entry)
-            else
-                -- Ascending, so nothing further can qualify on either test.
+        for slot = 1, nearCount do
+            if taken >= keep then
                 break
             end
+
+            local j = nearIndex[slot]
+
+            if j and not held[j] then
+                held[j] = true
+                taken   = taken + 1
+
+                table.insert(list, { index = j, yards = nearYards[slot] })
+            end
         end
 
-        out[i] = list
+        minOutgoing[i] = shortest
+        out[i]         = list
+        out[i].held    = held
     end
 
     -- AND THE GRAPH IS UNDIRECTED, BECAUSE FLIGHT PATHS ARE.
@@ -422,23 +441,21 @@ local function Neighbours(continent, nodes)
     -- and no way in, and Dijkstra from anywhere on the mainland simply never
     -- reached it. It vanished from every route, silently, which is the exact
     -- failure `minimumNeighbours` was written to prevent.
-    for i = 1, #nodes do
+    -- A membership set rather than a linear scan of the target's list: the
+    -- scan made this O(V*E), which on a dense graph is cubic in nodes.
+    for i = 1, count do
         for _, edge in ipairs(out[i]) do
-            local back    = out[edge.index]
-            local present = false
+            local back = out[edge.index]
 
-            for _, other in ipairs(back) do
-                if other.index == i then
-                    present = true
-                    break
-                end
-            end
+            if not back.held[i] then
+                back.held[i] = true
 
-            if not present then
                 table.insert(back, { index = i, yards = edge.yards })
             end
         end
     end
+
+    out.minOutgoing = minOutgoing
 
     neighbourCache[continent] = out
 
@@ -729,6 +746,19 @@ end
 
 Travel.Routes = Routes
 
+-- NUMERIC, NOT A STRING.
+--
+-- `IsKnownRoute` is asked once per surviving pair inside the search, which on
+-- a real continent is a thousand times per estimate -- so this built a
+-- thousand strings, each of them two coercions and a concatenation, to look
+-- up a table with a few dozen rows in it.
+--
+-- Node ids are integers well under the multiplier, so packing them into one
+-- number is exact and costs nothing. The stored keys change shape, so
+-- migration 8 rewrites them; `RouteKeyText` remains for anything that wants
+-- to read a key back.
+Travel.routeKeyStride = 1000000
+
 local function RouteKey(fromID, toID)
     if not fromID or not toID then
         return nil
@@ -740,7 +770,7 @@ local function RouteKey(fromID, toID)
         fromID, toID = toID, fromID
     end
 
-    return fromID .. ":" .. toID
+    return (fromID * Travel.routeKeyStride) + toID
 end
 
 Travel.RouteKey = RouteKey
@@ -1310,17 +1340,58 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
             end
         end
 
-        for i = 1, #nodes do
+        -- ORIGINS IN THE ORDER THAT MAKES THE BOUND BITE.
+        --
+        -- The loop used to walk the node list in whatever order the client
+        -- returned it, so `bestRanking` might not improve until late and the
+        -- bound could not reject anything before it did. Walked nearest-first,
+        -- the best route is usually found in the first few origins and every
+        -- one after it fails the bound -- and because the bound rises
+        -- monotonically with `walkOut`, the first failure means every
+        -- remaining origin fails too. A filter becomes an early exit.
+        local order = {}
+
+        for index = 1, #nodes do
+            if originSeconds[index] then
+                table.insert(order, index)
+            end
+        end
+
+        table.sort(order, function(a, b)
+            if originSeconds[a] == originSeconds[b] then
+                return a < b
+            end
+
+            return originSeconds[a] < originSeconds[b]
+        end)
+
+        -- The cheapest any flight out of a given node can be. Built with the
+        -- graph, and it tightens the bound in exactly the place the bound was
+        -- weakest: since 0.53.0 the flight leg is a path rather than a
+        -- straight line, so assuming the flight is free -- which is what the
+        -- bound did -- became a much larger lie.
+        local minOutgoing = Neighbours(continent, nodes).minOutgoing or {}
+
+        for _, i in ipairs(order) do
             local walkOut = originSeconds[i]
 
-            -- Nothing beyond this point can be free, and nothing can be
-            -- discounted further than a known route discounts it, so an
+            -- Nothing beyond this point can be free, no flight out of here is
+            -- shorter than the shortest edge leaving it, and nothing can be
+            -- discounted further than a known route discounts it -- so an
             -- origin whose best conceivable total already loses cannot win.
-            if walkOut and cheapestArrival
-                and (bestPossibleDiscount
-                    * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
-                    < bestRanking then
+            local floor = walkOut + Travel.flightOverheadSeconds
+                + ((minOutgoing[i] or 0) / flightSpeed)
+                + (cheapestArrival or 0)
 
+            if not cheapestArrival
+                or (bestPossibleDiscount * floor) >= bestRanking then
+
+                -- Sorted by `walkOut`, so every remaining origin has a floor
+                -- at least this high.
+                break
+            end
+
+            do
                 local origin = nodes[i]
 
                 -- THE WAY THE BIRD ACTUALLY GOES.
@@ -1334,6 +1405,18 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
                 for j = 1, #nodes do
                     local flightYards = (i ~= j) and path.dist[j] or nil
                     local walkIn      = arrivalSeconds[j]
+
+                    -- The same argument, one level down: an arrival whose two
+                    -- walks alone already lose cannot be rescued by a flight,
+                    -- which is never negative. There was no bound on the
+                    -- inner loop at all.
+                    if walkIn
+                        and (bestPossibleDiscount
+                            * (walkOut + Travel.flightOverheadSeconds + walkIn))
+                            >= bestRanking then
+
+                        flightYards = nil
+                    end
 
                     if flightYards and walkIn then
                         local seconds = walkOut
@@ -1419,6 +1502,41 @@ Travel.secondsPerCostPoint = 30
 CN.secondsPerCostPoint = Travel.secondsPerCostPoint
 Travel.maximumCost         = 40
 
+-- MEMOISED, BECAUSE EVERY LOCATED CANDIDATE PAYS THIS.
+--
+-- One estimate costs about two tenths of a millisecond against a real flight
+-- network, and a rebuild asks for one per located objective -- a full quest
+-- log plus rares, treasures and located vendor recipes is forty to eighty of
+-- them. That is most of the rebuild, and it was recomputed from scratch every
+-- time even though a rebuild answers the same question about the same
+-- destinations from the same place.
+--
+-- Keyed on the destination rounded to about a yard, and on where the player
+-- is standing rounded rather more coarsely -- the answer does not change
+-- meaningfully for a few paces, and re-keying on every step would defeat the
+-- cache in exactly the situation it is for.
+--
+-- Numeric key, not a string: `Travel.WorldPoint`'s string key is built two
+-- concatenations and two coercions at a time, and this runs far more often.
+Travel.costCacheCap = 512
+
+-- How far the player has to move before the cached costs stop being about
+-- where they are. Twenty yards is under two seconds of running and well
+-- inside the noise of a model whose smallest unit is thirty seconds.
+Travel.costCacheYards = 20
+
+local costCache, costCacheCount = {}, 0
+local costCacheMap, costCacheX, costCacheY
+
+function Travel.ForgetCosts()
+    costCache, costCacheCount = {}, 0
+    costCacheMap, costCacheX, costCacheY = nil, nil, nil
+end
+
+function Travel.CostCacheSize()
+    return costCacheCount
+end
+
 function Travel.CostFor(mapID, x, y)
     local playerMap, playerX, playerY = CN.GetPlayerPosition()
 
@@ -1426,13 +1544,61 @@ function Travel.CostFor(mapID, x, y)
         return nil
     end
 
+    -- Has the player moved far enough for the answers to be about somewhere
+    -- else? A different map always counts; on the same map, compare in yards.
+    local moved = costCacheMap ~= playerMap
+
+    if not moved and costCacheX then
+        local yards = Travel.YardsBetween(playerMap, costCacheX, costCacheY,
+            playerMap, playerX, playerY)
+
+        moved = (yards == nil) or (yards > Travel.costCacheYards)
+    end
+
+    if moved then
+        costCache, costCacheCount = {}, 0
+        costCacheMap = playerMap
+        costCacheX, costCacheY = playerX, playerY
+    end
+
+    local key = (mapID * 1000000)
+        + (math.floor((x or 0) * 1000) * 1000)
+        + math.floor((y or 0) * 1000)
+
+    local held = costCache[key]
+
+    if held ~= nil then
+        if held == false then
+            return nil
+        end
+
+        return held
+    end
+
     local seconds = Travel.EstimateSeconds(playerMap, playerX, playerY, mapID, x, y)
 
+    if costCacheCount >= Travel.costCacheCap then
+        costCache, costCacheCount = {}, 0
+    end
+
     if not seconds then
+        -- Remembered as a refusal rather than not remembered at all: a
+        -- destination the model cannot cost is asked about once per rebuild
+        -- for every objective there, and re-deriving the same nil is the
+        -- most expensive way to learn nothing.
+        costCache[key] = false
+        costCacheCount = costCacheCount + 1
+
         return nil
     end
 
-    return math.min(Travel.maximumCost, seconds / Travel.secondsPerCostPoint)
+    local cost = math.min(Travel.maximumCost,
+        seconds / Travel.secondsPerCostPoint)
+
+    costCache[key]  = cost
+    costCacheCount  = costCacheCount + 1
+
+    return cost
 end
 
 -- Published so providers do not each have to decide what to do when the
@@ -1507,11 +1673,11 @@ function Travel.Describe(detail, seconds, confident)
         or (math.floor(seconds / 60) .. " min")
 
     if detail and detail.mode == "self" then
-        text = text .. " |cff999999flying yourself|r"
+        text = text .. " |cff8a8f96flying yourself|r"
     end
 
     if detail and detail.mode == "teleport" then
-        text = text .. " |cff999999via " .. tostring(detail.via)
+        text = text .. " |cff8a8f96via " .. tostring(detail.via)
 
         if (detail.waited or 0) > 0 then
             text = text .. ", after a " .. Travel.FormatReset(detail.waited)
@@ -1522,7 +1688,7 @@ function Travel.Describe(detail, seconds, confident)
     end
 
     if detail and detail.mode == "fly" and detail.node then
-        text = text .. " |cff999999via " .. tostring(detail.node)
+        text = text .. " |cff8a8f96via " .. tostring(detail.node)
         if detail.arrival then
             text = text .. " to " .. tostring(detail.arrival)
         end
@@ -1550,13 +1716,33 @@ end
 -- There is no discovery event. TAXIMAP_OPENED is the honest substitute: you
 -- discover a flight point by talking to the flight master, which opens the
 -- map.
-for _, event in ipairs({ "TAXIMAP_OPENED", "PLAYER_ENTERING_WORLD" }) do
-    CN:RegisterEvent(event, function()
-        Travel.ForgetNodes()
+-- ONLY TAXIMAP_OPENED THROWS THE NETWORK AWAY.
+--
+-- `PLAYER_ENTERING_WORLD` was in this list, and it fires on every zone
+-- transition through a loading screen, every instance, every portal, every
+-- hearth and every reload -- so the first rebuild after any of those paid for
+-- the whole flight graph again. Measured at about ten milliseconds, on top of
+-- a provider rebuild, at precisely the moment the client is busiest.
+--
+-- And it bought nothing: flight points cannot appear during a loading screen.
+-- The only thing that adds one is talking to a flight master, which opens the
+-- taxi map. `Travel.KnownNodes` already refuses to remember an empty list, so
+-- the "client was not ready yet" case that the event was covering is handled
+-- where it belongs.
+CN:RegisterEvent("TAXIMAP_OPENED", function()
+    Travel.ForgetNodes()
 
-        CN.InvalidateCandidates()
-    end)
-end
+    CN.InvalidateCandidates()
+end)
+
+-- A loading screen still moves the player, though, so the costed journeys
+-- are about somewhere else now. Those are cheap to rebuild and the network
+-- they were derived from is not.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    Travel.ForgetCosts()
+
+    CN.InvalidateCandidates()
+end)
 
 -- WHERE THE FLYABILITY MEMORY IS ACTUALLY WRITTEN.
 --
@@ -1645,14 +1831,14 @@ CN:RegisterCommand{
         Print(string.format("Flight points known on this continent: %d", #nodes))
         Print(string.format("Flight speed: %.1f yards/second %s",
             speed, measured
-                and ("|cff999999from " .. Travel.FlightSampleCount()
+                and ("|cff8a8f96from " .. Travel.FlightSampleCount()
                     .. " of your own flights|r")
                 or (CN.WithConfidence("", CN.confidence.ESTIMATED)
-                    .. " |cff999999-- take a flight path and it will be "
+                    .. " |cff8a8f96-- take a flight path and it will be "
                     .. "measured|r")))
 
         if not continent then
-            Print("|cff999999The client will not say which continent this is.|r")
+            Print("|cff8a8f96The client will not say which continent this is.|r")
         end
 
         local results = CN.Recommend(1)
@@ -1660,7 +1846,7 @@ CN:RegisterCommand{
         local target = results and results[1]
 
         if not target or not target.mapID or not target.x then
-            Print("|cff999999Nothing with a location is being recommended, so "
+            Print("|cff8a8f96Nothing with a location is being recommended, so "
                 .. "there is nothing to cost.|r")
             return
         end
@@ -1679,7 +1865,7 @@ CN:RegisterCommand{
             local runSpeed = session and session.Speed() or 7
 
             Print(string.format(
-                "  |cff999999%.0f yd to %s, %.0f yd in the air, %.0f yd at the "
+                "  |cff8a8f96%.0f yd to %s, %.0f yd in the air, %.0f yd at the "
                 .. "far end -- against %.0f yd on foot|r",
                 detail.runToNode, tostring(detail.node), detail.flightYards,
                 detail.runFromNode, detail.yards))
@@ -1693,16 +1879,16 @@ CN:RegisterCommand{
             local legs = detail.legs or {}
 
             if #legs > 1 then
-                Print(string.format("  |cff999999%d legs:|r", #legs))
+                Print(string.format("  |cff8a8f96%d legs:|r", #legs))
 
                 for index, leg in ipairs(legs) do
-                    Print(string.format("    |cff999999%d. %s to %s, %.0f yd|r",
+                    Print(string.format("    |cff8a8f96%d. %s to %s, %.0f yd|r",
                         index, tostring(leg.from), tostring(leg.to),
                         leg.yards or 0))
                 end
             end
 
-            Print(string.format("  |cff999999running the whole way: %s|r",
+            Print(string.format("  |cff8a8f96running the whole way: %s|r",
                 session and session.FormatDuration
                     and session.FormatDuration(detail.yards / math.max(0.5, runSpeed))
                     or "unknown"))
@@ -1710,20 +1896,20 @@ CN:RegisterCommand{
             local flySpeed, flyMeasured = Travel.SelfFlightSpeed()
 
             Print(string.format(
-                "  |cff999999%.0f yd direct at %.0f yd/s%s|r",
+                "  |cff8a8f96%.0f yd direct at %.0f yd/s%s|r",
                 detail.yards, flySpeed,
                 flyMeasured and ""
                     or (" " .. CN.WithConfidence("",
                         CN.confidence.ESTIMATED))))
         elseif detail and detail.mode == "elsewhere" then
-            Print("|cff999999That is on another continent. Portals and boats "
+            Print("|cff8a8f96That is on another continent. Portals and boats "
                 .. "are not modelled, so no time is claimed -- but here is "
                 .. "what you have:|r")
 
             local teleports = detail.teleports or {}
 
             if #teleports == 0 then
-                Print("  |cff999999no hearthstone or teleport available|r")
+                Print("  |cff8a8f96no hearthstone or teleport available|r")
             end
 
             for index, teleport in ipairs(teleports) do
@@ -1734,13 +1920,13 @@ CN:RegisterCommand{
                 local line = "  " .. teleport.label
 
                 if teleport.bound then
-                    line = line .. " |cff999999to " .. teleport.bound .. "|r"
+                    line = line .. " |cff8a8f96to " .. teleport.bound .. "|r"
                 end
 
                 if teleport.ready then
                     line = line .. " |cff73b873ready|r"
                 else
-                    line = line .. " |cfff56b61"
+                    line = line .. " |cffe2564c"
                         .. Travel.FormatReset(teleport.remaining) .. "|r"
                 end
 

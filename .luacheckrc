@@ -70,7 +70,9 @@ read_globals = {
     "GetQuestID", "GetTitleText", "GetCategoryInfo",
 
     -- Globals the client defines that are not functions.
-    "Enum", "GameTooltip", "Minimap", "UIParent", "UISpecialFrames",
+    "Enum", "GameTooltip", "GameFontNormal", "Minimap", "UIParent",
+    "UIFrameFadeIn", "UIFrameFadeOut",
+    "UISpecialFrames",
     "UiMapPoint", "CreateVector2D", "DEFAULT_CHAT_FRAME", "TooltipDataProcessor",
     "TooltipUtil", "LE_PET_JOURNAL_FILTER_COLLECTED",
     "LE_PET_JOURNAL_FILTER_NOT_COLLECTED",

@@ -262,15 +262,15 @@ CN:RegisterCommand{
         Print(verdict)
 
         if best then
-            Print("|cffffd100" .. tostring(best.name) .. "|r"
+            Print("|cffffc74f" .. tostring(best.name) .. "|r"
                 .. (best.level and (" (" .. best.level .. ")") or "")
-                .. " |cff999999last played "
+                .. " |cff8a8f96last played "
                 .. Alts.DescribeAge({ lastSeen = time() - ((best.ageDays or 0) * 86400) })
                 .. "|r")
 
             for _, item in ipairs(best.items) do
-                Print("  |cffffff00" .. tostring(item.objective.name)
-                    .. "|r |cff999999" .. tostring(item.reason) .. "|r")
+                Print("  |cffffc74f" .. tostring(item.objective.name)
+                    .. "|r |cff8a8f96" .. tostring(item.reason) .. "|r")
             end
         end
 
@@ -281,15 +281,15 @@ CN:RegisterCommand{
             local character = CN.db and CN.db.characters
                 and CN.db.characters[row.key]
 
-            Print(string.format("  %s%-18s|r %-4s %-10s |cff999999%s|r",
-                row.isCurrent and "|cff00ff00" or "|cffffffff",
+            Print(string.format("  %s%-18s|r %-4s %-10s |cff8a8f96%s|r",
+                row.isCurrent and "|cff73b873" or "|cfff2f4f6",
                 tostring(row.name),
                 tostring(row.level or "?"),
                 tostring(row.class or ""),
                 Alts.DescribeAge(character)))
         end
 
-        Print("|cff999999Everything here is what each character recorded the "
+        Print("|cff8a8f96Everything here is what each character recorded the "
             .. "last time it logged in.|r")
     end,
 }

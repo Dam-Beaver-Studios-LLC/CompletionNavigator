@@ -187,11 +187,11 @@ function Vault.DescribeRow(row)
     local text = row.label .. ": " .. row.progress
 
     if row.capped then
-        return text .. " |cff00ff00all " .. row.unlocked .. " unlocked|r"
+        return text .. " |cff73b873all " .. row.unlocked .. " unlocked|r"
     end
 
     return text .. " of " .. row.next
-        .. " |cff999999(" .. row.unlocked .. " unlocked, "
+        .. " |cff8a8f96(" .. row.unlocked .. " unlocked, "
         .. row.remaining .. " more for the next)|r"
 end
 
@@ -320,7 +320,7 @@ CN:RegisterCommand{
 
         if #rows == 0 then
             Print("No Great Vault progress recorded yet.")
-            Print("|cff999999The client reports vault progress once you have "
+            Print("|cff8a8f96The client reports vault progress once you have "
                 .. "completed at least one qualifying activity this week.|r")
             return
         end
@@ -330,11 +330,11 @@ CN:RegisterCommand{
         Print("Great Vault: " .. summary.unlocked .. " reward"
             .. (summary.unlocked == 1 and "" or "s") .. " unlocked"
             .. (summary.resetsIn
-                and (" |cff999999resets in " .. FormatReset(summary.resetsIn) .. "|r")
+                and (" |cff8a8f96resets in " .. FormatReset(summary.resetsIn) .. "|r")
                 or ""))
 
         if summary.claimable then
-            Print("|cff00ff00A reward is waiting to be collected.|r")
+            Print("|cff73b873A reward is waiting to be collected.|r")
         end
 
         for _, row in ipairs(rows) do
@@ -342,14 +342,14 @@ CN:RegisterCommand{
         end
 
         if summary.closest then
-            Print("|cffffff00Closest:|r " .. summary.closest.label
+            Print("|cffffc74fClosest:|r " .. summary.closest.label
                 .. " -- " .. summary.closest.remaining .. " more, "
                 .. (Vault.rowActions[summary.closest.row] or "keep going") .. ".")
         else
-            Print("|cff00ff00Every row is capped. Nothing more to earn this week.|r")
+            Print("|cff73b873Every row is capped. Nothing more to earn this week.|r")
         end
 
-        Print("|cff999999You choose one item from everything unlocked.|r")
+        Print("|cff8a8f96You choose one item from everything unlocked.|r")
     end,
 }
 

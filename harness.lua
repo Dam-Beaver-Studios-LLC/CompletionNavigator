@@ -82,9 +82,20 @@ local function Frame()
     function f:UnregisterEvent(e) events[e] = nil end
     function f:SetScript(k, fn) scripts[k] = fn end
     function f:GetScript(k) return scripts[k] end
-    function f:IsShown() return f.shown == true end
+    function f:IsShown() return rawget(f, "shown") == true end
     function f:Show() f.shown = true end
     function f:Hide() f.shown = false end
+
+    -- `SetShown` fell through to the universal stub, so every frame the addon
+    -- shows or hides through it -- the selected-tab rule, the row selection
+    -- texture, the progress bar -- was invisible to every test.
+    function f:SetShown(value)
+        if value then
+            f:Show()
+        else
+            f:Hide()
+        end
+    end
     function f:CreateFontString()
         local fs = Frame()
 
@@ -126,8 +137,36 @@ local function Frame()
 
     -- Numeric getters must return numbers, or arithmetic in the addon
     -- silently becomes "attempt to perform arithmetic on a table value".
-    function f:GetWidth() return 400 end
-    function f:GetHeight() return 300 end
+    --
+    -- AND A WIDTH THAT WAS SET MUST BE THE WIDTH THAT COMES BACK.
+    --
+    -- These were flat constants and `SetWidth` fell through to the universal
+    -- stub, so nothing the addon sized could be asserted about -- which is
+    -- how a progress bar drawn at a fixed width would have passed. A stub
+    -- that forgets what it was told is a stub that agrees with any code.
+    function f:SetWidth(value)
+        if type(value) == "number" then
+            f.width = value
+        end
+    end
+
+    function f:SetHeight(value)
+        if type(value) == "number" then
+            f.height = value
+        end
+    end
+
+    function f:SetSize(w, h)
+        f:SetWidth(w)
+        f:SetHeight(h)
+    end
+
+    -- `rawget`, NOT `f.width`. Every frame here has a catch-all `__index`
+    -- that answers with the universal stub, so an unset field reads back as a
+    -- TABLE rather than as nil -- and `f.width or 400` therefore returned a
+    -- table, which the addon then did arithmetic on.
+    function f:GetWidth() return rawget(f, "width") or 400 end
+    function f:GetHeight() return rawget(f, "height") or 300 end
     function f:GetTextWidth() return 60 end
     function f:GetTextHeight() return 12 end
     function f:GetEffectiveScale() return 1 end
@@ -324,6 +363,21 @@ UiMapPoint = {
         }
     end,
 }
+
+-- Frame fades. Stock globals in the client; absent in plain Lua, so the
+-- fade path would never execute offline -- and a fade that throws takes the
+-- window with it.
+function UIFrameFadeIn(frame, seconds, from, to)
+    if frame and frame.SetAlpha then
+        frame:SetAlpha(to or 1)
+    end
+end
+
+function UIFrameFadeOut(frame, seconds, from, to)
+    if frame and frame.SetAlpha then
+        frame:SetAlpha(to or 0)
+    end
+end
 
 function CreateVector2D(x, y)
     local vector = { x = x, y = y }
@@ -647,11 +701,25 @@ if CN_BENCH then
             -- CLUSTERED IN A FAR CORNER, DELIBERATELY.
             --
             -- These exist to make the pair search do sixty-squared work, not
-            -- to change any answer. Spread across the map they started
-            -- winning journeys the tests assert are quicker on foot -- which
-            -- would have meant weakening real assertions to accommodate a
-            -- benchmark, and an assertion weakened for the tooling's
-            -- convenience is an assertion that has stopped checking.
+            -- to change any answer. Spread across the map they start winning
+            -- journeys the tests assert are quicker on foot -- which would
+            -- mean weakening real assertions to accommodate a benchmark, and
+            -- an assertion weakened for the tooling's convenience is an
+            -- assertion that has stopped checking.
+            --
+            -- BUT A CORNER CLUSTER IS NOT A CONTINENT, and since the pair
+            -- search gained a pruning bound that difference stopped being
+            -- cosmetic: a cluster is precisely the geometry the bound rejects
+            -- unexamined. One origin of fifty-nine survived here against
+            -- seventeen of sixty on a real continent, so the benchmark was
+            -- measuring a square the prune never walks -- and reported both
+            -- travel budgets at a fifth of their ceiling while a real network
+            -- was over both.
+            --
+            -- Resolved by doing it in two places rather than compromising in
+            -- one: the assertions keep this layout, and `bench.lua` spreads
+            -- the same nodes across the map after the suite has run and
+            -- before it measures anything. See BENCH: A REAL FLIGHT NETWORK.
             position = {
                 x = 0.94 + ((index % 10) * 0.006),
                 y = 0.94 + ((index % 7) * 0.008),
@@ -2307,7 +2375,10 @@ print("  ignore and defer round-trip verified")
 
 -- An expired deferral must be pruned rather than accumulating forever.
 CN.SetDeferred(CN.objectiveTypes.TOY, 500, 1)
-CN.Account("deferredObjectives")[CN.ObjectiveKey(CN.objectiveTypes.TOY, 500)].until_ = time() - 10
+
+-- Nested by type since 0.54.0: the flat "TYPE:id" key cost eight thousand
+-- string allocations per rebuild the moment a player used the feature once.
+CN.Account("deferredObjectives")[CN.objectiveTypes.TOY][500].until_ = time() - 10
 
 local pruned = filters.PruneExpired()
 
@@ -7111,6 +7182,132 @@ end)()
 
 
 
+print("\nOne palette, and nothing outside it:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE RULE, CHECKED RATHER THAN WRITTEN DOWN.
+    --
+    -- 0.54.0 collapsed sixteen colours into eight roles. A palette with an
+    -- exception is a palette that is sixteen colours again in three releases,
+    -- and that is exactly how this one got there: every one of the sixteen
+    -- was a defensible local choice.
+    --
+    -- So every colour code in the tree must be one of the palette's own. This
+    -- does not stop anybody writing a literal -- it stops them writing a
+    -- literal that is a NEW colour, which is the thing that actually costs
+    -- something.
+    ------------------------------------------------------------
+    local allowed = {}
+
+    for _, hex in pairs(CN.C) do
+        allowed[string.lower(hex)] = true
+    end
+
+    local root = ROOT
+
+    local offenders, counted = {}, 0
+
+    local function Scan(path)
+        local handle = io.open(path, "r")
+
+        if not handle then
+            return
+        end
+
+        local text = handle:read("*a")
+
+        handle:close()
+
+        local line = 1
+
+        for chunk in text:gmatch("[^\n]*\n?") do
+            for hex in chunk:gmatch("|cff(%x%x%x%x%x%x)") do
+                counted = counted + 1
+
+                if not allowed[string.lower(hex)] then
+                    table.insert(offenders,
+                        path:gsub("^.*/", "") .. ":" .. line .. " #" .. hex)
+                end
+            end
+
+            line = line + 1
+        end
+    end
+
+    -- The .toc is the list of what ships, which is the list that matters.
+    local manifest = io.open(root .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the .toc must be readable")
+
+    for entry in manifest:read("*a"):gmatch("[^\r\n]+") do
+        if entry:match("%.lua$") and not entry:match("^#") then
+            Scan(root .. "/" .. (entry:gsub("\\", "/")))
+        end
+    end
+
+    manifest:close()
+
+    if #offenders > 0 then
+        for index, offender in ipairs(offenders) do
+            if index > 12 then
+                print("  ... and " .. (#offenders - 12) .. " more")
+                break
+            end
+
+            print("  OFF-PALETTE: " .. offender)
+        end
+    end
+
+    assert(#offenders == 0,
+        #offenders .. " colour code(s) are not in the palette. Add a role to "
+        .. "Design.lua or use one of the ones that exist.")
+
+    assert(counted > 100,
+        "the scan must actually have read the tree, found " .. counted)
+
+    print("  " .. counted .. " colour codes, all of them from the palette")
+
+    ------------------------------------------------------------
+    -- AND EVERY ROLE MUST BE DISTINGUISHABLE FROM EVERY OTHER.
+    --
+    -- Five of the sixteen were near-identical greys. A palette whose roles
+    -- look the same is a palette that is not doing anything.
+    ------------------------------------------------------------
+    local function Luminance(hex)
+        local red = tonumber(hex:sub(1, 2), 16) / 255
+        local green = tonumber(hex:sub(3, 4), 16) / 255
+        local blue = tonumber(hex:sub(5, 6), 16) / 255
+
+        return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue), red, green, blue
+    end
+
+    local roles = {}
+
+    for role, hex in pairs(CN.C) do
+        local luminance, red, green, blue = Luminance(hex)
+
+        table.insert(roles, { role = role, l = luminance, red = red, green = green, blue = blue })
+    end
+
+    for i = 1, #roles do
+        for j = i + 1, #roles do
+            local one, other = roles[i], roles[j]
+
+            local distance = math.sqrt(((one.red - other.red) ^ 2)
+                + ((one.green - other.green) ^ 2)
+                + ((one.blue - other.blue) ^ 2))
+
+            assert(distance > 0.05,
+                one.role .. " and " .. other.role .. " are the same colour to look "
+                .. "at (" .. string.format("%.3f", distance) .. " apart); one "
+                .. "of them is not earning its place")
+        end
+    end
+
+    print("  " .. #roles .. " roles, none of them mistakable for another")
+end)()
+
 print("\nLocalization:")
 
 ;(function()
@@ -7889,6 +8086,11 @@ print("\nLearning what you actually do:")
 
     character.preference[QUEST] = { shown = 100, acted = 100 }
 
+    -- Written straight into the store, so say so: the multiplier cache is
+    -- keyed on the observation generation, and a write that does not move it
+    -- is a write the module never made.
+    preference.NoteStoreChanged()
+
     CN.InvalidateRanking()
 
     local base = CN.ScoreObjective({ type = "NOTHING", id = 1,
@@ -8243,6 +8445,709 @@ print("\nStubs, audited against a real client:")
             or ""))
 end)()
 
+
+print("\nWhat 0.54.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE PALETTE, AND NOTHING OUTSIDE IT.
+    --
+    -- Before this release there were sixteen distinct colours across five
+    -- hundred and forty-three inline hex codes -- five greys doing one job,
+    -- three reds, two greens, two golds, and the brand blue in two casings --
+    -- plus three separate palettes, none of which was the source of truth.
+    --
+    -- A palette with an exception is a palette that is sixteen colours again
+    -- in three releases, so the rule is checked rather than written down.
+    ------------------------------------------------------------
+    assert(CN.C and CN.C.BRAND, "the palette must exist")
+
+    assert(CN.Brand("x") == "|cff" .. CN.C.BRAND .. "x|r",
+        "the wrappers must produce the palette's own codes")
+
+    -- The RGB form and the hex form must be the same colour. They were two
+    -- hand-written sets that had drifted: Tooltips.lua's "green" was
+    -- #66FF66 and everything else's was #73B873.
+    local brand = CN.RGB.BRAND
+
+    assert(math.abs(brand[1] - (tonumber(CN.C.BRAND:sub(1, 2), 16) / 255)) < 0.001,
+        "CN.RGB and CN.C must be the same colour in two shapes")
+
+    local goodR, goodG, goodB = CN.Rgb("GOOD")
+
+    assert(goodR and goodG and goodB, "and the three-float form answers as well")
+
+    -- Every role a wrapper exists for must have a colour behind it.
+    for _, role in ipairs({ "BRAND", "ACCENT", "PRIMARY", "BODY", "MUTED",
+                            "GOOD", "WARN", "BAD", "DISABLED" }) do
+        assert(CN.C[role] and #CN.C[role] == 6,
+            role .. " must be a six-digit hex colour")
+    end
+
+    print("  " .. 9 .. " colour roles, one definition each")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE 2-OPT REWRITE MUST FIND THE SAME ROUTES.
+    --
+    -- It used to build a whole new route table per pair and measure both
+    -- routes end to end -- 33 ms and megabytes of garbage at forty stops,
+    -- every two seconds while the Zone tab is open. Reversing a segment
+    -- changes exactly two edges, so the comparison is four distances and the
+    -- swap is done in place.
+    --
+    -- A forty-times-cheaper search that returns a slightly different answer
+    -- is not the same search, so this asserts the ANSWER, not the speed.
+    ------------------------------------------------------------
+    CN.UseRouteMapScale(94)
+
+    local worst, checked = 0, 0
+
+    for seed = 1, 12 do
+        local stops = {}
+
+        for index = 1, 9 + (seed % 5) do
+            table.insert(stops, {
+                name = "Stop " .. index,
+                mapID = 94,
+                x = 0.05 + (((index * (7 + seed)) % 19) * 0.047),
+                y = 0.05 + (((index * (11 + seed)) % 17) * 0.052),
+            })
+        end
+
+        local routeBefore = CN.RouteLength(stops, 0.5, 0.5)
+
+        local improved = CN.ImproveRoute(stops, 0.5, 0.5)
+
+        local after = CN.RouteLength(improved, 0.5, 0.5)
+
+        assert(after <= routeBefore + 0.001,
+            "2-opt must never lengthen a route: " .. after .. " vs " .. routeBefore)
+
+        assert(#improved == #stops,
+            "and it must not lose or duplicate a stop")
+
+        -- Every stop still present exactly once. An in-place reversal that
+        -- gets its indices wrong loses one silently.
+        local seen = {}
+
+        for _, stop in ipairs(improved) do
+            assert(not seen[stop.name], "a stop appears twice: " .. stop.name)
+
+            seen[stop.name] = true
+        end
+
+        if routeBefore > 0 then
+            worst = math.max(worst, (routeBefore - after) / routeBefore)
+        end
+
+        checked = checked + 1
+    end
+
+    assert(worst > 0.01,
+        "the sweep must actually improve some route, or it is only checking "
+        .. "that nothing changed")
+
+    -- THE REVERSAL ITSELF, ORDER BY ORDER.
+    --
+    -- "The route did not get longer" and "no stop was lost" both hold for a
+    -- reversal that skips the middle of the segment, because a partial
+    -- reversal is still a permutation. The order is what the two-pointer swap
+    -- can get wrong.
+    do
+        local straight = {}
+
+        for index = 1, 6 do
+            table.insert(straight, {
+                name = "S" .. index, mapID = 94,
+                x = 0.1 + (index * 0.1), y = 0.5,
+            })
+        end
+
+        -- Six stops on a line, walked from beyond the far end: the whole
+        -- route is one crossing, and the only shortest answer is the exact
+        -- reverse.
+        local reversed = CN.ImproveRoute(straight, 0.95, 0.5)
+
+        local order = {}
+
+        for _, stop in ipairs(reversed) do
+            table.insert(order, stop.name)
+        end
+
+        assert(table.concat(order, "") == "S6S5S4S3S2S1",
+            "a line walked from the far end must come back exactly reversed, "
+            .. "got " .. table.concat(order, ""))
+    end
+
+    -- AND NO CROSSING SURVIVES, which is the property 2-opt exists for.
+    local crossed = {
+        { name = "A", mapID = 94, x = 0.10, y = 0.10 },
+        { name = "B", mapID = 94, x = 0.90, y = 0.90 },
+        { name = "C", mapID = 94, x = 0.90, y = 0.10 },
+        { name = "D", mapID = 94, x = 0.10, y = 0.90 },
+    }
+
+    local uncrossed = CN.ImproveRoute(crossed, 0.05, 0.05)
+
+    local order = {}
+
+    for _, stop in ipairs(uncrossed) do
+        table.insert(order, stop.name)
+    end
+
+    local joined = table.concat(order, "")
+
+    assert(joined ~= "ABCD",
+        "the diagonal crossing must be removed, got " .. joined)
+
+    print("  " .. checked .. " routes improved in place, best "
+        .. string.format("%.0f%%", worst * 100) .. " shorter, none lengthened")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- CLUSTERING MUST GROUP THE SAME THINGS, BUCKETED OR NOT.
+    --
+    -- It compared every objective against every member of every hub and
+    -- asked the Navigation module for the map scale on each comparison: 10.7
+    -- ms at a hundred and ten located objectives, growing as the square.
+    -- Bucketed into a grid of the hub radius, only the nine cells around a
+    -- candidate can decide the answer.
+    ------------------------------------------------------------
+    CN.UseRouteMapScale(94)
+
+    -- Three tight clumps far apart. Any correct clustering finds three hubs.
+    local objectives = {}
+
+    for clump = 1, 3 do
+        for member = 1, 5 do
+            table.insert(objectives, {
+                name  = "Clump " .. clump .. " member " .. member,
+                mapID = 94,
+                x     = (clump * 0.3) + (member * 0.0004),
+                y     = (clump * 0.25) + (member * 0.0004),
+            })
+        end
+    end
+
+    local hubs = CN.ClusterByProximity(objectives)
+
+    assert(#hubs == 3,
+        "three clumps must produce three hubs, got " .. #hubs)
+
+    local total = 0
+
+    for _, hub in ipairs(hubs) do
+        total = total + #hub.objectives
+
+        assert(hub.x and hub.y, "a hub must have a position")
+    end
+
+    assert(total == #objectives,
+        "and no objective may be lost or duplicated: " .. total
+        .. " of " .. #objectives)
+
+    -- ACROSS A CELL BOUNDARY.
+    --
+    -- The grid is the optimisation, and the way a grid gets clustering wrong
+    -- is at its own edges: two objectives a few yards apart but in different
+    -- cells are one stop, and looking only in a candidate's own cell would
+    -- split them. Placed deliberately either side of a boundary.
+    do
+        local scaleX = select(1, CN.UseRouteMapScale(94))
+
+        local cell = CN.hubRadiusYards / math.max(1, scaleX)
+
+        -- Just under and just over the same boundary line.
+        local boundary = cell * 4
+
+        local straddling = {
+            { name = "Before", mapID = 94, x = boundary - (cell * 0.02), y = 0.5 },
+            { name = "After",  mapID = 94, x = boundary + (cell * 0.02), y = 0.5 },
+        }
+
+        assert(#CN.ClusterByProximity(straddling) == 1,
+            "two objectives a few yards apart are one stop even when the "
+            .. "grid puts them in different cells")
+    end
+
+    -- Everything in one place is one hub, which is the case the grid could
+    -- get wrong by only looking at neighbouring cells.
+    local together = {}
+
+    for index = 1, 12 do
+        table.insert(together, {
+            name = "Together " .. index, mapID = 94,
+            x = 0.5 + (index * 0.0002), y = 0.5,
+        })
+    end
+
+    assert(#CN.ClusterByProximity(together) == 1,
+        "twelve things in one spot are one stop")
+
+    -- And things spread far apart are never merged.
+    local apart = {}
+
+    for index = 1, 8 do
+        table.insert(apart, {
+            name = "Apart " .. index, mapID = 94,
+            x = 0.05 + (index * 0.11), y = 0.5,
+        })
+    end
+
+    assert(#CN.ClusterByProximity(apart) == 8,
+        "and eight things far apart are eight stops, got "
+        .. #CN.ClusterByProximity(apart))
+
+    print("  clustering groups by place, and the grid does not merge or lose")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A REBUILD THAT CHANGED NOTHING MUST NOT RE-RANK EVERYTHING.
+    --
+    -- Seven providers are volatile and expire on a five-second clock, and
+    -- most of the time they return exactly the rows they returned before.
+    -- Every one of those bumped the aggregate generation, which forces a full
+    -- re-score and re-sort: measured, 0.007 ms became 0.221 ms, every five
+    -- seconds, for no change in what the player sees.
+    ------------------------------------------------------------
+    local builds = 0
+
+    CN.RegisterCandidateProvider("MutationSteady", function()
+        builds = builds + 1
+
+        return {
+            { type = CN.objectiveTypes.TOY, id = 90001,
+              name = "Steady", completionValue = 3 },
+        }
+    end)
+
+    CN.CollectCandidates(true)
+
+    local generation = CN.GetCandidateCacheState().generation
+
+    CN.InvalidateProvider("MutationSteady", true)
+    CN.CollectCandidates()
+
+    assert(builds >= 2, "the provider must actually have been asked again")
+
+    assert(CN.GetCandidateCacheState().generation == generation,
+        "a rebuild that produced the same list must not move the generation")
+
+    -- But a rebuild that DOES change something must.
+    local changed = false
+
+    CN.candidateProviders["MutationSteady"].fn = function()
+        changed = true
+
+        return {
+            { type = CN.objectiveTypes.TOY, id = 90002,
+              name = "Different", completionValue = 4 },
+        }
+    end
+
+    CN.InvalidateProvider("MutationSteady", true)
+    CN.CollectCandidates()
+
+    assert(changed, "the replacement provider must have run")
+
+    assert(CN.GetCandidateCacheState().generation ~= generation,
+        "a rebuild that produced a different list MUST move it")
+
+    -- And a provider going away must not leave its rows behind, which is the
+    -- hole the shortcut opened: with nothing rebuilding, the aggregate was
+    -- reused and the departed provider's candidates survived the session.
+    CN.candidateProviders["MutationSteady"] = nil
+
+    CN.InvalidateCandidates()
+
+    local survived = false
+
+    for _, objective in ipairs(CN.CollectCandidates()) do
+        if objective.id == 90002 then
+            survived = true
+        end
+    end
+
+    assert(not survived,
+        "a provider that has gone away must take its rows with it")
+
+    print("  an unchanged rebuild is not a change, and a departed provider "
+        .. "leaves")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- HIDING SOMETHING IS TWO HASH LOOKUPS, NOT A STRING.
+    --
+    -- The stores were keyed "TYPE:id" and the two readers are called twice
+    -- per candidate -- so one click of Ignore cost eight thousand string
+    -- allocations per rebuild, +53%, for exactly the players the feature is
+    -- for. Nested by type, and migration 8 converts the old shape.
+    ------------------------------------------------------------
+    local PET = CN.objectiveTypes.PET
+
+    CN.SetIgnored(PET, 4242, true)
+
+    local store = CN.Account("ignoredObjectives")
+
+    assert(store[PET] and store[PET][4242],
+        "the store is nested by type")
+
+    assert(CN.IsIgnored(PET, 4242), "and reads back")
+    assert(not CN.IsIgnored(PET, 4243), "and only for what was hidden")
+    assert(not CN.IsIgnored(CN.objectiveTypes.TOY, 4242),
+        "and not across types -- the flat key could not have told these apart "
+        .. "if a type name ever contained a colon")
+
+    -- Restoring the last row must leave the store genuinely empty, because
+    -- `next(store) == nil` is the fast path both readers take.
+    CN.SetIgnored(PET, 4242, false)
+
+    assert(next(store) == nil,
+        "an empty type bucket must go, or the empty fast path stops firing")
+
+    -- The migration, driven through the ladder rather than called directly.
+    local legacy = {
+        version = 8,
+        account = {
+            ignoredObjectives  = { ["PET:77"] = { since = 1 } },
+            deferredObjectives = { ["QUEST:88"] = { until_ = 2 } },
+            flightRoutes       = { ["10:20"] = 3 },
+        },
+    }
+
+    CN.migrations[8](legacy)
+
+    assert(legacy.account.ignoredObjectives.PET
+        and legacy.account.ignoredObjectives.PET[77],
+        "migration 8 must renest the ignore store")
+
+    assert(legacy.account.deferredObjectives.QUEST
+        and legacy.account.deferredObjectives.QUEST[88],
+        "and the defer store")
+
+    assert(legacy.account.flightRoutes[(10 * 1000000) + 20] == 3,
+        "and repack the flight route keys, which were read a thousand times "
+        .. "per journey estimate")
+
+    print("  ignore and defer are nested by type, and the old shape migrates")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- SETUP KNOWS WHICH SCANS HAVE RUN, NOT JUST WHETHER ONE DID.
+    --
+    -- A single account-wide flag meant the login reminder told players
+    -- nothing had been scanned while four subsystems had scanned themselves
+    -- eight seconds earlier, the window's own scan button did not satisfy it,
+    -- and the reminder could not name what was missing because it did not
+    -- know.
+    ------------------------------------------------------------
+    local setupModule = CN:GetModule("Setup")
+
+    local record = CN.Account("setup")
+
+    record.steps = {}
+    record.completedAt = nil
+
+    local missing = setupModule.NeverScanned()
+
+    assert(#missing == #setupModule.steps,
+        "with nothing stamped, everything is outstanding: " .. #missing)
+
+    assert(not setupModule.HasRun(), "and setup has not run")
+
+    -- Every scan in the addon routes through CN.MarkScanned, which is where
+    -- the stamp is written -- so a scan run from anywhere counts.
+    for _, step in ipairs(setupModule.steps) do
+        CN.MarkScanned(step.key)
+    end
+
+    assert(#setupModule.NeverScanned() == 0, "and stamping them all clears it")
+    assert(setupModule.HasRun(), "so setup has run, however it was run")
+
+    -- THE QUEST SCAN IS THE ONE STEP THAT DOES NOT GO THROUGH MarkScanned,
+    -- because it scans nothing collectible -- so it has to stamp itself, and
+    -- if it does not, the reminder asks for it forever.
+    record.steps = {}
+
+    CN:GetModule("Quests").ScanKnown()
+
+    assert(setupModule.StepDone("quests"),
+        "scanning quests must record that quests were scanned")
+
+    for _, step in ipairs(setupModule.steps) do
+        CN.MarkScanned(step.key)
+    end
+
+    -- One missing is named, rather than "your collections".
+    record.steps["appearances"] = nil
+
+    local named = setupModule.NeverScanned()
+
+    assert(#named == 1 and named[1] == "Appearances",
+        "the reminder must be able to name exactly what is missing")
+
+    CN.MarkScanned("appearances")
+
+    print("  " .. #setupModule.steps .. " scans stamped individually")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- COSTED JOURNEYS ARE ABOUT WHERE THE PLAYER IS STANDING.
+    --
+    -- Every located candidate asks for one, and against a real flight network
+    -- that is most of a rebuild -- so they are remembered. But a remembered
+    -- travel cost is a statement about a starting point, and the moment the
+    -- player walks away it is a statement about somewhere else. A memo that
+    -- outlives its premise is worse than no memo.
+    ------------------------------------------------------------
+    local travel = CN:GetModule("Travel")
+
+    travel.ForgetCosts()
+
+    local realPosition = CN.GetPlayerPosition
+
+    CN.GetPlayerPosition = function() return 94, 0.10, 0.10 end
+
+    local near = travel.CostFor(94, 0.90, 0.90)
+
+    assert(near, "a journey must be costable")
+
+    assert(travel.CostCacheSize() > 0, "and remembered")
+
+    -- Asking again from the same place must not recompute.
+    local held = travel.CostCacheSize()
+
+    travel.CostFor(94, 0.90, 0.90)
+
+    assert(travel.CostCacheSize() == held,
+        "the same question from the same place is answered from the memo")
+
+    -- Move to the far side of the zone. The costs are now about somewhere
+    -- else and must go.
+    CN.GetPlayerPosition = function() return 94, 0.85, 0.85 end
+
+    local far = travel.CostFor(94, 0.90, 0.90)
+
+    assert(far and far < near,
+        "standing next to the destination must cost less than standing "
+        .. "across the zone from it: " .. tostring(far) .. " vs "
+        .. tostring(near))
+
+    CN.GetPlayerPosition = realPosition
+
+    travel.ForgetCosts()
+
+    assert(travel.CostCacheSize() == 0, "and it can all be thrown away")
+
+    print("  costed journeys are memoised, and forgotten when you move")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A PROGRESS BAR THAT IS A TEXTURE, AND THE RIGHT WIDTH.
+    --
+    -- The window drew bars out of "=" and "-" characters in a proportional
+    -- font, so a twenty-four cell bar's PIXEL width changed as it filled --
+    -- a progress bar that got shorter as you made progress.
+    ------------------------------------------------------------
+    local panel = CN.UI.tabs[1] and CN.UI.tabs[1].panel
+
+    local list = CN.UI.CreateList(CN.UI.window or UIParent)
+
+    list:SetEntries({
+        { text = "Empty",  fraction = 0 },
+        { text = "Half",   fraction = 0.5 },
+        { text = "Full",   fraction = 1 },
+        { text = "No bar" },
+    })
+
+    -- `IsShown` on the stub reads `f.shown == true`, and Show/Hide set it,
+    -- so a texture that has never been shown or hidden reads false.
+    local empty = list:GetRow(1)
+    local half  = list:GetRow(2)
+    local full  = list:GetRow(3)
+    local none  = list:GetRow(4)
+
+    assert(half.bar:GetWidth() > empty.bar:GetWidth(),
+        "half full must be wider than empty")
+
+    assert(full.bar:GetWidth() > half.bar:GetWidth(),
+        "and full wider than half -- a bar that is always full is not a bar")
+
+    assert(not none.bar:IsShown(),
+        "and a row with no fraction has no bar at all")
+
+    -- The value column and the selection texture, which replaced padded
+    -- columns and a ">" glyph.
+    list:SetEntries({
+        { text = "Row", value = "12 / 30", selected = true },
+    })
+
+    local row = list:GetRow(1)
+
+    assert(row.value:GetText() == "12 / 30",
+        "the value column carries the number")
+
+    assert(row.selected:IsShown(),
+        "and selection is a texture, not two characters of punctuation")
+
+    if panel then
+        CN.UI.Refresh()
+    end
+
+    print("  bars, value columns and selection are drawn, not spelled")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A GOAL CAN BE NAMED, NOT ONLY NUMBERED.
+    --
+    -- The store page leads with `/cn chase rep 2600`. Nobody knows that 2600
+    -- is the Severed Threads. Six modules had a name resolver and the two
+    -- commands most likely to be handed a name called `CN.ToID` and refused
+    -- anything that was not already a number.
+    ------------------------------------------------------------
+    -- The toy store has to have been read for a name to mean anything.
+    CN:GetModule("Toys").Scan()
+
+    assert(CN.ResolveObjective(CN.objectiveTypes.TOY, "500") == 500,
+        "a number still resolves to itself")
+
+    assert(CN.ResolveObjective(CN.objectiveTypes.TOY, "Test Toy") == 500,
+        "and so does the name of a toy")
+
+    -- Same for the faction name store, which is what the reputation
+    -- resolver searches.
+    CN:GetModule("Reputations").Scan()
+
+    local resolved = CN.ResolveObjective(CN.objectiveTypes.REPUTATION,
+        "Kirin Tor")
+
+    assert(resolved == 1090,
+        "and a faction by name, which is what the store page asks for: "
+        .. tostring(resolved))
+
+    -- A type with no resolver says so, rather than reporting the thing does
+    -- not exist.
+    local none, why = CN.ResolveObjective(CN.objectiveTypes.RECIPE, "Flask")
+
+    assert(none == nil and why and why:find("by id"),
+        "a type with no resolver must say it wants an id, not that the thing "
+        .. "does not exist: " .. tostring(why))
+
+    -- And a name nothing matches says THAT.
+    local missing, reason = CN.ResolveObjective(CN.objectiveTypes.TOY,
+        "no such toy at all")
+
+    assert(missing == nil and reason and reason:find("matches"),
+        "and a name nothing matches says so: " .. tostring(reason))
+
+    -- Through the command, which is what a player actually types.
+    CN.HandleSlashCommand("goal toy Test Toy")
+
+    local goalsModule = CN:GetModule("Goals")
+
+    local pinned = false
+
+    for _, goal in ipairs(goalsModule.List()) do
+        if goal.type == CN.objectiveTypes.TOY and goal.id == 500 then
+            pinned = true
+        end
+    end
+
+    assert(pinned, "/cn goal must accept a name")
+
+    goalsModule.Remove(CN.objectiveTypes.TOY, 500)
+
+    print("  goalsModule and chases accept a name wherever a resolver exists")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ARRIVING SOMEWHERE IS A MOMENT WORTH ONE LINE.
+    --
+    -- The addon computed how many unpicked quests a zone holds on arrival and
+    -- kept it to itself until somebody typed `/cn zone`. It is a prompt: a
+    -- number and a command, no waypoint moved and nothing accepted.
+    ------------------------------------------------------------
+    local quests = CN:GetModule("Quests")
+
+    local realMinimum = quests.arrivalMinimum
+
+    -- The fixture zone offers two, so the bound is moved rather than the
+    -- fixture: what is under test is the prompt, and the bound is tested
+    -- separately below.
+    quests.arrivalMinimum = 2
+
+    quests.ForgetArrivals()
+
+    local arrivalBefore = #output
+
+    quests.AnnounceArrival(94)
+
+    local announced = false
+
+    for index = arrivalBefore + 1, #output do
+        if output[index]:find("not picked up") then announced = true end
+    end
+
+    assert(announced, "arriving in a zone with quests in it must say so")
+
+    -- Once per zone per session. A line that repeats is a line people turn
+    -- off.
+    local again = #output
+
+    quests.AnnounceArrival(94)
+
+    for index = again + 1, #output do
+        assert(not output[index]:find("not picked up"),
+            "and it must not say it twice")
+    end
+
+    -- Never in combat.
+    quests.ForgetArrivals()
+
+    CN_TEST_IN_COMBAT = true
+
+    local fighting = #output
+
+    quests.AnnounceArrival(94)
+
+    for index = fighting + 1, #output do
+        assert(not output[index]:find("not picked up"),
+            "and never in the middle of a fight")
+    end
+
+    CN_TEST_IN_COMBAT = false
+
+    -- AND A ZONE WITH ONE STRAY QUEST IN IT IS NOT WORTH A LINE.
+    quests.arrivalMinimum = 99
+
+    quests.ForgetArrivals()
+
+    local quiet = #output
+
+    quests.AnnounceArrival(94)
+
+    for index = quiet + 1, #output do
+        assert(not output[index]:find("not picked up"),
+            "below the threshold there is nothing worth saying")
+    end
+
+    quests.arrivalMinimum = realMinimum
+
+    quests.ForgetArrivals()
+
+    print("  arriving in a zone prompts once, above a threshold, never "
+        .. "mid-fight")
+end)()
 
 print("\nWhat 0.53.0 changed, asserted through the paths the game takes:")
 

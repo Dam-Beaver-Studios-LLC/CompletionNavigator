@@ -232,7 +232,7 @@ function Instances.DescribeSource(name)
     -- shown only when the journal's setting is genuinely what was queried,
     -- and is named as such rather than presented as a property of the drop.
     if first.difficulty then
-        text = text .. " |cff999999(searched on " .. first.difficulty .. ")|r"
+        text = text .. " |cff8a8f96(searched on " .. first.difficulty .. ")|r"
     end
 
     if #results > 1 then
@@ -281,7 +281,7 @@ function Instances.Describe(lockout)
     local text = lockout.name
 
     if lockout.difficulty then
-        text = text .. " |cff999999(" .. lockout.difficulty .. ")|r"
+        text = text .. " |cff8a8f96(" .. lockout.difficulty .. ")|r"
     end
 
     if lockout.encounters > 0 then
@@ -289,11 +289,11 @@ function Instances.Describe(lockout)
     end
 
     if lockout.complete then
-        return text .. " |cff00ff00cleared|r"
+        return text .. " |cff73b873cleared|r"
     end
 
-    return text .. " |cffffff00" .. lockout.remaining .. " left|r"
-        .. " |cff999999resets in " .. Instances.FormatReset(lockout.resetsIn) .. "|r"
+    return text .. " |cffffc74f" .. lockout.remaining .. " left|r"
+        .. " |cff8a8f96resets in " .. Instances.FormatReset(lockout.resetsIn) .. "|r"
 end
 
 ------------------------------------------------------------
@@ -409,7 +409,7 @@ CN:RegisterCommand{
 
         if #lockouts == 0 then
             Print("You are not saved to anything.")
-            Print("|cff999999Lockouts appear here as soon as you kill a boss "
+            Print("|cff8a8f96Lockouts appear here as soon as you kill a boss "
                 .. "in a dungeon or raid that saves you.|r")
             return
         end
@@ -423,11 +423,11 @@ CN:RegisterCommand{
             local bosses, note = Instances.RemainingBosses(lockout)
 
             for _, boss in ipairs(bosses) do
-                Print("      |cff999999" .. boss.name .. "|r")
+                Print("      |cff8a8f96" .. boss.name .. "|r")
             end
 
             if note then
-                Print("      |cff999999" .. note .. "|r")
+                Print("      |cff8a8f96" .. note .. "|r")
             end
         end
 
@@ -440,7 +440,7 @@ CN:RegisterCommand{
                 .. summary.unfinished
                 .. (summary.unfinished == 1 and " lockout." or " lockouts."))
         else
-            Print("|cff999999Everything you are saved to is cleared.|r")
+            Print("|cff8a8f96Everything you are saved to is cleared.|r")
         end
     end,
 }
@@ -475,7 +475,7 @@ CN:RegisterCommand{
 
         if #results == 0 then
             Print("Nothing in the Adventure Guide matches \"" .. args .. "\".")
-            Print("|cff999999Not everything drops from a boss; try the exact "
+            Print("|cff8a8f96Not everything drops from a boss; try the exact "
                 .. "name the journal uses.|r")
             return
         end
@@ -487,17 +487,17 @@ CN:RegisterCommand{
             local line = "  " .. tostring(result.encounter or "?")
 
             if result.instance then
-                line = line .. " |cff999999in " .. result.instance .. "|r"
+                line = line .. " |cff8a8f96in " .. result.instance .. "|r"
             end
 
             local lockout = result.instance and Instances.LockoutFor(result.instance)
 
             if lockout then
                 if lockout.complete then
-                    line = line .. " |cfff56b61locked until "
+                    line = line .. " |cffe2564clocked until "
                         .. Instances.FormatReset(lockout.resetsIn) .. "|r"
                 else
-                    line = line .. " |cffffff00" .. lockout.remaining
+                    line = line .. " |cffffc74f" .. lockout.remaining
                         .. " left on your lockout|r"
                 end
             end

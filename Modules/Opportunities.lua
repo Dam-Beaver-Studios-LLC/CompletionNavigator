@@ -307,12 +307,12 @@ CN:RegisterCommand{
             local worldQuest = worldQuests[index]
 
             Print("  " .. index .. ". " .. worldQuest.name
-                .. " |cff999999(" .. Opportunities.FormatTimeLeft(worldQuest.secondsLeft)
+                .. " |cff8a8f96(" .. Opportunities.FormatTimeLeft(worldQuest.secondsLeft)
                 .. (worldQuest.tagName and (", " .. worldQuest.tagName) or "") .. ")|r")
         end
 
         if #worldQuests > 10 then
-            Print("  |cff999999... and " .. (#worldQuests - 10) .. " more.|r")
+            Print("  |cff8a8f96... and " .. (#worldQuests - 10) .. " more.|r")
         end
     end,
 }
@@ -326,13 +326,13 @@ CN:RegisterCommand{
 
         if #events == 0 then
             Print("No world events detected as active today.")
-            Print("|cff999999The calendar may not have loaded yet; open it once and retry.|r")
+            Print("|cff8a8f96The calendar may not have loaded yet; open it once and retry.|r")
             return
         end
 
         for _, event in ipairs(events) do
             Print("  " .. event.title
-                .. " |cff999999(" .. tostring(event.sequenceType) .. ")|r")
+                .. " |cff8a8f96(" .. tostring(event.sequenceType) .. ")|r")
         end
     end,
 }

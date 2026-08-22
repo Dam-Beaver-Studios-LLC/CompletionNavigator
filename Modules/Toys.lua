@@ -270,7 +270,7 @@ CN:RegisterCommand{
 
         local record = Store()[itemID]
 
-        Print(record.name .. " |cff999999(" .. itemID .. ")|r")
+        Print(record.name .. " |cff8a8f96(" .. itemID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected))
     end,
 }

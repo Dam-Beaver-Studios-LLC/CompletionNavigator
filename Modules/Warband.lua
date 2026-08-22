@@ -250,10 +250,10 @@ CN:RegisterCommand{
             .. (#rows == 1 and "" or "s") .. "):")
 
         for _, row in ipairs(rows) do
-            local marker = row.isCurrent and "|cff00ff00>|r " or "  "
+            local marker = row.isCurrent and "|cff73b873>|r " or "  "
 
             Print(marker .. row.key
-                .. " |cff999999" .. tostring(row.level) .. " "
+                .. " |cff8a8f96" .. tostring(row.level) .. " "
                 .. tostring(row.class or "?")
                 .. (row.faction and (" " .. row.faction) or "") .. "|r")
 
@@ -278,10 +278,10 @@ CN:RegisterCommand{
             .. coverage.recipes .. " recipes, " .. coverage.titles .. " titles.")
 
         if #rows == 1 then
-            Print("|cffffff00Only one character has been seen. Log in on your alts "
+            Print("|cffffc74fOnly one character has been seen. Log in on your alts "
                 .. "with the addon loaded to make these comparisons useful.|r")
         else
-            Print("|cff999999An alt that has never logged in with the addon "
+            Print("|cff8a8f96An alt that has never logged in with the addon "
                 .. "loaded is not in this total.|r")
         end
     end,
@@ -301,9 +301,9 @@ CN:RegisterCommand{
             -- there fell through to "Could not resolve" -- which reads as
             -- "that recipe does not exist" rather than "give me the id".
             Print("Usage: /cn who <rep|title> <id or name>")
-            Print("|cff999999       /cn who <recipe|profession> <id>|r")
-            Print("|cff999999Recipes and professions are looked up by id "
-                .. "only; |cffffff00/cn recipes|r|cff999999 lists yours.|r")
+            Print("|cff8a8f96       /cn who <recipe|profession> <id>|r")
+            Print("|cff8a8f96Recipes and professions are looked up by id "
+                .. "only; |cffffc74f/cn recipes|r|cff8a8f96 lists yours.|r")
             return
         end
 
@@ -347,7 +347,7 @@ CN:RegisterCommand{
 
                 Print("Recipes and professions are looked up by id, not by "
                     .. "name: " .. value)
-                Print("|cff999999|cffffff00/cn recipes|r|cff999999 lists the "
+                Print("|cff8a8f96|cffffc74f/cn recipes|r|cff8a8f96 lists the "
                     .. "ones this addon knows about, with their ids.|r")
             else
                 Print("Could not resolve: " .. value)
@@ -371,7 +371,7 @@ CN:RegisterCommand{
         if bestKey == CN.characterKey then
             Print("This character is the best one for it (" .. tostring(detail) .. ").")
         else
-            Print("Best character: " .. bestKey .. " |cff999999(" .. tostring(detail) .. ")|r")
+            Print("Best character: " .. bestKey .. " |cff8a8f96(" .. tostring(detail) .. ")|r")
         end
     end,
 }

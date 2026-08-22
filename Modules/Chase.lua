@@ -737,7 +737,7 @@ function Chase.DescribeEstimate(chain)
     end
 
     if not estimate.enough then
-        return CN.WithConfidence(nil, CN.confidence.UNKNOWN) .. " time |cff999999-- "
+        return CN.WithConfidence(nil, CN.confidence.UNKNOWN) .. " time |cff8a8f96-- "
             .. estimate.unknown .. " of "
             .. (estimate.timed + estimate.unknown)
             .. " steps are kinds of thing this addon has not watched you do "
@@ -747,12 +747,12 @@ function Chase.DescribeEstimate(chain)
     local text = "roughly " .. format(estimate.low) .. " to " .. format(estimate.high)
 
     if estimate.travel > 60 then
-        text = text .. " |cff999999including " .. format(estimate.travel)
+        text = text .. " |cff8a8f96including " .. format(estimate.travel)
             .. " to get there|r"
     end
 
     if estimate.unknown > 0 then
-        text = text .. " |cff999999(" .. estimate.unknown
+        text = text .. " |cff8a8f96(" .. estimate.unknown
             .. " step(s) untimed, charged at the rate of the rest)|r"
     end
 
@@ -778,22 +778,22 @@ local function PrintChain(chain)
 
     for _, step in ipairs(chain.steps) do
         if shown >= 12 then
-            Print("  |cff999999... and " .. (#chain.steps - shown) .. " more|r")
+            Print("  |cff8a8f96... and " .. (#chain.steps - shown) .. " more|r")
             break
         end
 
         local label = Chase.stateLabels[step.state] or ""
 
-        local colour = "|cffcccccc"
+        local colour = "|cffc8ccd2"
 
         if step.state == Chase.states.DONE then
             colour = "|cff73b873"
         elseif step.state == Chase.states.NEXT then
             colour = "|cff5dd2fb"
         elseif step.state == Chase.states.BLOCKED then
-            colour = "|cfff56b61"
+            colour = "|cffe2564c"
         elseif step.state == Chase.states.NOTE then
-            colour = "|cff999999"
+            colour = "|cff8a8f96"
         end
 
         Print(string.format("  %s%s%s|r",
@@ -807,11 +807,11 @@ local function PrintChain(chain)
     local estimate = Chase.DescribeEstimate(chain)
 
     if estimate then
-        Print("  |cffffd100Time:|r " .. estimate)
+        Print("  |cffffc74fTime:|r " .. estimate)
     end
 
     if chain.character then
-        Print("  |cff999999Best character: " .. tostring(chain.character) .. "|r")
+        Print("  |cff8a8f96Best character: " .. tostring(chain.character) .. "|r")
     end
 end
 
@@ -820,7 +820,7 @@ Chase.PrintChain = PrintChain
 CN:RegisterCommand{
     name    = "chase",
     aliases = { "chain", "path" },
-    args    = "[type id, or nothing for all goals]",
+    args    = "[<type> <name or id>, or nothing for all goals]",
     order   = 16,
     help    = "Show what stands between you and a goal, step by step.",
     handler = function(args)
@@ -834,16 +834,37 @@ CN:RegisterCommand{
         end
 
         if args ~= "" then
-            local typeText, idText = string.match(args, "^(%S+)%s+(%S+)$")
+            -- BY NAME, NOT ONLY BY ID.
+            --
+            -- The store page leads with `/cn chase rep 2600`, and nobody
+            -- knows that faction 2600 is the Severed Threads. Meanwhile
+            -- `/cn rep`, `/cn mount`, `/cn pet`, `/cn toy`, `/cn title` and
+            -- `/cn recipe` had all accepted names for releases -- the
+            -- resolvers existed, and the flagship feature did not call them.
+            --
+            -- The name may contain spaces, so the split takes the first word
+            -- as the type and everything after it as the thing.
+            local typeText, idText = string.match(args, "^(%S+)%s+(.+)$")
 
             local objectiveType = typeText and goals.ResolveType(typeText)
-            local id            = idText and CN.ToID(idText)
+
+            local id, why
+
+            if objectiveType then
+                id, why = CN.ResolveObjective(objectiveType, idText)
+            end
 
             if not objectiveType or not id then
-                Print("Usage: |cffffff00/cn chase <type> <id>|r"
-                    .. "   e.g. /cn chase mount 1234")
-                Print("|cff999999Types: quest, achievement, mount, pet, toy, "
-                    .. "recipe, title, rep, rare, currency|r")
+                CN.PrintBlock("Usage: " .. CN.Accent("/cn chase <type> <name or id>"), {
+                    CN.Muted("e.g. ") .. CN.Accent("/cn chase mount Invincible"),
+                    CN.Muted("Types: quest, achievement, mount, pet, toy, "
+                        .. "recipe, title, rep, rare, currency"),
+                })
+
+                if why then
+                    CN.PrintLine(CN.Muted(why))
+                end
+
                 return
             end
 
@@ -869,8 +890,8 @@ CN:RegisterCommand{
         local chains = Chase.All()
 
         if #chains == 0 then
-            Print("Nothing pinned. Try |cffffff00/cn chase mount 1234|r, or")
-            Print("|cffffff00/cn goal <type> <id>|r to pin something first.")
+            Print("Nothing pinned. Try |cffffc74f/cn chase mount 1234|r, or")
+            Print("|cffffc74f/cn goal <type> <id>|r to pin something first.")
             return
         end
 

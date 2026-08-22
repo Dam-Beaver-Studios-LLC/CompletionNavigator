@@ -566,9 +566,9 @@ CN.RegisterCandidateDecorator("Goals", Goals.Decorate)
 local function PrintPlan(index, goal)
     local plan = Goals.Plan(goal)
 
-    Print(index .. ". |cffffff00" .. tostring(plan.name) .. "|r"
-        .. " |cff999999(" .. tostring(goal.type) .. " " .. tostring(goal.id) .. ")|r"
-        .. (plan.done and " |cff00ff00done|r" or ""))
+    Print(index .. ". |cffffc74f" .. tostring(plan.name) .. "|r"
+        .. " |cff8a8f96(" .. tostring(goal.type) .. " " .. tostring(goal.id) .. ")|r"
+        .. (plan.done and " |cff73b873done|r" or ""))
 
     if plan.source then
         Print("   Source: " .. tostring(plan.source))
@@ -579,11 +579,11 @@ local function PrintPlan(index, goal)
     end
 
     if plan.character then
-        Print("   Best character: |cffffff00" .. tostring(plan.character) .. "|r")
+        Print("   Best character: |cffffc74f" .. tostring(plan.character) .. "|r")
     end
 
     if plan.mapID and plan.x and plan.y then
-        Print("   |cffffff00/cn gogoal " .. index .. "|r to set a waypoint.")
+        Print("   |cffffc74f/cn gogoal " .. index .. "|r to set a waypoint.")
     end
 end
 
@@ -595,17 +595,25 @@ Goals.PrintPlan = PrintPlan
 
 CN:RegisterCommand{
     name    = "goal",
-    args    = "<type> <id>",
+    args    = "<type> <name or id>",
     order   = 12,
     help    = "Pin something as a goal. Types: quest, achievement, mount, pet, toy, recipe, title, rep, rare, currency.",
     handler = function(args)
-        local typeText, idText = string.match(CN.Trim(args or ""), "^(%S+)%s+(%S+)$")
+        -- Everything after the first word is the thing, because a name has
+        -- spaces in it. `^(%S+)%s+(%S+)$` accepted only a single word, so
+        -- even once names were resolvable "Reins of the Black Drake" could
+        -- not be typed.
+        local typeText, idText =
+            string.match(CN.Trim(args or ""), "^(%S+)%s+(.+)$")
 
         if not typeText then
-            Print("Usage: /cn goal <type> <id>")
-            Print("|cff999999Types: quest, achievement, mount, pet, toy, recipe, "
-                .. "title, rep, rare, currency|r")
-            Print("|cffffff00/cn goals|r lists what you have pinned.")
+            CN.PrintBlock("Usage: " .. CN.Accent("/cn goal <type> <name or id>"), {
+                CN.Muted("e.g. ") .. CN.Accent("/cn goal mount Invincible"),
+                CN.Muted("Types: quest, achievement, mount, pet, toy, recipe, "
+                    .. "title, rep, rare, currency"),
+                CN.Accent("/cn goals") .. CN.Muted(" lists what you have pinned."),
+            })
+
             return
         end
 
@@ -613,15 +621,15 @@ CN:RegisterCommand{
 
         if not objectiveType then
             Print("Not a goal type: " .. typeText)
-            Print("|cff999999Types: quest, achievement, mount, pet, toy, recipe, "
+            Print("|cff8a8f96Types: quest, achievement, mount, pet, toy, recipe, "
                 .. "title, rep, rare, currency|r")
             return
         end
 
-        local id = CN.ToID(idText)
+        local id, why = CN.ResolveObjective(objectiveType, idText)
 
         if not id then
-            Print("Not an ID: " .. idText)
+            Print(why or ("Not an ID: " .. idText))
             return
         end
 
@@ -632,8 +640,8 @@ CN:RegisterCommand{
             return
         end
 
-        Print("Goal set: |cffffff00" .. tostring(message) .. "|r")
-        Print("|cff999999See the path with |cffffff00/cn chase " .. typeText
+        Print("Goal set: |cffffc74f" .. tostring(message) .. "|r")
+        Print("|cff8a8f96See the path with |cffffc74f/cn chase " .. typeText
             .. " " .. idText .. "|r")
 
         local list = Goals.List()
@@ -656,8 +664,8 @@ CN:RegisterCommand{
 
         if #list == 0 then
             Print("No goals set.")
-            Print("|cffffff00/cn goal mount 1234|r pins something to work toward.")
-            Print("|cff999999A goal becomes actionable even when nothing else "
+            Print("|cffffc74f/cn goal mount 1234|r pins something to work toward.")
+            Print("|cff8a8f96A goal becomes actionable even when nothing else "
                 .. "would have surfaced it, and anything leading to it ranks higher.|r")
             return
         end
@@ -693,7 +701,7 @@ CN:RegisterCommand{
             Print("Usage: /cn ungoal <number or all>")
 
             if #list > 0 then
-                Print("|cff999999Numbers come from |cffffff00/cn goals|r.|r")
+                Print("|cff8a8f96Numbers come from |cffffc74f/cn goals|r.|r")
             end
 
             return

@@ -421,10 +421,10 @@ CN:RegisterCommand{
                 .. " / " .. tostring(record.maxRank)
 
             if record.recipesSeen then
-                line = line .. " |cff999999(" .. tostring(record.recipeKnown)
+                line = line .. " |cff8a8f96(" .. tostring(record.recipeKnown)
                     .. " of " .. tostring(record.recipeTotal) .. " recipes)|r"
             else
-                line = line .. " |cffffff00(recipes not captured)|r"
+                line = line .. " |cffffc74f(recipes not captured)|r"
             end
 
             Print(line)
@@ -494,7 +494,7 @@ CN:RegisterCommand{
             return
         end
 
-        Print(names[recipeID] .. " |cff999999(" .. recipeID .. ")|r")
+        Print(names[recipeID] .. " |cff8a8f96(" .. recipeID .. ")|r")
 
         local holders = Professions.WhoKnows(recipeID)
 

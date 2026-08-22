@@ -169,6 +169,37 @@ CN.RegisterCandidateProvider("Appearances", function()
 end, { events = { "TRANSMOG_COLLECTION_UPDATED" }, cooldown = 10 })
 
 ------------------------------------------------------------
+-- KEEPING UP
+------------------------------------------------------------
+
+-- THE ONE SETUP STEP WITH NO REFRESH PATH AT ALL.
+--
+-- Every other scan has something that renews it: an event, a login hook, or
+-- a command a player has a reason to run. Appearances had the provider's
+-- invalidation -- which rebuilds the CANDIDATES from the store -- and nothing
+-- that ever rebuilt the STORE. So it was read once by `/cn setup` and then
+-- silently rotted: a month of collecting left the addon recommending
+-- appearances the player already had.
+--
+-- Throttled hard, because the transmog event fires on every piece looted and
+-- the scan walks every category.
+Appearances.rescanSeconds = 600
+
+local lastRescan = 0
+
+CN:RegisterEvent("TRANSMOG_COLLECTION_UPDATED", function()
+    local now = time()
+
+    if (now - lastRescan) < Appearances.rescanSeconds then
+        return
+    end
+
+    lastRescan = now
+
+    pcall(Appearances.Scan)
+end)
+
+------------------------------------------------------------
 -- COMMANDS
 ------------------------------------------------------------
 
@@ -209,11 +240,11 @@ CN:RegisterCommand{
             local row = rows[index]
 
             Print("  " .. row.name .. ": " .. row.collected .. " / " .. row.total
-                .. " |cff999999(" .. row.remaining .. " left)|r")
+                .. " |cff8a8f96(" .. row.remaining .. " left)|r")
         end
 
         if #rows > 5 then
-            Print("  |cff999999... and " .. (#rows - 5) .. " more categories.|r")
+            Print("  |cff8a8f96... and " .. (#rows - 5) .. " more categories.|r")
         end
     end,
 }

@@ -39,9 +39,17 @@ local Print = CN.Print
 -- matches a registered name, so the entry printed nothing and "the ones worth
 -- knowing" was fourteen lines, not fifteen. Bare `/cn` is documented by
 -- ShowStatus, which is what it runs.
+-- TEN, NOT FIFTEEN, AND ALL TEN ARE DAY-ONE COMMANDS.
+--
+-- The list carried `why` (which answers "why is this quest not available",
+-- not "why did you recommend that"), `order` (ranking forensics, not day
+-- one), `nearby` (whose name meant the opposite of what it did) and
+-- `selftest` (which is in the list only because the addon expects to be
+-- broken). A fifteen-item list of "the ones worth knowing" that contains four
+-- that are not is a list nobody trusts.
 CN.helpEssentials = {
-    "next", "go", "why", "order", "list", "plan", "follow", "zone", "nearby",
-    "chase", "mode", "show", "ui", "setup", "selftest",
+    "setup", "next", "go", "list", "plan", "follow", "zone", "mode",
+    "goals", "ui",
 }
 
 -- Groups, by what the player is trying to do rather than by which module
@@ -55,18 +63,18 @@ CN.helpEssentials = {
 CN.helpGroups = {
     { title = "Deciding what to do",
       names = { "next", "why", "whyzero", "order", "urgency", "plan", "mode",
-                "show", "hidden", "unhide", "learned", "situation", "goal",
+                "types", "hidden", "unhide", "learned", "situation", "goal",
                 "goals", "ungoal", "gogoal", "chase", "closest", "now",
                 "list" } },
 
     { title = "Getting there",
       names = { "go", "travel", "nav", "navdiag", "arrow", "calibrate",
-                "pins", "follow", "zone", "zones", "nearby", "where",
+                "pins", "follow", "zone", "zones", "elsewhere", "where",
                 "where am i", "clearway", "auto", "providers", "setloc",
                 "tovendor" } },
 
     { title = "What is left",
-      names = { "progress", "loremaster", "available", "waiting", "breakdown",
+      names = { "progress", "loremaster", "available", "unpicked", "breakdown",
                 "vault", "instances", "drops", "clock", "bags", "orders",
                 "alts", "warband", "who", "sets", "percharacter" } },
 
@@ -96,7 +104,7 @@ CN.helpGroups = {
 }
 
 local function PrintCommand(definition, indent)
-    local line = (indent or "") .. "|cffffff00/cn " .. definition.name
+    local line = (indent or "") .. "|cffffc74f/cn " .. definition.name
 
     if definition.args and definition.args ~= "" then
         line = line .. " " .. definition.args
@@ -132,9 +140,9 @@ local function ShowEssentials()
         end
     end
 
-    Print("|cff999999" .. #CN.commandList .. " commands in total. "
-        .. "|cffffff00/cn help all|r lists them by what they are for, and "
-        .. "|cffffff00/cn help <word>|r searches them.|r")
+    Print("|cff8a8f96" .. #CN.commandList .. " commands in total. "
+        .. "|cffffc74f/cn help all|r lists them by what they are for, and "
+        .. "|cffffc74f/cn help <word>|r searches them.|r")
 end
 
 local function SearchHelp(term)
@@ -153,7 +161,7 @@ local function SearchHelp(term)
 
     if #matches == 0 then
         Print("Nothing matches \"" .. term .. "\".")
-        Print("|cff999999/cn help all|r lists everything.")
+        Print("|cff8a8f96/cn help all|r lists everything.")
         return
     end
 
@@ -168,7 +176,7 @@ local function ShowGrouped()
     local shown = {}
 
     for _, group in ipairs(CN.helpGroups) do
-        Print("|cffffd100" .. group.title .. "|r")
+        Print("|cffffc74f" .. group.title .. "|r")
 
         for _, name in ipairs(group.names) do
             local definition = Find(name)
@@ -192,7 +200,7 @@ local function ShowGrouped()
     if #rest > 0 then
         table.sort(rest, function(a, b) return a.name < b.name end)
 
-        Print("|cffffd100Everything else|r")
+        Print("|cffffc74fEverything else|r")
 
         for _, definition in ipairs(rest) do
             PrintCommand(definition, "  ")
@@ -234,7 +242,7 @@ local function ShowFullHelp()
     end)
 
     for _, definition in ipairs(sorted) do
-        local line = "|cffffff00/cn " .. definition.name
+        local line = "|cffffc74f/cn " .. definition.name
 
         if definition.args and definition.args ~= "" then
             line = line .. " " .. definition.args
@@ -263,34 +271,62 @@ CN.ShowFullHelp = ShowFullHelp
 ------------------------------------------------------------
 
 local function ShowStatus()
-    Print("Version " .. CN.version .. " is loaded.")
+    local lines = {}
 
     if CN.character then
-        Print("Active character: "
-            .. tostring(CN.character.name or "Unknown")
-            .. " (Level " .. tostring(CN.character.level or "?") .. ")")
+        table.insert(lines, "Playing "
+            .. CN.Body(tostring(CN.character.name or "Unknown"))
+            .. CN.Muted(", level " .. tostring(CN.character.level or "?"))
+            .. CN.Muted(", one of " .. CN.GetCharacterCount()
+                .. " this addon has seen"))
     end
 
     local settings = CN.Settings()
 
     if settings then
-        Print("Priority mode: " .. tostring(settings.priorityMode))
-        Print("Debug mode: " .. (settings.debug and "enabled" or "disabled"))
+        local filters = CN:GetModule("Filters")
+
+        local current, active
+
+        if filters and filters.CurrentMode then
+            current, active = filters.CurrentMode()
+        end
+
+        if current and active then
+            table.insert(lines, "Focus " .. CN.Accent(active.label)
+                .. CN.Muted(" -- " .. active.note))
+        end
+
+        table.insert(lines, "Ranking weight "
+            .. CN.Accent(tostring(settings.priorityMode)))
+
+        if settings.debug then
+            table.insert(lines, CN.Warn("Debug output is on."))
+        end
     end
 
-    Print("Known characters: " .. CN.GetCharacterCount())
+    -- THE MODULE LIST IS GONE.
+    --
+    -- This printed all forty-seven internal module names, which is the
+    -- addon's own vocabulary answering a question nobody asked -- and the
+    -- login banner pointed players here, so it was very often the first thing
+    -- anybody saw from this addon. "Is everything loaded" is what
+    -- `/cn selftest` is for, and it answers it properly.
+    local setup = CN:GetModule("Setup")
 
-    local moduleNames = {}
+    if setup and setup.NeverScanned then
+        local missing = setup.NeverScanned()
 
-    for name in pairs(CN.modules) do
-        table.insert(moduleNames, name)
+        if #missing > 0 then
+            table.insert(lines, CN.Accent("/cn setup")
+                .. CN.Muted(" -- " .. #missing .. " thing"
+                    .. (#missing == 1 and "" or "s")
+                    .. " here has never been read"))
+        end
     end
 
-    table.sort(moduleNames)
-
-    if #moduleNames > 0 then
-        Print("Modules: " .. table.concat(moduleNames, ", "))
-    end
+    CN.PrintBlock("Completion Navigator " .. CN.Muted("v" .. CN.version),
+        lines)
 end
 
 CN.ShowStatus = ShowStatus
@@ -307,8 +343,28 @@ local function HandleSlashCommand(message)
     command   = string.lower(command or "")
     arguments = CN.Trim(arguments)
 
+    -- BARE `/cn` ANSWERS THE QUESTION THE ADDON EXISTS FOR.
+    --
+    -- It used to print a status dump -- version, mode, and a list of all
+    -- forty-seven internal module names -- and the login banner told every
+    -- new player to type it. So the addon's front door, advertised in its own
+    -- first line of output, answered a question nobody asked in vocabulary
+    -- nobody shares, and never mentioned `/cn next`, `/cn help` or
+    -- `/cn setup`.
+    --
+    -- The status is still there, under `/cn status`, which is a name that
+    -- says what it is.
     if command == "" then
+        local next_ = CN.commands["next"]
+
+        if next_ and next_.handler then
+            next_.handler("")
+
+            return
+        end
+
         ShowStatus()
+
         return
     end
 
@@ -376,7 +432,7 @@ SlashCmdList.COMPLETIONNAVIGATOR = HandleSlashCommand
 CN:RegisterCommand{
     name    = "status",
     order   = 1,
-    help    = "Show addon status.",
+    help    = "Version, character, focus and what has never been scanned.",
     handler = function()
         ShowStatus()
     end,
@@ -443,7 +499,7 @@ CN:RegisterCommand{
 
             table.sort(presets)
 
-            Print("|cff999999Focus: " .. table.concat(presets, ", ") .. "|r")
+            Print("|cff8a8f96Focus: " .. table.concat(presets, ", ") .. "|r")
 
             -- ONLY THE NAMES THAT ACTUALLY DO WEIGHTING ONLY.
             --
@@ -461,11 +517,11 @@ CN:RegisterCommand{
                 end
             end
 
-            Print("|cff999999Weighting only: "
+            Print("|cff8a8f96Weighting only: "
                 .. table.concat(weightingOnly, ", ") .. "|r")
 
-            Print("|cff999999A name in both lists applies the focus preset. "
-                .. "|cffffff00/cn mode profile <name>|r|cff999999 sets the "
+            Print("|cff8a8f96A name in both lists applies the focus preset. "
+                .. "|cffffc74f/cn mode profile <name>|r|cff8a8f96 sets the "
                 .. "weighting and leaves your filters alone.|r")
         end
 
@@ -477,11 +533,11 @@ CN:RegisterCommand{
             end
 
             if current and active then
-                Print("Focus: |cffffff00" .. active.label .. "|r")
-                Print("|cff999999" .. active.note .. "|r")
-                Print("|cff999999/cn mode off|r restores what you had before.")
+                Print("Focus: |cffffc74f" .. active.label .. "|r")
+                Print("|cff8a8f96" .. active.note .. "|r")
+                Print("|cff8a8f96/cn mode off|r restores what you had before.")
             else
-                Print("Priority mode: |cffffff00"
+                Print("Priority mode: |cffffc74f"
                     .. tostring(settings.priorityMode) .. "|r")
             end
 
@@ -502,7 +558,7 @@ CN:RegisterCommand{
                 Print("Focus cleared. Previous filters and weighting restored.")
             else
                 Print("No focus was set, so nothing changed.")
-                Print("|cff999999Your own |r|cffffff00/cn show|r|cff999999 "
+                Print("|cff8a8f96Your own |r|cffffc74f/cn show|r|cff8a8f96 "
                     .. "choices are untouched.|r")
             end
 
@@ -524,9 +580,9 @@ CN:RegisterCommand{
             local ok, preset = filters.ApplyMode(requested)
 
             if ok then
-                Print("Focus: |cffffff00" .. preset.label .. "|r -- "
+                Print("Focus: |cffffc74f" .. preset.label .. "|r -- "
                     .. preset.note)
-                Print("|cff999999/cn mode off|r puts it back.")
+                Print("|cff8a8f96/cn mode off|r puts it back.")
                 return
             end
         end
@@ -538,8 +594,8 @@ CN:RegisterCommand{
 
                 CN.InvalidateCandidates("mode")
 
-                Print("Priority mode set to |cffffff00" .. requested .. "|r.")
-                Print("|cff999999Weighting only; your type filters are "
+                Print("Priority mode set to |cffffc74f" .. requested .. "|r.")
+                Print("|cff8a8f96Weighting only; your type filters are "
                     .. "untouched.|r")
                 return
             end

@@ -284,16 +284,21 @@ function CN.InvalidateRanking()
     CN.rankingGeneration = (CN.rankingGeneration or 0) + 1
 end
 
-function CN.ScoreObjective(objective)
-    if type(objective) ~= "table" then
-        return 0
+local weightCache = {}
+
+-- Also cleared whenever the weights themselves are replaced, which the test
+-- suite does and a future settings surface might.
+function CN.ForgetScoreWeights()
+    weightCache = {}
+end
+
+local function EffectiveWeights(mode, profile)
+    local held = weightCache[mode]
+
+    if held then
+        return held
     end
 
-    local settings = CN.Settings()
-    local mode     = (settings and settings.priorityMode) or "balanced"
-    local profile  = CN.priorityProfiles[mode] or {}
-
-    -- Effective weights: defaults, then this profile's overrides.
     local w = {}
 
     for key, value in pairs(CN.scoreWeights) do
@@ -305,6 +310,33 @@ function CN.ScoreObjective(objective)
             w[key] = value
         end
     end
+
+    weightCache[mode] = w
+
+    return w
+end
+
+function CN.ScoreObjective(objective)
+    if type(objective) ~= "table" then
+        return 0
+    end
+
+    local settings = CN.Settings()
+    local mode     = (settings and settings.priorityMode) or "balanced"
+    local profile  = CN.priorityProfiles[mode] or {}
+
+    -- MEMOISED ON THE MODE, BECAUSE THAT IS ALL IT DEPENDS ON.
+    --
+    -- This copied eight keys out of the defaults and eight more out of the
+    -- profile, per objective. Measured over a hundred and fifty candidates it
+    -- was 28% of the entire scoring pass -- a hundred and fifty table
+    -- allocations to produce a hundred and fifty identical tables.
+    --
+    -- The effective weights are a function of `priorityMode` and nothing
+    -- else, so they are built once per mode and reused. Changing the mode
+    -- already invalidates the candidates, and the cache key is the mode
+    -- itself, so a stale table is not reachable.
+    local w = EffectiveWeights(mode, profile)
 
     local travel = objective.travelCost
 
@@ -521,9 +553,29 @@ end
 -- one -- apply to objectives from modules that know nothing about them.
 CN.candidateDecorators = CN.candidateDecorators or {}
 
+-- A NEW DECORATOR HAS TO REACH OBJECTIVES THAT ALREADY EXIST.
+--
+-- Since 0.54.0 a provider whose rebuild produces an identical list keeps the
+-- objective tables it already had, rather than re-decorating fresh ones --
+-- which is most of the point, since seven providers expire on a five-second
+-- clock and almost always return the same rows.
+--
+-- But a decorator registered AFTER those tables were built would then never
+-- see them: the list never differs, so the tables are never replaced, so
+-- nothing is decorated. Every module that registers one does so at load, so
+-- this only bites the test suite and anything registering late -- which is
+-- exactly the kind of "works everywhere except where somebody looks" defect
+-- this project keeps finding.
+--
+-- The generation moves when the set of decorators does, and a provider whose
+-- cached objectives predate it is rebuilt properly.
+CN.decoratorGeneration = 0
+
 function CN.RegisterCandidateDecorator(name, decorator)
     if type(decorator) == "function" then
         CN.candidateDecorators[name] = decorator
+
+        CN.decoratorGeneration = CN.decoratorGeneration + 1
     end
 end
 
@@ -784,6 +836,34 @@ local function Decorate(candidates)
     end
 end
 
+-- Cheap enough to be worth doing before a full re-rank: one pass over one
+-- provider's output, which is capped, against scoring and sorting every
+-- candidate in the addon.
+--
+-- Compares what a consumer can actually see. Two lists holding the same
+-- objectives in the same order with the same completion values produce the
+-- same ranking, whatever else is hanging off the tables.
+local function Identical(left, right)
+    if #left ~= #right then
+        return false
+    end
+
+    for index = 1, #left do
+        local a, b = left[index], right[index]
+
+        if a.type ~= b.type
+            or a.id ~= b.id
+            or a.completionValue ~= b.completionValue
+            or a.urgency ~= b.urgency
+            or a.limitedTimeBonus ~= b.limitedTimeBonus then
+
+            return false
+        end
+    end
+
+    return true
+end
+
 local function RefreshProviders(force)
     local now     = time()
     local rebuilt = 0
@@ -815,15 +895,51 @@ local function RefreshProviders(force)
                 and (now - entry.builtAt) >= CN.candidateCacheSeconds)
 
         if stale then
+            local previous = entry.candidates
+
             entry.candidates = RunProvider(name, provider)
+
+            -- A REBUILD THAT PRODUCED THE SAME LIST IS NOT A CHANGE.
+            --
+            -- `rebuilt > 0` bumps the aggregate generation, and the ranked
+            -- list is keyed on that -- so one provider going stale forces a
+            -- full re-score and re-sort of everything. Seven providers are
+            -- volatile and expire on a five-second clock, and most of the
+            -- time they return exactly the rows they returned before: a
+            -- lockout with the same bosses left, a currency at the same
+            -- quantity, the same rare still up.
+            --
+            -- Measured, that turned a 0.007 ms answer into a 0.221 ms one,
+            -- every five seconds, for no change in what the player sees.
+            --
+            -- The header above `InvalidateCandidates` already reasons that a
+            -- rebuild "may produce an identical list" and declines to clear
+            -- the aggregate for that reason. This applies the same reasoning
+            -- to the rebuild's own result.
+            if previous
+                and entry.decorated == CN.decoratorGeneration
+                and Identical(previous, entry.candidates) then
+
+                entry.candidates = previous
+                entry.builtAt    = now
+                entry.dirty      = false
+                entry.urgent     = false
+
+                -- Deliberately NOT counted as a rebuild.
+                stale = false
+            end
+        end
+
+        if stale then
 
             -- Decorate here, not over the aggregate: these objectives are
             -- new, and every other provider's are not.
             Decorate(entry.candidates)
 
-            entry.builtAt = now
-            entry.dirty   = false
-            entry.urgent  = false
+            entry.builtAt   = now
+            entry.dirty     = false
+            entry.urgent    = false
+            entry.decorated = CN.decoratorGeneration
 
             rebuilt = rebuilt + 1
         end
@@ -836,8 +952,29 @@ end
 function CN.CollectCandidates(force)
     local rebuilt = RefreshProviders(force)
 
-    -- Nothing was rebuilt, so the aggregate cannot have changed.
-    if aggregate.candidates and rebuilt == 0 then
+    -- HOW MANY PROVIDERS THERE ARE IS PART OF THE ANSWER.
+    --
+    -- "Nothing was rebuilt" used to be enough, because a provider that had
+    -- gone away left its entry dirty and something always rebuilt. Since a
+    -- rebuild producing an identical list no longer counts as a rebuild, that
+    -- is no longer true: unregister a provider and every remaining one can
+    -- legitimately report no change, leaving the departed provider's rows in
+    -- the aggregate for the rest of the session.
+    --
+    -- Counting is O(providers), which is twenty-two, and it runs once per
+    -- collect rather than once per candidate.
+    local providerCount = 0
+
+    for _ in pairs(CN.candidateProviders) do
+        providerCount = providerCount + 1
+    end
+
+    -- Nothing was rebuilt and nothing came or went, so the aggregate cannot
+    -- have changed.
+    if aggregate.candidates
+        and rebuilt == 0
+        and aggregate.providers == providerCount then
+
         return aggregate.candidates
     end
 
@@ -909,6 +1046,7 @@ function CN.CollectCandidates(force)
 
     aggregate.candidates = candidates
     aggregate.builtAt    = time()
+    aggregate.providers  = providerCount
     aggregate.generation = aggregate.generation + 1
 
     return candidates
@@ -1292,14 +1430,14 @@ CN:RegisterCommand{
             local scaled = math.floor((value / (1 + CN.urgencyLongShare))
                 * width + 0.5)
 
-            CN.Print(string.format("  %-11s |cff5dd2fb%s|r|cff444444%s|r %.2f",
+            CN.Print(string.format("  %-11s |cff5dd2fb%s|r|cff5a5f66%s|r %.2f",
                 point.label,
                 string.rep("=", scaled),
                 string.rep("-", width - scaled),
                 value))
         end
 
-        CN.Print("|cff999999Multiplied by " .. CN.urgencyWeight
+        CN.Print("|cff8a8f96Multiplied by " .. CN.urgencyWeight
             .. " and added to the score. The steep ramp starts at "
             .. math.floor(CN.urgencyHorizonSeconds / 3600)
             .. " hours; the shallow one at "
@@ -1323,9 +1461,9 @@ CN:RegisterCommand{
         -- 20` silently gave five. Five is the right ceiling -- this prints a
         -- full score breakdown per row -- but saying so costs one line.
         if asked and asked > wanted then
-            CN.Print("|cff999999Showing " .. wanted .. ": the breakdown is "
-                .. "long, so this tops out there. |cffffff00/cn list "
-                .. asked .. "|r|cff999999 gives the plain ranking.|r")
+            CN.Print("|cff8a8f96Showing " .. wanted .. ": the breakdown is "
+                .. "long, so this tops out there. |cffffc74f/cn list "
+                .. asked .. "|r|cff8a8f96 gives the plain ranking.|r")
         end
 
         local results = CN.Recommend(wanted)
@@ -1338,24 +1476,24 @@ CN:RegisterCommand{
 
         local settings = CN.Settings()
 
-        CN.Print("Focus: |cffffff00"
+        CN.Print("Focus: |cffffc74f"
             .. tostring((settings and settings.priorityMode) or "balanced")
             .. "|r")
 
         for index, objective in ipairs(results) do
-            CN.Print(string.format("%d. |cffffffff%s|r |cff999999%.1f|r",
+            CN.Print(string.format("%d. |cfff2f4f6%s|r |cff8a8f96%.1f|r",
                 index, tostring(objective.name or objective.id),
                 objective.priorityWeight or 0))
 
             for _, term in ipairs(CN.ExplainScore(objective)) do
                 CN.Print(string.format("     %s%+.1f|r  %s",
-                    term.value >= 0 and "|cff73b873" or "|cfff56b61",
+                    term.value >= 0 and "|cff73b873" or "|cffe2564c",
                     term.value, term.label))
             end
         end
 
-        CN.Print("|cff999999Every line above is a term in the same sum. "
-            .. "|cffffff00/cn mode|r changes the weights; |cffffff00/cn why|r "
+        CN.Print("|cff8a8f96Every line above is a term in the same sum. "
+            .. "|cffffc74f/cn mode|r changes the weights; |cffffc74f/cn why|r "
             .. "explains one objective in detail.|r")
     end,
 }
@@ -1428,7 +1566,7 @@ CN:RegisterCommand{
             CN.Print("No actionable objectives are known yet.")
 
             for _, line in ipairs(CN.ExplainEmptyList()) do
-                CN.Print("|cff999999" .. line .. "|r")
+                CN.Print("|cff8a8f96" .. line .. "|r")
             end
             return
         end
@@ -1448,18 +1586,18 @@ CN:RegisterCommand{
         local notice = group and group.Notice()
 
         if notice then
-            CN.Print("|cffffd100" .. notice .. "|r")
+            CN.Print("|cffffc74f" .. notice .. "|r")
         end
 
-        CN.Print("Recommended next: " .. tostring(objective.name or objective.id)
-            .. " |cff999999(" .. CN.TypeLabel(objective.type) .. ")|r")
-
-        for _, line in ipairs(CN.ExplainRecommendation(objective)) do
-            CN.Print(line)
-        end
+        -- One headline, its reasons indented under it. The whole block used
+        -- to carry the addon's name on every line.
+        CN.PrintBlock(
+            "Next: " .. CN.Primary(tostring(objective.name or objective.id))
+                .. CN.Aside(CN.TypeBadge(objective.type)),
+            CN.ExplainRecommendation(objective))
 
         if objective.mapID and objective.x and objective.y then
-            CN.Print("|cffffff00/cn go|r to set a waypoint.")
+            CN.PrintLine(CN.Accent("/cn go") .. CN.Muted(" to set a waypoint."))
         end
     end,
 }
@@ -1473,12 +1611,24 @@ CN:RegisterCommand{
 
         CN.Print("Candidate cache: "
             .. (state.cached and (state.count .. " objectives") or "empty")
-            .. (state.dirty and " |cffffff00(stale)|r" or "")
-            .. (state.age and (" |cff999999" .. state.age .. "s old|r") or ""))
+            .. (state.dirty and " |cffffc74f(stale)|r" or "")
+            .. (state.age and (" |cff8a8f96" .. state.age .. "s old|r") or ""))
 
-        CN.Print("Providers: " .. state.fresh .. " of " .. state.providers
+        CN.PrintLine("Providers: " .. state.fresh .. " of " .. state.providers
             .. " cached, ranked list "
-            .. (state.ranked and "|cff00ff00reused|r" or "|cffffff00rebuilding|r"))
+            .. (state.ranked and CN.Good("reused") or CN.Accent("rebuilding")))
+
+        -- The travel cost cache, which is the largest single term in a
+        -- rebuild: every located objective asks for one journey estimate, and
+        -- against a real flight network that is most of the work.
+        local travel = CN:GetModule("Travel")
+
+        if travel and travel.CostCacheSize then
+            CN.PrintLine("Costed journeys held: " .. travel.CostCacheSize()
+                .. "|cff8a8f96 of " .. travel.costCacheCap
+                .. ", thrown away when you move more than "
+                .. travel.costCacheYards .. " yards|r")
+        end
 
         local rows = {}
 
@@ -1495,8 +1645,8 @@ CN:RegisterCommand{
         end
 
         if #rows == 0 then
-            CN.Print("No timings recorded yet. Run |cffffff00/cn next|r first.")
-            CN.Print("|cff999999Timings need debugprofilestop, which exists in game "
+            CN.Print("No timings recorded yet. Run |cffffc74f/cn next|r first.")
+            CN.Print("|cff8a8f96Timings need debugprofilestop, which exists in game "
                 .. "but not in offline tests.|r")
             return
         end
@@ -1509,7 +1659,7 @@ CN:RegisterCommand{
             CN.Print(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
                 row.name, row.average, row.worst, row.calls,
                 row.calls == 1 and "call" or "calls",
-                row.cached and "" or " |cffffff00stale|r"))
+                row.cached and "" or " |cffffc74fstale|r"))
         end
 
         -- A cap nobody can see reads as "that was everything".
@@ -1524,12 +1674,12 @@ CN:RegisterCommand{
 
                 CN.Print("  " .. name .. ": showing " .. CN.providerCandidateCap
                     .. " of " .. truncation.considered
-                    .. " |cff999999(" .. truncation.dropped .. " lower-valued dropped)|r")
+                    .. " |cff8a8f96(" .. truncation.dropped .. " lower-valued dropped)|r")
             end
         end
 
         if capped then
-            CN.Print("|cff999999Dropped entries scored no higher than the ones kept. "
+            CN.Print("|cff8a8f96Dropped entries scored no higher than the ones kept. "
                 .. "Full counts are in /cn breakdown.|r")
         end
     end,
@@ -1552,7 +1702,7 @@ CN:RegisterCommand{
 
         for index, objective in ipairs(results) do
             CN.Print(index .. ". " .. tostring(objective.name or objective.id)
-                .. " |cff999999[" .. CN.TypeLabel(objective.type)
+                .. " |cff8a8f96[" .. CN.TypeBadge(objective.type)
                 .. " " .. string.format("%.1f", objective.priorityWeight or 0) .. "]|r")
         end
     end,

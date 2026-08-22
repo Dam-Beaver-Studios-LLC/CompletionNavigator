@@ -7,6 +7,154 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.54.0]
+
+Three audits: what it costs, what it looks like, and what the first five
+minutes are actually like. The largest release this project has had.
+
+### Added
+
+- **One palette.** There were sixteen colours across five hundred and
+  forty-three inline codes -- five near-identical greys doing one job, three
+  reds, two greens, two golds, and the brand blue in two different casings --
+  plus three separate colour tables, none of which was the source of truth.
+  There are now eight roles in one file, every call site goes through a
+  wrapper, and the test suite fails on a colour that is not one of them. It
+  also fails if two roles become indistinguishable, which is how the five
+  greys happened.
+- **A settings page instead of seven checkboxes.** Twenty-one settings existed
+  and seven were reachable in the window. The fourteen that were not included
+  **both accessibility controls** -- text size and the colourblind arrow
+  labelling -- so the players who most need a larger interface were the least
+  likely to find it, since the only way in was typing `/cn scale 1.4`.
+  Everything is now grouped by subject, and every control has a tooltip
+  saying what it does.
+- **A sort control.** Three sort modes were written, tested, and reachable
+  from nowhere: the comment said "cycled by clicking the header" and nothing
+  called it.
+- **`/cn why` with no arguments** explains the current recommendation, which
+  is what the word means. It used to print a usage line, while the addon
+  computed exactly that answer and threw it away after `/cn next`.
+- **A prompt on arriving somewhere.** The addon has always counted how many
+  quests a zone holds that you have not picked up, and kept it to itself until
+  you typed `/cn zone`. Once per zone, above a threshold, never mid-fight.
+- **Per-tab footers** naming the two or three commands that go deeper from
+  *that* tab. The window's only route to a hundred and twenty-five commands
+  was one line pointing at `/cn help`.
+
+### Changed
+
+- **`/cn` answers the question the addon exists for.** It printed a status
+  dump -- version, mode, and a list of all forty-seven internal module names
+  -- and the login banner told every new player to type it. So the front door,
+  advertised in the addon's own first line of output, answered a question
+  nobody asked in vocabulary nobody shares. The status is still there, under
+  `/cn status`.
+- **The addon's name appears once per answer, not once per line.** Every line
+  carried "Completion Navigator: ", and this addon answers in blocks -- six
+  lines for `/cn next`, twenty for `/cn help`. Twenty-two characters of chrome
+  per line turned every answer into a wall of the addon's own name.
+- **Goals and chases accept names.** The store page leads with `/cn chase rep
+  2600` and nobody knows that 2600 is the Severed Threads. Six modules had a
+  name resolver; the two commands most likely to be handed a name called
+  `CN.ToID` and refused anything that was not already a number.
+- **Setup knows which scans have run**, not merely whether one did. The single
+  flag meant the login reminder told players nothing had been scanned while
+  four subsystems had scanned themselves eight seconds earlier, the window's
+  own scan button did not satisfy it, and it could not name what was missing.
+- **Three commands renamed.** `/cn nearby` meant "not near you"; it is
+  `/cn elsewhere` now. `/cn waiting` read as "waiting on a timer" and meant
+  unpicked quests; it is `/cn unpicked`. `/cn show` is `/cn types`, which is
+  what it filters. All three keep their old names as aliases.
+- **The essentials list is ten commands, all of them day-one.** It was
+  fifteen, four of which were not.
+- **The Blizzard options panel is a settings surface**, not a placard listing
+  six commands and omitting the one required step.
+- **The welcome screen offers the scan.** It arrived at the one moment a new
+  player is engaged and looking at the addon, and offered four flavour presets
+  and no way to do the thing that matters.
+
+### Fixed
+
+- **The tab strip was drawn on top of the filter box.** In the default
+  configuration, on every install, two of the eleven tabs sat underneath the
+  search field and its label.
+- **The selected tab was rendered as a disabled button** -- greyed text,
+  dimmed art. In every interface anywhere, greyed means unavailable, so the
+  tab you were looking at was the one that looked broken.
+- **The route optimiser cost 33 milliseconds and several megabytes of garbage
+  per call** at the size a busy zone produces, and it runs every two seconds
+  while the Zone tab is open. It built a whole new route table for every pair
+  of stops and measured both routes end to end, including the one that had not
+  changed. Reversing a segment alters exactly two edges, so the comparison is
+  four distances and the swap happens in place. Same routes, no allocation.
+- **Clustering was quadratic with a module lookup inside the inner loop** --
+  10.7 ms at a hundred and ten objectives, growing as the square. The map
+  scale is asked for once and candidates are bucketed into a grid, so only the
+  nine cells around one can decide the answer.
+- **Every located objective re-costed its journey from scratch on every
+  rebuild.** Those are now memoised on the destination and thrown away when
+  you move more than twenty yards.
+- **The flight network was rebuilt after every loading screen** -- about ten
+  milliseconds, on top of a provider rebuild, at the moment the client is
+  busiest. Flight points cannot appear during a loading screen; only talking
+  to a flight master adds one.
+- **One click of Ignore cost 2.2 ms on every rebuild after it.** The hide
+  lists were keyed on a `"TYPE:id"` string and read twice per candidate, so
+  using the feature once meant eight thousand string allocations per rebuild
+  -- for exactly the players the feature exists for. Nested by type now, which
+  is two hash lookups and no string. Database version 9.
+- **A volatile provider returning an identical list re-ranked everything.**
+  Seven providers expire on a five-second clock and most of the time return
+  precisely the rows they returned before; each one forced a full re-score.
+  Measured, 0.007 ms became 0.221 ms, every five seconds, for no change.
+- **The zone router scored every candidate and then threw the scores away**,
+  twice: nothing in the function read them, and it invalidated the ranking
+  immediately afterwards.
+- **The benchmark was measuring a corner, not a continent.** Its sixty flight
+  points were clustered into one corner of the map so they would not change
+  any test's answer -- which is exactly the geometry the search's pruning
+  bound rejects unexamined. One origin of fifty-nine survived there against
+  seventeen of sixty on a real network, so two travel budgets were reported at
+  a fifth of their ceiling while a realistic network was over both. The
+  benchmark now spreads them after the assertions have run.
+- **Nothing the addon drew over the game world had an outline.** The arrow's
+  distance readout -- the number you read *while running* -- the heads-up
+  line, the follow frame and the map pin numbers were all bare text with a
+  one-pixel shadow, which is enough over a dark panel and not enough over
+  Northrend snow.
+- **The heads-up line and the follow frame had no background at all**, while
+  the window used a Blizzard template and the welcome screen used parchment.
+  Three idioms, and two of them read as text that had come loose.
+- **Route pins were one bright arrow and eleven identical grey ones.** They
+  are a sequence now: same colour, fading back, so "where next" is answerable
+  without reading a digit. The arrow texture is still an arrow, which means
+  *direction*, not *place* -- that is a further release.
+- **Three tabs built their columns with `%-16s` padding in a proportional
+  font**, which is not a column. Values are right-aligned in their own slot,
+  and progress is a texture rather than a row of equals signs whose pixel
+  width changed as it filled.
+- **The completion flourish fired on every stop past the end of a route.**
+- **`Appearances` had no refresh path at all** -- no event, no login hook --
+  so it was read once by `/cn setup` and silently rotted from there.
+- **Reputation scope corrections apply**: writing a faction to one scope now
+  clears the other.
+- Smaller: the harvest store had no ceiling and kept a map name it can derive
+  from a map id; the preference cache was keyed on a string it rebuilt on
+  every call and on a generation that changed every two seconds; `YES` and
+  `NO` were shouting; type badges were plural on single items; the window
+  reopens on the tab you left it on.
+
+### Testing
+
+- 95 mutations killed, none surviving, up from 81.
+- The test stubs forgot what they were told: `SetWidth`, `SetSize` and
+  `SetShown` all fell through to a catch-all, so nothing the addon sized or
+  showed could be asserted about -- and an unset field read back as a *table*
+  rather than as nil, which is how `GetWidth() or 400` returned a table.
+- Coverage held at 85% across a release that added a file.
+
+
 ## [0.53.0]
 
 Multi-hop flight routing, and three audits: how state lives and dies, how the

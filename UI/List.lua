@@ -53,14 +53,62 @@ local function CreateList(parent)
         row:SetPoint("TOPLEFT", 0, -((index - 1) * ROW_HEIGHT))
         row:SetPoint("TOPRIGHT", 0, -((index - 1) * ROW_HEIGHT))
 
+        -- Alternating rows, very faintly. Below the threshold at which
+        -- anybody would call it striping, and above the threshold at which
+        -- the eye stops losing its place along a wide row.
+        row.stripe = row:CreateTexture(nil, "BACKGROUND")
+        row.stripe:SetAllPoints()
+        row.stripe:SetColorTexture(1, 1, 1, 0.025)
+        row.stripe:SetShown(index % 2 == 0)
+
+        -- SELECTION IS A TEXTURE NOW, NOT A CHARACTER.
+        --
+        -- Three tabs marked the selected row by prepending a green ">" to
+        -- the label string, which shifts every other row's text by the width
+        -- of two glyphs and reads as punctuation rather than as state.
+        row.selected = row:CreateTexture(nil, "ARTWORK")
+        row.selected:SetAllPoints()
+        row.selected:SetColorTexture(CN.Rgb("BRAND"))
+        row.selected:SetAlpha(0.16)
+        row.selected:Hide()
+
         row.highlight = row:CreateTexture(nil, "HIGHLIGHT")
         row.highlight:SetAllPoints()
         row.highlight:SetColorTexture(1, 1, 1, 0.10)
 
+        -- A RIGHT-ALIGNED VALUE COLUMN.
+        --
+        -- Three tabs built their columns with `%-16s` and `%6d` padding. WoW
+        -- ships no monospace font and Friz Quadrata is proportional, so
+        -- "Pets", "Appearances" and "Achievements" padded to sixteen
+        -- characters are three different widths and the numbers beside them
+        -- were visibly ragged -- on the tabs that most want to read as a
+        -- dashboard.
+        --
+        -- Two anchored fontstrings do what padding cannot.
+        row.value = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        row.value:SetPoint("RIGHT", -6, 0)
+        row.value:SetWidth(170)
+        row.value:SetJustifyH("RIGHT")
+
         row.label = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
         row.label:SetPoint("LEFT", 4, 0)
-        row.label:SetPoint("RIGHT", -4, 0)
+        row.label:SetPoint("RIGHT", row.value, "LEFT", -8, 0)
         row.label:SetJustifyH("LEFT")
+
+        -- A REAL BAR, RATHER THAN ONE MADE OF EQUALS SIGNS.
+        --
+        -- `CN.ProgressBar` builds its bar from "=" and "-" characters, which
+        -- is the right call in chat where there is no alternative. In the
+        -- window it meant a twenty-four cell bar whose PIXEL WIDTH changed as
+        -- it filled, because the two characters are different widths -- a
+        -- progress bar that gets shorter as you make progress.
+        row.bar = row:CreateTexture(nil, "ARTWORK")
+        row.bar:SetHeight(2)
+        row.bar:SetPoint("BOTTOMLEFT", 4, 1)
+        row.bar:SetColorTexture(CN.Rgb("BRAND"))
+        row.bar:SetAlpha(0.85)
+        row.bar:Hide()
 
         -- HANDLERS ARE BOUND ONCE, HERE.
         --
@@ -197,8 +245,42 @@ local function CreateList(parent)
             self:SetEntries(lastEntries)
         end
 
+        if list.sortCaption then
+            list.sortCaption:SetText(CN.Muted("sort: " .. self:SortMode()))
+        end
+
         return self:SortMode()
     end
+
+    -- AND THE BUTTON THAT CYCLES IT.
+    --
+    -- The comment above says "cycled by clicking the header" and nothing in
+    -- the addon called `CycleSort` -- a complete, tested, three-mode sort
+    -- that no player could reach. Twelve lines to ship a feature that was
+    -- already written.
+    local sortButton = CreateFrame("Button", nil, parent)
+
+    sortButton:SetSize(96, 16)
+    sortButton:SetPoint("BOTTOMRIGHT", list, "TOPRIGHT", -26, 2)
+
+    list.sortCaption = sortButton:CreateFontString(nil, "ARTWORK",
+        "GameFontHighlightSmall")
+    list.sortCaption:SetPoint("RIGHT")
+    list.sortCaption:SetJustifyH("RIGHT")
+    list.sortCaption:SetText(CN.Muted("sort: ranked"))
+
+    sortButton:SetScript("OnClick", function()
+        list:CycleSort()
+    end)
+
+    if CN.UI and CN.UI.AttachTooltip then
+        CN.UI.AttachTooltip(sortButton,
+            "As ranked, by name, or reversed. \"As ranked\" is the order the "
+            .. "addon thinks you should do things in, which is the point of "
+            .. "the addon.")
+    end
+
+    list.sortButton = sortButton
 
     function list:ApplySort(entries)
         local mode = self:SortMode()
@@ -280,6 +362,32 @@ local function CreateList(parent)
             local row = self:GetRow(index)
 
             row.label:SetText(entry.text or "")
+            row.value:SetText(entry.value or "")
+
+            row.selected:SetShown(entry.selected and true or false)
+
+            -- Only rows that do something respond to the mouse, so a hover
+            -- highlight means "this is clickable" rather than "the cursor is
+            -- here". Inert rows take the body colour; actionable ones the
+            -- brighter primary.
+            local actionable = entry.onClick ~= nil
+
+            row:EnableMouse(actionable or entry.tooltip ~= nil)
+
+            if actionable then
+                row.label:SetTextColor(CN.Rgb("PRIMARY"))
+            else
+                row.label:SetTextColor(CN.Rgb("BODY"))
+            end
+
+            if entry.fraction then
+                local fraction = math.max(0, math.min(1, entry.fraction))
+
+                row.bar:SetWidth(math.max(1, (width - 12) * fraction))
+                row.bar:Show()
+            else
+                row.bar:Hide()
+            end
 
             -- The only thing a redraw changes. The handlers were bound when
             -- the row was created and read this.
@@ -295,8 +403,10 @@ local function CreateList(parent)
 
             local row = self:GetRow(used)
 
-            row.label:SetText("|cff999999... and " .. truncated
-                .. " more not shown|r")
+            row.label:SetText(CN.Muted("and " .. truncated .. " more not shown"))
+            row.value:SetText("")
+            row.selected:Hide()
+            row.bar:Hide()
 
             row.entry = nil
 

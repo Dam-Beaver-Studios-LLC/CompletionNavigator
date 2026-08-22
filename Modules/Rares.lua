@@ -379,7 +379,18 @@ CN.RegisterCandidateProvider("Rares", function()
     end
 
     return candidates
-end, { events = { "VIGNETTE_MINIMAP_UPDATED", "VIGNETTES_UPDATED", "ZONE_CHANGED_NEW_AREA" }, volatile = true })
+-- A COOLDOWN, BECAUSE VIGNETTE EVENTS FIRE CONSTANTLY IN THE OPEN WORLD.
+--
+-- `VIGNETTE_MINIMAP_UPDATED` fires several times a second while anything is
+-- moving in range, and with no cooldown this provider was marked dirty
+-- continuously -- and every dirty rebuild used to bump the aggregate
+-- generation, which forces a full re-score of everything.
+--
+-- Five seconds costs nothing in freshness: a rare that appeared two seconds
+-- ago is still there, and the alert path that announces one is a separate
+-- event handler that is not throttled by this at all.
+end, { events = { "VIGNETTE_MINIMAP_UPDATED", "VIGNETTES_UPDATED", "ZONE_CHANGED_NEW_AREA" },
+       volatile = true, cooldown = 5 })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -449,7 +460,7 @@ CN:RegisterCommand{
 
         if #active == 0 then
             Print("Nothing is up nearby.")
-            Print("|cff999999Vignettes only appear for content in range; "
+            Print("|cff8a8f96Vignettes only appear for content in range; "
                 .. "move around the zone.|r")
             return
         end
@@ -461,14 +472,14 @@ CN:RegisterCommand{
                 and Rares.IsClearedByCharacter(vignette.vignetteID)
 
             Print("  " .. index .. ". " .. tostring(vignette.name)
-                .. " |cff999999[" .. tostring(vignette.kind) .. "]|r"
-                .. (cleared and " |cff999999(already cleared)|r" or "")
-                .. (vignette.x and string.format(" |cff999999%.1f, %.1f|r",
+                .. " |cff8a8f96[" .. tostring(vignette.kind) .. "]|r"
+                .. (cleared and " |cff8a8f96(already cleared)|r" or "")
+                .. (vignette.x and string.format(" |cff8a8f96%.1f, %.1f|r",
                     vignette.x * 100, vignette.y * 100) or ""))
         end
 
-        Print("|cffffff00/cn rare <number>|r to set a waypoint.")
-        Print("|cff999999\"already cleared\" is inferred from a vignette that "
+        Print("|cffffc74f/cn rare <number>|r to set a waypoint.")
+        Print("|cff8a8f96\"already cleared\" is inferred from a vignette that "
             .. "vanished while you were next to it, and it expires at the "
             .. "weekly reset. /cn rareforget clears it now.|r")
     end,

@@ -97,7 +97,12 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
         -- Banner first: login hooks print their own findings, and those
         -- read as noise before the addon has said it loaded.
-        Print("v" .. CN.version .. " loaded. Type |cffffff00/cn|r for status.")
+        -- The banner names the two commands worth knowing on day one, not
+        -- the status dump. It used to point at bare `/cn`, which printed the
+        -- addon's internal module list.
+        Print("v" .. CN.version .. " loaded. " .. CN.Accent("/cn")
+            .. CN.Muted(" for what to do next, ") .. CN.Accent("/cn help")
+            .. CN.Muted(" for everything else."))
 
         CN.RunHooks(CN.loginHooks)
 

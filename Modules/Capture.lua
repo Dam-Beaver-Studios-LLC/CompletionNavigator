@@ -489,17 +489,17 @@ CN:RegisterCommand{
 
         for name, value in pairs(records) do
             if type(value) == "table" and value.skipped then
-                Print("  |cff999999" .. name .. " -- " .. value.skipped .. "|r")
+                Print("  |cff8a8f96" .. name .. " -- " .. value.skipped .. "|r")
             end
         end
 
-        Print("|cff999999Nothing identifying you is recorded, and nothing "
+        Print("|cff8a8f96Nothing identifying you is recorded, and nothing "
             .. "leaves your machine -- this addon has no network access. "
             .. "It is written to your SavedVariables at logout.|r")
         Print("To send it: log out, then find "
-            .. "|cffffff00WTF\\Account\\<account>\\SavedVariables\\"
+            .. "|cffffc74fWTF\\Account\\<account>\\SavedVariables\\"
             .. "CompletionNavigatorDB.lua|r.")
-        Print("|cffffff00/cn capture clear|r removes it again.")
+        Print("|cffffc74f/cn capture clear|r removes it again.")
     end,
 }
 

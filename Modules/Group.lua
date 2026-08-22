@@ -353,7 +353,7 @@ CN:RegisterCommand{
         -- them. The four words are translated in all ten locale files and
         -- were never looked up, because the only place a player reads them is
         -- here.
-        Print("Situation: |cffffff00" .. CN.L[situation] .. "|r")
+        Print("Situation: |cffffc74f" .. CN.L[situation] .. "|r")
 
         local inside, kind = Group.Instance()
 
@@ -366,9 +366,9 @@ CN:RegisterCommand{
         local notice = Group.Notice()
 
         if notice then
-            Print("|cffffd100" .. notice .. "|r")
+            Print("|cffffc74f" .. notice .. "|r")
         else
-            Print("|cff999999Nothing about your situation is changing the "
+            Print("|cff8a8f96Nothing about your situation is changing the "
                 .. "ranking right now.|r")
         end
     end,

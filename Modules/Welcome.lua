@@ -123,7 +123,7 @@ function Welcome.Build()
     frame = CreateFrame("Frame", "CompletionNavigatorWelcome", UIParent,
         BackdropTemplateMixin and "BackdropTemplate" or nil)
 
-    frame:SetSize(420, 260)
+    frame:SetSize(432, 300)
     frame:SetPoint("CENTER")
     frame:SetFrameStrata("DIALOG")
     frame:EnableMouse(true)
@@ -150,8 +150,43 @@ function Welcome.Build()
     body:SetPoint("TOPRIGHT", -24, -48)
     body:SetJustifyH("LEFT")
     body:SetText("What are you playing for at the moment? This only sets a "
-        .. "starting focus -- everything is still tracked, and |cffffff00/cn "
-        .. "mode off|r puts it back.")
+        .. "starting focus " .. CN.DASH .. " everything is still tracked, and "
+        .. CN.Accent("/cn mode off") .. " puts it back.")
+
+    -- THE ONE THING THAT ACTUALLY MATTERS, AS A BUTTON.
+    --
+    -- This screen arrives at the single moment a new player is engaged and
+    -- looking at the addon's own interface, and it offered four flavour
+    -- presets and no way to do the required step. `/cn setup` was mentioned
+    -- in CHAT, after the click. Somebody who pressed "Not now" was told
+    -- "Right. /cn whenever you want it." and never heard about it again that
+    -- session.
+    --
+    -- Offered, not run, which is the standing rule -- but offered where the
+    -- player is, rather than in a line that scrolls away under login chatter.
+    local scan = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+
+    scan:SetSize(384, 26)
+    scan:SetPoint("TOPLEFT", 24, -96)
+    scan:SetText("Read my collections now (a few seconds)")
+
+    scan:SetScript("OnClick", function()
+        local setup = CN:GetModule("Setup")
+
+        if setup then
+            scan:SetEnabled(false)
+            scan:SetText("Reading" .. CN.DOT .. CN.DOT .. CN.DOT)
+
+            setup.Run(function()
+                if scan and scan.SetText then
+                    scan:SetText("Read. " .. CN.Accent("/cn")
+                        .. " asks what is next.")
+                end
+            end)
+        end
+    end)
+
+    frame.scan = scan
 
     local previous
 
@@ -163,11 +198,11 @@ function Welcome.Build()
         button:SetText(choice.label)
 
         if index == 1 then
-            button:SetPoint("TOPLEFT", 24, -104)
+            button:SetPoint("TOPLEFT", 24, -140)
         elseif index == 2 then
             button:SetPoint("TOPLEFT", previous, "TOPRIGHT", 12, 0)
         elseif index == 3 then
-            button:SetPoint("TOPLEFT", 24, -136)
+            button:SetPoint("TOPLEFT", 24, -172)
         else
             button:SetPoint("TOPLEFT", previous, "TOPRIGHT", 12, 0)
         end
@@ -175,23 +210,21 @@ function Welcome.Build()
         button:SetScript("OnClick", function()
             local _, mode = Welcome.Choose(choice.mode)
 
-            Print("Focus set to |cffffff00" .. mode .. "|r. "
-                .. "|cff999999/cn mode off|r undoes it.")
-            Print("Ask it anything with |cffffff00/cn|r, or open the window "
-                .. "with |cffffff00/cn ui|r.")
+            local lines = {
+                CN.Accent("/cn") .. CN.Muted(" asks what is next. ")
+                    .. CN.Accent("/cn ui") .. CN.Muted(" opens the window."),
+            }
 
-            -- OFFER THE SCAN HERE, where the player is already answering
-            -- questions -- rather than leaving it to a reminder that arrives
-            -- later, out of context, and reads like nagging. Offered, not
-            -- run: a first-run screen that starts work uninvited is the
-            -- opposite of what this addon does everywhere else.
             local setup = CN:GetModule("Setup")
 
             if setup and setup.HasRun and not setup.HasRun() then
-                Print("It has not looked at your collections yet. "
-                    .. "|cffffff00/cn setup|r does that once, and takes a "
-                    .. "few seconds.")
+                table.insert(lines, CN.Muted("It has not read your "
+                    .. "collections yet. ") .. CN.Accent("/cn setup")
+                    .. CN.Muted(" does that once."))
             end
+
+            CN.PrintBlock("Focus: " .. CN.Accent(mode)
+                .. CN.Aside(CN.Accent("/cn mode off") .. " undoes it"), lines)
 
             frame:Hide()
         end)
@@ -213,7 +246,7 @@ function Welcome.Build()
     dismiss:SetScript("OnClick", function()
         Welcome.MarkSeen()
 
-        Print("Right. |cffffff00/cn|r whenever you want it.")
+        Print("Right. |cffffc74f/cn|r whenever you want it.")
 
         frame:Hide()
     end)
@@ -244,9 +277,9 @@ function Welcome.Show()
     -- No frame available -- a headless test, or a client that refuses to
     -- create one. Say the same thing in chat rather than silently doing
     -- nothing.
-    Print("Completion Navigator is installed. |cffffff00/cn mode leveling|r, "
-        .. "|cffffff00collecting|r, |cffffff00reputation|r or just "
-        .. "|cffffff00/cn|r to begin.")
+    Print("Completion Navigator is installed. |cffffc74f/cn mode leveling|r, "
+        .. "|cffffc74fcollecting|r, |cffffc74freputation|r or just "
+        .. "|cffffc74f/cn|r to begin.")
 
     Welcome.MarkSeen()
 

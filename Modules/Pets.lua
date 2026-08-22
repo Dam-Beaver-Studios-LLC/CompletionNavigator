@@ -322,14 +322,14 @@ CN:RegisterCommand{
 
         local record = Store()[speciesID]
 
-        Print(NameOf(speciesID, record) .. " |cff999999(" .. speciesID .. ")|r")
+        Print(NameOf(speciesID, record) .. " |cff8a8f96(" .. speciesID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected)
             .. (record.collected and (" (" .. record.count .. "/" .. record.limit .. ")") or ""))
         Print("Wild: " .. CN.YesNo(record.isWild)
             .. "   Battle pet: " .. CN.YesNo(record.canBattle))
 
         if record.obtainable == false then
-            Print("|cffff4444Currently unobtainable.|r")
+            Print("|cffe2564cCurrently unobtainable.|r")
         end
     end,
 }

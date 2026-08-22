@@ -246,7 +246,7 @@ CN:RegisterCommand{
 
         if here then
             if here.completed then
-                Print("This zone: |cff00ff00fully explored|r")
+                Print("This zone: |cff73b873fully explored|r")
             else
                 Print("This zone: " .. here.done .. " / " .. here.criteria)
 
@@ -264,7 +264,7 @@ CN:RegisterCommand{
             Print("Closest to finishing:")
 
             for _, row in ipairs(closest) do
-                Print("  " .. row.name .. " |cff999999("
+                Print("  " .. row.name .. " |cff8a8f96("
                     .. row.done .. "/" .. row.criteria .. ")|r")
             end
         end

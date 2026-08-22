@@ -42,6 +42,20 @@ CN.localeMisses = CN.localeMisses or {}
 
 local active = {}
 
+-- DELIBERATELY NOT MEMOISED INTO THE TABLE ITSELF.
+--
+-- Every lookup here is a metamethod call rather than a hash hit, and 0.54.0's
+-- performance pass considered `rawset`-ing the resolved value into the outer
+-- table so the metamethod would run once per string per session.
+--
+-- It does not go in, because `__index` only fires for a key the table does
+-- not have -- and neither does `__newindex`. Populating the table would
+-- therefore silently disable the read-only guard below for exactly the keys
+-- the addon uses most, and that guard exists because assigning into `CN.L`
+-- looks like it worked and is gone on the next reload.
+--
+-- Measured, the whole saving was under a hundredth of a millisecond across
+-- the busiest path in the addon. A real protection is worth more than that.
 CN.L = setmetatable({}, {
     __index = function(_, key)
         if type(key) ~= "string" then
@@ -99,6 +113,10 @@ function CN.RegisterLocale(code, strings)
         if type(key) == "string" and type(value) == "string" and value ~= "" then
             active[key] = value
             added = added + 1
+
+            -- A key that fell back to English before its table arrived is not
+            -- missing any more.
+            CN.localeMisses[key] = nil
         end
     end
 
@@ -159,19 +177,19 @@ CN:RegisterCommand{
 
         args = string.lower(CN.Trim(args or ""))
 
-        Print("Client language: |cffffff00" .. stats.locale .. "|r")
+        Print("Client language: |cffffc74f" .. stats.locale .. "|r")
 
         if stats.locale == "enUS" or stats.locale == "enGB" then
             -- English is the source language, not an untranslated one. Saying
             -- "no translation available" to an English player would describe
             -- a problem that does not exist.
-            Print("|cff999999The addon is written in English, so there is "
+            Print("|cff8a8f96The addon is written in English, so there is "
                 .. "nothing to translate here.|r")
         elseif stats.translated == 0 then
-            Print("|cff999999No translation table for this language yet. "
+            Print("|cff8a8f96No translation table for this language yet. "
                 .. "Everything shows in English, which is the intended "
                 .. "fallback rather than a fault -- and "
-                .. "|cffffff00/cn locale missing|r is the list a translator "
+                .. "|cffffc74f/cn locale missing|r is the list a translator "
                 .. "would start from.|r")
         else
             Print(stats.translated .. " strings translated.")
@@ -189,7 +207,7 @@ CN:RegisterCommand{
         -- Stated rather than fixed: routing every line through CN.L is a
         -- release of its own, and a promise the addon cannot keep is worse
         -- than a limit it admits to.
-        Print("|cff999999Scope: the " .. (stats.total or 0) .. " recurring "
+        Print("|cff8a8f96Scope: the " .. (stats.total or 0) .. " recurring "
             .. "strings this addon routes through its locale table -- the "
             .. "confidence and status words, the tab names, the counters. "
             .. "Most one-off chat lines are still English and are not in "
@@ -205,11 +223,11 @@ CN:RegisterCommand{
                 .. "session:")
 
             for _, key in ipairs(stats.sample) do
-                Print("  |cff999999" .. key .. "|r")
+                Print("  |cff8a8f96" .. key .. "|r")
             end
 
             if stats.missing > #stats.sample then
-                Print("  |cff999999... and "
+                Print("  |cff8a8f96... and "
                     .. (stats.missing - #stats.sample) .. " more.|r")
             end
 
@@ -217,8 +235,8 @@ CN:RegisterCommand{
         end
 
         if stats.missing > 0 then
-            Print("|cff999999" .. stats.missing .. " strings fell back to "
-                .. "English this session. |cffffff00/cn locale missing|r "
+            Print("|cff8a8f96" .. stats.missing .. " strings fell back to "
+                .. "English this session. |cffffc74f/cn locale missing|r "
                 .. "lists them -- that list is exactly what a translator "
                 .. "needs.|r")
         end
@@ -245,7 +263,7 @@ CN:RegisterCommand{
                 Print('    ["' .. key .. '"] = "",')
             end
 
-            Print("|cff999999" .. #keys .. " keys. Leave anything you are not "
+            Print("|cff8a8f96" .. #keys .. " keys. Leave anything you are not "
                 .. "sure of blank -- an empty string is ignored, and English "
                 .. "is a better answer than a guess.|r")
 
@@ -255,7 +273,7 @@ CN:RegisterCommand{
             -- 0.39.0; the return path was never written down anywhere. A
             -- translator finished the work and then had to guess what to do
             -- with it, which is the point at which most people stop.
-            Print("|cff999999When you are done, open an issue on the project's "
+            Print("|cff8a8f96When you are done, open an issue on the project's "
                 .. "GitHub with the block pasted in, titled \"Translation: "
                 .. stats.locale .. "\". TRANSLATING.md in the repository has "
                 .. "the details.|r")
@@ -271,7 +289,7 @@ CN:RegisterCommand{
 
         table.sort(languages)
 
-        Print("|cff999999Bundled: " .. table.concat(languages, ", ") .. ".|r")
+        Print("|cff8a8f96Bundled: " .. table.concat(languages, ", ") .. ".|r")
     end,
 }
 

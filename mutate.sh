@@ -235,15 +235,13 @@ mutate "Modules/Inventory.lua" \
 # cheaper, which is exactly the kind of change that returns a slightly wrong
 # answer forever without ever erroring.
 mutate "Modules/Travel.lua" \
-    "                and (bestPossibleDiscount
-                    * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
-                    < bestRanking then" \
-    "                and walkOut < (bestRanking * 0.5) then" \
+    "            if not cheapestArrival
+                or (bestPossibleDiscount * floor) >= bestRanking then" \
+    "            if walkOut > (bestRanking * 0.5) then" \
     "the pruning bound discards a route that would have won"
 
 mutate "Modules/Travel.lua" \
     "    nodeCache      = {}
-    spanCache      = {}
     neighbourCache = {}
     pathCache      = {}" \
     "    nodeCache      = {}" \
@@ -278,11 +276,8 @@ end" \
 # The 0.47.0 fixes. Each of these was a real defect found by an end-to-end
 # audit, and each was invisible to the suite that existed at the time.
 mutate "Modules/Travel.lua" \
-    "                and (bestPossibleDiscount
-                    * (walkOut + Travel.flightOverheadSeconds + cheapestArrival))
-                    < bestRanking then" \
-    "                and (walkOut + Travel.flightOverheadSeconds + cheapestArrival)
-                    < bestRanking then" \
+    "                or (bestPossibleDiscount * floor) >= bestRanking then" \
+    "                or floor >= bestRanking then" \
     "the pruning bound ignores the known-route discount"
 
 mutate "Modules/Travel.lua" \
@@ -537,10 +532,14 @@ mutate "Modules/Travel.lua" \
     "the flight leg is a straight line again instead of a route"
 
 mutate "Modules/Travel.lua" \
-    "            if not present then
+    "            if not back.held[i] then
+                back.held[i] = true
+
                 table.insert(back, { index = i, yards = edge.yards })
             end" \
     "            if false then
+                back.held[i] = true
+
                 table.insert(back, { index = i, yards = edge.yards })
             end" \
     "the flight network is directed, so an outpost has no way in"
@@ -625,6 +624,115 @@ mutate "Modules/Instances.lua" \
     "                instanceID   = saved.instanceID," \
     "                instanceID   = saved.id," \
     "the Adventure Guide is asked with a lockout id"
+
+# 0.54.0: the performance pass, the design system and the first five minutes.
+mutate "Routing.lua" \
+    "                if swapped < (entering + leaving) - 1e-9 then" \
+    "                if swapped < (entering + leaving) + 1e9 then" \
+    "2-opt accepts a swap that lengthens the route"
+
+mutate "Routing.lua" \
+    "                    while low < high do
+                        route[low], route[high] = route[high], route[low]" \
+    "                    while low < high - 1 do
+                        route[low], route[high] = route[high], route[low]" \
+    "the in-place reversal leaves the middle of the segment unreversed"
+
+mutate "Routing.lua" \
+    "        for offsetX = -1, 1 do
+            for offsetY = -1, 1 do" \
+    "        for offsetX = 0, 0 do
+            for offsetY = 0, 0 do" \
+    "clustering only looks in its own cell, so a hub is split at a boundary"
+
+mutate "Scoring.lua" \
+    "            if previous
+                and entry.decorated == CN.decoratorGeneration
+                and Identical(previous, entry.candidates) then" \
+    "            if previous then" \
+    "an actually-changed provider is treated as unchanged"
+
+mutate "Scoring.lua" \
+    "    if aggregate.candidates
+        and rebuilt == 0
+        and aggregate.providers == providerCount then" \
+    "    if aggregate.candidates and rebuilt == 0 then" \
+    "a provider that has gone away leaves its rows in the aggregate"
+
+mutate "Objectives.lua" \
+    "    local byType = ignored[objectiveType]
+
+    return (byType ~= nil) and (byType[id] ~= nil)" \
+    "    return false" \
+    "nothing is ever ignored"
+
+mutate "Objectives.lua" \
+    "    if byType and next(byType) == nil then
+        store[objectiveType] = nil
+    end" \
+    "    if false then
+        store[objectiveType] = nil
+    end" \
+    "an emptied type bucket lingers, so the empty fast path stops firing"
+
+mutate "Modules/Travel.lua" \
+    "    if moved then
+        costCache, costCacheCount = {}, 0" \
+    "    if false then
+        costCache, costCacheCount = {}, 0" \
+    "travel costs are remembered after the player has moved away"
+
+mutate "Modules/Quests.lua" \
+    "    if CN.NoteSetupStep then
+        CN.NoteSetupStep(\"quests\")
+    end" \
+    "    if false then
+        CN.NoteSetupStep(\"quests\")
+    end" \
+    "a completed quest scan is not recorded, so setup asks for it forever"
+
+mutate "Database.lua" \
+    "    if CN.NoteSetupStep then
+        CN.NoteSetupStep(key)
+    end" \
+    "    if false then
+        CN.NoteSetupStep(key)
+    end" \
+    "a scan run from the window does not count as a scan"
+
+mutate "Objectives.lua" \
+    "    local resolved = module.Resolve(text)
+
+    if resolved then
+        return resolved
+    end" \
+    "    if false then
+        return nil
+    end" \
+    "a goal can only be named by its id again"
+
+mutate "Modules/Quests.lua" \
+    "    if #available < Quests.arrivalMinimum then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "arriving anywhere prompts, however little there is to do"
+
+mutate "Modules/Quests.lua" \
+    "    if not mapID or announcedZones[mapID] then
+        return false
+    end" \
+    "    if not mapID then
+        return false
+    end" \
+    "the arrival prompt repeats every time you re-enter a zone"
+
+mutate "UI/List.lua" \
+    "                row.bar:SetWidth(math.max(1, (width - 12) * fraction))" \
+    "                row.bar:SetWidth(math.max(1, width - 12))" \
+    "a progress bar is always full"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

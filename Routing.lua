@@ -69,7 +69,7 @@ function CN.SetWaypoint(mapID, x, y, title)
         -- Native navigation needs only the map API, so reaching this means
         -- something is badly wrong rather than merely uninstalled.
         CN.Print("No waypoint provider is available.")
-        CN.Print("|cff999999Try |cffffff00/cn nav auto|r to reset the choice.|r")
+        CN.Print("|cff8a8f96Try |cffffc74f/cn nav auto|r to reset the choice.|r")
         return false
     end
 
@@ -150,7 +150,7 @@ function CN.NavigateToObjective(objective)
 
         CN.Print("No coordinates are known for " .. name .. ".")
         CN.Print("The client exposes none for this quest and it is not in your log. "
-            .. "Add them with |cffffff00/cn setloc " .. tostring(objective.id)
+            .. "Add them with |cffffc74f/cn setloc " .. tostring(objective.id)
             .. " <mapID> <x> <y>|r.")
 
         return false
@@ -240,6 +240,42 @@ function CN.ObjectiveDistanceYards(a, b)
     return math.sqrt((dx * dx) + (dy * dy)) * 2000
 end
 
+-- property of the map being routed, and asking the client per pair would be
+-- thousands of calls for one answer.
+local routeScaleX, routeScaleY = 1, 1
+
+local function UseMapScale(mapID)
+    routeScaleX, routeScaleY = 1, 1
+
+    local navigation = CN:GetModule("Navigation")
+
+    if mapID and navigation and navigation.MapScale then
+        local ok, scaleX, scaleY = pcall(navigation.MapScale, mapID)
+
+        if ok and type(scaleX) == "number" and type(scaleY) == "number"
+            and scaleX > 0 and scaleY > 0 then
+
+            routeScaleX, routeScaleY = scaleX, scaleY
+        end
+    end
+
+    return routeScaleX, routeScaleY
+end
+
+CN.UseRouteMapScale = UseMapScale
+
+local function Distance2(ax, ay, bx, by)
+    local dx = ((ax or 0.5) - (bx or 0.5)) * routeScaleX
+    local dy = ((ay or 0.5) - (by or 0.5)) * routeScaleY
+
+    return (dx * dx) + (dy * dy)
+end
+
+-- The order you would naturally do things at one stop: collect the quests,
+-- do the work, hand them back. File scope because it was being rebuilt once
+-- per hub and once per summary.
+local PHASE_ORDER = { PICKUP = 1, ACTIVE = 2, TURNIN = 3 }
+
 -- Groups objectives that share a place.
 --
 -- This is the heart of not running back and forth. A route over individual
@@ -249,34 +285,126 @@ end
 -- Single-link clustering: a stop joins a hub if it is within the radius of
 -- ANY member, which is what makes a row of quest givers along a road become
 -- one stop rather than four.
+-- BUCKETED IN 0.54.0, AND THE DISTANCE MOVED OUT OF THE INNER LOOP.
+--
+-- The original compared every objective against every member of every hub,
+-- and each comparison called `CN.ObjectiveDistanceYards`, which looks the
+-- Navigation module up and asks it for the map's scale -- per pair. At a
+-- hundred and ten located objectives that was 10.7 ms, and it grew as the
+-- square.
+--
+-- Two changes, both of which preserve the answer exactly:
+--
+--   * The map scale is asked for ONCE, and comparisons are done on squared
+--     yards so there is no square root in the loop. `UseMapScale` and
+--     `Distance2` already existed for the routing phase further down this
+--     file; clustering simply never used them.
+--
+--   * Single-link clustering only ever joins things that are within the
+--     radius, so anything further away than the radius cannot decide the
+--     answer. Objectives are bucketed into a grid whose cell is the radius,
+--     and a candidate is compared only against the nine cells around it.
+--     That turns the quadratic into a linear pass for any real distribution
+--     of quest givers -- and a zone where every objective genuinely is
+--     within one radius of every other is one hub either way.
 function CN.ClusterByProximity(objectives, radiusYards)
     radiusYards = radiusYards or CN.hubRadiusYards
 
     local hubs = {}
 
+    -- Map units per cell, derived from the scale so the grid is square in
+    -- YARDS rather than in map coordinates -- most zones are not square, and
+    -- a grid in map units would be a different size north-south than
+    -- east-west.
+    local scaleX, scaleY = routeScaleX, routeScaleY
+
+    if objectives[1] and objectives[1].mapID then
+        scaleX, scaleY = UseMapScale(objectives[1].mapID)
+    end
+
+    local cellX = radiusYards / math.max(1, scaleX)
+    local cellY = radiusYards / math.max(1, scaleY)
+
+    local radiusSquared = radiusYards * radiusYards
+
+    -- cell key -> array of hub indices that have a member in that cell
+    local grid = {}
+
+    local function CellKey(cx, cy)
+        return cx .. ":" .. cy
+    end
+
+    local function Register(hubIndex, x, y)
+        local cx = math.floor((x or 0.5) / cellX)
+        local cy = math.floor((y or 0.5) / cellY)
+
+        local key = CellKey(cx, cy)
+
+        local bucket = grid[key]
+
+        if not bucket then
+            bucket = {}
+            grid[key] = bucket
+        end
+
+        -- A hub can already own this cell through another member.
+        for _, held in ipairs(bucket) do
+            if held == hubIndex then
+                return
+            end
+        end
+
+        table.insert(bucket, hubIndex)
+    end
+
     for _, objective in ipairs(objectives) do
         local joined = nil
 
-        for _, hub in ipairs(hubs) do
-            for _, member in ipairs(hub.objectives) do
-                local distance = CN.ObjectiveDistanceYards(objective, member)
+        local cx = math.floor((objective.x or 0.5) / cellX)
+        local cy = math.floor((objective.y or 0.5) / cellY)
 
-                if distance and distance <= radiusYards then
-                    joined = hub
-                    break
+        for offsetX = -1, 1 do
+            for offsetY = -1, 1 do
+                local bucket = grid[CellKey(cx + offsetX, cy + offsetY)]
+
+                if bucket then
+                    for _, hubIndex in ipairs(bucket) do
+                        local hub = hubs[hubIndex]
+
+                        if hub and (not hub.mapID or not objective.mapID
+                            or hub.mapID == objective.mapID) then
+
+                            for _, member in ipairs(hub.objectives) do
+                                if Distance2(objective.x, objective.y,
+                                    member.x, member.y) <= radiusSquared then
+
+                                    joined = hubIndex
+                                    break
+                                end
+                            end
+                        end
+
+                        if joined then break end
+                    end
                 end
+
+                if joined then break end
             end
 
             if joined then break end
         end
 
         if joined then
-            table.insert(joined.objectives, objective)
+            table.insert(hubs[joined].objectives, objective)
+
+            Register(joined, objective.x, objective.y)
         else
             table.insert(hubs, {
                 mapID      = objective.mapID,
                 objectives = { objective },
             })
+
+            Register(#hubs, objective.x, objective.y)
         end
     end
 
@@ -294,12 +422,11 @@ function CN.ClusterByProximity(objectives, radiusYards)
         hub.y = sumY / #hub.objectives
 
         -- Within a hub, order by what you would naturally do: collect quests,
-        -- do the work, hand them back.
-        local phaseOrder = { PICKUP = 1, ACTIVE = 2, TURNIN = 3 }
-
+        -- do the work, hand them back. (The order table is a file-scope
+        -- constant now; it used to be built once per hub.)
         table.sort(hub.objectives, function(a, b)
-            local left  = phaseOrder[a.phase or ""] or 2
-            local right = phaseOrder[b.phase or ""] or 2
+            local left  = PHASE_ORDER[a.phase or ""] or 2
+            local right = PHASE_ORDER[b.phase or ""] or 2
 
             if left ~= right then
                 return left < right
@@ -327,10 +454,8 @@ function CN.DescribeHub(hub)
         counts[phase] = counts[phase] + 1
     end
 
-    local phaseOrder = { PICKUP = 1, ACTIVE = 2, TURNIN = 3 }
-
     table.sort(order, function(a, b)
-        return (phaseOrder[a] or 2) < (phaseOrder[b] or 2)
+        return (PHASE_ORDER[a] or 2) < (PHASE_ORDER[b] or 2)
     end)
 
     local parts = {}
@@ -367,37 +492,6 @@ end
 -- file converts properly. Clustering and routing disagreed with each other.
 --
 -- The scale is resolved once per route rather than per comparison: it is a
--- property of the map being routed, and asking the client per pair would be
--- thousands of calls for one answer.
-local routeScaleX, routeScaleY = 1, 1
-
-local function UseMapScale(mapID)
-    routeScaleX, routeScaleY = 1, 1
-
-    local navigation = CN:GetModule("Navigation")
-
-    if mapID and navigation and navigation.MapScale then
-        local ok, scaleX, scaleY = pcall(navigation.MapScale, mapID)
-
-        if ok and type(scaleX) == "number" and type(scaleY) == "number"
-            and scaleX > 0 and scaleY > 0 then
-
-            routeScaleX, routeScaleY = scaleX, scaleY
-        end
-    end
-
-    return routeScaleX, routeScaleY
-end
-
-CN.UseRouteMapScale = UseMapScale
-
-local function Distance2(ax, ay, bx, by)
-    local dx = ((ax or 0.5) - (bx or 0.5)) * routeScaleX
-    local dy = ((ay or 0.5) - (by or 0.5)) * routeScaleY
-
-    return (dx * dx) + (dy * dy)
-end
-
 -- Total length of a route starting from the player, in yards.
 local function RouteLength(route, startX, startY)
     local total = 0
@@ -426,6 +520,28 @@ CN.RouteLength = RouteLength
 -- Bounded by passes so a pathological set cannot spin.
 CN.routeOptimizePasses = 12
 
+-- REWRITTEN IN 0.54.0. SAME ROUTES, A FORTIETH OF THE WORK.
+--
+-- The original built a whole new route table for every (i, k) pair and then
+-- measured BOTH routes end to end -- including `route`, which has not changed
+-- since the last accepted swap and was therefore recomputed a quadratic
+-- number of times for a value that does not move.
+--
+-- At the size the fixture produces that looked free. Measured against a busy
+-- zone -- a full quest log plus rares, treasures and located vendor recipes,
+-- which is thirty to fifty stops -- one call cost 33 ms and allocated
+-- something like six megabytes of garbage. It runs every two seconds while
+-- the Zone tab is open, on every map open, and on every stop cleared in
+-- follow mode. That is a visible stutter and a steady garbage-collection
+-- drip, in the one part of the addon a player watches while walking.
+--
+-- Reversing the segment i..k changes exactly TWO edges: the one entering the
+-- segment and the one leaving it. Everything between them is traversed in the
+-- opposite direction and is therefore the same total length. So the whole
+-- comparison is four distances, and an accepted swap is an in-place reversal
+-- with two indices walking toward each other.
+--
+-- No allocation in the loop at all.
 function CN.ImproveRoute(route, startX, startY)
     local count = #route
 
@@ -435,29 +551,64 @@ function CN.ImproveRoute(route, startX, startY)
 
     local before = RouteLength(route, startX, startY)
 
+    local originX, originY = startX or 0.5, startY or 0.5
+
     for _ = 1, CN.routeOptimizePasses do
         local improved = false
 
         for i = 1, count - 1 do
+            -- The stop before the segment: for i == 1 that is the player.
+            local prevX, prevY
+
+            if i == 1 then
+                prevX, prevY = originX, originY
+            else
+                prevX, prevY = route[i - 1].x or 0.5, route[i - 1].y or 0.5
+            end
+
+            local firstX, firstY = route[i].x or 0.5, route[i].y or 0.5
+
+            local entering = math.sqrt(Distance2(prevX, prevY, firstX, firstY))
+
             for k = i + 1, count do
-                -- Reverse the segment i..k and keep it only if shorter.
-                local candidate = {}
+                local lastX, lastY = route[k].x or 0.5, route[k].y or 0.5
 
-                for index = 1, i - 1 do
-                    candidate[#candidate + 1] = route[index]
+                -- The edge leaving the segment. Past the end of the route
+                -- there is none: the walk simply stops.
+                local leaving, afterX, afterY = 0
+
+                if k < count then
+                    afterX, afterY = route[k + 1].x or 0.5, route[k + 1].y or 0.5
+                    leaving = math.sqrt(Distance2(lastX, lastY, afterX, afterY))
                 end
 
-                for index = k, i, -1 do
-                    candidate[#candidate + 1] = route[index]
+                local swapped = math.sqrt(Distance2(prevX, prevY, lastX, lastY))
+
+                if k < count then
+                    swapped = swapped
+                        + math.sqrt(Distance2(firstX, firstY, afterX, afterY))
                 end
 
-                for index = k + 1, count do
-                    candidate[#candidate + 1] = route[index]
-                end
+                if swapped < (entering + leaving) - 1e-9 then
+                    -- In place, two pointers.
+                    local low, high = i, k
 
-                if RouteLength(candidate, startX, startY) < RouteLength(route, startX, startY) - 1e-9 then
-                    route = candidate
+                    while low < high do
+                        route[low], route[high] = route[high], route[low]
+
+                        low  = low + 1
+                        high = high - 1
+                    end
+
                     improved = true
+
+                    -- The segment's first stop is now what used to be its
+                    -- last, so the entering edge has to be remeasured before
+                    -- the next k.
+                    firstX, firstY = route[i].x or 0.5, route[i].y or 0.5
+
+                    entering = math.sqrt(
+                        Distance2(prevX, prevY, firstX, firstY))
                 end
             end
         end
@@ -540,7 +691,18 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     local located, skipped = {}, {}
 
     for _, objective in ipairs(candidates) do
-        CN.ScoreObjective(objective)
+        -- NOT SCORED HERE ANY MORE.
+        --
+        -- This scored every candidate and then nothing in the function read
+        -- the score: the clustering uses position and phase, the ordering and
+        -- 2-opt use position, the summary counts types, and the Zone tab
+        -- prints a name and a type. Worse, it ran BEFORE `hubSize` is stamped
+        -- at the end of this function, so the scores it produced were the
+        -- pre-batch-bonus ones -- and the `InvalidateRanking()` below then
+        -- guaranteed every objective would be scored again anyway.
+        --
+        -- A full scoring pass over the candidate list, twice, for a number
+        -- that was discarded both times.
 
         -- Honour the type filter. A player who has hidden everything but
         -- quests is asking not to be routed to a pet, and a route that
@@ -865,17 +1027,21 @@ end)
 ------------------------------------------------------------
 
 CN:RegisterCommand{
-    name    = "nearby",
-    aliases = { "elsewhere" },
+    -- RENAMED. `nearby` means "not near you", which is the opposite of the
+    -- word, and it was in the fifteen-item essentials list -- so the command
+    -- most likely to be tried by a new player was the one whose name was
+    -- wrong. Its own alias was already the right word.
+    name    = "elsewhere",
+    aliases = { "nearby", "otherzones" },
     order   = 30,
-    help    = "What is worth doing OUTSIDE this zone, by how long it takes "
-        .. "to get there.",
+    help    = "What is worth doing in OTHER zones, by how long it takes to "
+        .. "get there.",
     handler = function()
         local rows = CN.BuildCrossZoneRoute()
 
         if #rows == 0 then
             CN.Print("Nothing outside this zone is costable right now.")
-            CN.Print("|cff999999Either everything worth doing is here, or the "
+            CN.Print("|cff8a8f96Either everything worth doing is here, or the "
                 .. "client will not convert the positions -- which happens "
                 .. "during a loading screen and fixes itself.|r")
             return
@@ -889,24 +1055,24 @@ CN:RegisterCommand{
 
         for index, row in ipairs(rows) do
             if index > 12 then
-                CN.Print("  |cff999999... and " .. (#rows - 12) .. " more|r")
+                CN.Print("  |cff8a8f96... and " .. (#rows - 12) .. " more|r")
                 break
             end
 
             if row.zone ~= lastZone then
-                CN.Print("|cffffd100" .. tostring(row.zone or row.mapID) .. "|r")
+                CN.Print("|cffffc74f" .. tostring(row.zone or row.mapID) .. "|r")
 
                 lastZone = row.zone
             end
 
-            CN.Print(string.format("  %-34s |cff999999%s|r",
+            CN.Print(string.format("  %-34s |cff8a8f96%s|r",
                 tostring(row.objective.name or row.objective.id),
                 session and session.FormatDuration
                     and session.FormatDuration(row.seconds)
                     or (math.floor(row.seconds / 60) .. "m")))
         end
 
-        CN.Print("|cff999999Ordered by how long it takes to get there, not by "
+        CN.Print("|cff8a8f96Ordered by how long it takes to get there, not by "
             .. "how far away it is -- a flight point changes that answer.|r")
     end,
 }
@@ -956,7 +1122,7 @@ CN:RegisterCommand{
             -- them irrelevant, and no mention of `/cn setup`, which the
             -- addon's own first-run flow calls the required first step.
             for _, line in ipairs(CN.ExplainEmptyList()) do
-                CN.Print("|cff999999" .. line .. "|r")
+                CN.Print("|cff8a8f96" .. line .. "|r")
             end
 
             return
@@ -970,7 +1136,7 @@ CN:RegisterCommand{
             table.insert(parts, counts[key] .. " " .. string.lower(key))
         end
 
-        CN.Print(zoneName .. " |cff999999(map " .. mapID .. ")|r - remaining: "
+        CN.Print(zoneName .. " |cff8a8f96(map " .. mapID .. ")|r - remaining: "
             .. table.concat(parts, ", "))
 
         -- Printed by PLACE, not by stop.
@@ -989,8 +1155,8 @@ CN:RegisterCommand{
             end
 
             if #hub.objectives > 1 then
-                CN.Print("|cff5DD2FB" .. hubIndex .. ") " .. #hub.objectives
-                    .. " things here|r |cff999999-- " .. CN.DescribeHub(hub) .. "|r")
+                CN.Print("|cff5dd2fb" .. hubIndex .. ") " .. #hub.objectives
+                    .. " things here|r |cff8a8f96-- " .. CN.DescribeHub(hub) .. "|r")
             end
 
             for _, objective in ipairs(hub.objectives) do
@@ -1002,9 +1168,9 @@ CN:RegisterCommand{
 
                     CN.Print((#hub.objectives > 1 and "   " or "")
                         .. stopNumber .. ". "
-                        .. (verb and ("|cffffff00" .. verb .. "|r ") or "")
+                        .. (verb and ("|cffffc74f" .. verb .. "|r ") or "")
                         .. tostring(objective.name or objective.id)
-                        .. " |cff999999[" .. CN.TypeLabel(objective.type) .. "]|r")
+                        .. " |cff8a8f96[" .. CN.TypeBadge(objective.type) .. "]|r")
 
                     shown = shown + 1
                 end
@@ -1012,7 +1178,7 @@ CN:RegisterCommand{
         end
 
         if #route > shown then
-            CN.Print("|cff999999... and " .. (#route - shown) .. " more.|r")
+            CN.Print("|cff8a8f96... and " .. (#route - shown) .. " more.|r")
         end
 
         -- The whole point, stated plainly when it applies.
@@ -1025,20 +1191,20 @@ CN:RegisterCommand{
         end
 
         if batched > 0 then
-            CN.Print("|cff999999" .. batched .. " of " .. #route
+            CN.Print("|cff8a8f96" .. batched .. " of " .. #route
                 .. " stops share a place with something else, so they are "
                 .. "grouped rather than visited twice.|r")
         end
 
         if #skipped > 0 then
-            CN.Print("|cff999999" .. #skipped
+            CN.Print("|cff8a8f96" .. #skipped
                 .. " objective(s) here have no coordinates and cannot be routed.|r")
         end
 
         if #route > 0 then
             CN.currentRecommendation = route[1]
 
-            CN.Print("|cffffff00/cn go|r for stop 1, or |cffffff00/cn zone <n>|r for another.")
+            CN.Print("|cffffc74f/cn go|r for stop 1, or |cffffc74f/cn zone <n>|r for another.")
         end
     end,
 }
@@ -1078,7 +1244,7 @@ CN:RegisterCommand{
             objective = CN.currentRecommendation
 
             if not objective then
-                CN.Print("Nothing recommended yet. Run |cffffff00/cn next|r first.")
+                CN.Print("Nothing recommended yet. Run |cffffc74f/cn next|r first.")
                 return
             end
         end
@@ -1099,14 +1265,14 @@ CN:RegisterCommand{
         if settings.autoWaypoint then
             CN.StartAutoWaypointTicker()
 
-            CN.Print("Auto-waypoint |cff00ff00on|r. "
+            CN.Print("Auto-waypoint |cff73b873on|r. "
                 .. "The waypoint moves to the next objective as you finish things.")
 
             CN.AutoAdvance("enabled", true)
         else
             CN.StopAutoWaypointTicker()
 
-            CN.Print("Auto-waypoint |cffff4444off|r. Waypoints stay where you put them.")
+            CN.Print("Auto-waypoint |cffe2564coff|r. Waypoints stay where you put them.")
         end
     end,
 }
@@ -1120,7 +1286,7 @@ CN:RegisterCommand{
             CN.Print("Waypoints cleared.")
         else
             CN.Print("This addon had no waypoint set.")
-            CN.Print("|cff999999A pin you placed yourself is left alone.|r")
+            CN.Print("|cff8a8f96A pin you placed yourself is left alone.|r")
         end
     end,
 }

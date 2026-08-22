@@ -312,14 +312,16 @@ function Filters.DescribeObjective(objectiveType, id)
     return tostring(objectiveType) .. " " .. tostring(id)
 end
 
+-- The stores are nested by type since 0.54.0 -- see CN.IsIgnored for why --
+-- so these walk them through `CN.EachFiltered` rather than splitting a string
+-- key back apart. `key` is kept on the row because the UI and `/cn unhide`
+-- both address a row by it.
 function Filters.ListIgnored()
     local rows = {}
 
-    for key, entry in pairs(CN.Account("ignoredObjectives")) do
-        local objectiveType, id = SplitKey(key)
-
+    for objectiveType, id, entry in CN.EachFiltered(CN.Account("ignoredObjectives")) do
         table.insert(rows, {
-            key   = key,
+            key   = CN.ObjectiveKey(objectiveType, id),
             type  = objectiveType,
             id    = id,
             name  = Filters.DescribeObjective(objectiveType, id),
@@ -337,9 +339,7 @@ function Filters.ListDeferred()
 
     local now = time()
 
-    for key, entry in pairs(CN.Account("deferredObjectives")) do
-        local objectiveType, id = SplitKey(key)
-
+    for objectiveType, id, entry in CN.EachFiltered(CN.Account("deferredObjectives")) do
         local remaining
 
         if entry and entry.until_ then
@@ -347,7 +347,7 @@ function Filters.ListDeferred()
         end
 
         table.insert(rows, {
-            key       = key,
+            key       = CN.ObjectiveKey(objectiveType, id),
             type      = objectiveType,
             id        = id,
             name      = Filters.DescribeObjective(objectiveType, id),
@@ -368,19 +368,33 @@ end
 ------------------------------------------------------------
 
 function Filters.Restore(key)
+    local objectiveType, id = SplitKey(key)
+
+    if not objectiveType then
+        return false
+    end
+
     local ignored  = CN.Account("ignoredObjectives")
     local deferred = CN.Account("deferredObjectives")
 
     local removed = false
 
-    if ignored[key] then
-        ignored[key] = nil
+    if ignored[objectiveType] and ignored[objectiveType][id] ~= nil then
+        ignored[objectiveType][id] = nil
         removed = true
+
+        if next(ignored[objectiveType]) == nil then
+            ignored[objectiveType] = nil
+        end
     end
 
-    if deferred[key] then
-        deferred[key] = nil
+    if deferred[objectiveType] and deferred[objectiveType][id] ~= nil then
+        deferred[objectiveType][id] = nil
         removed = true
+
+        if next(deferred[objectiveType]) == nil then
+            deferred[objectiveType] = nil
+        end
     end
 
     -- Same reason as CN.SetIgnored: the list a provider built is the list the
@@ -396,14 +410,22 @@ function Filters.RestoreAll()
     local ignored  = CN.Account("ignoredObjectives")
     local deferred = CN.Account("deferredObjectives")
 
-    local count = CN.CountKeys(ignored) + CN.CountKeys(deferred)
+    local count = 0
 
-    for key in pairs(ignored) do
-        ignored[key] = nil
+    for _ in CN.EachFiltered(ignored) do
+        count = count + 1
     end
 
-    for key in pairs(deferred) do
-        deferred[key] = nil
+    for _ in CN.EachFiltered(deferred) do
+        count = count + 1
+    end
+
+    for objectiveType in pairs(ignored) do
+        ignored[objectiveType] = nil
+    end
+
+    for objectiveType in pairs(deferred) do
+        deferred[objectiveType] = nil
     end
 
     if count > 0 and CN.InvalidateCandidates then
@@ -419,10 +441,16 @@ function Filters.PruneExpired()
 
     local now, pruned = time(), 0
 
-    for key, entry in pairs(deferred) do
-        if entry and entry.until_ and entry.until_ <= now then
-            deferred[key] = nil
-            pruned = pruned + 1
+    for objectiveType, byType in pairs(deferred) do
+        for id, entry in pairs(byType) do
+            if entry and entry.until_ and entry.until_ <= now then
+                byType[id] = nil
+                pruned = pruned + 1
+            end
+        end
+
+        if next(byType) == nil then
+            deferred[objectiveType] = nil
         end
     end
 
@@ -481,7 +509,7 @@ CN:RegisterCommand{
             Print("Ignored (" .. #ignored .. "):")
 
             for _, row in ipairs(ignored) do
-                Print("  " .. row.name .. " |cff999999[" .. tostring(row.type)
+                Print("  " .. row.name .. " |cff8a8f96[" .. tostring(row.type)
                     .. " " .. tostring(row.id) .. "]|r")
             end
         end
@@ -490,13 +518,13 @@ CN:RegisterCommand{
             Print("Deferred (" .. #deferred .. "):")
 
             for _, row in ipairs(deferred) do
-                Print("  " .. row.name .. " |cff999999["
+                Print("  " .. row.name .. " |cff8a8f96["
                     .. FormatRemaining(row.remaining) .. " left]|r")
             end
         end
 
-        Print("|cffffff00/cn unhide <id>|r to restore one, "
-            .. "|cffffff00/cn unhide all|r for everything.")
+        Print("|cffffc74f/cn unhide <id>|r to restore one, "
+            .. "|cffffc74f/cn unhide all|r for everything.")
     end,
 }
 
@@ -546,7 +574,7 @@ CN:RegisterCommand{
 
         if restored == 0 then
             Print("Nothing hidden matches: " .. args)
-            Print("Run |cffffff00/cn hidden|r to see the list.")
+            Print("Run |cffffc74f/cn hidden|r to see the list.")
         end
     end,
 }
@@ -663,8 +691,11 @@ function Filters.ClearMode()
 end
 
 CN:RegisterCommand{
-    name    = "show",
-    aliases = { "types" },
+    -- `types` promoted. "Show" sounds like "show me things" and means the
+    -- objective-type filter; the alias was already the accurate word. The old
+    -- name stays, because it is in the docs and in people's macros.
+    name    = "types",
+    aliases = { "show" },
     args    = "[type, only <type>, or all]",
     order   = 17,
     help    = "Choose which kinds of objective appear in recommendations.",
@@ -684,7 +715,7 @@ CN:RegisterCommand{
 
             if not wanted then
                 Print("Not a type: " .. args)
-                Print("|cffffff00/cn show|r lists them.")
+                Print("|cffffc74f/cn show|r lists them.")
                 return
             end
 
@@ -697,7 +728,7 @@ CN:RegisterCommand{
 
             if not wanted then
                 Print("Not a type: " .. args)
-                Print("|cffffff00/cn show|r lists them.")
+                Print("|cffffc74f/cn show|r lists them.")
                 return
             end
 
@@ -709,20 +740,20 @@ CN:RegisterCommand{
         local hiddenCount = Filters.HiddenTypeCount()
 
         Print("Recommendation types"
-            .. (hiddenCount > 0 and (" |cffffff00" .. hiddenCount .. " hidden|r") or ""))
+            .. (hiddenCount > 0 and (" |cffffc74f" .. hiddenCount .. " hidden|r") or ""))
 
         for _, objectiveType in ipairs(Filters.TypeOrder()) do
             local enabled = Filters.IsTypeEnabled(objectiveType)
 
             Print("  " .. CN.YesNo(enabled) .. " " .. Filters.TypeLabel(objectiveType)
-                .. " |cff999999" .. string.lower(objectiveType) .. "|r")
+                .. " |cff8a8f96" .. string.lower(objectiveType) .. "|r")
         end
 
-        Print("|cff999999/cn show pets|r toggles one, |cff999999/cn show only quests|r "
-            .. "narrows to one, |cff999999/cn show all|r restores everything.")
+        Print("|cff8a8f96/cn show pets|r toggles one, |cff8a8f96/cn show only quests|r "
+            .. "narrows to one, |cff8a8f96/cn show all|r restores everything.")
 
         if hiddenCount > 0 then
-            Print("|cff999999Hidden types still appear in /cn breakdown and the "
+            Print("|cff8a8f96Hidden types still appear in /cn breakdown and the "
                 .. "Collections tab; this only filters recommendations.|r")
         end
     end,
@@ -769,7 +800,7 @@ CN:RegisterCommand{
 
                 table.sort(names)
 
-                Print("|cff999999Overridable: " .. table.concat(names, ", ") .. "|r")
+                Print("|cff8a8f96Overridable: " .. table.concat(names, ", ") .. "|r")
                 return
             end
 
@@ -816,11 +847,11 @@ CN:RegisterCommand{
 
             Print("  " .. key .. " = " .. tostring(settings[key])
                 .. (overridden
-                    and " |cffffff00this character only|r"
-                    or " |cff999999account-wide|r"))
+                    and " |cffffc74fthis character only|r"
+                    or " |cff8a8f96account-wide|r"))
         end
 
-        Print("|cff999999/cn perchar priorityMode|r toggles whether a setting "
+        Print("|cff8a8f96/cn perchar priorityMode|r toggles whether a setting "
             .. "is shared or per character.")
     end,
 }

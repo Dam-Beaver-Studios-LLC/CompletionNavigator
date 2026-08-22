@@ -244,14 +244,14 @@ CN:RegisterCommand{
         local mapID = CN.GetPlayerPosition()
 
         if not mapID then
-            Print("|cff999999The client will not say which map you are on.|r")
+            Print("|cff8a8f96The client will not say which map you are on.|r")
             return
         end
 
         local nodes = HandyNotes.GetNodesOnMap(mapID)
 
         if #nodes == 0 then
-            Print("|cff999999No plugin is drawing anything on this map.|r")
+            Print("|cff8a8f96No plugin is drawing anything on this map.|r")
             return
         end
 
@@ -259,16 +259,16 @@ CN:RegisterCommand{
 
         for index, node in ipairs(nodes) do
             if index > 20 then
-                Print("  |cff999999and " .. (#nodes - 20) .. " more|r")
+                Print("  |cff8a8f96and " .. (#nodes - 20) .. " more|r")
                 break
             end
 
-            Print(string.format("  %d. %s |cff999999%s at %.1f, %.1f|r",
+            Print(string.format("  %d. %s |cff8a8f96%s at %.1f, %.1f|r",
                 index, tostring(node.label or "unnamed"),
                 tostring(node.plugin), (node.x or 0) * 100, (node.y or 0) * 100))
         end
 
-        Print("|cff999999Shown, not scored: this is another addon's view of "
+        Print("|cff8a8f96Shown, not scored: this is another addon's view of "
             .. "the same world.|r")
     end,
 }

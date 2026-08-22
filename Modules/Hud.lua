@@ -98,15 +98,46 @@ local function Build()
     frame:SetPoint(placement.point or "TOP", UIParent,
         placement.point or "TOP", placement.x or 0, placement.y or -220)
 
+    -- A PANEL, AND THE ADDON'S OWN MARK ON IT.
+    --
+    -- The heads-up line and the follow frame were both bare frames with text
+    -- hung on them -- no background, no edge, no padding -- while the main
+    -- window used a Blizzard template and the welcome screen used parchment.
+    -- Three idioms in one addon, and two of them read as text that had come
+    -- loose from something.
+    --
+    -- `UI.PaintPanel` already draws a flat fill and a one-pixel border owing
+    -- nothing to any template, which is why it survives Blizzard retiring
+    -- one. Low alpha, because this sits over the world and a black box is
+    -- worse than no box.
+    if CN.UI and CN.UI.PaintPanel then
+        CN.UI.PaintPanel(frame, 0.04, 0.05, 0.07, 0.55)
+    end
+
+    -- Two pixels of brand blue down the left edge. The cheapest mark in the
+    -- addon: it appears here, on the follow frame and under the selected tab,
+    -- and it is what makes the three read as one product.
+    local rule = frame:CreateTexture(nil, "ARTWORK")
+    rule:SetPoint("TOPLEFT")
+    rule:SetPoint("BOTTOMLEFT")
+    rule:SetWidth(2)
+    rule:SetColorTexture(CN.Rgb("BRAND"))
+    rule:SetAlpha(0.9)
+
+    local inset = CN.SPACE.S
+
     frame.label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    frame.label:SetPoint("TOPLEFT")
-    frame.label:SetPoint("TOPRIGHT")
+    frame.label:SetPoint("TOPLEFT", inset, -inset)
+    frame.label:SetPoint("TOPRIGHT", -inset, -inset)
     frame.label:SetJustifyH("LEFT")
 
-    frame.detail = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    frame.detail:SetPoint("TOPLEFT", frame.label, "BOTTOMLEFT", 0, -2)
-    frame.detail:SetPoint("TOPRIGHT", frame.label, "BOTTOMRIGHT", 0, -2)
+    frame.detail = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.detail:SetPoint("TOPLEFT", frame.label, "BOTTOMLEFT", 0, -CN.SPACE.XS)
+    frame.detail:SetPoint("TOPRIGHT", frame.label, "BOTTOMRIGHT", 0, -CN.SPACE.XS)
     frame.detail:SetJustifyH("LEFT")
+
+    CN.Outline(frame.label, 13, "PRIMARY")
+    CN.Outline(frame.detail, 11, "MUTED")
 
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", function(self)
@@ -136,7 +167,7 @@ function Hud.Refresh()
     local objective = results and results[1]
 
     if not objective then
-        frame.label:SetText("|cff999999nothing actionable|r")
+        frame.label:SetText("|cff8a8f96nothing actionable|r")
         frame.detail:SetText("")
 
         return true
@@ -160,7 +191,7 @@ function Hud.Refresh()
             follow.startedWith)
     end
 
-    frame.detail:SetText(detail and ("|cff999999" .. detail .. "|r") or "")
+    frame.detail:SetText(detail and ("|cff8a8f96" .. detail .. "|r") or "")
 
     return true
 end
@@ -211,6 +242,38 @@ end)
 ------------------------------------------------------------
 
 -- Everything the addon draws, at the player's scale.
+-- SETTERS, so the window can offer these two.
+--
+-- Both accessibility controls were reachable only by typing a slash command,
+-- which is the sharpest form of the problem: the players who most need a
+-- larger interface or a hue-independent arrow are the least likely to find
+-- `/cn scale 1.4`.
+function Hud.SetScale(scale)
+    scale = tonumber(scale)
+
+    if not scale or scale < 0.7 or scale > 2.0 then
+        return false
+    end
+
+    Preferences().uiScale = scale
+
+    Hud.ApplyScale()
+
+    return true
+end
+
+function Hud.SetColourblind(enabled)
+    Preferences().colourblind = enabled or nil
+
+    local navigation = CN:GetModule("Navigation")
+
+    if navigation and navigation.Refresh then
+        navigation.Refresh()
+    end
+
+    return Hud.IsColourblind()
+end
+
 function Hud.ApplyScale()
     local scale = Hud.Scale()
 
@@ -288,28 +351,56 @@ function Hud.RegisterOptionsPanel()
     title:SetPoint("TOPLEFT", 16, -16)
     title:SetText("Completion Navigator")
 
+    -- WHAT THIS PANEL SAYS IS WHAT A NEW PLAYER NEEDS FIRST.
+    --
+    -- It used to list six commands, three of which are display preferences,
+    -- and point at bare `/cn`, which printed the addon's internal module
+    -- list. It did not mention `/cn setup` -- the one step the addon's own
+    -- first-run flow calls required -- so somebody who installed the addon
+    -- and went straight to Options learned about text size and never learned
+    -- that anything needed reading.
+    --
+    -- Three sentences and two buttons. The settings themselves live one click
+    -- away, in the window, where there is room to group them.
     local body = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     body:SetPoint("TOPLEFT", 16, -48)
     body:SetPoint("TOPRIGHT", -16, -48)
     body:SetJustifyH("LEFT")
-    body:SetText("Everything this addon can do is in its own window, which "
-        .. "has a Settings tab of its own.\n\n"
-        .. "/cn ui        open the window\n"
-        .. "/cn           what to do next\n"
-        .. "/cn scale     size of everything it draws\n"
-        .. "/cn colourblind   label the arrow in words\n"
-        .. "/cn hud       a small always-on line\n"
-        .. "/cn selftest  check the addon against your client")
+    body:SetText("Answers \"what should I do next?\" -- ranks what is worth "
+        .. "doing now, costs the journey the way you would really make it, "
+        .. "and shows its working when you ask why.\n\n"
+        .. "1.  Scan once, so it knows what you have.\n"
+        .. "2.  Type /cn to ask what is next.\n"
+        .. "3.  Open the window for everything else. Its Settings tab has "
+        .. "text size, the colourblind arrow labels, sound, and what the "
+        .. "addon draws on screen.")
+
+    local scan = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    scan:SetSize(190, 24)
+    scan:SetPoint("TOPLEFT", 16, -190)
+    scan:SetText("Scan my collections")
+    scan:SetScript("OnClick", function()
+        local setup = CN:GetModule("Setup")
+
+        if setup then
+            setup.Run()
+        end
+    end)
 
     local open = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     open:SetSize(160, 24)
-    open:SetPoint("TOPLEFT", 16, -190)
+    open:SetPoint("LEFT", scan, "RIGHT", 8, 0)
     open:SetText("Open the window")
     open:SetScript("OnClick", function()
         if CompletionNavigator_ToggleUI then
             CompletionNavigator_ToggleUI()
         end
     end)
+
+    local version = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    version:SetPoint("TOPLEFT", scan, "BOTTOMLEFT", 0, -12)
+    version:SetText("v" .. tostring(CN.version)
+        .. "  " .. CN.DOT .. "  Dam Beaver Studios, LLC")
 
     -- Modern path first.
     if SettingsPanel and Settings and Settings.RegisterCanvasLayoutCategory
@@ -364,7 +455,7 @@ CN:RegisterCommand{
         Print("Heads-up display: " .. CN.YesNo(Hud.IsEnabled()))
 
         if Hud.IsEnabled() then
-            Print("|cff999999Drag it where you want it.|r")
+            Print("|cff8a8f96Drag it where you want it.|r")
         end
     end,
 }
@@ -379,7 +470,7 @@ CN:RegisterCommand{
 
         if not scale then
             Print("Scale: " .. Hud.Scale())
-            Print("|cff999999Usage: /cn scale 1.25|r")
+            Print("|cff8a8f96Usage: /cn scale 1.25|r")
             return
         end
 
@@ -388,9 +479,7 @@ CN:RegisterCommand{
             return
         end
 
-        Preferences().uiScale = scale
-
-        Hud.ApplyScale()
+        Hud.SetScale(scale)
 
         Print("Scale set to " .. scale .. ".")
     end,
@@ -406,20 +495,14 @@ CN:RegisterCommand{
         args = string.lower(CN.Trim(args or ""))
 
         if args == "on" then
-            Preferences().colourblind = true
+            Hud.SetColourblind(true)
         elseif args == "off" then
-            Preferences().colourblind = nil
+            Hud.SetColourblind(false)
         else
-            Preferences().colourblind = (not Hud.IsColourblind()) or nil
+            Hud.SetColourblind(not Hud.IsColourblind())
         end
 
         Print("Arrow labelled in words: " .. CN.YesNo(Hud.IsColourblind()))
-
-        local navigation = CN:GetModule("Navigation")
-
-        if navigation and navigation.Refresh then
-            navigation.Refresh()
-        end
     end,
 }
 
@@ -454,7 +537,7 @@ CN:RegisterCommand{
                 ui.persistedFilter = nil
             end
 
-            Print("|cff999999Off is the safer default: a filter that persists "
+            Print("|cff8a8f96Off is the safer default: a filter that persists "
                 .. "invisibly is how a list looks empty when it is not.|r")
         end
     end,

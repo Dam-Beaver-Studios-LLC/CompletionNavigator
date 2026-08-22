@@ -591,7 +591,7 @@ CN:RegisterCommand{
         Print("  with coordinates: " .. counts.located)
         Print("  with confirmed prerequisites: " .. counts.withRequires)
         Print("  with unconfirmed prerequisite guesses: " .. counts.withGuesses)
-        Print("Use |cffffff00/cn export|r to emit them as Data\\Quests.lua rows.")
+        Print("Use |cffffc74f/cn export|r to emit them as Data\\Quests.lua rows.")
     end,
 }
 
@@ -624,7 +624,7 @@ CN:RegisterCommand{
 
         if count == 0 then
             Print("Nothing to export yet."
-                .. (onlyLocated and " Try |cffffff00/cn export all|r to include "
+                .. (onlyLocated and " Try |cffffc74f/cn export all|r to include "
                     .. "quests with no coordinates." or ""))
             return
         end
@@ -646,8 +646,8 @@ CN:RegisterCommand{
             local ok, isAvailable = pcall(provider.IsAvailable)
 
             local status = (ok and isAvailable)
-                and "|cff00ff00available|r"
-                or "|cff999999unavailable|r"
+                and "|cff73b873available|r"
+                or "|cff8a8f96unavailable|r"
 
             local detail = ""
 
@@ -655,7 +655,7 @@ CN:RegisterCommand{
                 local described, text = pcall(provider.Describe)
 
                 if described and text then
-                    detail = " |cff999999(" .. text .. ")|r"
+                    detail = " |cff8a8f96(" .. text .. ")|r"
                 end
             end
 
@@ -670,7 +670,7 @@ CN:RegisterCommand{
             local ok, isAvailable = pcall(provider.IsAvailable)
 
             Print("  " .. entry.name .. ": "
-                .. ((ok and isAvailable) and "|cff00ff00available|r" or "|cff999999unavailable|r"))
+                .. ((ok and isAvailable) and "|cff73b873available|r" or "|cff8a8f96unavailable|r"))
         end
     end,
 }
@@ -692,11 +692,11 @@ CN:RegisterCommand{
 
         if not data then
             Print("No external provider knows quest " .. questID .. ".")
-            Print("Run |cffffff00/cn providers|r to see what is installed.")
+            Print("Run |cffffc74f/cn providers|r to see what is installed.")
             return
         end
 
-        Print("Quest " .. questID .. " |cff999999via "
+        Print("Quest " .. questID .. " |cff8a8f96via "
             .. table.concat(data.providers or {}, ", ") .. "|r")
 
         if data.name then Print("  name: " .. data.name) end

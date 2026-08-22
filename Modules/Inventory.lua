@@ -501,7 +501,7 @@ CN:RegisterCommand{
             for _, item in ipairs(starters) do
                 Print("  " .. (Blizzard.GetItemName(item.itemID)
                     or ("item " .. item.itemID))
-                    .. " |cff999999bag " .. item.bag .. ", slot " .. item.slot .. "|r")
+                    .. " |cff8a8f96bag " .. item.bag .. ", slot " .. item.slot .. "|r")
             end
         end
 
@@ -513,7 +513,7 @@ CN:RegisterCommand{
             for _, item in ipairs(uncollected) do
                 Print("  " .. (Blizzard.GetItemName(item.itemID)
                     or ("item " .. item.itemID))
-                    .. " |cff999999" .. tostring(item.kind) .. "|r")
+                    .. " |cff8a8f96" .. tostring(item.kind) .. "|r")
             end
         end
 
@@ -539,13 +539,13 @@ CN:RegisterCommand{
                     -- Hardcoded English two lines from a CN.L lookup of the
                     -- same words is how a locale file ends up complete and
                     -- the addon still English.
-                    Print("  |cff999999"
+                    Print("  |cff8a8f96"
                         .. string.format(CN.L["%d more"], #nearly - 8) .. "|r")
                     break
                 end
 
-                Print(string.format("  |cffffff00" .. CN.L["%d more"]
-                    .. "|r %s |cff999999(%d/%d)|r",
+                Print(string.format("  |cffffc74f" .. CN.L["%d more"]
+                    .. "|r %s |cff8a8f96(%d/%d)|r",
                     row.remaining, tostring(row.text or row.title),
                     row.done, row.required))
             end
@@ -556,7 +556,7 @@ CN:RegisterCommand{
         if bank.scannedAt then
             local age = math.max(0, time() - bank.scannedAt)
 
-            Print("|cff999999Bank: " .. (CN.CountKeys(bank) - 1)
+            Print("|cff8a8f96Bank: " .. (CN.CountKeys(bank) - 1)
                 .. " kinds of item, seen "
                 .. math.floor(age / 3600) .. "h ago -- the client only "
                 .. "describes it while you are standing at one.|r")
@@ -565,10 +565,10 @@ CN:RegisterCommand{
         if #starters == 0 and #uncollected == 0 and #recipes == 0
             and #nearly == 0 then
 
-            Print("|cff999999Nothing in there needs doing.|r")
+            Print("|cff8a8f96Nothing in there needs doing.|r")
         end
 
-        Print("|cff999999Nothing is used, learned or moved on your behalf.|r")
+        Print("|cff8a8f96Nothing is used, learned or moved on your behalf.|r")
     end,
 }
 

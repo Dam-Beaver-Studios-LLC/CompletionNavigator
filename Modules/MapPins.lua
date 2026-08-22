@@ -342,26 +342,33 @@ end
 
 local pool = {}
 
+-- A SEQUENCE, NOT ONE BRIGHT PIN AND A CROWD OF GREY ONES.
+--
+-- Stop one wore the brand blue and every other stop wore the same flat grey,
+-- so a twelve-stop route read as one pin and eleven identical ones -- and the
+-- numbers, which are the smallest and least legible thing on the map, were
+-- the only way to tell them apart.
+--
+-- The route is ordered, and the pins should say so. Same hue throughout,
+-- stepped down in value: bright at the front, fading back. That is what the
+-- whole 2-opt pass exists to produce and it is now visible without reading a
+-- single digit.
+MapPins.trailFade = 0.06
+MapPins.trailFloor = 0.55
+
 local function PinColor(order)
-    local nav = CN:GetModule("Navigation")
+    local brand = CN.RGB.BRAND
 
-    local palette = nav and nav.colors
-
-    if not palette then
-        return 0.365, 0.824, 0.984
+    if (order or 1) <= 1 then
+        return brand[1], brand[2], brand[3]
     end
 
-    -- The next stop wears the addon's blue. Everything after it is dimmed,
-    -- so "where do I go now" is answerable at a glance rather than by
-    -- reading numbers.
-    if order == 1 then
-        local c = palette.ON_COURSE
-        return c[1], c[2], c[3]
-    end
+    local step = math.min(MapPins.trailFloor,
+        0.10 + ((order - 1) * MapPins.trailFade))
 
-    local c = palette.UNKNOWN
+    local keep = 1 - step
 
-    return c[1], c[2], c[3]
+    return brand[1] * keep, brand[2] * keep, brand[3] * keep
 end
 
 local function ShowPinTooltip(frame)
@@ -448,6 +455,11 @@ local function AcquirePin(index, canvas)
 
     frame.label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.label:SetPoint("CENTER")
+
+    -- Over map art, which is the same problem as over the world: a stop
+    -- number in ten-point gold with a one-pixel shadow disappears against
+    -- half the maps in the game.
+    CN.Outline(frame.label, 12, "PRIMARY")
 
     frame:SetScript("OnEnter", ShowPinTooltip)
     frame:SetScript("OnLeave", HidePinTooltip)

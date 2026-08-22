@@ -335,6 +335,48 @@ do
     end
 end
 
+------------------------------------------------------------
+-- BENCH: A REAL FLIGHT NETWORK
+------------------------------------------------------------
+
+-- The harness fixture clusters its sixty flight points into a far corner so
+-- that the suite's travel assertions keep their answers -- a spread network
+-- starts winning journeys the tests assert are quicker on foot, and weakening
+-- an assertion to suit a benchmark is how a suite stops checking.
+--
+-- That was fine while the flight leg was a straight line. It stopped being
+-- fine when the pair search gained a pruning bound, because a corner cluster
+-- is exactly the geometry that bound rejects unexamined: ONE origin of
+-- fifty-nine survived with the cluster, against seventeen of sixty on a real
+-- continent. So the benchmark was measuring a square the prune never walks,
+-- and it reported both travel budgets at a fifth of their ceiling while a
+-- realistic network was over both of them.
+--
+-- The assertions have run by this point. Spread the same nodes over the map
+-- and throw the derived caches away, and every number below is about a
+-- continent instead of a corner.
+do
+    local nodes = CN_TEST_TAXI_NODES and CN_TEST_TAXI_NODES[1941]
+
+    if nodes then
+        for index = 4, #nodes do
+            nodes[index].position = {
+                x = 0.05 + (((index * 7) % 23) * 0.040),
+                y = 0.05 + (((index * 11) % 19) * 0.048),
+            }
+        end
+    end
+
+    local travel = CN:GetModule("Travel")
+
+    if travel and travel.ForgetNodes then
+        travel.ForgetNodes()
+        travel.ForgetWorldPoints()
+    end
+
+    CN.InvalidateCandidates()
+end
+
 print("\nThe paths a player triggers without meaning to:")
 
 do
@@ -342,6 +384,58 @@ do
 
     bench("BuildZoneRoute()", 50, function()
         CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+    end)
+
+    -- THE ROUTE OPTIMISER, ON ITS OWN, AT THE SIZE A BUSY ZONE PRODUCES.
+    --
+    -- `BuildZoneRoute` above is measured against whatever the fixture happens
+    -- to place in the player's zone, which is a handful of stops. The 2-opt
+    -- pass is quadratic in stops and was, until 0.54.0, quadratic in
+    -- ALLOCATIONS too -- so at thirty to fifty stops, which is an ordinary
+    -- evening with a full quest log plus rares and treasures, one call cost
+    -- thirty-three milliseconds and produced megabytes of garbage. It runs
+    -- every two seconds while the Zone tab is open.
+    --
+    -- Measured directly, at a size the fixture cannot reach on its own.
+    local stops = {}
+
+    for index = 1, 40 do
+        table.insert(stops, {
+            name  = "Stop " .. index,
+            mapID = 94,
+            x     = 0.05 + (((index * 13) % 29) * 0.031),
+            y     = 0.05 + (((index * 17) % 31) * 0.029),
+        })
+    end
+
+    CN.UseRouteMapScale(94)
+
+    bench("ImproveRoute() over 40 stops", 50, function()
+        local copy = {}
+
+        for index = 1, #stops do
+            copy[index] = stops[index]
+        end
+
+        CN.ImproveRoute(copy, 0.5, 0.5)
+    end)
+
+    -- And the clustering that produces those stops, which was quadratic in
+    -- objectives with a module lookup and a square root inside the inner
+    -- loop.
+    local located = {}
+
+    for index = 1, 110 do
+        table.insert(located, {
+            name  = "Objective " .. index,
+            mapID = 94,
+            x     = 0.03 + (((index * 19) % 37) * 0.026),
+            y     = 0.03 + (((index * 23) % 41) * 0.023),
+        })
+    end
+
+    bench("ClusterByProximity() over 110 objectives", 50, function()
+        CN.ClusterByProximity(located)
     end)
 
     -- NOT UI.Refresh: it returns immediately unless the window is genuinely
@@ -412,6 +506,14 @@ local BUDGETS = {
     -- milliseconds of rebuild without anything looking slow.
     ["EstimateSeconds() across a zone"] = 0.25,
     ["CostFor() as the scorer calls it"] = 0.25,
+
+    -- Added in 0.54.0, and both of them were over a hundred times their
+    -- eventual measured cost before that release. The fixture could not
+    -- reach the size at which either mattered, so neither had a budget and
+    -- neither was measured -- which is how a thirty-three millisecond stutter
+    -- lived in the file a player watches while walking.
+    ["ImproveRoute() over 40 stops"] = 3.0,
+    ["ClusterByProximity() over 110 objectives"] = 3.0,
 }
 
 if ENFORCE_BUDGETS then

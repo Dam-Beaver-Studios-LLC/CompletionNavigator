@@ -510,14 +510,34 @@ local function BuildFrame()
         saved.followPosition.x or 40,
         saved.followPosition.y or -200)
 
+    -- Panelled and marked, for the reason spelled out in Modules/Hud.lua:
+    -- text drawn over the world with no ground under it reads as text that
+    -- has come loose from something. Slightly more opaque than the heads-up
+    -- line because this one carries a list.
+    if CN.UI and CN.UI.PaintPanel then
+        CN.UI.PaintPanel(frame, 0.04, 0.05, 0.07, 0.70)
+    end
+
+    local rule = frame:CreateTexture(nil, "ARTWORK")
+    rule:SetPoint("TOPLEFT")
+    rule:SetPoint("BOTTOMLEFT")
+    rule:SetWidth(2)
+    rule:SetColorTexture(CN.Rgb("BRAND"))
+    rule:SetAlpha(0.9)
+
+    local inset = CN.SPACE.M
+
     frame.header = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    frame.header:SetPoint("TOPLEFT", 8, -8)
+    frame.header:SetPoint("TOPLEFT", inset, -CN.SPACE.S)
     frame.header:SetJustifyH("LEFT")
 
     frame.body = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    frame.body:SetPoint("TOPLEFT", frame.header, "BOTTOMLEFT", 0, -6)
+    frame.body:SetPoint("TOPLEFT", frame.header, "BOTTOMLEFT", 0, -CN.SPACE.S)
     frame.body:SetJustifyH("LEFT")
     frame.body:SetJustifyV("TOP")
+
+    CN.Outline(frame.header, 13, "PRIMARY")
+    CN.Outline(frame.body, 11, "BODY")
 
     frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
 
@@ -546,12 +566,12 @@ function Follow.Redraw()
     local rendered = {}
 
     for _, line in ipairs(Follow.Lines()) do
-        local colour = "|cffcccccc"
+        local colour = "|cffc8ccd2"
 
         if line.state == "DONE" then
             colour = "|cff73b873"
         elseif line.state == "NOTE" then
-            colour = "|cff999999"
+            colour = "|cff8a8f96"
         end
 
         table.insert(rendered, colour
@@ -744,7 +764,7 @@ CN:RegisterCommand{
 
         if args == "next" or args == "skip" then
             if not Follow.active then
-                Print("Follow mode is not running. |cffffff00/cn follow|r starts it.")
+                Print("Follow mode is not running. |cffffc74f/cn follow|r starts it.")
                 return
             end
 
@@ -776,8 +796,8 @@ CN:RegisterCommand{
             if hub then
                 Print("Following. First stop: "
                     .. (CN.DescribeHub(hub) or "ahead") .. ".")
-                Print("|cff999999It advances when the stop is clear. "
-                    .. "|cffffff00/cn follow off|r|cff999999 stops.|r")
+                Print("|cff8a8f96It advances when the stop is clear. "
+                    .. "|cffffc74f/cn follow off|r|cff8a8f96 stops.|r")
             else
                 Print("Following, but nothing here needs doing.")
             end
