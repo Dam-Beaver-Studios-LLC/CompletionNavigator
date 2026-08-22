@@ -425,11 +425,22 @@ CN:RegisterCommand{
         end
 
         if requested == "off" or requested == "clear" then
-            if filters then
-                filters.ClearMode()
+            -- SAY WHAT ACTUALLY HAPPENED.
+            --
+            -- This printed "Previous filters and weighting restored"
+            -- unconditionally -- including when there was no focus to clear,
+            -- which is exactly the case where the old code had just unhidden
+            -- everything the player had hidden by hand.
+            local cleared = filters and filters.ClearMode()
+
+            if cleared then
+                Print("Focus cleared. Previous filters and weighting restored.")
+            else
+                Print("No focus was set, so nothing changed.")
+                Print("|cff999999Your own |r|cffffff00/cn show|r|cff999999 "
+                    .. "choices are untouched.|r")
             end
 
-            Print("Focus cleared. Previous filters and weighting restored.")
             return
         end
 

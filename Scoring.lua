@@ -212,6 +212,37 @@ end
 -- moved in would cost milliseconds to achieve nothing.
 CN.rankingGeneration = CN.rankingGeneration or 0
 
+-- A REASON AN ADJUSTER ADDS, ADDED ONCE.
+--
+-- Scoring runs repeatedly over the SAME cached objective tables -- ranking
+-- re-scores them on every rebuild, and every zone route bumps the ranking
+-- generation. An adjuster that did `table.insert(objective.reasons, ...)`
+-- therefore appended on every pass: one objective was measured carrying
+-- sixty-two reasons after thirty rounds of ordinary play, and `/cn why`
+-- printed the same sentence sixty times over.
+--
+-- This is the identical defect recorded as fixed for DECORATORS further down
+-- this file. That fix was applied to decorators and nobody looked at the
+-- adjuster path, which runs far more often.
+function CN.AddAdjusterReason(objective, key, text)
+    if type(objective) ~= "table" or not text then
+        return false
+    end
+
+    objective.adjusterReasons = objective.adjusterReasons or {}
+
+    if objective.adjusterReasons[key] then
+        return false
+    end
+
+    objective.adjusterReasons[key] = true
+    objective.reasons = objective.reasons or {}
+
+    table.insert(objective.reasons, text)
+
+    return true
+end
+
 function CN.InvalidateRanking()
     CN.rankingGeneration = (CN.rankingGeneration or 0) + 1
 end
@@ -282,6 +313,20 @@ function CN.ScoreObjective(objective)
     -- that a focus the player CHOSE always outranks a habit something merely
     -- inferred -- "I am levelling tonight" must not be argued with by a
     -- counter.
+    -- SCORING RUNS AGAIN AND AGAIN OVER THE SAME TABLES.
+    --
+    -- The candidate list is cached; ranking re-scores those same objective
+    -- tables on every rebuild, and every zone route bumps the ranking
+    -- generation. Adjusters that append to `objective.reasons` therefore
+    -- appended once per rebuild, forever -- one objective was measured
+    -- carrying sixty-two reasons after thirty rounds of ordinary play, and
+    -- `/cn why` printed the same sentence sixty times.
+    --
+    -- This is the identical defect the decorator comment below records as
+    -- fixed. The fix was applied to decorators and nobody looked at the
+    -- adjuster path. So: mark where the objective's own reasons end, and let
+    -- an adjuster append only if it has not already done so for this
+    -- objective.
     for index = 1, #CN.scoreAdjusterOrder do
         local adjuster = CN.scoreAdjusters[CN.scoreAdjusterOrder[index]]
 

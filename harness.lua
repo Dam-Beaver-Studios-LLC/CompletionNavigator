@@ -1188,6 +1188,28 @@ local petSpecies = {
 LE_PET_JOURNAL_FILTER_COLLECTED     = 1
 LE_PET_JOURNAL_FILTER_NOT_COLLECTED = 2
 
+-- THE GAME'S OWN OPTIONS API.
+--
+-- Absent from this stub for as long as the addon has tried to register with
+-- it, so the `if SettingsPanel and Settings and ...` chain short-circuited on
+-- the first term and the suite never reached the line that threw on every
+-- real client. Defined now, so that path is exercised.
+SettingsPanel = { name = "SettingsPanel" }
+
+CN_TEST_OPTIONS_REGISTERED = {}
+
+Settings = {
+    RegisterCanvasLayoutCategory = function(panel, name)
+        return { ID = name, panel = panel }
+    end,
+
+    RegisterAddOnCategory = function(category)
+        table.insert(CN_TEST_OPTIONS_REGISTERED, category)
+
+        return true
+    end,
+}
+
 CN_TEST_PET_FILTERS = { collected = true, uncollected = true, search = "" }
 
 C_PetJournal = {
@@ -2721,21 +2743,69 @@ assert(candidates[1] == firstBefore,
 
 print("  candidate list is not reordered by ranking")
 
--- Scanning a store with no candidate provider must dirty nothing.
+-- EVERY SCAN THAT FEEDS A PROVIDER MUST DIRTY IT.
+--
+-- This used to assert the opposite for mounts -- "a mount scan must not
+-- rebuild candidate providers" -- which was true when mounts fed only the
+-- Collections tab and became false the day Mounts became a candidate
+-- provider. Nobody revisited it, so the suite spent several releases
+-- asserting that a real defect was correct: `/cn setup` scanned mounts, toys,
+-- appearances and professions, printed "Setup complete", and left all four
+-- providers serving a cache built before the scan.
+--
+-- The property is not a list of names; it is the relationship. Every store
+-- named in CN.scanProviders must mark each provider it names stale.
+--
+-- AND EVERY CANDIDATE PROVIDER THAT READS A SCANNED STORE MUST BE NAMED.
+-- Walking the table alone cannot catch a missing entry -- a removed row is
+-- simply a row the loop does not visit -- so the set is checked too.
+for _, required in ipairs({ "Mounts", "Toys", "Appearances", "Professions",
+                            "Pets", "Achievements", "Reputations",
+                            "Currencies", "Exploration" }) do
+    local named = false
+
+    for _, providers in pairs(CN.scanProviders) do
+        for _, provider in ipairs(providers) do
+            if provider == required then named = true end
+        end
+    end
+
+    assert(named,
+        required .. " is a candidate provider fed by a scan, and no store in "
+        .. "CN.scanProviders names it -- so scanning it leaves the "
+        .. "recommendation built from the state before the scan")
+end
 CN.CollectCandidates(true)
+
+local scannedStores = 0
+
+for store, providers in pairs(CN.scanProviders) do
+    CN.CollectCandidates(true)
+
+    CN.MarkScanned(store)
+
+    for _, provider in ipairs(providers) do
+        assert(CN.GetProviderCacheState(provider)
+            and CN.GetProviderCacheState(provider).dirty,
+            "scanning " .. store .. " must mark " .. provider
+            .. " stale, or the scan is invisible to the recommendation")
+    end
+
+    scannedStores = scannedStores + 1
+end
+
+-- And a store nothing reads must still dirty nothing.
+CN.CollectCandidates(true)
+
 local generationBefore = CN.GetCandidateCacheState().generation
 
-CN.MarkScanned("mounts")
+CN.MarkScanned("titles")
 CN.CollectCandidates()
 
 assert(CN.GetCandidateCacheState().generation == generationBefore,
-    "a mount scan must not rebuild candidate providers")
+    "a scan of a store no provider reads must not rebuild anything")
 
-CN.MarkScanned("pets")
-assert(CN.GetProviderCacheState("Pets").dirty,
-    "a pet scan must mark the Pets provider stale")
-
-print("  scans invalidate only the providers that read them")
+print("  " .. scannedStores .. " scanned stores, each dirtying what reads it")
 
 -- Decorators must run exactly once per objective. Per-provider caching means
 -- the aggregate is mostly the SAME tables as last time, so a decorator that
@@ -9779,6 +9849,200 @@ print("\nEvery client function this addon calls, checked against the client:")
         .. "agrees with the client in both directions")
 end)()
 
+print("\nOff means off, and a setting you can name you can set:")
+
+;(function()
+    ------------------------------------------------------------
+    -- FOUR THINGS THAT ONLY GO WRONG ON A PATH THE SUITE NEVER WALKED.
+    ------------------------------------------------------------
+    local modes    = CN:GetModule("Filters")
+    local follow   = CN:GetModule("Follow")
+    local goalList = CN:GetModule("Goals")
+
+    local live = CN.Settings()
+
+    -- 1. `/cn mode off` with no focus must not touch what the player hid.
+    live.mode         = nil
+    live.modePrevious = nil
+
+    modes.EnableAllTypes()
+    modes.SetTypeEnabled(CN.objectiveTypes.PET, false)
+
+    CN.HandleSlashCommand("mode off")
+
+    assert(not modes.IsTypeEnabled(CN.objectiveTypes.PET),
+        "clearing a focus that was never set must not unhide what the "
+        .. "player hid by hand -- hidden types are persisted, so the loss "
+        .. "is permanent")
+
+    modes.EnableAllTypes()
+
+    print("  clearing a focus that was never set changes nothing")
+
+    -- 2. Every overridable setting must be settable by its own name.
+    local names = {}
+
+    for name in pairs(CN.characterOverridable) do
+        table.insert(names, name)
+    end
+
+    table.sort(names)
+
+    for _, name in ipairs(names) do
+        CN.HandleSlashCommand("percharacter " .. name)
+
+        assert(CN.character and CN.character.settings
+            and CN.character.settings[name] ~= nil,
+            "`/cn percharacter " .. name .. "` must set it; the handler "
+            .. "lowercased the argument and looked it up in a camelCase "
+            .. "table, so half of these could never be set by any input")
+
+        CN.character.settings[name] = nil
+    end
+
+    print("  all " .. #names .. " overridable settings accept their own name")
+
+    -- 3. Stopping follow mode must leave nothing on screen.
+    follow.Start()
+
+    follow.Stop()
+
+    local navigation = CN:GetModule("Navigation")
+
+    assert(not navigation.GetTarget(),
+        "stopping follow mode must clear the waypoint it set; it hid its own "
+        .. "frame and left the arrow pointing at a route nobody is walking")
+
+    assert(follow.deferred ~= true,
+        "and must not leave a combat deferral armed for the next session")
+
+    print("  stopping follow mode clears the arrow and the waypoint")
+
+    -- 4. A goal pinned before the scan picks up its real name afterwards.
+    local coinNames = CN:GetModule("Currencies")
+
+    local names2 = CN.Account("currencyNames")
+
+    names2[3008] = nil
+
+    goalList.Add(CN.objectiveTypes.CURRENCY, 3008)
+
+    coinNames.Scan()
+
+    local found
+
+    for _, goal in ipairs(goalList.List()) do
+        if goal.id == 3008 then found = goal end
+    end
+
+    assert(found, "the goal must be listed")
+
+    assert(found.name and not tostring(found.name):find("3008", 1, true),
+        "a goal pinned before the scan must take its real name once the "
+        .. "client can supply one, got " .. tostring(found.name))
+
+    goalList.Remove(CN.objectiveTypes.CURRENCY, 3008)
+
+    print("  a goal pinned before its scan is named properly afterwards")
+end)()
+
+print("\nA reason an adjuster adds is added once:")
+
+;(function()
+    ------------------------------------------------------------
+    -- SCORING RUNS AGAIN AND AGAIN OVER THE SAME TABLES.
+    --
+    -- The candidate list is cached and ranking re-scores those same tables on
+    -- every rebuild -- and every zone route bumps the ranking generation, so
+    -- this is ordinary play, not an edge case. Adjusters appended to
+    -- `objective.reasons` each pass: one objective was measured carrying
+    -- sixty-two reasons after thirty rounds, with `/cn why` printing the same
+    -- sentence sixty times.
+    --
+    -- The identical defect was found and fixed for DECORATORS, and there is a
+    -- probe for that. Nobody looked at the adjuster path, which runs far more
+    -- often.
+    ------------------------------------------------------------
+    local probe = CN.NewObjective({
+        id              = 1,
+        type            = CN.objectiveTypes.QUEST,
+        name            = "Repeatedly Scored",
+        completionValue = 3,
+    })
+
+    CN.RegisterScoreAdjuster("ReasonProbe", function(candidate, score)
+        CN.AddAdjusterReason(candidate, "reasonProbe", "an adjuster said so")
+
+        return score
+    end)
+
+    for _ = 1, 25 do
+        CN.ScoreObjective(probe)
+    end
+
+    local saidIt = 0
+
+    for _, reason in ipairs(probe.reasons or {}) do
+        if reason == "an adjuster said so" then
+            saidIt = saidIt + 1
+        end
+    end
+
+    assert(saidIt == 1,
+        "twenty-five scorings of one objective must add an adjuster's reason "
+        .. "once, not " .. saidIt .. " times")
+
+    CN.scoreAdjusters["ReasonProbe"] = nil
+
+    for index, name in ipairs(CN.scoreAdjusterOrder) do
+        if name == "ReasonProbe" then
+            table.remove(CN.scoreAdjusterOrder, index)
+            break
+        end
+    end
+
+    print("  scored 25 times, the reason appears once")
+end)()
+
+print("\nThe addon appears in the game's own options list:")
+
+;(function()
+    ------------------------------------------------------------
+    -- IT NEVER HAS.
+    --
+    -- The registration read `Settings.RegisterCanvasLayoutCategory`, meaning
+    -- the client's global options API -- and `Settings` was also the name of
+    -- a file-local function two hundred lines above, so it indexed a function
+    -- and threw on every login on every retail client since Dragonflight. The
+    -- error was caught and printed; because it aborted the function, the
+    -- pre-10.0 fallback never ran either.
+    --
+    -- The stub had no SettingsPanel, so the guard short-circuited before the
+    -- bad index and the suite saw nothing.
+    ------------------------------------------------------------
+    local hud = CN:GetModule("Hud")
+
+    local errors = CN:GetModule("Errors")
+
+    local errorsBefore = errors and errors.Count() or 0
+
+    local registered = hud.RegisterOptionsPanel()
+
+    assert(registered,
+        "the addon must register with the game's options list")
+
+    -- Registered during the login hook, which is when it happens in game.
+    -- Once, not once per call: the function guards itself.
+    assert(#CN_TEST_OPTIONS_REGISTERED == 1,
+        "and must reach RegisterAddOnCategory exactly once across the whole "
+        .. "session, got " .. #CN_TEST_OPTIONS_REGISTERED)
+
+    assert((errors and errors.Count() or 0) == errorsBefore,
+        "and must not throw doing it")
+
+    print("  registered with the client's options API, without erroring")
+end)()
+
 print("\nFeatures that were wired to nothing:")
 
 ;(function()
@@ -10197,6 +10461,46 @@ print("\nEvery scoring weight has something that sets it:")
     local session = CN:GetModule("Session")
 
     assert(session.TimeCost, "the time-cost producer must exist")
+
+    ------------------------------------------------------------
+    -- AND THE PRODUCER MUST ACTUALLY PRODUCE IT.
+    --
+    -- The rest of this block hand-built objectives with `estimatedTime`
+    -- already set and checked that the scorer used it -- testing the consumer
+    -- against a fixture the producer never made. The producer was registered
+    -- as a decorator taking a LIST while decorators receive one objective, so
+    -- it set the field on nothing; and the whole block had landed inside
+    -- another function, so it only existed as a side effect of calling that
+    -- one. `/cn mode fastest` kept the inert lever 0.48.0 recorded as fixed.
+    ------------------------------------------------------------
+    local durations = session.Durations()
+
+    durations[CN.objectiveTypes.QUEST] = { 180, 180, 180, 180, 180 }
+
+    local decorated = CN.NewObjective({
+        id              = 4242,
+        type            = CN.objectiveTypes.QUEST,
+        name            = "Timed Thing",
+        completionValue = 3,
+    })
+
+    local sessionDecorator = false
+
+    for name, decorator in pairs(CN.candidateDecorators) do
+        if name == "Session" then
+            decorator(decorated)
+            sessionDecorator = true
+        end
+    end
+
+    assert(sessionDecorator, "the Session decorator must be registered")
+
+    assert(type(decorated.estimatedTime) == "number"
+        and decorated.estimatedTime > 0,
+        "the decorator must set how long the thing takes, got "
+        .. tostring(decorated.estimatedTime))
+
+    durations[CN.objectiveTypes.QUEST] = nil
 
     local saved = CN.Settings().priorityMode
 

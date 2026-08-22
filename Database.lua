@@ -374,9 +374,17 @@ end
 -- rebuild the achievement candidates; measured, that mistake cost 18ms of a
 -- 16ms frame every time a mount was learned.
 --
--- A store with no entry here feeds no candidate provider at all -- mounts,
--- toys, appearances and titles are reported by /cn breakdown and the
--- Collections tab, which read their stores directly.
+-- A store with no entry here feeds no candidate provider at all.
+--
+-- That sentence used to name mounts, toys and appearances as examples, and
+-- it stopped being true when each of them became a candidate provider. So
+-- `/cn setup` scanned them, rewrote their stores, printed "Setup complete",
+-- and left the providers holding a cache built before the scan -- the
+-- collections a new player had just scanned for were invisible to `/cn next`
+-- until a zone change, a level-up, or the next login.
+--
+-- The suite asserted the bug was correct: "a mount scan must not rebuild
+-- candidate providers".
 CN.scanProviders = {
     pets         = { "Pets" },
     achievements = { "Achievements" },
@@ -385,6 +393,10 @@ CN.scanProviders = {
     exploration  = { "Exploration" },
     loremaster   = { "Loremaster" },
     vendors      = { "Vendors" },
+    mounts       = { "Mounts" },
+    toys         = { "Toys" },
+    appearances  = { "Appearances" },
+    professions  = { "Professions" },
 
     -- Recipe names are the left-hand side of the vendor recipe join.
     recipes      = { "Vendors" },

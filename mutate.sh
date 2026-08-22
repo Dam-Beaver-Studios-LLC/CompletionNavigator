@@ -413,6 +413,53 @@ mutate "Modules/Filters.lua" \
     "switching focus overwrites what off would restore"
 
 
+# The 0.50.0 audit: defects that only appear across a sequence of actions.
+mutate "Modules/Hud.lua" \
+    "local function Preferences()" \
+    "local function Settings()" \
+    "the options-panel registration indexes a local function"
+
+mutate "Scoring.lua" \
+    "    if objective.adjusterReasons[key] then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "an adjuster's reason is appended on every rescore"
+
+mutate "Database.lua" \
+    "    mounts       = { \"Mounts\" },
+    toys         = { \"Toys\" }," \
+    "    toys         = { \"Toys\" }," \
+    "a mount scan is invisible to the recommendation"
+
+mutate "Modules/Filters.lua" \
+    "    if not previous and not settings.mode then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "clearing an unset focus unhides what the player hid"
+
+mutate "Modules/Follow.lua" \
+    "    if CN.ClearWaypoints then
+        pcall(CN.ClearWaypoints)
+    end" \
+    "    if false then
+        pcall(CN.ClearWaypoints)
+    end" \
+    "stopping follow mode leaves the arrow up"
+
+mutate "Modules/Session.lua" \
+    "CN.RegisterCandidateDecorator(\"Session\", function(objective)
+    if type(objective) == \"table\" and objective.type then" \
+    "CN.RegisterCandidateDecorator(\"Session\", function(objective)
+    if false then" \
+    "nothing ever sets how long a thing takes"
+
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

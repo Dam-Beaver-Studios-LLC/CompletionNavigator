@@ -201,6 +201,7 @@ CN.apiSurface = {
     "IsTitleKnown",
     "PlaySound",
     "PlayerHasToy",
+    "Settings",
     "UIFrameFlash",
     "UiMapPoint",
     "UnitClass",

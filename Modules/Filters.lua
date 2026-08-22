@@ -636,6 +636,20 @@ function Filters.ClearMode()
 
     local previous = settings.modePrevious
 
+    -- NOTHING TO CLEAR MEANS NOTHING TO CHANGE.
+    --
+    -- This called EnableAllTypes unconditionally and only then looked for
+    -- something to restore -- so `/cn mode off` with no focus active unhid
+    -- everything the player had hidden by hand with `/cn show`, and then
+    -- printed "Previous filters and weighting restored". Hidden types live in
+    -- SavedVariables, so the loss was permanent.
+    --
+    -- The suite only ever called this after ApplyMode, which is the one path
+    -- where there is something to restore.
+    if not previous and not settings.mode then
+        return false
+    end
+
     Filters.EnableAllTypes()
 
     if previous then
@@ -727,17 +741,45 @@ CN:RegisterCommand{
     order   = 18,
     help    = "Make a setting apply to this character only.",
     handler = function(args)
-        args = string.lower(CN.Trim(args or ""))
+        args = CN.Trim(args or "")
 
         local settings = CN.Settings()
 
         if args ~= "" then
-            if not CN.characterOverridable[args] then
+            -- MATCHED WITHOUT CASE, BECAUSE THE KEYS ARE camelCase.
+            --
+            -- This lowercased the argument and then looked it up in a table
+            -- keyed `priorityMode`, `autoWaypoint`, `mapPins` -- so those
+            -- three could never be set by any input, and the command rejected
+            -- the exact spelling its own help line prints. Three of the six
+            -- overridable settings were unreachable, including the one the
+            -- feature was built for: a levelling alt wanting a different
+            -- priority mode from a max-level main.
+            local key
+
+            for name in pairs(CN.characterOverridable) do
+                if string.lower(name) == string.lower(args) then
+                    key = name
+                    break
+                end
+            end
+
+            if not key then
                 Print("That setting cannot be set per character: " .. args)
-                Print("|cff999999Overridable: priorityMode, autoWaypoint, "
-                    .. "arrow, tooltips|r")
+
+                local names = {}
+
+                for name in pairs(CN.characterOverridable) do
+                    table.insert(names, name)
+                end
+
+                table.sort(names)
+
+                Print("|cff999999Overridable: " .. table.concat(names, ", ") .. "|r")
                 return
             end
+
+            args = key
 
             if CN.IsOverridden(args) then
                 CN.ClearOverride(args)

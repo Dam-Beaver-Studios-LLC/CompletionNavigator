@@ -154,7 +154,8 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
 
     if situation == "dead" then
         if objective and objective.reasons then
-            table.insert(objective.reasons, "you are dead -- this is for after")
+            CN.AddAdjusterReason(objective, "groupDead",
+                "you are dead -- this is for after")
         end
 
         return score * Group.deadPenalty
@@ -164,10 +165,8 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
         and objective
         and Group.instancedTypes[objective.type] then
 
-        if objective.reasons then
-            table.insert(objective.reasons,
-                "outside work, and you are in an instance with a group")
-        end
+        CN.AddAdjusterReason(objective, "groupInstanced",
+            "outside work, and you are in an instance with a group")
 
         return score * Group.instancedPenalty
     end

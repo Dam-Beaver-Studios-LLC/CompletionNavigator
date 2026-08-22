@@ -401,45 +401,7 @@ function Session.Speed(mounted)
         end
     end
 
-    ------------------------------------------------------------
--- HOW LONG A THING TAKES, AS A SCORING TERM
-------------------------------------------------------------
-
--- THE LEVER `/cn mode fastest` HAS ALWAYS ADVERTISED AND NEVER HAD.
---
--- `estimatedTime` is a declared scoring weight, summed on every objective,
--- printed by `/cn order`, and overridden by the `fastest` profile to -1.5 --
--- and nothing in the addon has ever set the field. So the mode's second lever
--- did nothing: `/cn mode fastest` was a travel-cost change wearing the name
--- of something broader.
---
--- The data to fill it has been collected since 0.41.0. This is the wiring.
---
--- SCALED, NOT RAW. A raw duration in seconds would swamp every other term --
--- a twenty-minute dungeon would arrive at 1200 against a completion value of
--- 5. The term is the duration in units of the typical objective, so 1 means
--- "about as long as things usually take", 3 means "three times as long", and
--- an objective the addon has never timed contributes nothing rather than a
--- guess. The addon does not invent a duration it has not watched.
-Session.timeScaleSeconds = 300
-
-function Session.TimeCost(objectiveType)
-    local typical = Session.TypicalSeconds(objectiveType)
-
-    if not typical or typical <= 0 then
-        return nil
-    end
-
-    return typical / Session.timeScaleSeconds
-end
-
-CN.RegisterCandidateDecorator("Session", function(candidates)
-    for _, objective in ipairs(candidates or {}) do
-        objective.estimatedTime = Session.TimeCost(objective.type)
-    end
-end)
-
-return Session.defaultSpeed, false
+    return Session.defaultSpeed, false
 end
 
 function Session.SpeedSampleCount(mounted)
@@ -1044,5 +1006,60 @@ CN:RegisterCommand{
         end
     end,
 }
+
+------------------------------------------------------------
+-- HOW LONG A THING TAKES, AS A SCORING TERM
+------------------------------------------------------------
+
+-- THE LEVER `/cn mode fastest` HAS ALWAYS ADVERTISED AND NEVER HAD.
+--
+-- `estimatedTime` is a declared scoring weight, summed on every objective,
+-- printed by `/cn order`, and overridden by the `fastest` profile to -1.5 --
+-- and nothing in the addon has ever set the field. So the mode's second lever
+-- did nothing: `/cn mode fastest` was a travel-cost change wearing the name
+-- of something broader.
+--
+-- The data to fill it has been collected since 0.41.0. This is the wiring.
+--
+-- SCALED, NOT RAW. A raw duration in seconds would swamp every other term --
+-- a twenty-minute dungeon would arrive at 1200 against a completion value of
+-- 5. The term is the duration in units of the typical objective, so 1 means
+-- "about as long as things usually take", 3 means "three times as long", and
+-- an objective the addon has never timed contributes nothing rather than a
+-- guess. The addon does not invent a duration it has not watched.
+Session.timeScaleSeconds = 300
+
+function Session.TimeCost(objectiveType)
+    local typical = Session.TypicalSeconds(objectiveType)
+
+    if not typical or typical <= 0 then
+        return nil
+    end
+
+    return typical / Session.timeScaleSeconds
+end
+
+-- A DECORATOR RECEIVES ONE OBJECTIVE, NOT A LIST.
+--
+-- This took `candidates` and iterated it, which yields nothing when handed a
+-- single objective table -- so the field was never set on anything and
+-- `/cn mode fastest` kept the inert second lever that 0.48.0 recorded as
+-- fixed. Two mistakes in one edit: this, and the block landing INSIDE
+-- Session.Speed because the anchor `return Session` also matched
+-- `return Session.defaultSpeed`. Everything here was therefore defined only
+-- as a side effect of calling Speed(), and re-registered on every call that
+-- fell through all three buckets -- fifty-seven registrations of the same
+-- decorator in one session.
+--
+-- The harness asserted that TimeCost exists and then hand-built objectives
+-- with estimatedTime already set, testing the scorer against a fixture the
+-- producer never made. That is precisely the trap this file's own comment
+-- about the flying speed bucket warns about.
+CN.RegisterCandidateDecorator("Session", function(objective)
+    if type(objective) == "table" and objective.type then
+        objective.estimatedTime = Session.TimeCost(objective.type)
+    end
+end)
+
 
 return Session

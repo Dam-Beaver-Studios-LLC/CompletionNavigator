@@ -38,16 +38,29 @@ local Print = CN.Print
 -- SETTINGS
 ------------------------------------------------------------
 
-local function Settings()
+-- Named `Preferences`, not `Settings`.
+--
+-- `Settings` is also the name of the client's global options API since 10.0,
+-- and this file's options-panel registration reads `Settings.RegisterCanvas-
+-- LayoutCategory` -- which resolved to this local FUNCTION and threw
+-- "attempt to index a function value" on every login on every retail client.
+-- The error was caught and printed, and because it aborted the function the
+-- pre-10.0 fallback below never ran either: the addon has never appeared in
+-- the game's own options list, which is the entire purpose of that block.
+--
+-- The harness never defined SettingsPanel, so the `and` chain short-circuited
+-- before the bad index and the suite saw nothing. Same shape as the invented
+-- event name: a stub more forgiving than the client.
+local function Preferences()
     return CN.Settings() or {}
 end
 
 function Hud.IsEnabled()
-    return Settings().hud == true
+    return Preferences().hud == true
 end
 
 function Hud.Scale()
-    local scale = tonumber(Settings().uiScale)
+    local scale = tonumber(Preferences().uiScale)
 
     if not scale or scale < 0.7 or scale > 2.0 then
         return 1
@@ -57,7 +70,7 @@ function Hud.Scale()
 end
 
 function Hud.IsColourblind()
-    return Settings().colourblind == true
+    return Preferences().colourblind == true
 end
 
 ------------------------------------------------------------
@@ -80,7 +93,7 @@ local function Build()
     frame:RegisterForDrag("LeftButton")
     frame:SetClampedToScreen(true)
 
-    local placement = Settings().hudPosition or {}
+    local placement = Preferences().hudPosition or {}
 
     frame:SetPoint(placement.point or "TOP", UIParent,
         placement.point or "TOP", placement.x or 0, placement.y or -220)
@@ -101,7 +114,7 @@ local function Build()
 
         local point, _, _, x, y = self:GetPoint()
 
-        Settings().hudPosition = { point = point, x = x, y = y }
+        Preferences().hudPosition = { point = point, x = x, y = y }
     end)
 
     frame:SetScale(Hud.Scale())
@@ -153,7 +166,7 @@ function Hud.Refresh()
 end
 
 function Hud.SetEnabled(enabled)
-    Settings().hud = enabled and true or nil
+    Preferences().hud = enabled and true or nil
 
     if enabled then
         Build()
@@ -369,7 +382,7 @@ CN:RegisterCommand{
             return
         end
 
-        Settings().uiScale = scale
+        Preferences().uiScale = scale
 
         Hud.ApplyScale()
 
@@ -387,11 +400,11 @@ CN:RegisterCommand{
         args = string.lower(CN.Trim(args or ""))
 
         if args == "on" then
-            Settings().colourblind = true
+            Preferences().colourblind = true
         elseif args == "off" then
-            Settings().colourblind = nil
+            Preferences().colourblind = nil
         else
-            Settings().colourblind = (not Hud.IsColourblind()) or nil
+            Preferences().colourblind = (not Hud.IsColourblind()) or nil
         end
 
         Print("Arrow labelled in words: " .. CN.YesNo(Hud.IsColourblind()))
@@ -412,7 +425,7 @@ CN:RegisterCommand{
     handler = function(args)
         args = string.lower(CN.Trim(args or ""))
 
-        local settings = Settings()
+        local settings = Preferences()
 
         if args == "on" then
             settings.keepFilter = true
@@ -441,14 +454,14 @@ CN:RegisterCommand{
         args = string.lower(CN.Trim(args or ""))
 
         if args == "on" then
-            Settings().cues = true
+            Preferences().cues = true
         elseif args == "off" then
-            Settings().cues = nil
+            Preferences().cues = nil
         else
-            Settings().cues = (not Settings().cues) or nil
+            Preferences().cues = (not Preferences().cues) or nil
         end
 
-        Print("Completion cues: " .. CN.YesNo(Settings().cues))
+        Print("Completion cues: " .. CN.YesNo(Preferences().cues))
     end,
 }
 

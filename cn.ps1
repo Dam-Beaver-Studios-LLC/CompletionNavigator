@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.49.0'
+$script:ToolkitVersion = '0.50.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.49.0"
+CN.version     = "0.50.0"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -931,9 +931,17 @@ end
 -- rebuild the achievement candidates; measured, that mistake cost 18ms of a
 -- 16ms frame every time a mount was learned.
 --
--- A store with no entry here feeds no candidate provider at all -- mounts,
--- toys, appearances and titles are reported by /cn breakdown and the
--- Collections tab, which read their stores directly.
+-- A store with no entry here feeds no candidate provider at all.
+--
+-- That sentence used to name mounts, toys and appearances as examples, and
+-- it stopped being true when each of them became a candidate provider. So
+-- `/cn setup` scanned them, rewrote their stores, printed "Setup complete",
+-- and left the providers holding a cache built before the scan -- the
+-- collections a new player had just scanned for were invisible to `/cn next`
+-- until a zone change, a level-up, or the next login.
+--
+-- The suite asserted the bug was correct: "a mount scan must not rebuild
+-- candidate providers".
 CN.scanProviders = {
     pets         = { "Pets" },
     achievements = { "Achievements" },
@@ -942,6 +950,10 @@ CN.scanProviders = {
     exploration  = { "Exploration" },
     loremaster   = { "Loremaster" },
     vendors      = { "Vendors" },
+    mounts       = { "Mounts" },
+    toys         = { "Toys" },
+    appearances  = { "Appearances" },
+    professions  = { "Professions" },
 
     -- Recipe names are the left-hand side of the vendor recipe join.
     recipes      = { "Vendors" },
@@ -2556,11 +2568,22 @@ CN:RegisterCommand{
         end
 
         if requested == "off" or requested == "clear" then
-            if filters then
-                filters.ClearMode()
+            -- SAY WHAT ACTUALLY HAPPENED.
+            --
+            -- This printed "Previous filters and weighting restored"
+            -- unconditionally -- including when there was no focus to clear,
+            -- which is exactly the case where the old code had just unhidden
+            -- everything the player had hidden by hand.
+            local cleared = filters and filters.ClearMode()
+
+            if cleared then
+                Print("Focus cleared. Previous filters and weighting restored.")
+            else
+                Print("No focus was set, so nothing changed.")
+                Print("|cff999999Your own |r|cffffff00/cn show|r|cff999999 "
+                    .. "choices are untouched.|r")
             end
 
-            Print("Focus cleared. Previous filters and weighting restored.")
             return
         end
 
@@ -3707,6 +3730,37 @@ end
 -- moved in would cost milliseconds to achieve nothing.
 CN.rankingGeneration = CN.rankingGeneration or 0
 
+-- A REASON AN ADJUSTER ADDS, ADDED ONCE.
+--
+-- Scoring runs repeatedly over the SAME cached objective tables -- ranking
+-- re-scores them on every rebuild, and every zone route bumps the ranking
+-- generation. An adjuster that did `table.insert(objective.reasons, ...)`
+-- therefore appended on every pass: one objective was measured carrying
+-- sixty-two reasons after thirty rounds of ordinary play, and `/cn why`
+-- printed the same sentence sixty times over.
+--
+-- This is the identical defect recorded as fixed for DECORATORS further down
+-- this file. That fix was applied to decorators and nobody looked at the
+-- adjuster path, which runs far more often.
+function CN.AddAdjusterReason(objective, key, text)
+    if type(objective) ~= "table" or not text then
+        return false
+    end
+
+    objective.adjusterReasons = objective.adjusterReasons or {}
+
+    if objective.adjusterReasons[key] then
+        return false
+    end
+
+    objective.adjusterReasons[key] = true
+    objective.reasons = objective.reasons or {}
+
+    table.insert(objective.reasons, text)
+
+    return true
+end
+
 function CN.InvalidateRanking()
     CN.rankingGeneration = (CN.rankingGeneration or 0) + 1
 end
@@ -3777,6 +3831,20 @@ function CN.ScoreObjective(objective)
     -- that a focus the player CHOSE always outranks a habit something merely
     -- inferred -- "I am levelling tonight" must not be argued with by a
     -- counter.
+    -- SCORING RUNS AGAIN AND AGAIN OVER THE SAME TABLES.
+    --
+    -- The candidate list is cached; ranking re-scores those same objective
+    -- tables on every rebuild, and every zone route bumps the ranking
+    -- generation. Adjusters that append to `objective.reasons` therefore
+    -- appended once per rebuild, forever -- one objective was measured
+    -- carrying sixty-two reasons after thirty rounds of ordinary play, and
+    -- `/cn why` printed the same sentence sixty times.
+    --
+    -- This is the identical defect the decorator comment below records as
+    -- fixed. The fix was applied to decorators and nobody looked at the
+    -- adjuster path. So: mark where the objective's own reasons end, and let
+    -- an adjuster append only if it has not already done so for this
+    -- objective.
     for index = 1, #CN.scoreAdjusterOrder do
         local adjuster = CN.scoreAdjusters[CN.scoreAdjusterOrder[index]]
 
@@ -8902,6 +8970,7 @@ CN.apiSurface = {
     "IsTitleKnown",
     "PlaySound",
     "PlayerHasToy",
+    "Settings",
     "UIFrameFlash",
     "UiMapPoint",
     "UnitClass",
@@ -16566,6 +16635,11 @@ function Professions.Scan()
         CN.character.professionsScanned = time()
     end
 
+    -- The Professions provider reads this store, and nothing told it the
+    -- store had been rewritten -- so a scan left the recommendations built
+    -- from the state before it.
+    CN.MarkScanned("professions")
+
     return #lines
 end
 
@@ -20503,6 +20577,20 @@ function Filters.ClearMode()
 
     local previous = settings.modePrevious
 
+    -- NOTHING TO CLEAR MEANS NOTHING TO CHANGE.
+    --
+    -- This called EnableAllTypes unconditionally and only then looked for
+    -- something to restore -- so `/cn mode off` with no focus active unhid
+    -- everything the player had hidden by hand with `/cn show`, and then
+    -- printed "Previous filters and weighting restored". Hidden types live in
+    -- SavedVariables, so the loss was permanent.
+    --
+    -- The suite only ever called this after ApplyMode, which is the one path
+    -- where there is something to restore.
+    if not previous and not settings.mode then
+        return false
+    end
+
     Filters.EnableAllTypes()
 
     if previous then
@@ -20594,17 +20682,45 @@ CN:RegisterCommand{
     order   = 18,
     help    = "Make a setting apply to this character only.",
     handler = function(args)
-        args = string.lower(CN.Trim(args or ""))
+        args = CN.Trim(args or "")
 
         local settings = CN.Settings()
 
         if args ~= "" then
-            if not CN.characterOverridable[args] then
+            -- MATCHED WITHOUT CASE, BECAUSE THE KEYS ARE camelCase.
+            --
+            -- This lowercased the argument and then looked it up in a table
+            -- keyed `priorityMode`, `autoWaypoint`, `mapPins` -- so those
+            -- three could never be set by any input, and the command rejected
+            -- the exact spelling its own help line prints. Three of the six
+            -- overridable settings were unreachable, including the one the
+            -- feature was built for: a levelling alt wanting a different
+            -- priority mode from a max-level main.
+            local key
+
+            for name in pairs(CN.characterOverridable) do
+                if string.lower(name) == string.lower(args) then
+                    key = name
+                    break
+                end
+            end
+
+            if not key then
                 Print("That setting cannot be set per character: " .. args)
-                Print("|cff999999Overridable: priorityMode, autoWaypoint, "
-                    .. "arrow, tooltips|r")
+
+                local names = {}
+
+                for name in pairs(CN.characterOverridable) do
+                    table.insert(names, name)
+                end
+
+                table.sort(names)
+
+                Print("|cff999999Overridable: " .. table.concat(names, ", ") .. "|r")
                 return
             end
+
+            args = key
 
             if CN.IsOverridden(args) then
                 CN.ClearOverride(args)
@@ -22142,12 +22258,44 @@ end
 function Goals.List()
     local list = {}
 
+    local filters = CN:GetModule("Filters")
+
     for key, goal in pairs(Store()) do
+        -- RE-RESOLVED, NOT FROZEN.
+        --
+        -- The name was worked out once when the goal was pinned and then
+        -- persisted -- and for currencies, recipes, titles, toys and rares
+        -- the describer can only answer from a cache the scans fill. Pin one
+        -- before the relevant scan and the placeholder was kept forever:
+        -- "Currency 3008" in `/cn goals`, in `/cn chase`, and after every
+        -- future login, even once the client could name it.
+        --
+        -- `/cn chase <type> <id>` pins automatically, so hitting this needs
+        -- no unusual sequence at all. It undoes, for exactly the cache-only
+        -- types, the fix recorded in Filters.lua: "The client knows. Ask it."
+        local name = goal.name
+
+        if filters and filters.DescribeObjective then
+            local ok, described = pcall(filters.DescribeObjective,
+                goal.type, goal.id)
+
+            if ok and described and described ~= "" then
+                local placeholder = tostring(goal.type):sub(1, 1)
+                    .. tostring(goal.type):sub(2):lower() .. " " .. tostring(goal.id)
+
+                -- Only when the describer has learned something real: a
+                -- second placeholder is not an improvement on the first.
+                if described ~= placeholder or not name then
+                    name = described
+                end
+            end
+        end
+
         table.insert(list, {
             key   = key,
             type  = goal.type,
             id    = goal.id,
-            name  = goal.name,
+            name  = name,
             since = goal.since or 0,
         })
     end
@@ -24699,6 +24847,13 @@ function Follow.NextStop()
         return nil
     end
 
+    -- The route length, counted the first time there is a route to count.
+    -- Start() runs at login too, before the map API will answer, so counting
+    -- only there left the total at zero for the whole session.
+    if (Follow.startedWith or 0) == 0 and #hubs > 0 then
+        Follow.startedWith = #hubs
+    end
+
     for _, hub in ipairs(hubs) do
         local remaining = Follow.Remaining(hub.objectives)
 
@@ -24738,6 +24893,11 @@ end
 -- am I" is a question about tonight.
 Follow.completed = 0
 Follow.startedWith = 0
+
+-- How long to wait before searching again when the last search found nothing
+-- routable here. A forced advance -- the player asking -- ignores it.
+Follow.emptySearchSeconds = 15
+Follow.lastEmptySearch    = 0
 
 function Follow.NoteStopCleared()
     Follow.completed = Follow.completed + 1
@@ -24811,6 +24971,27 @@ function Follow.Advance(force)
         -- Still work here. Do not move the waypoint out from under someone
         -- who is walking toward it.
         return false
+    end
+
+    -- NOTHING TO ROUTE TO IS NOT A REASON TO KEEP ROUTING.
+    --
+    -- When no hub is found, `current.hub` is cleared -- and the guard above
+    -- then lets every subsequent call fall straight through to NextStop,
+    -- which builds a full zone route with a 2-opt pass and bumps the ranking
+    -- generation. QUEST_LOG_UPDATE is not throttled on this path, so standing
+    -- somewhere with nothing routable -- a capital city, a dungeon, a
+    -- battleground, a flight -- rebuilt the route on every one of them.
+    --
+    -- Measured: with a live stop, twenty events cost zero route builds; with
+    -- none, twenty events cost twenty.
+    if not force and not current.hub then
+        local now = time()
+
+        if (now - (Follow.lastEmptySearch or 0)) < Follow.emptySearchSeconds then
+            return false
+        end
+
+        Follow.lastEmptySearch = now
     end
 
     local hub, remaining = Follow.NextStop()
@@ -25031,6 +25212,17 @@ function Follow.Start()
         hubs = built
     end
 
+    -- COUNTED WHEN THE MAP WILL ANSWER, NOT BEFORE.
+    --
+    -- Start() also runs from the login hook when follow mode was left on, and
+    -- at PLAYER_LOGIN the map API has nothing to say yet -- so the total was
+    -- fixed at zero for the whole session. Every "Stop 3 of 8 cleared"
+    -- degraded to a bare "Stop cleared", and the completion moment, which
+    -- needs a total to compare against, was unreachable for any session that
+    -- resumed follow rather than typing the command.
+    --
+    -- Zero means "not counted yet" rather than "no stops", so the first
+    -- advance that finds a route sets it.
     Follow.startedWith = (type(hubs) == "table") and #hubs or 0
 
     Settings().follow = true
@@ -25067,6 +25259,25 @@ function Follow.Stop()
     if frame then
         frame:Hide()
     end
+
+    -- OFF MEANS OFF.
+    --
+    -- Setting a stop puts a waypoint on the map, draws the on-screen arrow
+    -- and starts Navigation's own ticker. Stopping hid this module's frame
+    -- and cancelled this module's ticker and left all three of those running
+    -- -- so `/cn follow off` left an arrow pointing at a route that was no
+    -- longer being followed, indefinitely.
+    --
+    -- The suite started follow mode and read its lines; it never asked what
+    -- was still on screen after stopping it.
+    if CN.ClearWaypoints then
+        pcall(CN.ClearWaypoints)
+    end
+
+    -- And a deferral is about the route that was being walked. Left set, it
+    -- fired into the next combat-free moment of a session that was no longer
+    -- following anything, and survived into the next Start().
+    Follow.deferred = false
 
     return true
 end
@@ -25599,45 +25810,7 @@ function Session.Speed(mounted)
         end
     end
 
-    ------------------------------------------------------------
--- HOW LONG A THING TAKES, AS A SCORING TERM
-------------------------------------------------------------
-
--- THE LEVER `/cn mode fastest` HAS ALWAYS ADVERTISED AND NEVER HAD.
---
--- `estimatedTime` is a declared scoring weight, summed on every objective,
--- printed by `/cn order`, and overridden by the `fastest` profile to -1.5 --
--- and nothing in the addon has ever set the field. So the mode's second lever
--- did nothing: `/cn mode fastest` was a travel-cost change wearing the name
--- of something broader.
---
--- The data to fill it has been collected since 0.41.0. This is the wiring.
---
--- SCALED, NOT RAW. A raw duration in seconds would swamp every other term --
--- a twenty-minute dungeon would arrive at 1200 against a completion value of
--- 5. The term is the duration in units of the typical objective, so 1 means
--- "about as long as things usually take", 3 means "three times as long", and
--- an objective the addon has never timed contributes nothing rather than a
--- guess. The addon does not invent a duration it has not watched.
-Session.timeScaleSeconds = 300
-
-function Session.TimeCost(objectiveType)
-    local typical = Session.TypicalSeconds(objectiveType)
-
-    if not typical or typical <= 0 then
-        return nil
-    end
-
-    return typical / Session.timeScaleSeconds
-end
-
-CN.RegisterCandidateDecorator("Session", function(candidates)
-    for _, objective in ipairs(candidates or {}) do
-        objective.estimatedTime = Session.TimeCost(objective.type)
-    end
-end)
-
-return Session.defaultSpeed, false
+    return Session.defaultSpeed, false
 end
 
 function Session.SpeedSampleCount(mounted)
@@ -26242,6 +26415,61 @@ CN:RegisterCommand{
         end
     end,
 }
+
+------------------------------------------------------------
+-- HOW LONG A THING TAKES, AS A SCORING TERM
+------------------------------------------------------------
+
+-- THE LEVER `/cn mode fastest` HAS ALWAYS ADVERTISED AND NEVER HAD.
+--
+-- `estimatedTime` is a declared scoring weight, summed on every objective,
+-- printed by `/cn order`, and overridden by the `fastest` profile to -1.5 --
+-- and nothing in the addon has ever set the field. So the mode's second lever
+-- did nothing: `/cn mode fastest` was a travel-cost change wearing the name
+-- of something broader.
+--
+-- The data to fill it has been collected since 0.41.0. This is the wiring.
+--
+-- SCALED, NOT RAW. A raw duration in seconds would swamp every other term --
+-- a twenty-minute dungeon would arrive at 1200 against a completion value of
+-- 5. The term is the duration in units of the typical objective, so 1 means
+-- "about as long as things usually take", 3 means "three times as long", and
+-- an objective the addon has never timed contributes nothing rather than a
+-- guess. The addon does not invent a duration it has not watched.
+Session.timeScaleSeconds = 300
+
+function Session.TimeCost(objectiveType)
+    local typical = Session.TypicalSeconds(objectiveType)
+
+    if not typical or typical <= 0 then
+        return nil
+    end
+
+    return typical / Session.timeScaleSeconds
+end
+
+-- A DECORATOR RECEIVES ONE OBJECTIVE, NOT A LIST.
+--
+-- This took `candidates` and iterated it, which yields nothing when handed a
+-- single objective table -- so the field was never set on anything and
+-- `/cn mode fastest` kept the inert second lever that 0.48.0 recorded as
+-- fixed. Two mistakes in one edit: this, and the block landing INSIDE
+-- Session.Speed because the anchor `return Session` also matched
+-- `return Session.defaultSpeed`. Everything here was therefore defined only
+-- as a side effect of calling Speed(), and re-registered on every call that
+-- fell through all three buckets -- fifty-seven registrations of the same
+-- decorator in one session.
+--
+-- The harness asserted that TimeCost exists and then hand-built objectives
+-- with estimatedTime already set, testing the scorer against a fixture the
+-- producer never made. That is precisely the trap this file's own comment
+-- about the flying speed bucket warns about.
+CN.RegisterCandidateDecorator("Session", function(objective)
+    if type(objective) == "table" and objective.type then
+        objective.estimatedTime = Session.TimeCost(objective.type)
+    end
+end)
+
 
 return Session
 '@
@@ -29521,7 +29749,8 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
 
     if situation == "dead" then
         if objective and objective.reasons then
-            table.insert(objective.reasons, "you are dead -- this is for after")
+            CN.AddAdjusterReason(objective, "groupDead",
+                "you are dead -- this is for after")
         end
 
         return score * Group.deadPenalty
@@ -29531,10 +29760,8 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
         and objective
         and Group.instancedTypes[objective.type] then
 
-        if objective.reasons then
-            table.insert(objective.reasons,
-                "outside work, and you are in an instance with a group")
-        end
+        CN.AddAdjusterReason(objective, "groupInstanced",
+            "outside work, and you are in an instance with a group")
 
         return score * Group.instancedPenalty
     end
@@ -33313,8 +33540,8 @@ CN.RegisterScoreAdjuster("Preference", function(objective, score)
     -- SAY SO. A list that quietly reordered itself is a list nobody can
     -- argue with, and this addon's whole contract is that every line has a
     -- stated reason.
-    if reason and objective.reasons then
-        table.insert(objective.reasons, reason)
+    if reason then
+        CN.AddAdjusterReason(objective, "preference", reason)
     end
 
     return score * multiplier
@@ -35484,16 +35711,29 @@ local Print = CN.Print
 -- SETTINGS
 ------------------------------------------------------------
 
-local function Settings()
+-- Named `Preferences`, not `Settings`.
+--
+-- `Settings` is also the name of the client's global options API since 10.0,
+-- and this file's options-panel registration reads `Settings.RegisterCanvas-
+-- LayoutCategory` -- which resolved to this local FUNCTION and threw
+-- "attempt to index a function value" on every login on every retail client.
+-- The error was caught and printed, and because it aborted the function the
+-- pre-10.0 fallback below never ran either: the addon has never appeared in
+-- the game's own options list, which is the entire purpose of that block.
+--
+-- The harness never defined SettingsPanel, so the `and` chain short-circuited
+-- before the bad index and the suite saw nothing. Same shape as the invented
+-- event name: a stub more forgiving than the client.
+local function Preferences()
     return CN.Settings() or {}
 end
 
 function Hud.IsEnabled()
-    return Settings().hud == true
+    return Preferences().hud == true
 end
 
 function Hud.Scale()
-    local scale = tonumber(Settings().uiScale)
+    local scale = tonumber(Preferences().uiScale)
 
     if not scale or scale < 0.7 or scale > 2.0 then
         return 1
@@ -35503,7 +35743,7 @@ function Hud.Scale()
 end
 
 function Hud.IsColourblind()
-    return Settings().colourblind == true
+    return Preferences().colourblind == true
 end
 
 ------------------------------------------------------------
@@ -35526,7 +35766,7 @@ local function Build()
     frame:RegisterForDrag("LeftButton")
     frame:SetClampedToScreen(true)
 
-    local placement = Settings().hudPosition or {}
+    local placement = Preferences().hudPosition or {}
 
     frame:SetPoint(placement.point or "TOP", UIParent,
         placement.point or "TOP", placement.x or 0, placement.y or -220)
@@ -35547,7 +35787,7 @@ local function Build()
 
         local point, _, _, x, y = self:GetPoint()
 
-        Settings().hudPosition = { point = point, x = x, y = y }
+        Preferences().hudPosition = { point = point, x = x, y = y }
     end)
 
     frame:SetScale(Hud.Scale())
@@ -35599,7 +35839,7 @@ function Hud.Refresh()
 end
 
 function Hud.SetEnabled(enabled)
-    Settings().hud = enabled and true or nil
+    Preferences().hud = enabled and true or nil
 
     if enabled then
         Build()
@@ -35815,7 +36055,7 @@ CN:RegisterCommand{
             return
         end
 
-        Settings().uiScale = scale
+        Preferences().uiScale = scale
 
         Hud.ApplyScale()
 
@@ -35833,11 +36073,11 @@ CN:RegisterCommand{
         args = string.lower(CN.Trim(args or ""))
 
         if args == "on" then
-            Settings().colourblind = true
+            Preferences().colourblind = true
         elseif args == "off" then
-            Settings().colourblind = nil
+            Preferences().colourblind = nil
         else
-            Settings().colourblind = (not Hud.IsColourblind()) or nil
+            Preferences().colourblind = (not Hud.IsColourblind()) or nil
         end
 
         Print("Arrow labelled in words: " .. CN.YesNo(Hud.IsColourblind()))
@@ -35858,7 +36098,7 @@ CN:RegisterCommand{
     handler = function(args)
         args = string.lower(CN.Trim(args or ""))
 
-        local settings = Settings()
+        local settings = Preferences()
 
         if args == "on" then
             settings.keepFilter = true
@@ -35887,14 +36127,14 @@ CN:RegisterCommand{
         args = string.lower(CN.Trim(args or ""))
 
         if args == "on" then
-            Settings().cues = true
+            Preferences().cues = true
         elseif args == "off" then
-            Settings().cues = nil
+            Preferences().cues = nil
         else
-            Settings().cues = (not Settings().cues) or nil
+            Preferences().cues = (not Preferences().cues) or nil
         end
 
-        Print("Completion cues: " .. CN.YesNo(Settings().cues))
+        Print("Completion cues: " .. CN.YesNo(Preferences().cues))
     end,
 }
 
@@ -36166,7 +36406,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.49.0
+## Version: 0.50.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -36420,6 +36660,74 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.50.0]
+
+An audit of **sequences** rather than files: login to logout to login again,
+state machines entered and left, events arriving in the order the game sends
+them. Ten findings, and the previous three audits could not have found any of
+them by reading one file at a time.
+
+### Fixed
+
+- **The addon threw a Lua error into your chat frame on every login, and has
+  never appeared in the game's own options list.** The registration reads
+  `Settings.RegisterCanvasLayoutCategory` -- the client's options API since
+  Dragonflight -- and `Settings` was also the name of a file-local function
+  two hundred lines above it, so it indexed a function and threw. The error
+  was caught and printed; because it aborted the function, the older fallback
+  never ran either, which is why the addon has never been in that list at all.
+  The test harness did not define the client's options API, so the guard
+  short-circuited before the bad line. Same shape as the invented event name
+  in 0.46.0: a stub more forgiving than the client.
+- **`/cn why` repeated itself, more each time.** Scoring runs repeatedly over
+  the same cached objectives, and adjusters appended their explanation on
+  every pass -- one objective was measured carrying **sixty-two** reasons
+  after thirty rounds of ordinary play, printing the same sentence sixty times
+  over. This is the identical defect recorded as fixed for decorators; that
+  fix was applied to decorators and nobody looked at the adjuster path, which
+  runs far more often.
+- **`/cn setup` told you it had scanned your mounts, toys, appearances and
+  professions, and the recommendation could not see any of it.** Four of the
+  eleven scans rewrote their store and left their own provider serving a cache
+  built before the scan -- stale until a zone change, a level-up or the next
+  login, which is exactly the first five minutes of a new install. The suite
+  asserted the bug was correct: *"a mount scan must not rebuild candidate
+  providers"*, true when mounts fed only the Collections tab and false from
+  the day they became a source of recommendations.
+- **Three of the six per-character settings could not be set by any input** --
+  including `priorityMode`, the example the feature was built around. The
+  command lowercased what you typed and looked it up in a table with camelCase
+  keys, so it rejected the exact spelling its own help line prints.
+- **`/cn mode fastest` still had an inert second lever.** 0.48.0 wired the
+  learned-duration term and got two things wrong in one edit: the producer was
+  registered as taking a list where the addon hands over one objective, and
+  the whole block landed *inside* another function -- so it existed only as a
+  side effect of calling that one, and re-registered itself on every call.
+  Fifty-seven copies of the same producer in one session, none of which set
+  the field. The suite hand-built objectives with the value already in them,
+  testing the consumer against a fixture the producer never made.
+- **`/cn mode off` with no focus set silently deleted your `/cn show`
+  filters** while printing that it had restored them. Hidden types are saved
+  to disk, so the loss was permanent. It now says nothing changed, because
+  nothing did.
+- **`/cn follow off` left the arrow on screen** pointing at a route nobody was
+  walking, along with the map waypoint, the map pin and the navigation ticker
+  -- it hid its own frame and cancelled its own timer and stopped there. It
+  also left a combat deferral armed, which fired into the next quiet moment of
+  a session that was no longer following anything.
+- **Follow mode rebuilt the entire zone route on every quest-log update**
+  whenever nothing routable was near you -- a capital city, a dungeon, a
+  battleground, a flight. Measured: twenty events cost twenty full route
+  builds with a 2-opt pass each, where a live stop costs zero.
+- **Follow mode resumed at login never showed progress.** The route length was
+  counted only when the command was typed, and at login the map API has not
+  answered yet -- so every "Stop 3 of 8 cleared" degraded to a bare "Stop
+  cleared" and the completion moment was unreachable for the entire session.
+- **A goal pinned before the matching scan kept its placeholder name
+  forever** -- "Currency 3008" in the goal list, in `/cn chase`, and after
+  every future login, even once the client could name it. `/cn chase` pins
+  automatically, so this needed no unusual sequence at all.
 
 ## [0.49.0]
 
@@ -39924,7 +40232,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.49.0
+0.50.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -40767,6 +41075,53 @@ mutate "Modules/Filters.lua" \
     "switching focus overwrites what off would restore"
 
 
+# The 0.50.0 audit: defects that only appear across a sequence of actions.
+mutate "Modules/Hud.lua" \
+    "local function Preferences()" \
+    "local function Settings()" \
+    "the options-panel registration indexes a local function"
+
+mutate "Scoring.lua" \
+    "    if objective.adjusterReasons[key] then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "an adjuster's reason is appended on every rescore"
+
+mutate "Database.lua" \
+    "    mounts       = { \"Mounts\" },
+    toys         = { \"Toys\" }," \
+    "    toys         = { \"Toys\" }," \
+    "a mount scan is invisible to the recommendation"
+
+mutate "Modules/Filters.lua" \
+    "    if not previous and not settings.mode then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "clearing an unset focus unhides what the player hid"
+
+mutate "Modules/Follow.lua" \
+    "    if CN.ClearWaypoints then
+        pcall(CN.ClearWaypoints)
+    end" \
+    "    if false then
+        pcall(CN.ClearWaypoints)
+    end" \
+    "stopping follow mode leaves the arrow up"
+
+mutate "Modules/Session.lua" \
+    "CN.RegisterCandidateDecorator(\"Session\", function(objective)
+    if type(objective) == \"table\" and objective.type then" \
+    "CN.RegisterCandidateDecorator(\"Session\", function(objective)
+    if false then" \
+    "nothing ever sets how long a thing takes"
+
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 
@@ -40862,7 +41217,8 @@ read_globals = {
     "C_TransmogSets", "C_LFGList", "IsInGuild", "GetGuildInfo", "GetBuildInfo",
     "IsSpellKnown", "IsPlayerSpell", "GetSpellCooldown", "GetItemCooldown",
     "GetItemCount", "GetBindLocation", "EJ_GetDifficulty", "GetDifficultyInfo",
-    "SettingsPanel", "InterfaceOptions_AddCategory", "BackdropTemplateMixin",
+    "SettingsPanel", "Settings", "InterfaceOptions_AddCategory",
+    "BackdropTemplateMixin",
     "EncounterJournal", "EJ_SelectInstance", "EJ_GetCurrentInstance",
     "EJ_GetInstanceInfo", "EJ_GetEncounterInfoByIndex", "EJ_GetEncounterInfo",
     "EJ_SetSearch", "EJ_ClearSearch", "EJ_GetNumSearchResults",
@@ -42174,6 +42530,28 @@ local petSpecies = {
 
 LE_PET_JOURNAL_FILTER_COLLECTED     = 1
 LE_PET_JOURNAL_FILTER_NOT_COLLECTED = 2
+
+-- THE GAME'S OWN OPTIONS API.
+--
+-- Absent from this stub for as long as the addon has tried to register with
+-- it, so the `if SettingsPanel and Settings and ...` chain short-circuited on
+-- the first term and the suite never reached the line that threw on every
+-- real client. Defined now, so that path is exercised.
+SettingsPanel = { name = "SettingsPanel" }
+
+CN_TEST_OPTIONS_REGISTERED = {}
+
+Settings = {
+    RegisterCanvasLayoutCategory = function(panel, name)
+        return { ID = name, panel = panel }
+    end,
+
+    RegisterAddOnCategory = function(category)
+        table.insert(CN_TEST_OPTIONS_REGISTERED, category)
+
+        return true
+    end,
+}
 
 CN_TEST_PET_FILTERS = { collected = true, uncollected = true, search = "" }
 
@@ -43708,21 +44086,69 @@ assert(candidates[1] == firstBefore,
 
 print("  candidate list is not reordered by ranking")
 
--- Scanning a store with no candidate provider must dirty nothing.
+-- EVERY SCAN THAT FEEDS A PROVIDER MUST DIRTY IT.
+--
+-- This used to assert the opposite for mounts -- "a mount scan must not
+-- rebuild candidate providers" -- which was true when mounts fed only the
+-- Collections tab and became false the day Mounts became a candidate
+-- provider. Nobody revisited it, so the suite spent several releases
+-- asserting that a real defect was correct: `/cn setup` scanned mounts, toys,
+-- appearances and professions, printed "Setup complete", and left all four
+-- providers serving a cache built before the scan.
+--
+-- The property is not a list of names; it is the relationship. Every store
+-- named in CN.scanProviders must mark each provider it names stale.
+--
+-- AND EVERY CANDIDATE PROVIDER THAT READS A SCANNED STORE MUST BE NAMED.
+-- Walking the table alone cannot catch a missing entry -- a removed row is
+-- simply a row the loop does not visit -- so the set is checked too.
+for _, required in ipairs({ "Mounts", "Toys", "Appearances", "Professions",
+                            "Pets", "Achievements", "Reputations",
+                            "Currencies", "Exploration" }) do
+    local named = false
+
+    for _, providers in pairs(CN.scanProviders) do
+        for _, provider in ipairs(providers) do
+            if provider == required then named = true end
+        end
+    end
+
+    assert(named,
+        required .. " is a candidate provider fed by a scan, and no store in "
+        .. "CN.scanProviders names it -- so scanning it leaves the "
+        .. "recommendation built from the state before the scan")
+end
 CN.CollectCandidates(true)
+
+local scannedStores = 0
+
+for store, providers in pairs(CN.scanProviders) do
+    CN.CollectCandidates(true)
+
+    CN.MarkScanned(store)
+
+    for _, provider in ipairs(providers) do
+        assert(CN.GetProviderCacheState(provider)
+            and CN.GetProviderCacheState(provider).dirty,
+            "scanning " .. store .. " must mark " .. provider
+            .. " stale, or the scan is invisible to the recommendation")
+    end
+
+    scannedStores = scannedStores + 1
+end
+
+-- And a store nothing reads must still dirty nothing.
+CN.CollectCandidates(true)
+
 local generationBefore = CN.GetCandidateCacheState().generation
 
-CN.MarkScanned("mounts")
+CN.MarkScanned("titles")
 CN.CollectCandidates()
 
 assert(CN.GetCandidateCacheState().generation == generationBefore,
-    "a mount scan must not rebuild candidate providers")
+    "a scan of a store no provider reads must not rebuild anything")
 
-CN.MarkScanned("pets")
-assert(CN.GetProviderCacheState("Pets").dirty,
-    "a pet scan must mark the Pets provider stale")
-
-print("  scans invalidate only the providers that read them")
+print("  " .. scannedStores .. " scanned stores, each dirtying what reads it")
 
 -- Decorators must run exactly once per objective. Per-provider caching means
 -- the aggregate is mostly the SAME tables as last time, so a decorator that
@@ -50766,6 +51192,200 @@ print("\nEvery client function this addon calls, checked against the client:")
         .. "agrees with the client in both directions")
 end)()
 
+print("\nOff means off, and a setting you can name you can set:")
+
+;(function()
+    ------------------------------------------------------------
+    -- FOUR THINGS THAT ONLY GO WRONG ON A PATH THE SUITE NEVER WALKED.
+    ------------------------------------------------------------
+    local modes    = CN:GetModule("Filters")
+    local follow   = CN:GetModule("Follow")
+    local goalList = CN:GetModule("Goals")
+
+    local live = CN.Settings()
+
+    -- 1. `/cn mode off` with no focus must not touch what the player hid.
+    live.mode         = nil
+    live.modePrevious = nil
+
+    modes.EnableAllTypes()
+    modes.SetTypeEnabled(CN.objectiveTypes.PET, false)
+
+    CN.HandleSlashCommand("mode off")
+
+    assert(not modes.IsTypeEnabled(CN.objectiveTypes.PET),
+        "clearing a focus that was never set must not unhide what the "
+        .. "player hid by hand -- hidden types are persisted, so the loss "
+        .. "is permanent")
+
+    modes.EnableAllTypes()
+
+    print("  clearing a focus that was never set changes nothing")
+
+    -- 2. Every overridable setting must be settable by its own name.
+    local names = {}
+
+    for name in pairs(CN.characterOverridable) do
+        table.insert(names, name)
+    end
+
+    table.sort(names)
+
+    for _, name in ipairs(names) do
+        CN.HandleSlashCommand("percharacter " .. name)
+
+        assert(CN.character and CN.character.settings
+            and CN.character.settings[name] ~= nil,
+            "`/cn percharacter " .. name .. "` must set it; the handler "
+            .. "lowercased the argument and looked it up in a camelCase "
+            .. "table, so half of these could never be set by any input")
+
+        CN.character.settings[name] = nil
+    end
+
+    print("  all " .. #names .. " overridable settings accept their own name")
+
+    -- 3. Stopping follow mode must leave nothing on screen.
+    follow.Start()
+
+    follow.Stop()
+
+    local navigation = CN:GetModule("Navigation")
+
+    assert(not navigation.GetTarget(),
+        "stopping follow mode must clear the waypoint it set; it hid its own "
+        .. "frame and left the arrow pointing at a route nobody is walking")
+
+    assert(follow.deferred ~= true,
+        "and must not leave a combat deferral armed for the next session")
+
+    print("  stopping follow mode clears the arrow and the waypoint")
+
+    -- 4. A goal pinned before the scan picks up its real name afterwards.
+    local coinNames = CN:GetModule("Currencies")
+
+    local names2 = CN.Account("currencyNames")
+
+    names2[3008] = nil
+
+    goalList.Add(CN.objectiveTypes.CURRENCY, 3008)
+
+    coinNames.Scan()
+
+    local found
+
+    for _, goal in ipairs(goalList.List()) do
+        if goal.id == 3008 then found = goal end
+    end
+
+    assert(found, "the goal must be listed")
+
+    assert(found.name and not tostring(found.name):find("3008", 1, true),
+        "a goal pinned before the scan must take its real name once the "
+        .. "client can supply one, got " .. tostring(found.name))
+
+    goalList.Remove(CN.objectiveTypes.CURRENCY, 3008)
+
+    print("  a goal pinned before its scan is named properly afterwards")
+end)()
+
+print("\nA reason an adjuster adds is added once:")
+
+;(function()
+    ------------------------------------------------------------
+    -- SCORING RUNS AGAIN AND AGAIN OVER THE SAME TABLES.
+    --
+    -- The candidate list is cached and ranking re-scores those same tables on
+    -- every rebuild -- and every zone route bumps the ranking generation, so
+    -- this is ordinary play, not an edge case. Adjusters appended to
+    -- `objective.reasons` each pass: one objective was measured carrying
+    -- sixty-two reasons after thirty rounds, with `/cn why` printing the same
+    -- sentence sixty times.
+    --
+    -- The identical defect was found and fixed for DECORATORS, and there is a
+    -- probe for that. Nobody looked at the adjuster path, which runs far more
+    -- often.
+    ------------------------------------------------------------
+    local probe = CN.NewObjective({
+        id              = 1,
+        type            = CN.objectiveTypes.QUEST,
+        name            = "Repeatedly Scored",
+        completionValue = 3,
+    })
+
+    CN.RegisterScoreAdjuster("ReasonProbe", function(candidate, score)
+        CN.AddAdjusterReason(candidate, "reasonProbe", "an adjuster said so")
+
+        return score
+    end)
+
+    for _ = 1, 25 do
+        CN.ScoreObjective(probe)
+    end
+
+    local saidIt = 0
+
+    for _, reason in ipairs(probe.reasons or {}) do
+        if reason == "an adjuster said so" then
+            saidIt = saidIt + 1
+        end
+    end
+
+    assert(saidIt == 1,
+        "twenty-five scorings of one objective must add an adjuster's reason "
+        .. "once, not " .. saidIt .. " times")
+
+    CN.scoreAdjusters["ReasonProbe"] = nil
+
+    for index, name in ipairs(CN.scoreAdjusterOrder) do
+        if name == "ReasonProbe" then
+            table.remove(CN.scoreAdjusterOrder, index)
+            break
+        end
+    end
+
+    print("  scored 25 times, the reason appears once")
+end)()
+
+print("\nThe addon appears in the game's own options list:")
+
+;(function()
+    ------------------------------------------------------------
+    -- IT NEVER HAS.
+    --
+    -- The registration read `Settings.RegisterCanvasLayoutCategory`, meaning
+    -- the client's global options API -- and `Settings` was also the name of
+    -- a file-local function two hundred lines above, so it indexed a function
+    -- and threw on every login on every retail client since Dragonflight. The
+    -- error was caught and printed; because it aborted the function, the
+    -- pre-10.0 fallback never ran either.
+    --
+    -- The stub had no SettingsPanel, so the guard short-circuited before the
+    -- bad index and the suite saw nothing.
+    ------------------------------------------------------------
+    local hud = CN:GetModule("Hud")
+
+    local errors = CN:GetModule("Errors")
+
+    local errorsBefore = errors and errors.Count() or 0
+
+    local registered = hud.RegisterOptionsPanel()
+
+    assert(registered,
+        "the addon must register with the game's options list")
+
+    -- Registered during the login hook, which is when it happens in game.
+    -- Once, not once per call: the function guards itself.
+    assert(#CN_TEST_OPTIONS_REGISTERED == 1,
+        "and must reach RegisterAddOnCategory exactly once across the whole "
+        .. "session, got " .. #CN_TEST_OPTIONS_REGISTERED)
+
+    assert((errors and errors.Count() or 0) == errorsBefore,
+        "and must not throw doing it")
+
+    print("  registered with the client's options API, without erroring")
+end)()
+
 print("\nFeatures that were wired to nothing:")
 
 ;(function()
@@ -51184,6 +51804,46 @@ print("\nEvery scoring weight has something that sets it:")
     local session = CN:GetModule("Session")
 
     assert(session.TimeCost, "the time-cost producer must exist")
+
+    ------------------------------------------------------------
+    -- AND THE PRODUCER MUST ACTUALLY PRODUCE IT.
+    --
+    -- The rest of this block hand-built objectives with `estimatedTime`
+    -- already set and checked that the scorer used it -- testing the consumer
+    -- against a fixture the producer never made. The producer was registered
+    -- as a decorator taking a LIST while decorators receive one objective, so
+    -- it set the field on nothing; and the whole block had landed inside
+    -- another function, so it only existed as a side effect of calling that
+    -- one. `/cn mode fastest` kept the inert lever 0.48.0 recorded as fixed.
+    ------------------------------------------------------------
+    local durations = session.Durations()
+
+    durations[CN.objectiveTypes.QUEST] = { 180, 180, 180, 180, 180 }
+
+    local decorated = CN.NewObjective({
+        id              = 4242,
+        type            = CN.objectiveTypes.QUEST,
+        name            = "Timed Thing",
+        completionValue = 3,
+    })
+
+    local sessionDecorator = false
+
+    for name, decorator in pairs(CN.candidateDecorators) do
+        if name == "Session" then
+            decorator(decorated)
+            sessionDecorator = true
+        end
+    end
+
+    assert(sessionDecorator, "the Session decorator must be registered")
+
+    assert(type(decorated.estimatedTime) == "number"
+        and decorated.estimatedTime > 0,
+        "the decorator must set how long the thing takes, got "
+        .. tostring(decorated.estimatedTime))
+
+    durations[CN.objectiveTypes.QUEST] = nil
 
     local saved = CN.Settings().priorityMode
 

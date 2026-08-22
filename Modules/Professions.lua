@@ -102,6 +102,11 @@ function Professions.Scan()
         CN.character.professionsScanned = time()
     end
 
+    -- The Professions provider reads this store, and nothing told it the
+    -- store had been rewritten -- so a scan left the recommendations built
+    -- from the state before it.
+    CN.MarkScanned("professions")
+
     return #lines
 end
 

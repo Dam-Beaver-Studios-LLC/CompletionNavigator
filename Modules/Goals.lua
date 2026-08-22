@@ -171,12 +171,44 @@ end
 function Goals.List()
     local list = {}
 
+    local filters = CN:GetModule("Filters")
+
     for key, goal in pairs(Store()) do
+        -- RE-RESOLVED, NOT FROZEN.
+        --
+        -- The name was worked out once when the goal was pinned and then
+        -- persisted -- and for currencies, recipes, titles, toys and rares
+        -- the describer can only answer from a cache the scans fill. Pin one
+        -- before the relevant scan and the placeholder was kept forever:
+        -- "Currency 3008" in `/cn goals`, in `/cn chase`, and after every
+        -- future login, even once the client could name it.
+        --
+        -- `/cn chase <type> <id>` pins automatically, so hitting this needs
+        -- no unusual sequence at all. It undoes, for exactly the cache-only
+        -- types, the fix recorded in Filters.lua: "The client knows. Ask it."
+        local name = goal.name
+
+        if filters and filters.DescribeObjective then
+            local ok, described = pcall(filters.DescribeObjective,
+                goal.type, goal.id)
+
+            if ok and described and described ~= "" then
+                local placeholder = tostring(goal.type):sub(1, 1)
+                    .. tostring(goal.type):sub(2):lower() .. " " .. tostring(goal.id)
+
+                -- Only when the describer has learned something real: a
+                -- second placeholder is not an improvement on the first.
+                if described ~= placeholder or not name then
+                    name = described
+                end
+            end
+        end
+
         table.insert(list, {
             key   = key,
             type  = goal.type,
             id    = goal.id,
-            name  = goal.name,
+            name  = name,
             since = goal.since or 0,
         })
     end

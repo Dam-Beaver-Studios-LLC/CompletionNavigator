@@ -175,6 +175,13 @@ function Follow.NextStop()
         return nil
     end
 
+    -- The route length, counted the first time there is a route to count.
+    -- Start() runs at login too, before the map API will answer, so counting
+    -- only there left the total at zero for the whole session.
+    if (Follow.startedWith or 0) == 0 and #hubs > 0 then
+        Follow.startedWith = #hubs
+    end
+
     for _, hub in ipairs(hubs) do
         local remaining = Follow.Remaining(hub.objectives)
 
@@ -214,6 +221,11 @@ end
 -- am I" is a question about tonight.
 Follow.completed = 0
 Follow.startedWith = 0
+
+-- How long to wait before searching again when the last search found nothing
+-- routable here. A forced advance -- the player asking -- ignores it.
+Follow.emptySearchSeconds = 15
+Follow.lastEmptySearch    = 0
 
 function Follow.NoteStopCleared()
     Follow.completed = Follow.completed + 1
@@ -287,6 +299,27 @@ function Follow.Advance(force)
         -- Still work here. Do not move the waypoint out from under someone
         -- who is walking toward it.
         return false
+    end
+
+    -- NOTHING TO ROUTE TO IS NOT A REASON TO KEEP ROUTING.
+    --
+    -- When no hub is found, `current.hub` is cleared -- and the guard above
+    -- then lets every subsequent call fall straight through to NextStop,
+    -- which builds a full zone route with a 2-opt pass and bumps the ranking
+    -- generation. QUEST_LOG_UPDATE is not throttled on this path, so standing
+    -- somewhere with nothing routable -- a capital city, a dungeon, a
+    -- battleground, a flight -- rebuilt the route on every one of them.
+    --
+    -- Measured: with a live stop, twenty events cost zero route builds; with
+    -- none, twenty events cost twenty.
+    if not force and not current.hub then
+        local now = time()
+
+        if (now - (Follow.lastEmptySearch or 0)) < Follow.emptySearchSeconds then
+            return false
+        end
+
+        Follow.lastEmptySearch = now
     end
 
     local hub, remaining = Follow.NextStop()
@@ -507,6 +540,17 @@ function Follow.Start()
         hubs = built
     end
 
+    -- COUNTED WHEN THE MAP WILL ANSWER, NOT BEFORE.
+    --
+    -- Start() also runs from the login hook when follow mode was left on, and
+    -- at PLAYER_LOGIN the map API has nothing to say yet -- so the total was
+    -- fixed at zero for the whole session. Every "Stop 3 of 8 cleared"
+    -- degraded to a bare "Stop cleared", and the completion moment, which
+    -- needs a total to compare against, was unreachable for any session that
+    -- resumed follow rather than typing the command.
+    --
+    -- Zero means "not counted yet" rather than "no stops", so the first
+    -- advance that finds a route sets it.
     Follow.startedWith = (type(hubs) == "table") and #hubs or 0
 
     Settings().follow = true
@@ -543,6 +587,25 @@ function Follow.Stop()
     if frame then
         frame:Hide()
     end
+
+    -- OFF MEANS OFF.
+    --
+    -- Setting a stop puts a waypoint on the map, draws the on-screen arrow
+    -- and starts Navigation's own ticker. Stopping hid this module's frame
+    -- and cancelled this module's ticker and left all three of those running
+    -- -- so `/cn follow off` left an arrow pointing at a route that was no
+    -- longer being followed, indefinitely.
+    --
+    -- The suite started follow mode and read its lines; it never asked what
+    -- was still on screen after stopping it.
+    if CN.ClearWaypoints then
+        pcall(CN.ClearWaypoints)
+    end
+
+    -- And a deferral is about the route that was being walked. Left set, it
+    -- fired into the next combat-free moment of a session that was no longer
+    -- following anything, and survived into the next Start().
+    Follow.deferred = false
 
     return true
 end

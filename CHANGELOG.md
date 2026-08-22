@@ -7,6 +7,74 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.50.0]
+
+An audit of **sequences** rather than files: login to logout to login again,
+state machines entered and left, events arriving in the order the game sends
+them. Ten findings, and the previous three audits could not have found any of
+them by reading one file at a time.
+
+### Fixed
+
+- **The addon threw a Lua error into your chat frame on every login, and has
+  never appeared in the game's own options list.** The registration reads
+  `Settings.RegisterCanvasLayoutCategory` -- the client's options API since
+  Dragonflight -- and `Settings` was also the name of a file-local function
+  two hundred lines above it, so it indexed a function and threw. The error
+  was caught and printed; because it aborted the function, the older fallback
+  never ran either, which is why the addon has never been in that list at all.
+  The test harness did not define the client's options API, so the guard
+  short-circuited before the bad line. Same shape as the invented event name
+  in 0.46.0: a stub more forgiving than the client.
+- **`/cn why` repeated itself, more each time.** Scoring runs repeatedly over
+  the same cached objectives, and adjusters appended their explanation on
+  every pass -- one objective was measured carrying **sixty-two** reasons
+  after thirty rounds of ordinary play, printing the same sentence sixty times
+  over. This is the identical defect recorded as fixed for decorators; that
+  fix was applied to decorators and nobody looked at the adjuster path, which
+  runs far more often.
+- **`/cn setup` told you it had scanned your mounts, toys, appearances and
+  professions, and the recommendation could not see any of it.** Four of the
+  eleven scans rewrote their store and left their own provider serving a cache
+  built before the scan -- stale until a zone change, a level-up or the next
+  login, which is exactly the first five minutes of a new install. The suite
+  asserted the bug was correct: *"a mount scan must not rebuild candidate
+  providers"*, true when mounts fed only the Collections tab and false from
+  the day they became a source of recommendations.
+- **Three of the six per-character settings could not be set by any input** --
+  including `priorityMode`, the example the feature was built around. The
+  command lowercased what you typed and looked it up in a table with camelCase
+  keys, so it rejected the exact spelling its own help line prints.
+- **`/cn mode fastest` still had an inert second lever.** 0.48.0 wired the
+  learned-duration term and got two things wrong in one edit: the producer was
+  registered as taking a list where the addon hands over one objective, and
+  the whole block landed *inside* another function -- so it existed only as a
+  side effect of calling that one, and re-registered itself on every call.
+  Fifty-seven copies of the same producer in one session, none of which set
+  the field. The suite hand-built objectives with the value already in them,
+  testing the consumer against a fixture the producer never made.
+- **`/cn mode off` with no focus set silently deleted your `/cn show`
+  filters** while printing that it had restored them. Hidden types are saved
+  to disk, so the loss was permanent. It now says nothing changed, because
+  nothing did.
+- **`/cn follow off` left the arrow on screen** pointing at a route nobody was
+  walking, along with the map waypoint, the map pin and the navigation ticker
+  -- it hid its own frame and cancelled its own timer and stopped there. It
+  also left a combat deferral armed, which fired into the next quiet moment of
+  a session that was no longer following anything.
+- **Follow mode rebuilt the entire zone route on every quest-log update**
+  whenever nothing routable was near you -- a capital city, a dungeon, a
+  battleground, a flight. Measured: twenty events cost twenty full route
+  builds with a 2-opt pass each, where a live stop costs zero.
+- **Follow mode resumed at login never showed progress.** The route length was
+  counted only when the command was typed, and at login the map API has not
+  answered yet -- so every "Stop 3 of 8 cleared" degraded to a bare "Stop
+  cleared" and the completion moment was unreachable for the entire session.
+- **A goal pinned before the matching scan kept its placeholder name
+  forever** -- "Currency 3008" in the goal list, in `/cn chase`, and after
+  every future login, even once the client could name it. `/cn chase` pins
+  automatically, so this needed no unusual sequence at all.
+
 ## [0.49.0]
 
 A third end-to-end audit, over the subsystems the first two did not reach.

@@ -538,8 +538,8 @@ CN.RegisterScoreAdjuster("Preference", function(objective, score)
     -- SAY SO. A list that quietly reordered itself is a list nobody can
     -- argue with, and this addon's whole contract is that every line has a
     -- stated reason.
-    if reason and objective.reasons then
-        table.insert(objective.reasons, reason)
+    if reason then
+        CN.AddAdjusterReason(objective, "preference", reason)
     end
 
     return score * multiplier
