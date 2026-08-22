@@ -371,7 +371,7 @@ CN:RegisterCommand{
         end
 
         if not said then
-            Print("Nothing is on a clock right now.")
+            Print(CN.L["Nothing is on a clock right now."])
         end
     end,
 }

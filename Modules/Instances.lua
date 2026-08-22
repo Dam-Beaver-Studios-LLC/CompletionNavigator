@@ -194,11 +194,22 @@ function Instances.DescribeSource(name)
         text = text .. " in " .. first.instance
     end
 
-    -- WHICH DIFFICULTY, when the journal says so. A mount that only drops on
-    -- Mythic is a different plan from one that drops on Normal, and "go and
-    -- kill it" without that distinction sends people to the wrong lockout.
+    -- THE DIFFICULTY THIS REPORTED WAS NOT THE DROP'S.
+    --
+    -- It came from `EJ_GetDifficulty()`, which answers with the difficulty
+    -- the Encounter Journal happens to be SET to -- a window the player may
+    -- have opened once and left on Normal. So a Mythic-only mount was
+    -- confidently labelled "Normal", and the sentence below explaining why
+    -- that distinction matters made the wrong label worse: it told the reader
+    -- to trust it.
+    --
+    -- A mount that only drops on Mythic is indeed a different plan from one
+    -- that drops on Normal -- which is exactly why a guess is not good enough
+    -- here. The client offers no per-item difficulty, so the label is now
+    -- shown only when the journal's setting is genuinely what was queried,
+    -- and is named as such rather than presented as a property of the drop.
     if first.difficulty then
-        text = text .. " |cff999999(" .. first.difficulty .. ")|r"
+        text = text .. " |cff999999(searched on " .. first.difficulty .. ")|r"
     end
 
     if #results > 1 then

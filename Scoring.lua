@@ -871,8 +871,16 @@ local function Ranked()
 
         CN.ScoreObjective(objective)
 
-        if not CN.IsObjectiveTypeEnabled
+        -- A DISPLAY PREFERENCE CANNOT HIDE YOUR OWN BODY.
+        --
+        -- The type filter is what a player chose to be shown. The corpse is
+        -- not a kind of content they can have an opinion about -- while they
+        -- are a ghost it is the only actionable thing there is, and a filter
+        -- set weeks ago should not be able to suppress it.
+        if objective.corpse
+            or not CN.IsObjectiveTypeEnabled
             or CN.IsObjectiveTypeEnabled(objective.type) then
+
             list[#list + 1] = objective
         end
     end

@@ -7,6 +7,91 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.52.0]
+
+The backlog, reconciled item by item against the shipped code rather than
+against its own status tags -- and then the buildable half of what that
+reconciliation found still outstanding.
+
+### Fixed
+
+- **Nine languages were shipping English for strings that had already been
+  translated.** Forty-six strings were carried in ten locale files and only
+  seventeen were ever looked up. The arrow's own words -- *ahead*, *veer*,
+  *turn*, *back* -- were printed as English literals, and so were "Stop 3 of 8
+  cleared", "Route complete.", the confidence qualifier that wraps every
+  uncertain number in the addon, and the situation line. Thirteen more had no
+  display anywhere at all: translated into ten languages, passing every lint,
+  appearing on no screen.
+  
+  The existing lint only ever asked whether a translation matched a key and
+  whether a key had a translation. Neither question is *does anything show
+  this*. It is asked now, and the build fails on a string nothing displays.
+  The thirteen orphans have been removed rather than kept, because a list of
+  translated strings is a claim about what has been translated, and one that
+  counts strings nobody sees makes that claim false in the direction that
+  flatters it.
+
+### Added
+
+- **A ghost is pointed at their body.** The addon has recognised death since
+  0.43.0, ranked everything else down for it, and printed *"your body first"*
+  -- while being unable to say where the body is. The client answers that
+  directly and was never asked. The corpse is now an ordinary recommendation,
+  so the arrow, the map pin, `/cn go` and the heads-up display all pick it up
+  without any of them needing to know what a corpse is; it keeps its full
+  weight while everything else is ranked down, and no display filter can hide
+  it.
+- **A non-mage can be told how long another continent takes.** A
+  cross-continent journey can only be costed through a teleport whose landing
+  place is known, and eight of the fourteen the addon tracks carried none --
+  including the hearthstone, which everybody has. Five of those eight had no
+  destination for no better reason than that nobody had filled it in.
+  Costable teleports go from six to eleven; the remaining three say why they
+  cannot be pinned rather than being given a plausible-looking false landing.
+- **The colourblind mode now changes the colours.** It added a word beside the
+  arrow -- which satisfies "no information carried by colour alone" and left
+  the palette exactly as unusable as it was. Gold against red is the worst
+  pair there is for the commonest form of colour blindness, and it was
+  carrying *drifting* against *walking away*: the one distinction the arrow
+  exists to make. The alternate palette separates by lightness as well as
+  hue, and the build checks the separation rather than trusting the eye.
+- **`/cn cues` fires at the two moments it was written for.** It was described
+  as sound and a flash when a route finishes, and that is all it did -- while
+  the moments a player actually wants marked are the smaller ones: arriving
+  somewhere, and clearing a stop. All three now, quieter for the small ones.
+- **`TRANSLATING.md`**, and a line in `/cn locale export` saying where to send
+  the block. The tool half of that workflow has existed since 0.39.0 and the
+  return path was written down nowhere, so a translator finished the work and
+  then had to guess -- which is where most people stop.
+- **`cn.ps1 provenance` names the rows worth checking** instead of counting
+  them and telling you to go and look.
+
+### Changed
+
+- **A curated turn-in location now beats the client's moving waypoint** for a
+  quest that is ready to hand in. The lookup was written when the three-phase
+  quest model was designed -- *"a quest is a pick up, a do, and a turn in"* --
+  and was called by nothing, so the third phase, the one the design rests on,
+  has always used a waypoint that points at whatever the quest currently wants
+  rather than at the person who takes it back.
+- **A drop's difficulty is no longer stated as though it were the drop's.**
+  The label came from the Encounter Journal's *currently selected* difficulty
+  -- a window the player may have opened once and left on Normal -- so a
+  Mythic-only mount was confidently labelled Normal. The client offers no
+  per-item difficulty, so it now says what was actually searched.
+
+### Not done, and why
+
+Multi-hop flight routing is a day's work through the code path two previous
+releases' performance and correctness guards both sit on, and is the right
+first thing for the next release rather than a rushed addition to this one.
+Reading the Warband bank cannot be verified against a real container list from
+here. A cross-tab search is a decision the author declined in writing and it
+stays declined until he says otherwise. Screenshots for the store page, the
+in-game arrow verification, the Wago project id and the curated quest data all
+need a live client or an account this build cannot reach.
+
 ## [0.51.0]
 
 An audit of **whether the numbers are right** -- not whether the code runs,

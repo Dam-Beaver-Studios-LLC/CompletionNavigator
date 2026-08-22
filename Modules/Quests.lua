@@ -929,6 +929,29 @@ end
 function Quests.GetLocation(questID)
     local mapID, x, y = Blizzard.GetQuestWaypoint(questID)
 
+    -- A CURATED TURN-IN BEATS THE CLIENT'S MOVING WAYPOINT.
+    --
+    -- `Static.GetQuestTurnIn` has existed since the three-phase quest model
+    -- was designed -- "a quest is a pick up, a do, and a turn in" -- with a
+    -- documented schema, and was called by nothing at all: the harness's dead
+    -- code check listed it by name. So the third phase, the one the design
+    -- rests on, has always used the client's waypoint, which points at
+    -- whatever the quest currently wants rather than at the person who takes
+    -- it back.
+    --
+    -- Only when the quest is actually ready to hand in. Before that the
+    -- client's waypoint is the better answer, because it moves with the work.
+    if CN.Static and CN.Static.GetQuestTurnIn
+        and Blizzard.IsQuestReadyForTurnIn
+        and Blizzard.IsQuestReadyForTurnIn(questID) then
+
+        local turnMap, turnX, turnY = CN.Static.GetQuestTurnIn(questID)
+
+        if turnMap and turnX and turnY then
+            return turnMap, turnX, turnY, "turn-in"
+        end
+    end
+
     if mapID and x and y then
         return mapID, x, y, "blizzard"
     end

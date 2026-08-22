@@ -44,15 +44,20 @@ CN.localeKeys = {
     "Route complete.",
     "estimated",
     "unknown",
-    "ready",
     "solo",
     "dead",
     "grouped",
     "instanced",
 
-    -- Added in 0.45.0: the words on the newest surfaces, chosen the same way
-    -- as the last batch -- where a player's eye lands, not where the strings
-    -- happen to be easy to extract.
+    -- Added in 0.45.0 as "the words on the newest surfaces" -- and thirteen
+    -- of them were never looked up by anything. They were translated into
+    -- ten languages, passed every lint, and appeared on no screen.
+    --
+    -- Removed in 0.52.0 rather than kept: a canonical list is the addon's
+    -- claim about what has been translated, and a key nothing displays makes
+    -- that claim false in the direction that matters -- it says the work is
+    -- done. The build now fails on a key with no call site, so the list
+    -- cannot drift this way again.
     --
     -- "ready" and "another zone" were listed a second time here in 0.45.0.
     -- A duplicate in the canonical list is not harmless: this file is the one
@@ -60,20 +65,29 @@ CN.localeKeys = {
     -- counts it, and 48 entries describing 46 strings makes every coverage
     -- number it reports wrong. Removed in 0.48.1, and the lint now refuses a
     -- list that repeats itself.
-    "cleared",
-    "left",
-    "expiring",
-    "in your bags",
-    "uncollected",
-    "quest starter",
     "%d more",
-    "%d of %d",
-    "flying yourself",
-    "on a flight path",
-    "on foot",
-    "measured",
-    "Nothing to do right now.",
     "Nothing is on a clock right now.",
+}
+
+-- REACHED THROUGH A VARIABLE, NOT A LITERAL.
+--
+-- The build fails on a canonical key that nothing looks up, which is how
+-- thirteen keys translated into ten languages were found to appear on no
+-- screen at all. Two lookups are legitimately dynamic, and this is where
+-- they are declared -- with the site named, so the claim can be checked by a
+-- reader as well as by the build.
+CN.localeDynamic = {
+    -- UI.lua: `button:SetText(CN.L[tab.name])`
+    ["Next"] = "UI tab", ["Zone"] = "UI tab", ["Scans"] = "UI tab",
+    ["Now"] = "UI tab", ["Warband"] = "UI tab", ["Vault"] = "UI tab",
+    ["Goals"] = "UI tab", ["Journey"] = "UI tab", ["Remaining"] = "UI tab",
+    ["Collections"] = "UI tab", ["Settings"] = "UI tab",
+
+    -- Modules/Group.lua: `CN.L[situation]` in `/cn situation`. The values are
+    -- identifiers four call sites compare against, so only the display is
+    -- translated. "solo" is also looked up literally in the same function.
+    ["dead"] = "situation", ["grouped"] = "situation",
+    ["instanced"] = "situation",
 }
 
 CN.RegisterLocale("enUS", {})

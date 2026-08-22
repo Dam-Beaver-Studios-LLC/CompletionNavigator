@@ -42,7 +42,7 @@ local function CurrentText(results)
     end
 
     if not results or not results[1] then
-        return "Completion Navigator", "nothing actionable"
+        return "Completion Navigator", CN.L["nothing actionable"]
     end
 
     local objective = results[1]

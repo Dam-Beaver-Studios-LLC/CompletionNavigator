@@ -116,9 +116,17 @@ echo "  a string with no translation anywhere blocks the release"
 # was ignored every single time, including by the person who wrote the string.
 cp Locales/enUS.lua Locales/enUS.bak
 python3 - <<'EOF'
+# ANCHORED ON A KEY THAT IS ASSERTED TO EXIST.
+#
+# This anchored on "cleared", which 0.52.0 removed from the canonical list --
+# so the insertion silently did nothing and the test failed reporting that the
+# lint was broken. A probe that can no-op is a probe that can pass for the
+# wrong reason; this one refuses rather than pretending.
 p = 'Locales/enUS.lua'
 s = open(p, encoding='utf-8').read()
-s = s.replace('    "cleared",', '    "cleared",\n    "untranslated probe",', 1)
+anchor = '    "ahead",'
+assert anchor in s, "the probe anchor is gone from Locales/enUS.lua"
+s = s.replace(anchor, anchor + '\n    "untranslated probe",', 1)
 open(p, 'w', encoding='utf-8').write(s)
 EOF
 $PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q 'no translation in ANY locale' \
@@ -131,7 +139,9 @@ cp Locales/enUS.bak Locales/enUS.lua
 python3 - <<'EOF'
 p = 'Locales/enUS.lua'
 s = open(p, encoding='utf-8').read()
-s = s.replace('    "cleared",', '    "cleared",\n    "cleared",', 1)
+anchor = '    "ahead",'
+assert anchor in s, "the probe anchor is gone from Locales/enUS.lua"
+s = s.replace(anchor, anchor + '\n    "ahead",', 1)
 open(p, 'w', encoding='utf-8').write(s)
 EOF
 $PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q 'more than once' \

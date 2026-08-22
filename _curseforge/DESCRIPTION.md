@@ -43,7 +43,7 @@ Half an hour is not the same question as "what should I do next", and it gets it
 
 Travel time is **computed** from the journey you would actually make, weighing three options against each other: run it, take a flight path from the nearest point **you have discovered**, or fly it yourself â€” whichever is genuinely quicker. Your speed is measured from your own play, separately for running, riding and flying, because those are three different numbers and one median across them is wrong in all three. Task time is **learned** the same way, and learned as the *work* â€” the journey is taken back out, because the plan adds it separately and counting it twice is how a twelve-minute stop gets quoted as thirty-six. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
 
-A journey it cannot model â€” another continent, reached by a portal â€” still refuses to invent a duration, but it now lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
+A journey it cannot model â€” another continent, reached by a portal â€” still refuses to invent a duration, but it lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. Where a teleport lands somewhere fixed, the whole journey is costed straight through it â€” *"hearth, then four minutes"* rather than a list to work from yourself. The three that go wherever you happen to be bound say so instead of guessing. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
 ## Aim it in one command
 
@@ -275,7 +275,7 @@ The game only lists quest pins for the map you are looking at, so "what is waiti
 
 ## Built to be read
 
-A scale for everything it draws, and a mode that labels the arrow in words as well as colour â€” the arrow's whole language was colour, which is exactly the design that fails a colourblind player.
+A scale for everything it draws, and a colourblind mode that changes the arrow's **palette** as well as labelling it in words. The arrow's whole language is colour, and gold against red is the worst pair there is for the commonest form of colour blindness â€” so the alternate palette separates by lightness as well as by hue, and the build checks that separation rather than trusting somebody's eye.
 
 ```
 /cn scale 1.25
@@ -316,7 +316,7 @@ Every check exists because the thing it covers was once broken in a release, and
 
 ## In your language
 
-German, Spanish, French, Italian, Korean, Portuguese, Russian and both Chinese scripts are started. Anything not yet translated falls back to English rather than to a blank label or a raw identifier, so a partly translated addon is still a working one. `/cn locale` says how far along your language is, and `/cn locale missing` prints exactly the list a translator would work from. Nothing was machine-translated to make that number look larger.
+German, Spanish, French, Italian, Korean, Portuguese, Russian and both Chinese scripts are started. Anything not yet translated falls back to English rather than to a blank label or a raw identifier, so a partly translated addon is still a working one. `/cn locale` says how far along your language is, `/cn locale missing` prints exactly the list a translator would work from, and `/cn locale export` produces a ready-made block to fill in â€” no toolchain, no file format to learn. Nothing was machine-translated to make that number look larger, and the build refuses to ship a string that is translated everywhere and displayed nowhere.
 
 ## Show only what you care about
 
@@ -391,6 +391,7 @@ There is a benchmark in the repository, and the numbers above come out of it rat
 - Where the game does not provide a trustworthy denominator, this addon reports counts rather than inventing a completion percentage. That rule is why some things get a progress bar and others deliberately do not.
 - "Available to pick up nearby" counts what is genuinely within reach and reports anything further out separately, rather than calling a four-minute ride "here".
 - Follow mode never moves your waypoint during a fight. Whatever it was going to do happens when the fight ends.
+- While you are a ghost, the only thing it recommends is your body â€” pointed at, not just mentioned. Everything else keeps.
 - On a fresh install it asks you to run one scan, and keeps asking until you have â€” an addon that knows nothing about your collections should say so rather than quietly looking thin. Once scanned, it never mentions it again.
 - Nothing is taken over without being asked. Auto-advancing the waypoint and rare alerts are off by default.
 - No external server, no account required, no data leaves your machine.

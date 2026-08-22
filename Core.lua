@@ -18,7 +18,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.51.0"
+CN.version     = "0.52.0"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -293,12 +293,19 @@ CN.confidence = {
 
 -- Wraps a value in the convention. Returns the text to print.
 function CN.WithConfidence(text, level)
+    -- Translated. This is the convention every number in the addon is
+    -- wrapped in, so leaving it in English left the single most repeated
+    -- qualifier a non-English player sees untranslated -- while the word sat
+    -- translated in all ten locale files.
+    --
+    -- CN.L is not available while Core.lua is loading, so the lookup happens
+    -- here at call time rather than at file scope.
     if level == CN.confidence.UNKNOWN or text == nil then
-        return "|cff999999unknown|r"
+        return "|cff999999" .. CN.L["unknown"] .. "|r"
     end
 
     if level == CN.confidence.ESTIMATED then
-        return text .. " |cff999999(estimated)|r"
+        return text .. " |cff999999(" .. CN.L["estimated"] .. ")|r"
     end
 
     return text

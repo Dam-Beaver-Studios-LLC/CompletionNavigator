@@ -31,6 +31,7 @@ CN.apiSurface = {
     "C_CurrencyInfo.GetCurrencyListSize",
     "C_DateAndTime.GetCurrentCalendarTime",
     "C_DateAndTime.GetSecondsUntilWeeklyReset",
+    "C_DeathInfo.GetCorpseMapPosition",
     "C_GossipInfo.GetAvailableQuests",
     "C_GossipInfo.GetFriendshipReputation",
     "C_Heirloom.GetHeirloomItemIDFromIndex",

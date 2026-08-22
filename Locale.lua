@@ -221,6 +221,17 @@ CN:RegisterCommand{
                 .. "sure of blank -- an empty string is ignored, and English "
                 .. "is a better answer than a guess.|r")
 
+            -- AND WHERE TO SEND IT.
+            --
+            -- The tool half of the translator workflow has existed since
+            -- 0.39.0; the return path was never written down anywhere. A
+            -- translator finished the work and then had to guess what to do
+            -- with it, which is the point at which most people stop.
+            Print("|cff999999When you are done, open an issue on the project's "
+                .. "GitHub with the block pasted in, titled \"Translation: "
+                .. stats.locale .. "\". TRANSLATING.md in the repository has "
+                .. "the details.|r")
+
             return
         end
 

@@ -153,6 +153,15 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
     local situation = Group.Situation()
 
     if situation == "dead" then
+        -- EXCEPT THE BODY.
+        --
+        -- The corpse is the one thing that IS actionable while dead;
+        -- demoting it with everything else would bury the answer under the
+        -- list it is supposed to replace.
+        if objective and objective.corpse then
+            return score
+        end
+
         if objective and objective.reasons then
             CN.AddAdjusterReason(objective, "groupDead",
                 "you are dead -- this is for after")
@@ -182,11 +191,105 @@ end)
 -- makes the list beside the point. Nil when there is nothing to say, which is
 -- most of the time -- an addon that comments on your circumstances constantly
 -- is an addon people turn off.
+-- WHERE YOUR BODY IS.
+--
+-- The addon has recognised death since 0.43.0 and ranked everything else down
+-- for it -- which is right, and is only half an answer. A dead player's next
+-- action is a corpse run, and the addon knew that, said so in a sentence, and
+-- then could not point at the one place that mattered.
+--
+-- `C_DeathInfo.GetCorpseMapPosition` answers with the map position of your
+-- own corpse. Guarded like every other client call: a client that will not
+-- say returns nothing and the sentence stays a sentence.
+function Group.CorpseTarget()
+    if not Group.IsGhost() then
+        return nil
+    end
+
+    if not C_DeathInfo or not C_DeathInfo.GetCorpseMapPosition then
+        return nil
+    end
+
+    local mapID = CN.GetPlayerPosition()
+
+    if not mapID then
+        return nil
+    end
+
+    local ok, position = pcall(C_DeathInfo.GetCorpseMapPosition, mapID)
+
+    if not ok or not position then
+        return nil
+    end
+
+    local x, y
+
+    if position.GetXY then
+        local gotXY, gx, gy = pcall(position.GetXY, position)
+
+        if gotXY then
+            x, y = gx, gy
+        end
+    end
+
+    x = x or position.x
+    y = y or position.y
+
+    if not x or not y or (x == 0 and y == 0) then
+        return nil
+    end
+
+    return { mapID = mapID, x = x, y = y, title = "Your corpse" }
+end
+
+------------------------------------------------------------
+-- THE ONE THING WORTH DOING WHILE YOU ARE DEAD
+------------------------------------------------------------
+
+-- A dead player's next action is not the recommendation list -- it is their
+-- body. The addon has said so in a sentence since 0.43.0 while ranking
+-- everything else down, and never once pointed at the place.
+--
+-- Offered as an ordinary candidate, so the arrow, the map pin, `/cn go` and
+-- the heads-up display all pick it up without any of them needing to know
+-- what a corpse is. Weighted far above anything else, because while you are a
+-- ghost nothing else is actionable at all.
+CN.RegisterCandidateProvider("Corpse", function()
+    local corpse = Group.CorpseTarget()
+
+    if not corpse then
+        return {}
+    end
+
+    return {
+        CN.NewObjective({
+            id              = 1,
+            type            = CN.objectiveTypes.QUEST,
+            name            = "Run to your body",
+            completionValue = 40,
+            travelCost      = 0,
+            mapID           = corpse.mapID,
+            x               = corpse.x,
+            y               = corpse.y,
+            corpse          = true,
+            reasons         = { "you are a ghost; everything else keeps" },
+        }),
+    }
+end, { volatile = true, events = { "PLAYER_DEAD", "PLAYER_ALIVE",
+                                   "PLAYER_UNGHOST" } })
+
 function Group.Notice()
     local situation = Group.Situation()
 
     if situation == "dead" then
         if Group.IsGhost() then
+            local corpse = Group.CorpseTarget()
+
+            if corpse then
+                return "You are a ghost. Your body is marked -- the rest of "
+                    .. "this keeps."
+            end
+
             return "You are a ghost. Your body first -- the rest of this "
                 .. "keeps."
         end
@@ -225,13 +328,20 @@ CN:RegisterCommand{
     handler = function()
         local situation = Group.Situation()
 
-        Print("Situation: |cffffff00" .. situation .. "|r")
+        -- TRANSLATED WHERE IT IS SHOWN, NOT WHERE IT IS DECIDED.
+        --
+        -- `Situation()` returns an identifier that four call sites compare
+        -- against; translating the return value would break every one of
+        -- them. The four words are translated in all ten locale files and
+        -- were never looked up, because the only place a player reads them is
+        -- here.
+        Print("Situation: |cffffff00" .. CN.L[situation] .. "|r")
 
         local inside, kind = Group.Instance()
 
         Print("  group: " .. (Group.InGroup()
             and (Group.Size() .. (Group.InRaid() and " (raid)" or " (party)"))
-            or "solo"))
+            or CN.L["solo"]))
         Print("  instance: " .. (inside and kind or "no"))
         Print("  alive: " .. CN.YesNo(not Group.IsDead()))
 

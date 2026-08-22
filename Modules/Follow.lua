@@ -243,19 +243,26 @@ function Follow.NoteStopCleared()
 
     local total = Follow.startedWith
 
-    local text = "Stop cleared"
+    -- Translated. This is the string 0.48.1 made a build failure over for
+    -- having no translations at all -- and then it was printed as an English
+    -- literal anyway, so the ten locale files that carry it were never
+    -- consulted.
+    local text = CN.L["Stop cleared"]
 
     if total > 0 then
-        text = string.format("Stop %d of %d cleared", Follow.completed, total)
+        text = string.format(CN.L["Stop %d of %d cleared"],
+            Follow.completed, total)
     end
 
     Print("|cff73b873" .. text .. "|r")
+
+    Follow.Cue("stop")
 
     -- A COMPLETION MOMENT, when there is genuinely nothing left. The route
     -- finishing is the only thing this addon does that is worth a small
     -- flourish, and it happens rarely enough to stay one.
     if total > 0 and Follow.completed >= total then
-        Print("|cff5dd2fbRoute complete.|r " .. total .. " stops, "
+        Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r " .. total .. " stops, "
             .. "everything on it done.")
 
         Follow.Celebrate()
@@ -267,22 +274,45 @@ end
 -- Sound and a flash, both OFF by default, because unsolicited noise is the
 -- most intrusive thing an addon can do and this addon's standing rule is that
 -- nothing is taken over without being asked.
-function Follow.Celebrate()
+-- THREE MOMENTS, NOT ONE.
+--
+-- `/cn cues` was described as sound and a flash "when a route finishes", and
+-- that is all it did -- while the two moments a player actually wants marking
+-- are the smaller ones: arriving somewhere, and clearing a stop. A cue that
+-- fires once an hour is a cue nobody has an opinion about.
+--
+-- Quieter for the small moments than for the big one. A route finishing is
+-- worth a noise; arriving at the third of eight camps is worth a tap.
+Follow.cueSounds = {
+    route   = "UI_QUEST_ROLLING_FORWARD_01",
+    stop    = "IG_QUEST_LIST_SELECT",
+    arrival = "IG_QUEST_LIST_OPEN",
+}
+
+function Follow.Cue(moment)
     local settings = CN.Settings()
 
     if not settings or not settings.cues then
         return false
     end
 
-    if PlaySound and SOUNDKIT and SOUNDKIT.UI_QUEST_ROLLING_FORWARD_01 then
-        pcall(PlaySound, SOUNDKIT.UI_QUEST_ROLLING_FORWARD_01)
+    local sound = Follow.cueSounds[moment or "route"]
+
+    if PlaySound and SOUNDKIT and sound and SOUNDKIT[sound] then
+        pcall(PlaySound, SOUNDKIT[sound])
     end
 
-    if UIFrameFlash and frame then
+    -- The flash belongs to the route, not to every arrival: a frame that
+    -- blinks every time you reach a camp is a frame people turn off.
+    if moment == "route" and UIFrameFlash and frame then
         pcall(UIFrameFlash, frame, 0.3, 0.3, 1.2, false, 0, 0)
     end
 
     return true
+end
+
+function Follow.Celebrate()
+    return Follow.Cue("route")
 end
 
 function Follow.Advance(force)

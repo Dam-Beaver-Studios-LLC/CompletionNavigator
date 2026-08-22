@@ -494,6 +494,42 @@ mutate "Modules/Preference.lua" \
     "a player who does everything is recorded as doing nothing"
 
 
+# The 0.52.0 backlog work.
+mutate "Modules/Hud.lua" \
+    "        return CN.L[\"ahead\"]" \
+    "        return \"ahead\"" \
+    "a translated string is printed as an English literal"
+
+mutate "Modules/Group.lua" \
+    "        if objective and objective.corpse then
+            return score
+        end" \
+    "        if false then
+            return score
+        end" \
+    "a ghost's body is ranked down with everything else"
+
+mutate "Scoring.lua" \
+    "        if objective.corpse
+            or not CN.IsObjectiveTypeEnabled" \
+    "        if not CN.IsObjectiveTypeEnabled" \
+    "a type filter can hide your own corpse"
+
+mutate "Modules/Navigation.lua" \
+    "    if hud and hud.IsColourblind and hud.IsColourblind() then
+        return Navigation.colorblindColors
+    end" \
+    "    if false then
+        return Navigation.colorblindColors
+    end" \
+    "colourblind mode leaves the palette alone"
+
+mutate "Modules/Travel.lua" \
+    "    { kind = \"spell\", id = 50977,  label = \"Death Gate\",              mapID = 118 }," \
+    "    { kind = \"spell\", id = 50977,  label = \"Death Gate\" }," \
+    "a teleport loses the destination that makes it costable"
+
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

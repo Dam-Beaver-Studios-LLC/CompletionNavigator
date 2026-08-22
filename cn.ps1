@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.51.0'
+$script:ToolkitVersion = '0.52.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.51.0"
+CN.version     = "0.52.0"
 CN.dbVersion   = 7
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -396,12 +396,19 @@ CN.confidence = {
 
 -- Wraps a value in the convention. Returns the text to print.
 function CN.WithConfidence(text, level)
+    -- Translated. This is the convention every number in the addon is
+    -- wrapped in, so leaving it in English left the single most repeated
+    -- qualifier a non-English player sees untranslated -- while the word sat
+    -- translated in all ten locale files.
+    --
+    -- CN.L is not available while Core.lua is loading, so the lookup happens
+    -- here at call time rather than at file scope.
     if level == CN.confidence.UNKNOWN or text == nil then
-        return "|cff999999unknown|r"
+        return "|cff999999" .. CN.L["unknown"] .. "|r"
     end
 
     if level == CN.confidence.ESTIMATED then
-        return text .. " |cff999999(estimated)|r"
+        return text .. " |cff999999(" .. CN.L["estimated"] .. ")|r"
     end
 
     return text
@@ -2843,6 +2850,17 @@ CN:RegisterCommand{
                 .. "sure of blank -- an empty string is ignored, and English "
                 .. "is a better answer than a guess.|r")
 
+            -- AND WHERE TO SEND IT.
+            --
+            -- The tool half of the translator workflow has existed since
+            -- 0.39.0; the return path was never written down anywhere. A
+            -- translator finished the work and then had to guess what to do
+            -- with it, which is the point at which most people stop.
+            Print("|cff999999When you are done, open an issue on the project's "
+                .. "GitHub with the block pasted in, titled \"Translation: "
+                .. stats.locale .. "\". TRANSLATING.md in the repository has "
+                .. "the details.|r")
+
             return
         end
 
@@ -2908,15 +2926,20 @@ CN.localeKeys = {
     "Route complete.",
     "estimated",
     "unknown",
-    "ready",
     "solo",
     "dead",
     "grouped",
     "instanced",
 
-    -- Added in 0.45.0: the words on the newest surfaces, chosen the same way
-    -- as the last batch -- where a player's eye lands, not where the strings
-    -- happen to be easy to extract.
+    -- Added in 0.45.0 as "the words on the newest surfaces" -- and thirteen
+    -- of them were never looked up by anything. They were translated into
+    -- ten languages, passed every lint, and appeared on no screen.
+    --
+    -- Removed in 0.52.0 rather than kept: a canonical list is the addon's
+    -- claim about what has been translated, and a key nothing displays makes
+    -- that claim false in the direction that matters -- it says the work is
+    -- done. The build now fails on a key with no call site, so the list
+    -- cannot drift this way again.
     --
     -- "ready" and "another zone" were listed a second time here in 0.45.0.
     -- A duplicate in the canonical list is not harmless: this file is the one
@@ -2924,20 +2947,29 @@ CN.localeKeys = {
     -- counts it, and 48 entries describing 46 strings makes every coverage
     -- number it reports wrong. Removed in 0.48.1, and the lint now refuses a
     -- list that repeats itself.
-    "cleared",
-    "left",
-    "expiring",
-    "in your bags",
-    "uncollected",
-    "quest starter",
     "%d more",
-    "%d of %d",
-    "flying yourself",
-    "on a flight path",
-    "on foot",
-    "measured",
-    "Nothing to do right now.",
     "Nothing is on a clock right now.",
+}
+
+-- REACHED THROUGH A VARIABLE, NOT A LITERAL.
+--
+-- The build fails on a canonical key that nothing looks up, which is how
+-- thirteen keys translated into ten languages were found to appear on no
+-- screen at all. Two lookups are legitimately dynamic, and this is where
+-- they are declared -- with the site named, so the claim can be checked by a
+-- reader as well as by the build.
+CN.localeDynamic = {
+    -- UI.lua: `button:SetText(CN.L[tab.name])`
+    ["Next"] = "UI tab", ["Zone"] = "UI tab", ["Scans"] = "UI tab",
+    ["Now"] = "UI tab", ["Warband"] = "UI tab", ["Vault"] = "UI tab",
+    ["Goals"] = "UI tab", ["Journey"] = "UI tab", ["Remaining"] = "UI tab",
+    ["Collections"] = "UI tab", ["Settings"] = "UI tab",
+
+    -- Modules/Group.lua: `CN.L[situation]` in `/cn situation`. The values are
+    -- identifiers four call sites compare against, so only the display is
+    -- translated. "solo" is also looked up literally in the same function.
+    ["dead"] = "situation", ["grouped"] = "situation",
+    ["instanced"] = "situation",
 }
 
 CN.RegisterLocale("enUS", {})
@@ -2982,24 +3014,11 @@ CN.RegisterLocale("deDE", {
     ["Route complete."] = "Route abgeschlossen.",
     ["estimated"] = "geschätzt",
     ["unknown"] = "unbekannt",
-    ["ready"] = "bereit",
     ["solo"] = "allein",
     ["dead"] = "tot",
     ["grouped"] = "in einer Gruppe",
     ["instanced"] = "in einer Instanz",
-    ["cleared"] = "erledigt",
-    ["left"] = "übrig",
-    ["expiring"] = "läuft ab",
-    ["in your bags"] = "in deinen Taschen",
-    ["uncollected"] = "nicht gesammelt",
-    ["quest starter"] = "Questgegenstand",
     ["%d more"] = "noch %d",
-    ["%d of %d"] = "%d von %d",
-    ["flying yourself"] = "selbst fliegen",
-    ["on a flight path"] = "per Flugroute",
-    ["on foot"] = "zu Fuß",
-    ["measured"] = "gemessen",
-    ["Nothing to do right now."] = "Im Moment nichts zu tun.",
     ["Nothing is on a clock right now."] = "Nichts läuft gerade ab.",
 })
 '@
@@ -3043,24 +3062,11 @@ CN.RegisterLocale("esES", {
     ["Route complete."] = "Ruta completada.",
     ["estimated"] = "estimado",
     ["unknown"] = "desconocido",
-    ["ready"] = "listo",
     ["solo"] = "en solitario",
     ["dead"] = "muerto",
     ["grouped"] = "en grupo",
     ["instanced"] = "en una instancia",
-    ["cleared"] = "completado",
-    ["left"] = "restante",
-    ["expiring"] = "caduca pronto",
-    ["in your bags"] = "en tus bolsas",
-    ["uncollected"] = "sin coleccionar",
-    ["quest starter"] = "objeto de misión",
     ["%d more"] = "%d más",
-    ["%d of %d"] = "%d de %d",
-    ["flying yourself"] = "volando tú mismo",
-    ["on a flight path"] = "en ruta de vuelo",
-    ["on foot"] = "a pie",
-    ["measured"] = "medido",
-    ["Nothing to do right now."] = "Nada que hacer ahora mismo.",
     ["Nothing is on a clock right now."] = "Nada caduca ahora mismo.",
 })
 '@
@@ -3104,24 +3110,11 @@ CN.RegisterLocale("esMX", {
     ["Route complete."] = "Ruta completada.",
     ["estimated"] = "estimado",
     ["unknown"] = "desconocido",
-    ["ready"] = "listo",
     ["solo"] = "en solitario",
     ["dead"] = "muerto",
     ["grouped"] = "en grupo",
     ["instanced"] = "en una instancia",
-    ["cleared"] = "completado",
-    ["left"] = "restante",
-    ["expiring"] = "caduca pronto",
-    ["in your bags"] = "en tus bolsas",
-    ["uncollected"] = "sin coleccionar",
-    ["quest starter"] = "objeto de misión",
     ["%d more"] = "%d más",
-    ["%d of %d"] = "%d de %d",
-    ["flying yourself"] = "volando tú mismo",
-    ["on a flight path"] = "en ruta de vuelo",
-    ["on foot"] = "a pie",
-    ["measured"] = "medido",
-    ["Nothing to do right now."] = "Nada que hacer ahora mismo.",
     ["Nothing is on a clock right now."] = "Nada caduca ahora mismo.",
 })
 '@
@@ -3165,24 +3158,11 @@ CN.RegisterLocale("frFR", {
     ["Route complete."] = "Itinéraire terminé.",
     ["estimated"] = "estimé",
     ["unknown"] = "inconnu",
-    ["ready"] = "prêt",
     ["solo"] = "seul",
     ["dead"] = "mort",
     ["grouped"] = "en groupe",
     ["instanced"] = "en instance",
-    ["cleared"] = "terminé",
-    ["left"] = "restant",
-    ["expiring"] = "expire bientôt",
-    ["in your bags"] = "dans vos sacs",
-    ["uncollected"] = "non collecté",
-    ["quest starter"] = "objet de quête",
     ["%d more"] = "encore %d",
-    ["%d of %d"] = "%d sur %d",
-    ["flying yourself"] = "en volant vous-même",
-    ["on a flight path"] = "en vol régulier",
-    ["on foot"] = "à pied",
-    ["measured"] = "mesuré",
-    ["Nothing to do right now."] = "Rien à faire pour le moment.",
     ["Nothing is on a clock right now."] = "Rien n'expire pour le moment.",
 })
 '@
@@ -3226,24 +3206,11 @@ CN.RegisterLocale("itIT", {
     ["Route complete."] = "Percorso completato.",
     ["estimated"] = "stimato",
     ["unknown"] = "sconosciuto",
-    ["ready"] = "pronto",
     ["solo"] = "da solo",
     ["dead"] = "morto",
     ["grouped"] = "in gruppo",
     ["instanced"] = "in istanza",
-    ["cleared"] = "completato",
-    ["left"] = "rimanenti",
-    ["expiring"] = "in scadenza",
-    ["in your bags"] = "nelle tue borse",
-    ["uncollected"] = "non collezionato",
-    ["quest starter"] = "oggetto di missione",
     ["%d more"] = "altri %d",
-    ["%d of %d"] = "%d di %d",
-    ["flying yourself"] = "volando da solo",
-    ["on a flight path"] = "su rotta di volo",
-    ["on foot"] = "a piedi",
-    ["measured"] = "misurato",
-    ["Nothing to do right now."] = "Niente da fare al momento.",
     ["Nothing is on a clock right now."] = "Nulla sta scadendo al momento.",
 })
 '@
@@ -3283,16 +3250,8 @@ CN.RegisterLocale("koKR", {
     ["Stop %d of %d cleared"] = "%d/%d 지점 완료",
     ["estimated"] = "추정치",
     ["unknown"] = "알 수 없음",
-    ["ready"] = "준비됨",
     ["dead"] = "사망",
     ["grouped"] = "파티 중",
-    ["left"] = "남음",
-    ["expiring"] = "만료 임박",
-    ["in your bags"] = "가방 안",
-    ["uncollected"] = "미수집",
-    ["%d of %d"] = "%d / %d",
-    ["on foot"] = "도보",
-    ["measured"] = "측정됨",
 })
 '@
 
@@ -3335,24 +3294,11 @@ CN.RegisterLocale("ptBR", {
     ["Route complete."] = "Rota concluída.",
     ["estimated"] = "estimado",
     ["unknown"] = "desconhecido",
-    ["ready"] = "pronto",
     ["solo"] = "sozinho",
     ["dead"] = "morto",
     ["grouped"] = "em grupo",
     ["instanced"] = "em uma instância",
-    ["cleared"] = "concluído",
-    ["left"] = "restante",
-    ["expiring"] = "expirando",
-    ["in your bags"] = "nas suas bolsas",
-    ["uncollected"] = "não coletado",
-    ["quest starter"] = "item de missão",
     ["%d more"] = "mais %d",
-    ["%d of %d"] = "%d de %d",
-    ["flying yourself"] = "voando você mesmo",
-    ["on a flight path"] = "em rota de voo",
-    ["on foot"] = "a pé",
-    ["measured"] = "medido",
-    ["Nothing to do right now."] = "Nada a fazer agora.",
     ["Nothing is on a clock right now."] = "Nada está expirando agora.",
 })
 '@
@@ -3392,17 +3338,9 @@ CN.RegisterLocale("ruRU", {
     ["Stop %d of %d cleared"] = "Точка %d из %d пройдена",
     ["estimated"] = "оценка",
     ["unknown"] = "неизвестно",
-    ["ready"] = "готово",
     ["dead"] = "мертв",
     ["grouped"] = "в группе",
-    ["left"] = "осталось",
-    ["expiring"] = "истекает",
-    ["in your bags"] = "в сумках",
-    ["uncollected"] = "не собрано",
     ["%d more"] = "ещё %d",
-    ["%d of %d"] = "%d из %d",
-    ["on foot"] = "пешком",
-    ["measured"] = "измерено",
 })
 '@
 
@@ -3445,24 +3383,11 @@ CN.RegisterLocale("zhCN", {
     ["Route complete."] = "路线完成。",
     ["estimated"] = "估算",
     ["unknown"] = "未知",
-    ["ready"] = "就绪",
     ["solo"] = "单人",
     ["dead"] = "死亡",
     ["grouped"] = "组队中",
     ["instanced"] = "副本中",
-    ["cleared"] = "已完成",
-    ["left"] = "剩余",
-    ["expiring"] = "即将过期",
-    ["in your bags"] = "在你的背包里",
-    ["uncollected"] = "未收集",
-    ["quest starter"] = "任务起始物品",
     ["%d more"] = "还差 %d",
-    ["%d of %d"] = "%d / %d",
-    ["flying yourself"] = "自行飞行",
-    ["on a flight path"] = "飞行路线",
-    ["on foot"] = "步行",
-    ["measured"] = "实测",
-    ["Nothing to do right now."] = "目前没有可做的事。",
     ["Nothing is on a clock right now."] = "目前没有计时的事项。",
 })
 '@
@@ -3502,16 +3427,8 @@ CN.RegisterLocale("zhTW", {
     ["Stop %d of %d cleared"] = "站點 %d/%d 完成",
     ["estimated"] = "估算",
     ["unknown"] = "未知",
-    ["ready"] = "就緒",
     ["dead"] = "死亡",
     ["grouped"] = "組隊中",
-    ["left"] = "剩餘",
-    ["expiring"] = "即將過期",
-    ["in your bags"] = "在你的背包裡",
-    ["uncollected"] = "未收集",
-    ["%d of %d"] = "%d / %d",
-    ["on foot"] = "步行",
-    ["measured"] = "實測",
 })
 '@
 
@@ -4389,8 +4306,16 @@ local function Ranked()
 
         CN.ScoreObjective(objective)
 
-        if not CN.IsObjectiveTypeEnabled
+        -- A DISPLAY PREFERENCE CANNOT HIDE YOUR OWN BODY.
+        --
+        -- The type filter is what a player chose to be shown. The corpse is
+        -- not a kind of content they can have an opinion about -- while they
+        -- are a ghost it is the only actionable thing there is, and a filter
+        -- set weeks ago should not be able to suppress it.
+        if objective.corpse
+            or not CN.IsObjectiveTypeEnabled
             or CN.IsObjectiveTypeEnabled(objective.type) then
+
             list[#list + 1] = objective
         end
     end
@@ -8850,6 +8775,7 @@ CN.apiSurface = {
     "C_CurrencyInfo.GetCurrencyListSize",
     "C_DateAndTime.GetCurrentCalendarTime",
     "C_DateAndTime.GetSecondsUntilWeeklyReset",
+    "C_DeathInfo.GetCorpseMapPosition",
     "C_GossipInfo.GetAvailableQuests",
     "C_GossipInfo.GetFriendshipReputation",
     "C_Heirloom.GetHeirloomItemIDFromIndex",
@@ -13398,6 +13324,29 @@ end
 -- static data. Live wins because it tracks the quest's *current* step.
 function Quests.GetLocation(questID)
     local mapID, x, y = Blizzard.GetQuestWaypoint(questID)
+
+    -- A CURATED TURN-IN BEATS THE CLIENT'S MOVING WAYPOINT.
+    --
+    -- `Static.GetQuestTurnIn` has existed since the three-phase quest model
+    -- was designed -- "a quest is a pick up, a do, and a turn in" -- with a
+    -- documented schema, and was called by nothing at all: the harness's dead
+    -- code check listed it by name. So the third phase, the one the design
+    -- rests on, has always used the client's waypoint, which points at
+    -- whatever the quest currently wants rather than at the person who takes
+    -- it back.
+    --
+    -- Only when the quest is actually ready to hand in. Before that the
+    -- client's waypoint is the better answer, because it moves with the work.
+    if CN.Static and CN.Static.GetQuestTurnIn
+        and Blizzard.IsQuestReadyForTurnIn
+        and Blizzard.IsQuestReadyForTurnIn(questID) then
+
+        local turnMap, turnX, turnY = CN.Static.GetQuestTurnIn(questID)
+
+        if turnMap and turnX and turnY then
+            return turnMap, turnX, turnY, "turn-in"
+        end
+    end
 
     if mapID and x and y then
         return mapID, x, y, "blizzard"
@@ -25052,19 +25001,26 @@ function Follow.NoteStopCleared()
 
     local total = Follow.startedWith
 
-    local text = "Stop cleared"
+    -- Translated. This is the string 0.48.1 made a build failure over for
+    -- having no translations at all -- and then it was printed as an English
+    -- literal anyway, so the ten locale files that carry it were never
+    -- consulted.
+    local text = CN.L["Stop cleared"]
 
     if total > 0 then
-        text = string.format("Stop %d of %d cleared", Follow.completed, total)
+        text = string.format(CN.L["Stop %d of %d cleared"],
+            Follow.completed, total)
     end
 
     Print("|cff73b873" .. text .. "|r")
+
+    Follow.Cue("stop")
 
     -- A COMPLETION MOMENT, when there is genuinely nothing left. The route
     -- finishing is the only thing this addon does that is worth a small
     -- flourish, and it happens rarely enough to stay one.
     if total > 0 and Follow.completed >= total then
-        Print("|cff5dd2fbRoute complete.|r " .. total .. " stops, "
+        Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r " .. total .. " stops, "
             .. "everything on it done.")
 
         Follow.Celebrate()
@@ -25076,22 +25032,45 @@ end
 -- Sound and a flash, both OFF by default, because unsolicited noise is the
 -- most intrusive thing an addon can do and this addon's standing rule is that
 -- nothing is taken over without being asked.
-function Follow.Celebrate()
+-- THREE MOMENTS, NOT ONE.
+--
+-- `/cn cues` was described as sound and a flash "when a route finishes", and
+-- that is all it did -- while the two moments a player actually wants marking
+-- are the smaller ones: arriving somewhere, and clearing a stop. A cue that
+-- fires once an hour is a cue nobody has an opinion about.
+--
+-- Quieter for the small moments than for the big one. A route finishing is
+-- worth a noise; arriving at the third of eight camps is worth a tap.
+Follow.cueSounds = {
+    route   = "UI_QUEST_ROLLING_FORWARD_01",
+    stop    = "IG_QUEST_LIST_SELECT",
+    arrival = "IG_QUEST_LIST_OPEN",
+}
+
+function Follow.Cue(moment)
     local settings = CN.Settings()
 
     if not settings or not settings.cues then
         return false
     end
 
-    if PlaySound and SOUNDKIT and SOUNDKIT.UI_QUEST_ROLLING_FORWARD_01 then
-        pcall(PlaySound, SOUNDKIT.UI_QUEST_ROLLING_FORWARD_01)
+    local sound = Follow.cueSounds[moment or "route"]
+
+    if PlaySound and SOUNDKIT and sound and SOUNDKIT[sound] then
+        pcall(PlaySound, SOUNDKIT[sound])
     end
 
-    if UIFrameFlash and frame then
+    -- The flash belongs to the route, not to every arrival: a frame that
+    -- blinks every time you reach a camp is a frame people turn off.
+    if moment == "route" and UIFrameFlash and frame then
         pcall(UIFrameFlash, frame, 0.3, 0.3, 1.2, false, 0, 0)
     end
 
     return true
+end
+
+function Follow.Celebrate()
+    return Follow.Cue("route")
 end
 
 function Follow.Advance(force)
@@ -27724,11 +27703,43 @@ Navigation.colors = {
     UNKNOWN   = { 0.600, 0.640, 0.680 },   -- no bearing available
 }
 
+-- THE PALETTE ITSELF, NOT ONLY A LABEL BESIDE IT.
+--
+-- Colourblind mode has until now added a word next to the arrow, which
+-- satisfies "no information carried by colour alone" and leaves the colours
+-- themselves as bad as they were. Gold against red is the single worst pair
+-- for the commonest form of colour blindness -- and it is the pair carrying
+-- "drifting" against "walking away", which is the distinction the arrow
+-- exists to make.
+--
+-- Blue and orange instead, which separate under every common form, with
+-- white for on-course so the three differ in lightness as well as in hue.
+-- Somebody who cannot tell the hues apart can still tell these apart.
+-- Chosen so that the three differ by at least 0.27 in relative luminance --
+-- checked by the suite, not by eye. Lightness is what survives when hue does
+-- not.
+Navigation.colorblindColors = {
+    ON_COURSE = { 0.980, 0.980, 0.980 },   -- near-white, luminance 0.98
+    DRIFTING  = { 0.400, 0.760, 1.000 },   -- light blue,  luminance 0.70
+    AWAY      = { 0.780, 0.340, 0.020 },   -- dark orange, luminance 0.41
+    UNKNOWN   = { 0.520, 0.540, 0.560 },
+}
+
+function Navigation.Palette()
+    local hud = CN:GetModule("Hud")
+
+    if hud and hud.IsColourblind and hud.IsColourblind() then
+        return Navigation.colorblindColors
+    end
+
+    return Navigation.colors
+end
+
 -- Blue when you are walking toward it, gold when you are drifting, red when
 -- you are walking away. The single most useful thing an arrow does, and it
 -- costs one comparison.
 function Navigation.BearingColor(relative)
-    local palette = Navigation.colors
+    local palette = Navigation.Palette()
 
     if not relative then
         return palette.UNKNOWN[1], palette.UNKNOWN[2], palette.UNKNOWN[3]
@@ -28339,6 +28350,13 @@ function Navigation.Arrive()
     local reached = tostring(target.title or "destination")
 
     Print(string.format(CN.L["Arrived: %s"], reached))
+
+    -- The other moment `/cn cues` was written for and never wired to.
+    local follow = CN:GetModule("Follow")
+
+    if follow and follow.Cue then
+        pcall(follow.Cue, "arrival")
+    end
 
     -- Arrival is exactly the moment auto-advance was designed for; before
     -- this, it could only re-point on a timer or an event.
@@ -29510,7 +29528,7 @@ local function CurrentText(results)
     end
 
     if not results or not results[1] then
-        return "Completion Navigator", "nothing actionable"
+        return "Completion Navigator", CN.L["nothing actionable"]
     end
 
     local objective = results[1]
@@ -29962,6 +29980,15 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
     local situation = Group.Situation()
 
     if situation == "dead" then
+        -- EXCEPT THE BODY.
+        --
+        -- The corpse is the one thing that IS actionable while dead;
+        -- demoting it with everything else would bury the answer under the
+        -- list it is supposed to replace.
+        if objective and objective.corpse then
+            return score
+        end
+
         if objective and objective.reasons then
             CN.AddAdjusterReason(objective, "groupDead",
                 "you are dead -- this is for after")
@@ -29991,11 +30018,105 @@ end)
 -- makes the list beside the point. Nil when there is nothing to say, which is
 -- most of the time -- an addon that comments on your circumstances constantly
 -- is an addon people turn off.
+-- WHERE YOUR BODY IS.
+--
+-- The addon has recognised death since 0.43.0 and ranked everything else down
+-- for it -- which is right, and is only half an answer. A dead player's next
+-- action is a corpse run, and the addon knew that, said so in a sentence, and
+-- then could not point at the one place that mattered.
+--
+-- `C_DeathInfo.GetCorpseMapPosition` answers with the map position of your
+-- own corpse. Guarded like every other client call: a client that will not
+-- say returns nothing and the sentence stays a sentence.
+function Group.CorpseTarget()
+    if not Group.IsGhost() then
+        return nil
+    end
+
+    if not C_DeathInfo or not C_DeathInfo.GetCorpseMapPosition then
+        return nil
+    end
+
+    local mapID = CN.GetPlayerPosition()
+
+    if not mapID then
+        return nil
+    end
+
+    local ok, position = pcall(C_DeathInfo.GetCorpseMapPosition, mapID)
+
+    if not ok or not position then
+        return nil
+    end
+
+    local x, y
+
+    if position.GetXY then
+        local gotXY, gx, gy = pcall(position.GetXY, position)
+
+        if gotXY then
+            x, y = gx, gy
+        end
+    end
+
+    x = x or position.x
+    y = y or position.y
+
+    if not x or not y or (x == 0 and y == 0) then
+        return nil
+    end
+
+    return { mapID = mapID, x = x, y = y, title = "Your corpse" }
+end
+
+------------------------------------------------------------
+-- THE ONE THING WORTH DOING WHILE YOU ARE DEAD
+------------------------------------------------------------
+
+-- A dead player's next action is not the recommendation list -- it is their
+-- body. The addon has said so in a sentence since 0.43.0 while ranking
+-- everything else down, and never once pointed at the place.
+--
+-- Offered as an ordinary candidate, so the arrow, the map pin, `/cn go` and
+-- the heads-up display all pick it up without any of them needing to know
+-- what a corpse is. Weighted far above anything else, because while you are a
+-- ghost nothing else is actionable at all.
+CN.RegisterCandidateProvider("Corpse", function()
+    local corpse = Group.CorpseTarget()
+
+    if not corpse then
+        return {}
+    end
+
+    return {
+        CN.NewObjective({
+            id              = 1,
+            type            = CN.objectiveTypes.QUEST,
+            name            = "Run to your body",
+            completionValue = 40,
+            travelCost      = 0,
+            mapID           = corpse.mapID,
+            x               = corpse.x,
+            y               = corpse.y,
+            corpse          = true,
+            reasons         = { "you are a ghost; everything else keeps" },
+        }),
+    }
+end, { volatile = true, events = { "PLAYER_DEAD", "PLAYER_ALIVE",
+                                   "PLAYER_UNGHOST" } })
+
 function Group.Notice()
     local situation = Group.Situation()
 
     if situation == "dead" then
         if Group.IsGhost() then
+            local corpse = Group.CorpseTarget()
+
+            if corpse then
+                return "You are a ghost. Your body is marked -- the rest of "
+                    .. "this keeps."
+            end
+
             return "You are a ghost. Your body first -- the rest of this "
                 .. "keeps."
         end
@@ -30034,13 +30155,20 @@ CN:RegisterCommand{
     handler = function()
         local situation = Group.Situation()
 
-        Print("Situation: |cffffff00" .. situation .. "|r")
+        -- TRANSLATED WHERE IT IS SHOWN, NOT WHERE IT IS DECIDED.
+        --
+        -- `Situation()` returns an identifier that four call sites compare
+        -- against; translating the return value would break every one of
+        -- them. The four words are translated in all ten locale files and
+        -- were never looked up, because the only place a player reads them is
+        -- here.
+        Print("Situation: |cffffff00" .. CN.L[situation] .. "|r")
 
         local inside, kind = Group.Instance()
 
         Print("  group: " .. (Group.InGroup()
             and (Group.Size() .. (Group.InRaid() and " (raid)" or " (party)"))
-            or "solo"))
+            or CN.L["solo"]))
         Print("  instance: " .. (inside and kind or "no"))
         Print("  alive: " .. CN.YesNo(not Group.IsDead()))
 
@@ -30056,6 +30184,7 @@ CN:RegisterCommand{
 }
 
 return Group
+
 '@
 
 $Embedded['Modules\Inventory.lua'] = @'
@@ -30600,7 +30729,8 @@ CN:RegisterCommand{
                     break
                 end
 
-                Print(string.format("  |cffffff00%d more|r %s |cff999999(%d/%d)|r",
+                Print(string.format("  |cffffff00" .. CN.L["%d more"]
+                    .. "|r %s |cff999999(%d/%d)|r",
                     row.remaining, tostring(row.text or row.title),
                     row.done, row.required))
             end
@@ -31004,7 +31134,7 @@ CN:RegisterCommand{
         end
 
         if not said then
-            Print("Nothing is on a clock right now.")
+            Print(CN.L["Nothing is on a clock right now."])
         end
     end,
 }
@@ -32046,22 +32176,58 @@ end
 -- `mapID` is the ZONE the teleport lands in. Where it is nil, the option is
 -- still listed and simply cannot be costed; naming a shortcut you have is
 -- useful even when the addon cannot price it.
+-- WHERE EACH ONE PUTS YOU DOWN.
+--
+-- A cross-continent journey can only be costed through a teleport whose
+-- destination is known, and eight of these fourteen carried no destination at
+-- all -- including the hearthstone, which is the one every player has. So a
+-- non-mage asking about another continent got a list of what they own and no
+-- duration whatsoever, which is the state this whole branch was built to
+-- replace.
+--
+-- Three of them genuinely cannot be pinned, and are marked rather than given
+-- a plausible-looking false landing:
+--
+--   * The hearthstone and Astral Recall go wherever the player set them. The
+--     client reports that as a zone NAME, and this addon has no name-to-map
+--     index -- building one means walking the whole map tree, which is a
+--     client call per zone for a fact that is worth less than its cost. They
+--     are still listed as available; they are not costed.
+--   * The Flight Master's Whistle lands at the nearest flight point in the
+--     zone you are already standing in. It is not a cross-continent option at
+--     all.
+--
+-- The other eleven are fixed locations and are simply written down. Five of
+-- them had no destination for no better reason than that nobody had filled
+-- it in, which is why a non-mage got no cross-continent number at all.
 Travel.teleports = {
-    { kind = "item",  id = 6948,   label = "Hearthstone" },
-    { kind = "item",  id = 110560, label = "Garrison Hearthstone" },
-    { kind = "item",  id = 140192, label = "Dalaran Hearthstone" },
-    { kind = "item",  id = 141605, label = "Flight Master's Whistle" },
-    { kind = "spell", id = 556,    label = "Astral Recall" },
+    { kind = "item",  id = 6948,   label = "Hearthstone", bindPoint = true },
+
+    { kind = "item",  id = 110560, label = "Garrison Hearthstone",
+      -- Two garrisons, one per faction, and the client will not say which
+      -- without reading the player's own garrison data. Draenor is the
+      -- continent either way, which is what a cross-continent estimate needs.
+      mapID = 590 },
+
+    { kind = "item",  id = 140192, label = "Dalaran Hearthstone", mapID = 627 },
+
+    -- Not a destination: it lands you at the nearest flight point in the zone
+    -- you are already in.
+    { kind = "item",  id = 141605, label = "Flight Master's Whistle",
+      local_ = true },
+
+    { kind = "spell", id = 556,    label = "Astral Recall", bindPoint = true },
     { kind = "spell", id = 3565,   label = "Teleport: Darnassus",     mapID = 89 },
     { kind = "spell", id = 3562,   label = "Teleport: Ironforge",     mapID = 87 },
     { kind = "spell", id = 3561,   label = "Teleport: Stormwind",     mapID = 84 },
     { kind = "spell", id = 3567,   label = "Teleport: Orgrimmar",     mapID = 85 },
     { kind = "spell", id = 3563,   label = "Teleport: Undercity",     mapID = 90 },
     { kind = "spell", id = 3566,   label = "Teleport: Thunder Bluff", mapID = 88 },
-    { kind = "spell", id = 18960,  label = "Teleport: Moonglade" },
-    { kind = "spell", id = 50977,  label = "Death Gate" },
-    { kind = "spell", id = 126892, label = "Zen Pilgrimage" },
+    { kind = "spell", id = 18960,  label = "Teleport: Moonglade",     mapID = 80 },
+    { kind = "spell", id = 50977,  label = "Death Gate",              mapID = 118 },
+    { kind = "spell", id = 126892, label = "Zen Pilgrimage",          mapID = 809 },
 }
+
 
 local function ItemCooldown(itemID)
     local count = 0
@@ -32984,11 +33150,22 @@ function Instances.DescribeSource(name)
         text = text .. " in " .. first.instance
     end
 
-    -- WHICH DIFFICULTY, when the journal says so. A mount that only drops on
-    -- Mythic is a different plan from one that drops on Normal, and "go and
-    -- kill it" without that distinction sends people to the wrong lockout.
+    -- THE DIFFICULTY THIS REPORTED WAS NOT THE DROP'S.
+    --
+    -- It came from `EJ_GetDifficulty()`, which answers with the difficulty
+    -- the Encounter Journal happens to be SET to -- a window the player may
+    -- have opened once and left on Normal. So a Mythic-only mount was
+    -- confidently labelled "Normal", and the sentence below explaining why
+    -- that distinction matters made the wrong label worse: it told the reader
+    -- to trust it.
+    --
+    -- A mount that only drops on Mythic is indeed a different plan from one
+    -- that drops on Normal -- which is exactly why a guess is not good enough
+    -- here. The client offers no per-item difficulty, so the label is now
+    -- shown only when the journal's setting is genuinely what was queried,
+    -- and is named as such rather than presented as a property of the drop.
     if first.difficulty then
-        text = text .. " |cff999999(" .. first.difficulty .. ")|r"
+        text = text .. " |cff999999(searched on " .. first.difficulty .. ")|r"
     end
 
     if #results > 1 then
@@ -36232,19 +36409,25 @@ function Hud.BearingWord(relative)
 
     local off = math.abs(relative)
 
+    -- THROUGH CN.L, LIKE EVERY OTHER STRING A PLAYER READS.
+    --
+    -- These four are translated into all ten shipped locales and were
+    -- returned as English literals, so the one accessibility feature that
+    -- exists for players who cannot use the arrow's colours spoke only
+    -- English to nine of them.
     if off < 0.35 then
-        return "ahead"
+        return CN.L["ahead"]
     end
 
     if off < 1.2 then
-        return "veer"
+        return CN.L["veer"]
     end
 
     if off < 2.4 then
-        return "turn"
+        return CN.L["turn"]
     end
 
-    return "back"
+    return CN.L["back"]
 end
 
 ------------------------------------------------------------
@@ -36441,7 +36624,7 @@ CN:RegisterCommand{
     name    = "cues",
     args    = "[on or off]",
     order   = 42,
-    help    = "Sound and a flash when a route finishes. Off by default.",
+    help    = "Sound when you arrive, clear a stop, or finish a route.",
     handler = function(args)
         args = string.lower(CN.Trim(args or ""))
 
@@ -36725,7 +36908,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.51.0
+## Version: 0.52.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -36979,6 +37162,91 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.52.0]
+
+The backlog, reconciled item by item against the shipped code rather than
+against its own status tags -- and then the buildable half of what that
+reconciliation found still outstanding.
+
+### Fixed
+
+- **Nine languages were shipping English for strings that had already been
+  translated.** Forty-six strings were carried in ten locale files and only
+  seventeen were ever looked up. The arrow's own words -- *ahead*, *veer*,
+  *turn*, *back* -- were printed as English literals, and so were "Stop 3 of 8
+  cleared", "Route complete.", the confidence qualifier that wraps every
+  uncertain number in the addon, and the situation line. Thirteen more had no
+  display anywhere at all: translated into ten languages, passing every lint,
+  appearing on no screen.
+  
+  The existing lint only ever asked whether a translation matched a key and
+  whether a key had a translation. Neither question is *does anything show
+  this*. It is asked now, and the build fails on a string nothing displays.
+  The thirteen orphans have been removed rather than kept, because a list of
+  translated strings is a claim about what has been translated, and one that
+  counts strings nobody sees makes that claim false in the direction that
+  flatters it.
+
+### Added
+
+- **A ghost is pointed at their body.** The addon has recognised death since
+  0.43.0, ranked everything else down for it, and printed *"your body first"*
+  -- while being unable to say where the body is. The client answers that
+  directly and was never asked. The corpse is now an ordinary recommendation,
+  so the arrow, the map pin, `/cn go` and the heads-up display all pick it up
+  without any of them needing to know what a corpse is; it keeps its full
+  weight while everything else is ranked down, and no display filter can hide
+  it.
+- **A non-mage can be told how long another continent takes.** A
+  cross-continent journey can only be costed through a teleport whose landing
+  place is known, and eight of the fourteen the addon tracks carried none --
+  including the hearthstone, which everybody has. Five of those eight had no
+  destination for no better reason than that nobody had filled it in.
+  Costable teleports go from six to eleven; the remaining three say why they
+  cannot be pinned rather than being given a plausible-looking false landing.
+- **The colourblind mode now changes the colours.** It added a word beside the
+  arrow -- which satisfies "no information carried by colour alone" and left
+  the palette exactly as unusable as it was. Gold against red is the worst
+  pair there is for the commonest form of colour blindness, and it was
+  carrying *drifting* against *walking away*: the one distinction the arrow
+  exists to make. The alternate palette separates by lightness as well as
+  hue, and the build checks the separation rather than trusting the eye.
+- **`/cn cues` fires at the two moments it was written for.** It was described
+  as sound and a flash when a route finishes, and that is all it did -- while
+  the moments a player actually wants marked are the smaller ones: arriving
+  somewhere, and clearing a stop. All three now, quieter for the small ones.
+- **`TRANSLATING.md`**, and a line in `/cn locale export` saying where to send
+  the block. The tool half of that workflow has existed since 0.39.0 and the
+  return path was written down nowhere, so a translator finished the work and
+  then had to guess -- which is where most people stop.
+- **`cn.ps1 provenance` names the rows worth checking** instead of counting
+  them and telling you to go and look.
+
+### Changed
+
+- **A curated turn-in location now beats the client's moving waypoint** for a
+  quest that is ready to hand in. The lookup was written when the three-phase
+  quest model was designed -- *"a quest is a pick up, a do, and a turn in"* --
+  and was called by nothing, so the third phase, the one the design rests on,
+  has always used a waypoint that points at whatever the quest currently wants
+  rather than at the person who takes it back.
+- **A drop's difficulty is no longer stated as though it were the drop's.**
+  The label came from the Encounter Journal's *currently selected* difficulty
+  -- a window the player may have opened once and left on Normal -- so a
+  Mythic-only mount was confidently labelled Normal. The client offers no
+  per-item difficulty, so it now says what was actually searched.
+
+### Not done, and why
+
+Multi-hop flight routing is a day's work through the code path two previous
+releases' performance and correctness guards both sit on, and is the right
+first thing for the next release rather than a rushed addition to this one.
+Reading the Warband bank cannot be verified against a real container list from
+here. A cross-tab search is a decision the author declined in writing and it
+stays declined until he says otherwise. Screenshots for the store page, the
+in-game arrow verification, the Wago project id and the curated quest data all
+need a live client or an account this build cannot reach.
 
 ## [0.51.0]
 
@@ -40158,6 +40426,76 @@ Items 4.1, 2.3 and 2.4 are worth doing but are not on the critical path.
 Public-facing copy for this addon carries no outcome promises, no superlatives, no specialization claims. That applies to the CurseForge page, the README, and any future marketing.
 '@
 
+$Embedded['TRANSLATING.md'] = @'
+# Translating Completion Navigator
+
+Thank you. Nine languages ship with this addon and every one of them was
+contributed by somebody who did not have to.
+
+## What you need
+
+Nothing but the game. You do not need to clone anything, install a toolchain,
+or learn the addon's file format.
+
+## How
+
+1. In game, set your language and run:
+
+   ```
+   /cn locale export
+   ```
+
+   That prints every string the addon uses, as a ready-made Lua block with
+   empty right-hand sides.
+
+2. Copy it out of the chat frame and fill in the translations.
+
+   **Leave anything you are unsure of blank.** An empty string is ignored and
+   the English is shown instead. English is a better answer than a guess --
+   a wrong translation is worse than no translation, because the player
+   cannot tell it is wrong.
+
+   **Keep the `%d` and `%s` markers exactly as they appear**, including their
+   order. `"Stop %d of %d cleared"` has two numbers in it and the addon fills
+   them in that order.
+
+3. Open an issue on the project's GitHub with the block pasted in, titled
+   `Translation: <locale code>` — for example `Translation: deDE`.
+
+That is the whole process. You do not need to open a pull request; if you
+would rather, the file is `Locales/<code>.lua` and the format is the same
+block you pasted.
+
+## What happens next
+
+The block is checked for two things and then merged:
+
+* every key still exists in the addon (a renamed string orphans its
+  translations, and the build fails rather than showing English silently);
+* every string the addon displays has a translation somewhere.
+
+Both are enforced by the build, so a merged translation cannot quietly rot.
+
+## Which strings matter most
+
+`/cn locale missing` lists what is currently falling back to English for your
+language, most-seen first. The arrow's words — `ahead`, `veer`, `turn`,
+`back` — and the tab names are what a player reads hundreds of times a
+session. The rest can wait.
+
+## Locale codes
+
+`deDE` `esES` `esMX` `frFR` `itIT` `koKR` `ptBR` `ruRU` `zhCN` `zhTW`
+
+If yours is not listed, export it anyway — adding a new one is a new file and
+nothing else.
+
+---
+
+Completion Navigator is a product of **Dam Beaver Studios, LLC**.
+Authored by **Travis A. Bryan I**.
+'@
+
 $Embedded['.pkgmeta'] = @'
 package-as: CompletionNavigator
 
@@ -40173,6 +40511,7 @@ ignore:
   - cn.ps1
   - README.md
   - ROADMAP.md
+  - TRANSLATING.md
   - .luacheckrc
   # Test tooling. harness.lua stubs the entire client API, so shipping it into
   # a player's AddOns folder would be actively dangerous, not merely wasteful.
@@ -40237,7 +40576,7 @@ Half an hour is not the same question as "what should I do next", and it gets it
 
 Travel time is **computed** from the journey you would actually make, weighing three options against each other: run it, take a flight path from the nearest point **you have discovered**, or fly it yourself — whichever is genuinely quicker. Your speed is measured from your own play, separately for running, riding and flying, because those are three different numbers and one median across them is wrong in all three. Task time is **learned** the same way, and learned as the *work* — the journey is taken back out, because the plan adds it separately and counting it twice is how a twelve-minute stop gets quoted as thirty-six. Until it has watched something enough times it says *time unknown* rather than inventing a number, so the plan starts honest and sharpens as you go.
 
-A journey it cannot model — another continent, reached by a portal — still refuses to invent a duration, but it now lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
+A journey it cannot model — another continent, reached by a portal — still refuses to invent a duration, but it lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. Where a teleport lands somewhere fixed, the whole journey is costed straight through it — *"hearth, then four minutes"* rather than a list to work from yourself. The three that go wherever you happen to be bound say so instead of guessing. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
 ## Aim it in one command
 
@@ -40469,7 +40808,7 @@ The game only lists quest pins for the map you are looking at, so "what is waiti
 
 ## Built to be read
 
-A scale for everything it draws, and a mode that labels the arrow in words as well as colour — the arrow's whole language was colour, which is exactly the design that fails a colourblind player.
+A scale for everything it draws, and a colourblind mode that changes the arrow's **palette** as well as labelling it in words. The arrow's whole language is colour, and gold against red is the worst pair there is for the commonest form of colour blindness — so the alternate palette separates by lightness as well as by hue, and the build checks that separation rather than trusting somebody's eye.
 
 ```
 /cn scale 1.25
@@ -40510,7 +40849,7 @@ Every check exists because the thing it covers was once broken in a release, and
 
 ## In your language
 
-German, Spanish, French, Italian, Korean, Portuguese, Russian and both Chinese scripts are started. Anything not yet translated falls back to English rather than to a blank label or a raw identifier, so a partly translated addon is still a working one. `/cn locale` says how far along your language is, and `/cn locale missing` prints exactly the list a translator would work from. Nothing was machine-translated to make that number look larger.
+German, Spanish, French, Italian, Korean, Portuguese, Russian and both Chinese scripts are started. Anything not yet translated falls back to English rather than to a blank label or a raw identifier, so a partly translated addon is still a working one. `/cn locale` says how far along your language is, `/cn locale missing` prints exactly the list a translator would work from, and `/cn locale export` produces a ready-made block to fill in — no toolchain, no file format to learn. Nothing was machine-translated to make that number look larger, and the build refuses to ship a string that is translated everywhere and displayed nowhere.
 
 ## Show only what you care about
 
@@ -40585,6 +40924,7 @@ There is a benchmark in the repository, and the numbers above come out of it rat
 - Where the game does not provide a trustworthy denominator, this addon reports counts rather than inventing a completion percentage. That rule is why some things get a progress bar and others deliberately do not.
 - "Available to pick up nearby" counts what is genuinely within reach and reports anything further out separately, rather than calling a four-minute ride "here".
 - Follow mode never moves your waypoint during a fight. Whatever it was going to do happens when the fight ends.
+- While you are a ghost, the only thing it recommends is your body — pointed at, not just mentioned. Everything else keeps.
 - On a fresh install it asks you to run one scan, and keeps asking until you have — an addon that knows nothing about your collections should say so rather than quietly looking thin. Once scanned, it never mentions it again.
 - Nothing is taken over without being asked. Auto-advancing the waypoint and rare alerts are off by default.
 - No external server, no account required, no data leaves your machine.
@@ -40630,7 +40970,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.51.0
+0.52.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -41554,6 +41894,42 @@ mutate "Modules/Preference.lua" \
     "a player who does everything is recorded as doing nothing"
 
 
+# The 0.52.0 backlog work.
+mutate "Modules/Hud.lua" \
+    "        return CN.L[\"ahead\"]" \
+    "        return \"ahead\"" \
+    "a translated string is printed as an English literal"
+
+mutate "Modules/Group.lua" \
+    "        if objective and objective.corpse then
+            return score
+        end" \
+    "        if false then
+            return score
+        end" \
+    "a ghost's body is ranked down with everything else"
+
+mutate "Scoring.lua" \
+    "        if objective.corpse
+            or not CN.IsObjectiveTypeEnabled" \
+    "        if not CN.IsObjectiveTypeEnabled" \
+    "a type filter can hide your own corpse"
+
+mutate "Modules/Navigation.lua" \
+    "    if hud and hud.IsColourblind and hud.IsColourblind() then
+        return Navigation.colorblindColors
+    end" \
+    "    if false then
+        return Navigation.colorblindColors
+    end" \
+    "colourblind mode leaves the palette alone"
+
+mutate "Modules/Travel.lua" \
+    "    { kind = \"spell\", id = 50977,  label = \"Death Gate\",              mapID = 118 }," \
+    "    { kind = \"spell\", id = 50977,  label = \"Death Gate\" }," \
+    "a teleport loses the destination that makes it costable"
+
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 
@@ -41637,7 +42013,7 @@ read_globals = {
     -- the call site, all real APIs the client provides.
     "UpdateAddOnMemoryUsage", "GetAddOnMemoryUsage",
     "SOUNDKIT", "PlaySound", "UIFrameFlash",
-    "UnitIsDeadOrGhost", "UnitIsGhost", "GetNumGroupMembers",
+    "UnitIsDeadOrGhost", "UnitIsGhost", "GetNumGroupMembers", "C_DeathInfo",
     "IsInRaid", "IsInInstance", "IsFlying", "IsFlyableArea",
     "C_CraftingOrders", "C_DelvesUI", "C_Spell",
 
@@ -42428,6 +42804,23 @@ function GetInboxHeaderInfo(index)
     return nil, nil, mail.sender, mail.subject, mail.money, 0,
         mail.daysLeft, mail.items
 end
+
+-- WHERE YOUR BODY IS.
+--
+-- The client will tell you, and the addon never asked -- it ranked everything
+-- down for being dead and then pointed at nothing. Modelled here so the path
+-- is exercised rather than assumed.
+CN_TEST_CORPSE = { x = 0.31, y = 0.62 }
+
+C_DeathInfo = {
+    GetCorpseMapPosition = function(mapID)
+        if not CN_TEST_GHOST or not CN_TEST_CORPSE then
+            return nil
+        end
+
+        return CreateVector2D(CN_TEST_CORPSE.x, CN_TEST_CORPSE.y)
+    end,
+}
 
 CN_TEST_DEAD       = false
 CN_TEST_GHOST      = false
@@ -44454,7 +44847,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 21, "every candidate provider must register, got "
+assert(firstState.providers == 22, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -51661,6 +52054,241 @@ print("\nEvery client function this addon calls, checked against the client:")
         .. "agrees with the client in both directions")
 end)()
 
+print("\nThe arrow's colours separate for a colourblind player too:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A LABEL BESIDE A BAD PALETTE IS HALF A FIX.
+    --
+    -- Colourblind mode added a word next to the arrow -- which satisfies "no
+    -- information carried by colour alone" and left the colours exactly as
+    -- unusable as they were. Gold against red is the worst pair there is for
+    -- the commonest form of colour blindness, and it was carrying "drifting"
+    -- against "walking away": the one distinction the arrow exists to make.
+    ------------------------------------------------------------
+    local navigation = CN:GetModule("Navigation")
+    local hud        = CN:GetModule("Hud")
+
+    CN.Settings().colourblind = nil
+
+    assert(navigation.Palette() == navigation.colors,
+        "the default palette is the default")
+
+    CN.Settings().colourblind = true
+
+    local palette = navigation.Palette()
+
+    assert(palette == navigation.colorblindColors,
+        "colourblind mode must change the palette, not only add a word")
+
+    -- The three states must differ in LIGHTNESS, not only in hue -- that is
+    -- what makes them tell apart when the hues do not.
+    local function luminance(colour)
+        return (0.2126 * colour[1]) + (0.7152 * colour[2]) + (0.0722 * colour[3])
+    end
+
+    local onCourse = luminance(palette.ON_COURSE)
+    local drifting = luminance(palette.DRIFTING)
+    local away     = luminance(palette.AWAY)
+
+    for _, pair in ipairs({
+        { onCourse, drifting, "on course", "drifting" },
+        { drifting, away,     "drifting",  "away" },
+        { onCourse, away,     "on course", "away" },
+    }) do
+        assert(math.abs(pair[1] - pair[2]) > 0.15,
+            "in colourblind mode " .. pair[3] .. " and " .. pair[4]
+            .. " must differ in lightness as well as hue, and they differ by "
+            .. string.format("%.2f", math.abs(pair[1] - pair[2])))
+    end
+
+    CN.Settings().colourblind = nil
+
+    print("  three states, told apart by lightness as well as by hue")
+end)()
+
+print("\nA ghost is pointed at their body:")
+
+;(function()
+    ------------------------------------------------------------
+    -- HALF AN ANSWER IS NOT AN ANSWER.
+    --
+    -- The addon has recognised death since 0.43.0, ranked everything else
+    -- down for it, and printed "your body first" -- while being unable to say
+    -- where the body is. The client answers that question directly and was
+    -- never asked.
+    ------------------------------------------------------------
+    local group = CN:GetModule("Group")
+
+    CN_TEST_DEAD  = true
+    CN_TEST_GHOST = true
+
+    local corpse = group.CorpseTarget()
+
+    assert(corpse and corpse.mapID and corpse.x,
+        "a ghost's corpse position must be readable")
+
+    CN.CollectCandidates(true)
+
+    local ghostList = CN.Recommend(1)
+
+    assert(ghostList and ghostList[1],
+        "there must be something to recommend to a ghost")
+
+    assert(ghostList[1].corpse,
+        "and it must be the body -- while dead, nothing else is actionable, "
+        .. "so anything else at the top is the addon burying its own answer; "
+        .. "got " .. tostring(ghostList[1].name))
+
+    assert(ghostList[1].x == CN_TEST_CORPSE.x,
+        "pointed at the actual corpse position")
+
+    -- AND THE DEATH PENALTY MUST NOT APPLY TO IT.
+    --
+    -- Every objective is multiplied down while dead, by design. Applying that
+    -- to the corpse as well leaves the ORDER unchanged -- everything shrinks
+    -- together -- so an ordering check cannot see the difference. What it
+    -- changes is the number itself, and with it every threshold downstream
+    -- that compares a score against an absolute: the heads-up display, the
+    -- broker feed, and anything that asks "is this worth interrupting for".
+    local scored = CN.ScoreObjective(ghostList[1])
+
+    assert(scored > 30,
+        "the body must keep its full weight while dead -- the death penalty "
+        .. "applies to everything that can wait, and the body cannot; got "
+        .. string.format("%.2f", scored))
+
+    CN_TEST_GHOST = false
+    CN_TEST_DEAD  = false
+
+    CN.CollectCandidates(true)
+
+    for _, candidate in ipairs(CN.CollectCandidates()) do
+        assert(not candidate.corpse,
+            "and a living player is not told to run to their body")
+    end
+
+    print("  a ghost's next action is their body, at the right coordinates")
+end)()
+
+print("\nA non-mage can be told how long another continent takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- ELEVEN OF FOURTEEN TELEPORTS NOW HAVE A DESTINATION.
+    --
+    -- The cross-continent branch can only cost a journey through a teleport
+    -- whose landing map is known, and eight of the fourteen carried none --
+    -- so anyone without the six vanilla mage teleports got a list of what
+    -- they own and no duration at all, which is exactly the state the branch
+    -- was written to replace. Five of the eight were simply never filled in.
+    ------------------------------------------------------------
+    local travel = CN:GetModule("Travel")
+
+    local costable, marked = 0, 0
+
+    for _, teleport in ipairs(travel.teleports) do
+        if teleport.mapID then
+            costable = costable + 1
+        elseif teleport.bindPoint or teleport.local_ then
+            marked = marked + 1
+        end
+    end
+
+    assert(costable >= 11,
+        "at least eleven teleports must carry a destination the addon can "
+        .. "cost a journey from, got " .. costable)
+
+    assert(costable + marked == #travel.teleports,
+        "and every one without a destination must say WHY it has none -- "
+        .. (#travel.teleports - costable - marked) .. " are simply blank")
+
+    print("  " .. costable .. " teleports costable, " .. marked
+        .. " honestly marked as unpinnable")
+end)()
+
+print("\nEvery string translated into ten languages is shown to somebody:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE LINT ONLY EVER CHECKED ONE DIRECTION.
+    --
+    -- `cn.ps1 check` asserts that every translation corresponds to a
+    -- canonical key, and that every canonical key has at least one
+    -- translation. Neither question is "does anything ever DISPLAY this".
+    --
+    -- Thirteen keys were translated into ten languages, passed every lint,
+    -- and appeared on no screen -- while strings that WERE on screen were
+    -- printed as English literals beside them. Nine languages were shipping
+    -- English for text that had already been translated.
+    ------------------------------------------------------------
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the .toc must be readable")
+
+    local listed = manifest:read("*a")
+
+    manifest:close()
+
+    local source = ""
+
+    for line in string.gmatch(listed, "[^\r\n]+") do
+        if string.match(line, "%.lua%s*$") and not string.match(line, "^%s*#") then
+            local relative = CN.Trim(string.gsub(line, "\\", "/"))
+
+            if not string.find(relative, "Locales/") then
+                local file = io.open(ROOT .. "/" .. relative, "r")
+
+                if file then
+                    source = source .. file:read("*a")
+
+                    file:close()
+                end
+            end
+        end
+    end
+
+    assert(#source > 100000, "the source scan found almost nothing")
+
+    local unused = {}
+
+    for _, key in ipairs(CN.localeKeys) do
+        local literal = 'CN.L["' .. key .. '"]'
+
+        if not string.find(source, literal, 1, true)
+            and not (CN.localeDynamic and CN.localeDynamic[key]) then
+
+            table.insert(unused, key)
+        end
+    end
+
+    table.sort(unused)
+
+    for _, key in ipairs(unused) do
+        print("  SHOWN BY NOTHING: " .. key)
+    end
+
+    assert(#unused == 0,
+        #unused .. " canonical string(s) are translated into every locale "
+        .. "and displayed by nothing: " .. table.concat(unused, ", "))
+
+    -- And the dynamic declarations must not outlive their keys either.
+    local canonical = {}
+
+    for _, key in ipairs(CN.localeKeys) do
+        canonical[key] = true
+    end
+
+    for key in pairs(CN.localeDynamic or {}) do
+        assert(canonical[key],
+            "the dynamic-lookup list names \"" .. key .. "\", which is not a "
+            .. "canonical key any more")
+    end
+
+    print("  " .. #CN.localeKeys .. " strings, every one of them reaching a "
+        .. "screen")
+end)()
+
 print("\nThe numbers the addon prints are the numbers it means:")
 
 ;(function()
@@ -53901,9 +54529,17 @@ echo "  a string with no translation anywhere blocks the release"
 # was ignored every single time, including by the person who wrote the string.
 cp Locales/enUS.lua Locales/enUS.bak
 python3 - <<'EOF'
+# ANCHORED ON A KEY THAT IS ASSERTED TO EXIST.
+#
+# This anchored on "cleared", which 0.52.0 removed from the canonical list --
+# so the insertion silently did nothing and the test failed reporting that the
+# lint was broken. A probe that can no-op is a probe that can pass for the
+# wrong reason; this one refuses rather than pretending.
 p = 'Locales/enUS.lua'
 s = open(p, encoding='utf-8').read()
-s = s.replace('    "cleared",', '    "cleared",\n    "untranslated probe",', 1)
+anchor = '    "ahead",'
+assert anchor in s, "the probe anchor is gone from Locales/enUS.lua"
+s = s.replace(anchor, anchor + '\n    "untranslated probe",', 1)
 open(p, 'w', encoding='utf-8').write(s)
 EOF
 $PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q 'no translation in ANY locale' \
@@ -53916,7 +54552,9 @@ cp Locales/enUS.bak Locales/enUS.lua
 python3 - <<'EOF'
 p = 'Locales/enUS.lua'
 s = open(p, encoding='utf-8').read()
-s = s.replace('    "cleared",', '    "cleared",\n    "cleared",', 1)
+anchor = '    "ahead",'
+assert anchor in s, "the probe anchor is gone from Locales/enUS.lua"
+s = s.replace(anchor, anchor + '\n    "ahead",', 1)
 open(p, 'w', encoding='utf-8').write(s)
 EOF
 $PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q 'more than once' \
@@ -58186,15 +58824,34 @@ function Invoke-CNProvenance {
 
     $community = Read-CNFile 'Data\Community.lua'
 
-    $curated  = 0
-    $observed = 0
+    $curated      = 0
+    $observed     = 0
+    $observedIDs  = @()
 
     foreach ($match in [regex]::Matches($quests, '(?m)^\s*\[(\d+)\]\s*=\s*\{')) {
         $block = Get-CNLuaBlock -Text $quests -StartIndex $match.Index
 
         if (-not $block) { continue }
 
-        if ($block.Body -match 'chain observed on') { $observed++ } else { $curated++ }
+        if ($block.Body -match 'chain observed on') {
+            $observed++
+
+            # NAMED, NOT COUNTED.
+            #
+            # This reported three numbers and told you to spot-check -- and
+            # then made you open the file and find the rows yourself. A
+            # command that says "check these" without saying WHICH is a
+            # command whose advice nobody takes.
+            $name = if ($block.Body -match 'name\s*=\s*"([^"]*)"') { $Matches[1] } else { '' }
+
+            $observedIDs += [PSCustomObject]@{
+                ID   = [int]$match.Groups[1].Value
+                Name = $name
+            }
+        }
+        else {
+            $curated++
+        }
     }
 
     $contributed = 0
@@ -58211,9 +58868,17 @@ function Invoke-CNProvenance {
     Write-Host ''
 
     if ($observed -gt 0) {
-        Write-Host '  The observed rows are marked in the file. They held on three or' -ForegroundColor DarkGray
-        Write-Host '  more characters, which is good evidence and is not the same as' -ForegroundColor DarkGray
-        Write-Host '  somebody having looked. Spot-check before relying on them.' -ForegroundColor DarkGray
+        Write-Host '  These held on three or more characters, which is good evidence and' -ForegroundColor DarkGray
+        Write-Host '  is not the same as somebody having looked:' -ForegroundColor DarkGray
+        Write-Host ''
+
+        foreach ($row in ($observedIDs | Sort-Object ID)) {
+            Write-Host ("    {0,-8} {1}" -f $row.ID, $row.Name) -ForegroundColor Yellow
+        }
+
+        Write-Host ''
+        Write-Host '  Check one against a wiki, then delete its `chain observed on`' -ForegroundColor DarkGray
+        Write-Host '  comment -- that comment IS the unchecked marker.' -ForegroundColor DarkGray
         Write-Host ''
     }
 

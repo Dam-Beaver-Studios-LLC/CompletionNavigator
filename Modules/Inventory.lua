@@ -539,7 +539,8 @@ CN:RegisterCommand{
                     break
                 end
 
-                Print(string.format("  |cffffff00%d more|r %s |cff999999(%d/%d)|r",
+                Print(string.format("  |cffffff00" .. CN.L["%d more"]
+                    .. "|r %s |cff999999(%d/%d)|r",
                     row.remaining, tostring(row.text or row.title),
                     row.done, row.required))
             end

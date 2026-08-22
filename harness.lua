@@ -654,6 +654,23 @@ function GetInboxHeaderInfo(index)
         mail.daysLeft, mail.items
 end
 
+-- WHERE YOUR BODY IS.
+--
+-- The client will tell you, and the addon never asked -- it ranked everything
+-- down for being dead and then pointed at nothing. Modelled here so the path
+-- is exercised rather than assumed.
+CN_TEST_CORPSE = { x = 0.31, y = 0.62 }
+
+C_DeathInfo = {
+    GetCorpseMapPosition = function(mapID)
+        if not CN_TEST_GHOST or not CN_TEST_CORPSE then
+            return nil
+        end
+
+        return CreateVector2D(CN_TEST_CORPSE.x, CN_TEST_CORPSE.y)
+    end,
+}
+
 CN_TEST_DEAD       = false
 CN_TEST_GHOST      = false
 CN_TEST_GROUP_SIZE = 1
@@ -2679,7 +2696,7 @@ print("  providers = " .. firstState.providers
     .. ", cached = " .. firstState.fresh
     .. ", objectives = " .. firstState.count)
 
-assert(firstState.providers == 21, "every candidate provider must register, got "
+assert(firstState.providers == 22, "every candidate provider must register, got "
     .. firstState.providers)
 assert(firstState.fresh == firstState.providers,
     "a forced collection must leave every provider cached")
@@ -9884,6 +9901,241 @@ print("\nEvery client function this addon calls, checked against the client:")
 
     print("  " .. #CN.apiSurface .. " client functions listed; the checker "
         .. "agrees with the client in both directions")
+end)()
+
+print("\nThe arrow's colours separate for a colourblind player too:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A LABEL BESIDE A BAD PALETTE IS HALF A FIX.
+    --
+    -- Colourblind mode added a word next to the arrow -- which satisfies "no
+    -- information carried by colour alone" and left the colours exactly as
+    -- unusable as they were. Gold against red is the worst pair there is for
+    -- the commonest form of colour blindness, and it was carrying "drifting"
+    -- against "walking away": the one distinction the arrow exists to make.
+    ------------------------------------------------------------
+    local navigation = CN:GetModule("Navigation")
+    local hud        = CN:GetModule("Hud")
+
+    CN.Settings().colourblind = nil
+
+    assert(navigation.Palette() == navigation.colors,
+        "the default palette is the default")
+
+    CN.Settings().colourblind = true
+
+    local palette = navigation.Palette()
+
+    assert(palette == navigation.colorblindColors,
+        "colourblind mode must change the palette, not only add a word")
+
+    -- The three states must differ in LIGHTNESS, not only in hue -- that is
+    -- what makes them tell apart when the hues do not.
+    local function luminance(colour)
+        return (0.2126 * colour[1]) + (0.7152 * colour[2]) + (0.0722 * colour[3])
+    end
+
+    local onCourse = luminance(palette.ON_COURSE)
+    local drifting = luminance(palette.DRIFTING)
+    local away     = luminance(palette.AWAY)
+
+    for _, pair in ipairs({
+        { onCourse, drifting, "on course", "drifting" },
+        { drifting, away,     "drifting",  "away" },
+        { onCourse, away,     "on course", "away" },
+    }) do
+        assert(math.abs(pair[1] - pair[2]) > 0.15,
+            "in colourblind mode " .. pair[3] .. " and " .. pair[4]
+            .. " must differ in lightness as well as hue, and they differ by "
+            .. string.format("%.2f", math.abs(pair[1] - pair[2])))
+    end
+
+    CN.Settings().colourblind = nil
+
+    print("  three states, told apart by lightness as well as by hue")
+end)()
+
+print("\nA ghost is pointed at their body:")
+
+;(function()
+    ------------------------------------------------------------
+    -- HALF AN ANSWER IS NOT AN ANSWER.
+    --
+    -- The addon has recognised death since 0.43.0, ranked everything else
+    -- down for it, and printed "your body first" -- while being unable to say
+    -- where the body is. The client answers that question directly and was
+    -- never asked.
+    ------------------------------------------------------------
+    local group = CN:GetModule("Group")
+
+    CN_TEST_DEAD  = true
+    CN_TEST_GHOST = true
+
+    local corpse = group.CorpseTarget()
+
+    assert(corpse and corpse.mapID and corpse.x,
+        "a ghost's corpse position must be readable")
+
+    CN.CollectCandidates(true)
+
+    local ghostList = CN.Recommend(1)
+
+    assert(ghostList and ghostList[1],
+        "there must be something to recommend to a ghost")
+
+    assert(ghostList[1].corpse,
+        "and it must be the body -- while dead, nothing else is actionable, "
+        .. "so anything else at the top is the addon burying its own answer; "
+        .. "got " .. tostring(ghostList[1].name))
+
+    assert(ghostList[1].x == CN_TEST_CORPSE.x,
+        "pointed at the actual corpse position")
+
+    -- AND THE DEATH PENALTY MUST NOT APPLY TO IT.
+    --
+    -- Every objective is multiplied down while dead, by design. Applying that
+    -- to the corpse as well leaves the ORDER unchanged -- everything shrinks
+    -- together -- so an ordering check cannot see the difference. What it
+    -- changes is the number itself, and with it every threshold downstream
+    -- that compares a score against an absolute: the heads-up display, the
+    -- broker feed, and anything that asks "is this worth interrupting for".
+    local scored = CN.ScoreObjective(ghostList[1])
+
+    assert(scored > 30,
+        "the body must keep its full weight while dead -- the death penalty "
+        .. "applies to everything that can wait, and the body cannot; got "
+        .. string.format("%.2f", scored))
+
+    CN_TEST_GHOST = false
+    CN_TEST_DEAD  = false
+
+    CN.CollectCandidates(true)
+
+    for _, candidate in ipairs(CN.CollectCandidates()) do
+        assert(not candidate.corpse,
+            "and a living player is not told to run to their body")
+    end
+
+    print("  a ghost's next action is their body, at the right coordinates")
+end)()
+
+print("\nA non-mage can be told how long another continent takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- ELEVEN OF FOURTEEN TELEPORTS NOW HAVE A DESTINATION.
+    --
+    -- The cross-continent branch can only cost a journey through a teleport
+    -- whose landing map is known, and eight of the fourteen carried none --
+    -- so anyone without the six vanilla mage teleports got a list of what
+    -- they own and no duration at all, which is exactly the state the branch
+    -- was written to replace. Five of the eight were simply never filled in.
+    ------------------------------------------------------------
+    local travel = CN:GetModule("Travel")
+
+    local costable, marked = 0, 0
+
+    for _, teleport in ipairs(travel.teleports) do
+        if teleport.mapID then
+            costable = costable + 1
+        elseif teleport.bindPoint or teleport.local_ then
+            marked = marked + 1
+        end
+    end
+
+    assert(costable >= 11,
+        "at least eleven teleports must carry a destination the addon can "
+        .. "cost a journey from, got " .. costable)
+
+    assert(costable + marked == #travel.teleports,
+        "and every one without a destination must say WHY it has none -- "
+        .. (#travel.teleports - costable - marked) .. " are simply blank")
+
+    print("  " .. costable .. " teleports costable, " .. marked
+        .. " honestly marked as unpinnable")
+end)()
+
+print("\nEvery string translated into ten languages is shown to somebody:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE LINT ONLY EVER CHECKED ONE DIRECTION.
+    --
+    -- `cn.ps1 check` asserts that every translation corresponds to a
+    -- canonical key, and that every canonical key has at least one
+    -- translation. Neither question is "does anything ever DISPLAY this".
+    --
+    -- Thirteen keys were translated into ten languages, passed every lint,
+    -- and appeared on no screen -- while strings that WERE on screen were
+    -- printed as English literals beside them. Nine languages were shipping
+    -- English for text that had already been translated.
+    ------------------------------------------------------------
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the .toc must be readable")
+
+    local listed = manifest:read("*a")
+
+    manifest:close()
+
+    local source = ""
+
+    for line in string.gmatch(listed, "[^\r\n]+") do
+        if string.match(line, "%.lua%s*$") and not string.match(line, "^%s*#") then
+            local relative = CN.Trim(string.gsub(line, "\\", "/"))
+
+            if not string.find(relative, "Locales/") then
+                local file = io.open(ROOT .. "/" .. relative, "r")
+
+                if file then
+                    source = source .. file:read("*a")
+
+                    file:close()
+                end
+            end
+        end
+    end
+
+    assert(#source > 100000, "the source scan found almost nothing")
+
+    local unused = {}
+
+    for _, key in ipairs(CN.localeKeys) do
+        local literal = 'CN.L["' .. key .. '"]'
+
+        if not string.find(source, literal, 1, true)
+            and not (CN.localeDynamic and CN.localeDynamic[key]) then
+
+            table.insert(unused, key)
+        end
+    end
+
+    table.sort(unused)
+
+    for _, key in ipairs(unused) do
+        print("  SHOWN BY NOTHING: " .. key)
+    end
+
+    assert(#unused == 0,
+        #unused .. " canonical string(s) are translated into every locale "
+        .. "and displayed by nothing: " .. table.concat(unused, ", "))
+
+    -- And the dynamic declarations must not outlive their keys either.
+    local canonical = {}
+
+    for _, key in ipairs(CN.localeKeys) do
+        canonical[key] = true
+    end
+
+    for key in pairs(CN.localeDynamic or {}) do
+        assert(canonical[key],
+            "the dynamic-lookup list names \"" .. key .. "\", which is not a "
+            .. "canonical key any more")
+    end
+
+    print("  " .. #CN.localeKeys .. " strings, every one of them reaching a "
+        .. "screen")
 end)()
 
 print("\nThe numbers the addon prints are the numbers it means:")

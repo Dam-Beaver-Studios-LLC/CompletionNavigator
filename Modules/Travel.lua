@@ -699,22 +699,58 @@ end
 -- `mapID` is the ZONE the teleport lands in. Where it is nil, the option is
 -- still listed and simply cannot be costed; naming a shortcut you have is
 -- useful even when the addon cannot price it.
+-- WHERE EACH ONE PUTS YOU DOWN.
+--
+-- A cross-continent journey can only be costed through a teleport whose
+-- destination is known, and eight of these fourteen carried no destination at
+-- all -- including the hearthstone, which is the one every player has. So a
+-- non-mage asking about another continent got a list of what they own and no
+-- duration whatsoever, which is the state this whole branch was built to
+-- replace.
+--
+-- Three of them genuinely cannot be pinned, and are marked rather than given
+-- a plausible-looking false landing:
+--
+--   * The hearthstone and Astral Recall go wherever the player set them. The
+--     client reports that as a zone NAME, and this addon has no name-to-map
+--     index -- building one means walking the whole map tree, which is a
+--     client call per zone for a fact that is worth less than its cost. They
+--     are still listed as available; they are not costed.
+--   * The Flight Master's Whistle lands at the nearest flight point in the
+--     zone you are already standing in. It is not a cross-continent option at
+--     all.
+--
+-- The other eleven are fixed locations and are simply written down. Five of
+-- them had no destination for no better reason than that nobody had filled
+-- it in, which is why a non-mage got no cross-continent number at all.
 Travel.teleports = {
-    { kind = "item",  id = 6948,   label = "Hearthstone" },
-    { kind = "item",  id = 110560, label = "Garrison Hearthstone" },
-    { kind = "item",  id = 140192, label = "Dalaran Hearthstone" },
-    { kind = "item",  id = 141605, label = "Flight Master's Whistle" },
-    { kind = "spell", id = 556,    label = "Astral Recall" },
+    { kind = "item",  id = 6948,   label = "Hearthstone", bindPoint = true },
+
+    { kind = "item",  id = 110560, label = "Garrison Hearthstone",
+      -- Two garrisons, one per faction, and the client will not say which
+      -- without reading the player's own garrison data. Draenor is the
+      -- continent either way, which is what a cross-continent estimate needs.
+      mapID = 590 },
+
+    { kind = "item",  id = 140192, label = "Dalaran Hearthstone", mapID = 627 },
+
+    -- Not a destination: it lands you at the nearest flight point in the zone
+    -- you are already in.
+    { kind = "item",  id = 141605, label = "Flight Master's Whistle",
+      local_ = true },
+
+    { kind = "spell", id = 556,    label = "Astral Recall", bindPoint = true },
     { kind = "spell", id = 3565,   label = "Teleport: Darnassus",     mapID = 89 },
     { kind = "spell", id = 3562,   label = "Teleport: Ironforge",     mapID = 87 },
     { kind = "spell", id = 3561,   label = "Teleport: Stormwind",     mapID = 84 },
     { kind = "spell", id = 3567,   label = "Teleport: Orgrimmar",     mapID = 85 },
     { kind = "spell", id = 3563,   label = "Teleport: Undercity",     mapID = 90 },
     { kind = "spell", id = 3566,   label = "Teleport: Thunder Bluff", mapID = 88 },
-    { kind = "spell", id = 18960,  label = "Teleport: Moonglade" },
-    { kind = "spell", id = 50977,  label = "Death Gate" },
-    { kind = "spell", id = 126892, label = "Zen Pilgrimage" },
+    { kind = "spell", id = 18960,  label = "Teleport: Moonglade",     mapID = 80 },
+    { kind = "spell", id = 50977,  label = "Death Gate",              mapID = 118 },
+    { kind = "spell", id = 126892, label = "Zen Pilgrimage",          mapID = 809 },
 }
+
 
 local function ItemCooldown(itemID)
     local count = 0

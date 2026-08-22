@@ -240,19 +240,25 @@ function Hud.BearingWord(relative)
 
     local off = math.abs(relative)
 
+    -- THROUGH CN.L, LIKE EVERY OTHER STRING A PLAYER READS.
+    --
+    -- These four are translated into all ten shipped locales and were
+    -- returned as English literals, so the one accessibility feature that
+    -- exists for players who cannot use the arrow's colours spoke only
+    -- English to nine of them.
     if off < 0.35 then
-        return "ahead"
+        return CN.L["ahead"]
     end
 
     if off < 1.2 then
-        return "veer"
+        return CN.L["veer"]
     end
 
     if off < 2.4 then
-        return "turn"
+        return CN.L["turn"]
     end
 
-    return "back"
+    return CN.L["back"]
 end
 
 ------------------------------------------------------------
@@ -449,7 +455,7 @@ CN:RegisterCommand{
     name    = "cues",
     args    = "[on or off]",
     order   = 42,
-    help    = "Sound and a flash when a route finishes. Off by default.",
+    help    = "Sound when you arrive, clear a stop, or finish a route.",
     handler = function(args)
         args = string.lower(CN.Trim(args or ""))
 

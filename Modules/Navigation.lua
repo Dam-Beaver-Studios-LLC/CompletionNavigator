@@ -374,11 +374,43 @@ Navigation.colors = {
     UNKNOWN   = { 0.600, 0.640, 0.680 },   -- no bearing available
 }
 
+-- THE PALETTE ITSELF, NOT ONLY A LABEL BESIDE IT.
+--
+-- Colourblind mode has until now added a word next to the arrow, which
+-- satisfies "no information carried by colour alone" and leaves the colours
+-- themselves as bad as they were. Gold against red is the single worst pair
+-- for the commonest form of colour blindness -- and it is the pair carrying
+-- "drifting" against "walking away", which is the distinction the arrow
+-- exists to make.
+--
+-- Blue and orange instead, which separate under every common form, with
+-- white for on-course so the three differ in lightness as well as in hue.
+-- Somebody who cannot tell the hues apart can still tell these apart.
+-- Chosen so that the three differ by at least 0.27 in relative luminance --
+-- checked by the suite, not by eye. Lightness is what survives when hue does
+-- not.
+Navigation.colorblindColors = {
+    ON_COURSE = { 0.980, 0.980, 0.980 },   -- near-white, luminance 0.98
+    DRIFTING  = { 0.400, 0.760, 1.000 },   -- light blue,  luminance 0.70
+    AWAY      = { 0.780, 0.340, 0.020 },   -- dark orange, luminance 0.41
+    UNKNOWN   = { 0.520, 0.540, 0.560 },
+}
+
+function Navigation.Palette()
+    local hud = CN:GetModule("Hud")
+
+    if hud and hud.IsColourblind and hud.IsColourblind() then
+        return Navigation.colorblindColors
+    end
+
+    return Navigation.colors
+end
+
 -- Blue when you are walking toward it, gold when you are drifting, red when
 -- you are walking away. The single most useful thing an arrow does, and it
 -- costs one comparison.
 function Navigation.BearingColor(relative)
-    local palette = Navigation.colors
+    local palette = Navigation.Palette()
 
     if not relative then
         return palette.UNKNOWN[1], palette.UNKNOWN[2], palette.UNKNOWN[3]
@@ -989,6 +1021,13 @@ function Navigation.Arrive()
     local reached = tostring(target.title or "destination")
 
     Print(string.format(CN.L["Arrived: %s"], reached))
+
+    -- The other moment `/cn cues` was written for and never wired to.
+    local follow = CN:GetModule("Follow")
+
+    if follow and follow.Cue then
+        pcall(follow.Cue, "arrival")
+    end
 
     -- Arrival is exactly the moment auto-advance was designed for; before
     -- this, it could only re-point on a timer or an event.

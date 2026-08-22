@@ -49,7 +49,7 @@ read_globals = {
     -- the call site, all real APIs the client provides.
     "UpdateAddOnMemoryUsage", "GetAddOnMemoryUsage",
     "SOUNDKIT", "PlaySound", "UIFrameFlash",
-    "UnitIsDeadOrGhost", "UnitIsGhost", "GetNumGroupMembers",
+    "UnitIsDeadOrGhost", "UnitIsGhost", "GetNumGroupMembers", "C_DeathInfo",
     "IsInRaid", "IsInInstance", "IsFlying", "IsFlyableArea",
     "C_CraftingOrders", "C_DelvesUI", "C_Spell",
 
