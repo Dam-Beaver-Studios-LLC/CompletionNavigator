@@ -53,9 +53,12 @@ release pipeline did.
   in the `.toc` reported it as missing and exited non-zero, before the
   packager ran. The failure began the moment the first recording was committed
   and repeated on every release after it.
-- **Three separate lists decide what counts as addon source** -- the toolkit's
-  file scanner, the build workflow's search, and the packager's ignore list --
-  and 0.47.0 taught only the first one about `fixtures/`. That is a fix
+- **Four separate lists decide what counts as addon source** -- the toolkit's
+  file scanner, the build workflow's search, luacheck's exclusion list and the
+  packager's ignore list -- and 0.47.0 taught only the first one about
+  `fixtures/`. Fixing three of the four moved the failure from the `.toc` step
+  to the Lint step rather than curing it, which is the same mistake a second
+  time in the same hour. That is a fix
   applied to the instance somebody noticed instead of to the class, which is
   the same mistake this project's comments have described twice already. All
   three now agree, and a test scaffolds a tree with a recording in it and

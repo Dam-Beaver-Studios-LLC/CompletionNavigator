@@ -36085,9 +36085,12 @@ release pipeline did.
   in the `.toc` reported it as missing and exited non-zero, before the
   packager ran. The failure began the moment the first recording was committed
   and repeated on every release after it.
-- **Three separate lists decide what counts as addon source** -- the toolkit's
-  file scanner, the build workflow's search, and the packager's ignore list --
-  and 0.47.0 taught only the first one about `fixtures/`. That is a fix
+- **Four separate lists decide what counts as addon source** -- the toolkit's
+  file scanner, the build workflow's search, luacheck's exclusion list and the
+  packager's ignore list -- and 0.47.0 taught only the first one about
+  `fixtures/`. Fixing three of the four moved the failure from the `.toc` step
+  to the Lint step rather than curing it, which is the same mistake a second
+  time in the same hour. That is a fix
   applied to the instance somebody noticed instead of to the class, which is
   the same mistake this project's comments have described twice already. All
   three now agree, and a test scaffolds a tree with a recording in it and
@@ -40409,6 +40412,16 @@ files["bench.lua"]   = { ignore = { "1" }, unused = false }
 -- dependencies. They are not ours and must not be analysed.
 exclude_files = {
     "_backups/",
+
+    -- Recordings of a live client, read only by the harness. Evidence, not
+    -- source: a malformed one is a broken recording to re-capture, not a
+    -- syntax error in the addon -- and it failed the build as though it were.
+    --
+    -- The FOURTH place that decides what counts as addon source. The other
+    -- three -- the toolkit's file scanner, the CI search, and .pkgmeta --
+    -- were taught about fixtures/ and this was missed, so the build moved
+    -- from failing at the .toc step to failing at Lint.
+    "fixtures/",
     ".lua/**",
     ".lua-build/**",
     ".luarocks/**",
@@ -51601,7 +51614,7 @@ grep -q "All checks passed" localecheck.log \
   || { echo "FAIL: the shipped locales do not pass their own lint"; cat localecheck.log; exit 1; }
 echo "    named, blocking, and the shipped locales are complete"
 
-echo "  three lists of what counts as addon source, agreeing"
+echo "  four lists of what counts as addon source, agreeing"
 # THE FAILURE THAT COST THREE RELEASES.
 #
 # `cn.ps1 fixtures` writes fixtures/captured.lua -- a recording of a live
@@ -51649,12 +51662,22 @@ rm -f "$toc"
 [ "$status" -eq 0 ] \
   || { echo "FAIL: CI would reject the tree over a file the toolkit ignores"; exit 1; }
 
+# And luacheck -- the FOURTH list, and the one that was missed. A malformed
+# recording is a recording to re-capture, not a syntax error in the addon,
+# and it failed the Lint step as though it were.
+printf 'return\n["capture"] = {}\n' > fixtures/broken.lua
+if command -v luacheck >/dev/null 2>&1; then
+  luacheck . --no-color >lintfix.log 2>&1 \
+    || { echo "FAIL: luacheck rejects the tree over a file under fixtures/"; tail -4 lintfix.log; exit 1; }
+fi
+rm -f fixtures/broken.lua
+
 # And the packager must not ship the recording to players.
 tr -d '\r' < .pkgmeta | grep -q '^  - fixtures$' \
   || { echo "FAIL: .pkgmeta does not ignore fixtures/"; exit 1; }
 
 rm -rf fixtures
-echo "    toolkit, CI and .pkgmeta all ignore a captured fixture"
+echo "    toolkit, CI, luacheck and .pkgmeta all ignore a captured fixture"
 
 echo "  release guard: the project page must be reviewed"
 # A release with no user-visible change legitimately needs no new copy -- but

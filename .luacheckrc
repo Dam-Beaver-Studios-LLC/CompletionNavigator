@@ -166,6 +166,16 @@ files["bench.lua"]   = { ignore = { "1" }, unused = false }
 -- dependencies. They are not ours and must not be analysed.
 exclude_files = {
     "_backups/",
+
+    -- Recordings of a live client, read only by the harness. Evidence, not
+    -- source: a malformed one is a broken recording to re-capture, not a
+    -- syntax error in the addon -- and it failed the build as though it were.
+    --
+    -- The FOURTH place that decides what counts as addon source. The other
+    -- three -- the toolkit's file scanner, the CI search, and .pkgmeta --
+    -- were taught about fixtures/ and this was missed, so the build moved
+    -- from failing at the .toc step to failing at Lint.
+    "fixtures/",
     ".lua/**",
     ".lua-build/**",
     ".luarocks/**",

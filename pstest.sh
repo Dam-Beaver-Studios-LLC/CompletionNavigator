@@ -82,7 +82,7 @@ grep -q "All checks passed" localecheck.log \
   || { echo "FAIL: the shipped locales do not pass their own lint"; cat localecheck.log; exit 1; }
 echo "    named, blocking, and the shipped locales are complete"
 
-echo "  three lists of what counts as addon source, agreeing"
+echo "  four lists of what counts as addon source, agreeing"
 # THE FAILURE THAT COST THREE RELEASES.
 #
 # `cn.ps1 fixtures` writes fixtures/captured.lua -- a recording of a live
@@ -130,12 +130,22 @@ rm -f "$toc"
 [ "$status" -eq 0 ] \
   || { echo "FAIL: CI would reject the tree over a file the toolkit ignores"; exit 1; }
 
+# And luacheck -- the FOURTH list, and the one that was missed. A malformed
+# recording is a recording to re-capture, not a syntax error in the addon,
+# and it failed the Lint step as though it were.
+printf 'return\n["capture"] = {}\n' > fixtures/broken.lua
+if command -v luacheck >/dev/null 2>&1; then
+  luacheck . --no-color >lintfix.log 2>&1 \
+    || { echo "FAIL: luacheck rejects the tree over a file under fixtures/"; tail -4 lintfix.log; exit 1; }
+fi
+rm -f fixtures/broken.lua
+
 # And the packager must not ship the recording to players.
 tr -d '\r' < .pkgmeta | grep -q '^  - fixtures$' \
   || { echo "FAIL: .pkgmeta does not ignore fixtures/"; exit 1; }
 
 rm -rf fixtures
-echo "    toolkit, CI and .pkgmeta all ignore a captured fixture"
+echo "    toolkit, CI, luacheck and .pkgmeta all ignore a captured fixture"
 
 echo "  release guard: the project page must be reviewed"
 # A release with no user-visible change legitimately needs no new copy -- but
