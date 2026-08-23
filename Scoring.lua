@@ -43,10 +43,22 @@ CN.scoreWeights = {
     estimatedTime       = -0.5,
 }
 
--- An objective with no known coordinates costs nothing to travel to, which
--- would let every unlocated objective outrank every located one. Charge a
--- baseline instead: not knowing where something is has a real cost.
-CN.unknownLocationCost = 3
+-- WHAT A JOURNEY THE ADDON CANNOT COST IS CHARGED.
+--
+-- Raised from 3 in 0.57.0, and split from "this is not anywhere" -- see
+-- `CN.IsPlaceless`. At 3 it was CHEAPER than the far side of the player's own
+-- zone, which costs about 3.3, so "I have no idea where this is" outranked
+-- "I can see it from here" and twenty of the top thirty recommendations had
+-- no coordinates on them.
+--
+-- `Travel.CostFor` already reasons this out for a journey it cannot compute
+-- and lands on the pessimistic answer. This is the same question about the
+-- same kind of ignorance, so it gets the same shape of answer: comfortably
+-- above a zone crossing, comfortably below the cross-continent ceiling of 40.
+CN.unknownLocationCost = 8
+
+-- And a thing that is not ANYWHERE is not a journey at all.
+CN.placelessCost = 0
 
 -- Doing something at a place you are going to anyway is cheaper than doing it
 -- somewhere else, and the engine should say so rather than leaving it to the
@@ -212,6 +224,161 @@ end
 -- moved in would cost milliseconds to achieve nothing.
 CN.rankingGeneration = CN.rankingGeneration or 0
 
+------------------------------------------------------------
+-- WHY SOMETHING IS ON THE LIST
+------------------------------------------------------------
+
+-- THREE RELEASES IN A ROW BROKE THIS, SO THE SHAPE IS WRONG.
+--
+-- Every reason -- the provider's own, a decorator's, the aggregate's, an
+-- adjuster's -- was appended to one array on the objective. Four writers with
+-- four different lifetimes sharing one list, and each of them had to know
+-- where its own entries began and ended in order to take them back.
+--
+-- That produced, in three consecutive releases: sentences repeated once per
+-- rebuild; sentences deleted and unrestorable because the key that said "I
+-- already said this" outlived the sentence itself; a quest collecting every
+-- state it had ever been in; and an unlock count frozen because a rollback
+-- nilled half its bookkeeping. Every one was a different symptom of the same
+-- cause -- BOUNDARY INDICES INTO A SHARED, MUTATING ARRAY.
+--
+-- So the array is not shared any more.
+--
+--   objective.reasons          what the PROVIDER said. Written once, when the
+--                              provider builds the row, and never touched by
+--                              anything downstream.
+--   objective.decoratorReasons keyed, owned by decorators
+--   objective.adjusterReasons  keyed, owned by adjusters
+--   objective.mergedReasons    a list, rebuilt by the aggregate on every pass
+--
+-- Nothing writes into anything it does not own, so nothing has to know where
+-- anything else's entries are, so there is no index to go stale. `CN.Reasons`
+-- composes the four at READ time, which is the only moment the answer is
+-- actually wanted.
+--
+-- Adding a fifth source is now a table and two lines here, rather than a
+-- fifth boundary counter and a fourth rollback.
+
+-- Keyed sources, in the order they read best: what it is, then what the
+-- addon worked out about it, then what another provider added, then what is
+-- true of your situation right now.
+local REASON_SOURCES = { "decoratorReasons", "mergedReasons", "adjusterReasons" }
+
+local function Record(objective, field, key, text)
+    if type(objective) ~= "table" or not text then
+        return false
+    end
+
+    objective[field] = objective[field] or {}
+
+    if objective[field][key] == text then
+        return false
+    end
+
+    -- SAME KEY, DIFFERENT SENTENCE, IS AN UPDATE.
+    --
+    -- A sentence that carries a NUMBER froze at whatever the number was the
+    -- first time: three party members leaving one at a time left "3 others
+    -- here are on this quest" on screen while the ranking tracked the truth.
+    -- Assignment rather than append means that cannot happen again.
+    objective[field][key] = text
+
+    return true
+end
+
+local function Withdraw(objective, field, key)
+    local held = objective and objective[field]
+
+    if type(held) ~= "table" or held[key] == nil then
+        return false
+    end
+
+    held[key] = nil
+
+    return true
+end
+
+-- Every sentence that applies, in one list, composed fresh.
+--
+-- Every surface that shows a reason calls this: `/cn why`, the tooltip, the
+-- heads-up line, the Remaining tab, the Journey tab and `/cn breakdown`. A
+-- surface that read `objective.reasons` directly would see the provider's
+-- half and none of the rest -- so there is exactly one way to ask.
+function CN.Reasons(objective)
+    if type(objective) ~= "table" then
+        return {}
+    end
+
+    local composed = {}
+
+    for _, reason in ipairs(objective.reasons or {}) do
+        composed[#composed + 1] = reason
+    end
+
+    for _, field in ipairs(REASON_SOURCES) do
+        local held = objective[field]
+
+        if type(held) == "table" then
+            -- Sorted by key, so the same objective reads the same way twice
+            -- running. `pairs` order is not an order.
+            local keys = {}
+
+            for key in pairs(held) do
+                keys[#keys + 1] = key
+            end
+
+            table.sort(keys)
+
+            for _, key in ipairs(keys) do
+                composed[#composed + 1] = held[key]
+            end
+        end
+    end
+
+    return composed
+end
+
+-- WHAT FINISHING IT IS WORTH, INCLUDING WHAT ANOTHER PROVIDER SAYS.
+--
+-- Two providers can know about the same objective and disagree about what it
+-- is worth -- a quest in your log that is also a pinned goal, an appearance
+-- that is also part of a nearly-finished set. The aggregate takes the higher
+-- of the two, and records it separately rather than writing it into the
+-- provider's own row: a number another provider contributed is not this
+-- provider's answer, and it has to be able to go away when that provider
+-- changes its mind.
+function CN.CompletionValue(objective)
+    if type(objective) ~= "table" then
+        return 1
+    end
+
+    local own = objective.completionValue or 1
+
+    local merged = objective.mergedCompletionValue
+
+    if merged and merged > own then
+        return merged
+    end
+
+    return own
+end
+
+-- The first sentence, which is what the tooltip and the heads-up line show.
+-- Cheaper than composing the whole list for one string.
+function CN.FirstReason(objective)
+    if type(objective) ~= "table" then
+        return nil
+    end
+
+    local own = objective.reasons
+
+    if own and own[1] then
+        return own[1]
+    end
+
+    return CN.Reasons(objective)[1]
+end
+
 -- A REASON AN ADJUSTER ADDS, ADDED ONCE.
 --
 -- Scoring runs repeatedly over the SAME cached objective tables -- ranking
@@ -225,136 +392,25 @@ CN.rankingGeneration = CN.rankingGeneration or 0
 -- this file. That fix was applied to decorators and nobody looked at the
 -- adjuster path, which runs far more often.
 function CN.AddAdjusterReason(objective, key, text)
-    if type(objective) ~= "table" or not text then
-        return false
-    end
+    return Record(objective, "adjusterReasons", key, text)
+end
 
-    objective.adjusterReasons = objective.adjusterReasons or {}
-
-    local held = objective.adjusterReasons[key]
-
-    if held == text then
-        return false
-    end
-
-    -- SAME KEY, DIFFERENT SENTENCE, IS AN UPDATE.
-    --
-    -- The guard was on the key alone, so a sentence that carries a NUMBER
-    -- froze at whatever the number was the first time. Three party members
-    -- leaving one at a time left "3 others here are on this quest" on screen
-    -- while the multiplier tracked the truth, and the singular branch was
-    -- unreachable in practice. Withdraw the old sentence, then add the new.
-    if held then
-        CN.ClearAdjusterReason(objective, key)
-    end
-
-    -- The text itself, not a boolean, so it can be taken back out again --
-    -- see CN.ClearAdjusterReason.
-    objective.adjusterReasons[key] = text
-    objective.reasons = objective.reasons or {}
-
-    table.insert(objective.reasons, text)
-
-    return true
+function CN.ClearAdjusterReason(objective, key)
+    return Withdraw(objective, "adjusterReasons", key)
 end
 
 ------------------------------------------------------------
 -- THE SAME THING, FOR DECORATORS
 ------------------------------------------------------------
 
--- DECORATORS HAD NO WAY TO TAKE A SENTENCE BACK, AND NOW THEY NEED ONE.
---
--- Until 0.55.0 a decorator could append blindly, because every rebuild
--- produced fresh objective tables and the sentence went with the old one.
--- Repairing the unchanged-provider shortcut means a provider's tables are
--- REUSED -- so a decorator that appends is a decorator that repeats, and a
--- decorator whose answer stops being true is a decorator that lies.
---
--- Keyed, replaceable and withdrawable, exactly like the adjuster reasons
--- above. The two live in separate tables because they are rolled back at
--- different moments: a decorator's output is rolled back when the provider
--- rebuilds, and an adjuster's when the situation changes.
+-- Decorators need the identical contract, for the identical reason: their
+-- output lives on objectives that outlive the fact it describes.
 function CN.AddDecoratorReason(objective, key, text)
-    if type(objective) ~= "table" or not text then
-        return false
-    end
-
-    objective.decoratorReasons = objective.decoratorReasons or {}
-
-    local held = objective.decoratorReasons[key]
-
-    if held == text then
-        return false
-    end
-
-    if held then
-        CN.ClearDecoratorReason(objective, key)
-    end
-
-    objective.decoratorReasons[key] = text
-    objective.reasons = objective.reasons or {}
-
-    table.insert(objective.reasons, text)
-
-    return true
+    return Record(objective, "decoratorReasons", key, text)
 end
 
 function CN.ClearDecoratorReason(objective, key)
-    if type(objective) ~= "table" or not objective.decoratorReasons then
-        return false
-    end
-
-    local text = objective.decoratorReasons[key]
-
-    if text == nil then
-        return false
-    end
-
-    objective.decoratorReasons[key] = nil
-
-    for index = #(objective.reasons or {}), 1, -1 do
-        if objective.reasons[index] == text then
-            table.remove(objective.reasons, index)
-            break
-        end
-    end
-
-    return true
-end
-
--- AND A REASON ABOUT RIGHT NOW HAS TO BE REMOVABLE.
---
--- Adjusters describe the player's situation -- dead, in an instance, in a
--- group -- and stamp a sentence explaining the score they returned. The
--- objectives they stamp it on live in the per-provider cache, which outlives
--- the situation by a long way.
---
--- So: die in the open world, and every cached candidate is marked "you are
--- dead -- this is for after". Resurrect, and the adjuster stops applying the
--- penalty -- but the sentence stays, because appending was the only operation
--- there was. `/cn why` then told a living player their recommendation was for
--- later, and for a provider that rarely rebuilds it said so for hours.
-function CN.ClearAdjusterReason(objective, key)
-    if type(objective) ~= "table" or not objective.adjusterReasons then
-        return false
-    end
-
-    local text = objective.adjusterReasons[key]
-
-    if text == nil then
-        return false
-    end
-
-    objective.adjusterReasons[key] = nil
-
-    for index = #(objective.reasons or {}), 1, -1 do
-        if objective.reasons[index] == text then
-            table.remove(objective.reasons, index)
-            break
-        end
-    end
-
-    return true
+    return Withdraw(objective, "decoratorReasons", key)
 end
 
 function CN.InvalidateRanking()
@@ -418,7 +474,9 @@ function CN.ScoreObjective(objective)
     local travel = objective.travelCost
 
     if travel == nil then
-        travel = CN.unknownLocationCost
+        travel = CN.IsPlaceless(objective)
+            and CN.placelessCost
+            or CN.unknownLocationCost
     end
 
     -- WORTH AND COST ARE SUMMED SEPARATELY, AND ONLY WORTH IS MULTIPLIED.
@@ -441,7 +499,7 @@ function CN.ScoreObjective(objective)
     -- reverse the sign of anything.
     local worth = 0
 
-    worth = worth + (objective.completionValue      or 1) * w.completionValue
+    worth = worth + CN.CompletionValue(objective) * w.completionValue
     worth = worth + (objective.unlockValue          or 0) * w.unlockValue
     worth = worth + (objective.limitedTimeBonus     or 0) * w.limitedTimeBonus
 
@@ -1021,85 +1079,19 @@ CN.candidateDecoratorOrder = CN.candidateDecoratorOrder or {}
 -- its answer?
 --
 -- Decorators only ever append, so a count is enough.
-local function MarkProviderReasons(candidates)
-    for index = 1, #candidates do
-        local objective = candidates[index]
-
-        if type(objective) == "table" then
-            -- A PROVIDER MAY HAND BACK THE SAME TABLE IT HANDED BACK LAST
-            -- TIME, and several do.
-            --
-            -- Marking the count blindly would absorb the previous pass's
-            -- decorator output into "what the provider said", so the boundary
-            -- would creep upward one sentence per rebuild and `/cn why` would
-            -- repeat the Warband line once per rebuild -- the exact defect
-            -- the decorator contract exists to prevent.
-            --
-            -- `decorated` says this table has been through the decorators
-            -- before. Take that output back, so decorating a table twice
-            -- produces what decorating it once produces.
-            if objective.decorated and objective.providerReasons then
-                local held = objective.reasons or {}
-
-                for reason = #held, objective.providerReasons + 1, -1 do
-                    table.remove(held, reason)
-                end
-
-                -- ROLLING THE LIST BACK ROLLS EVERYTHING KEYED TO IT BACK.
-                --
-                -- The truncation removes the sentences that decorators,
-                -- adjusters and the aggregate merge appended -- and every one
-                -- of those keeps a KEY saying "I already said this", which
-                -- then refuses to say it again. So the first rebuild after a
-                -- decoration silently deleted every explanation on the
-                -- objective and nothing could ever restore them, while the
-                -- multipliers those sentences described went on applying.
-                -- `/cn why` printed a score with no reasons under it.
-                --
-                -- Rolling back the list without rolling back the bookkeeping
-                -- is the whole bug. They go together.
-                objective.decoratorReasons = nil
-                objective.adjusterReasons  = nil
-                objective.mergedReasons    = nil
-                objective.unlockGeneration = nil
-                objective.unlockReason     = nil
-
-                -- And the value the aggregate raised, back to the one the
-                -- provider itself built. Same reasoning: a number another
-                -- provider contributed is not this provider's answer, and it
-                -- must not survive into a pass where that provider has
-                -- changed its mind or gone away.
-                if objective.ownCompletionValue ~= nil then
-                    objective.completionValue = objective.ownCompletionValue
-
-                    objective.ownCompletionValue = nil
-                end
-
-                objective.decorated = nil
-            else
-                objective.providerReasons = #(objective.reasons or {})
-            end
-        end
-    end
-end
-
-local function MarkDecorated(candidates)
-    for index = 1, #candidates do
-        local objective = candidates[index]
-
-        if type(objective) == "table" then
-            objective.decorated = true
-        end
-    end
-end
-
--- Published so the suite can drive the rollback directly. A rollback that is
--- only reachable through a full rebuild is a rollback nothing tests until it
--- has already deleted somebody's explanations.
-CN.MarkProviderReasons = MarkProviderReasons
+-- NOTHING TO ROLL BACK ANY MORE.
+--
+-- `MarkProviderReasons` and `MarkDecorated` lived here. They recorded where
+-- the provider's own sentences ended, truncated back to that boundary before
+-- re-decorating, and then had to nil every piece of bookkeeping keyed to the
+-- list they had just cut. Three releases in a row shipped a defect from that
+-- arrangement, each a different way for a boundary index to go stale.
+--
+-- Since the derived sentences live in their own tables now (see CN.Reasons),
+-- a decorator that runs twice simply assigns the same key twice, and there is
+-- nothing to cut, nothing to count, and nothing to reset.
 
 local function Decorate(candidates)
-    MarkProviderReasons(candidates)
 
     for _, name in ipairs(CN.candidateDecoratorOrder) do
         local decorator = CN.candidateDecorators[name]
@@ -1137,7 +1129,6 @@ local function Decorate(candidates)
         end
     end
 
-    MarkDecorated(candidates)
 end
 
 -- Cheap enough to be worth doing before a full re-rank: one pass over one
@@ -1222,21 +1213,17 @@ local function Identical(left, right)
         -- Reasons are what `/cn why` prints, and a provider that changes its
         -- mind about why something is worth doing has changed the answer.
         --
-        -- ONLY THE PROVIDER'S OWN, though. `a` has been through the
-        -- decorators and `b` has not, so comparing the full lists compares a
-        -- decorated list against an undecorated one and can only ever
-        -- disagree. `providerReasons` is the count as the provider left it.
+        -- ONLY THE PROVIDER'S OWN, and now that is simply `a.reasons` --
+        -- nothing downstream writes into it, so there is no boundary to
+        -- count and no way for the count to be stale.
         local leftReasons  = a.reasons or {}
         local rightReasons = b.reasons or {}
 
-        local leftCount  = a.providerReasons or #leftReasons
-        local rightCount = b.providerReasons or #rightReasons
-
-        if leftCount ~= rightCount then
+        if #leftReasons ~= #rightReasons then
             return false
         end
 
-        for reason = 1, leftCount do
+        for reason = 1, #leftReasons do
             if leftReasons[reason] ~= rightReasons[reason] then
                 return false
             end
@@ -1368,6 +1355,10 @@ function CN.CollectCandidates(force)
         return aggregate.candidates
     end
 
+    -- Which winners this pass has already reset. An objective can be the
+    -- winner for several losers in one pass, and the reset must happen once.
+    local touched = {}
+
     -- ONE OBJECTIVE, ONE ROW.
     --
     -- Each provider dedupes its own list; the aggregate simply concatenated
@@ -1413,54 +1404,37 @@ function CN.CollectCandidates(force)
                 local existing = key and byKey[key]
 
                 if existing then
-                    -- WHAT THE WINNER SAID ON ITS OWN, RESTORED FIRST.
+                    -- THE MERGE NEVER WRITES INTO THE PROVIDER'S OWN ROW.
                     --
-                    -- This raises the winner's value to the loser's when the
-                    -- loser thinks the objective is worth more -- into the
-                    -- winner's LIVE CACHED TABLE, with no way back. Unpin a
-                    -- goal and the quest kept the pinned-era value for the
-                    -- rest of the session; the losing provider could stop
-                    -- emitting the row entirely and the number stayed.
+                    -- It used to raise `existing.completionValue` in place
+                    -- and append the loser's sentences to `existing.reasons`
+                    -- -- into the winner's LIVE CACHED TABLE, with no way
+                    -- back. Unpin a goal and the quest kept the pinned-era
+                    -- value for the session; the losing provider could stop
+                    -- emitting the row entirely and the number stayed. And
+                    -- because the raised value then differed from the fresh
+                    -- one every pass, that provider could never take the
+                    -- unchanged-provider shortcut again -- measured: one
+                    -- shipped provider rebuilt on 31 of 31 passes while the
+                    -- player stood still, for a value it had not changed.
                     --
-                    -- `ownCompletionValue` is what the provider itself last
-                    -- built, so each pass raises from that rather than from
-                    -- the last pass's raised figure.
-                    if existing.ownCompletionValue == nil then
-                        existing.ownCompletionValue = existing.completionValue
+                    -- Both go in tables the aggregate owns, cleared at the
+                    -- top of this pass, so a contribution that stops being
+                    -- made simply stops appearing.
+                    if not touched[existing] then
+                        touched[existing]              = true
+                        existing.mergedReasons         = nil
+                        existing.mergedCompletionValue = nil
                     end
-
-                    existing.completionValue = existing.ownCompletionValue
 
                     if (objective.completionValue or 0)
-                        > (existing.completionValue or 0) then
+                        > (existing.completionValue or 0)
+                        and (objective.completionValue or 0)
+                            > (existing.mergedCompletionValue or 0) then
 
-                        existing.completionValue = objective.completionValue
+                        existing.mergedCompletionValue =
+                            objective.completionValue
                     end
-
-                    -- WHAT WAS MERGED LAST TIME IS TAKEN BACK FIRST.
-                    --
-                    -- This merges the losing provider's sentences onto the
-                    -- WINNER'S LIVE TABLE, and until 0.55.0 that was harmless
-                    -- only by accident: the identity comparison always failed,
-                    -- so the winner's table was rebuilt every pass and the
-                    -- union reset with it. Repairing that comparison made the
-                    -- union permanent -- and a quest two providers know about
-                    -- accumulated every state it had ever been in, so
-                    -- `/cn why` printed "available to pick up", "quest is
-                    -- ACTIVE" and "ready to turn in" at the same time, about
-                    -- the same quest.
-                    --
-                    -- The merge is append-only and always runs to completion,
-                    -- so a count is enough to undo it.
-                    if existing.mergedReasons then
-                        local held = existing.reasons or {}
-
-                        for merged = #held, existing.mergedReasons + 1, -1 do
-                            table.remove(held, merged)
-                        end
-                    end
-
-                    existing.mergedReasons = #(existing.reasons or {})
 
                     for _, reason in ipairs(objective.reasons or {}) do
                         local seen = false
@@ -1472,9 +1446,17 @@ function CN.CollectCandidates(force)
                             end
                         end
 
+                        for _, held in pairs(existing.mergedReasons or {}) do
+                            if held == reason then
+                                seen = true
+                                break
+                            end
+                        end
+
                         if not seen then
-                            existing.reasons = existing.reasons or {}
-                            table.insert(existing.reasons, reason)
+                            existing.mergedReasons = existing.mergedReasons or {}
+
+                            existing.mergedReasons[reason] = reason
                         end
                     end
                 else
@@ -1598,7 +1580,24 @@ local function Ranked()
         if left == right then
             -- Ties must break deterministically or the list shuffles between
             -- refreshes and reads as flicker.
-            return tostring(a.id) < tostring(b.id)
+            --
+            -- AND THE TIE IS THE COMMON CASE, NOT THE EDGE CASE. Measured on
+            -- a real collection: 134 of 153 candidates share a score with an
+            -- earlier one -- sixty pets all at -1.00, sixty reputations all
+            -- at 2.00. So this ran 943 times per sort and built 1,886 strings
+            -- to do it: 0.35 ms and 4.1 KB per re-rank, for a comparison that
+            -- is two numbers in almost every case.
+            --
+            -- `tostring` only where the two ids are genuinely different
+            -- shapes, which is a provider mixing numeric and string ids and
+            -- is rare enough to pay for itself there.
+            local leftID, rightID = a.id, b.id
+
+            if type(leftID) == type(rightID) then
+                return leftID < rightID
+            end
+
+            return tostring(leftID) < tostring(rightID)
         end
 
         return left > right
@@ -1673,10 +1672,8 @@ end
 function CN.ExplainRecommendation(objective)
     local lines = {}
 
-    if objective.reasons then
-        for _, reason in ipairs(objective.reasons) do
-            table.insert(lines, "- " .. reason)
-        end
+    for _, reason in ipairs(CN.Reasons(objective)) do
+        table.insert(lines, "- " .. reason)
     end
 
     if #lines == 0 then
@@ -1722,12 +1719,14 @@ function CN.ExplainScore(objective)
     local travel = objective.travelCost
 
     if travel == nil then
-        travel = CN.unknownLocationCost
+        travel = CN.IsPlaceless(objective)
+            and CN.placelessCost
+            or CN.unknownLocationCost
     end
 
     local terms = {
         { label = "what finishing it is worth",
-          value = (objective.completionValue or 1) * w.completionValue },
+          value = CN.CompletionValue(objective) * w.completionValue },
         { label = "what it unlocks",
           value = (objective.unlockValue or 0) * w.unlockValue },
         { label = "limited time",

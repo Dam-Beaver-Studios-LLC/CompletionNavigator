@@ -262,6 +262,8 @@ Every term in the score for the top few, biggest first, adding up to the number 
 
 Deadlines are the heaviest thing in that score, and until now the curve behind them could only be reasoned about. This draws it: what a reset is worth at ten distances from it, from a week out to the last hour.
 
+**Not knowing where something is has a real cost, and it is not the same as there being nowhere to go.** A currency, a reputation or a renown track is not *anywhere* â€” there is no walk, so nothing is charged for one. A quest whose coordinates the client has not given up is somewhere the addon cannot name, and it is charged the pessimistic figure rather than the optimistic one, the same way a journey it cannot compute already is. Getting that wrong in the other direction is how a list fills up with things that have no location: they look free.
+
 ## It knows what you are in the middle of
 
 Dead, in a group, in an instance, or out in the world alone are four different situations, and only one of them makes "go and collect a battle pet" a sensible thing to say.

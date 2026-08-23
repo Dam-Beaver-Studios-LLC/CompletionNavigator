@@ -116,8 +116,8 @@ mutate "Core.lua" \
     "estimated numbers are printed as though measured"
 
 mutate "Modules/Inventory.lua" \
-    "        if ok and type(info) == \"table\" and info.questID and not info.isActive then" \
-    "        if ok and type(info) == \"table\" and info.questID then" \
+    "        if item.startsQuest and not item.questActive then" \
+    "        if item.startsQuest then" \
     "quest starters already accepted are offered again"
 
 mutate "Modules/Waiting.lua" \
@@ -288,7 +288,9 @@ end" \
     "nothing ever observes whether a zone allows flying"
 
 mutate "Modules/Inventory.lua" \
-    "                        questItem = QuestItem(bag, slot)," \
+    "                        questItem = questInfo
+                            and (questInfo.isQuestItem or questInfo.questID)
+                            and true or false," \
     "                        questItem = info.hasNoValue and true or false," \
     "a quest item is read from its vendor sell price"
 
@@ -339,10 +341,11 @@ mutate "Routing.lua" \
     "routing assumes every map is square"
 
 mutate "Routing.lua" \
-    "    for _, objective in ipairs(candidates) do
+    "        previousHub[objective]  = objective.hub
+        previousSize[objective] = objective.hubSize
+
         objective.hub     = nil
-        objective.hubSize = nil
-    end" \
+        objective.hubSize = nil" \
     "    for _, objective in ipairs(candidates) do
     end" \
     "last zone's batching survives into this one"
@@ -413,16 +416,18 @@ mutate "Modules/Hud.lua" \
     "the options-panel registration indexes a local function"
 
 mutate "Scoring.lua" \
-    "    if held then
-        CN.ClearAdjusterReason(objective, key)
-    end
+    "    objective[field][key] = text
 
-    -- The text itself, not a boolean, so it can be taken back out again --
-    -- see CN.ClearAdjusterReason.
-    objective.adjusterReasons[key] = text" \
-    "    -- The text itself, not a boolean, so it can be taken back out again --
-    -- see CN.ClearAdjusterReason.
-    objective.adjusterReasons[key] = text" \
+    return true
+end
+
+local function Withdraw(objective, field, key)" \
+    "    objective[field][#objective[field] + 1] = text
+
+    return true
+end
+
+local function Withdraw(objective, field, key)" \
     "an adjuster's reason is appended on every rescore"
 
 mutate "Database.lua" \
@@ -629,15 +634,15 @@ mutate "Modules/Instances.lua" \
 
 # 0.54.0: the performance pass, the design system and the first five minutes.
 mutate "Routing.lua" \
-    "                if swapped < (entering + leaving) - 1e-9 then" \
-    "                if swapped < (entering + leaving) + 1e9 then" \
+    "                    if swapped < (entering + leaving) - 1e-9 then" \
+    "                    if swapped < (entering + leaving) + 1e9 then" \
     "2-opt accepts a swap that lengthens the route"
 
 mutate "Routing.lua" \
-    "                    while low < high do
-                        route[low], route[high] = route[high], route[low]" \
-    "                    while low < high - 1 do
-                        route[low], route[high] = route[high], route[low]" \
+    "                        while low < high do
+                            route[low], route[high] = route[high], route[low]" \
+    "                        while low < high - 1 do
+                            route[low], route[high] = route[high], route[low]" \
     "the in-place reversal leaves the middle of the segment unreversed"
 
 mutate "Routing.lua" \
@@ -822,10 +827,6 @@ mutate "Modules/Preference.lua" \
     "        local withdrawn = nil" \
     "a withdrawn preference keeps saying you rarely act on these"
 
-mutate "Scoring.lua" \
-    "        local leftCount  = a.providerReasons or #leftReasons" \
-    "        local leftCount  = #leftReasons" \
-    "a decorated reason defeats the unchanged-provider shortcut"
 
 mutate "UI.lua" \
     "        CN.Settings().selectedTabName = tab.name" \
@@ -847,24 +848,8 @@ mutate "Modules/Session.lua" \
     "        if false then" \
     "a stale journey estimate flattens a real sample to the floor"
 
-mutate "Scoring.lua" \
-    "                    if existing.mergedReasons then" \
-    "                    if false then" \
-    "a merged reason is never withdrawn, so a quest collects contradictions"
 
-mutate "Scoring.lua" \
-    "            if objective.decorated and objective.providerReasons then" \
-    "            if false then" \
-    "a reused table absorbs the last pass's decorator sentences"
 
-mutate "Modules/Harvest.lua" \
-    "    if objective.unlockGeneration == Harvest.unlockGeneration then
-        return
-    end" \
-    "    if objective.unlockValue ~= nil then
-        return
-    end" \
-    "an unlock count is frozen for the session"
 
 mutate "Modules/Group.lua" \
     "        local isSelf = UnitIsUnit and UnitIsUnit(unit, \"player\")" \
@@ -966,26 +951,7 @@ mutate "Modules/Goals.lua" \
     end" \
     "unpinning every goal leaves their weighting behind"
 
-mutate "Scoring.lua" \
-    "                objective.decoratorReasons = nil
-                objective.adjusterReasons  = nil" \
-    "                objective.decoratorReasons = objective.decoratorReasons
-                objective.adjusterReasons  = objective.adjusterReasons" \
-    "a rolled-back reason can never be said again"
 
-mutate "Scoring.lua" \
-    "    if held then
-        CN.ClearAdjusterReason(objective, key)
-    end" \
-    "    if held then
-        return false
-    end" \
-    "a reason carrying a number freezes at the first number"
-
-mutate "Scoring.lua" \
-    "                    existing.completionValue = existing.ownCompletionValue" \
-    "                    existing.ownCompletionValue = existing.completionValue" \
-    "a value another provider contributed is never given back"
 
 mutate "Modules/Harvest.lua" \
     "    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
@@ -1000,10 +966,12 @@ mutate "Modules/Harvest.lua" \
 
 mutate "Modules/Inventory.lua" \
     "        if answered[bag] then
-            held[bag] = {}
+            store.containers[bag] = {}
+            store.seenAt[bag]     = now
         end" \
     "        if true then
-            held[bag] = {}
+            store.containers[bag] = {}
+            store.seenAt[bag]     = now
         end" \
     "a bank tab the client stops describing is emptied"
 
@@ -1024,6 +992,136 @@ mutate "Modules/Group.lua" \
         return held
     end" \
     "the shared-quest answer is asked of the client once per candidate"
+
+
+############################################################
+# 0.57.0
+############################################################
+
+mutate "Scoring.lua" \
+    "    for _, field in ipairs(REASON_SOURCES) do" \
+    "    for _, field in ipairs({}) do" \
+    "the composed answer leaves out every derived sentence"
+
+mutate "Scoring.lua" \
+    "    if objective[field][key] == text then
+        return false
+    end" \
+    "    if objective[field][key] ~= nil then
+        return false
+    end" \
+    "a reason carrying a number freezes at the first number"
+
+mutate "Scoring.lua" \
+    "    local merged = objective.mergedCompletionValue
+
+    if merged and merged > own then
+        return merged
+    end" \
+    "    local merged = nil
+
+    if merged and merged > own then
+        return merged
+    end" \
+    "what another provider says a thing is worth is ignored"
+
+mutate "Scoring.lua" \
+    "                    if not touched[existing] then
+                        touched[existing]              = true
+                        existing.mergedReasons         = nil
+                        existing.mergedCompletionValue = nil
+                    end" \
+    "                    if false then
+                        existing.mergedReasons         = nil
+                        existing.mergedCompletionValue = nil
+                    end" \
+    "a contribution another provider has stopped making never goes away"
+
+mutate "Modules/Goals.lua" \
+    "    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+
+    CN.InvalidateCandidates()
+end" \
+    "    CN.InvalidateCandidates()
+end" \
+    "pinning a goal never reaches a row that is already built"
+
+mutate "Routing.lua" \
+    "    if moved then
+        CN.InvalidateRanking()
+    end" \
+    "    CN.InvalidateRanking()
+    if moved then
+    end" \
+    "routing the same zone re-ranks the whole addon every two seconds"
+
+mutate "Scoring.lua" \
+    "CN.unknownLocationCost = 8" \
+    "CN.unknownLocationCost = 3" \
+    "not knowing where something is is cheaper than seeing it"
+
+mutate "Objectives.lua" \
+    "    if objective.mapID and objective.x and objective.y then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "a currency with coordinates is still treated as being nowhere"
+
+mutate "Modules/Inventory.lua" \
+    "        if item.startsQuest and not item.questActive then" \
+    "        if item.startsQuest then" \
+    "quest starters already accepted are offered again"
+
+mutate "Modules/Inventory.lua" \
+    "    itemKinds[itemID] = held
+
+    return held" \
+    "    return held" \
+    "what an item is is asked of the client once per slot"
+
+mutate "Routing.lua" \
+    "    if now and positionAt == now and positionMap == mapID then" \
+    "    if false then" \
+    "the client is asked where you are once per call"
+
+mutate "Routing.lua" \
+    "    local now = GetTime and GetTime()
+
+    if now and positionAt == now and positionMap == mapID then
+        return mapID, positionX, positionY
+    end" \
+    "    local now = GetTime and GetTime()
+
+    if now and positionAt == now then
+        return positionMap, positionX, positionY
+    end" \
+    "walking into a building leaves the arrow on the zone map"
+
+mutate "Modules/Session.lua" \
+    "    if held ~= nil and held.count == count then
+        return held.median
+    end" \
+    "    if held ~= nil then
+        return held.median
+    end" \
+    "a learned duration is memoised past the sample that changed it"
+
+mutate "Modules/Breakdown.lua" \
+    "        if reportCache and reportGeneration == Breakdown.generation then
+            return reportCache
+        end" \
+    "        if reportCache then
+            return reportCache
+        end" \
+    "the remaining counts never notice a new collection"
+
+mutate "Database.lua" \
+    "    raw.rescuedCharacters = raw.characters
+    raw.characters        = nil" \
+    "    raw.characters        = nil" \
+    "data the migration refused to destroy is dropped anyway"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

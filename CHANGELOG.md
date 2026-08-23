@@ -7,6 +7,114 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.57.0]
+
+The reason-tracking machinery is rebuilt rather than patched again, because
+three consecutive releases each shipped a different symptom of the same cause.
+Plus the largest performance pass since 0.54.0, and an accuracy fix that
+changes what the addon recommends.
+
+### Fixed
+
+- **The shape that kept breaking is gone.** Every reason â€” the provider's own,
+  a decorator's, another provider's, an adjuster's â€” was appended to one array
+  on the objective, and each of four writers with four different lifetimes had
+  to know where its own entries began and ended in order to take them back.
+  That produced, in three consecutive releases: sentences repeated once per
+  rebuild, sentences deleted and unrestorable, a quest collecting every state
+  it had ever been in, and an unlock count frozen because a rollback nilled
+  half its bookkeeping. Each was fixed; the shape that produced them was not.
+  Nothing writes into anything it does not own now, so there is no boundary
+  index to go stale, and the build fails on a write from outside the file that
+  owns the list.
+- **The most recent symptom, which 0.56.0 shipped:** the aggregate's rollback
+  deleted adjuster sentences and left the key that says "I already said this",
+  so `/cn why` lost the group-shared line, the "you are dead" line and the
+  instance line after one rebuild â€” while the multipliers they described kept
+  applying.
+- **`/cn goal` did nothing to a quest already in your log, and `/cn ungoal`
+  left its weighting behind.** Pinning changes the weight of a row without
+  changing the row, so a provider that had not rebuilt took the
+  unchanged-provider shortcut and the goals decorator never ran. Both
+  persisted until that provider's list happened to change â€” which, standing at
+  a vendor managing your goal list, is never.
+- **A provider's row is never written into by the aggregate.** Two providers
+  that know the same objective would raise the winner's value in place, with
+  no way back: unpin a goal and the quest kept the pinned-era value for the
+  session. Worse, the raised value then differed from the fresh one on every
+  pass, so that provider could never take the unchanged-provider shortcut
+  again â€” one shipped provider was measured rebuilding on 31 of 31 passes
+  while the player stood still.
+- **The Warband bank forgot every tab but one after each reload.** The
+  per-container record 0.56.0 added lived in memory only, so the first time
+  you opened a bank in a new session it threw away everything on disk except
+  the tab the client happened to be describing â€” and reported the remains as
+  freshly scanned. The record is per container on disk now, and "seen Nh ago"
+  is the age of the stalest part of it rather than of the newest.
+- **Data the addon refused to destroy stopped being mentioned one login
+  later.** The refusal was recorded, the data was set aside â€” and the next
+  login found the empty space where it had been, succeeded, and cleared the
+  record. `/cn rescued` shows what is there and discards it when you say so;
+  until then `/cn navdiag` and `/cn selftest` both keep saying it exists.
+
+### Changed
+
+- **"I don't know where it is" no longer beats "I can see it from here".** An
+  objective with no coordinates was charged 3 for the journey; the far side of
+  your own zone costs about 3.3. Measured on a real collection: twenty of the
+  top thirty recommendations had no location at all. Two states are now
+  distinguished â€” a currency or a reputation is not *anywhere*, so there is no
+  journey to charge for, while a quest whose coordinates have not resolved is
+  somewhere the addon cannot name and is charged the pessimistic figure, the
+  same way an uncostable journey already was.
+
+### Performance
+
+Every figure below is measured, at a realistic scale: 300 candidates, a full
+quest log, 160 located objectives in one zone, a 59-node flight network.
+
+- **Routing a zone re-ranked the entire addon, every time, whether anything
+  had moved or not.** The Zone tab refreshes every two seconds, the map does
+  it on every open, and follow mode does it every three â€” so the ranked list
+  had a hit rate of **zero** for as long as any of those was open. Thirty
+  ticks produced thirty full re-ranks, 4,590 scorings and no hub changes.
+  1.34ms per tick, returned.
+- **The ranked sort built two strings per comparison**, and ties are the
+  common case rather than the edge case â€” 134 of 153 candidates share a score
+  with an earlier one. 943 comparisons per sort, 1,886 strings: 0.35ms and
+  4.1KB per re-rank, down to 0.12ms.
+- **One bag update cost 1,022 client calls**, 144 of them exact duplicates:
+  the scan asked whether each slot starts a quest and threw the answer away,
+  then asked again. What an item *is* â€” a mount, a pet, a toy â€” is a property
+  of the item and was re-asked per slot, so a 40-slot stack of one reagent
+  asked forty times.
+- **The route optimiser** now works from flat coordinate arrays with
+  don't-look bits: 3.70ms to 3.11ms at ninety stops, exactly the same route.
+- **The clustering grid** builds numeric cell keys instead of 1,600 strings:
+  0.63ms to 0.20ms.
+- **The journey search** reuses its three per-node buffers instead of
+  allocating 8.3KB per call, and the costing cache stopped allocating a
+  closure before its own lookup.
+- **The client is asked where you are once a frame**, not twenty-three times
+  per rebuild â€” each of which allocated a vector in the client. The *map* is
+  still asked every time, because walking into a building changes it without
+  you moving.
+- **The Remaining tab recounted three thousand achievement rows and eighteen
+  hundred pets every two seconds** for numbers that change only when you
+  collect something. Cached behind the events that announce a collection.
+- **Learned task durations** are no longer re-sorted once per candidate.
+
+### Internal
+
+- Four of the eleven performance budgets could not fail: two measured the
+  cached branch of the path they were guarding, and two fed the route
+  optimiser a fixture a quarter the size of a real zone. All four now measure
+  what a player triggers.
+- A build-time check that nothing outside `Scoring.lua` writes into a reason
+  list.
+- Fifteen new mutations and eleven new assertions. Mutation score: 142 of 142.
+
+
 ## [0.56.0]
 
 An adversarial review of everything 0.55.0 changed, a pass over the words the

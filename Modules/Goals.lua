@@ -65,8 +65,6 @@ end
 
 Goals.ResolveType = ResolveType
 
-Goals.ResolveType = ResolveType
-
 local function Key(objectiveType, id)
     return CN.ObjectiveKey(objectiveType, id)
 end
@@ -74,6 +72,27 @@ end
 ------------------------------------------------------------
 -- MANAGING GOALS
 ------------------------------------------------------------
+
+-- INVALIDATING THE CANDIDATES WAS NOT ENOUGH, AND THE COMMENT SAID IT WAS.
+--
+-- A goal changes the WEIGHT of rows that are otherwise unchanged, and
+-- `userPreference` is not one of the fields the identity comparison looks at
+-- -- deliberately, since no provider writes it. So a provider whose rows had
+-- not changed took the unchanged-provider shortcut, `Goals.Decorate` never
+-- ran, and `/cn goal` did nothing to a quest already in your log while
+-- `/cn ungoal` left the +8 and the sentence behind. Both persisted until the
+-- owning provider's list actually changed -- which, standing at a vendor
+-- managing your goal list, is never.
+--
+-- `CN.decoratorGeneration` is the hook that defeats the shortcut, and it is
+-- what `Harvest.NoteUnlocksChanged` uses one file over for the same reason.
+function Goals.NoteChanged()
+    Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
+
+    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+
+    CN.InvalidateCandidates()
+end
 
 function Goals.IsGoal(objectiveType, id)
     if not objectiveType or not id then
@@ -119,13 +138,7 @@ function Goals.Add(objectiveType, id)
         since = time(),
     }
 
-    -- A goal changes the weight of everything, and objectives are decorated
-    -- when their provider builds them. Force a full rebuild so the new
-    -- weighting takes effect immediately rather than whenever something
-    -- happens to go stale.
-    Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
-
-    CN.InvalidateCandidates()
+    Goals.NoteChanged()
 
     return true, name
 end
@@ -143,9 +156,7 @@ function Goals.Remove(objectiveType, id)
 
     store[key] = nil
 
-    Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
-
-    CN.InvalidateCandidates()
+    Goals.NoteChanged()
 
     return true, name
 end
@@ -159,9 +170,7 @@ function Goals.Clear()
         store[key] = nil
     end
 
-    Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
-
-    CN.InvalidateCandidates()
+    Goals.NoteChanged()
 
     return count
 end

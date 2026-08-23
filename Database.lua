@@ -444,6 +444,46 @@ CN.migrations = {
         end
     end,
 
+    -- 11 -> 12. The bank stores gained a per-container shape.
+    --
+    -- The flat store said WHAT was in a bank and not WHICH CONTAINER it was
+    -- in, and the container is what makes "this tab has not been described"
+    -- separable from "this tab is empty". There is nothing in the old rows
+    -- that can be attributed, so they are dropped rather than guessed at --
+    -- and the next time the player stands at a bank they are replaced by a
+    -- record that keeps its own attribution.
+    [11] = function(db)
+        db.account    = db.account or {}
+        db.characters = db.characters or {}
+
+        local dropped = 0
+
+        local function Flatten(store)
+            if type(store) ~= "table" or store.containers ~= nil then
+                return
+            end
+
+            for key in pairs(store) do
+                store[key] = nil
+            end
+
+            dropped = dropped + 1
+        end
+
+        Flatten(db.account.warbandBank)
+
+        for _, character in pairs(db.characters) do
+            if type(character) == "table" then
+                Flatten(character.bank)
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Reset " .. dropped .. " bank record(s) that could "
+                .. "not say which container each item was in.")
+        end
+    end,
+
     -- 7 -> 8. `questStatus` was a per-character fact kept in an account-wide
     -- table, which is two defects at once.
     --
@@ -601,6 +641,19 @@ local function Migrate(db)
             end
 
             -- Cleared only by the migration that failed actually succeeding.
+            --
+            -- NOT WHEN SOMETHING WAS SET ASIDE, though. Migration 9 refuses a
+            -- corrupt `characters` value; the rescue below moves it to
+            -- `rescuedCharacters` and leaves `characters` nil -- so on the
+            -- NEXT login the same migration sees nil, takes the "create it"
+            -- branch, succeeds, and cleared the record right here. One login
+            -- after the refusal, `/cn navdiag` reported a clean bill of
+            -- health over an empty character list, and the rescued data sat
+            -- in SavedVariables forever with nothing that mentioned it.
+            --
+            -- The failure is what the player is told about; the rescue is the
+            -- thing that has not been dealt with. They are separate facts and
+            -- only the first of them is over.
             if db.migrationFailure and db.migrationFailure.version == from then
                 db.migrationFailure = nil
                 CN.migrationFailure = nil
@@ -619,6 +672,37 @@ CN.RunMigrations = Migrate
 ------------------------------------------------------------
 -- INITIALIZATION
 ------------------------------------------------------------
+
+-- WHAT A MIGRATION REFUSED TO DESTROY, `CopyDefaults` WOULD.
+--
+-- Migration 9 raises rather than replacing a corrupt `characters` value,
+-- which stops the ladder and files the fault -- and then `CopyDefaults`
+-- replaces any stored value whose type no longer matches its default, which
+-- is exactly that value. So the refusal was announced and then quietly
+-- undone, the evidence was overwritten, and the next login found a clean `{}`
+-- and cleared the failure record. The whole point of refusing is that the
+-- data is still there afterwards.
+--
+-- Moved aside under its own key, which `CopyDefaults` has no default for and
+-- therefore leaves alone. `/cn rescued` is the only thing that removes it.
+function CN.RescueUnreadable(raw)
+    if type(raw) ~= "table" then
+        return false
+    end
+
+    if not raw.migrationFailure then
+        return false
+    end
+
+    if raw.characters == nil or type(raw.characters) == "table" then
+        return false
+    end
+
+    raw.rescuedCharacters = raw.characters
+    raw.characters        = nil
+
+    return true
+end
 
 function CN.InitializeDatabase()
     local raw = CompletionNavigatorDB
@@ -642,25 +726,7 @@ function CN.InitializeDatabase()
         -- do so silently.
         Migrate(raw)
 
-        -- AND WHAT A MIGRATION REFUSED TO DESTROY, `CopyDefaults` WOULD.
-        --
-        -- Migration 9 raises rather than replacing a corrupt `characters`
-        -- value, which stops the ladder and files the fault -- and then
-        -- `CopyDefaults` three lines below replaces any stored value whose
-        -- type no longer matches its default, which is exactly that value.
-        -- So the refusal was announced and then quietly undone, the evidence
-        -- was overwritten, and the next login found a clean `{}` and cleared
-        -- the failure record. The whole point of refusing is that the data is
-        -- still there afterwards.
-        --
-        -- Moved aside under its own key, which `CopyDefaults` has no default
-        -- for and therefore leaves alone.
-        if raw.migrationFailure and raw.characters ~= nil
-            and type(raw.characters) ~= "table" then
-
-            raw.rescuedCharacters = raw.characters
-            raw.characters        = nil
-        end
+        CN.RescueUnreadable(raw)
     end
 
     CompletionNavigatorDB = CN.CopyDefaults(CN.defaults, raw)
@@ -855,6 +921,56 @@ function CN.DatabaseSizes()
 
     return rows, CN.MeasureDatabase(CN.db)
 end
+
+-- WHAT WAS SET ASIDE, AND WHAT TO DO WITH IT.
+--
+-- A migration that refuses to destroy data it cannot read leaves that data
+-- somewhere, and until 0.57.0 the somewhere was a key nothing in the addon
+-- mentioned -- so the refusal was announced once and the data sat in
+-- SavedVariables for ever. A rescue with no way to look at it or clear it is
+-- a leak with good manners.
+CN:RegisterCommand{
+    name    = "rescued",
+    order   = 93,
+    args    = "[discard]",
+    help    = "Saved data the addon set aside rather than destroy.",
+    handler = function(args)
+        args = string.lower(CN.Trim(args or ""))
+
+        local held = CN.db and CN.db.rescuedCharacters
+
+        if held == nil then
+            Print("Nothing has been set aside.")
+            CN.PrintLine(CN.Muted("This is where saved data the addon could "
+                .. "not read would be kept, rather than replaced."))
+            return
+        end
+
+        if args == "discard" then
+            CN.db.rescuedCharacters = nil
+            CN.rescuedData          = false
+
+            Print("Discarded. " .. CN.Muted("The addon will stop mentioning "
+                .. "it."))
+            return
+        end
+
+        Print("Your character records were set aside as unreadable.")
+
+        CN.PrintLine("held as: " .. CN.Muted(type(held)))
+
+        if type(held) == "string" then
+            CN.PrintLine(CN.Muted(string.sub(held, 1, 120)))
+        elseif type(held) == "table" then
+            CN.PrintLine(CN.Muted(CN.CountKeys(held) .. " row(s)"))
+        end
+
+        CN.PrintLine(CN.Muted("Nothing was destroyed, and nothing else is "
+            .. "using it. If it means nothing to you, "
+            .. "") .. CN.Accent("/cn rescued discard")
+            .. CN.Muted(" removes it."))
+    end,
+}
 
 CN:RegisterCommand{
     name    = "dbsize",

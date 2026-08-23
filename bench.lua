@@ -158,6 +158,25 @@ bench("Recommend(25)", 200, function()
     CN.Recommend(25)
 end)
 
+-- AND THE BRANCH THAT ACTUALLY RUNS WHILE PLAYING.
+--
+-- The two above measure the cache hit, which is 0.008 ms and cannot fail any
+-- budget worth writing. The ranked list is invalidated by anything that
+-- changes the ORDER without changing a candidate -- entering combat, a
+-- faction standing moving, a goal being pinned -- and until 0.57.0 it was
+-- invalidated by every zone route build, which the Zone tab does every two
+-- seconds. The cold branch is the one that costs 1.4 ms, and no budget in
+-- this file was measuring it.
+print("\nCold path (what a re-rank costs when the order has changed):")
+bench("Recommend(1) after a re-rank", 100, function()
+    CN.InvalidateRanking()
+    CN.Recommend(1)
+end)
+bench("Recommend(25) after a re-rank", 100, function()
+    CN.InvalidateRanking()
+    CN.Recommend(25)
+end)
+
 print("\nCandidates produced: " .. #CN.CollectCandidates(true))
 
 print("\nPer-provider, slowest first:")
@@ -397,9 +416,18 @@ do
     -- every two seconds while the Zone tab is open.
     --
     -- Measured directly, at a size the fixture cannot reach on its own.
+    -- NINETY, NOT FORTY.
+    --
+    -- Forty was chosen before the clustering was measured against a real
+    -- zone. A hundred and sixty located objectives -- a full quest log plus
+    -- rares and treasures, which is an ordinary evening -- cluster to about
+    -- ninety hubs, and this is quadratic in hubs: measured at 3.70 ms, past
+    -- its own 3.0 ms budget, and 72% of the whole route build. A budget the
+    -- benchmark cannot reach is a budget that guards nothing, which is the
+    -- reasoning this file already applies to `UI.Refresh`.
     local stops = {}
 
-    for index = 1, 40 do
+    for index = 1, 90 do
         table.insert(stops, {
             name  = "Stop " .. index,
             mapID = 94,
@@ -410,7 +438,7 @@ do
 
     CN.UseRouteMapScale(94)
 
-    bench("ImproveRoute() over 40 stops", 50, function()
+    bench("ImproveRoute() over 90 stops", 50, function()
         local copy = {}
 
         for index = 1, #stops do
@@ -492,6 +520,13 @@ local BUDGETS = {
     ["CollectCandidates()"]       = 0.05,
     ["Recommend(1)"]              = 0.10,
     ["Recommend(25)"]             = 0.40,
+
+    -- The branch that runs when the order has actually changed. Generous
+    -- against the 1.4 ms it was measured at before 0.57.0's sort fix, and
+    -- tight enough that a regression in the scoring pass shows up here rather
+    -- than in a player's frame rate.
+    ["Recommend(1) after a re-rank"]  = 2.5,
+    ["Recommend(25) after a re-rank"] = 2.5,
     ["ItemLines on an ordinary item"] = 0.05,
 
     -- Added in 0.44.0. The two paths a player triggers most often without
@@ -512,7 +547,7 @@ local BUDGETS = {
     -- reach the size at which either mattered, so neither had a budget and
     -- neither was measured -- which is how a thirty-three millisecond stutter
     -- lived in the file a player watches while walking.
-    ["ImproveRoute() over 40 stops"] = 3.0,
+    ["ImproveRoute() over 90 stops"] = 6.0,
     ["ClusterByProximity() over 110 objectives"] = 3.0,
 }
 

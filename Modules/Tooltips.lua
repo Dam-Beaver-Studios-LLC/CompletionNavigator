@@ -296,8 +296,7 @@ function Tooltips.ItemLines(itemID, itemName)
             local candidate = CN.FindCandidate and goalType
                 and CN.FindCandidate(goalType, goalID)
 
-            local reason = candidate and candidate.reasons
-                and candidate.reasons[1]
+            local reason = candidate and CN.FirstReason(candidate)
 
             if reason then
                 Add(lines, reason, { 0.6, 0.6, 0.6 })

@@ -1261,14 +1261,20 @@ CN:RegisterCommand{
         -- the player was told to look, so this is where it has to appear.
         local failure = (CN.db and CN.db.migrationFailure) or CN.migrationFailure
 
+        -- OUTSIDE THE FAILURE BRANCH, because the failure is cleared the
+        -- moment the migration succeeds against the empty table left behind
+        -- and the rescued data is not. Reported until somebody deals with it.
+        if CN.db and CN.db.rescuedCharacters ~= nil then
+            Print(CN.Warn("Some of your saved data was set aside."))
+            Print("  " .. CN.Muted("Your character records were the wrong "
+                .. "shape, so they were kept rather than replaced. Nothing "
+                .. "was destroyed. "
+                .. "Run ") .. CN.Accent("/cn rescued")
+                .. CN.Muted(" to see what is there."))
+        end
+
         if type(failure) == "table" then
             Print(CN.Bad("Your saved data did not finish upgrading."))
-
-            if CN.db and CN.db.rescuedCharacters ~= nil then
-                Print("  " .. CN.Muted("Your character records were the "
-                    .. "wrong shape and have been set aside rather than "
-                    .. "replaced -- nothing was destroyed."))
-            end
             Print("  " .. CN.Muted("step " .. tostring(failure.version)
                 .. ": " .. tostring(failure.error)))
             Print("  " .. CN.Muted("Everything above is read from that data. "

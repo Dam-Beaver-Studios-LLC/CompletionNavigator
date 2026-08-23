@@ -65,18 +65,26 @@ end
 -- from the rest: GetContainerItemQuestInfo is a different call with its own
 -- availability, and a client that lacks it should report "not a quest item"
 -- rather than erroring on every slot in the bag.
-local function QuestItem(bag, slot)
+-- ASKED ONCE, AND THE WHOLE ANSWER KEPT.
+--
+-- This asked the client whether a slot is a quest item and threw away the
+-- rest of what came back -- and then `QuestStarters` asked the identical
+-- question again about every slot, for the `questID` and `isActive` this call
+-- had already been handed. Measured at retail scale: one `BAG_UPDATE_DELAYED`
+-- produced 288 calls to `GetContainerItemQuestInfo` for 144 distinct slots.
+-- Exactly half of them were wasted.
+local function QuestInfo(bag, slot)
     if not C_Container or not C_Container.GetContainerItemQuestInfo then
-        return false
+        return nil
     end
 
     local ok, info = pcall(C_Container.GetContainerItemQuestInfo, bag, slot)
 
     if not ok or type(info) ~= "table" then
-        return false
+        return nil
     end
 
-    return (info.isQuestItem or info.questID) and true or false
+    return info
 end
 
 -- Every item in a set of containers, as { itemID, count, link, quality, bag,
@@ -123,6 +131,8 @@ function Inventory.Scan(containers)
                     pcall(C_Container.GetContainerItemInfo, bag, slot)
 
                 if gotInfo and type(info) == "table" and info.itemID then
+                    local questInfo = QuestInfo(bag, slot)
+
                     table.insert(items, {
                         itemID   = info.itemID,
                         count    = info.stackCount or 1,
@@ -136,7 +146,13 @@ function Inventory.Scan(containers)
                         -- every soulbound token in the bag. The real question
                         -- has its own API, which this same file already asks
                         -- correctly forty lines below.
-                        questItem = QuestItem(bag, slot),
+                        questItem = questInfo
+                            and (questInfo.isQuestItem or questInfo.questID)
+                            and true or false,
+
+                        -- Kept rather than re-asked. See `QuestInfo` above.
+                        startsQuest = questInfo and questInfo.questID or nil,
+                        questActive = questInfo and questInfo.isActive or false,
                     })
                 end
             end
@@ -185,22 +201,52 @@ end
 function Inventory.QuestStarters()
     local starters = {}
 
-    if not Inventory.IsAvailable() or not C_Container.GetContainerItemQuestInfo then
+    if not Inventory.IsAvailable() then
         return starters
     end
 
+    -- Read from what the scan already asked, rather than asking again. See
+    -- `QuestInfo` above.
     for _, item in ipairs(Inventory.Scan()) do
-        local ok, info = pcall(C_Container.GetContainerItemQuestInfo,
-            item.bag, item.slot)
-
-        if ok and type(info) == "table" and info.questID and not info.isActive then
-            item.questID = info.questID
+        if item.startsQuest and not item.questActive then
+            item.questID = item.startsQuest
 
             table.insert(starters, item)
         end
     end
 
     return starters
+end
+
+-- WHAT AN ITEM *IS*, WHICH NEVER CHANGES.
+--
+-- "Does this item teach a mount" is a property of the item, not of the
+-- player, and the client answers it from a static table. The scan asked it --
+-- along with the pet, toy and recipe forms of the same question -- once per
+-- SLOT, so a forty-slot stack of the same reagent asked four times forty. One
+-- bag update was measured at 576 of these calls for at most a few dozen
+-- distinct items.
+--
+-- Keyed on the item, and never cleared: an item that teaches a mount teaches
+-- that mount for the life of the game. What CAN change is whether the player
+-- has collected it, and that is asked separately below and not memoised.
+local itemKinds = {}
+
+local function KindOf(itemID)
+    local held = itemKinds[itemID]
+
+    if held then
+        return held
+    end
+
+    held = {
+        mount   = Blizzard.GetMountFromItem(itemID),
+        species = Blizzard.GetPetSpeciesFromItem(itemID),
+    }
+
+    itemKinds[itemID] = held
+
+    return held
 end
 
 -- Collectible items sitting in a bag: a mount, a pet, a toy or a recipe the
@@ -213,7 +259,9 @@ function Inventory.UncollectedItems()
         -- Asking "is this item a mount" and "do I own that mount" are two
         -- different questions and only the second one keeps the addon from
         -- telling somebody to learn what they already have.
-        local mountID = Blizzard.GetMountFromItem(item.itemID)
+        local kind = KindOf(item.itemID)
+
+        local mountID = kind.mount
 
         local mount = mountID and Blizzard.GetMountByID(mountID)
 
@@ -223,7 +271,7 @@ function Inventory.UncollectedItems()
 
             table.insert(found, item)
         else
-            local speciesID = Blizzard.GetPetSpeciesFromItem(item.itemID)
+            local speciesID = kind.species
 
             local pets = CN:GetModule("Pets")
 
@@ -393,42 +441,52 @@ end
 -- the player clicked last -- and moving one item at the bank rewrites both
 -- stores from whatever happens to be described at that moment.
 --
--- So the session holds a snapshot PER CONTAINER, updated only for containers
--- that actually answered, and the store is the union of those. A container
--- that says nothing leaves what was already known about it alone. Nothing
--- extra is written to disk: the snapshot is in memory and the store keeps the
--- same shape it always had.
-local snapshots = {}
-
+-- 0.56.0 fixed that with an IN-MEMORY snapshot per container, which fixed it
+-- only inside one session: at the next login the snapshot was empty, so the
+-- first `BANKFRAME_OPENED` threw away everything on disk except the tab that
+-- happened to be visible -- and stamped `scannedAt = now`, so `/cn bags`
+-- reported the truncated record as freshly scanned. You had to click through
+-- every tab again after every reload.
+--
+-- So the per-container shape is what is PERSISTED. `store.containers[bag]` is
+-- what was in that container the last time the client described it, with its
+-- own timestamp; the flat item counts stay beside it for every reader that
+-- wants a total. A container the client is not describing keeps what it had,
+-- across a reload, across a week.
 local function Fill(store, containers, items, answered)
-    local held = snapshots[store] or {}
+    store.containers = store.containers or {}
+    store.seenAt     = store.seenAt or {}
+
+    local now = time()
 
     -- Only the containers the client described this time.
     for _, bag in ipairs(containers) do
         if answered[bag] then
-            held[bag] = {}
+            store.containers[bag] = {}
+            store.seenAt[bag]     = now
         end
     end
 
     for _, item in ipairs(items) do
-        local bag = held[item.bag]
+        local bag = store.containers[item.bag]
 
         if bag then
             bag[item.itemID] = (bag[item.itemID] or 0) + (item.count or 1)
         end
     end
 
-    snapshots[store] = held
-
+    -- The flat totals, rebuilt from the containers. Item ids and counts only:
+    -- the bag and slot of something in a bank is not worth a byte on disk,
+    -- because it moves and the player is looking at it.
     for key in pairs(store) do
-        store[key] = nil
+        if key ~= "containers" and key ~= "seenAt" then
+            store[key] = nil
+        end
     end
 
-    -- Item ids and counts only. The bag and slot of something in a bank is
-    -- not worth a byte on disk: it moves, and the player is looking at it.
     local seen = 0
 
-    for _, bag in pairs(held) do
+    for _, bag in pairs(store.containers) do
         for itemID, count in pairs(bag) do
             store[itemID] = (store[itemID] or 0) + count
 
@@ -436,9 +494,39 @@ local function Fill(store, containers, items, answered)
         end
     end
 
-    store.scannedAt = time()
+    -- The OLDEST container's timestamp, not this instant.
+    --
+    -- Stamping `now` claimed the whole record was as fresh as the one tab the
+    -- client happened to describe. What `/cn bags` should say is how old the
+    -- stalest part of the answer is, which is the honest reading of "seen Nh
+    -- ago" over a record assembled from several visits.
+    local oldest
+
+    for _, at in pairs(store.seenAt) do
+        if not oldest or at < oldest then
+            oldest = at
+        end
+    end
+
+    store.scannedAt = oldest or now
 
     return seen
+end
+
+-- How many kinds of item a bank store holds, ignoring its bookkeeping keys.
+-- Counting them was a subtraction of one against a store that now carries
+-- three, which is the kind of arithmetic that is wrong the moment anything is
+-- added beside it.
+function Inventory.Kinds(store)
+    local kinds = 0
+
+    for key in pairs(store or {}) do
+        if key ~= "containers" and key ~= "seenAt" and key ~= "scannedAt" then
+            kinds = kinds + 1
+        end
+    end
+
+    return kinds
 end
 
 -- Which containers the client was willing to describe. A container with no
@@ -708,7 +796,7 @@ CN:RegisterCommand{
         local bank = Inventory.BankStore()
 
         if bank.scannedAt then
-            CN.PrintLine(CN.Muted("Your bank: " .. (CN.CountKeys(bank) - 1)
+            CN.PrintLine(CN.Muted("Your bank: " .. Inventory.Kinds(bank)
                 .. " kinds of item, seen " .. Age(bank) .. "h ago " .. CN.DASH
                 .. " the client only describes it while you are standing at "
                 .. "one."))
@@ -718,7 +806,7 @@ CN:RegisterCommand{
 
         if warband.scannedAt then
             CN.PrintLine(CN.Muted("Warband bank: "
-                .. (CN.CountKeys(warband) - 1)
+                .. Inventory.Kinds(warband)
                 .. " kinds of item, seen " .. Age(warband) .. "h ago "
                 .. CN.DASH .. " reachable from every character."))
         end

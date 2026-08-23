@@ -524,6 +524,14 @@ CN.RegisterSelfTest{
 
         -- The specific reason, when there is one. "Version 7, expected 10" is
         -- true and useless; "migration 7 threw X" is the actual fault.
+        -- Data that was set aside rather than destroyed is still an
+        -- unresolved fault, and it outlives the failure record that produced
+        -- it -- so it is reported on its own rather than under it.
+        if CN.db.rescuedCharacters ~= nil then
+            return FAIL, "some saved data was set aside as unreadable -- "
+                .. "/cn rescued"
+        end
+
         local failure = CN.db.migrationFailure or CN.migrationFailure
 
         if type(failure) == "table" and failure.version then

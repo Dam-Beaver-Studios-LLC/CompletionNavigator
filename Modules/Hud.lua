@@ -175,7 +175,7 @@ function Hud.Refresh()
 
     frame.label:SetText(tostring(objective.name or objective.id))
 
-    local detail = objective.reasons and objective.reasons[1]
+    local detail = CN.FirstReason(objective)
 
     -- WHILE A ROUTE IS BEING WALKED, SAY HOW FAR THROUGH IT YOU ARE.
     --

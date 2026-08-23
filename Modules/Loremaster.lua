@@ -466,7 +466,7 @@ CN:RegisterCommand{
                 tostring(row.name),
                 row.done, row.criteria))
 
-            Print("     |cff8a8f96" .. table.concat(row.reasons, "; ") .. "|r")
+            Print("     " .. CN.Muted(table.concat(CN.Reasons(row), "; ")))
         end
 
         Print("|cff8a8f96Ordered by what is cheapest to finish, not by size. "

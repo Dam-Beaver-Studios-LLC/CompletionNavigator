@@ -750,6 +750,8 @@ function Session.NoteCompleted(objectiveType, id)
 
     table.insert(store[objectiveType], elapsed)
 
+    Session.NoteDurationsChanged()
+
     while #store[objectiveType] > Session.durationSampleCap do
         table.remove(store[objectiveType], 1)
     end
@@ -763,14 +765,62 @@ end
 -- Seconds this type usually takes, or NIL when the addon has not watched it
 -- often enough to have an opinion. Nil is a real answer here and every
 -- caller must handle it rather than substituting a guess.
-function Session.TypicalSeconds(objectiveType)
-    local samples = Durations()[objectiveType]
+-- MEMOISED PER TYPE, because it is asked per CANDIDATE.
+--
+-- The Session decorator asks this for every objective it decorates, and it
+-- copies and sorts up to twenty-five samples to answer. Sixty pets is sixty
+-- copies-and-sorts for one number, and the cost scales with the length of the
+-- candidate list rather than with the nineteen objective types there are.
+--
+-- The store only changes when a completion is recorded, which is the same
+-- shape `Preference.Multiplier` has used since 0.54.0.
+Session.durationGeneration = 0
 
-    if not samples or #samples < Session.minDurationSamples then
+local typicalCache, typicalGeneration = {}, nil
+
+function Session.NoteDurationsChanged()
+    Session.durationGeneration = Session.durationGeneration + 1
+end
+
+function Session.TypicalSeconds(objectiveType)
+    if not objectiveType then
         return nil
     end
 
-    return Median(samples)
+    if typicalGeneration ~= Session.durationGeneration then
+        typicalCache     = {}
+        typicalGeneration = Session.durationGeneration
+    end
+
+    local samples = Durations()[objectiveType]
+
+    -- KEYED ON THE SAMPLE COUNT AS WELL AS THE GENERATION.
+    --
+    -- `NoteDurationsChanged` catches every write this file makes. It cannot
+    -- catch a write from somewhere else -- a future importer, a fixture, a
+    -- `/cn` command that seeds the store -- and a memo that is silently wrong
+    -- about a learned duration is the sort of defect this project keeps
+    -- finding. The count is one length operation and it makes the memo
+    -- self-correcting rather than dependent on everybody remembering.
+    local held = typicalCache[objectiveType]
+
+    local count = samples and #samples or 0
+
+    if held ~= nil and held.count == count then
+        return held.median
+    end
+
+    if not samples or count < Session.minDurationSamples then
+        typicalCache[objectiveType] = { count = count, median = nil }
+
+        return nil
+    end
+
+    local median = Median(samples)
+
+    typicalCache[objectiveType] = { count = count, median = median }
+
+    return median
 end
 
 function Session.HasEnoughData()

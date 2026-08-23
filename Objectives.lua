@@ -123,6 +123,56 @@ CN.typeBadges = {
 -- Returns the id, or nil and a sentence saying why not. The sentence matters:
 -- "that recipe does not exist" and "recipes are looked up by id" send the
 -- player to completely different places.
+-- THINGS THAT ARE NOT ANYWHERE.
+--
+-- A currency, a reputation, a renown track, a profession skill line, a
+-- Warband row: none of these has a place you walk to. Their provider emits no
+-- coordinates, and the addon has always read "no coordinates" as "somewhere
+-- unknown" and charged them a baseline for the journey.
+--
+-- Which produced the wrong answer TWICE, in opposite directions. Measured
+-- over a real collection: `CN.unknownLocationCost` is 3, and the far side of
+-- the player's own zone costs 3.3 -- so an objective with no location was
+-- CHEAPER to reach than one you can see from where you are standing, and
+-- twenty of the top thirty recommendations had no coordinates at all. And an
+-- objective that genuinely should have a location and has not resolved one
+-- was charged the same 3 as a currency, when the honest reading there is that
+-- the addon does not know and should not be optimistic about it.
+--
+-- Two different states, so two different costs. A thing that is not anywhere
+-- costs nothing to travel to, because there is no journey; a thing that is
+-- somewhere the addon cannot name is charged the pessimistic fallback, the
+-- same way `Travel.CostFor` charges one when it cannot cost a journey.
+CN.placelessTypes = {
+    CURRENCY    = true,
+    REPUTATION  = true,
+    RENOWN      = true,
+    PROFESSION  = true,
+    TITLE       = true,
+    ACHIEVEMENT = true,
+    COLLECTIBLE = true,
+}
+
+function CN.IsPlaceless(objective)
+    if type(objective) ~= "table" then
+        return false
+    end
+
+    -- Something the provider gave coordinates for is somewhere, whatever its
+    -- type says.
+    if objective.mapID and objective.x and objective.y then
+        return false
+    end
+
+    -- An item in your bag is not anywhere either -- it is already with you --
+    -- and its provider says so by costing the journey at zero.
+    if objective.travelCost == 0 then
+        return true
+    end
+
+    return CN.placelessTypes[objective.type] == true
+end
+
 -- AND WHICH SCAN FILLS EACH ONE.
 --
 -- "It may need scanning first" was the whole of the advice, in an addon with

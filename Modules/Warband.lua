@@ -179,12 +179,21 @@ function Warband.Decorate(objective)
 
     local suitability, reason = Warband.Suitability(objective.type, objective.id)
 
-    if suitability ~= 0 then
+    if suitability == 0 then
+        -- No verdict now means no sentence now. Withdrawn rather than left
+        -- behind, the same way every adjuster reason has been since 0.51.0.
+        objective.characterSuitability = nil
+
+        CN.ClearDecoratorReason(objective, "warband")
+    else
         objective.characterSuitability = suitability
 
         if reason then
-            objective.reasons = objective.reasons or {}
-            table.insert(objective.reasons, reason)
+            -- Through the keyed mechanism, so the sentence is replaced when
+            -- the verdict changes and withdrawn when it stops applying --
+            -- rather than appended once per rebuild now that a provider's
+            -- tables are reused.
+            CN.AddDecoratorReason(objective, "warband", reason)
         end
     end
 

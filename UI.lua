@@ -2090,7 +2090,7 @@ UI.RegisterTab{
                 })
             end
 
-            for _, reason in ipairs(row.reasons or {}) do
+            for _, reason in ipairs(CN.Reasons(row)) do
                 table.insert(entries, { text = "      " .. reason })
             end
 
