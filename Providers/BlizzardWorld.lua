@@ -1351,7 +1351,7 @@ local function WithJournal(work)
     end
 
     if Blizzard.IsEncounterJournalOpen() then
-        return nil, "the Adventure Guide is open -- close it and try again"
+        return nil, "the Adventure Guide is open" .. CN.DASH .. "close it and try again"
     end
 
     local restoreInstance

@@ -173,7 +173,14 @@ function Warband.Decorate(objective)
         return objective
     end
 
+    -- WITHDRAWN HERE TOO. This was the one branch in the file that returned
+    -- without cleaning up, so an objective that became account-wide kept a
+    -- verdict about a character that no longer needs to do it.
     if objective.accountWide then
+        objective.characterSuitability = nil
+
+        CN.ClearDecoratorReason(objective, "warband")
+
         return objective
     end
 
@@ -384,5 +391,23 @@ CN:RegisterCommand{
         end
     end,
 }
+
+-- WHEN ANOTHER CHARACTER'S PICTURE CHANGES, SAY SO LOUDLY ENOUGH.
+--
+-- `Warband.Decorate` stamps `characterSuitability` and the "your Druid could
+-- do four of these" sentence, and a provider whose rows are unchanged takes
+-- the unchanged-provider shortcut and is never re-decorated -- which 0.57.0
+-- made the common case. So logging in on an alt, or that alt learning a
+-- profession, never reached the rows already on the list.
+--
+-- `CN.decoratorGeneration` is the hook that defeats the shortcut; Goals,
+-- Harvest and Session all use it for the same reason.
+for _, event in ipairs({
+    "PLAYER_ENTERING_WORLD", "UPDATE_FACTION", "SKILL_LINES_CHANGED",
+}) do
+    CN:RegisterEvent(event, function()
+        CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+    end)
+end
 
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.

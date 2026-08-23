@@ -122,14 +122,14 @@ function Broker.Install()
             end
 
             if not results or #results == 0 then
-                tooltip:AddLine("Nothing actionable yet.", 0.6, 0.6, 0.6)
+                tooltip:AddLine("Nothing actionable yet.", CN.Rgb("MUTED"))
 
                 for index, line in ipairs(CN.ExplainEmptyList()) do
                     if index > 2 then
                         break
                     end
 
-                    tooltip:AddLine(line, 0.6, 0.6, 0.6)
+                    tooltip:AddLine(line, CN.Rgb("MUTED"))
                 end
 
                 return
@@ -315,7 +315,7 @@ CN:RegisterCommand{
         end
 
         Print("LibDataBroker feed: " .. CN.YesNo(false))
-        Print("|cff8a8f96LibDataBroker is not installed, which is fine -- it is "
+        Print("|cff8a8f96LibDataBroker is not installed, which is fine" .. CN.DASH .. "it is "
             .. "optional. Display addons like Titan Panel and ElvUI ship it, "
             .. "and the feed appears automatically when one of them is present.|r")
     end,

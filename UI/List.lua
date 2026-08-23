@@ -23,9 +23,25 @@ local ROW_HEIGHT   = UI.ROW_HEIGHT or 20
 
 local SafeCreateFrame = UI.SafeCreateFrame
 
+-- WHICH PANELS HAVE A LIST, RECORDED RATHER THAN GUESSED.
+--
+-- The window's filter box applies to one list, and the check for "does this
+-- tab have one" was `panel.list and panel.list.SetFilter`. That reads a field
+-- off a frame, and a frame is exactly the kind of object that answers yes to
+-- any field it is asked about -- in the offline harness it did, so a check
+-- that was correct in game could not be tested at all.
+--
+-- A registry keyed on the panel is the same answer, asked of something that
+-- can only say yes when it is true.
+UI.listPanels = UI.listPanels or {}
+
 -- Creates a reusable row list. Rows are pooled; SetRows swaps the data.
 local function CreateList(parent)
     local list = CreateFrame("Frame", nil, parent)
+
+    if parent then
+        UI.listPanels[parent] = list
+    end
 
     list:SetPoint("TOPLEFT", 8, -8)
     list:SetPoint("BOTTOMRIGHT", -8, 8)
@@ -136,7 +152,26 @@ local function CreateList(parent)
             end
 
             GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
-            GameTooltip:SetText(entry.tooltip, nil, nil, nil, nil, true)
+            -- A FUNCTION IS ALLOWED, AND IS THE CHEAPER SHAPE.
+            --
+            -- A tooltip that is expensive to build -- composing and sorting
+            -- an objective's four reason tables, say -- was being built for
+            -- every row of every refresh whether the mouse went near it or
+            -- not. Passing the work instead of the answer means it happens
+            -- once, when somebody actually hovers.
+            local text = entry.tooltip
+
+            if type(text) == "function" then
+                local ok, built = pcall(text)
+
+                text = ok and built or nil
+            end
+
+            if not text then
+                return
+            end
+
+            GameTooltip:SetText(text, nil, nil, nil, nil, true)
             GameTooltip:Show()
         end)
 
@@ -312,6 +347,128 @@ local function CreateList(parent)
 
     list.sortButton = sortButton
 
+    -- ROWS THAT BELONG TO EACH OTHER MOVE TOGETHER.
+    --
+    -- Five tabs draw a heading and then the rows under it -- a goal and its
+    -- chain, a character and their Warband totals, a vault slot and its three
+    -- options. Sorting treated all of them as peers, so "A to Z" interleaved
+    -- every chain step of every goal into one alphabetical column with the
+    -- headings scattered through it, and filtering for a step's text showed
+    -- the step with no indication of which goal it belonged to.
+    --
+    -- A tab marks the parent and its children with the same `group` value.
+    -- Consecutive rows sharing one become a block: the block sorts on its
+    -- first row's text and its children keep the order the tab produced,
+    -- because that order is the sequence you do them in and alphabetising a
+    -- sequence destroys the only information it carries.
+    local function Blocks(entries)
+        local blocks = {}
+
+        local index, count = 1, #entries
+
+        while index <= count do
+            local entry = entries[index]
+
+            local group = entry.group
+
+            if group == nil then
+                table.insert(blocks, { entry })
+
+                index = index + 1
+            else
+                local block = { entry }
+
+                index = index + 1
+
+                while index <= count and entries[index].group == group do
+                    table.insert(block, entries[index])
+
+                    index = index + 1
+                end
+
+                table.insert(blocks, block)
+            end
+        end
+
+        return blocks
+    end
+
+    -- THE SORT KEY IS THE WORDS, NOT THE MARKUP AROUND THEM.
+    --
+    -- `entry.text` is the RENDERED string: `|cff8a8f96Aardvark|r`, a route
+    -- number, a `!` for stale, a leading `x ` for done. Sorting on it sorted
+    -- on all of that first, because `|` and the hex digits after it are
+    -- ordinary characters. Measured on three tabs:
+    --
+    --   * Zone: every row begins with its route index, so "A to Z" re-sorted
+    --     by route number -- clicking the header did visibly nothing.
+    --   * Goals: finished goals are muted (`8a...`) and the rest accented
+    --     (`ff...`), so every finished goal sorted above every unfinished one
+    --     whatever they were called.
+    --   * Scans: stale rows carry a coloured `!`, so A to Z grouped by
+    --     staleness and alphabetised within each group.
+    --
+    -- The same key feeds the filter, so typing `cff` matched every row in the
+    -- addon.
+    --
+    -- Strips colour openers, the `|r` that closes them, inline textures, and
+    -- then any leading punctuation and digits the row uses as a marker.
+    local function SortKey(text)
+        text = tostring(text or "")
+
+        text = text:gsub("|c%x%x%x%x%x%x%x%x", "")
+        text = text:gsub("|r", "")
+        text = text:gsub("|T.-|t", "")
+
+        -- Leading markers: "  ", "x ", "> ", "! ", "12. ".
+        text = text:gsub("^[%s%p%d]+", "")
+
+        return string.lower(text)
+    end
+
+    list.SortKey = SortKey
+
+    local function Flatten(blocks)
+        local out = {}
+
+        for _, block in ipairs(blocks) do
+            for _, entry in ipairs(block) do
+                table.insert(out, entry)
+            end
+        end
+
+        return out
+    end
+
+    -- AND A SECOND KIND OF BELONGING, WHICH IS NOT THE SAME KIND.
+    --
+    -- A goal's chain is atomic: its steps are a sequence and reordering them
+    -- is meaningless. A section is not -- the Journey tab draws "Closest to
+    -- finished" and then twelve achievements, and those twelve are peers that
+    -- a player may well want alphabetised. Freezing them because they sit
+    -- under a heading would take the sort away exactly where it is useful.
+    --
+    -- So `section` sorts WITHIN itself: sections keep the order the tab
+    -- produced, a row marked `sectionHeader` stays at the top of its own, and
+    -- everything else moves only among its own section's rows.
+    local function Runs(blocks)
+        local runs, current = {}, nil
+
+        for _, block in ipairs(blocks) do
+            local section = block[1].section
+
+            if not current or current.section ~= section then
+                current = { section = section }
+
+                table.insert(runs, current)
+            end
+
+            table.insert(current, block)
+        end
+
+        return runs
+    end
+
     function list:ApplySort(entries)
         local mode = self:SortMode()
 
@@ -319,27 +476,44 @@ local function CreateList(parent)
             return entries
         end
 
-        local sorted = {}
+        local blocks = Blocks(entries)
 
-        for _, entry in ipairs(entries) do
-            table.insert(sorted, entry)
+        -- `table.sort` is not stable, and two blocks whose first rows read the
+        -- same would otherwise swap places on every refresh -- a list that
+        -- twitches once a second. The original index breaks the tie.
+        for position, block in ipairs(blocks) do
+            block.order  = position
+            block.key    = SortKey(block[1].text)
+            block.pinned = block[1].sectionHeader and true or false
         end
 
-        -- A stable-enough comparison on the visible text: the rows are what
-        -- the player is reading, so the order they asked for is an order over
-        -- what they can see, not over an id they cannot.
-        table.sort(sorted, function(a, b)
-            local left  = string.lower(tostring(a.text or ""))
-            local right = string.lower(tostring(b.text or ""))
+        local out = {}
 
-            if mode == "reverse" then
-                return left > right
+        for _, run in ipairs(Runs(blocks)) do
+            table.sort(run, function(a, b)
+                -- A heading is not a row to be alphabetised against the rows
+                -- it introduces. It is the thing that says what they are.
+                if a.pinned ~= b.pinned then
+                    return a.pinned
+                end
+
+                if a.key == b.key then
+                    return a.order < b.order
+                end
+
+                if mode == "reverse" then
+                    return a.key > b.key
+                end
+
+                return a.key < b.key
+            end)
+
+            for _, block in ipairs(run) do
+                table.insert(out, block)
             end
+        end
 
-            return left < right
-        end)
-
-        return sorted
+        return Flatten(out)
     end
 
     function list:Matches(entry)
@@ -347,29 +521,50 @@ local function CreateList(parent)
             return true
         end
 
-        local haystack = string.lower(tostring(entry.text or ""))
+        -- The same stripped text the sort uses: a filter that searches the
+        -- colour codes is a filter where `cff` matches everything.
+        local haystack = SortKey(entry.text)
 
         -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
         -- name, not a regular expression, and a stray bracket must not throw.
         return haystack:find(filterText, 1, true) ~= nil
     end
 
+    -- A block survives the filter if ANY row in it matches, and it survives
+    -- whole. Matching a chain step and showing it without its goal is an
+    -- answer to a question nobody asked.
+    function list:Filter(entries)
+        if not filterText then
+            return entries
+        end
+
+        local kept = {}
+
+        for _, block in ipairs(Blocks(entries)) do
+            local hit = false
+
+            for _, entry in ipairs(block) do
+                if self:Matches(entry) then
+                    hit = true
+                    break
+                end
+            end
+
+            if hit then
+                for _, entry in ipairs(block) do
+                    table.insert(kept, entry)
+                end
+            end
+        end
+
+        return kept
+    end
+
     -- entries = { { text = , onClick = , tooltip = }, ... }
     function list:SetEntries(entries)
         lastEntries = entries
 
-        if filterText then
-            local kept = {}
-
-            for _, entry in ipairs(entries) do
-                if self:Matches(entry) then
-                    table.insert(kept, entry)
-                end
-            end
-
-            entries = kept
-        end
-
+        entries = self:Filter(entries)
         entries = self:ApplySort(entries)
 
         local width = scroll:GetWidth() or (WINDOW_WIDTH - 60)

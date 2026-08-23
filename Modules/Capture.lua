@@ -67,7 +67,7 @@ function CN.RegisterCapture(definition)
     end
 
     if type(definition.name) ~= "string" or definition.name == "" then
-        return false, "a capture needs a name -- it is the key its result is "
+        return false, "a capture needs a name" .. CN.DASH .. "it is the key its result is "
             .. "filed under"
     end
 
@@ -508,12 +508,12 @@ CN:RegisterCommand{
 
         for name, value in pairs(records) do
             if type(value) == "table" and value.skipped then
-                Print("  |cff8a8f96" .. name .. " -- " .. value.skipped .. "|r")
+                Print("  |cff8a8f96" .. name .. "" .. CN.DASH .. "" .. value.skipped .. "|r")
             end
         end
 
         Print("|cff8a8f96Nothing identifying you is recorded, and nothing "
-            .. "leaves your machine -- this addon has no network access. "
+            .. "leaves your machine" .. CN.DASH .. "this addon has no network access. "
             .. "It is written to your SavedVariables at logout.|r")
         Print("To send it: log out, then find "
             .. "|cffffc74fWTF\\Account\\<account>\\SavedVariables\\"

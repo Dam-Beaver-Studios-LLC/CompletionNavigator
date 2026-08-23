@@ -85,8 +85,18 @@ function Breakdown.NoteChanged()
     Breakdown.generation = Breakdown.generation + 1
 end
 
-function Breakdown.Report(categoryName)
-    if not categoryName then
+-- `force` IS NOT A LUXURY.
+--
+-- The cache is keyed on a generation bumped by nine collection events, and
+-- most of what this report counts is not a collection: harvested quests,
+-- captured recipes, scanned vendors. So the Remaining tab's own Refresh
+-- button -- whose tooltip says "counts what is left again" -- could not
+-- recount, and a row that says "run /cn harvest" went on showing the old
+-- number after the player ran it.
+--
+-- Anything that ASKED for a recount gets one.
+function Breakdown.Report(categoryName, force)
+    if not categoryName and not force then
         if reportCache and reportGeneration == Breakdown.generation then
             return reportCache
         end

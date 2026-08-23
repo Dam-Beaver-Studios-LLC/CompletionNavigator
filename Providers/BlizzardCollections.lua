@@ -113,7 +113,7 @@ function Blizzard.WithAllPetsShown(scan)
             CN.Print("Your Pet Journal's source and type filters were hiding "
                 .. "every pet, so they were set to show everything. The "
                 .. "client does not let an addon read those checkboxes, so "
-                .. "they cannot be put back -- set them again in the journal "
+                .. "they cannot be put back" .. CN.DASH .. "set them again in the journal "
                 .. "if you had them narrowed.")
         end
     end

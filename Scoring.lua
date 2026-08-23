@@ -1355,9 +1355,30 @@ function CN.CollectCandidates(force)
         return aggregate.candidates
     end
 
-    -- Which winners this pass has already reset. An objective can be the
-    -- winner for several losers in one pass, and the reset must happen once.
+    -- WHAT THE AGGREGATE CONTRIBUTED LAST TIME, RESET FOR EVERY ROW.
+    --
+    -- 0.57.0 reset only rows that were merged into AGAIN this pass, which
+    -- misses the case the reset exists for: the losing provider STOPPING.
+    -- Unpin a goal and the Goals provider stops emitting the quest -- so the
+    -- quest is never an `existing` again, its merged sentence and merged
+    -- value are never cleared, and because the reuse shortcut hands back the
+    -- same table they stay for the rest of the session. Exactly the symptom
+    -- the release notes claimed to have removed.
+    --
+    -- Reset on FIRST SIGHT of a row in this pass instead, wherever it is
+    -- first seen, so a contribution that is no longer being made is gone
+    -- whether or not anything else is still merging into it.
     local touched = {}
+
+    local function Reset(objective)
+        if touched[objective] then
+            return
+        end
+
+        touched[objective]              = true
+        objective.mergedReasons         = nil
+        objective.mergedCompletionValue = nil
+    end
 
     -- ONE OBJECTIVE, ONE ROW.
     --
@@ -1403,7 +1424,13 @@ function CN.CollectCandidates(force)
 
                 local existing = key and byKey[key]
 
+                if objective then
+                    Reset(objective)
+                end
+
                 if existing then
+                    Reset(existing)
+
                     -- THE MERGE NEVER WRITES INTO THE PROVIDER'S OWN ROW.
                     --
                     -- It used to raise `existing.completionValue` in place
@@ -1421,12 +1448,6 @@ function CN.CollectCandidates(force)
                     -- Both go in tables the aggregate owns, cleared at the
                     -- top of this pass, so a contribution that stops being
                     -- made simply stops appearing.
-                    if not touched[existing] then
-                        touched[existing]              = true
-                        existing.mergedReasons         = nil
-                        existing.mergedCompletionValue = nil
-                    end
-
                     if (objective.completionValue or 0)
                         > (existing.completionValue or 0)
                         and (objective.completionValue or 0)
@@ -1592,6 +1613,19 @@ local function Ranked()
             -- shapes, which is a provider mixing numeric and string ids and
             -- is rare enough to pay for itself there.
             local leftID, rightID = a.id, b.id
+
+            -- `type(nil) == type(nil)`, so two rows with no id reached
+            -- `nil < nil` and threw -- taking `/cn next`, `/cn list`, the
+            -- HUD, the broker and the Next tab with them. The string form
+            -- this replaced was nil-safe by accident; this one has to be
+            -- nil-safe on purpose.
+            --
+            -- No shipped provider emits a nil id, but
+            -- `RegisterCandidateProvider` is published and several ids come
+            -- straight out of client tables.
+            if leftID == nil or rightID == nil then
+                return rightID ~= nil
+            end
 
             if type(leftID) == type(rightID) then
                 return leftID < rightID
@@ -1908,7 +1942,7 @@ CN:RegisterCommand{
             local scaled = math.floor((value / (1 + CN.urgencyLongShare))
                 * width + 0.5)
 
-            CN.Print(string.format("  %-11s |cff5dd2fb%s|r|cff5a5f66%s|r %.2f",
+            CN.PrintLine(string.format("  %-11s |cff5dd2fb%s|r|cff5a5f66%s|r %.2f",
                 point.label,
                 string.rep("=", scaled),
                 string.rep("-", width - scaled),
@@ -1964,12 +1998,12 @@ CN:RegisterCommand{
             tostring((settings and settings.priorityMode) or "balanced")))
 
         for index, objective in ipairs(results) do
-            CN.Print(string.format("%d. |cfff2f4f6%s|r |cff8a8f96%.1f|r",
+            CN.PrintLine(string.format("%d. |cfff2f4f6%s|r |cff8a8f96%.1f|r",
                 index, tostring(objective.name or objective.id),
                 objective.priorityWeight or 0))
 
             for _, term in ipairs(CN.ExplainScore(objective)) do
-                CN.Print(string.format("     %s%+.1f|r  %s",
+                CN.PrintLine(string.format("     %s%+.1f|r  %s",
                     term.value >= 0 and "|cff73b873" or "|cffe2564c",
                     term.value, term.label))
             end
@@ -2150,7 +2184,7 @@ CN:RegisterCommand{
         CN.Print("Providers, slowest first:")
 
         for _, row in ipairs(rows) do
-            CN.Print(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
+            CN.PrintLine(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
                 row.name, row.average, row.worst, row.calls,
                 row.calls == 1 and "call" or "calls",
                 row.cached and "" or " |cffffc74fstale|r"))
@@ -2162,11 +2196,12 @@ CN:RegisterCommand{
         for name, truncation in pairs(CN.providerTruncation) do
             if (truncation.dropped or 0) > 0 then
                 if not capped then
-                    CN.Print("Capped at " .. CN.providerCandidateCap .. " per provider:")
+                    CN.PrintLine("Capped at " .. CN.providerCandidateCap
+                        .. " per provider:")
                     capped = true
                 end
 
-                CN.Print("  " .. name .. ": showing " .. CN.providerCandidateCap
+                CN.PrintLine("  " .. name .. ": showing " .. CN.providerCandidateCap
                     .. " of " .. truncation.considered
                     .. " |cff8a8f96(" .. truncation.dropped .. " lower-valued dropped)|r")
             end
@@ -2206,10 +2241,39 @@ CN:RegisterCommand{
             return
         end
 
+        -- A NUMBER WITH NO UNIT, NO SCALE AND NO MAXIMUM.
+        --
+        -- Every line ended `[Quest 12.4]`. 12.4 is the internal priority
+        -- weight: nothing on the line said what it was of, nothing said what
+        -- a good one looks like, and the command that explains it was not
+        -- named. `/cn list` is one of the ten day-one commands and the one a
+        -- new player types after `/cn next`.
+        --
+        -- Replaced with the figure the ranking already computed that a person
+        -- can act on: how far away it is.
+        local session = CN:GetModule("Session")
+
+        CN.Print("The top " .. #results .. ":")
+
         for index, objective in ipairs(results) do
-            CN.Print(index .. ". " .. tostring(objective.name or objective.id)
-                .. " |cff8a8f96[" .. CN.TypeBadge(objective.type)
-                .. " " .. string.format("%.1f", objective.priorityWeight or 0) .. "]|r")
+            local away
+
+            if objective.travelCost and objective.travelCost > 0
+                and CN.secondsPerCostPoint and session
+                and session.FormatDuration then
+
+                away = session.FormatDuration(objective.travelCost
+                    * CN.secondsPerCostPoint)
+            end
+
+            CN.PrintLine(index .. ". "
+                .. CN.Primary(tostring(objective.name or objective.id))
+                .. CN.Muted(" [" .. CN.TypeBadge(objective.type)
+                    .. (away and (" " .. CN.DOT .. " " .. away .. " away") or "")
+                    .. "]"))
         end
+
+        CN.PrintLine(CN.Muted("") .. CN.Accent("/cn order")
+            .. CN.Muted(" shows why this is the order."))
     end,
 }

@@ -280,7 +280,7 @@ CN:RegisterCommand{
 
             Print("Nothing has gone wrong this session.")
             Print("|cff8a8f96Errors inside the addon are caught so they "
-                .. "cannot break your session -- which is also why they would "
+                .. "cannot break your session" .. CN.DASH .. "which is also why they would "
                 .. "otherwise be invisible. They are recorded here instead.|r")
             return
         end

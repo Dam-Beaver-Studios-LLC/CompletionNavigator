@@ -66,7 +66,7 @@ function Contribute.Build()
     table.sort(ids)
 
     if #ids == 0 then
-        return nil, "nothing is confident yet -- a chain has to hold on "
+        return nil, "nothing is confident yet" .. CN.DASH .. "a chain has to hold on "
             .. (harvest.confidenceThreshold or 3)
             .. " characters before it is worth sending"
     end
@@ -262,7 +262,7 @@ CN:RegisterCommand{
         Print(count .. " chain(s) ready to share. This text and nothing else:")
         Print("|cffffc74f" .. export .. "|r")
         Print("|cff8a8f96It contains quest IDs and orderings. No character "
-            .. "name, no realm, no timestamps, no coordinates -- read it "
+            .. "name, no realm, no timestamps, no coordinates" .. CN.DASH .. "read it "
             .. "before you send it, which is rather the point of a format you "
             .. "can read.|r")
         Print("Paste it into an issue on the tracker and it ships to everyone "

@@ -527,11 +527,11 @@ local function BuildFrame()
 
     local inset = CN.SPACE.M
 
-    frame.header = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.header = frame:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
     frame.header:SetPoint("TOPLEFT", inset, -CN.SPACE.S)
     frame.header:SetJustifyH("LEFT")
 
-    frame.body = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.body = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
     frame.body:SetPoint("TOPLEFT", frame.header, "BOTTOMLEFT", 0, -CN.SPACE.S)
     frame.body:SetJustifyH("LEFT")
     frame.body:SetJustifyV("TOP")

@@ -469,7 +469,7 @@ CN:RegisterCommand{
         end
 
         Print("|cff8a8f96This is what the addon has actually seen, not every "
-            .. "quest in the game -- the client only lists pins for the map "
+            .. "quest in the game" .. CN.DASH .. "the client only lists pins for the map "
             .. "you are looking at.|r")
     end,
 }
@@ -1597,7 +1597,7 @@ CN:RegisterCommand{
         if #tasks > 0 then
             Print("|cff8a8f96Also " .. #tasks .. " world quest"
                 .. (#tasks == 1 and "" or "s")
-                .. " or bonus objective in this zone -- no giver to talk "
+                .. " or bonus objective in this zone" .. CN.DASH .. "no giver to talk "
                 .. "to.|r")
         end
 
@@ -1791,7 +1791,7 @@ CN:RegisterCommand{
             -- stated problem.
             Print("|cff8a8f96No prerequisite data for this quest. "
                 .. "Install AllTheThings or BtWQuests, or let the addon "
-                .. "learn the ordering by playing -- |cffffc74f/cn harvest|r"
+                .. "learn the ordering by playing" .. CN.DASH .. "|cffffc74f/cn harvest|r"
                 .. "|cff8a8f96 shows what it has seen so far.|r")
         end
     end,

@@ -363,7 +363,7 @@ function Tooltips.Render(tooltip, lines)
     end
 
     tooltip:AddLine(" ")
-    tooltip:AddLine(HEADER, 0.2, 1.0, 0.6)
+    tooltip:AddLine(HEADER, CN.Rgb("BRAND"))
 
     for _, line in ipairs(lines) do
         tooltip:AddLine(line.text, line.color[1], line.color[2], line.color[3])

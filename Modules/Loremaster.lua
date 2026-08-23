@@ -375,7 +375,7 @@ function Loremaster.NextZones(limit)
         if row.fraction >= Loremaster.nearlyDoneFraction then
             value = value + 3
             table.insert(reasons, string.format(
-                "%d%% done -- finishing is cheaper than starting",
+                "%d%% done" .. CN.DASH .. "finishing is cheaper than starting",
                 math.floor(row.fraction * 100)))
         elseif row.done > 0 then
             value = value + 1
@@ -470,7 +470,7 @@ CN:RegisterCommand{
         end
 
         Print("|cff8a8f96Ordered by what is cheapest to finish, not by size. "
-            .. "Zones you have not started are included -- an earlier version "
+            .. "Zones you have not started are included" .. CN.DASH .. "an earlier version "
             .. "left them out entirely.|r")
     end,
 }

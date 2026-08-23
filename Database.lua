@@ -389,7 +389,7 @@ CN.migrations = {
 
         if type(db.characters) ~= "table" then
             error("db.characters is a " .. type(db.characters)
-                .. ", not a table -- refusing to replace it")
+                .. ", not a table" .. CN.DASH .. "refusing to replace it")
         end
 
         local keep = {
@@ -899,15 +899,38 @@ end
 function CN.DatabaseSizes()
     local rows = {}
 
+    -- THREE BOOKKEEPING KEYS ARE NOT THREE ITEMS.
+    --
+    -- An inventory store holds one key per item id PLUS `containers`,
+    -- `seenAt` and `scannedAt`, which are how the snapshot knows what it
+    -- covers and when it was taken. `CN.CountKeys` counted all of them, so a
+    -- Warband bank holding nothing at all was reported as three rows -- and
+    -- one holding four items as seven, which is the worse error, because it
+    -- is wrong by an amount that looks plausible.
+    --
+    -- `Inventory.Kinds` is the function that already knows the difference,
+    -- and this is the second caller it should always have had.
+    local inventory = CN:GetModule("Inventory")
+
+    local storeSections = { warbandBank = true, bank = true }
+
     local function section(label, contents)
         if type(contents) ~= "table" then
             return
         end
 
+        local count
+
+        if storeSections[label] and inventory and inventory.Kinds then
+            count = inventory.Kinds(contents)
+        else
+            count = CN.CountKeys(contents)
+        end
+
         table.insert(rows, {
             name  = label,
             bytes = CN.MeasureDatabase(contents),
-            count = CN.CountKeys(contents),
+            count = count,
         })
     end
 
@@ -947,8 +970,10 @@ CN:RegisterCommand{
         end
 
         if args == "discard" then
+            -- `CN.rescuedData` was set here and read nowhere in the tree.
+            -- A flag nothing reads is not a flag, it is a note to a reader
+            -- that a decision was carried when it was not.
             CN.db.rescuedCharacters = nil
-            CN.rescuedData          = false
 
             Print("Discarded. " .. CN.Muted("The addon will stop mentioning "
                 .. "it."))

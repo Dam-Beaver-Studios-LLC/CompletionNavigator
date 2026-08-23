@@ -177,7 +177,7 @@ local function SearchHelp(term)
 
     if #matches == 0 then
         Print("Nothing matches \"" .. term .. "\".")
-        Print(CN.Muted("Try a word from what you want to do -- "
+        Print(CN.Muted("Try a word from what you want to do" .. CN.DASH .. ""
             .. CN.Accent("/cn help mount") .. CN.Muted(", ")
             .. CN.Accent("/cn help time") .. CN.Muted(". ")
             .. CN.Accent("/cn help all") .. CN.Muted(" lists everything.")))
@@ -314,7 +314,7 @@ local function ShowStatus()
 
         if current and active then
             table.insert(lines, "Focus " .. CN.Accent(active.label)
-                .. CN.Muted(" -- " .. active.note))
+                .. CN.Muted("" .. CN.DASH .. "" .. active.note))
         end
 
         table.insert(lines, "Ranking weight "
@@ -339,7 +339,7 @@ local function ShowStatus()
 
         if #missing > 0 then
             table.insert(lines, CN.Accent("/cn setup")
-                .. CN.Muted(" -- " .. #missing .. " thing"
+                .. CN.Muted("" .. CN.DASH .. "" .. #missing .. " thing"
                     .. (#missing == 1 and "" or "s")
                     .. " here has never been read"))
         end
@@ -443,9 +443,16 @@ local function HandleSlashCommand(message)
         return
     end
 
+    -- SEARCH, RATHER THAN DUMPING THE DAY-ONE LIST.
+    --
+    -- A player who typed something wrong or half-remembered a name got
+    -- eleven lines of the essentials list, which is unlikely to contain what
+    -- they were reaching for. `SearchHelp` matches names, aliases and help
+    -- text, and it is what this file's own header says the search exists for.
+    -- Its own miss path already points at `/cn help all`.
     Print("Unknown command: " .. tostring(command))
 
-    ShowHelp()
+    SearchHelp(command)
 end
 
 CN.HandleSlashCommand = HandleSlashCommand
@@ -614,7 +621,7 @@ CN:RegisterCommand{
             local ok, preset = filters.ApplyMode(requested)
 
             if ok then
-                Print("Focus: |cffffc74f" .. preset.label .. "|r -- "
+                Print("Focus: |cffffc74f" .. preset.label .. "|r" .. CN.DASH .. ""
                     .. preset.note)
                 Print("|cff8a8f96/cn mode off|r puts it back.")
                 return

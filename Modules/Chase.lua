@@ -337,7 +337,7 @@ function Chase.Chain(goal)
                     "Drops from " .. description,
                     {
                         note = "you are saved to " .. first.instance
-                            .. " and it is cleared -- resets in "
+                            .. " and it is cleared" .. CN.DASH .. "resets in "
                             .. instances.FormatReset(lockout.resetsIn),
                     }))
             else
@@ -441,10 +441,10 @@ function Chase.Summarize(chain)
         table.insert(parts, "next: " .. tostring(nextStep.text))
     elseif #parts == 0 then
         return tostring(chain.name)
-            .. " -- the game does not say how this is obtained."
+            .. "" .. CN.DASH .. "the game does not say how this is obtained."
     end
 
-    return tostring(chain.name) .. " -- " .. table.concat(parts, ", ")
+    return tostring(chain.name) .. "" .. CN.DASH .. "" .. table.concat(parts, ", ")
 end
 
 -- Percent complete, or nil. Nil is a real answer and callers must render it

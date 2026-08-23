@@ -485,7 +485,7 @@ function Harvest.BuildExport(onlyLocated)
         local zone = Harvest.Zone(record)
 
         if zone then
-            table.insert(lines, '        -- ' .. zone)
+            table.insert(lines, '       " .. CN.DASH .. "' .. zone)
         end
 
         if record.mapID then
@@ -523,7 +523,7 @@ function Harvest.BuildExport(onlyLocated)
         local confident = Harvest.ConfidentPrerequisites(record.questID)
 
         if #confident > 0 then
-            table.insert(lines, "        -- observed on "
+            table.insert(lines, "       " .. CN.DASH .. "observed on "
                 .. Harvest.confidenceThreshold .. "+ characters")
             table.insert(lines, "        observedRequires = { "
                 .. table.concat(confident, ", ") .. " },")
@@ -542,7 +542,7 @@ function Harvest.BuildExport(onlyLocated)
         table.sort(unconfirmed)
 
         if #unconfirmed > 0 then
-            table.insert(lines, "        -- unconfirmed, character count in "
+            table.insert(lines, "       " .. CN.DASH .. "unconfirmed, character count in "
                 .. "brackets: " .. table.concat(unconfirmed, ", "))
         end
 
@@ -585,7 +585,7 @@ local function ShowExport(text, count)
         local edit = CreateFrame("EditBox", nil, scroll)
 
         edit:SetMultiLine(true)
-        edit:SetFontObject("GameFontHighlightSmall")
+        edit:SetFontObject(CN.FONT.SMALL)
         edit:SetWidth(540)
         edit:SetAutoFocus(false)
         edit:SetScript("OnEscapePressed", function() exportFrame:Hide() end)
@@ -594,7 +594,7 @@ local function ShowExport(text, count)
 
         exportFrame.edit = edit
 
-        local hint = exportFrame:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        local hint = exportFrame:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
         hint:SetPoint("BOTTOMLEFT", 14, 14)
         hint:SetText("Ctrl+A then Ctrl+C, and paste into Data\\Quests.lua")
 

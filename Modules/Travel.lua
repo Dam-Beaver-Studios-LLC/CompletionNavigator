@@ -1655,13 +1655,14 @@ function Travel.CostFor(mapID, x, y)
 
     local key = (mapID * 1000000) + (Packed(x) * 1000) + Packed(y)
 
+    -- `~= nil` rather than a truth test, and no `false` branch: 0.54.0 stored
+    -- `false` for a refusal and the paragraph below explains why it stopped.
+    -- The branch that read it back outlived the branch that wrote it, so it
+    -- was unreachable code standing exactly where a reader would look to find
+    -- out whether misses are cached. They are not.
     local held = costCache[key]
 
     if held ~= nil then
-        if held == false then
-            return nil
-        end
-
         return held
     end
 
@@ -1964,7 +1965,7 @@ CN:RegisterCommand{
 
             Print(string.format(
                 "  |cff8a8f96%.0f yd to %s, %.0f yd in the air, %.0f yd at the "
-                .. "far end -- against %.0f yd on foot|r",
+                .. "far end" .. CN.DASH .. "against %.0f yd on foot|r",
                 detail.runToNode, tostring(detail.node), detail.flightYards,
                 detail.runFromNode, detail.yards))
 
@@ -2001,7 +2002,7 @@ CN:RegisterCommand{
                         CN.confidence.ESTIMATED))))
         elseif detail and detail.mode == "elsewhere" then
             Print("|cff8a8f96That is on another continent. Portals and boats "
-                .. "are not modelled, so no time is claimed -- but here is "
+                .. "are not modelled, so no time is claimed" .. CN.DASH .. "but here is "
                 .. "what you have:|r")
 
             local teleports = detail.teleports or {}

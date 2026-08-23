@@ -126,12 +126,12 @@ local function Build()
 
     local inset = CN.SPACE.S
 
-    frame.label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.label = frame:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
     frame.label:SetPoint("TOPLEFT", inset, -inset)
     frame.label:SetPoint("TOPRIGHT", -inset, -inset)
     frame.label:SetJustifyH("LEFT")
 
-    frame.detail = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.detail = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
     frame.detail:SetPoint("TOPLEFT", frame.label, "BOTTOMLEFT", 0, -CN.SPACE.XS)
     frame.detail:SetPoint("TOPRIGHT", frame.label, "BOTTOMRIGHT", 0, -CN.SPACE.XS)
     frame.detail:SetJustifyH("LEFT")
@@ -147,6 +147,46 @@ local function Build()
 
         Preferences().hudPosition = { point = point, x = x, y = y }
     end)
+
+    -- IT NAMES THE NEXT THING AND COULD NOT BE CLICKED.
+    --
+    -- The frame was mouse-enabled for dragging and showed the current
+    -- recommendation -- so the player read "Kill Ten Rats" on their own
+    -- screen and then typed `/cn go`. The two actions the Next tab offers for
+    -- the same objective are a left and a right click away, and neither
+    -- fights the drag: `OnMouseUp` fires on a click, not on a drag.
+    frame:RegisterForDrag("LeftButton")
+
+    frame:SetScript("OnMouseUp", function(_, button)
+        local objective = CN.currentRecommendation
+
+        if not objective then
+            return
+        end
+
+        if button == "RightButton" then
+            CN.SetDeferred(objective.type, objective.id, 3600)
+
+            CN.Print("Deferred for an hour: "
+                .. tostring(objective.name or objective.id)
+                .. CN.Aside(CN.Accent("/cn unhide " .. tostring(objective.id))
+                    .. " brings it back now"))
+
+            CN.InvalidateCandidates()
+
+            Hud.Refresh()
+
+            return
+        end
+
+        CN.NavigateToObjective(objective)
+    end)
+
+    if CN.UI and CN.UI.AttachTooltip then
+        CN.UI.AttachTooltip(frame,
+            "Click to navigate to this. Right-click to put it off for an "
+            .. "hour. Drag to move this line.")
+    end
 
     frame:SetScale(Hud.Scale())
 
@@ -235,6 +275,19 @@ CN:OnLogin(function()
     if Hud.IsEnabled() then
         Hud.SetEnabled(true)
     end
+
+    -- THE TEXT SIZE SILENTLY REVERTED ON EVERY RELOAD.
+    --
+    -- `ApplyScale` is what scales the window, the arrow, the follow frame and
+    -- the welcome frame, and it was called from exactly one place: the
+    -- command that sets the number. So a player who set Size 1.50 saw it
+    -- apply, reloaded, and got everything except the heads-up line back at
+    -- 1.0 -- with the button still reading "Size 1.50".
+    --
+    -- This is the accessibility control the settings rebuild existed for,
+    -- because "the players who most need a larger interface are the least
+    -- likely to find /cn scale 1.4 in a hundred-line help listing".
+    Hud.ApplyScale()
 end)
 
 ------------------------------------------------------------
@@ -347,7 +400,7 @@ function Hud.RegisterOptionsPanel()
 
     panel.name = "Completion Navigator"
 
-    local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    local title = panel:CreateFontString(nil, "ARTWORK", CN.FONT.TITLE)
     title:SetPoint("TOPLEFT", 16, -16)
     title:SetText("Completion Navigator")
 
@@ -362,11 +415,11 @@ function Hud.RegisterOptionsPanel()
     --
     -- Three sentences and two buttons. The settings themselves live one click
     -- away, in the window, where there is room to group them.
-    local body = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    local body = panel:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
     body:SetPoint("TOPLEFT", 16, -48)
     body:SetPoint("TOPRIGHT", -16, -48)
     body:SetJustifyH("LEFT")
-    body:SetText("Answers \"what should I do next?\" -- ranks what is worth "
+    body:SetText("Answers \"what should I do next?\"" .. CN.DASH .. "ranks what is worth "
         .. "doing now, costs the journey the way you would really make it, "
         .. "and shows its working when you ask why.\n\n"
         .. "1.  Scan once, so it knows what you have.\n"
@@ -397,7 +450,7 @@ function Hud.RegisterOptionsPanel()
         end
     end)
 
-    local version = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    local version = panel:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
     version:SetPoint("TOPLEFT", scan, "BOTTOMLEFT", 0, -12)
     version:SetText("v" .. tostring(CN.version)
         .. "  " .. CN.DOT .. "  Dam Beaver Studios, LLC")

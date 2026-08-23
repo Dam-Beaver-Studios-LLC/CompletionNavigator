@@ -338,7 +338,7 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
         -- fivefold penalty was applied with nothing on screen saying why.
         -- `AddAdjusterReason` creates the table itself.
         CN.AddAdjusterReason(objective, "groupDead",
-            "you are dead -- this is for after")
+            "you are dead" .. CN.DASH .. "this is for after")
 
         return score * Group.deadPenalty
     end
@@ -459,11 +459,11 @@ function Group.Notice()
             local corpse = Group.CorpseTarget()
 
             if corpse then
-                return "You are a ghost. Your body is marked -- the rest of "
+                return "You are a ghost. Your body is marked" .. CN.DASH .. "the rest of "
                     .. "this keeps."
             end
 
-            return "You are a ghost. Your body first -- the rest of this "
+            return "You are a ghost. Your body first" .. CN.DASH .. "the rest of this "
                 .. "keeps."
         end
 

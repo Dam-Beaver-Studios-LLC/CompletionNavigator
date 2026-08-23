@@ -343,7 +343,7 @@ CN:RegisterCommand{
 
         if summary.closest then
             Print("|cffffc74fClosest:|r " .. summary.closest.label
-                .. " -- " .. summary.closest.remaining .. " more, "
+                .. "" .. CN.DASH .. "" .. summary.closest.remaining .. " more, "
                 .. (Vault.rowActions[summary.closest.row] or "keep going") .. ".")
         else
             Print("|cff73b873Every row is capped. Nothing more to earn this week.|r")

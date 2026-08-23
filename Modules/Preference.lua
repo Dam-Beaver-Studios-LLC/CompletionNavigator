@@ -906,13 +906,13 @@ CN:RegisterCommand{
                 -- Only reachable from a database written before 0.55.0 and
                 -- not yet migrated. Say what it is rather than implying the
                 -- counter is on its way somewhere.
-                line = line .. " |cff8a8f96(not watched -- the addon cannot "
+                line = line .. " |cff8a8f96(not watched" .. CN.DASH .. "the addon cannot "
                     .. "see when you finish one of these)|r"
             elseif multiplier == 1 then
                 local short = Preference.minimumObservations - entry.row.shown
 
                 line = line .. " |cff8a8f96(no effect"
-                    .. (short > 0 and (" -- " .. short .. " more sightings needed")
+                    .. (short > 0 and ("" .. CN.DASH .. "" .. short .. " more sightings needed")
                         or "")
                     .. ")|r"
             else

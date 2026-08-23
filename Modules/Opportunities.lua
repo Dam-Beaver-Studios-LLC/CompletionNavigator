@@ -240,7 +240,7 @@ CN.RegisterCandidateProvider("Opportunities", function()
                 completionValue  = 2,
                 limitedTimeBonus = event.endsIn
                     and Opportunities.Urgency(event.endsIn) or 1,
-                travelCost       = CN.unknownLocationCost,
+                travelCost       = CN.placelessCost,
                 expiresIn        = event.endsIn,
                 reasons          = reasons,
             }))

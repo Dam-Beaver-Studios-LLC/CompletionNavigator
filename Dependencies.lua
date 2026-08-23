@@ -321,13 +321,13 @@ end
 function CN.Explain(objectiveType, id)
     if CN.IsIgnored(objectiveType, id) then
         return CN.objectiveStates.IGNORED,
-            "you ignored this -- /cn unhide " .. tostring(id) .. " restores it",
+            "you ignored this" .. CN.DASH .. "/cn unhide " .. tostring(id) .. " restores it",
             nil
     end
 
     if CN.IsDeferred(objectiveType, id) then
         return CN.objectiveStates.DEFERRED,
-            "you deferred this -- /cn unhide " .. tostring(id)
+            "you deferred this" .. CN.DASH .. "/cn unhide " .. tostring(id)
             .. " restores it now", nil
     end
 

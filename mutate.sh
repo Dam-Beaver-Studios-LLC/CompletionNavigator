@@ -926,7 +926,7 @@ mutate "Database.lua" \
 
         if type(db.characters) ~= \"table\" then
             error(\"db.characters is a \" .. type(db.characters)
-                .. \", not a table -- refusing to replace it\")
+                .. \", not a table\" .. CN.DASH .. \"refusing to replace it\")
         end" \
     "        if type(db.characters) ~= \"table\" then
             db.characters = {}
@@ -1026,15 +1026,22 @@ mutate "Scoring.lua" \
     "what another provider says a thing is worth is ignored"
 
 mutate "Scoring.lua" \
-    "                    if not touched[existing] then
-                        touched[existing]              = true
-                        existing.mergedReasons         = nil
-                        existing.mergedCompletionValue = nil
-                    end" \
-    "                    if false then
-                        existing.mergedReasons         = nil
-                        existing.mergedCompletionValue = nil
-                    end" \
+    "    local function Reset(objective)
+        if touched[objective] then
+            return
+        end
+
+        touched[objective]              = true
+        objective.mergedReasons         = nil
+        objective.mergedCompletionValue = nil
+    end" \
+    "    local function Reset(objective)
+        if touched[objective] then
+            return
+        end
+
+        touched[objective] = true
+    end" \
     "a contribution another provider has stopped making never goes away"
 
 mutate "Modules/Goals.lua" \
@@ -1075,11 +1082,15 @@ mutate "Modules/Inventory.lua" \
     "quest starters already accepted are offered again"
 
 mutate "Modules/Inventory.lua" \
+    "    if held.mount or held.species then
+        itemKinds[itemID] = held
+    end
+
+    return held" \
     "    itemKinds[itemID] = held
 
     return held" \
-    "    return held" \
-    "what an item is is asked of the client once per slot"
+    "an item that is neither a mount nor a pet is remembered as neither forever"
 
 mutate "Routing.lua" \
     "    if now and positionAt == now and positionMap == mapID then" \
@@ -1122,6 +1133,153 @@ mutate "Database.lua" \
     raw.characters        = nil" \
     "    raw.characters        = nil" \
     "data the migration refused to destroy is dropped anyway"
+
+############################################################
+# 0.58.0
+############################################################
+
+mutate "UI/List.lua" \
+    "                while index <= count and entries[index].group == group do
+                    table.insert(block, entries[index])
+
+                    index = index + 1
+                end" \
+    "                while false do
+                    table.insert(block, entries[index])
+
+                    index = index + 1
+                end" \
+    "a goal's chain is scattered through the list when it is sorted"
+
+mutate "UI/List.lua" \
+    "                if a.pinned ~= b.pinned then
+                    return a.pinned
+                end" \
+    "                if false then
+                    return a.pinned
+                end" \
+    "a section heading is alphabetised against the rows it introduces"
+
+mutate "UI/List.lua" \
+    "                if a.key == b.key then
+                    return a.order < b.order
+                end" \
+    "                if false then
+                    return a.order < b.order
+                end" \
+    "two rows that read the same swap places on every refresh"
+
+mutate "UI/List.lua" \
+    "            if hit then
+                for _, entry in ipairs(block) do
+                    table.insert(kept, entry)
+                end
+            end" \
+    "            if hit then
+                for _, entry in ipairs(block) do
+                    if self:Matches(entry) then
+                        table.insert(kept, entry)
+                    end
+                end
+            end" \
+    "filtering shows a chain step without the goal it belongs to"
+
+mutate "UI/List.lua" \
+    "    if parent then
+        UI.listPanels[parent] = list
+    end" \
+    "    if false then
+        UI.listPanels[parent] = list
+    end" \
+    "the window forgets which tabs have a list at all"
+
+mutate "Core.lua" \
+    "    if seconds < 60 then
+        return \"just now\"
+    end" \
+    "    if seconds < 0 then
+        return \"just now\"
+    end" \
+    "a clock that moved backwards prints a negative age"
+
+mutate "Core.lua" \
+    "    return days .. (days == 1 and \" day ago\" or \" days ago\")" \
+    "    return days .. \" days ago\"" \
+    "one day ago is reported in the plural"
+
+mutate "UI.lua" \
+    "    if window and window:IsShown() and window.answer then
+        window.answer:SetText(CN.Body(text))" \
+    "    if false then
+        window.answer:SetText(CN.Body(text))" \
+    "a button answers into chat behind the window that was clicked"
+
+mutate "UI.lua" \
+    "                    elseif step.state == \"BLOCKED\" then
+                        marker = \"! \"" \
+    "                    elseif false then
+                        marker = \"! \"" \
+    "a blocked step is marked by its colour and nothing else"
+
+mutate "Modules/Welcome.lua" \
+    "    if UISpecialFrames then
+        table.insert(UISpecialFrames, \"CompletionNavigatorWelcome\")
+    end" \
+    "    if false then
+        table.insert(UISpecialFrames, \"CompletionNavigatorWelcome\")
+    end" \
+    "escape does not close the one frame every player is shown"
+
+# NOT `if held then` in place of `if held ~= nil then`: nothing stores `false`
+# in this cache any more, and in Lua zero is truthy -- so that mutation is
+# behaviourally identical and survived for the honest reason that it is not a
+# defect. Same shape as the math.fmod note above. What IS a defect is the
+# cache never being written, which the derived-count assertion catches.
+mutate "Modules/Travel.lua" \
+    "    costCache[key]  = cost
+    costCacheCount  = costCacheCount + 1" \
+    "    costCacheCount  = costCacheCount + 1" \
+    "a travel cost is derived again on every single read"
+
+mutate "UI/List.lua" \
+    "        text = text:gsub(\"|c%x%x%x%x%x%x%x%x\", \"\")" \
+    "        text = text" \
+    "the list sorts on the colour in front of a name instead of the name"
+
+mutate "UI/List.lua" \
+    "        text = text:gsub(\"^[%s%p%d]+\", \"\")" \
+    "        text = text" \
+    "a route number sorts ahead of the name it belongs to"
+
+mutate "UI.lua" \
+    "    if leavingList and not (CN.Settings() and CN.Settings().keepFilter) then
+        leavingList:SetFilter(\"\")
+    end" \
+    "    if false then
+        leavingList:SetFilter(\"\")
+    end" \
+    "the tab you leave keeps a filter its own box no longer shows"
+
+mutate "UI.lua" \
+    "        local held = UI.persistedFilter
+
+        window.search:SetText(\"\")
+        window.search:ClearFocus()
+
+        UI.persistedFilter = held" \
+    "        window.search:SetText(\"\")
+        window.search:ClearFocus()" \
+    "visiting a tab with no list throws away the filter you asked to keep"
+
+mutate "UI.lua" \
+    "                local ok, err = pcall(work)" \
+    "                local ok, err = true, work()" \
+    "a scan that throws disables its own button for the session"
+
+mutate "UI.lua" \
+    "    Stored(\"Quests known\", \"quests\", \"scanquests\"," \
+    "    Stored(\"Quests known\", \"quests\", \"discoveractive\"," \
+    "a source row runs a scan that cannot clear its own staleness"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

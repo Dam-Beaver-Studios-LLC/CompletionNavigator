@@ -125,7 +125,7 @@ CN.RegisterCandidateProvider("Orders", function()
                     .. tostring(order.itemName or order.itemID or "?"),
                 completionValue  = 3,
                 limitedTimeBonus = 2,
-                travelCost       = CN.unknownLocationCost,
+                travelCost       = CN.placelessCost,
                 expiresIn        = order.expiresIn,
                 reasons          = {
                     "a crafting order you placed expires in "
@@ -144,7 +144,7 @@ CN.RegisterCandidateProvider("Orders", function()
             name             = "Collect your finished crafting order",
             completionValue  = 5,
             limitedTimeBonus = 2,
-            travelCost       = CN.unknownLocationCost,
+            travelCost       = CN.placelessCost,
             reasons          = { "it is done and waiting at a crafting table" },
         }))
     end
@@ -175,7 +175,7 @@ function Orders.DelveProgressAvailable()
 
     for _, name in ipairs(Orders.delveProgressAPIs) do
         if type(C_DelvesUI[name]) == "function" then
-            return true, "C_DelvesUI." .. name .. " exists -- Delve progress "
+            return true, "C_DelvesUI." .. name .. " exists" .. CN.DASH .. "Delve progress "
                 .. "is now readable, and this addon should be tracking it"
         end
     end

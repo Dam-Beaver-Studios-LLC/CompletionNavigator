@@ -69,6 +69,32 @@ local TAB_MARGIN     = 24
 
 local window, minimapButton
 
+-- A BUTTON'S ANSWER, PUT WHERE THE BUTTON IS.
+--
+-- Replaces `Print` at every call site inside a button handler. The window
+-- gets the line if it is open -- the click happened there, so the answer
+-- belongs there -- and chat gets it if it is not, which is how the same
+-- handler behaves when a slash command reaches it.
+--
+-- Never both: the same sentence in two places reads as two things happening.
+function UI.Answer(text)
+    text = tostring(text)
+
+    if window and window:IsShown() and window.answer then
+        window.answer:SetText(CN.Body(text))
+
+        -- The next click's answer replaces this one, and so does a tab
+        -- change -- see SelectTab. A stale answer beside a different tab is
+        -- worse than no answer.
+        return true
+    end
+
+    Print(text)
+
+    return false
+end
+
+
 ------------------------------------------------------------
 -- TEMPLATE SAFETY
 ------------------------------------------------------------
@@ -247,7 +273,7 @@ local function AddButton(parent, text, width, onClick, tooltip)
         -- A plain Button has no artwork and no font string of its own.
         PaintPanel(button, 0.16, 0.16, 0.19, 1)
 
-        local label = button:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+        local label = button:CreateFontString(nil, "ARTWORK", CN.FONT.CAPTION)
         label:SetPoint("CENTER")
         button:SetFontString(label)
 
@@ -274,7 +300,7 @@ local function AddCheckbox(parent, text, getter, setter, tooltip)
     if check.Text then
         check.Text:SetText(text)
     else
-        local label = check:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
+        local label = check:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
         label:SetPoint("LEFT", check, "RIGHT", 2, 0)
         label:SetText(text)
         check.Text = label
@@ -346,7 +372,7 @@ local function BuildWindow()
         titleBackground:SetAllPoints()
         titleBackground:SetColorTexture(0.13, 0.13, 0.16, 1)
 
-        local title = titleBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        local title = titleBar:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
         title:SetPoint("LEFT", 10, 0)
         -- The fallback title, which must say the same thing as the
         -- templated one above -- these were two separate literals and could
@@ -358,7 +384,7 @@ local function BuildWindow()
         close:SetSize(22, 22)
         close:SetPoint("TOPRIGHT", -3, -2)
 
-        local closeLabel = close:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        local closeLabel = close:CreateFontString(nil, "OVERLAY", CN.FONT.TITLE)
         closeLabel:SetPoint("CENTER")
         closeLabel:SetText("x")
         close:SetFontString(closeLabel)
@@ -392,7 +418,7 @@ local function BuildWindow()
     search:SetAutoFocus(false)
     search:SetMaxLetters(40)
 
-    local searchLabel = window:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    local searchLabel = window:CreateFontString(nil, "OVERLAY", CN.FONT.LABEL)
     searchLabel:SetPoint("RIGHT", search, "LEFT", -6, 0)
     searchLabel:SetText("filter")
 
@@ -439,7 +465,8 @@ local function BuildWindow()
         self:ClearFocus()
     end)
 
-    window.search = search
+    window.search      = search
+    window.searchLabel = searchLabel
 
     window.body = CreateFrame("Frame", nil, window)
     window.body:SetPoint("TOPLEFT", 10, -58)
@@ -456,12 +483,38 @@ local function BuildWindow()
     -- buried commands for the cost of one fontstring.
     window.footer = window:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
     window.footer:SetTextColor(CN.Rgb("MUTED"))
-    window.footer:SetPoint("BOTTOMLEFT", 14, 14)
-    window.footer:SetPoint("BOTTOMRIGHT", -14, 14)
+    window.footer:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
+    window.footer:SetPoint("BOTTOMRIGHT", -CN.SPACE.M, CN.SPACE.M)
     window.footer:SetJustifyH("LEFT")
     window.footer:SetText("/cn help for the full command list")
 
+    -- WHERE A BUTTON'S ANSWER GOES.
+    --
+    -- Every button in this window answered into the chat frame. A player
+    -- clicking "Scan everything" was looking at the window; the sentence
+    -- saying what happened appeared behind it, in a scrolling log they may
+    -- have moved, resized or filtered. Eleven buttons, and the result of
+    -- clicking any of them was somewhere else on the screen.
+    --
+    -- One line under the tabs, in the window, where the click happened. Chat
+    -- still gets it when the window is not open, because the same handlers
+    -- run from slash commands.
+    window.answer = window:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+    window.answer:SetPoint("BOTTOMLEFT", window.footer, "TOPLEFT", 0, 4)
+    window.answer:SetPoint("BOTTOMRIGHT", window.footer, "TOPRIGHT", 0, 4)
+    window.answer:SetJustifyH("LEFT")
+    window.answer:SetText("")
+
     UI.RebuildTabs()
+
+    -- AND SCALE IT, because the window does not exist at login and the login
+    -- handler's `ApplyScale` therefore could not reach it. A player who set
+    -- the text size got the heads-up line at 1.5 and everything else at 1.0.
+    local hud = CN:GetModule("Hud")
+
+    if hud and hud.ApplyScale then
+        hud.ApplyScale()
+    end
 
     return window
 end
@@ -670,6 +723,23 @@ function UI.SelectTab(index)
         return
     end
 
+    -- THE OUTGOING TAB'S LIST HAS TO BE CLEARED WHILE IT IS STILL SELECTED.
+    --
+    -- `UI.SetFilter` resolves its target through `UI.tabs[UI.selectedTab]`,
+    -- and `UI.selectedTab` is advanced two lines below -- so from the moment
+    -- it moves, NOTHING in the addon can reach the list you just left, and
+    -- emptying the box afterwards cleared the widget and not the list behind
+    -- it. Leave a filtered tab for one without a list and the box came back
+    -- empty and enabled over a list that was still filtered.
+    local leaving = UI.tabs[UI.selectedTab or 0]
+
+    local leavingList = leaving and leaving.panel
+        and UI.listPanels and UI.listPanels[leaving.panel]
+
+    if leavingList and not (CN.Settings() and CN.Settings().keepFilter) then
+        leavingList:SetFilter("")
+    end
+
     UI.selectedTab     = index
     UI.selectedTabName = tab.name
 
@@ -679,6 +749,13 @@ function UI.SelectTab(index)
     if CN.Settings() then
         CN.Settings().selectedTab     = index
         CN.Settings().selectedTabName = tab.name
+    end
+
+    -- An answer belongs to the tab whose button produced it. Carrying "Read
+    -- 6 collections." onto the Goals tab is a sentence about nothing on
+    -- screen.
+    if window.answer then
+        window.answer:SetText("")
     end
 
     if window.footer then
@@ -750,7 +827,69 @@ function UI.SelectTab(index)
     -- Now that the panel exists, the filter has something to apply to.
     UI.RestoreFilter()
 
+    -- AND IF IT HAS NOTHING TO APPLY TO, SAY SO.
+    --
+    -- The Settings and Scans tabs draw controls, not a list, so `UI.SetFilter`
+    -- found no `panel.list` and returned. The box stayed white, focusable and
+    -- typeable, and every keystroke did nothing -- which reads as the addon
+    -- being broken, not as the control being inapplicable. A control that
+    -- cannot act must not look like it can.
+    UI.UpdateFilterAvailability(tab)
+
     UI.Refresh()
+end
+
+-- Split out so the tab switch above and the tests can both reach it.
+function UI.UpdateFilterAvailability(tab)
+    if not window or not window.search then
+        return false
+    end
+
+    local panel = tab and tab.panel
+
+    -- The registry, not `panel.list` -- see UI/List.lua for why a field read
+    -- off a frame cannot answer this honestly.
+    local usable = (panel and UI.listPanels and UI.listPanels[panel]) and true
+        or false
+
+    -- `Enable`/`Disable`, not `SetEnabled`: SetEnabled is a Button method and
+    -- this is an EditBox. It exists on enough widget types to look safe and
+    -- would have been a nil call on the one type this actually runs against.
+    if usable then
+        window.search:Enable()
+    else
+        window.search:Disable()
+    end
+
+    window.search:EnableMouse(usable)
+
+    if not usable then
+        -- CLEARED WITHOUT DESTROYING WHAT IS REMEMBERED.
+        --
+        -- `ClearFocus` on a focused EditBox fires `OnEditFocusLost`, which
+        -- with `keepFilter` on writes whatever the box now holds -- nothing
+        -- -- over `UI.persistedFilter`. So typing a filter and then clicking
+        -- the one tab with no list threw the persisted term away, which is
+        -- the opposite of what that setting is for.
+        local held = UI.persistedFilter
+
+        window.search:SetText("")
+        window.search:ClearFocus()
+
+        UI.persistedFilter = held
+    end
+
+    -- Greyed AND relabelled: colour alone is not an explanation, and "filter"
+    -- beside a dead box is worse than no label.
+    if window.searchLabel then
+        window.searchLabel:SetText(usable and "filter" or "no list here")
+    end
+
+    if window.search.SetTextColor then
+        window.search:SetTextColor(CN.Rgb(usable and "PRIMARY" or "DISABLED"))
+    end
+
+    return usable
 end
 
 ------------------------------------------------------------
@@ -780,8 +919,10 @@ function UI.SetFilter(text)
 
     local panel = tab and tab.panel
 
-    if panel and panel.list and panel.list.SetFilter then
-        panel.list:SetFilter(text)
+    local list = panel and UI.listPanels and UI.listPanels[panel]
+
+    if list then
+        list:SetFilter(text)
     end
 end
 
@@ -849,9 +990,28 @@ function UI.Toggle()
     end
 end
 
+-- The window frame itself, for the tests and for `/cn uistatus`. It is a
+-- local because nothing outside this file should be reaching into it, and
+-- readable because a window nothing can read is a window nothing can assert
+-- about -- which is how the filter box shipped three defects.
+function UI.Frame()
+    return window
+end
+
 function UI.Show()
     BuildWindow()
     UI.RestorePosition()
+
+    -- AN ANSWER BELONGS TO THE CLICK THAT PRODUCED IT.
+    --
+    -- It was cleared on a tab change and nowhere else, and neither `Show` nor
+    -- `Toggle` changes tabs -- so "Read 6 collections." was still sitting
+    -- under the tab strip when the window was reopened twenty minutes later,
+    -- describing something that had not just happened.
+    if window and window.answer then
+        window.answer:SetText("")
+    end
+
     FadeIn(window)
     UI.Refresh()
 end
@@ -875,17 +1035,17 @@ UI.RegisterTab{
     order = 10,
 
     build = function(panel)
-        panel.title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-        panel.title:SetPoint("TOPLEFT", 8, -8)
-        panel.title:SetPoint("TOPRIGHT", -8, -8)
+        panel.title = panel:CreateFontString(nil, "ARTWORK", CN.FONT.TITLE)
+        panel.title:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.title:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.title:SetJustifyH("LEFT")
 
-        panel.type = panel:CreateFontString(nil, "ARTWORK", "GameFontDisable")
+        panel.type = panel:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
         panel.type:SetPoint("TOPLEFT", panel.title, "BOTTOMLEFT", 0, -2)
 
-        panel.why = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
+        panel.why = panel:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
         panel.why:SetPoint("TOPLEFT", panel.type, "BOTTOMLEFT", 0, -12)
-        panel.why:SetPoint("RIGHT", -8, 0)
+        panel.why:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.why:SetJustifyH("LEFT")
         panel.why:SetJustifyV("TOP")
 
@@ -911,7 +1071,7 @@ UI.RegisterTab{
             CN.SetDeferred(objective.type, objective.id, 3600)
             -- SAY HOW LONG, AND SAY THE WAY BACK. The button says "1 hour"
             -- and the message did not; nothing named the undo.
-            Print("Deferred for an hour: " .. tostring(objective.name)
+            UI.Answer("Deferred for an hour: " .. tostring(objective.name)
                 .. CN.Aside(CN.Accent("/cn unhide " .. tostring(objective.id))
                     .. " brings it back now"))
             UI.Refresh()
@@ -929,7 +1089,7 @@ UI.RegisterTab{
             CN.SetIgnored(objective.type, objective.id, true)
             -- Ignore is permanent and one click, so the message it prints is
             -- the only place the way back can appear.
-            Print("Ignored: " .. tostring(objective.name)
+            UI.Answer("Ignored: " .. tostring(objective.name)
                 .. CN.Aside(CN.Accent("/cn unhide " .. tostring(objective.id))
                     .. " restores it"))
             UI.Refresh()
@@ -951,7 +1111,7 @@ UI.RegisterTab{
         panel.list.emptyText = "Nothing actionable is known yet. /cn setup reads everything the client will answer for."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", panel.why, "BOTTOMLEFT", -4, -14)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
     end,
 
     refresh = function(panel)
@@ -1029,6 +1189,21 @@ UI.RegisterTab{
 
         local best = results[1]
 
+        -- The headline is the addon's answer unless the player has picked a
+        -- different row, in which case it is theirs. A selection that no
+        -- longer exists is dropped rather than left aiming at nothing.
+        local held = panel.selected
+
+        panel.selected = nil
+
+        for _, objective in ipairs(results) do
+            if objective == held then
+                panel.selected = held
+            end
+        end
+
+        best = panel.selected or best
+
         CN.currentRecommendation = best
 
         panel.title:SetText(tostring(best.name or best.id))
@@ -1045,15 +1220,32 @@ UI.RegisterTab{
                     index, tostring(objective.name or objective.id),
                     CN.TypeBadge(objective.type)),
 
-                tooltip = table.concat(CN.ExplainRecommendation(objective), "\n"),
+                -- SHOW WHICH ROW THE BUTTONS ARE AIMED AT.
+                --
+                -- Clicking a row re-aimed Navigate, Defer and Ignore at it
+                -- and changed nothing on screen -- so the list still numbered
+                -- it "7." under a headline that now said something else, and
+                -- nothing anywhere said which one was armed. The Goals tab
+                -- has done this correctly since 0.50.0, and the list widget
+                -- already draws a brand-tinted selection for it.
+                selected = (panel.selected == objective),
+
+                -- BUILT ON HOVER, NOT ON EVERY REFRESH.
+                --
+                -- Composing an explanation now sorts three keyed tables, and
+                -- this ran for every row of every refresh whether the mouse
+                -- went near it or not.
+                tooltip = function()
+                    return table.concat(CN.ExplainRecommendation(objective),
+                        "\n")
+                end,
 
                 onClick = function()
+                    panel.selected = objective
+
                     CN.currentRecommendation = objective
 
-                    panel.title:SetText(tostring(objective.name or objective.id))
-                    panel.type:SetText(CN.TypeBadge(objective.type))
-                    panel.why:SetText("Why:\n"
-                        .. table.concat(CN.ExplainRecommendation(objective), "\n"))
+                    UI.Refresh()
                 end,
             })
         end
@@ -1072,15 +1264,15 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "Nothing left here that the addon knows about. Press Re-route, or try another zone."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.route = AddButton(panel, "Re-route", 110, function()
             UI.Refresh()
@@ -1163,129 +1355,312 @@ UI.RegisterTab{
 -- TAB: SCANS
 ------------------------------------------------------------
 
+-- REBUILT AS PROVENANCE, BECAUSE IT WAS THE WEAKEST TAB IN THE WINDOW.
+--
+-- It was one FontString holding twenty-odd lines of concatenated text, two
+-- buttons, and no list -- so it could not be filtered, could not be sorted,
+-- could not be clicked, and its own filter box sat above it doing nothing.
+-- Every other tab in the window is a list of rows you can act on; this one
+-- was a paragraph.
+--
+-- What it is FOR is the question no other tab answers: where does each number
+-- in this addon come from, and how old is it. So that is what it shows now --
+-- one row per source, with its count, its age, and the scan that refreshes
+-- it on click. The two buttons it had are two of those rows.
 UI.RegisterTab{
     name  = "Scans",
     order = 30,
 
     build = function(panel)
-        panel.status = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
-        panel.status:SetPoint("TOPLEFT", 8, -8)
-        panel.status:SetPoint("RIGHT", -8, 0)
-        panel.status:SetJustifyH("LEFT")
-        panel.status:SetJustifyV("TOP")
+        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetJustifyH("LEFT")
 
-        local quests = AddButton(panel, "Scan quests", 130, function()
-            local module = CN:GetModule("Quests")
+        panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "No sources are readable on this client."
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
-            if module then
-                -- A deliberate rescan overrides the arrival latch, the same
-                -- way `/cn discoveractive` does.
-                if module.ForgetArrivals then
-                    module.ForgetArrivals()
-                end
+        -- ONE BUTTON, AND IT NAMES WHAT IT WILL DO.
+        --
+        -- "Scan quests" and "Scan reputations" were two of eleven sources
+        -- picked by nothing in particular. Every source is a clickable row
+        -- now, so the only button worth keeping is the one that does the
+        -- thing a player would otherwise do eleven times.
+        panel.stale = AddButton(panel, "Refresh what is stale", 190, function()
+            local refreshed = UI.RefreshStaleSources()
 
-                local seen, recorded = module.DiscoverActive()
-                local scanned        = module.ScanKnown()
-
-                Print("Quests: " .. seen .. " in your log, "
-                    .. "|cffffc74f" .. module.AvailableCount() .. "|r "
-                    .. "available to pick up nearby.")
-
-                CN.DebugPrint(recorded .. " newly recorded, "
-                    .. scanned .. " checked.")
+            if refreshed == 0 then
+                UI.Answer("Nothing is stale. Every source has been read today.")
+            else
+                UI.Answer("Read " .. refreshed .. " stale "
+                    .. (refreshed == 1 and "source" or "sources") .. ".")
             end
 
             UI.Refresh()
-        end,
-            "Reads your quest log and the quest givers on the map you are on.")
-        quests:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
+        end, "Re-reads every source that has not been read in a day, or has "
+            .. "never been read. Freezes the client while it runs.")
 
-        local reps = AddButton(panel, "Scan reputations", 150, function()
-            local module = CN:GetModule("Reputations")
+        panel.stale:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
 
-            if module then
-                local total = module.Scan()
-
-                Print("Reputation scan: " .. total .. " factions.")
-            end
-
-            UI.Refresh()
-        end,
-            "Reads every faction standing the client will report for this character.")
-        reps:SetPoint("LEFT", quests, "RIGHT", CN.SPACE.S, 0)
+        panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M + 26)
+        panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
+        panel.note:SetJustifyH("LEFT")
     end,
 
     refresh = function(panel)
-        local lines = {}
+        local entries = {}
 
-        -- What is true of the player's world first; what is true of the
-        -- addon's database second, and marked as such. The order matters:
-        -- a player reads the top line and stops.
-        local questModule = CN:GetModule("Quests")
+        local sources = UI.Sources()
 
-        table.insert(lines, "|cffffc74fQuests|r")
+        local stale = 0
 
-        -- The number he actually wanted back, first.
-        local progressModule = CN:GetModule("Progress")
+        -- LIVE FIRST, STORED SECOND.
+        --
+        -- The old tab put "what is true of your world" above "what the
+        -- database holds" and said in a comment that the order mattered
+        -- because a player reads the top line and stops. That was right, and
+        -- it survives the rebuild as two sections.
+        local sections = {
+            { key = "live",   label = "Read from the client, right now" },
+            { key = "stored", label = "Held by the addon, from a scan" },
+        }
 
-        if progressModule then
-            local summary = progressModule.Summary()
+        for _, section in ipairs(sections) do
+            local rows = {}
 
-            if summary.lifetime then
-                table.insert(lines, "Completed: |cffffc74f"
-                    .. CN.Comma(summary.lifetime) .. "|r")
+            for _, source in ipairs(sources) do
+                if source.kind == section.key then
+                    table.insert(rows, source)
+                end
             end
 
-            local todayLine = "Today: |cffffc74f" .. summary.today .. "|r"
+            if #rows > 0 then
+                table.insert(entries, {
+                    section       = section.key,
+                    sectionHeader = true,
+                    text          = CN.Accent(section.label),
+                })
 
-            if summary.best > 0 then
-                todayLine = todayLine .. "   |cff8a8f96best "
-                    .. summary.best .. "|r"
+                for _, source in ipairs(rows) do
+                    local age = source.at and CN.Ago(source.at) or nil
+
+                    local isStale = source.command
+                        and (not source.at
+                            or (time() - source.at) > 86400)
+
+                    if isStale then
+                        stale = stale + 1
+                    end
+
+                    -- `!` as well as the colour: nothing in this addon is
+                    -- carried by hue alone.
+                    local mark = isStale and CN.Warn("! ") or "  "
+
+                    table.insert(entries, {
+                        section = section.key,
+
+                        text = mark .. source.label
+                            .. (source.command
+                                and CN.Aside(age or "never read")
+                                or CN.Aside("live")),
+
+                        value = CN.Body(source.value or ""),
+
+                        tooltip = source.detail
+                            .. (source.command
+                                and ("\n\nClick to run /cn " .. source.command
+                                    .. ".")
+                                or ""),
+
+                        onClick = source.command and function()
+                            CN.HandleSlashCommand(source.command)
+
+                            UI.Refresh()
+                        end or nil,
+                    })
+                end
             end
-
-            table.insert(lines, todayLine)
         end
 
-        if questModule then
-            local available = questModule.AvailableCount()
+        panel.header:SetText("Where every number in this addon comes from"
+            .. (stale > 0
+                and CN.Aside(CN.Warn(stale .. " stale"))
+                or CN.Aside("all current")))
 
-            table.insert(lines, "Available to pick up nearby: "
-                .. (available > 0 and "|cffffc74f" or "|cff8a8f96")
-                .. available .. "|r")
-            table.insert(lines, "In your log: " .. #CN.Blizzard.GetQuestLogEntries())
-        end
+        panel.list:SetEntries(entries)
 
-        table.insert(lines, "|cff8a8f96Database: "
-            .. CN.CountKeys(CN.Account("discoveredQuests")) .. " known, "
-            .. CN.CountKeys(CN.Account("questMetadata")) .. " named|r")
-        table.insert(lines, " ")
-
-        local reputations = CN:GetModule("Reputations")
-
-        if reputations then
-            local counts = reputations.Summary()
-
-            table.insert(lines, "|cffffc74fReputations|r")
-            table.insert(lines, "Account-wide: " .. counts.account)
-            table.insert(lines, "Character-specific: " .. counts.character)
-            table.insert(lines, "Renown: " .. counts.renown
-                .. " (" .. counts.maxedRenown .. " maxed)")
-            table.insert(lines, "Exalted: " .. counts.exalted)
-
-            if counts.paragonPending > 0 then
-                table.insert(lines, "|cff73b873Paragon rewards waiting: "
-                    .. counts.paragonPending .. "|r")
-            end
-
-            table.insert(lines, " ")
-        end
-
-        table.insert(lines, "|cffffc74fWarband|r")
-        table.insert(lines, "Known characters: " .. CN.GetCharacterCount())
-
-        panel.status:SetText(table.concat(lines, "\n"))
+        panel.note:SetText(CN.Muted("A source read more than a day ago is "
+            .. "marked. Click any row to read it again."))
     end,
 }
+
+-- THE SOURCE TABLE, SEPARATE FROM THE TAB THAT DRAWS IT.
+--
+-- Two callers -- the tab above and the "refresh what is stale" button -- and
+-- the tests, which is the third and the reason this is not a local.
+function UI.Sources()
+    local sources = {}
+
+    local steps = {}
+
+    local setup = CN:GetModule("Setup")
+
+    if setup and setup.Steps then
+        steps = setup.Steps()
+    end
+
+    local function Stored(label, moduleName, command, value, detail)
+        table.insert(sources, {
+            kind    = "stored",
+            label   = label,
+            command = command,
+            value   = value,
+            detail  = detail,
+            at      = steps[string.lower(moduleName)],
+        })
+    end
+
+    local function Live(label, value, detail)
+        table.insert(sources, {
+            kind   = "live",
+            label  = label,
+            value  = value,
+            detail = detail,
+        })
+    end
+
+    ------------------------------------------------------------
+    -- LIVE
+    ------------------------------------------------------------
+    local quests = CN:GetModule("Quests")
+
+    if quests then
+        Live("Quests in your log",
+            tostring(#CN.Blizzard.GetQuestLogEntries()),
+            "Asked of the client every time it is needed. Never stored, "
+            .. "because the client always has it.")
+
+        local available = quests.AvailableCount()
+
+        Live("Quest givers on this map", tostring(available),
+            "Counted from the map you are standing on. Changes as you move.")
+    end
+
+    local progress = CN:GetModule("Progress")
+
+    if progress then
+        local summary = progress.Summary()
+
+        if summary.lifetime then
+            Live("Quests completed, lifetime", CN.Comma(summary.lifetime),
+                "The client's own total. The addon does not maintain it.")
+        end
+
+        Live("Quests completed today", tostring(summary.today),
+            "Counted by the addon since midnight"
+            .. (summary.best > 0
+                and (". Your best day was " .. summary.best .. ".")
+                or "."))
+    end
+
+    Live("Characters seen", tostring(CN.GetCharacterCount()),
+        "One row per character that has logged in with the addon loaded.")
+
+    ------------------------------------------------------------
+    -- STORED
+    ------------------------------------------------------------
+    -- `scanquests`, NOT `discoveractive`.
+    --
+    -- The age on this row is `steps.quests`, and the ONLY writer of that key
+    -- in the tree is `Quests.ScanKnown`, which `/cn scanquests` runs.
+    -- `/cn discoveractive` reads the log and stamps nothing -- so clicking
+    -- this row did real work, printed a real answer, and left the row marked
+    -- stale for ever. Worse, "refresh what is stale" then ran it on every
+    -- press and could never reach "nothing is stale".
+    Stored("Quests known", "quests", "scanquests",
+        CN.Comma(CN.CountKeys(CN.Account("discoveredQuests"))) .. " known, "
+        .. CN.Comma(CN.CountKeys(CN.Account("questMetadata"))) .. " named",
+        "Quests this account has seen offered. Grows as you play; a scan "
+        .. "adds the ones on the map you are on now.")
+
+    local reputations = CN:GetModule("Reputations")
+
+    if reputations then
+        local counts = reputations.Summary()
+
+        Stored("Reputations", "reputations", "repscan",
+            counts.account .. " account, " .. counts.character .. " character",
+            counts.renown .. " renown tracks (" .. counts.maxedRenown
+            .. " maxed), " .. counts.exalted .. " exalted"
+            .. (counts.paragonPending > 0
+                and (", " .. counts.paragonPending
+                    .. " Paragon reward(s) waiting")
+                or ""))
+    end
+
+    local collections = {
+        { label = "Mounts",       module = "Mounts",       command = "mountscan" },
+        { label = "Pets",         module = "Pets",         command = "petscan" },
+        { label = "Toys",         module = "Toys",         command = "toyscan" },
+        { label = "Titles",       module = "Titles",       command = "titlescan" },
+        { label = "Appearances",  module = "Appearances",  command = "appearancescan" },
+        { label = "Achievements", module = "Achievements", command = "achievescan" },
+        { label = "Currencies",   module = "Currencies",   command = "currencyscan" },
+        { label = "Professions",  module = "Professions",  command = "profscan" },
+    }
+
+    for _, entry in ipairs(collections) do
+        local module = CN:GetModule(entry.module)
+
+        if module and module.Summary then
+            local ok, counts = pcall(module.Summary)
+
+            local value = ""
+
+            if ok and type(counts) == "table" then
+                local held  = counts.collected or counts.completed
+                    or counts.onAccount
+                local total = counts.known or counts.total
+
+                if held and total then
+                    value = held .. " / " .. total
+                elseif held then
+                    value = tostring(held)
+                end
+            end
+
+            Stored(entry.label, entry.module, entry.command, value,
+                "Counted against what the addon last read from the client, "
+                .. "which is the only denominator it can honestly use.")
+        end
+    end
+
+    return sources
+end
+
+-- Runs every stale source's scan. "Stale" is a day, which is roughly the
+-- rate at which any of these can change for a player who is playing.
+function UI.RefreshStaleSources()
+    local refreshed = 0
+
+    local now = time()
+
+    for _, source in ipairs(UI.Sources()) do
+        if source.command
+            and (not source.at or (now - source.at) > 86400) then
+
+            if pcall(CN.HandleSlashCommand, source.command) then
+                refreshed = refreshed + 1
+            end
+        end
+    end
+
+    return refreshed
+end
 
 ------------------------------------------------------------
 -- TAB: NOW
@@ -1299,15 +1674,15 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "Nothing is on a timer right now."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.refresh = AddButton(panel, "Refresh", 110, function()
             UI.Refresh()
@@ -1333,9 +1708,11 @@ UI.RegisterTab{
 
         local opportunities = CN:GetModule("Opportunities")
 
-        if opportunities then
-            local resets = opportunities.GetResets()
+        -- Hoisted: the weekly-currency rows below sort against the weekly
+        -- reset, and they are built outside this block.
+        local resets = opportunities and opportunities.GetResets() or {}
 
+        if opportunities then
             local parts = {}
 
             if resets.daily then
@@ -1354,7 +1731,12 @@ UI.RegisterTab{
 
             for _, event in ipairs(opportunities.GetActiveEvents()) do
                 table.insert(entries, {
-                    text = "|cffffc74fEVENT|r  " .. tostring(event.title),
+                    text  = CN.Accent("EVENT") .. "  " .. tostring(event.title),
+                    value = event.endsIn
+                        and CN.Muted(opportunities.FormatTimeLeft(event.endsIn))
+                        or nil,
+
+                    sortSeconds = event.endsIn or math.huge,
                 })
             end
 
@@ -1362,10 +1744,15 @@ UI.RegisterTab{
 
             for _, worldQuest in ipairs(worldQuests) do
                 table.insert(entries, {
-                    text = string.format("|cff5dd2fbWQ|r     %s  |cff8a8f96%s%s|r",
-                        tostring(worldQuest.name),
-                        opportunities.FormatTimeLeft(worldQuest.secondsLeft),
-                        worldQuest.tagName and (", " .. worldQuest.tagName) or ""),
+                    text = CN.Brand("WQ") .. "  " .. tostring(worldQuest.name)
+                        .. (worldQuest.tagName
+                            and CN.Muted(" " .. CN.DOT .. " " .. worldQuest.tagName)
+                            or ""),
+
+                    value = CN.Muted(
+                        opportunities.FormatTimeLeft(worldQuest.secondsLeft)),
+
+                    sortSeconds = worldQuest.secondsLeft or math.huge,
 
                     tooltip = "Click to set a waypoint.",
 
@@ -1390,9 +1777,13 @@ UI.RegisterTab{
         if rares then
             for _, vignette in ipairs(rares.GetActive()) do
                 table.insert(entries, {
-                    text = string.format("|cffffc74f%s|r  %s",
-                        vignette.kind == "TREASURE" and "CHEST " or "RARE  ",
-                        tostring(vignette.name)),
+                    text = CN.Accent(vignette.kind == "TREASURE"
+                        and "CHEST" or "RARE") .. "  " .. tostring(vignette.name),
+
+                    value = CN.Good("up now"),
+
+                    -- Up right now, so it sorts above anything on a clock.
+                    sortSeconds = 0,
 
                     tooltip = "Up right now. Click to set a waypoint.",
 
@@ -1417,16 +1808,22 @@ UI.RegisterTab{
         if currencies then
             for _, currency in ipairs(currencies.Capped()) do
                 table.insert(entries, {
-                    text = "|cffe2564cCAP|r    " .. tostring(currency.name)
-                        .. " |cff8a8f96" .. currency.quantity
-                        .. " / " .. currency.maximum .. " -- spend it|r",
+                    text  = CN.Bad("CAP") .. "  " .. tostring(currency.name),
+                    value = CN.Muted(currency.quantity .. " / "
+                        .. currency.maximum .. " " .. CN.DASH .. " spend it"),
+
+                    -- At the cap already: every further point is being thrown
+                    -- away, so this is as urgent as the list gets.
+                    sortSeconds = 0,
                 })
             end
 
             for _, currency in ipairs(currencies.WeeklyUnfilled()) do
                 table.insert(entries, {
-                    text = "|cff8a8f96WEEK|r   " .. tostring(currency.name)
-                        .. " |cff8a8f96" .. currency.remaining .. " left this week|r",
+                    text  = CN.Muted("WEEK") .. "  " .. tostring(currency.name),
+                    value = CN.Muted(currency.remaining .. " left this week"),
+
+                    sortSeconds = resets and resets.weekly or math.huge,
                 })
             end
         end
@@ -1434,9 +1831,32 @@ UI.RegisterTab{
         if #entries == 0 then
             table.insert(entries, { text = "Nothing is expiring nearby." })
             table.insert(entries, {
-                text = "|cff8a8f96World quests and rares only appear for your current map.|r",
+                text = CN.Muted("World quests and rares only appear for your "
+                    .. "current map."),
             })
         end
+
+        -- SOONEST FIRST, WHICH IS THE ONLY ORDER THIS TAB CAN MEAN.
+        --
+        -- Entries were appended in module order -- events, then world quests,
+        -- then rares, then capped currencies -- so a world quest with eleven
+        -- minutes left sat above a rare that is up right now and below an
+        -- event that runs for a fortnight. A list called "expiring soon" in
+        -- an order unrelated to expiry is a list you have to read all of.
+        --
+        -- The tags were also hand-padded with trailing spaces to line up, in
+        -- a game that ships no monospace font. The time now lives in the
+        -- value column, which is anchored and does line up.
+        table.sort(entries, function(a, b)
+            local left  = a.sortSeconds or math.huge
+            local right = b.sortSeconds or math.huge
+
+            if left == right then
+                return tostring(a.text) < tostring(b.text)
+            end
+
+            return left < right
+        end)
 
         panel.list:SetEntries(entries)
     end,
@@ -1452,19 +1872,19 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "No other characters recorded yet. Log in on one and this fills itself."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
-        panel.note:SetPoint("BOTTOMLEFT", 12, 12)
-        panel.note:SetPoint("RIGHT", -12, 0)
+        panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
+        panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.note:SetJustifyH("LEFT")
     end,
 
@@ -1494,21 +1914,29 @@ UI.RegisterTab{
                 -- other row's text by two glyphs.
                 selected = row.isCurrent and true or false,
 
+                -- SAID ONCE, NOT TWICE.
+                --
+                -- Every character carried a tooltip with these four numbers
+                -- AND an indented second row repeating them in prose, which
+                -- doubled the length of the tab and left the value column --
+                -- which exists for exactly this -- empty.
+                --
+                -- And `(you)` in words, because the selection is a 16% tint
+                -- and this addon's own rule is that nothing is carried by
+                -- colour alone.
                 text = row.key
+                    .. (row.isCurrent and CN.Brand("  (you)") or "")
                     .. CN.Aside(tostring(row.level) .. " "
                         .. tostring(row.class or "?")
                         .. (row.faction and (" " .. row.faction) or "")),
 
+                value = CN.Muted(row.professions .. " prof " .. CN.DOT .. " "
+                    .. row.recipes .. " rec " .. CN.DOT .. " "
+                    .. row.titles .. " tit"),
+
                 tooltip = string.format(
                     "professions %d\nrecipes %d\ntitles %d\nreputations %d",
                     row.professions, row.recipes, row.titles, row.reputations),
-            })
-
-            table.insert(entries, {
-                text = "      |cff8a8f96professions " .. row.professions
-                    .. ", recipes " .. row.recipes
-                    .. ", titles " .. row.titles
-                    .. ", reputations " .. row.reputations .. "|r",
             })
         end
 
@@ -1534,19 +1962,19 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "The Great Vault has nothing to report on this character yet."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
-        panel.note:SetPoint("BOTTOMLEFT", 12, 12)
-        panel.note:SetPoint("RIGHT", -12, 0)
+        panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
+        panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.note:SetJustifyH("LEFT")
     end,
 
@@ -1586,7 +2014,12 @@ UI.RegisterTab{
         end
 
         for _, row in ipairs(rows) do
+            -- The slot and its three thresholds are one block. See UI/List.lua.
+            local group = "vault:" .. tostring(row.row)
+
             table.insert(entries, {
+                group = group,
+
                 text = "  " .. vault.DescribeRow(row),
 
                 tooltip = row.label .. "\n"
@@ -1598,6 +2031,7 @@ UI.RegisterTab{
 
             for _, tier in ipairs(row.tiers) do
                 table.insert(entries, {
+                    group = group,
                     text = "        |cff8a8f96" .. tier.threshold .. ": "
                         .. (tier.unlocked
                             and ("|cff73b873unlocked" .. (tier.level and tier.level > 0
@@ -1612,7 +2046,7 @@ UI.RegisterTab{
 
         if summary.closest then
             panel.note:SetText("|cffffc74fClosest: " .. summary.closest.label
-                .. " -- " .. summary.closest.remaining .. " more, "
+                .. "" .. CN.DASH .. "" .. summary.closest.remaining .. " more, "
                 .. (vault.rowActions[summary.closest.row] or "keep going") .. ".|r")
         else
             panel.note:SetText("|cff8a8f96Every row is capped. You choose one item "
@@ -1631,19 +2065,19 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "Nothing pinned. /cn goal <type> <name or id> pins something so it stays at the top."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
 
         -- Deeper than the other tabs' 38, because this one has a note row
         -- under its buttons. The buttons themselves sit on the same baseline
         -- as every other tab's.
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 64)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 64)
 
         -- "Next step", not "Navigate". They are different destinations and
         -- the difference is the point: the mount is behind a dungeon you
@@ -1768,8 +2202,13 @@ UI.RegisterTab{
                     math.floor(fraction * 100 + 0.5)))
             end
 
+            -- The goal and every row of its chain carry one group key, so
+            -- sorting and filtering move them as a unit. See UI/List.lua.
+            local group = tostring(goal.type) .. ":" .. tostring(goal.id)
+
             table.insert(entries, {
                 selected = isSelected,
+                group    = group,
 
                 text = (chain.done and CN.Muted(tostring(goal.name))
                         or CN.Accent(tostring(goal.name)))
@@ -1795,6 +2234,7 @@ UI.RegisterTab{
                     -- The bar is a texture on the row now, not a run of
                     -- equals signs whose pixel width changed as it filled.
                     table.insert(entries, {
+                        group    = group,
                         text     = "    " .. CN.Muted(CN.Comma(chain.progress.done)
                             .. " / " .. CN.Comma(chain.progress.total)
                             .. " " .. tostring(chain.progress.unit)),
@@ -1807,7 +2247,8 @@ UI.RegisterTab{
                 for _, step in ipairs(chain.steps) do
                     if shown >= 15 then
                         table.insert(entries, {
-                            text = "      |cff8a8f96... and "
+                            group = group,
+                            text  = "      |cff8a8f96... and "
                                 .. (#chain.steps - shown) .. " more|r",
                         })
                         break
@@ -1817,14 +2258,26 @@ UI.RegisterTab{
 
                     local marker = "  "
 
+                    -- EVERY STATE GETS A GLYPH, NOT JUST TWO OF THEM.
+                    --
+                    -- Done was "x", next was ">", and BLOCKED -- the one
+                    -- state that tells a player to stop reading down the
+                    -- chain -- was carried by red text alone. Red against
+                    -- this file's TODO grey is a hue difference of exactly
+                    -- the kind eight percent of men cannot make, and the
+                    -- addon ships a colourblind mode for the arrow that says
+                    -- so in its own help text.
                     if step.state == "DONE" then
                         marker = "x "
                     elseif step.state == "NEXT" then
                         marker = "> "
+                    elseif step.state == "BLOCKED" then
+                        marker = "! "
                     end
 
                     table.insert(entries, {
-                        text = "      " .. colour .. marker .. step.text .. "|r",
+                        group = group,
+                        text  = "      " .. colour .. marker .. step.text .. "|r",
                     })
 
                     shown = shown + 1
@@ -1832,7 +2285,8 @@ UI.RegisterTab{
 
                 if chain.character then
                     table.insert(entries, {
-                        text = "      |cff8a8f96Best character: "
+                        group = group,
+                        text  = "      |cff8a8f96Best character: "
                             .. tostring(chain.character) .. "|r",
                     })
                 end
@@ -1866,19 +2320,19 @@ UI.RegisterTab{
         -- `CN.FONT.HEAD`, like the other seven. This one was a size larger
         -- than every other tab's header for no reason anybody recorded.
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
-        panel.sub = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        panel.sub = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
         panel.sub:SetPoint("TOPLEFT", panel.header, "BOTTOMLEFT", 0, -4)
         panel.sub:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "No route yet. Press Rescan zones, or open the Zone tab."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -52)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -52)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.follow = AddButton(panel, "Follow the route", 150, function()
             local follow = CN:GetModule("Follow")
@@ -1989,10 +2443,20 @@ UI.RegisterTab{
 
             if #closest > 0 then
                 table.insert(entries, { text = " " })
-                table.insert(entries, { text = "|cffffc74fClosest to finished|r" })
+
+                -- A section rather than a group: these twelve are peers, so
+                -- they may be alphabetised -- among themselves, under their
+                -- own heading. See UI/List.lua.
+                table.insert(entries, {
+                    section       = "closest",
+                    sectionHeader = true,
+                    text          = "|cffffc74fClosest to finished|r",
+                })
 
                 for _, entry in ipairs(closest) do
                     table.insert(entries, {
+                        section = "closest",
+
                         text = "  |cffffc74f" .. tostring(entry.name) .. "|r"
                             .. " |cff5dd2fb"
                             .. CN.ProgressBar(entry.fraction, 14) .. "|r "
@@ -2025,17 +2489,29 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "Nothing outstanding that the addon can count."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.refresh = AddButton(panel, "Refresh", 110, function()
+            -- FORCED. The report is cached behind the events that announce a
+            -- collection, and most of what it counts is not a collection --
+            -- harvested quests, captured recipes, scanned vendors. So the
+            -- button whose tooltip says "counts what is left again" could
+            -- not, and a row telling you to run `/cn harvest` went on showing
+            -- the old number after you ran it.
+            local breakdown = CN:GetModule("Breakdown")
+
+            if breakdown then
+                breakdown.NoteChanged()
+            end
+
             UI.Refresh()
         end,
             "Counts what is left again and redraws this list.")
@@ -2074,7 +2550,13 @@ UI.RegisterTab{
                 value = CN.Body((row.collected or 0) .. " collected")
             end
 
+            -- The row and everything indented under it -- why there is no
+            -- percentage, the reasons, the action -- are one block. See
+            -- UI/List.lua.
+            local group = "remaining:" .. tostring(row.name)
+
             table.insert(entries, {
+                group    = group,
                 text     = headline,
                 value    = value,
                 fraction = fraction,
@@ -2085,18 +2567,50 @@ UI.RegisterTab{
 
             if row.unknownTotal then
                 table.insert(entries, {
-                    text = "      " .. CN.Muted("no percentage: "
+                    group = group,
+                    text  = "      " .. CN.Muted("no percentage: "
                         .. row.unknownTotal),
                 })
             end
 
             for _, reason in ipairs(CN.Reasons(row)) do
-                table.insert(entries, { text = "      " .. reason })
+                table.insert(entries, { group = group, text = "      " .. reason })
             end
 
             if row.action then
+                -- THE ADDON KNOWS THE NEXT ACTION AND MADE YOU RETYPE IT.
+                --
+                -- `row.action` is literally "/cn mountscan". It was rendered
+                -- as an inert line and the player had to read it, remember
+                -- it, and type it into chat -- while it sat there, on screen,
+                -- in a list widget that already supports clicking.
+                --
+                -- Guarded on the prefix: one action is prose ("open each
+                -- profession window once"), which correctly stays inert.
+                local command = row.action:match("^/cn (.+)$")
+
                 table.insert(entries, {
-                    text = "      |cffffc74f-> " .. row.action .. "|r",
+                    group = group,
+
+                    text = "      " .. CN.Accent((command and "" or "")
+                        .. CN.DASH .. " " .. row.action),
+
+                    onClick = command and function()
+                        CN.HandleSlashCommand(command)
+
+                        -- The counts this row reports are exactly what the
+                        -- scan changes, so recount rather than redraw the
+                        -- same numbers.
+                        local breakdown = CN:GetModule("Breakdown")
+
+                        if breakdown then
+                            breakdown.NoteChanged()
+                        end
+
+                        UI.Refresh()
+                    end or nil,
+
+                    tooltip = command and ("Runs " .. row.action .. ".") or nil,
                 })
             end
         end
@@ -2129,15 +2643,15 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "Nothing scanned yet. Press Scan my collections."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         -- A WORKING STATE, BECAUSE THIS FREEZES THE CLIENT.
         --
@@ -2154,10 +2668,30 @@ UI.RegisterTab{
             button:SetText("Working" .. CN.DOT .. CN.DOT .. CN.DOT)
 
             local function finish()
-                work()
+                -- PROTECTED, OR THE BUTTON WEDGES.
+                --
+                -- `work()` ran raw, and it is re-enabled AFTER it returns --
+                -- so a scan that threw left the button disabled and reading
+                -- "Working..." until the player reloaded, with no way to
+                -- retry and nothing on screen saying why. The achievement
+                -- scan walks `GetCategoryList`/`GetAchievementInfo`, whose
+                -- shape has changed across expansions, which is exactly the
+                -- kind of call this cannot afford to trust.
+                local ok, err = pcall(work)
 
                 button:SetText(label)
                 button:SetEnabled(true)
+
+                if not ok then
+                    UI.Answer(CN.Bad("That scan failed. ")
+                        .. CN.Muted("/cn errors has the detail."))
+
+                    local errors = CN:GetModule("Errors")
+
+                    if errors then
+                        errors.Record("the " .. label .. " button", err)
+                    end
+                end
 
                 UI.Refresh()
             end
@@ -2189,7 +2723,7 @@ UI.RegisterTab{
                     end
                 end
 
-                Print("Read " .. scanned .. " collections.")
+                UI.Answer("Read " .. scanned .. " collections.")
             end)
         end, "Read your pets, mounts, toys, appearances, titles and "
             .. "professions from the game. Takes a few seconds and freezes "
@@ -2211,7 +2745,7 @@ UI.RegisterTab{
                     CN.NoteSetupStep("Achievements")
                 end
 
-                Print("Read " .. CN.Comma(scanned) .. " achievements, "
+                UI.Answer("Read " .. CN.Comma(scanned) .. " achievements, "
                     .. CN.Comma(completed) .. " of them done.")
             end,
                 "Reads your achievement criteria again.")
@@ -2224,19 +2758,47 @@ UI.RegisterTab{
     refresh = function(panel)
         local entries = {}
 
-        local function row(label, collected, total, note)
+        local setup = CN:GetModule("Setup")
+
+        -- WHEN THE DENOMINATOR WAS READ.
+        --
+        -- Every percentage on this tab is against the addon's own scan
+        -- snapshot, which is the honest denominator and also one that goes
+        -- stale the day the game adds collectibles. The header said so in
+        -- general; no row said it about itself, so "89.4%" from a scan four
+        -- months ago looked exactly like one from this morning.
+        --
+        -- `Setup.Steps()` has had the per-scan timestamps since 0.52.0 and
+        -- nothing displayed them.
+        local steps = (setup and setup.Steps and setup.Steps()) or {}
+
+        local function Age(key)
+            return CN.Ago(steps[string.lower(tostring(key))])
+        end
+
+        local function row(label, collected, total, note, key)
+            local age = Age(key or label)
+
+            -- "never read" rather than nothing: a row with no age is not a
+            -- row that was read at an unknown time.
+            local stamp = CN.Muted("  " .. (age or "never read"))
+
             if total and total > 0 then
                 local fraction = collected / total
 
                 table.insert(entries, {
-                    text     = label,
+                    text     = label .. stamp,
                     value    = CN.Body(collected .. " / " .. total) .. "  "
                         .. CN.Muted(string.format("%.1f%%", fraction * 100)),
                     fraction = fraction,
+                    tooltip  = age
+                        and ("Counted against what the addon read " .. age
+                            .. ". Rescan to bring it up to date.")
+                        or "This has never been scanned on this account.",
                 })
             else
                 table.insert(entries, {
-                    text  = label,
+                    text  = label .. stamp,
                     value = CN.Muted(note or "not scanned"),
                 })
             end
@@ -2290,7 +2852,8 @@ UI.RegisterTab{
             local counts = reputations.Summary()
 
             table.insert(entries, {
-                text  = "Reputations",
+                text  = "Reputations"
+                    .. CN.Muted("  " .. (Age("reputations") or "never read")),
                 value = CN.Body(counts.account) .. CN.Muted(" account-wide")
                     .. CN.Muted(", ") .. CN.Body(counts.character)
                     .. CN.Muted(" this character"),
@@ -2303,7 +2866,8 @@ UI.RegisterTab{
 
         if quests then
             table.insert(entries, {
-                text  = "Quests",
+                text  = "Quests"
+                    .. CN.Muted("  " .. (Age("quests") or "never read")),
                 value = CN.Body(CN.CountKeys(CN.Account("discoveredQuests")))
                     .. CN.Muted(" discovered"),
             })
@@ -2319,7 +2883,9 @@ UI.RegisterTab{
                     or CN.Accent("open its window once")
 
                 table.insert(entries, {
-                    text  = record.name or "?",
+                    text  = (record.name or "?")
+                        .. CN.Muted("  "
+                            .. (Age("professions") or "never read")),
                     value = CN.Body(tostring(record.rank) .. " / "
                         .. tostring(record.maxRank)) .. "  " .. note,
                 })
@@ -2340,7 +2906,7 @@ UI.RegisterTab{
         end
 
         panel.header:SetText("Account completion  |cff8a8f96(collected / "
-            .. "known at the last scan -- not of everything in the game)|r")
+            .. "known at the last scan" .. CN.DASH .. "not of everything in the game)|r")
         panel.list:SetEntries(entries)
     end,
 }
@@ -2445,13 +3011,22 @@ UI.RegisterTab{
         end, "Puts back the filters and the weighting you had before the "
             .. "focus was set.")
 
-        panel.focusClear:SetPoint("LEFT", panel.focusButton, "RIGHT", CN.SPACE.S, 0)
+        -- ON ITS OWN ROW, NOT BESIDE THE FOCUS BUTTON.
+        --
+        -- The left column is 268 wide. "Everything" is 170 starting at 12, so
+        -- it ends at 182; "Clear focus" is 120 starting at 190 and ends at
+        -- 310 -- forty-two pixels into the right column, on top of the
+        -- "Minimap button" checkbox, which is the first control over there
+        -- and sits in the same vertical band. Two controls drawn on top of
+        -- each other, on the tab whose own header says it was rebuilt so the
+        -- window would read as a settings page.
+        Under(panel.focusClear, panel.focusButton, CN.SPACE.XS)
 
         panel.focusNote = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
         panel.focusNote:SetTextColor(CN.Rgb("MUTED"))
         panel.focusNote:SetWidth(COLUMN - CN.SPACE.M)
         panel.focusNote:SetJustifyH("LEFT")
-        Under(panel.focusNote, panel.focusButton, CN.SPACE.XS)
+        Under(panel.focusNote, panel.focusClear, CN.SPACE.XS)
 
         panel.weightHead = Heading("Ranking weight", panel.focusNote)
 
@@ -2557,7 +3132,7 @@ UI.RegisterTab{
         panel.tooltips = AddCheckbox(panel, "Lines on item and unit tooltips",
             function() return CN.Settings().tooltips ~= false end,
             function(value) CN.Settings().tooltips = value end,
-            "Only where there is something to say -- most items have nothing.")
+            "Only where there is something to say" .. CN.DASH .. "most items have nothing.")
 
         Under(panel.tooltips, panel.pins, CN.SPACE.XS)
 
@@ -2587,6 +3162,38 @@ UI.RegisterTab{
 
         Under(panel.cues, panel.hud, CN.SPACE.XS)
 
+        -- THE TWO MOST INTRUSIVE THINGS THE ADDON CAN DO WERE TYPING-ONLY.
+        --
+        -- The header on this tab says it was rebuilt because "twenty-one
+        -- settings existed and seven were reachable in the window". Moving
+        -- the player's waypoint on its own, and making a noise, are exactly
+        -- the two a player wants to find and switch off in a settings panel
+        -- rather than discover by surprise -- and both were reachable only by
+        -- typing a command they would have to already know about.
+        panel.autoWaypoint = AddCheckbox(panel,
+            "Move the waypoint on as I finish things",
+            function() return CN.IsAutoWaypointEnabled() end,
+            function(value)
+                CN.Settings().autoWaypoint = value and true or false
+
+                if value and CN.StartAutoWaypointTicker then
+                    CN.StartAutoWaypointTicker()
+                end
+            end,
+            "Off by default. Taking over the waypoint uninvited is the most "
+            .. "intrusive thing this addon can do, and TomTom's arrow is "
+            .. "shared with every other addon you run.")
+
+        Under(panel.autoWaypoint, panel.cues, CN.SPACE.XS)
+
+        panel.rares = AddCheckbox(panel, "Announce rares out loud",
+            function() return CN.Settings().rareAlerts == true end,
+            function(value) CN.Settings().rareAlerts = value and true or false end,
+            "Off by default. Unsolicited sound is worse than an uninvited "
+            .. "waypoint, and the waypoint is already off.")
+
+        Under(panel.rares, panel.autoWaypoint, CN.SPACE.XS)
+
         ------------------------------------------------------------
         -- ACCESSIBILITY -- BOTH OF THESE WERE SLASH-ONLY.
         ------------------------------------------------------------
@@ -2615,7 +3222,7 @@ UI.RegisterTab{
             hud.SetScale(steps[(index % #steps) + 1])
 
             UI.Refresh()
-        end, "How large everything this addon draws is -- the window, the "
+        end, "How large everything this addon draws is" .. CN.DASH .. "the window, the "
             .. "arrow, the heads-up line. Click to cycle.")
 
         Under(panel.scale, panel.accessHead, CN.SPACE.XS)
@@ -2736,7 +3343,8 @@ UI.RegisterTab{
 
         for _, control in ipairs({ panel.learn, panel.minimap, panel.arrow,
                                    panel.pins, panel.tooltips, panel.hud,
-                                   panel.cues, panel.colourblind,
+                                   panel.cues, panel.autoWaypoint, panel.rares,
+                                   panel.colourblind,
                                    panel.keepFilter, panel.debug }) do
             control.Refresh()
         end
@@ -2874,7 +3482,7 @@ local function BuildMinimapButton()
                     break
                 end
 
-                GameTooltip:AddLine(reason, 0.6, 0.6, 0.6)
+                GameTooltip:AddLine(reason, CN.Rgb("MUTED"))
             end
         elseif not ok then
             -- An engine that threw is not an empty list, and telling the
@@ -2883,7 +3491,8 @@ local function BuildMinimapButton()
             GameTooltip:AddLine("Something went wrong; /cn errors has it.",
                 0.96, 0.42, 0.38)
         else
-            GameTooltip:AddLine("Nothing actionable is known yet.", 0.6, 0.6, 0.6)
+            GameTooltip:AddLine("Nothing actionable is known yet.",
+                CN.Rgb("MUTED"))
 
             -- The shared explanation rather than an unconditional "run
             -- setup", which was shown to players who had run it and then
@@ -2893,7 +3502,7 @@ local function BuildMinimapButton()
                     break
                 end
 
-                GameTooltip:AddLine(line, 0.6, 0.6, 0.6)
+                GameTooltip:AddLine(line, CN.Rgb("MUTED"))
             end
         end
 
@@ -3046,16 +3655,26 @@ CN:RegisterCommand{
     order   = 7,
     help    = "Diagnose the window and minimap button.",
     handler = function()
+        -- `UI.Frame()`, not the global. The global is published by the client
+        -- when the frame is NAMED, and this addon creates it through
+        -- `SafeCreateFrame`, which falls back to an unnamed frame if the
+        -- template is missing -- exactly the case a diagnostic exists for.
+        -- So the one command whose job is "tell me whether the window got
+        -- built" reported "not created" for a window that was created and
+        -- working.
+        local frame = UI.Frame()
+
         Print("UI diagnostics:")
-        Print("Window object: " .. (CompletionNavigatorFrame and "created" or "|cffe2564cnot created|r"))
+        Print("Window object: " .. (frame and "created" or "|cffe2564cnot created|r"))
 
-        if CompletionNavigatorFrame then
-            Print("  shown: " .. tostring(CompletionNavigatorFrame:IsShown()))
-            Print("  size: " .. math.floor(CompletionNavigatorFrame:GetWidth() or 0)
-                .. " x " .. math.floor(CompletionNavigatorFrame:GetHeight() or 0))
-            Print("  strata: " .. tostring(CompletionNavigatorFrame:GetFrameStrata()))
+        if frame then
+            Print("  named: " .. tostring(CompletionNavigatorFrame ~= nil))
+            Print("  shown: " .. tostring(frame:IsShown()))
+            Print("  size: " .. math.floor(frame:GetWidth() or 0)
+                .. " x " .. math.floor(frame:GetHeight() or 0))
+            Print("  strata: " .. tostring(frame:GetFrameStrata()))
 
-            local point, _, _, x, y = CompletionNavigatorFrame:GetPoint()
+            local point, _, _, x, y = frame:GetPoint()
 
             Print("  anchored: " .. tostring(point)
                 .. " at " .. math.floor(x or 0) .. ", " .. math.floor(y or 0))
@@ -3073,14 +3692,14 @@ CN:RegisterCommand{
         Print("Registered tabs: " .. #UI.tabs)
         Print("Minimap frame exists: " .. tostring(Minimap ~= nil))
 
-        if CompletionNavigatorFrame and not CompletionNavigatorFrame:IsShown() then
+        if frame and not frame:IsShown() then
             Print("Forcing the window open and centering it.")
 
             CN.Settings().window = nil
 
-            CompletionNavigatorFrame:ClearAllPoints()
-            CompletionNavigatorFrame:SetPoint("CENTER")
-            CompletionNavigatorFrame:Show()
+            frame:ClearAllPoints()
+            frame:SetPoint("CENTER")
+            frame:Show()
         end
     end,
 }

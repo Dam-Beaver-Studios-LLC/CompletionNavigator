@@ -445,7 +445,6 @@ CN.RegisterCandidateProvider("Goals", function()
                     accountWide     = true,
                     completionValue = 6,
                     travelCost      = travel,
-                    isGoal          = true,
                     reasons         = reasons,
                 }))
             end
@@ -538,8 +537,11 @@ function Goals.Decorate(objective)
         objective.goalPreference = Goals.goalPreference
         objective.userPreference = own + Goals.goalPreference
 
-        objective.isGoal = true
-
+        -- `objective.isGoal` was set here, cleared in Withdraw, set again in
+        -- the provider above, and read by nothing anywhere in the tree. What
+        -- consumers actually ask is `CN.Reasons(objective)`, which carries
+        -- the sentence below -- so the flag was a second, silent answer to a
+        -- question already answered, with its own lifetime to get wrong.
         CN.AddDecoratorReason(objective, "goal", "this is one of your goals")
 
         return objective
@@ -627,8 +629,6 @@ function Goals.Withdraw(objective)
 
         objective.goalPreference = nil
     end
-
-    objective.isGoal = nil
 
     CN.ClearDecoratorReason(objective, "goal")
 

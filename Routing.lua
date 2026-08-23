@@ -153,7 +153,7 @@ function CN.NavigateToObjective(objective)
             .. "is not in your log. Add them with ")
             .. CN.Accent("/cn setloc " .. tostring(objective.id)
                 .. " <mapID> <x> <y>")
-            .. CN.Muted(" -- ") .. CN.Accent("/cn where am i")
+            .. CN.Muted("" .. CN.DASH .. "") .. CN.Accent("/cn where am i")
             .. CN.Muted(" prints the map id."))
 
         return false
@@ -645,26 +645,28 @@ function CN.ImproveRoute(route, startX, startY)
         ys[index] = route[index].y or 0.5
     end
 
-    -- DON'T-LOOK BITS.
+    -- DON'T-LOOK BITS WERE HERE IN 0.57.0, AND THEY WERE NOT EXACT.
     --
-    -- A stop whose whole inner sweep failed to improve anything cannot start
-    -- improving again until one of its own edges moves. Standard for 2-opt,
-    -- exact rather than approximate, and it turns the second and later passes
-    -- -- which are most of them, because the first pass does most of the work
-    -- -- into a scan over the few stops that actually changed.
-    local look = {}
-
-    for index = 1, count do
-        look[index] = true
-    end
+    -- The bit was indexed by array POSITION, and a 2-opt reversal permutes
+    -- positions -- so a move that was rejected earlier becomes improving
+    -- when the content of the positions it spans is replaced, and the bit
+    -- for the outer index was never re-armed. Measured against the identical
+    -- 2-opt with the bits removed: 290 of 3,000 random routes came out
+    -- LONGER, worst case 27.7%, and at ninety stops -- the size a busy zone
+    -- actually produces -- 41 of 60 were worse. The returned route was not
+    -- even a local optimum: feeding it back in shortened it by another 21%.
+    --
+    -- The release notes said "exactly the same route". They were wrong, and
+    -- the suite did not catch it because it asserted the route got shorter
+    -- rather than that it got AS SHORT. It asserts the second thing now.
+    --
+    -- The flat coordinate arrays above are exact and stay; the bits are gone.
 
     for _ = 1, CN.routeOptimizePasses do
         local improved = false
 
         for i = 1, count - 1 do
-            if look[i] then
-                local touched = false
-
+            do
                 -- The stop before the segment: for i == 1 that is the player.
                 local prevX, prevY
 
@@ -712,16 +714,6 @@ function CN.ImproveRoute(route, startX, startY)
                         end
 
                         improved = true
-                        touched  = true
-
-                        -- Both ends of the reversed segment moved, and so did
-                        -- their neighbours, so all four are worth looking at
-                        -- again.
-                        look[i] = true
-                        look[k] = true
-
-                        if i > 1 then look[i - 1] = true end
-                        if k < count then look[k + 1] = true end
 
                         -- The segment's first stop is now what used to be its
                         -- last, so the entering edge has to be remeasured
@@ -731,10 +723,6 @@ function CN.ImproveRoute(route, startX, startY)
                         entering = math.sqrt(
                             Distance2(prevX, prevY, firstX, firstY))
                     end
-                end
-
-                if not touched then
-                    look[i] = false
                 end
             end
         end
@@ -801,8 +789,42 @@ end
 -- Builds an ordered sweep of everything currently actionable in one map.
 -- Returns route, skipped -- where skipped are objectives that belong to the
 -- zone conceptually but have no coordinates to route to.
+-- THE ROUTE IS REBUILT FROM SCRATCH ON EVERY REFRESH, AND IT NEED NOT BE.
+--
+-- This runs from the Zone tab's two-second refresh, from every map open, and
+-- from follow mode's three-second ticker. Clustering, ordering and the 2-opt
+-- pass together cost 5 ms at the size a busy zone produces -- and the answer
+-- changes only when the candidate set changes, when the player moves far
+-- enough to reorder the walk, or when the map does.
+--
+-- So it is remembered against exactly those three things. The position is
+-- quantised: moving four yards cannot change which stop is nearest, and
+-- rebuilding a ninety-stop route because the player shuffled sideways is the
+-- shape of waste this addon keeps finding.
+local routeCache = {}
+
+CN.routeCacheStep = 0.02
+
+function CN.ForgetRoutes()
+    routeCache = {}
+end
+
 function CN.BuildZoneRoute(mapID, startX, startY)
     local candidates = CN.CollectCandidates()
+
+    local state = CN.GetCandidateCacheState()
+
+    local key = tostring(mapID)
+        .. ":" .. tostring(state.generation)
+        .. ":" .. tostring(math.floor((startX or 0.5) / CN.routeCacheStep))
+        .. ":" .. tostring(math.floor((startY or 0.5) / CN.routeCacheStep))
+        .. ":" .. tostring(CN.typeFilterGeneration)
+
+    local held = routeCache[key]
+
+    if held then
+        return held.route, held.skipped, held.hubs
+    end
 
     -- LAST ZONE'S BATCHING IS NOT THIS ZONE'S.
     --
@@ -935,6 +957,19 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     if moved then
         CN.InvalidateRanking()
     end
+
+    -- One entry per (map, candidate generation, quantised position). The
+    -- generation is in the key, so a new candidate set never reads an old
+    -- route -- which means the cache never has to be told anything.
+    --
+    -- Bounded because a player crossing a zone visits a lot of cells: past
+    -- the cap the whole thing goes, which costs one rebuild rather than a
+    -- book-keeping pass.
+    if CN.CountKeys(routeCache) > 64 then
+        routeCache = {}
+    end
+
+    routeCache[key] = { route = route, skipped = skipped, hubs = orderedHubs }
 
     return route, skipped, orderedHubs
 end
@@ -1224,7 +1259,7 @@ CN:RegisterCommand{
         if #rows == 0 then
             CN.Print("Nothing outside this zone is costable right now.")
             CN.Print("|cff8a8f96Either everything worth doing is here, or the "
-                .. "client will not convert the positions -- which happens "
+                .. "client will not convert the positions" .. CN.DASH .. "which happens "
                 .. "during a loading screen and fixes itself.|r")
             return
         end
@@ -1237,25 +1272,25 @@ CN:RegisterCommand{
 
         for index, row in ipairs(rows) do
             if index > 12 then
-                CN.Print("  |cff8a8f96... and " .. (#rows - 12) .. " more|r")
+                CN.PrintLine("  |cff8a8f96... and " .. (#rows - 12) .. " more|r")
                 break
             end
 
             if row.zone ~= lastZone then
-                CN.Print("|cffffc74f" .. tostring(row.zone or row.mapID) .. "|r")
+                CN.PrintLine("|cffffc74f" .. tostring(row.zone or row.mapID) .. "|r")
 
                 lastZone = row.zone
             end
 
-            CN.Print(string.format("  %-34s |cff8a8f96%s|r",
+            CN.PrintLine(string.format("  %-34s |cff8a8f96%s|r",
                 tostring(row.objective.name or row.objective.id),
                 session and session.FormatDuration
                     and session.FormatDuration(row.seconds)
                     or (math.floor(row.seconds / 60) .. "m")))
         end
 
-        CN.Print("|cff8a8f96Ordered by how long it takes to get there, not by "
-            .. "how far away it is -- a flight point changes that answer.|r")
+        CN.PrintLine("|cff8a8f96Ordered by how long it takes to get there, not by "
+            .. "how far away it is" .. CN.DASH .. "a flight point changes that answer.|r")
     end,
 }
 
@@ -1337,8 +1372,9 @@ CN:RegisterCommand{
             end
 
             if #hub.objectives > 1 then
-                CN.Print("|cff5dd2fb" .. hubIndex .. ") " .. #hub.objectives
-                    .. " things here|r |cff8a8f96-- " .. CN.DescribeHub(hub) .. "|r")
+                CN.PrintLine("|cff5dd2fb" .. hubIndex .. ") " .. #hub.objectives
+                    .. " things here|r |cff8a8f96" .. CN.DASH .. " "
+                    .. CN.DescribeHub(hub) .. "|r")
             end
 
             for _, objective in ipairs(hub.objectives) do
@@ -1348,7 +1384,7 @@ CN:RegisterCommand{
                     local verb = objective.phase and quests
                         and quests.PhaseVerb(objective.phase)
 
-                    CN.Print((#hub.objectives > 1 and "   " or "")
+                    CN.PrintLine((#hub.objectives > 1 and "   " or "")
                         .. stopNumber .. ". "
                         .. (verb and ("|cffffc74f" .. verb .. "|r ") or "")
                         .. tostring(objective.name or objective.id)

@@ -188,7 +188,7 @@ CN:RegisterCommand{
         elseif stats.translated == 0 then
             Print("|cff8a8f96No translation table for this language yet. "
                 .. "Everything shows in English, which is the intended "
-                .. "fallback rather than a fault -- and "
+                .. "fallback rather than a fault" .. CN.DASH .. "and "
                 .. "|cffffc74f/cn locale missing|r is the list a translator "
                 .. "would start from.|r")
         else
@@ -208,7 +208,7 @@ CN:RegisterCommand{
         -- release of its own, and a promise the addon cannot keep is worse
         -- than a limit it admits to.
         Print("|cff8a8f96Scope: the " .. (stats.total or 0) .. " recurring "
-            .. "strings this addon routes through its locale table -- the "
+            .. "strings this addon routes through its locale table" .. CN.DASH .. "the "
             .. "confidence and status words, the tab names, the counters. "
             .. "Most one-off chat lines are still English and are not in "
             .. "this count.|r")
@@ -237,7 +237,7 @@ CN:RegisterCommand{
         if stats.missing > 0 then
             Print("|cff8a8f96" .. stats.missing .. " strings fell back to "
                 .. "English this session. |cffffc74f/cn locale missing|r "
-                .. "lists them -- that list is exactly what a translator "
+                .. "lists them" .. CN.DASH .. "that list is exactly what a translator "
                 .. "needs.|r")
         end
 
@@ -264,7 +264,7 @@ CN:RegisterCommand{
             end
 
             Print("|cff8a8f96" .. #keys .. " keys. Leave anything you are not "
-                .. "sure of blank -- an empty string is ignored, and English "
+                .. "sure of blank" .. CN.DASH .. "an empty string is ignored, and English "
                 .. "is a better answer than a guess.|r")
 
             -- AND WHERE TO SEND IT.

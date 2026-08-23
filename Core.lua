@@ -18,7 +18,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.57.0"
+CN.version     = "0.58.0"
 CN.dbVersion   = 12
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -460,6 +460,47 @@ function CN.RegisterSelfTest(definition)
     table.insert(CN.selfTests, definition)
 
     return true
+end
+
+-- HOW OLD A STORED NUMBER IS, IN WORDS A PLAYER USES.
+--
+-- `Session.FormatDuration` is the right shape for "this will take 40m" and
+-- the wrong one for "this was read four days ago", which it renders as
+-- "97h 12m". Anything the addon keeps between sessions is measured in days,
+-- so this stops at days and rounds toward the coarser unit: the point of the
+-- line is "is this stale", not "how stale to the minute".
+--
+-- Returns nil rather than a word when there is no stamp, so a caller can tell
+-- "never" from "just now" -- they are different answers and the second is a
+-- lie about the first.
+function CN.Ago(stamp, now)
+    stamp = tonumber(stamp)
+
+    if not stamp or stamp <= 0 then
+        return nil
+    end
+
+    now = tonumber(now) or (time and time()) or 0
+
+    local seconds = now - stamp
+
+    -- A clock that moved backwards -- a timezone change, a client restart
+    -- across one -- must not print a negative age.
+    if seconds < 60 then
+        return "just now"
+    end
+
+    if seconds < 3600 then
+        return math.floor(seconds / 60) .. "m ago"
+    end
+
+    if seconds < 86400 then
+        return math.floor(seconds / 3600) .. "h ago"
+    end
+
+    local days = math.floor(seconds / 86400)
+
+    return days .. (days == 1 and " day ago" or " days ago")
 end
 
 function CN.Comma(number)

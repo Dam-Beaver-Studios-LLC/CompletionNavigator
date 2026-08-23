@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.57.0'
+$script:ToolkitVersion = '0.58.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.57.0"
+CN.version     = "0.58.0"
 CN.dbVersion   = 12
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -565,6 +565,47 @@ function CN.RegisterSelfTest(definition)
     return true
 end
 
+-- HOW OLD A STORED NUMBER IS, IN WORDS A PLAYER USES.
+--
+-- `Session.FormatDuration` is the right shape for "this will take 40m" and
+-- the wrong one for "this was read four days ago", which it renders as
+-- "97h 12m". Anything the addon keeps between sessions is measured in days,
+-- so this stops at days and rounds toward the coarser unit: the point of the
+-- line is "is this stale", not "how stale to the minute".
+--
+-- Returns nil rather than a word when there is no stamp, so a caller can tell
+-- "never" from "just now" -- they are different answers and the second is a
+-- lie about the first.
+function CN.Ago(stamp, now)
+    stamp = tonumber(stamp)
+
+    if not stamp or stamp <= 0 then
+        return nil
+    end
+
+    now = tonumber(now) or (time and time()) or 0
+
+    local seconds = now - stamp
+
+    -- A clock that moved backwards -- a timezone change, a client restart
+    -- across one -- must not print a negative age.
+    if seconds < 60 then
+        return "just now"
+    end
+
+    if seconds < 3600 then
+        return math.floor(seconds / 60) .. "m ago"
+    end
+
+    if seconds < 86400 then
+        return math.floor(seconds / 3600) .. "h ago"
+    end
+
+    local days = math.floor(seconds / 86400)
+
+    return days .. (days == 1 and " day ago" or " days ago")
+end
+
 function CN.Comma(number)
     number = tonumber(number)
 
@@ -823,6 +864,23 @@ CN.FONT = {
     BODY  = "GameFontHighlightLeft",
     SMALL = "GameFontHighlightSmall",
     LABEL = "GameFontDisableSmall",
+
+    -- THE TWO ROLES THAT WERE MISSING, WHICH IS WHY SIX WIDGETS STILL NAMED
+    -- A FONT OBJECT DIRECTLY.
+    --
+    -- The five roles above covered the window and nothing else, so the arrow,
+    -- the map pins, the follow frame, the heads-up line and the welcome
+    -- screen went on typing `GameFont*` -- and drifted, because a name is not
+    -- a decision. A role nobody can express is a role everybody works around.
+    --
+    -- CAPTION: emphasised text at small size. A button's own label, and the
+    -- word under a map pin.
+    CAPTION = "GameFontNormalSmall",
+
+    -- LEAD: the one number on screen that is read at a glance while moving.
+    -- Exactly one widget uses it -- the arrow's distance -- and that is the
+    -- point of it having a name.
+    LEAD    = "GameFontHighlightLarge",
 }
 
 ------------------------------------------------------------
@@ -1292,7 +1350,7 @@ CN.migrations = {
 
         if type(db.characters) ~= "table" then
             error("db.characters is a " .. type(db.characters)
-                .. ", not a table -- refusing to replace it")
+                .. ", not a table" .. CN.DASH .. "refusing to replace it")
         end
 
         local keep = {
@@ -1802,15 +1860,38 @@ end
 function CN.DatabaseSizes()
     local rows = {}
 
+    -- THREE BOOKKEEPING KEYS ARE NOT THREE ITEMS.
+    --
+    -- An inventory store holds one key per item id PLUS `containers`,
+    -- `seenAt` and `scannedAt`, which are how the snapshot knows what it
+    -- covers and when it was taken. `CN.CountKeys` counted all of them, so a
+    -- Warband bank holding nothing at all was reported as three rows -- and
+    -- one holding four items as seven, which is the worse error, because it
+    -- is wrong by an amount that looks plausible.
+    --
+    -- `Inventory.Kinds` is the function that already knows the difference,
+    -- and this is the second caller it should always have had.
+    local inventory = CN:GetModule("Inventory")
+
+    local storeSections = { warbandBank = true, bank = true }
+
     local function section(label, contents)
         if type(contents) ~= "table" then
             return
         end
 
+        local count
+
+        if storeSections[label] and inventory and inventory.Kinds then
+            count = inventory.Kinds(contents)
+        else
+            count = CN.CountKeys(contents)
+        end
+
         table.insert(rows, {
             name  = label,
             bytes = CN.MeasureDatabase(contents),
-            count = CN.CountKeys(contents),
+            count = count,
         })
     end
 
@@ -1850,8 +1931,10 @@ CN:RegisterCommand{
         end
 
         if args == "discard" then
+            -- `CN.rescuedData` was set here and read nowhere in the tree.
+            -- A flag nothing reads is not a flag, it is a note to a reader
+            -- that a decision was carried when it was not.
             CN.db.rescuedCharacters = nil
-            CN.rescuedData          = false
 
             Print("Discarded. " .. CN.Muted("The addon will stop mentioning "
                 .. "it."))
@@ -2216,18 +2299,29 @@ CN.typeBadges = {
 -- unknown" and charged them a baseline for the journey.
 --
 -- Which produced the wrong answer TWICE, in opposite directions. Measured
--- over a real collection: `CN.unknownLocationCost` is 3, and the far side of
--- the player's own zone costs 3.3 -- so an objective with no location was
--- CHEAPER to reach than one you can see from where you are standing, and
--- twenty of the top thirty recommendations had no coordinates at all. And an
--- objective that genuinely should have a location and has not resolved one
--- was charged the same 3 as a currency, when the honest reading there is that
--- the addon does not know and should not be optimistic about it.
+-- over a real collection before 0.57.0: the unknown-journey cost was 3 and
+-- the far side of the player's own zone costs 3.3 -- so an objective with no
+-- location was CHEAPER to reach than one you can see from where you are
+-- standing, and twenty of the top thirty recommendations had no coordinates
+-- at all. And an objective that genuinely should have a location and has not
+-- resolved one was charged the same 3 as a currency, when the honest reading
+-- there is that the addon does not know and should not be optimistic.
 --
 -- Two different states, so two different costs. A thing that is not anywhere
 -- costs nothing to travel to, because there is no journey; a thing that is
 -- somewhere the addon cannot name is charged the pessimistic fallback, the
 -- same way `Travel.CostFor` charges one when it cannot cost a journey.
+-- WHICH IS EVERY TYPE WHOSE PROVIDER EMITS NO COORDINATES BY NATURE.
+--
+-- 0.57.0 listed seven and left out the five that matter most by volume:
+-- PET, MOUNT, TOY, APPEARANCE and RECIPE. Their own provider says so in as
+-- many words -- "1200 uncollected pets, say, none of which has a known
+-- location" -- and raising the unknown-journey cost from 3 to 8 therefore
+-- charged every one of them five points it should never have paid, against a
+-- completionValue that tops out around 8. Measured: an uncollected pet
+-- scored -6.0 where a reputation with the same completion value scored +2.0.
+-- The release meant to push things with no location DOWN and pushed exactly
+-- the wrong half of them off the list.
 CN.placelessTypes = {
     CURRENCY    = true,
     REPUTATION  = true,
@@ -2236,6 +2330,15 @@ CN.placelessTypes = {
     TITLE       = true,
     ACHIEVEMENT = true,
     COLLECTIBLE = true,
+
+    -- A collection entry is a thing you own or do not own. Where it can be
+    -- got is a separate question the chase chain answers; the row itself is
+    -- not a place, and it is not a journey.
+    PET         = true,
+    MOUNT       = true,
+    TOY         = true,
+    APPEARANCE  = true,
+    RECIPE      = true,
 }
 
 function CN.IsPlaceless(objective)
@@ -3163,13 +3266,13 @@ end
 function CN.Explain(objectiveType, id)
     if CN.IsIgnored(objectiveType, id) then
         return CN.objectiveStates.IGNORED,
-            "you ignored this -- /cn unhide " .. tostring(id) .. " restores it",
+            "you ignored this" .. CN.DASH .. "/cn unhide " .. tostring(id) .. " restores it",
             nil
     end
 
     if CN.IsDeferred(objectiveType, id) then
         return CN.objectiveStates.DEFERRED,
-            "you deferred this -- /cn unhide " .. tostring(id)
+            "you deferred this" .. CN.DASH .. "/cn unhide " .. tostring(id)
             .. " restores it now", nil
     end
 
@@ -3642,7 +3745,7 @@ local function SearchHelp(term)
 
     if #matches == 0 then
         Print("Nothing matches \"" .. term .. "\".")
-        Print(CN.Muted("Try a word from what you want to do -- "
+        Print(CN.Muted("Try a word from what you want to do" .. CN.DASH .. ""
             .. CN.Accent("/cn help mount") .. CN.Muted(", ")
             .. CN.Accent("/cn help time") .. CN.Muted(". ")
             .. CN.Accent("/cn help all") .. CN.Muted(" lists everything.")))
@@ -3779,7 +3882,7 @@ local function ShowStatus()
 
         if current and active then
             table.insert(lines, "Focus " .. CN.Accent(active.label)
-                .. CN.Muted(" -- " .. active.note))
+                .. CN.Muted("" .. CN.DASH .. "" .. active.note))
         end
 
         table.insert(lines, "Ranking weight "
@@ -3804,7 +3907,7 @@ local function ShowStatus()
 
         if #missing > 0 then
             table.insert(lines, CN.Accent("/cn setup")
-                .. CN.Muted(" -- " .. #missing .. " thing"
+                .. CN.Muted("" .. CN.DASH .. "" .. #missing .. " thing"
                     .. (#missing == 1 and "" or "s")
                     .. " here has never been read"))
         end
@@ -3908,9 +4011,16 @@ local function HandleSlashCommand(message)
         return
     end
 
+    -- SEARCH, RATHER THAN DUMPING THE DAY-ONE LIST.
+    --
+    -- A player who typed something wrong or half-remembered a name got
+    -- eleven lines of the essentials list, which is unlikely to contain what
+    -- they were reaching for. `SearchHelp` matches names, aliases and help
+    -- text, and it is what this file's own header says the search exists for.
+    -- Its own miss path already points at `/cn help all`.
     Print("Unknown command: " .. tostring(command))
 
-    ShowHelp()
+    SearchHelp(command)
 end
 
 CN.HandleSlashCommand = HandleSlashCommand
@@ -4079,7 +4189,7 @@ CN:RegisterCommand{
             local ok, preset = filters.ApplyMode(requested)
 
             if ok then
-                Print("Focus: |cffffc74f" .. preset.label .. "|r -- "
+                Print("Focus: |cffffc74f" .. preset.label .. "|r" .. CN.DASH .. ""
                     .. preset.note)
                 Print("|cff8a8f96/cn mode off|r puts it back.")
                 return
@@ -4297,7 +4407,7 @@ CN:RegisterCommand{
         elseif stats.translated == 0 then
             Print("|cff8a8f96No translation table for this language yet. "
                 .. "Everything shows in English, which is the intended "
-                .. "fallback rather than a fault -- and "
+                .. "fallback rather than a fault" .. CN.DASH .. "and "
                 .. "|cffffc74f/cn locale missing|r is the list a translator "
                 .. "would start from.|r")
         else
@@ -4317,7 +4427,7 @@ CN:RegisterCommand{
         -- release of its own, and a promise the addon cannot keep is worse
         -- than a limit it admits to.
         Print("|cff8a8f96Scope: the " .. (stats.total or 0) .. " recurring "
-            .. "strings this addon routes through its locale table -- the "
+            .. "strings this addon routes through its locale table" .. CN.DASH .. "the "
             .. "confidence and status words, the tab names, the counters. "
             .. "Most one-off chat lines are still English and are not in "
             .. "this count.|r")
@@ -4346,7 +4456,7 @@ CN:RegisterCommand{
         if stats.missing > 0 then
             Print("|cff8a8f96" .. stats.missing .. " strings fell back to "
                 .. "English this session. |cffffc74f/cn locale missing|r "
-                .. "lists them -- that list is exactly what a translator "
+                .. "lists them" .. CN.DASH .. "that list is exactly what a translator "
                 .. "needs.|r")
         end
 
@@ -4373,7 +4483,7 @@ CN:RegisterCommand{
             end
 
             Print("|cff8a8f96" .. #keys .. " keys. Leave anything you are not "
-                .. "sure of blank -- an empty string is ignored, and English "
+                .. "sure of blank" .. CN.DASH .. "an empty string is ignored, and English "
                 .. "is a better answer than a guess.|r")
 
             -- AND WHERE TO SEND IT.
@@ -6316,9 +6426,30 @@ function CN.CollectCandidates(force)
         return aggregate.candidates
     end
 
-    -- Which winners this pass has already reset. An objective can be the
-    -- winner for several losers in one pass, and the reset must happen once.
+    -- WHAT THE AGGREGATE CONTRIBUTED LAST TIME, RESET FOR EVERY ROW.
+    --
+    -- 0.57.0 reset only rows that were merged into AGAIN this pass, which
+    -- misses the case the reset exists for: the losing provider STOPPING.
+    -- Unpin a goal and the Goals provider stops emitting the quest -- so the
+    -- quest is never an `existing` again, its merged sentence and merged
+    -- value are never cleared, and because the reuse shortcut hands back the
+    -- same table they stay for the rest of the session. Exactly the symptom
+    -- the release notes claimed to have removed.
+    --
+    -- Reset on FIRST SIGHT of a row in this pass instead, wherever it is
+    -- first seen, so a contribution that is no longer being made is gone
+    -- whether or not anything else is still merging into it.
     local touched = {}
+
+    local function Reset(objective)
+        if touched[objective] then
+            return
+        end
+
+        touched[objective]              = true
+        objective.mergedReasons         = nil
+        objective.mergedCompletionValue = nil
+    end
 
     -- ONE OBJECTIVE, ONE ROW.
     --
@@ -6364,7 +6495,13 @@ function CN.CollectCandidates(force)
 
                 local existing = key and byKey[key]
 
+                if objective then
+                    Reset(objective)
+                end
+
                 if existing then
+                    Reset(existing)
+
                     -- THE MERGE NEVER WRITES INTO THE PROVIDER'S OWN ROW.
                     --
                     -- It used to raise `existing.completionValue` in place
@@ -6382,12 +6519,6 @@ function CN.CollectCandidates(force)
                     -- Both go in tables the aggregate owns, cleared at the
                     -- top of this pass, so a contribution that stops being
                     -- made simply stops appearing.
-                    if not touched[existing] then
-                        touched[existing]              = true
-                        existing.mergedReasons         = nil
-                        existing.mergedCompletionValue = nil
-                    end
-
                     if (objective.completionValue or 0)
                         > (existing.completionValue or 0)
                         and (objective.completionValue or 0)
@@ -6553,6 +6684,19 @@ local function Ranked()
             -- shapes, which is a provider mixing numeric and string ids and
             -- is rare enough to pay for itself there.
             local leftID, rightID = a.id, b.id
+
+            -- `type(nil) == type(nil)`, so two rows with no id reached
+            -- `nil < nil` and threw -- taking `/cn next`, `/cn list`, the
+            -- HUD, the broker and the Next tab with them. The string form
+            -- this replaced was nil-safe by accident; this one has to be
+            -- nil-safe on purpose.
+            --
+            -- No shipped provider emits a nil id, but
+            -- `RegisterCandidateProvider` is published and several ids come
+            -- straight out of client tables.
+            if leftID == nil or rightID == nil then
+                return rightID ~= nil
+            end
 
             if type(leftID) == type(rightID) then
                 return leftID < rightID
@@ -6869,7 +7013,7 @@ CN:RegisterCommand{
             local scaled = math.floor((value / (1 + CN.urgencyLongShare))
                 * width + 0.5)
 
-            CN.Print(string.format("  %-11s |cff5dd2fb%s|r|cff5a5f66%s|r %.2f",
+            CN.PrintLine(string.format("  %-11s |cff5dd2fb%s|r|cff5a5f66%s|r %.2f",
                 point.label,
                 string.rep("=", scaled),
                 string.rep("-", width - scaled),
@@ -6925,12 +7069,12 @@ CN:RegisterCommand{
             tostring((settings and settings.priorityMode) or "balanced")))
 
         for index, objective in ipairs(results) do
-            CN.Print(string.format("%d. |cfff2f4f6%s|r |cff8a8f96%.1f|r",
+            CN.PrintLine(string.format("%d. |cfff2f4f6%s|r |cff8a8f96%.1f|r",
                 index, tostring(objective.name or objective.id),
                 objective.priorityWeight or 0))
 
             for _, term in ipairs(CN.ExplainScore(objective)) do
-                CN.Print(string.format("     %s%+.1f|r  %s",
+                CN.PrintLine(string.format("     %s%+.1f|r  %s",
                     term.value >= 0 and "|cff73b873" or "|cffe2564c",
                     term.value, term.label))
             end
@@ -7111,7 +7255,7 @@ CN:RegisterCommand{
         CN.Print("Providers, slowest first:")
 
         for _, row in ipairs(rows) do
-            CN.Print(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
+            CN.PrintLine(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
                 row.name, row.average, row.worst, row.calls,
                 row.calls == 1 and "call" or "calls",
                 row.cached and "" or " |cffffc74fstale|r"))
@@ -7123,11 +7267,12 @@ CN:RegisterCommand{
         for name, truncation in pairs(CN.providerTruncation) do
             if (truncation.dropped or 0) > 0 then
                 if not capped then
-                    CN.Print("Capped at " .. CN.providerCandidateCap .. " per provider:")
+                    CN.PrintLine("Capped at " .. CN.providerCandidateCap
+                        .. " per provider:")
                     capped = true
                 end
 
-                CN.Print("  " .. name .. ": showing " .. CN.providerCandidateCap
+                CN.PrintLine("  " .. name .. ": showing " .. CN.providerCandidateCap
                     .. " of " .. truncation.considered
                     .. " |cff8a8f96(" .. truncation.dropped .. " lower-valued dropped)|r")
             end
@@ -7167,11 +7312,40 @@ CN:RegisterCommand{
             return
         end
 
+        -- A NUMBER WITH NO UNIT, NO SCALE AND NO MAXIMUM.
+        --
+        -- Every line ended `[Quest 12.4]`. 12.4 is the internal priority
+        -- weight: nothing on the line said what it was of, nothing said what
+        -- a good one looks like, and the command that explains it was not
+        -- named. `/cn list` is one of the ten day-one commands and the one a
+        -- new player types after `/cn next`.
+        --
+        -- Replaced with the figure the ranking already computed that a person
+        -- can act on: how far away it is.
+        local session = CN:GetModule("Session")
+
+        CN.Print("The top " .. #results .. ":")
+
         for index, objective in ipairs(results) do
-            CN.Print(index .. ". " .. tostring(objective.name or objective.id)
-                .. " |cff8a8f96[" .. CN.TypeBadge(objective.type)
-                .. " " .. string.format("%.1f", objective.priorityWeight or 0) .. "]|r")
+            local away
+
+            if objective.travelCost and objective.travelCost > 0
+                and CN.secondsPerCostPoint and session
+                and session.FormatDuration then
+
+                away = session.FormatDuration(objective.travelCost
+                    * CN.secondsPerCostPoint)
+            end
+
+            CN.PrintLine(index .. ". "
+                .. CN.Primary(tostring(objective.name or objective.id))
+                .. CN.Muted(" [" .. CN.TypeBadge(objective.type)
+                    .. (away and (" " .. CN.DOT .. " " .. away .. " away") or "")
+                    .. "]"))
         end
+
+        CN.PrintLine(CN.Muted("") .. CN.Accent("/cn order")
+            .. CN.Muted(" shows why this is the order."))
     end,
 }
 '@
@@ -7332,7 +7506,7 @@ function CN.NavigateToObjective(objective)
             .. "is not in your log. Add them with ")
             .. CN.Accent("/cn setloc " .. tostring(objective.id)
                 .. " <mapID> <x> <y>")
-            .. CN.Muted(" -- ") .. CN.Accent("/cn where am i")
+            .. CN.Muted("" .. CN.DASH .. "") .. CN.Accent("/cn where am i")
             .. CN.Muted(" prints the map id."))
 
         return false
@@ -7824,26 +7998,28 @@ function CN.ImproveRoute(route, startX, startY)
         ys[index] = route[index].y or 0.5
     end
 
-    -- DON'T-LOOK BITS.
+    -- DON'T-LOOK BITS WERE HERE IN 0.57.0, AND THEY WERE NOT EXACT.
     --
-    -- A stop whose whole inner sweep failed to improve anything cannot start
-    -- improving again until one of its own edges moves. Standard for 2-opt,
-    -- exact rather than approximate, and it turns the second and later passes
-    -- -- which are most of them, because the first pass does most of the work
-    -- -- into a scan over the few stops that actually changed.
-    local look = {}
-
-    for index = 1, count do
-        look[index] = true
-    end
+    -- The bit was indexed by array POSITION, and a 2-opt reversal permutes
+    -- positions -- so a move that was rejected earlier becomes improving
+    -- when the content of the positions it spans is replaced, and the bit
+    -- for the outer index was never re-armed. Measured against the identical
+    -- 2-opt with the bits removed: 290 of 3,000 random routes came out
+    -- LONGER, worst case 27.7%, and at ninety stops -- the size a busy zone
+    -- actually produces -- 41 of 60 were worse. The returned route was not
+    -- even a local optimum: feeding it back in shortened it by another 21%.
+    --
+    -- The release notes said "exactly the same route". They were wrong, and
+    -- the suite did not catch it because it asserted the route got shorter
+    -- rather than that it got AS SHORT. It asserts the second thing now.
+    --
+    -- The flat coordinate arrays above are exact and stay; the bits are gone.
 
     for _ = 1, CN.routeOptimizePasses do
         local improved = false
 
         for i = 1, count - 1 do
-            if look[i] then
-                local touched = false
-
+            do
                 -- The stop before the segment: for i == 1 that is the player.
                 local prevX, prevY
 
@@ -7891,16 +8067,6 @@ function CN.ImproveRoute(route, startX, startY)
                         end
 
                         improved = true
-                        touched  = true
-
-                        -- Both ends of the reversed segment moved, and so did
-                        -- their neighbours, so all four are worth looking at
-                        -- again.
-                        look[i] = true
-                        look[k] = true
-
-                        if i > 1 then look[i - 1] = true end
-                        if k < count then look[k + 1] = true end
 
                         -- The segment's first stop is now what used to be its
                         -- last, so the entering edge has to be remeasured
@@ -7910,10 +8076,6 @@ function CN.ImproveRoute(route, startX, startY)
                         entering = math.sqrt(
                             Distance2(prevX, prevY, firstX, firstY))
                     end
-                end
-
-                if not touched then
-                    look[i] = false
                 end
             end
         end
@@ -7980,8 +8142,42 @@ end
 -- Builds an ordered sweep of everything currently actionable in one map.
 -- Returns route, skipped -- where skipped are objectives that belong to the
 -- zone conceptually but have no coordinates to route to.
+-- THE ROUTE IS REBUILT FROM SCRATCH ON EVERY REFRESH, AND IT NEED NOT BE.
+--
+-- This runs from the Zone tab's two-second refresh, from every map open, and
+-- from follow mode's three-second ticker. Clustering, ordering and the 2-opt
+-- pass together cost 5 ms at the size a busy zone produces -- and the answer
+-- changes only when the candidate set changes, when the player moves far
+-- enough to reorder the walk, or when the map does.
+--
+-- So it is remembered against exactly those three things. The position is
+-- quantised: moving four yards cannot change which stop is nearest, and
+-- rebuilding a ninety-stop route because the player shuffled sideways is the
+-- shape of waste this addon keeps finding.
+local routeCache = {}
+
+CN.routeCacheStep = 0.02
+
+function CN.ForgetRoutes()
+    routeCache = {}
+end
+
 function CN.BuildZoneRoute(mapID, startX, startY)
     local candidates = CN.CollectCandidates()
+
+    local state = CN.GetCandidateCacheState()
+
+    local key = tostring(mapID)
+        .. ":" .. tostring(state.generation)
+        .. ":" .. tostring(math.floor((startX or 0.5) / CN.routeCacheStep))
+        .. ":" .. tostring(math.floor((startY or 0.5) / CN.routeCacheStep))
+        .. ":" .. tostring(CN.typeFilterGeneration)
+
+    local held = routeCache[key]
+
+    if held then
+        return held.route, held.skipped, held.hubs
+    end
 
     -- LAST ZONE'S BATCHING IS NOT THIS ZONE'S.
     --
@@ -8114,6 +8310,19 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     if moved then
         CN.InvalidateRanking()
     end
+
+    -- One entry per (map, candidate generation, quantised position). The
+    -- generation is in the key, so a new candidate set never reads an old
+    -- route -- which means the cache never has to be told anything.
+    --
+    -- Bounded because a player crossing a zone visits a lot of cells: past
+    -- the cap the whole thing goes, which costs one rebuild rather than a
+    -- book-keeping pass.
+    if CN.CountKeys(routeCache) > 64 then
+        routeCache = {}
+    end
+
+    routeCache[key] = { route = route, skipped = skipped, hubs = orderedHubs }
 
     return route, skipped, orderedHubs
 end
@@ -8403,7 +8612,7 @@ CN:RegisterCommand{
         if #rows == 0 then
             CN.Print("Nothing outside this zone is costable right now.")
             CN.Print("|cff8a8f96Either everything worth doing is here, or the "
-                .. "client will not convert the positions -- which happens "
+                .. "client will not convert the positions" .. CN.DASH .. "which happens "
                 .. "during a loading screen and fixes itself.|r")
             return
         end
@@ -8416,25 +8625,25 @@ CN:RegisterCommand{
 
         for index, row in ipairs(rows) do
             if index > 12 then
-                CN.Print("  |cff8a8f96... and " .. (#rows - 12) .. " more|r")
+                CN.PrintLine("  |cff8a8f96... and " .. (#rows - 12) .. " more|r")
                 break
             end
 
             if row.zone ~= lastZone then
-                CN.Print("|cffffc74f" .. tostring(row.zone or row.mapID) .. "|r")
+                CN.PrintLine("|cffffc74f" .. tostring(row.zone or row.mapID) .. "|r")
 
                 lastZone = row.zone
             end
 
-            CN.Print(string.format("  %-34s |cff8a8f96%s|r",
+            CN.PrintLine(string.format("  %-34s |cff8a8f96%s|r",
                 tostring(row.objective.name or row.objective.id),
                 session and session.FormatDuration
                     and session.FormatDuration(row.seconds)
                     or (math.floor(row.seconds / 60) .. "m")))
         end
 
-        CN.Print("|cff8a8f96Ordered by how long it takes to get there, not by "
-            .. "how far away it is -- a flight point changes that answer.|r")
+        CN.PrintLine("|cff8a8f96Ordered by how long it takes to get there, not by "
+            .. "how far away it is" .. CN.DASH .. "a flight point changes that answer.|r")
     end,
 }
 
@@ -8516,8 +8725,9 @@ CN:RegisterCommand{
             end
 
             if #hub.objectives > 1 then
-                CN.Print("|cff5dd2fb" .. hubIndex .. ") " .. #hub.objectives
-                    .. " things here|r |cff8a8f96-- " .. CN.DescribeHub(hub) .. "|r")
+                CN.PrintLine("|cff5dd2fb" .. hubIndex .. ") " .. #hub.objectives
+                    .. " things here|r |cff8a8f96" .. CN.DASH .. " "
+                    .. CN.DescribeHub(hub) .. "|r")
             end
 
             for _, objective in ipairs(hub.objectives) do
@@ -8527,7 +8737,7 @@ CN:RegisterCommand{
                     local verb = objective.phase and quests
                         and quests.PhaseVerb(objective.phase)
 
-                    CN.Print((#hub.objectives > 1 and "   " or "")
+                    CN.PrintLine((#hub.objectives > 1 and "   " or "")
                         .. stopNumber .. ". "
                         .. (verb and ("|cffffc74f" .. verb .. "|r ") or "")
                         .. tostring(objective.name or objective.id)
@@ -8778,6 +8988,32 @@ local TAB_MARGIN     = 24
 
 local window, minimapButton
 
+-- A BUTTON'S ANSWER, PUT WHERE THE BUTTON IS.
+--
+-- Replaces `Print` at every call site inside a button handler. The window
+-- gets the line if it is open -- the click happened there, so the answer
+-- belongs there -- and chat gets it if it is not, which is how the same
+-- handler behaves when a slash command reaches it.
+--
+-- Never both: the same sentence in two places reads as two things happening.
+function UI.Answer(text)
+    text = tostring(text)
+
+    if window and window:IsShown() and window.answer then
+        window.answer:SetText(CN.Body(text))
+
+        -- The next click's answer replaces this one, and so does a tab
+        -- change -- see SelectTab. A stale answer beside a different tab is
+        -- worse than no answer.
+        return true
+    end
+
+    Print(text)
+
+    return false
+end
+
+
 ------------------------------------------------------------
 -- TEMPLATE SAFETY
 ------------------------------------------------------------
@@ -8956,7 +9192,7 @@ local function AddButton(parent, text, width, onClick, tooltip)
         -- A plain Button has no artwork and no font string of its own.
         PaintPanel(button, 0.16, 0.16, 0.19, 1)
 
-        local label = button:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+        local label = button:CreateFontString(nil, "ARTWORK", CN.FONT.CAPTION)
         label:SetPoint("CENTER")
         button:SetFontString(label)
 
@@ -8983,7 +9219,7 @@ local function AddCheckbox(parent, text, getter, setter, tooltip)
     if check.Text then
         check.Text:SetText(text)
     else
-        local label = check:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
+        local label = check:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
         label:SetPoint("LEFT", check, "RIGHT", 2, 0)
         label:SetText(text)
         check.Text = label
@@ -9055,7 +9291,7 @@ local function BuildWindow()
         titleBackground:SetAllPoints()
         titleBackground:SetColorTexture(0.13, 0.13, 0.16, 1)
 
-        local title = titleBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        local title = titleBar:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
         title:SetPoint("LEFT", 10, 0)
         -- The fallback title, which must say the same thing as the
         -- templated one above -- these were two separate literals and could
@@ -9067,7 +9303,7 @@ local function BuildWindow()
         close:SetSize(22, 22)
         close:SetPoint("TOPRIGHT", -3, -2)
 
-        local closeLabel = close:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        local closeLabel = close:CreateFontString(nil, "OVERLAY", CN.FONT.TITLE)
         closeLabel:SetPoint("CENTER")
         closeLabel:SetText("x")
         close:SetFontString(closeLabel)
@@ -9101,7 +9337,7 @@ local function BuildWindow()
     search:SetAutoFocus(false)
     search:SetMaxLetters(40)
 
-    local searchLabel = window:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    local searchLabel = window:CreateFontString(nil, "OVERLAY", CN.FONT.LABEL)
     searchLabel:SetPoint("RIGHT", search, "LEFT", -6, 0)
     searchLabel:SetText("filter")
 
@@ -9148,7 +9384,8 @@ local function BuildWindow()
         self:ClearFocus()
     end)
 
-    window.search = search
+    window.search      = search
+    window.searchLabel = searchLabel
 
     window.body = CreateFrame("Frame", nil, window)
     window.body:SetPoint("TOPLEFT", 10, -58)
@@ -9165,12 +9402,38 @@ local function BuildWindow()
     -- buried commands for the cost of one fontstring.
     window.footer = window:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
     window.footer:SetTextColor(CN.Rgb("MUTED"))
-    window.footer:SetPoint("BOTTOMLEFT", 14, 14)
-    window.footer:SetPoint("BOTTOMRIGHT", -14, 14)
+    window.footer:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
+    window.footer:SetPoint("BOTTOMRIGHT", -CN.SPACE.M, CN.SPACE.M)
     window.footer:SetJustifyH("LEFT")
     window.footer:SetText("/cn help for the full command list")
 
+    -- WHERE A BUTTON'S ANSWER GOES.
+    --
+    -- Every button in this window answered into the chat frame. A player
+    -- clicking "Scan everything" was looking at the window; the sentence
+    -- saying what happened appeared behind it, in a scrolling log they may
+    -- have moved, resized or filtered. Eleven buttons, and the result of
+    -- clicking any of them was somewhere else on the screen.
+    --
+    -- One line under the tabs, in the window, where the click happened. Chat
+    -- still gets it when the window is not open, because the same handlers
+    -- run from slash commands.
+    window.answer = window:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+    window.answer:SetPoint("BOTTOMLEFT", window.footer, "TOPLEFT", 0, 4)
+    window.answer:SetPoint("BOTTOMRIGHT", window.footer, "TOPRIGHT", 0, 4)
+    window.answer:SetJustifyH("LEFT")
+    window.answer:SetText("")
+
     UI.RebuildTabs()
+
+    -- AND SCALE IT, because the window does not exist at login and the login
+    -- handler's `ApplyScale` therefore could not reach it. A player who set
+    -- the text size got the heads-up line at 1.5 and everything else at 1.0.
+    local hud = CN:GetModule("Hud")
+
+    if hud and hud.ApplyScale then
+        hud.ApplyScale()
+    end
 
     return window
 end
@@ -9379,6 +9642,23 @@ function UI.SelectTab(index)
         return
     end
 
+    -- THE OUTGOING TAB'S LIST HAS TO BE CLEARED WHILE IT IS STILL SELECTED.
+    --
+    -- `UI.SetFilter` resolves its target through `UI.tabs[UI.selectedTab]`,
+    -- and `UI.selectedTab` is advanced two lines below -- so from the moment
+    -- it moves, NOTHING in the addon can reach the list you just left, and
+    -- emptying the box afterwards cleared the widget and not the list behind
+    -- it. Leave a filtered tab for one without a list and the box came back
+    -- empty and enabled over a list that was still filtered.
+    local leaving = UI.tabs[UI.selectedTab or 0]
+
+    local leavingList = leaving and leaving.panel
+        and UI.listPanels and UI.listPanels[leaving.panel]
+
+    if leavingList and not (CN.Settings() and CN.Settings().keepFilter) then
+        leavingList:SetFilter("")
+    end
+
     UI.selectedTab     = index
     UI.selectedTabName = tab.name
 
@@ -9388,6 +9668,13 @@ function UI.SelectTab(index)
     if CN.Settings() then
         CN.Settings().selectedTab     = index
         CN.Settings().selectedTabName = tab.name
+    end
+
+    -- An answer belongs to the tab whose button produced it. Carrying "Read
+    -- 6 collections." onto the Goals tab is a sentence about nothing on
+    -- screen.
+    if window.answer then
+        window.answer:SetText("")
     end
 
     if window.footer then
@@ -9459,7 +9746,69 @@ function UI.SelectTab(index)
     -- Now that the panel exists, the filter has something to apply to.
     UI.RestoreFilter()
 
+    -- AND IF IT HAS NOTHING TO APPLY TO, SAY SO.
+    --
+    -- The Settings and Scans tabs draw controls, not a list, so `UI.SetFilter`
+    -- found no `panel.list` and returned. The box stayed white, focusable and
+    -- typeable, and every keystroke did nothing -- which reads as the addon
+    -- being broken, not as the control being inapplicable. A control that
+    -- cannot act must not look like it can.
+    UI.UpdateFilterAvailability(tab)
+
     UI.Refresh()
+end
+
+-- Split out so the tab switch above and the tests can both reach it.
+function UI.UpdateFilterAvailability(tab)
+    if not window or not window.search then
+        return false
+    end
+
+    local panel = tab and tab.panel
+
+    -- The registry, not `panel.list` -- see UI/List.lua for why a field read
+    -- off a frame cannot answer this honestly.
+    local usable = (panel and UI.listPanels and UI.listPanels[panel]) and true
+        or false
+
+    -- `Enable`/`Disable`, not `SetEnabled`: SetEnabled is a Button method and
+    -- this is an EditBox. It exists on enough widget types to look safe and
+    -- would have been a nil call on the one type this actually runs against.
+    if usable then
+        window.search:Enable()
+    else
+        window.search:Disable()
+    end
+
+    window.search:EnableMouse(usable)
+
+    if not usable then
+        -- CLEARED WITHOUT DESTROYING WHAT IS REMEMBERED.
+        --
+        -- `ClearFocus` on a focused EditBox fires `OnEditFocusLost`, which
+        -- with `keepFilter` on writes whatever the box now holds -- nothing
+        -- -- over `UI.persistedFilter`. So typing a filter and then clicking
+        -- the one tab with no list threw the persisted term away, which is
+        -- the opposite of what that setting is for.
+        local held = UI.persistedFilter
+
+        window.search:SetText("")
+        window.search:ClearFocus()
+
+        UI.persistedFilter = held
+    end
+
+    -- Greyed AND relabelled: colour alone is not an explanation, and "filter"
+    -- beside a dead box is worse than no label.
+    if window.searchLabel then
+        window.searchLabel:SetText(usable and "filter" or "no list here")
+    end
+
+    if window.search.SetTextColor then
+        window.search:SetTextColor(CN.Rgb(usable and "PRIMARY" or "DISABLED"))
+    end
+
+    return usable
 end
 
 ------------------------------------------------------------
@@ -9489,8 +9838,10 @@ function UI.SetFilter(text)
 
     local panel = tab and tab.panel
 
-    if panel and panel.list and panel.list.SetFilter then
-        panel.list:SetFilter(text)
+    local list = panel and UI.listPanels and UI.listPanels[panel]
+
+    if list then
+        list:SetFilter(text)
     end
 end
 
@@ -9558,9 +9909,28 @@ function UI.Toggle()
     end
 end
 
+-- The window frame itself, for the tests and for `/cn uistatus`. It is a
+-- local because nothing outside this file should be reaching into it, and
+-- readable because a window nothing can read is a window nothing can assert
+-- about -- which is how the filter box shipped three defects.
+function UI.Frame()
+    return window
+end
+
 function UI.Show()
     BuildWindow()
     UI.RestorePosition()
+
+    -- AN ANSWER BELONGS TO THE CLICK THAT PRODUCED IT.
+    --
+    -- It was cleared on a tab change and nowhere else, and neither `Show` nor
+    -- `Toggle` changes tabs -- so "Read 6 collections." was still sitting
+    -- under the tab strip when the window was reopened twenty minutes later,
+    -- describing something that had not just happened.
+    if window and window.answer then
+        window.answer:SetText("")
+    end
+
     FadeIn(window)
     UI.Refresh()
 end
@@ -9584,17 +9954,17 @@ UI.RegisterTab{
     order = 10,
 
     build = function(panel)
-        panel.title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-        panel.title:SetPoint("TOPLEFT", 8, -8)
-        panel.title:SetPoint("TOPRIGHT", -8, -8)
+        panel.title = panel:CreateFontString(nil, "ARTWORK", CN.FONT.TITLE)
+        panel.title:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.title:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.title:SetJustifyH("LEFT")
 
-        panel.type = panel:CreateFontString(nil, "ARTWORK", "GameFontDisable")
+        panel.type = panel:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
         panel.type:SetPoint("TOPLEFT", panel.title, "BOTTOMLEFT", 0, -2)
 
-        panel.why = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
+        panel.why = panel:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
         panel.why:SetPoint("TOPLEFT", panel.type, "BOTTOMLEFT", 0, -12)
-        panel.why:SetPoint("RIGHT", -8, 0)
+        panel.why:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.why:SetJustifyH("LEFT")
         panel.why:SetJustifyV("TOP")
 
@@ -9620,7 +9990,7 @@ UI.RegisterTab{
             CN.SetDeferred(objective.type, objective.id, 3600)
             -- SAY HOW LONG, AND SAY THE WAY BACK. The button says "1 hour"
             -- and the message did not; nothing named the undo.
-            Print("Deferred for an hour: " .. tostring(objective.name)
+            UI.Answer("Deferred for an hour: " .. tostring(objective.name)
                 .. CN.Aside(CN.Accent("/cn unhide " .. tostring(objective.id))
                     .. " brings it back now"))
             UI.Refresh()
@@ -9638,7 +10008,7 @@ UI.RegisterTab{
             CN.SetIgnored(objective.type, objective.id, true)
             -- Ignore is permanent and one click, so the message it prints is
             -- the only place the way back can appear.
-            Print("Ignored: " .. tostring(objective.name)
+            UI.Answer("Ignored: " .. tostring(objective.name)
                 .. CN.Aside(CN.Accent("/cn unhide " .. tostring(objective.id))
                     .. " restores it"))
             UI.Refresh()
@@ -9660,7 +10030,7 @@ UI.RegisterTab{
         panel.list.emptyText = "Nothing actionable is known yet. /cn setup reads everything the client will answer for."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", panel.why, "BOTTOMLEFT", -4, -14)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
     end,
 
     refresh = function(panel)
@@ -9738,6 +10108,21 @@ UI.RegisterTab{
 
         local best = results[1]
 
+        -- The headline is the addon's answer unless the player has picked a
+        -- different row, in which case it is theirs. A selection that no
+        -- longer exists is dropped rather than left aiming at nothing.
+        local held = panel.selected
+
+        panel.selected = nil
+
+        for _, objective in ipairs(results) do
+            if objective == held then
+                panel.selected = held
+            end
+        end
+
+        best = panel.selected or best
+
         CN.currentRecommendation = best
 
         panel.title:SetText(tostring(best.name or best.id))
@@ -9754,15 +10139,32 @@ UI.RegisterTab{
                     index, tostring(objective.name or objective.id),
                     CN.TypeBadge(objective.type)),
 
-                tooltip = table.concat(CN.ExplainRecommendation(objective), "\n"),
+                -- SHOW WHICH ROW THE BUTTONS ARE AIMED AT.
+                --
+                -- Clicking a row re-aimed Navigate, Defer and Ignore at it
+                -- and changed nothing on screen -- so the list still numbered
+                -- it "7." under a headline that now said something else, and
+                -- nothing anywhere said which one was armed. The Goals tab
+                -- has done this correctly since 0.50.0, and the list widget
+                -- already draws a brand-tinted selection for it.
+                selected = (panel.selected == objective),
+
+                -- BUILT ON HOVER, NOT ON EVERY REFRESH.
+                --
+                -- Composing an explanation now sorts three keyed tables, and
+                -- this ran for every row of every refresh whether the mouse
+                -- went near it or not.
+                tooltip = function()
+                    return table.concat(CN.ExplainRecommendation(objective),
+                        "\n")
+                end,
 
                 onClick = function()
+                    panel.selected = objective
+
                     CN.currentRecommendation = objective
 
-                    panel.title:SetText(tostring(objective.name or objective.id))
-                    panel.type:SetText(CN.TypeBadge(objective.type))
-                    panel.why:SetText("Why:\n"
-                        .. table.concat(CN.ExplainRecommendation(objective), "\n"))
+                    UI.Refresh()
                 end,
             })
         end
@@ -9781,15 +10183,15 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "Nothing left here that the addon knows about. Press Re-route, or try another zone."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.route = AddButton(panel, "Re-route", 110, function()
             UI.Refresh()
@@ -9872,129 +10274,312 @@ UI.RegisterTab{
 -- TAB: SCANS
 ------------------------------------------------------------
 
+-- REBUILT AS PROVENANCE, BECAUSE IT WAS THE WEAKEST TAB IN THE WINDOW.
+--
+-- It was one FontString holding twenty-odd lines of concatenated text, two
+-- buttons, and no list -- so it could not be filtered, could not be sorted,
+-- could not be clicked, and its own filter box sat above it doing nothing.
+-- Every other tab in the window is a list of rows you can act on; this one
+-- was a paragraph.
+--
+-- What it is FOR is the question no other tab answers: where does each number
+-- in this addon come from, and how old is it. So that is what it shows now --
+-- one row per source, with its count, its age, and the scan that refreshes
+-- it on click. The two buttons it had are two of those rows.
 UI.RegisterTab{
     name  = "Scans",
     order = 30,
 
     build = function(panel)
-        panel.status = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
-        panel.status:SetPoint("TOPLEFT", 8, -8)
-        panel.status:SetPoint("RIGHT", -8, 0)
-        panel.status:SetJustifyH("LEFT")
-        panel.status:SetJustifyV("TOP")
+        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetJustifyH("LEFT")
 
-        local quests = AddButton(panel, "Scan quests", 130, function()
-            local module = CN:GetModule("Quests")
+        panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "No sources are readable on this client."
+        panel.list:ClearAllPoints()
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
-            if module then
-                -- A deliberate rescan overrides the arrival latch, the same
-                -- way `/cn discoveractive` does.
-                if module.ForgetArrivals then
-                    module.ForgetArrivals()
-                end
+        -- ONE BUTTON, AND IT NAMES WHAT IT WILL DO.
+        --
+        -- "Scan quests" and "Scan reputations" were two of eleven sources
+        -- picked by nothing in particular. Every source is a clickable row
+        -- now, so the only button worth keeping is the one that does the
+        -- thing a player would otherwise do eleven times.
+        panel.stale = AddButton(panel, "Refresh what is stale", 190, function()
+            local refreshed = UI.RefreshStaleSources()
 
-                local seen, recorded = module.DiscoverActive()
-                local scanned        = module.ScanKnown()
-
-                Print("Quests: " .. seen .. " in your log, "
-                    .. "|cffffc74f" .. module.AvailableCount() .. "|r "
-                    .. "available to pick up nearby.")
-
-                CN.DebugPrint(recorded .. " newly recorded, "
-                    .. scanned .. " checked.")
+            if refreshed == 0 then
+                UI.Answer("Nothing is stale. Every source has been read today.")
+            else
+                UI.Answer("Read " .. refreshed .. " stale "
+                    .. (refreshed == 1 and "source" or "sources") .. ".")
             end
 
             UI.Refresh()
-        end,
-            "Reads your quest log and the quest givers on the map you are on.")
-        quests:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
+        end, "Re-reads every source that has not been read in a day, or has "
+            .. "never been read. Freezes the client while it runs.")
 
-        local reps = AddButton(panel, "Scan reputations", 150, function()
-            local module = CN:GetModule("Reputations")
+        panel.stale:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
 
-            if module then
-                local total = module.Scan()
-
-                Print("Reputation scan: " .. total .. " factions.")
-            end
-
-            UI.Refresh()
-        end,
-            "Reads every faction standing the client will report for this character.")
-        reps:SetPoint("LEFT", quests, "RIGHT", CN.SPACE.S, 0)
+        panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M + 26)
+        panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
+        panel.note:SetJustifyH("LEFT")
     end,
 
     refresh = function(panel)
-        local lines = {}
+        local entries = {}
 
-        -- What is true of the player's world first; what is true of the
-        -- addon's database second, and marked as such. The order matters:
-        -- a player reads the top line and stops.
-        local questModule = CN:GetModule("Quests")
+        local sources = UI.Sources()
 
-        table.insert(lines, "|cffffc74fQuests|r")
+        local stale = 0
 
-        -- The number he actually wanted back, first.
-        local progressModule = CN:GetModule("Progress")
+        -- LIVE FIRST, STORED SECOND.
+        --
+        -- The old tab put "what is true of your world" above "what the
+        -- database holds" and said in a comment that the order mattered
+        -- because a player reads the top line and stops. That was right, and
+        -- it survives the rebuild as two sections.
+        local sections = {
+            { key = "live",   label = "Read from the client, right now" },
+            { key = "stored", label = "Held by the addon, from a scan" },
+        }
 
-        if progressModule then
-            local summary = progressModule.Summary()
+        for _, section in ipairs(sections) do
+            local rows = {}
 
-            if summary.lifetime then
-                table.insert(lines, "Completed: |cffffc74f"
-                    .. CN.Comma(summary.lifetime) .. "|r")
+            for _, source in ipairs(sources) do
+                if source.kind == section.key then
+                    table.insert(rows, source)
+                end
             end
 
-            local todayLine = "Today: |cffffc74f" .. summary.today .. "|r"
+            if #rows > 0 then
+                table.insert(entries, {
+                    section       = section.key,
+                    sectionHeader = true,
+                    text          = CN.Accent(section.label),
+                })
 
-            if summary.best > 0 then
-                todayLine = todayLine .. "   |cff8a8f96best "
-                    .. summary.best .. "|r"
+                for _, source in ipairs(rows) do
+                    local age = source.at and CN.Ago(source.at) or nil
+
+                    local isStale = source.command
+                        and (not source.at
+                            or (time() - source.at) > 86400)
+
+                    if isStale then
+                        stale = stale + 1
+                    end
+
+                    -- `!` as well as the colour: nothing in this addon is
+                    -- carried by hue alone.
+                    local mark = isStale and CN.Warn("! ") or "  "
+
+                    table.insert(entries, {
+                        section = section.key,
+
+                        text = mark .. source.label
+                            .. (source.command
+                                and CN.Aside(age or "never read")
+                                or CN.Aside("live")),
+
+                        value = CN.Body(source.value or ""),
+
+                        tooltip = source.detail
+                            .. (source.command
+                                and ("\n\nClick to run /cn " .. source.command
+                                    .. ".")
+                                or ""),
+
+                        onClick = source.command and function()
+                            CN.HandleSlashCommand(source.command)
+
+                            UI.Refresh()
+                        end or nil,
+                    })
+                end
             end
-
-            table.insert(lines, todayLine)
         end
 
-        if questModule then
-            local available = questModule.AvailableCount()
+        panel.header:SetText("Where every number in this addon comes from"
+            .. (stale > 0
+                and CN.Aside(CN.Warn(stale .. " stale"))
+                or CN.Aside("all current")))
 
-            table.insert(lines, "Available to pick up nearby: "
-                .. (available > 0 and "|cffffc74f" or "|cff8a8f96")
-                .. available .. "|r")
-            table.insert(lines, "In your log: " .. #CN.Blizzard.GetQuestLogEntries())
-        end
+        panel.list:SetEntries(entries)
 
-        table.insert(lines, "|cff8a8f96Database: "
-            .. CN.CountKeys(CN.Account("discoveredQuests")) .. " known, "
-            .. CN.CountKeys(CN.Account("questMetadata")) .. " named|r")
-        table.insert(lines, " ")
-
-        local reputations = CN:GetModule("Reputations")
-
-        if reputations then
-            local counts = reputations.Summary()
-
-            table.insert(lines, "|cffffc74fReputations|r")
-            table.insert(lines, "Account-wide: " .. counts.account)
-            table.insert(lines, "Character-specific: " .. counts.character)
-            table.insert(lines, "Renown: " .. counts.renown
-                .. " (" .. counts.maxedRenown .. " maxed)")
-            table.insert(lines, "Exalted: " .. counts.exalted)
-
-            if counts.paragonPending > 0 then
-                table.insert(lines, "|cff73b873Paragon rewards waiting: "
-                    .. counts.paragonPending .. "|r")
-            end
-
-            table.insert(lines, " ")
-        end
-
-        table.insert(lines, "|cffffc74fWarband|r")
-        table.insert(lines, "Known characters: " .. CN.GetCharacterCount())
-
-        panel.status:SetText(table.concat(lines, "\n"))
+        panel.note:SetText(CN.Muted("A source read more than a day ago is "
+            .. "marked. Click any row to read it again."))
     end,
 }
+
+-- THE SOURCE TABLE, SEPARATE FROM THE TAB THAT DRAWS IT.
+--
+-- Two callers -- the tab above and the "refresh what is stale" button -- and
+-- the tests, which is the third and the reason this is not a local.
+function UI.Sources()
+    local sources = {}
+
+    local steps = {}
+
+    local setup = CN:GetModule("Setup")
+
+    if setup and setup.Steps then
+        steps = setup.Steps()
+    end
+
+    local function Stored(label, moduleName, command, value, detail)
+        table.insert(sources, {
+            kind    = "stored",
+            label   = label,
+            command = command,
+            value   = value,
+            detail  = detail,
+            at      = steps[string.lower(moduleName)],
+        })
+    end
+
+    local function Live(label, value, detail)
+        table.insert(sources, {
+            kind   = "live",
+            label  = label,
+            value  = value,
+            detail = detail,
+        })
+    end
+
+    ------------------------------------------------------------
+    -- LIVE
+    ------------------------------------------------------------
+    local quests = CN:GetModule("Quests")
+
+    if quests then
+        Live("Quests in your log",
+            tostring(#CN.Blizzard.GetQuestLogEntries()),
+            "Asked of the client every time it is needed. Never stored, "
+            .. "because the client always has it.")
+
+        local available = quests.AvailableCount()
+
+        Live("Quest givers on this map", tostring(available),
+            "Counted from the map you are standing on. Changes as you move.")
+    end
+
+    local progress = CN:GetModule("Progress")
+
+    if progress then
+        local summary = progress.Summary()
+
+        if summary.lifetime then
+            Live("Quests completed, lifetime", CN.Comma(summary.lifetime),
+                "The client's own total. The addon does not maintain it.")
+        end
+
+        Live("Quests completed today", tostring(summary.today),
+            "Counted by the addon since midnight"
+            .. (summary.best > 0
+                and (". Your best day was " .. summary.best .. ".")
+                or "."))
+    end
+
+    Live("Characters seen", tostring(CN.GetCharacterCount()),
+        "One row per character that has logged in with the addon loaded.")
+
+    ------------------------------------------------------------
+    -- STORED
+    ------------------------------------------------------------
+    -- `scanquests`, NOT `discoveractive`.
+    --
+    -- The age on this row is `steps.quests`, and the ONLY writer of that key
+    -- in the tree is `Quests.ScanKnown`, which `/cn scanquests` runs.
+    -- `/cn discoveractive` reads the log and stamps nothing -- so clicking
+    -- this row did real work, printed a real answer, and left the row marked
+    -- stale for ever. Worse, "refresh what is stale" then ran it on every
+    -- press and could never reach "nothing is stale".
+    Stored("Quests known", "quests", "scanquests",
+        CN.Comma(CN.CountKeys(CN.Account("discoveredQuests"))) .. " known, "
+        .. CN.Comma(CN.CountKeys(CN.Account("questMetadata"))) .. " named",
+        "Quests this account has seen offered. Grows as you play; a scan "
+        .. "adds the ones on the map you are on now.")
+
+    local reputations = CN:GetModule("Reputations")
+
+    if reputations then
+        local counts = reputations.Summary()
+
+        Stored("Reputations", "reputations", "repscan",
+            counts.account .. " account, " .. counts.character .. " character",
+            counts.renown .. " renown tracks (" .. counts.maxedRenown
+            .. " maxed), " .. counts.exalted .. " exalted"
+            .. (counts.paragonPending > 0
+                and (", " .. counts.paragonPending
+                    .. " Paragon reward(s) waiting")
+                or ""))
+    end
+
+    local collections = {
+        { label = "Mounts",       module = "Mounts",       command = "mountscan" },
+        { label = "Pets",         module = "Pets",         command = "petscan" },
+        { label = "Toys",         module = "Toys",         command = "toyscan" },
+        { label = "Titles",       module = "Titles",       command = "titlescan" },
+        { label = "Appearances",  module = "Appearances",  command = "appearancescan" },
+        { label = "Achievements", module = "Achievements", command = "achievescan" },
+        { label = "Currencies",   module = "Currencies",   command = "currencyscan" },
+        { label = "Professions",  module = "Professions",  command = "profscan" },
+    }
+
+    for _, entry in ipairs(collections) do
+        local module = CN:GetModule(entry.module)
+
+        if module and module.Summary then
+            local ok, counts = pcall(module.Summary)
+
+            local value = ""
+
+            if ok and type(counts) == "table" then
+                local held  = counts.collected or counts.completed
+                    or counts.onAccount
+                local total = counts.known or counts.total
+
+                if held and total then
+                    value = held .. " / " .. total
+                elseif held then
+                    value = tostring(held)
+                end
+            end
+
+            Stored(entry.label, entry.module, entry.command, value,
+                "Counted against what the addon last read from the client, "
+                .. "which is the only denominator it can honestly use.")
+        end
+    end
+
+    return sources
+end
+
+-- Runs every stale source's scan. "Stale" is a day, which is roughly the
+-- rate at which any of these can change for a player who is playing.
+function UI.RefreshStaleSources()
+    local refreshed = 0
+
+    local now = time()
+
+    for _, source in ipairs(UI.Sources()) do
+        if source.command
+            and (not source.at or (now - source.at) > 86400) then
+
+            if pcall(CN.HandleSlashCommand, source.command) then
+                refreshed = refreshed + 1
+            end
+        end
+    end
+
+    return refreshed
+end
 
 ------------------------------------------------------------
 -- TAB: NOW
@@ -10008,15 +10593,15 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "Nothing is on a timer right now."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.refresh = AddButton(panel, "Refresh", 110, function()
             UI.Refresh()
@@ -10042,9 +10627,11 @@ UI.RegisterTab{
 
         local opportunities = CN:GetModule("Opportunities")
 
-        if opportunities then
-            local resets = opportunities.GetResets()
+        -- Hoisted: the weekly-currency rows below sort against the weekly
+        -- reset, and they are built outside this block.
+        local resets = opportunities and opportunities.GetResets() or {}
 
+        if opportunities then
             local parts = {}
 
             if resets.daily then
@@ -10063,7 +10650,12 @@ UI.RegisterTab{
 
             for _, event in ipairs(opportunities.GetActiveEvents()) do
                 table.insert(entries, {
-                    text = "|cffffc74fEVENT|r  " .. tostring(event.title),
+                    text  = CN.Accent("EVENT") .. "  " .. tostring(event.title),
+                    value = event.endsIn
+                        and CN.Muted(opportunities.FormatTimeLeft(event.endsIn))
+                        or nil,
+
+                    sortSeconds = event.endsIn or math.huge,
                 })
             end
 
@@ -10071,10 +10663,15 @@ UI.RegisterTab{
 
             for _, worldQuest in ipairs(worldQuests) do
                 table.insert(entries, {
-                    text = string.format("|cff5dd2fbWQ|r     %s  |cff8a8f96%s%s|r",
-                        tostring(worldQuest.name),
-                        opportunities.FormatTimeLeft(worldQuest.secondsLeft),
-                        worldQuest.tagName and (", " .. worldQuest.tagName) or ""),
+                    text = CN.Brand("WQ") .. "  " .. tostring(worldQuest.name)
+                        .. (worldQuest.tagName
+                            and CN.Muted(" " .. CN.DOT .. " " .. worldQuest.tagName)
+                            or ""),
+
+                    value = CN.Muted(
+                        opportunities.FormatTimeLeft(worldQuest.secondsLeft)),
+
+                    sortSeconds = worldQuest.secondsLeft or math.huge,
 
                     tooltip = "Click to set a waypoint.",
 
@@ -10099,9 +10696,13 @@ UI.RegisterTab{
         if rares then
             for _, vignette in ipairs(rares.GetActive()) do
                 table.insert(entries, {
-                    text = string.format("|cffffc74f%s|r  %s",
-                        vignette.kind == "TREASURE" and "CHEST " or "RARE  ",
-                        tostring(vignette.name)),
+                    text = CN.Accent(vignette.kind == "TREASURE"
+                        and "CHEST" or "RARE") .. "  " .. tostring(vignette.name),
+
+                    value = CN.Good("up now"),
+
+                    -- Up right now, so it sorts above anything on a clock.
+                    sortSeconds = 0,
 
                     tooltip = "Up right now. Click to set a waypoint.",
 
@@ -10126,16 +10727,22 @@ UI.RegisterTab{
         if currencies then
             for _, currency in ipairs(currencies.Capped()) do
                 table.insert(entries, {
-                    text = "|cffe2564cCAP|r    " .. tostring(currency.name)
-                        .. " |cff8a8f96" .. currency.quantity
-                        .. " / " .. currency.maximum .. " -- spend it|r",
+                    text  = CN.Bad("CAP") .. "  " .. tostring(currency.name),
+                    value = CN.Muted(currency.quantity .. " / "
+                        .. currency.maximum .. " " .. CN.DASH .. " spend it"),
+
+                    -- At the cap already: every further point is being thrown
+                    -- away, so this is as urgent as the list gets.
+                    sortSeconds = 0,
                 })
             end
 
             for _, currency in ipairs(currencies.WeeklyUnfilled()) do
                 table.insert(entries, {
-                    text = "|cff8a8f96WEEK|r   " .. tostring(currency.name)
-                        .. " |cff8a8f96" .. currency.remaining .. " left this week|r",
+                    text  = CN.Muted("WEEK") .. "  " .. tostring(currency.name),
+                    value = CN.Muted(currency.remaining .. " left this week"),
+
+                    sortSeconds = resets and resets.weekly or math.huge,
                 })
             end
         end
@@ -10143,9 +10750,32 @@ UI.RegisterTab{
         if #entries == 0 then
             table.insert(entries, { text = "Nothing is expiring nearby." })
             table.insert(entries, {
-                text = "|cff8a8f96World quests and rares only appear for your current map.|r",
+                text = CN.Muted("World quests and rares only appear for your "
+                    .. "current map."),
             })
         end
+
+        -- SOONEST FIRST, WHICH IS THE ONLY ORDER THIS TAB CAN MEAN.
+        --
+        -- Entries were appended in module order -- events, then world quests,
+        -- then rares, then capped currencies -- so a world quest with eleven
+        -- minutes left sat above a rare that is up right now and below an
+        -- event that runs for a fortnight. A list called "expiring soon" in
+        -- an order unrelated to expiry is a list you have to read all of.
+        --
+        -- The tags were also hand-padded with trailing spaces to line up, in
+        -- a game that ships no monospace font. The time now lives in the
+        -- value column, which is anchored and does line up.
+        table.sort(entries, function(a, b)
+            local left  = a.sortSeconds or math.huge
+            local right = b.sortSeconds or math.huge
+
+            if left == right then
+                return tostring(a.text) < tostring(b.text)
+            end
+
+            return left < right
+        end)
 
         panel.list:SetEntries(entries)
     end,
@@ -10161,19 +10791,19 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "No other characters recorded yet. Log in on one and this fills itself."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
-        panel.note:SetPoint("BOTTOMLEFT", 12, 12)
-        panel.note:SetPoint("RIGHT", -12, 0)
+        panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
+        panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.note:SetJustifyH("LEFT")
     end,
 
@@ -10203,21 +10833,29 @@ UI.RegisterTab{
                 -- other row's text by two glyphs.
                 selected = row.isCurrent and true or false,
 
+                -- SAID ONCE, NOT TWICE.
+                --
+                -- Every character carried a tooltip with these four numbers
+                -- AND an indented second row repeating them in prose, which
+                -- doubled the length of the tab and left the value column --
+                -- which exists for exactly this -- empty.
+                --
+                -- And `(you)` in words, because the selection is a 16% tint
+                -- and this addon's own rule is that nothing is carried by
+                -- colour alone.
                 text = row.key
+                    .. (row.isCurrent and CN.Brand("  (you)") or "")
                     .. CN.Aside(tostring(row.level) .. " "
                         .. tostring(row.class or "?")
                         .. (row.faction and (" " .. row.faction) or "")),
 
+                value = CN.Muted(row.professions .. " prof " .. CN.DOT .. " "
+                    .. row.recipes .. " rec " .. CN.DOT .. " "
+                    .. row.titles .. " tit"),
+
                 tooltip = string.format(
                     "professions %d\nrecipes %d\ntitles %d\nreputations %d",
                     row.professions, row.recipes, row.titles, row.reputations),
-            })
-
-            table.insert(entries, {
-                text = "      |cff8a8f96professions " .. row.professions
-                    .. ", recipes " .. row.recipes
-                    .. ", titles " .. row.titles
-                    .. ", reputations " .. row.reputations .. "|r",
             })
         end
 
@@ -10243,19 +10881,19 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "The Great Vault has nothing to report on this character yet."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
-        panel.note:SetPoint("BOTTOMLEFT", 12, 12)
-        panel.note:SetPoint("RIGHT", -12, 0)
+        panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
+        panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.note:SetJustifyH("LEFT")
     end,
 
@@ -10295,7 +10933,12 @@ UI.RegisterTab{
         end
 
         for _, row in ipairs(rows) do
+            -- The slot and its three thresholds are one block. See UI/List.lua.
+            local group = "vault:" .. tostring(row.row)
+
             table.insert(entries, {
+                group = group,
+
                 text = "  " .. vault.DescribeRow(row),
 
                 tooltip = row.label .. "\n"
@@ -10307,6 +10950,7 @@ UI.RegisterTab{
 
             for _, tier in ipairs(row.tiers) do
                 table.insert(entries, {
+                    group = group,
                     text = "        |cff8a8f96" .. tier.threshold .. ": "
                         .. (tier.unlocked
                             and ("|cff73b873unlocked" .. (tier.level and tier.level > 0
@@ -10321,7 +10965,7 @@ UI.RegisterTab{
 
         if summary.closest then
             panel.note:SetText("|cffffc74fClosest: " .. summary.closest.label
-                .. " -- " .. summary.closest.remaining .. " more, "
+                .. "" .. CN.DASH .. "" .. summary.closest.remaining .. " more, "
                 .. (vault.rowActions[summary.closest.row] or "keep going") .. ".|r")
         else
             panel.note:SetText("|cff8a8f96Every row is capped. You choose one item "
@@ -10340,19 +10984,19 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "Nothing pinned. /cn goal <type> <name or id> pins something so it stays at the top."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
 
         -- Deeper than the other tabs' 38, because this one has a note row
         -- under its buttons. The buttons themselves sit on the same baseline
         -- as every other tab's.
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 64)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 64)
 
         -- "Next step", not "Navigate". They are different destinations and
         -- the difference is the point: the mount is behind a dungeon you
@@ -10477,8 +11121,13 @@ UI.RegisterTab{
                     math.floor(fraction * 100 + 0.5)))
             end
 
+            -- The goal and every row of its chain carry one group key, so
+            -- sorting and filtering move them as a unit. See UI/List.lua.
+            local group = tostring(goal.type) .. ":" .. tostring(goal.id)
+
             table.insert(entries, {
                 selected = isSelected,
+                group    = group,
 
                 text = (chain.done and CN.Muted(tostring(goal.name))
                         or CN.Accent(tostring(goal.name)))
@@ -10504,6 +11153,7 @@ UI.RegisterTab{
                     -- The bar is a texture on the row now, not a run of
                     -- equals signs whose pixel width changed as it filled.
                     table.insert(entries, {
+                        group    = group,
                         text     = "    " .. CN.Muted(CN.Comma(chain.progress.done)
                             .. " / " .. CN.Comma(chain.progress.total)
                             .. " " .. tostring(chain.progress.unit)),
@@ -10516,7 +11166,8 @@ UI.RegisterTab{
                 for _, step in ipairs(chain.steps) do
                     if shown >= 15 then
                         table.insert(entries, {
-                            text = "      |cff8a8f96... and "
+                            group = group,
+                            text  = "      |cff8a8f96... and "
                                 .. (#chain.steps - shown) .. " more|r",
                         })
                         break
@@ -10526,14 +11177,26 @@ UI.RegisterTab{
 
                     local marker = "  "
 
+                    -- EVERY STATE GETS A GLYPH, NOT JUST TWO OF THEM.
+                    --
+                    -- Done was "x", next was ">", and BLOCKED -- the one
+                    -- state that tells a player to stop reading down the
+                    -- chain -- was carried by red text alone. Red against
+                    -- this file's TODO grey is a hue difference of exactly
+                    -- the kind eight percent of men cannot make, and the
+                    -- addon ships a colourblind mode for the arrow that says
+                    -- so in its own help text.
                     if step.state == "DONE" then
                         marker = "x "
                     elseif step.state == "NEXT" then
                         marker = "> "
+                    elseif step.state == "BLOCKED" then
+                        marker = "! "
                     end
 
                     table.insert(entries, {
-                        text = "      " .. colour .. marker .. step.text .. "|r",
+                        group = group,
+                        text  = "      " .. colour .. marker .. step.text .. "|r",
                     })
 
                     shown = shown + 1
@@ -10541,7 +11204,8 @@ UI.RegisterTab{
 
                 if chain.character then
                     table.insert(entries, {
-                        text = "      |cff8a8f96Best character: "
+                        group = group,
+                        text  = "      |cff8a8f96Best character: "
                             .. tostring(chain.character) .. "|r",
                     })
                 end
@@ -10575,19 +11239,19 @@ UI.RegisterTab{
         -- `CN.FONT.HEAD`, like the other seven. This one was a size larger
         -- than every other tab's header for no reason anybody recorded.
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
-        panel.sub = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        panel.sub = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
         panel.sub:SetPoint("TOPLEFT", panel.header, "BOTTOMLEFT", 0, -4)
         panel.sub:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "No route yet. Press Rescan zones, or open the Zone tab."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -52)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -52)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.follow = AddButton(panel, "Follow the route", 150, function()
             local follow = CN:GetModule("Follow")
@@ -10698,10 +11362,20 @@ UI.RegisterTab{
 
             if #closest > 0 then
                 table.insert(entries, { text = " " })
-                table.insert(entries, { text = "|cffffc74fClosest to finished|r" })
+
+                -- A section rather than a group: these twelve are peers, so
+                -- they may be alphabetised -- among themselves, under their
+                -- own heading. See UI/List.lua.
+                table.insert(entries, {
+                    section       = "closest",
+                    sectionHeader = true,
+                    text          = "|cffffc74fClosest to finished|r",
+                })
 
                 for _, entry in ipairs(closest) do
                     table.insert(entries, {
+                        section = "closest",
+
                         text = "  |cffffc74f" .. tostring(entry.name) .. "|r"
                             .. " |cff5dd2fb"
                             .. CN.ProgressBar(entry.fraction, 14) .. "|r "
@@ -10734,17 +11408,29 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "Nothing outstanding that the addon can count."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         panel.refresh = AddButton(panel, "Refresh", 110, function()
+            -- FORCED. The report is cached behind the events that announce a
+            -- collection, and most of what it counts is not a collection --
+            -- harvested quests, captured recipes, scanned vendors. So the
+            -- button whose tooltip says "counts what is left again" could
+            -- not, and a row telling you to run `/cn harvest` went on showing
+            -- the old number after you ran it.
+            local breakdown = CN:GetModule("Breakdown")
+
+            if breakdown then
+                breakdown.NoteChanged()
+            end
+
             UI.Refresh()
         end,
             "Counts what is left again and redraws this list.")
@@ -10783,7 +11469,13 @@ UI.RegisterTab{
                 value = CN.Body((row.collected or 0) .. " collected")
             end
 
+            -- The row and everything indented under it -- why there is no
+            -- percentage, the reasons, the action -- are one block. See
+            -- UI/List.lua.
+            local group = "remaining:" .. tostring(row.name)
+
             table.insert(entries, {
+                group    = group,
                 text     = headline,
                 value    = value,
                 fraction = fraction,
@@ -10794,18 +11486,50 @@ UI.RegisterTab{
 
             if row.unknownTotal then
                 table.insert(entries, {
-                    text = "      " .. CN.Muted("no percentage: "
+                    group = group,
+                    text  = "      " .. CN.Muted("no percentage: "
                         .. row.unknownTotal),
                 })
             end
 
             for _, reason in ipairs(CN.Reasons(row)) do
-                table.insert(entries, { text = "      " .. reason })
+                table.insert(entries, { group = group, text = "      " .. reason })
             end
 
             if row.action then
+                -- THE ADDON KNOWS THE NEXT ACTION AND MADE YOU RETYPE IT.
+                --
+                -- `row.action` is literally "/cn mountscan". It was rendered
+                -- as an inert line and the player had to read it, remember
+                -- it, and type it into chat -- while it sat there, on screen,
+                -- in a list widget that already supports clicking.
+                --
+                -- Guarded on the prefix: one action is prose ("open each
+                -- profession window once"), which correctly stays inert.
+                local command = row.action:match("^/cn (.+)$")
+
                 table.insert(entries, {
-                    text = "      |cffffc74f-> " .. row.action .. "|r",
+                    group = group,
+
+                    text = "      " .. CN.Accent((command and "" or "")
+                        .. CN.DASH .. " " .. row.action),
+
+                    onClick = command and function()
+                        CN.HandleSlashCommand(command)
+
+                        -- The counts this row reports are exactly what the
+                        -- scan changes, so recount rather than redraw the
+                        -- same numbers.
+                        local breakdown = CN:GetModule("Breakdown")
+
+                        if breakdown then
+                            breakdown.NoteChanged()
+                        end
+
+                        UI.Refresh()
+                    end or nil,
+
+                    tooltip = command and ("Runs " .. row.action .. ".") or nil,
                 })
             end
         end
@@ -10838,15 +11562,15 @@ UI.RegisterTab{
 
     build = function(panel)
         panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
-        panel.header:SetPoint("TOPLEFT", 8, -8)
-        panel.header:SetPoint("TOPRIGHT", -8, -8)
+        panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
+        panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
         panel.list.emptyText = "Nothing scanned yet. Press Scan my collections."
         panel.list:ClearAllPoints()
-        panel.list:SetPoint("TOPLEFT", 4, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
+        panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
         -- A WORKING STATE, BECAUSE THIS FREEZES THE CLIENT.
         --
@@ -10863,10 +11587,30 @@ UI.RegisterTab{
             button:SetText("Working" .. CN.DOT .. CN.DOT .. CN.DOT)
 
             local function finish()
-                work()
+                -- PROTECTED, OR THE BUTTON WEDGES.
+                --
+                -- `work()` ran raw, and it is re-enabled AFTER it returns --
+                -- so a scan that threw left the button disabled and reading
+                -- "Working..." until the player reloaded, with no way to
+                -- retry and nothing on screen saying why. The achievement
+                -- scan walks `GetCategoryList`/`GetAchievementInfo`, whose
+                -- shape has changed across expansions, which is exactly the
+                -- kind of call this cannot afford to trust.
+                local ok, err = pcall(work)
 
                 button:SetText(label)
                 button:SetEnabled(true)
+
+                if not ok then
+                    UI.Answer(CN.Bad("That scan failed. ")
+                        .. CN.Muted("/cn errors has the detail."))
+
+                    local errors = CN:GetModule("Errors")
+
+                    if errors then
+                        errors.Record("the " .. label .. " button", err)
+                    end
+                end
 
                 UI.Refresh()
             end
@@ -10898,7 +11642,7 @@ UI.RegisterTab{
                     end
                 end
 
-                Print("Read " .. scanned .. " collections.")
+                UI.Answer("Read " .. scanned .. " collections.")
             end)
         end, "Read your pets, mounts, toys, appearances, titles and "
             .. "professions from the game. Takes a few seconds and freezes "
@@ -10920,7 +11664,7 @@ UI.RegisterTab{
                     CN.NoteSetupStep("Achievements")
                 end
 
-                Print("Read " .. CN.Comma(scanned) .. " achievements, "
+                UI.Answer("Read " .. CN.Comma(scanned) .. " achievements, "
                     .. CN.Comma(completed) .. " of them done.")
             end,
                 "Reads your achievement criteria again.")
@@ -10933,19 +11677,47 @@ UI.RegisterTab{
     refresh = function(panel)
         local entries = {}
 
-        local function row(label, collected, total, note)
+        local setup = CN:GetModule("Setup")
+
+        -- WHEN THE DENOMINATOR WAS READ.
+        --
+        -- Every percentage on this tab is against the addon's own scan
+        -- snapshot, which is the honest denominator and also one that goes
+        -- stale the day the game adds collectibles. The header said so in
+        -- general; no row said it about itself, so "89.4%" from a scan four
+        -- months ago looked exactly like one from this morning.
+        --
+        -- `Setup.Steps()` has had the per-scan timestamps since 0.52.0 and
+        -- nothing displayed them.
+        local steps = (setup and setup.Steps and setup.Steps()) or {}
+
+        local function Age(key)
+            return CN.Ago(steps[string.lower(tostring(key))])
+        end
+
+        local function row(label, collected, total, note, key)
+            local age = Age(key or label)
+
+            -- "never read" rather than nothing: a row with no age is not a
+            -- row that was read at an unknown time.
+            local stamp = CN.Muted("  " .. (age or "never read"))
+
             if total and total > 0 then
                 local fraction = collected / total
 
                 table.insert(entries, {
-                    text     = label,
+                    text     = label .. stamp,
                     value    = CN.Body(collected .. " / " .. total) .. "  "
                         .. CN.Muted(string.format("%.1f%%", fraction * 100)),
                     fraction = fraction,
+                    tooltip  = age
+                        and ("Counted against what the addon read " .. age
+                            .. ". Rescan to bring it up to date.")
+                        or "This has never been scanned on this account.",
                 })
             else
                 table.insert(entries, {
-                    text  = label,
+                    text  = label .. stamp,
                     value = CN.Muted(note or "not scanned"),
                 })
             end
@@ -10999,7 +11771,8 @@ UI.RegisterTab{
             local counts = reputations.Summary()
 
             table.insert(entries, {
-                text  = "Reputations",
+                text  = "Reputations"
+                    .. CN.Muted("  " .. (Age("reputations") or "never read")),
                 value = CN.Body(counts.account) .. CN.Muted(" account-wide")
                     .. CN.Muted(", ") .. CN.Body(counts.character)
                     .. CN.Muted(" this character"),
@@ -11012,7 +11785,8 @@ UI.RegisterTab{
 
         if quests then
             table.insert(entries, {
-                text  = "Quests",
+                text  = "Quests"
+                    .. CN.Muted("  " .. (Age("quests") or "never read")),
                 value = CN.Body(CN.CountKeys(CN.Account("discoveredQuests")))
                     .. CN.Muted(" discovered"),
             })
@@ -11028,7 +11802,9 @@ UI.RegisterTab{
                     or CN.Accent("open its window once")
 
                 table.insert(entries, {
-                    text  = record.name or "?",
+                    text  = (record.name or "?")
+                        .. CN.Muted("  "
+                            .. (Age("professions") or "never read")),
                     value = CN.Body(tostring(record.rank) .. " / "
                         .. tostring(record.maxRank)) .. "  " .. note,
                 })
@@ -11049,7 +11825,7 @@ UI.RegisterTab{
         end
 
         panel.header:SetText("Account completion  |cff8a8f96(collected / "
-            .. "known at the last scan -- not of everything in the game)|r")
+            .. "known at the last scan" .. CN.DASH .. "not of everything in the game)|r")
         panel.list:SetEntries(entries)
     end,
 }
@@ -11154,13 +11930,22 @@ UI.RegisterTab{
         end, "Puts back the filters and the weighting you had before the "
             .. "focus was set.")
 
-        panel.focusClear:SetPoint("LEFT", panel.focusButton, "RIGHT", CN.SPACE.S, 0)
+        -- ON ITS OWN ROW, NOT BESIDE THE FOCUS BUTTON.
+        --
+        -- The left column is 268 wide. "Everything" is 170 starting at 12, so
+        -- it ends at 182; "Clear focus" is 120 starting at 190 and ends at
+        -- 310 -- forty-two pixels into the right column, on top of the
+        -- "Minimap button" checkbox, which is the first control over there
+        -- and sits in the same vertical band. Two controls drawn on top of
+        -- each other, on the tab whose own header says it was rebuilt so the
+        -- window would read as a settings page.
+        Under(panel.focusClear, panel.focusButton, CN.SPACE.XS)
 
         panel.focusNote = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
         panel.focusNote:SetTextColor(CN.Rgb("MUTED"))
         panel.focusNote:SetWidth(COLUMN - CN.SPACE.M)
         panel.focusNote:SetJustifyH("LEFT")
-        Under(panel.focusNote, panel.focusButton, CN.SPACE.XS)
+        Under(panel.focusNote, panel.focusClear, CN.SPACE.XS)
 
         panel.weightHead = Heading("Ranking weight", panel.focusNote)
 
@@ -11266,7 +12051,7 @@ UI.RegisterTab{
         panel.tooltips = AddCheckbox(panel, "Lines on item and unit tooltips",
             function() return CN.Settings().tooltips ~= false end,
             function(value) CN.Settings().tooltips = value end,
-            "Only where there is something to say -- most items have nothing.")
+            "Only where there is something to say" .. CN.DASH .. "most items have nothing.")
 
         Under(panel.tooltips, panel.pins, CN.SPACE.XS)
 
@@ -11296,6 +12081,38 @@ UI.RegisterTab{
 
         Under(panel.cues, panel.hud, CN.SPACE.XS)
 
+        -- THE TWO MOST INTRUSIVE THINGS THE ADDON CAN DO WERE TYPING-ONLY.
+        --
+        -- The header on this tab says it was rebuilt because "twenty-one
+        -- settings existed and seven were reachable in the window". Moving
+        -- the player's waypoint on its own, and making a noise, are exactly
+        -- the two a player wants to find and switch off in a settings panel
+        -- rather than discover by surprise -- and both were reachable only by
+        -- typing a command they would have to already know about.
+        panel.autoWaypoint = AddCheckbox(panel,
+            "Move the waypoint on as I finish things",
+            function() return CN.IsAutoWaypointEnabled() end,
+            function(value)
+                CN.Settings().autoWaypoint = value and true or false
+
+                if value and CN.StartAutoWaypointTicker then
+                    CN.StartAutoWaypointTicker()
+                end
+            end,
+            "Off by default. Taking over the waypoint uninvited is the most "
+            .. "intrusive thing this addon can do, and TomTom's arrow is "
+            .. "shared with every other addon you run.")
+
+        Under(panel.autoWaypoint, panel.cues, CN.SPACE.XS)
+
+        panel.rares = AddCheckbox(panel, "Announce rares out loud",
+            function() return CN.Settings().rareAlerts == true end,
+            function(value) CN.Settings().rareAlerts = value and true or false end,
+            "Off by default. Unsolicited sound is worse than an uninvited "
+            .. "waypoint, and the waypoint is already off.")
+
+        Under(panel.rares, panel.autoWaypoint, CN.SPACE.XS)
+
         ------------------------------------------------------------
         -- ACCESSIBILITY -- BOTH OF THESE WERE SLASH-ONLY.
         ------------------------------------------------------------
@@ -11324,7 +12141,7 @@ UI.RegisterTab{
             hud.SetScale(steps[(index % #steps) + 1])
 
             UI.Refresh()
-        end, "How large everything this addon draws is -- the window, the "
+        end, "How large everything this addon draws is" .. CN.DASH .. "the window, the "
             .. "arrow, the heads-up line. Click to cycle.")
 
         Under(panel.scale, panel.accessHead, CN.SPACE.XS)
@@ -11445,7 +12262,8 @@ UI.RegisterTab{
 
         for _, control in ipairs({ panel.learn, panel.minimap, panel.arrow,
                                    panel.pins, panel.tooltips, panel.hud,
-                                   panel.cues, panel.colourblind,
+                                   panel.cues, panel.autoWaypoint, panel.rares,
+                                   panel.colourblind,
                                    panel.keepFilter, panel.debug }) do
             control.Refresh()
         end
@@ -11583,7 +12401,7 @@ local function BuildMinimapButton()
                     break
                 end
 
-                GameTooltip:AddLine(reason, 0.6, 0.6, 0.6)
+                GameTooltip:AddLine(reason, CN.Rgb("MUTED"))
             end
         elseif not ok then
             -- An engine that threw is not an empty list, and telling the
@@ -11592,7 +12410,8 @@ local function BuildMinimapButton()
             GameTooltip:AddLine("Something went wrong; /cn errors has it.",
                 0.96, 0.42, 0.38)
         else
-            GameTooltip:AddLine("Nothing actionable is known yet.", 0.6, 0.6, 0.6)
+            GameTooltip:AddLine("Nothing actionable is known yet.",
+                CN.Rgb("MUTED"))
 
             -- The shared explanation rather than an unconditional "run
             -- setup", which was shown to players who had run it and then
@@ -11602,7 +12421,7 @@ local function BuildMinimapButton()
                     break
                 end
 
-                GameTooltip:AddLine(line, 0.6, 0.6, 0.6)
+                GameTooltip:AddLine(line, CN.Rgb("MUTED"))
             end
         end
 
@@ -11755,16 +12574,26 @@ CN:RegisterCommand{
     order   = 7,
     help    = "Diagnose the window and minimap button.",
     handler = function()
+        -- `UI.Frame()`, not the global. The global is published by the client
+        -- when the frame is NAMED, and this addon creates it through
+        -- `SafeCreateFrame`, which falls back to an unnamed frame if the
+        -- template is missing -- exactly the case a diagnostic exists for.
+        -- So the one command whose job is "tell me whether the window got
+        -- built" reported "not created" for a window that was created and
+        -- working.
+        local frame = UI.Frame()
+
         Print("UI diagnostics:")
-        Print("Window object: " .. (CompletionNavigatorFrame and "created" or "|cffe2564cnot created|r"))
+        Print("Window object: " .. (frame and "created" or "|cffe2564cnot created|r"))
 
-        if CompletionNavigatorFrame then
-            Print("  shown: " .. tostring(CompletionNavigatorFrame:IsShown()))
-            Print("  size: " .. math.floor(CompletionNavigatorFrame:GetWidth() or 0)
-                .. " x " .. math.floor(CompletionNavigatorFrame:GetHeight() or 0))
-            Print("  strata: " .. tostring(CompletionNavigatorFrame:GetFrameStrata()))
+        if frame then
+            Print("  named: " .. tostring(CompletionNavigatorFrame ~= nil))
+            Print("  shown: " .. tostring(frame:IsShown()))
+            Print("  size: " .. math.floor(frame:GetWidth() or 0)
+                .. " x " .. math.floor(frame:GetHeight() or 0))
+            Print("  strata: " .. tostring(frame:GetFrameStrata()))
 
-            local point, _, _, x, y = CompletionNavigatorFrame:GetPoint()
+            local point, _, _, x, y = frame:GetPoint()
 
             Print("  anchored: " .. tostring(point)
                 .. " at " .. math.floor(x or 0) .. ", " .. math.floor(y or 0))
@@ -11782,14 +12611,14 @@ CN:RegisterCommand{
         Print("Registered tabs: " .. #UI.tabs)
         Print("Minimap frame exists: " .. tostring(Minimap ~= nil))
 
-        if CompletionNavigatorFrame and not CompletionNavigatorFrame:IsShown() then
+        if frame and not frame:IsShown() then
             Print("Forcing the window open and centering it.")
 
             CN.Settings().window = nil
 
-            CompletionNavigatorFrame:ClearAllPoints()
-            CompletionNavigatorFrame:SetPoint("CENTER")
-            CompletionNavigatorFrame:Show()
+            frame:ClearAllPoints()
+            frame:SetPoint("CENTER")
+            frame:Show()
         end
     end,
 }
@@ -11836,9 +12665,25 @@ local ROW_HEIGHT   = UI.ROW_HEIGHT or 20
 
 local SafeCreateFrame = UI.SafeCreateFrame
 
+-- WHICH PANELS HAVE A LIST, RECORDED RATHER THAN GUESSED.
+--
+-- The window's filter box applies to one list, and the check for "does this
+-- tab have one" was `panel.list and panel.list.SetFilter`. That reads a field
+-- off a frame, and a frame is exactly the kind of object that answers yes to
+-- any field it is asked about -- in the offline harness it did, so a check
+-- that was correct in game could not be tested at all.
+--
+-- A registry keyed on the panel is the same answer, asked of something that
+-- can only say yes when it is true.
+UI.listPanels = UI.listPanels or {}
+
 -- Creates a reusable row list. Rows are pooled; SetRows swaps the data.
 local function CreateList(parent)
     local list = CreateFrame("Frame", nil, parent)
+
+    if parent then
+        UI.listPanels[parent] = list
+    end
 
     list:SetPoint("TOPLEFT", 8, -8)
     list:SetPoint("BOTTOMRIGHT", -8, 8)
@@ -11949,7 +12794,26 @@ local function CreateList(parent)
             end
 
             GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
-            GameTooltip:SetText(entry.tooltip, nil, nil, nil, nil, true)
+            -- A FUNCTION IS ALLOWED, AND IS THE CHEAPER SHAPE.
+            --
+            -- A tooltip that is expensive to build -- composing and sorting
+            -- an objective's four reason tables, say -- was being built for
+            -- every row of every refresh whether the mouse went near it or
+            -- not. Passing the work instead of the answer means it happens
+            -- once, when somebody actually hovers.
+            local text = entry.tooltip
+
+            if type(text) == "function" then
+                local ok, built = pcall(text)
+
+                text = ok and built or nil
+            end
+
+            if not text then
+                return
+            end
+
+            GameTooltip:SetText(text, nil, nil, nil, nil, true)
             GameTooltip:Show()
         end)
 
@@ -12125,6 +12989,128 @@ local function CreateList(parent)
 
     list.sortButton = sortButton
 
+    -- ROWS THAT BELONG TO EACH OTHER MOVE TOGETHER.
+    --
+    -- Five tabs draw a heading and then the rows under it -- a goal and its
+    -- chain, a character and their Warband totals, a vault slot and its three
+    -- options. Sorting treated all of them as peers, so "A to Z" interleaved
+    -- every chain step of every goal into one alphabetical column with the
+    -- headings scattered through it, and filtering for a step's text showed
+    -- the step with no indication of which goal it belonged to.
+    --
+    -- A tab marks the parent and its children with the same `group` value.
+    -- Consecutive rows sharing one become a block: the block sorts on its
+    -- first row's text and its children keep the order the tab produced,
+    -- because that order is the sequence you do them in and alphabetising a
+    -- sequence destroys the only information it carries.
+    local function Blocks(entries)
+        local blocks = {}
+
+        local index, count = 1, #entries
+
+        while index <= count do
+            local entry = entries[index]
+
+            local group = entry.group
+
+            if group == nil then
+                table.insert(blocks, { entry })
+
+                index = index + 1
+            else
+                local block = { entry }
+
+                index = index + 1
+
+                while index <= count and entries[index].group == group do
+                    table.insert(block, entries[index])
+
+                    index = index + 1
+                end
+
+                table.insert(blocks, block)
+            end
+        end
+
+        return blocks
+    end
+
+    -- THE SORT KEY IS THE WORDS, NOT THE MARKUP AROUND THEM.
+    --
+    -- `entry.text` is the RENDERED string: `|cff8a8f96Aardvark|r`, a route
+    -- number, a `!` for stale, a leading `x ` for done. Sorting on it sorted
+    -- on all of that first, because `|` and the hex digits after it are
+    -- ordinary characters. Measured on three tabs:
+    --
+    --   * Zone: every row begins with its route index, so "A to Z" re-sorted
+    --     by route number -- clicking the header did visibly nothing.
+    --   * Goals: finished goals are muted (`8a...`) and the rest accented
+    --     (`ff...`), so every finished goal sorted above every unfinished one
+    --     whatever they were called.
+    --   * Scans: stale rows carry a coloured `!`, so A to Z grouped by
+    --     staleness and alphabetised within each group.
+    --
+    -- The same key feeds the filter, so typing `cff` matched every row in the
+    -- addon.
+    --
+    -- Strips colour openers, the `|r` that closes them, inline textures, and
+    -- then any leading punctuation and digits the row uses as a marker.
+    local function SortKey(text)
+        text = tostring(text or "")
+
+        text = text:gsub("|c%x%x%x%x%x%x%x%x", "")
+        text = text:gsub("|r", "")
+        text = text:gsub("|T.-|t", "")
+
+        -- Leading markers: "  ", "x ", "> ", "! ", "12. ".
+        text = text:gsub("^[%s%p%d]+", "")
+
+        return string.lower(text)
+    end
+
+    list.SortKey = SortKey
+
+    local function Flatten(blocks)
+        local out = {}
+
+        for _, block in ipairs(blocks) do
+            for _, entry in ipairs(block) do
+                table.insert(out, entry)
+            end
+        end
+
+        return out
+    end
+
+    -- AND A SECOND KIND OF BELONGING, WHICH IS NOT THE SAME KIND.
+    --
+    -- A goal's chain is atomic: its steps are a sequence and reordering them
+    -- is meaningless. A section is not -- the Journey tab draws "Closest to
+    -- finished" and then twelve achievements, and those twelve are peers that
+    -- a player may well want alphabetised. Freezing them because they sit
+    -- under a heading would take the sort away exactly where it is useful.
+    --
+    -- So `section` sorts WITHIN itself: sections keep the order the tab
+    -- produced, a row marked `sectionHeader` stays at the top of its own, and
+    -- everything else moves only among its own section's rows.
+    local function Runs(blocks)
+        local runs, current = {}, nil
+
+        for _, block in ipairs(blocks) do
+            local section = block[1].section
+
+            if not current or current.section ~= section then
+                current = { section = section }
+
+                table.insert(runs, current)
+            end
+
+            table.insert(current, block)
+        end
+
+        return runs
+    end
+
     function list:ApplySort(entries)
         local mode = self:SortMode()
 
@@ -12132,27 +13118,44 @@ local function CreateList(parent)
             return entries
         end
 
-        local sorted = {}
+        local blocks = Blocks(entries)
 
-        for _, entry in ipairs(entries) do
-            table.insert(sorted, entry)
+        -- `table.sort` is not stable, and two blocks whose first rows read the
+        -- same would otherwise swap places on every refresh -- a list that
+        -- twitches once a second. The original index breaks the tie.
+        for position, block in ipairs(blocks) do
+            block.order  = position
+            block.key    = SortKey(block[1].text)
+            block.pinned = block[1].sectionHeader and true or false
         end
 
-        -- A stable-enough comparison on the visible text: the rows are what
-        -- the player is reading, so the order they asked for is an order over
-        -- what they can see, not over an id they cannot.
-        table.sort(sorted, function(a, b)
-            local left  = string.lower(tostring(a.text or ""))
-            local right = string.lower(tostring(b.text or ""))
+        local out = {}
 
-            if mode == "reverse" then
-                return left > right
+        for _, run in ipairs(Runs(blocks)) do
+            table.sort(run, function(a, b)
+                -- A heading is not a row to be alphabetised against the rows
+                -- it introduces. It is the thing that says what they are.
+                if a.pinned ~= b.pinned then
+                    return a.pinned
+                end
+
+                if a.key == b.key then
+                    return a.order < b.order
+                end
+
+                if mode == "reverse" then
+                    return a.key > b.key
+                end
+
+                return a.key < b.key
+            end)
+
+            for _, block in ipairs(run) do
+                table.insert(out, block)
             end
+        end
 
-            return left < right
-        end)
-
-        return sorted
+        return Flatten(out)
     end
 
     function list:Matches(entry)
@@ -12160,29 +13163,50 @@ local function CreateList(parent)
             return true
         end
 
-        local haystack = string.lower(tostring(entry.text or ""))
+        -- The same stripped text the sort uses: a filter that searches the
+        -- colour codes is a filter where `cff` matches everything.
+        local haystack = SortKey(entry.text)
 
         -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
         -- name, not a regular expression, and a stray bracket must not throw.
         return haystack:find(filterText, 1, true) ~= nil
     end
 
+    -- A block survives the filter if ANY row in it matches, and it survives
+    -- whole. Matching a chain step and showing it without its goal is an
+    -- answer to a question nobody asked.
+    function list:Filter(entries)
+        if not filterText then
+            return entries
+        end
+
+        local kept = {}
+
+        for _, block in ipairs(Blocks(entries)) do
+            local hit = false
+
+            for _, entry in ipairs(block) do
+                if self:Matches(entry) then
+                    hit = true
+                    break
+                end
+            end
+
+            if hit then
+                for _, entry in ipairs(block) do
+                    table.insert(kept, entry)
+                end
+            end
+        end
+
+        return kept
+    end
+
     -- entries = { { text = , onClick = , tooltip = }, ... }
     function list:SetEntries(entries)
         lastEntries = entries
 
-        if filterText then
-            local kept = {}
-
-            for _, entry in ipairs(entries) do
-                if self:Matches(entry) then
-                    table.insert(kept, entry)
-                end
-            end
-
-            entries = kept
-        end
-
+        entries = self:Filter(entries)
         entries = self:ApplySort(entries)
 
         local width = scroll:GetWidth() or (WINDOW_WIDTH - 60)
@@ -13331,7 +14355,7 @@ function Blizzard.WithAllPetsShown(scan)
             CN.Print("Your Pet Journal's source and type filters were hiding "
                 .. "every pet, so they were set to show everything. The "
                 .. "client does not let an addon read those checkboxes, so "
-                .. "they cannot be put back -- set them again in the journal "
+                .. "they cannot be put back" .. CN.DASH .. "set them again in the journal "
                 .. "if you had them narrowed.")
         end
     end
@@ -15158,7 +16182,7 @@ local function WithJournal(work)
     end
 
     if Blizzard.IsEncounterJournalOpen() then
-        return nil, "the Adventure Guide is open -- close it and try again"
+        return nil, "the Adventure Guide is open" .. CN.DASH .. "close it and try again"
     end
 
     local restoreInstance
@@ -16870,7 +17894,7 @@ CN:RegisterCommand{
         end
 
         Print("|cff8a8f96This is what the addon has actually seen, not every "
-            .. "quest in the game -- the client only lists pins for the map "
+            .. "quest in the game" .. CN.DASH .. "the client only lists pins for the map "
             .. "you are looking at.|r")
     end,
 }
@@ -17998,7 +19022,7 @@ CN:RegisterCommand{
         if #tasks > 0 then
             Print("|cff8a8f96Also " .. #tasks .. " world quest"
                 .. (#tasks == 1 and "" or "s")
-                .. " or bonus objective in this zone -- no giver to talk "
+                .. " or bonus objective in this zone" .. CN.DASH .. "no giver to talk "
                 .. "to.|r")
         end
 
@@ -18192,7 +19216,7 @@ CN:RegisterCommand{
             -- stated problem.
             Print("|cff8a8f96No prerequisite data for this quest. "
                 .. "Install AllTheThings or BtWQuests, or let the addon "
-                .. "learn the ordering by playing -- |cffffc74f/cn harvest|r"
+                .. "learn the ordering by playing" .. CN.DASH .. "|cffffc74f/cn harvest|r"
                 .. "|cff8a8f96 shows what it has seen so far.|r")
         end
     end,
@@ -21930,7 +22954,7 @@ function Harvest.BuildExport(onlyLocated)
         local zone = Harvest.Zone(record)
 
         if zone then
-            table.insert(lines, '        -- ' .. zone)
+            table.insert(lines, '       " .. CN.DASH .. "' .. zone)
         end
 
         if record.mapID then
@@ -21968,7 +22992,7 @@ function Harvest.BuildExport(onlyLocated)
         local confident = Harvest.ConfidentPrerequisites(record.questID)
 
         if #confident > 0 then
-            table.insert(lines, "        -- observed on "
+            table.insert(lines, "       " .. CN.DASH .. "observed on "
                 .. Harvest.confidenceThreshold .. "+ characters")
             table.insert(lines, "        observedRequires = { "
                 .. table.concat(confident, ", ") .. " },")
@@ -21987,7 +23011,7 @@ function Harvest.BuildExport(onlyLocated)
         table.sort(unconfirmed)
 
         if #unconfirmed > 0 then
-            table.insert(lines, "        -- unconfirmed, character count in "
+            table.insert(lines, "       " .. CN.DASH .. "unconfirmed, character count in "
                 .. "brackets: " .. table.concat(unconfirmed, ", "))
         end
 
@@ -22030,7 +23054,7 @@ local function ShowExport(text, count)
         local edit = CreateFrame("EditBox", nil, scroll)
 
         edit:SetMultiLine(true)
-        edit:SetFontObject("GameFontHighlightSmall")
+        edit:SetFontObject(CN.FONT.SMALL)
         edit:SetWidth(540)
         edit:SetAutoFocus(false)
         edit:SetScript("OnEscapePressed", function() exportFrame:Hide() end)
@@ -22039,7 +23063,7 @@ local function ShowExport(text, count)
 
         exportFrame.edit = edit
 
-        local hint = exportFrame:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        local hint = exportFrame:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
         hint:SetPoint("BOTTOMLEFT", 14, 14)
         hint:SetText("Ctrl+A then Ctrl+C, and paste into Data\\Quests.lua")
 
@@ -22623,7 +23647,7 @@ CN.RegisterCandidateProvider("Opportunities", function()
                 completionValue  = 2,
                 limitedTimeBonus = event.endsIn
                     and Opportunities.Urgency(event.endsIn) or 1,
-                travelCost       = CN.unknownLocationCost,
+                travelCost       = CN.placelessCost,
                 expiresIn        = event.endsIn,
                 reasons          = reasons,
             }))
@@ -22899,7 +23923,14 @@ function Warband.Decorate(objective)
         return objective
     end
 
+    -- WITHDRAWN HERE TOO. This was the one branch in the file that returned
+    -- without cleaning up, so an objective that became account-wide kept a
+    -- verdict about a character that no longer needs to do it.
     if objective.accountWide then
+        objective.characterSuitability = nil
+
+        CN.ClearDecoratorReason(objective, "warband")
+
         return objective
     end
 
@@ -23110,6 +24141,24 @@ CN:RegisterCommand{
         end
     end,
 }
+
+-- WHEN ANOTHER CHARACTER'S PICTURE CHANGES, SAY SO LOUDLY ENOUGH.
+--
+-- `Warband.Decorate` stamps `characterSuitability` and the "your Druid could
+-- do four of these" sentence, and a provider whose rows are unchanged takes
+-- the unchanged-provider shortcut and is never re-decorated -- which 0.57.0
+-- made the common case. So logging in on an alt, or that alt learning a
+-- profession, never reached the rows already on the list.
+--
+-- `CN.decoratorGeneration` is the hook that defeats the shortcut; Goals,
+-- Harvest and Session all use it for the same reason.
+for _, event in ipairs({
+    "PLAYER_ENTERING_WORLD", "UPDATE_FACTION", "SKILL_LINES_CHANGED",
+}) do
+    CN:RegisterEvent(event, function()
+        CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+    end)
+end
 
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.
 '@
@@ -24098,8 +25147,18 @@ function Breakdown.NoteChanged()
     Breakdown.generation = Breakdown.generation + 1
 end
 
-function Breakdown.Report(categoryName)
-    if not categoryName then
+-- `force` IS NOT A LUXURY.
+--
+-- The cache is keyed on a generation bumped by nine collection events, and
+-- most of what this report counts is not a collection: harvested quests,
+-- captured recipes, scanned vendors. So the Remaining tab's own Refresh
+-- button -- whose tooltip says "counts what is left again" -- could not
+-- recount, and a row that says "run /cn harvest" went on showing the old
+-- number after the player ran it.
+--
+-- Anything that ASKED for a recount gets one.
+function Breakdown.Report(categoryName, force)
+    if not categoryName and not force then
         if reportCache and reportGeneration == Breakdown.generation then
             return reportCache
         end
@@ -26538,7 +27597,7 @@ function Tooltips.Render(tooltip, lines)
     end
 
     tooltip:AddLine(" ")
-    tooltip:AddLine(HEADER, 0.2, 1.0, 0.6)
+    tooltip:AddLine(HEADER, CN.Rgb("BRAND"))
 
     for _, line in ipairs(lines) do
         tooltip:AddLine(line.text, line.color[1], line.color[2], line.color[3])
@@ -27643,7 +28702,6 @@ CN.RegisterCandidateProvider("Goals", function()
                     accountWide     = true,
                     completionValue = 6,
                     travelCost      = travel,
-                    isGoal          = true,
                     reasons         = reasons,
                 }))
             end
@@ -27736,8 +28794,11 @@ function Goals.Decorate(objective)
         objective.goalPreference = Goals.goalPreference
         objective.userPreference = own + Goals.goalPreference
 
-        objective.isGoal = true
-
+        -- `objective.isGoal` was set here, cleared in Withdraw, set again in
+        -- the provider above, and read by nothing anywhere in the tree. What
+        -- consumers actually ask is `CN.Reasons(objective)`, which carries
+        -- the sentence below -- so the flag was a second, silent answer to a
+        -- question already answered, with its own lifetime to get wrong.
         CN.AddDecoratorReason(objective, "goal", "this is one of your goals")
 
         return objective
@@ -27825,8 +28886,6 @@ function Goals.Withdraw(objective)
 
         objective.goalPreference = nil
     end
-
-    objective.isGoal = nil
 
     CN.ClearDecoratorReason(objective, "goal")
 
@@ -28375,7 +29434,7 @@ function Chase.Chain(goal)
                     "Drops from " .. description,
                     {
                         note = "you are saved to " .. first.instance
-                            .. " and it is cleared -- resets in "
+                            .. " and it is cleared" .. CN.DASH .. "resets in "
                             .. instances.FormatReset(lockout.resetsIn),
                     }))
             else
@@ -28479,10 +29538,10 @@ function Chase.Summarize(chain)
         table.insert(parts, "next: " .. tostring(nextStep.text))
     elseif #parts == 0 then
         return tostring(chain.name)
-            .. " -- the game does not say how this is obtained."
+            .. "" .. CN.DASH .. "the game does not say how this is obtained."
     end
 
-    return tostring(chain.name) .. " -- " .. table.concat(parts, ", ")
+    return tostring(chain.name) .. "" .. CN.DASH .. "" .. table.concat(parts, ", ")
 end
 
 -- Percent complete, or nil. Nil is a real answer and callers must render it
@@ -29673,7 +30732,7 @@ function Loremaster.NextZones(limit)
         if row.fraction >= Loremaster.nearlyDoneFraction then
             value = value + 3
             table.insert(reasons, string.format(
-                "%d%% done -- finishing is cheaper than starting",
+                "%d%% done" .. CN.DASH .. "finishing is cheaper than starting",
                 math.floor(row.fraction * 100)))
         elseif row.done > 0 then
             value = value + 1
@@ -29768,7 +30827,7 @@ CN:RegisterCommand{
         end
 
         Print("|cff8a8f96Ordered by what is cheapest to finish, not by size. "
-            .. "Zones you have not started are included -- an earlier version "
+            .. "Zones you have not started are included" .. CN.DASH .. "an earlier version "
             .. "left them out entirely.|r")
     end,
 }
@@ -30497,11 +31556,11 @@ local function BuildFrame()
 
     local inset = CN.SPACE.M
 
-    frame.header = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.header = frame:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
     frame.header:SetPoint("TOPLEFT", inset, -CN.SPACE.S)
     frame.header:SetJustifyH("LEFT")
 
-    frame.body = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.body = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
     frame.body:SetPoint("TOPLEFT", frame.header, "BOTTOMLEFT", 0, -CN.SPACE.S)
     frame.body:SetJustifyH("LEFT")
     frame.body:SetJustifyV("TOP")
@@ -31574,6 +32633,17 @@ local typicalCache, typicalGeneration = {}, nil
 
 function Session.NoteDurationsChanged()
     Session.durationGeneration = Session.durationGeneration + 1
+
+    -- AND SAY SO WHERE THE DECORATOR WILL HEAR IT.
+    --
+    -- The Session decorator stamps `estimatedTime` onto candidates, and a
+    -- provider whose rows are unchanged takes the unchanged-provider
+    -- shortcut and is never re-decorated -- which 0.57.0 made the COMMON
+    -- case. So a duration the addon had just learned was never applied to
+    -- anything already on the list, and `/cn mode fastest`'s second lever
+    -- stayed inert. `CN.decoratorGeneration` is the only thing that defeats
+    -- that shortcut; Goals and Harvest already use it.
+    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
 end
 
 function Session.TypicalSeconds(objectiveType)
@@ -32041,7 +33111,7 @@ CN:RegisterCommand{
         if plan.overran then
             Print("|cffffc74fThe nearest stop is longer than the time you "
                 .. "have.|r |cff8a8f96Nothing smaller was available, so it "
-                .. "is shown anyway -- but it will not fit.|r")
+                .. "is shown anyway" .. CN.DASH .. "but it will not fit.|r")
         end
 
         if not plan.confident then
@@ -32773,7 +33843,7 @@ CN:RegisterCommand{
 
         if summary.closest then
             Print("|cffffc74fClosest:|r " .. summary.closest.label
-                .. " -- " .. summary.closest.remaining .. " more, "
+                .. "" .. CN.DASH .. "" .. summary.closest.remaining .. " more, "
                 .. (Vault.rowActions[summary.closest.row] or "keep going") .. ".")
         else
             Print("|cff73b873Every row is capped. Nothing more to earn this week.|r")
@@ -33147,11 +34217,11 @@ local function BuildArrow()
         arrow.texture:SetTexture("Interface\\Minimap\\MinimapArrow")
     end
 
-    arrow.label = arrow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    arrow.label = arrow:CreateFontString(nil, "OVERLAY", CN.FONT.CAPTION)
     arrow.label:SetPoint("TOP", arrow, "BOTTOM", 0, -2)
     arrow.label:SetJustifyH("CENTER")
 
-    arrow.distance = arrow:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
+    arrow.distance = arrow:CreateFontString(nil, "OVERLAY", CN.FONT.LEAD)
     arrow.distance:SetPoint("TOP", arrow.label, "BOTTOM", 0, -2)
     arrow.distance:SetJustifyH("CENTER")
 
@@ -33955,7 +35025,7 @@ function Navigation.Diagnose()
     end
 
     if not target then
-        add("target", "none -- nothing is being tracked")
+        add("target", "none" .. CN.DASH .. "nothing is being tracked")
 
         return report
     end
@@ -33988,7 +35058,7 @@ function Navigation.Diagnose()
     add("facing sign", tostring(Navigation.FacingSign())
         .. " (flips if the arrow ever pointed backwards)")
     add("facing evidence", motionState.samples == 0
-        and "none yet -- walk a few yards with the arrow up"
+        and "none yet" .. CN.DASH .. "walk a few yards with the arrow up"
         or string.format("%d movement samples, %s",
             motionState.samples, tostring(motionState.verdict)))
 
@@ -33998,7 +35068,7 @@ function Navigation.Diagnose()
 
     add("relative bearing", state.relative
         and string.format("%.1f deg", math.deg(state.relative))
-        or "nil -- no bearing could be computed")
+        or "nil" .. CN.DASH .. "no bearing could be computed")
 
     if state.relative then
         add("rotation applied", string.format("%.1f deg", math.deg(-state.relative)))
@@ -34018,7 +35088,7 @@ function Navigation.Diagnose()
     -- The two settings that can change what the arrow means without the
     -- player doing anything.
     add("auto-advance", (CN.IsAutoWaypointEnabled and CN.IsAutoWaypointEnabled())
-        and "ON -- arriving re-points the arrow at the next thing"
+        and "ON" .. CN.DASH .. "arriving re-points the arrow at the next thing"
         or "off")
 
     local follow = CN:GetModule("Follow")
@@ -34843,14 +35913,14 @@ local function ShowPinTooltip(frame)
     GameTooltip:AddLine(string.format("Stop %d", frame.pin.order), 1, 1, 1)
 
     if frame.pin.summary then
-        GameTooltip:AddLine(frame.pin.summary, 0.365, 0.824, 0.984)
+        GameTooltip:AddLine(frame.pin.summary, CN.Rgb("BRAND"))
     end
 
     for _, line in ipairs(MapPins.DescribeLines(frame.pin)) do
-        GameTooltip:AddLine(line, 0.8, 0.8, 0.8)
+        GameTooltip:AddLine(line, CN.Rgb("BODY"))
     end
 
-    GameTooltip:AddLine("Click to navigate here", 0.6, 0.6, 0.6)
+    GameTooltip:AddLine("Click to navigate here", CN.Rgb("MUTED"))
 
     GameTooltip:Show()
 end
@@ -34915,7 +35985,7 @@ local function AcquirePin(index, canvas)
         frame.texture:SetTexture("Interface\\Minimap\\MinimapArrow")
     end
 
-    frame.label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.label = frame:CreateFontString(nil, "OVERLAY", CN.FONT.CAPTION)
     frame.label:SetPoint("CENTER")
 
     -- Over map art, which is the same problem as over the world: a stop
@@ -35279,14 +36349,14 @@ function Broker.Install()
             end
 
             if not results or #results == 0 then
-                tooltip:AddLine("Nothing actionable yet.", 0.6, 0.6, 0.6)
+                tooltip:AddLine("Nothing actionable yet.", CN.Rgb("MUTED"))
 
                 for index, line in ipairs(CN.ExplainEmptyList()) do
                     if index > 2 then
                         break
                     end
 
-                    tooltip:AddLine(line, 0.6, 0.6, 0.6)
+                    tooltip:AddLine(line, CN.Rgb("MUTED"))
                 end
 
                 return
@@ -35472,7 +36542,7 @@ CN:RegisterCommand{
         end
 
         Print("LibDataBroker feed: " .. CN.YesNo(false))
-        Print("|cff8a8f96LibDataBroker is not installed, which is fine -- it is "
+        Print("|cff8a8f96LibDataBroker is not installed, which is fine" .. CN.DASH .. "it is "
             .. "optional. Display addons like Titan Panel and ElvUI ship it, "
             .. "and the feed appears automatically when one of them is present.|r")
     end,
@@ -35858,7 +36928,7 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
         -- fivefold penalty was applied with nothing on screen saying why.
         -- `AddAdjusterReason` creates the table itself.
         CN.AddAdjusterReason(objective, "groupDead",
-            "you are dead -- this is for after")
+            "you are dead" .. CN.DASH .. "this is for after")
 
         return score * Group.deadPenalty
     end
@@ -35979,11 +37049,11 @@ function Group.Notice()
             local corpse = Group.CorpseTarget()
 
             if corpse then
-                return "You are a ghost. Your body is marked -- the rest of "
+                return "You are a ghost. Your body is marked" .. CN.DASH .. "the rest of "
                     .. "this keeps."
             end
 
-            return "You are a ghost. Your body first -- the rest of this "
+            return "You are a ghost. Your body first" .. CN.DASH .. "the rest of this "
                 .. "keeps."
         end
 
@@ -36312,7 +37382,20 @@ local function KindOf(itemID)
         species = Blizzard.GetPetSpeciesFromItem(itemID),
     }
 
-    itemKinds[itemID] = held
+    -- A COLD JOURNAL'S "NO" IS NOT AN ANSWER.
+    --
+    -- Both calls return nil until their journal is populated, which at login
+    -- happens AFTER the first `BAG_UPDATE_DELAYED` scan. Remembering that
+    -- made every caged pet and every mount item in the player's bags
+    -- invisible to the addon for the whole session, recoverable only by a
+    -- reload -- where before this memo existed each scan re-asked and it
+    -- corrected itself within seconds.
+    --
+    -- So only a positive answer is remembered. An item that is genuinely
+    -- neither costs two client calls per scan, which is what it cost before.
+    if held.mount or held.species then
+        itemKinds[itemID] = held
+    end
 
     return held
 end
@@ -36333,7 +37416,20 @@ function Inventory.UncollectedItems()
 
         local mount = mountID and Blizzard.GetMountByID(mountID)
 
-        if mount and not mount.collected then
+        -- `isCollected`, NOT `collected`.
+        --
+        -- `Blizzard.GetMountByID` returns the field as `isCollected`, and
+        -- `Modules/Mounts.lua` reads it correctly. Here it was spelled
+        -- `collected`, which is always nil, so `not nil` was always true and
+        -- EVERY bag item that teaches a mount was emitted as uncollected --
+        -- at completionValue 4 with a travel cost of zero, which is close to
+        -- the strongest score shape the addon can produce. A mount you
+        -- already learned and kept the item for sat near the top of `/cn next`
+        -- telling you to learn it, for ever.
+        --
+        -- The comment three lines above says this check is what "keeps the
+        -- addon from telling somebody to learn what they already have".
+        if mount and not mount.isCollected then
             item.kind = CN.objectiveTypes.MOUNT
             item.collectibleID = mountID
 
@@ -36720,7 +37816,7 @@ CN.RegisterCandidateProvider("Inventory", function()
                 -- Zero, and it is the honest number: the item is in your bag.
                 travelCost       = 0,
                 reasons          = {
-                    "a quest starter in your bags -- right-click it",
+                    "a quest starter in your bags" .. CN.DASH .. "right-click it",
                 },
             }))
         end
@@ -36743,9 +37839,9 @@ CN.RegisterCandidateProvider("Inventory", function()
 
                 -- Worth more the closer it is, which is the entire point.
                 completionValue  = 2 + (Inventory.nearlyDoneRemaining - row.remaining),
-                travelCost       = CN.unknownLocationCost,
+                travelCost       = CN.placelessCost,
                 reasons          = {
-                    string.format("%s -- %d of %d done",
+                    string.format("%s" .. CN.DASH .. "%d of %d done",
                         tostring(row.text or "objective"), row.done, row.required),
                 },
             }))
@@ -37182,7 +38278,7 @@ CN.RegisterCandidateProvider("Waiting", function()
                 name             = row.name .. ": " .. row.remaining .. " left this week",
                 completionValue  = 5,
                 limitedTimeBonus = 2,
-                travelCost       = CN.unknownLocationCost,
+                travelCost       = CN.placelessCost,
                 expiresIn        = Blizzard.GetSecondsUntilWeeklyReset(),
                 reasons          = {
                     row.remaining .. " of " .. row.cap .. " still collectable this week",
@@ -37217,7 +38313,7 @@ CN:RegisterCommand{
             Print("|cff8a8f96Mail cannot be read in this client.|r")
         elseif #mail == 0 then
             Print("|cff8a8f96No mail, or the mailbox has not been opened this "
-                .. "session -- the client only hands the addon the inbox once "
+                .. "session" .. CN.DASH .. "the client only hands the addon the inbox once "
                 .. "you have looked at it.|r")
         else
             Print(#mail .. " message(s) in your mailbox:")
@@ -37531,7 +38627,7 @@ CN.RegisterCandidateProvider("Sets", function()
 
                 -- A REAL denominator, which this addon is normally short of.
                 completionValue  = 3 + (3 - math.min(3, set.missing)),
-                travelCost       = CN.unknownLocationCost,
+                travelCost       = CN.placelessCost,
                 reasons          = {
                     set.collected .. " of " .. set.total .. " pieces collected",
                 },
@@ -39264,13 +40360,14 @@ function Travel.CostFor(mapID, x, y)
 
     local key = (mapID * 1000000) + (Packed(x) * 1000) + Packed(y)
 
+    -- `~= nil` rather than a truth test, and no `false` branch: 0.54.0 stored
+    -- `false` for a refusal and the paragraph below explains why it stopped.
+    -- The branch that read it back outlived the branch that wrote it, so it
+    -- was unreachable code standing exactly where a reader would look to find
+    -- out whether misses are cached. They are not.
     local held = costCache[key]
 
     if held ~= nil then
-        if held == false then
-            return nil
-        end
-
         return held
     end
 
@@ -39573,7 +40670,7 @@ CN:RegisterCommand{
 
             Print(string.format(
                 "  |cff8a8f96%.0f yd to %s, %.0f yd in the air, %.0f yd at the "
-                .. "far end -- against %.0f yd on foot|r",
+                .. "far end" .. CN.DASH .. "against %.0f yd on foot|r",
                 detail.runToNode, tostring(detail.node), detail.flightYards,
                 detail.runFromNode, detail.yards))
 
@@ -39610,7 +40707,7 @@ CN:RegisterCommand{
                         CN.confidence.ESTIMATED))))
         elseif detail and detail.mode == "elsewhere" then
             Print("|cff8a8f96That is on another continent. Portals and boats "
-                .. "are not modelled, so no time is claimed -- but here is "
+                .. "are not modelled, so no time is claimed" .. CN.DASH .. "but here is "
                 .. "what you have:|r")
 
             local teleports = detail.teleports or {}
@@ -40025,7 +41122,7 @@ CN.RegisterCandidateProvider("Instances", function()
 
             local reasons = {
                 lockout.defeated .. " of " .. lockout.encounters
-                    .. " already defeated -- those kills expire at the reset",
+                    .. " already defeated" .. CN.DASH .. "those kills expire at the reset",
                 lockout.remaining .. " "
                     .. (lockout.remaining == 1 and "boss" or "bosses") .. " left",
             }
@@ -40135,7 +41232,7 @@ CN:RegisterCommand{
         if Blizzard.IsEncounterJournalOpen() then
             -- Reading the journal moves its selection, which is what the
             -- player is looking at. Refuse rather than reach into it.
-            Print("Close the Adventure Guide first -- reading it would change "
+            Print("Close the Adventure Guide first" .. CN.DASH .. "reading it would change "
                 .. "what you are looking at.")
             return
         end
@@ -40149,7 +41246,7 @@ CN:RegisterCommand{
             return
         end
 
-        Print("\"" .. args .. "\" -- " .. #results
+        Print("\"" .. args .. "\"" .. CN.DASH .. "" .. #results
             .. (#results == 1 and " encounter:" or " encounters:"))
 
         for _, result in ipairs(results) do
@@ -41088,13 +42185,13 @@ CN:RegisterCommand{
                 -- Only reachable from a database written before 0.55.0 and
                 -- not yet migrated. Say what it is rather than implying the
                 -- counter is on its way somewhere.
-                line = line .. " |cff8a8f96(not watched -- the addon cannot "
+                line = line .. " |cff8a8f96(not watched" .. CN.DASH .. "the addon cannot "
                     .. "see when you finish one of these)|r"
             elseif multiplier == 1 then
                 local short = Preference.minimumObservations - entry.row.shown
 
                 line = line .. " |cff8a8f96(no effect"
-                    .. (short > 0 and (" -- " .. short .. " more sightings needed")
+                    .. (short > 0 and ("" .. CN.DASH .. "" .. short .. " more sightings needed")
                         or "")
                     .. ")|r"
             else
@@ -41183,7 +42280,7 @@ function CN.RegisterCapture(definition)
     end
 
     if type(definition.name) ~= "string" or definition.name == "" then
-        return false, "a capture needs a name -- it is the key its result is "
+        return false, "a capture needs a name" .. CN.DASH .. "it is the key its result is "
             .. "filed under"
     end
 
@@ -41624,12 +42721,12 @@ CN:RegisterCommand{
 
         for name, value in pairs(records) do
             if type(value) == "table" and value.skipped then
-                Print("  |cff8a8f96" .. name .. " -- " .. value.skipped .. "|r")
+                Print("  |cff8a8f96" .. name .. "" .. CN.DASH .. "" .. value.skipped .. "|r")
             end
         end
 
         Print("|cff8a8f96Nothing identifying you is recorded, and nothing "
-            .. "leaves your machine -- this addon has no network access. "
+            .. "leaves your machine" .. CN.DASH .. "this addon has no network access. "
             .. "It is written to your SavedVariables at logout.|r")
         Print("To send it: log out, then find "
             .. "|cffffc74fWTF\\Account\\<account>\\SavedVariables\\"
@@ -41824,7 +42921,7 @@ CN.RegisterSelfTest{
         local mapID, x, y = CN.GetPlayerPosition()
 
         if not mapID then
-            return SKIP, "no map -- are you in an instance or a loading screen?"
+            return SKIP, "no map" .. CN.DASH .. "are you in an instance or a loading screen?"
         end
 
         if not x or not y then
@@ -41859,7 +42956,7 @@ CN.RegisterSelfTest{
         local yards = nav.DistanceYards(mapID, x, y, x, math.max(0, y - 0.01))
 
         if not yards then
-            return FAIL, "the client would not convert -- every distance in "
+            return FAIL, "the client would not convert" .. CN.DASH .. "every distance in "
                 .. "the addon will read 'unknown'"
         end
 
@@ -41884,7 +42981,7 @@ CN.RegisterSelfTest{
         local parentID = info and info.parentMapID
 
         if not parentID or parentID == 0 then
-            return SKIP, "this map has no parent -- you are not indoors"
+            return SKIP, "this map has no parent" .. CN.DASH .. "you are not indoors"
         end
 
         local nav = CN:GetModule("Navigation")
@@ -41980,7 +43077,7 @@ CN.RegisterSelfTest{
         local state = nav.MotionState()
 
         if state.samples == 0 then
-            return SKIP, "no movement seen yet -- point the arrow at "
+            return SKIP, "no movement seen yet" .. CN.DASH .. "point the arrow at "
                 .. "something with /cn go, walk forward a few seconds, and "
                 .. "run this again"
         end
@@ -42020,7 +43117,7 @@ CN.RegisterSelfTest{
         local ratio = scaleX / scaleY
 
         return PASS, string.format(
-            "%.0f x %.0f yards, ratio %.2f -- angles adjusted by it",
+            "%.0f x %.0f yards, ratio %.2f" .. CN.DASH .. "angles adjusted by it",
             scaleX, scaleY, ratio)
     end,
 }
@@ -42109,7 +43206,7 @@ CN.RegisterSelfTest{
         end
 
         if sampled == 0 then
-            return SKIP, "nothing scanned yet -- run /cn setup"
+            return SKIP, "nothing scanned yet" .. CN.DASH .. "run /cn setup"
         end
 
         return PASS, string.format("%d criteria read, %d carry a counter",
@@ -42147,7 +43244,7 @@ CN.RegisterSelfTest{
 
         if resolved == 0 then
             return FAIL, "the pet journal named none of "
-                .. checked .. " -- the interface will show numbers"
+                .. checked .. "" .. CN.DASH .. "the interface will show numbers"
         end
 
         return PASS, resolved .. " of " .. checked .. " named by the client"
@@ -42172,7 +43269,7 @@ CN.RegisterSelfTest{
         -- unresolved fault, and it outlives the failure record that produced
         -- it -- so it is reported on its own rather than under it.
         if CN.db.rescuedCharacters ~= nil then
-            return FAIL, "some saved data was set aside as unreadable -- "
+            return FAIL, "some saved data was set aside as unreadable" .. CN.DASH .. ""
                 .. "/cn rescued"
         end
 
@@ -42208,7 +43305,7 @@ CN.RegisterSelfTest{
 
         if kb > 4096 then
             return FAIL, string.format(
-                "%.0f KB -- unusually large; run /cn dbsize to see where", kb)
+                "%.0f KB" .. CN.DASH .. "unusually large; run /cn dbsize to see where", kb)
         end
 
         return PASS, string.format("%.0f KB", kb)
@@ -42224,7 +43321,7 @@ CN.RegisterSelfTest{
         local results = CN.Recommend(1)
 
         if not results or #results == 0 then
-            return SKIP, "nothing actionable right now -- try /cn setup, or "
+            return SKIP, "nothing actionable right now" .. CN.DASH .. "try /cn setup, or "
                 .. "check /cn show in case everything is filtered out"
         end
 
@@ -42272,7 +43369,7 @@ CN.RegisterSelfTest{
         end
 
         if Blizzard.IsEncounterJournalOpen() then
-            return SKIP, "the Adventure Guide is open, so nothing was read -- "
+            return SKIP, "the Adventure Guide is open, so nothing was read" .. CN.DASH .. ""
                 .. "which is the intended behaviour, not a fault"
         end
 
@@ -42331,7 +43428,7 @@ CN:RegisterCommand{
 
         if rows.failed > 0 then
             Print("|cffffc74fA failure above is a real defect. Copy this "
-                .. "output into a bug report -- it says more than any "
+                .. "output into a bug report" .. CN.DASH .. "it says more than any "
                 .. "description could.|r")
         end
     end,
@@ -42468,7 +43565,7 @@ CN.RegisterCandidateProvider("Orders", function()
                     .. tostring(order.itemName or order.itemID or "?"),
                 completionValue  = 3,
                 limitedTimeBonus = 2,
-                travelCost       = CN.unknownLocationCost,
+                travelCost       = CN.placelessCost,
                 expiresIn        = order.expiresIn,
                 reasons          = {
                     "a crafting order you placed expires in "
@@ -42487,7 +43584,7 @@ CN.RegisterCandidateProvider("Orders", function()
             name             = "Collect your finished crafting order",
             completionValue  = 5,
             limitedTimeBonus = 2,
-            travelCost       = CN.unknownLocationCost,
+            travelCost       = CN.placelessCost,
             reasons          = { "it is done and waiting at a crafting table" },
         }))
     end
@@ -42518,7 +43615,7 @@ function Orders.DelveProgressAvailable()
 
     for _, name in ipairs(Orders.delveProgressAPIs) do
         if type(C_DelvesUI[name]) == "function" then
-            return true, "C_DelvesUI." .. name .. " exists -- Delve progress "
+            return true, "C_DelvesUI." .. name .. " exists" .. CN.DASH .. "Delve progress "
                 .. "is now readable, and this addon should be tracking it"
         end
     end
@@ -42673,7 +43770,7 @@ function Contribute.Build()
     table.sort(ids)
 
     if #ids == 0 then
-        return nil, "nothing is confident yet -- a chain has to hold on "
+        return nil, "nothing is confident yet" .. CN.DASH .. "a chain has to hold on "
             .. (harvest.confidenceThreshold or 3)
             .. " characters before it is worth sending"
     end
@@ -42869,7 +43966,7 @@ CN:RegisterCommand{
         Print(count .. " chain(s) ready to share. This text and nothing else:")
         Print("|cffffc74f" .. export .. "|r")
         Print("|cff8a8f96It contains quest IDs and orderings. No character "
-            .. "name, no realm, no timestamps, no coordinates -- read it "
+            .. "name, no realm, no timestamps, no coordinates" .. CN.DASH .. "read it "
             .. "before you send it, which is rather the point of a format you "
             .. "can read.|r")
         Print("Paste it into an issue on the tracker and it ships to everyone "
@@ -43022,6 +44119,17 @@ function Welcome.Build()
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
 
+    -- ESCAPE CLOSES IT, LIKE EVERY OTHER PANEL IN THE GAME.
+    --
+    -- Three frames this addon creates were on this list and one was not: the
+    -- welcome screen -- the only frame most players ever see, shown once, on
+    -- first login, over a character they have just logged into. Escape did
+    -- nothing, and the close button is a small X in a corner of a dialog that
+    -- appears without being asked for.
+    if UISpecialFrames then
+        table.insert(UISpecialFrames, "CompletionNavigatorWelcome")
+    end
+
     if frame.SetBackdrop then
         frame:SetBackdrop({
             bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
@@ -43031,11 +44139,11 @@ function Welcome.Build()
         })
     end
 
-    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    local title = frame:CreateFontString(nil, "OVERLAY", CN.FONT.TITLE)
     title:SetPoint("TOP", 0, -18)
     title:SetText("Completion Navigator")
 
-    local body = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    local body = frame:CreateFontString(nil, "OVERLAY", CN.FONT.BODY)
     body:SetPoint("TOPLEFT", 24, -48)
     body:SetPoint("TOPRIGHT", -24, -48)
     body:SetJustifyH("LEFT")
@@ -43138,7 +44246,7 @@ function Welcome.Build()
         previous = button
     end
 
-    local note = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    local note = frame:CreateFontString(nil, "OVERLAY", CN.FONT.LABEL)
     note:SetPoint("BOTTOMLEFT", 24, 46)
     note:SetPoint("BOTTOMRIGHT", -24, 46)
     note:SetJustifyH("LEFT")
@@ -43151,7 +44259,7 @@ function Welcome.Build()
     -- this is not a privacy defect -- it is a promise that needs one more
     -- clause to stay true.
     note:SetText("Nothing is scanned or sent until you ask. It does notice "
-        .. "which kinds of thing you go and do -- /cn learned shows what, and "
+        .. "which kinds of thing you go and do" .. CN.DASH .. "/cn learned shows what, and "
         .. "undoes it. This appears once.")
 
     local dismiss = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
@@ -43365,12 +44473,12 @@ local function Build()
 
     local inset = CN.SPACE.S
 
-    frame.label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.label = frame:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
     frame.label:SetPoint("TOPLEFT", inset, -inset)
     frame.label:SetPoint("TOPRIGHT", -inset, -inset)
     frame.label:SetJustifyH("LEFT")
 
-    frame.detail = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.detail = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
     frame.detail:SetPoint("TOPLEFT", frame.label, "BOTTOMLEFT", 0, -CN.SPACE.XS)
     frame.detail:SetPoint("TOPRIGHT", frame.label, "BOTTOMRIGHT", 0, -CN.SPACE.XS)
     frame.detail:SetJustifyH("LEFT")
@@ -43386,6 +44494,46 @@ local function Build()
 
         Preferences().hudPosition = { point = point, x = x, y = y }
     end)
+
+    -- IT NAMES THE NEXT THING AND COULD NOT BE CLICKED.
+    --
+    -- The frame was mouse-enabled for dragging and showed the current
+    -- recommendation -- so the player read "Kill Ten Rats" on their own
+    -- screen and then typed `/cn go`. The two actions the Next tab offers for
+    -- the same objective are a left and a right click away, and neither
+    -- fights the drag: `OnMouseUp` fires on a click, not on a drag.
+    frame:RegisterForDrag("LeftButton")
+
+    frame:SetScript("OnMouseUp", function(_, button)
+        local objective = CN.currentRecommendation
+
+        if not objective then
+            return
+        end
+
+        if button == "RightButton" then
+            CN.SetDeferred(objective.type, objective.id, 3600)
+
+            CN.Print("Deferred for an hour: "
+                .. tostring(objective.name or objective.id)
+                .. CN.Aside(CN.Accent("/cn unhide " .. tostring(objective.id))
+                    .. " brings it back now"))
+
+            CN.InvalidateCandidates()
+
+            Hud.Refresh()
+
+            return
+        end
+
+        CN.NavigateToObjective(objective)
+    end)
+
+    if CN.UI and CN.UI.AttachTooltip then
+        CN.UI.AttachTooltip(frame,
+            "Click to navigate to this. Right-click to put it off for an "
+            .. "hour. Drag to move this line.")
+    end
 
     frame:SetScale(Hud.Scale())
 
@@ -43474,6 +44622,19 @@ CN:OnLogin(function()
     if Hud.IsEnabled() then
         Hud.SetEnabled(true)
     end
+
+    -- THE TEXT SIZE SILENTLY REVERTED ON EVERY RELOAD.
+    --
+    -- `ApplyScale` is what scales the window, the arrow, the follow frame and
+    -- the welcome frame, and it was called from exactly one place: the
+    -- command that sets the number. So a player who set Size 1.50 saw it
+    -- apply, reloaded, and got everything except the heads-up line back at
+    -- 1.0 -- with the button still reading "Size 1.50".
+    --
+    -- This is the accessibility control the settings rebuild existed for,
+    -- because "the players who most need a larger interface are the least
+    -- likely to find /cn scale 1.4 in a hundred-line help listing".
+    Hud.ApplyScale()
 end)
 
 ------------------------------------------------------------
@@ -43586,7 +44747,7 @@ function Hud.RegisterOptionsPanel()
 
     panel.name = "Completion Navigator"
 
-    local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    local title = panel:CreateFontString(nil, "ARTWORK", CN.FONT.TITLE)
     title:SetPoint("TOPLEFT", 16, -16)
     title:SetText("Completion Navigator")
 
@@ -43601,11 +44762,11 @@ function Hud.RegisterOptionsPanel()
     --
     -- Three sentences and two buttons. The settings themselves live one click
     -- away, in the window, where there is room to group them.
-    local body = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    local body = panel:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
     body:SetPoint("TOPLEFT", 16, -48)
     body:SetPoint("TOPRIGHT", -16, -48)
     body:SetJustifyH("LEFT")
-    body:SetText("Answers \"what should I do next?\" -- ranks what is worth "
+    body:SetText("Answers \"what should I do next?\"" .. CN.DASH .. "ranks what is worth "
         .. "doing now, costs the journey the way you would really make it, "
         .. "and shows its working when you ask why.\n\n"
         .. "1.  Scan once, so it knows what you have.\n"
@@ -43636,7 +44797,7 @@ function Hud.RegisterOptionsPanel()
         end
     end)
 
-    local version = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    local version = panel:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
     version:SetPoint("TOPLEFT", scan, "BOTTOMLEFT", 0, -12)
     version:SetText("v" .. tostring(CN.version)
         .. "  " .. CN.DOT .. "  Dam Beaver Studios, LLC")
@@ -44094,7 +45255,7 @@ CN:RegisterCommand{
 
             Print("Nothing has gone wrong this session.")
             Print("|cff8a8f96Errors inside the addon are caught so they "
-                .. "cannot break your session -- which is also why they would "
+                .. "cannot break your session" .. CN.DASH .. "which is also why they would "
                 .. "otherwise be invisible. They are recorded here instead.|r")
             return
         end
@@ -44144,7 +45305,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.57.0
+## Version: 0.58.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -44399,6 +45560,104 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.58.0]
+
+A pass over the window, because the ranking has been the focus for four
+releases and the surface that shows it had drifted. Plus two accuracy fixes
+that change what the addon recommends, and one that changes what it counts.
+
+### Fixed
+
+- **Every mount sitting in your bags was recommended as uncollected, for
+  ever.** The check read `mount.collected`; the client's field is
+  `isCollected`. It was always nil, so every bag item that teaches a mount --
+  including ones learned years ago -- came back as something to go and do, and
+  no scan could clear it.
+- **A travel cost of zero was correct and a cost of zero was also "I have no
+  idea".** Things with no location at all were priced at the cost of walking
+  across a zone, so an item in your bags competed with a rare on the far side
+  of the map. Placeless work now costs nothing to reach, which is the truth,
+  and the type list that gets that treatment covers pets, mounts, toys,
+  appearances and recipes.
+- **Routing the same zone re-ranked the entire addon every two seconds.** The
+  Zone tab, every map open and follow mode's ticker all call the router, and
+  it ended by invalidating the ranked list unconditionally -- so the cache had
+  a hit rate of zero for as long as any of those was open. It now re-ranks only
+  when a route actually moves something. Measured: thirty Zone-tab ticks
+  produced thirty full re-ranks and zero changes.
+- **The route planner's pruning was not exact.** Three thousand random routes
+  were laid out with and without it; two hundred and ninety came out longer
+  with it on. A shortcut that produces a worse answer is not a shortcut.
+- **`/cn dbsize` counted a bank's bookkeeping as items.** A Warband bank
+  holding nothing was reported as three rows, and one holding four items as
+  seven -- wrong by an amount that looks plausible.
+- **A contribution another provider had stopped making could outlive it.** The
+  merge reset ran on the row it was merging into and not on the row being
+  merged, so a value withdrawn on one pass could survive to the next.
+- **Two rows with no id crashed the ranked sort** on the comparison that broke
+  the tie between them.
+
+### Changed
+
+- **The Scans tab is rebuilt as a provenance list.** It was one block of
+  concatenated text, two buttons and no list -- nothing to click, nothing to
+  sort, and its own filter box sat above it doing nothing. It now answers the
+  question no other tab does: where does each number in this addon come from,
+  how old is it, and what refreshes it. One row per source, live sources
+  separated from stored ones, a marker on anything read more than a day ago,
+  and a click runs that source's scan.
+- **Sorting and filtering no longer shred rows that belong together.** A goal
+  and its chain, a vault slot and its thresholds, a Remaining row and its
+  reasons now move as one unit; a heading stays at the top of its own section
+  while the rows under it still sort among themselves.
+- **Sorting reads the words, not the markup in front of them.** The key was
+  the rendered string, so "A to Z" sorted on colour codes and route numbers
+  first: on the Goals tab every finished goal sorted above every unfinished
+  one whatever they were called, and on the Zone tab clicking the header did
+  nothing at all. The filter shared the key, so typing `cff` matched every row
+  in the addon.
+- **The Collections tab says when each number was read.** Every percentage on
+  it is measured against the addon's own scan snapshot, which is the honest
+  denominator and one that goes stale the day the game adds collectibles.
+  Nothing on screen said when the snapshot was taken.
+- **A button's answer appears in the window, not behind it.** Eleven buttons
+  answered into the chat frame, which is somewhere else on the screen from
+  where the click happened. Slash commands still answer in chat, because that
+  is where those were typed.
+- **The filter box goes dead on the two tabs it cannot reach**, instead of
+  staying white and typeable while every keystroke did nothing.
+- **A blocked step in a goal chain carries a marker as well as a colour.**
+  Done was `x`, next was `>`, and blocked -- the one state that says stop
+  reading down the chain -- had only red text.
+- **Escape closes the welcome screen**, which was the only frame the addon
+  puts on screen that it did not close, and the only one most players see.
+- **Every panel edge is on the four-pixel grid.** Headers, lists, notes and
+  the footer used four different left edges.
+- **Every font is asked for by role.** Six widgets outside the window still
+  named `GameFont*` objects directly and had drifted apart; two roles that did
+  not exist are the reason, and now do.
+- **An answer printed in a loop no longer repeats the addon's name once per
+  row.** A thirty-row answer said "Completion Navigator:" thirty-one times.
+- **A scan that fails gives its button back.** The Collections buttons
+  disabled themselves, ran the scan and re-enabled afterwards -- so a scan
+  that threw left the button reading "Working..." until the next reload.
+- **Leaving a filtered tab clears that tab's filter**, rather than only the
+  box above it; and visiting the one tab without a list no longer throws away
+  the filter term you asked to keep.
+
+### Internal
+
+- Three build-time lints added, each of which fails the build: no colour may
+  reach a frame as a raw float triple, no loop may call `CN.Print`, and the
+  palette scan now covers both shapes of colour.
+- The offline frame stub now fires `OnEditFocusLost` on `ClearFocus` and
+  records edit-box text, which is the eleventh defect this project has traced
+  to a stub more forgiving than the client.
+- Eighteen mutations added; a hundred and fifty-nine now run and all are
+  killed. Two existing assertions were rewritten because they checked a flag
+  that existed only to be checked.
+
 
 ## [0.57.0]
 
@@ -48947,7 +50206,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.57.0
+0.58.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -50303,7 +51562,7 @@ mutate "Database.lua" \
 
         if type(db.characters) ~= \"table\" then
             error(\"db.characters is a \" .. type(db.characters)
-                .. \", not a table -- refusing to replace it\")
+                .. \", not a table\" .. CN.DASH .. \"refusing to replace it\")
         end" \
     "        if type(db.characters) ~= \"table\" then
             db.characters = {}
@@ -50403,15 +51662,22 @@ mutate "Scoring.lua" \
     "what another provider says a thing is worth is ignored"
 
 mutate "Scoring.lua" \
-    "                    if not touched[existing] then
-                        touched[existing]              = true
-                        existing.mergedReasons         = nil
-                        existing.mergedCompletionValue = nil
-                    end" \
-    "                    if false then
-                        existing.mergedReasons         = nil
-                        existing.mergedCompletionValue = nil
-                    end" \
+    "    local function Reset(objective)
+        if touched[objective] then
+            return
+        end
+
+        touched[objective]              = true
+        objective.mergedReasons         = nil
+        objective.mergedCompletionValue = nil
+    end" \
+    "    local function Reset(objective)
+        if touched[objective] then
+            return
+        end
+
+        touched[objective] = true
+    end" \
     "a contribution another provider has stopped making never goes away"
 
 mutate "Modules/Goals.lua" \
@@ -50452,11 +51718,15 @@ mutate "Modules/Inventory.lua" \
     "quest starters already accepted are offered again"
 
 mutate "Modules/Inventory.lua" \
+    "    if held.mount or held.species then
+        itemKinds[itemID] = held
+    end
+
+    return held" \
     "    itemKinds[itemID] = held
 
     return held" \
-    "    return held" \
-    "what an item is is asked of the client once per slot"
+    "an item that is neither a mount nor a pet is remembered as neither forever"
 
 mutate "Routing.lua" \
     "    if now and positionAt == now and positionMap == mapID then" \
@@ -50499,6 +51769,153 @@ mutate "Database.lua" \
     raw.characters        = nil" \
     "    raw.characters        = nil" \
     "data the migration refused to destroy is dropped anyway"
+
+############################################################
+# 0.58.0
+############################################################
+
+mutate "UI/List.lua" \
+    "                while index <= count and entries[index].group == group do
+                    table.insert(block, entries[index])
+
+                    index = index + 1
+                end" \
+    "                while false do
+                    table.insert(block, entries[index])
+
+                    index = index + 1
+                end" \
+    "a goal's chain is scattered through the list when it is sorted"
+
+mutate "UI/List.lua" \
+    "                if a.pinned ~= b.pinned then
+                    return a.pinned
+                end" \
+    "                if false then
+                    return a.pinned
+                end" \
+    "a section heading is alphabetised against the rows it introduces"
+
+mutate "UI/List.lua" \
+    "                if a.key == b.key then
+                    return a.order < b.order
+                end" \
+    "                if false then
+                    return a.order < b.order
+                end" \
+    "two rows that read the same swap places on every refresh"
+
+mutate "UI/List.lua" \
+    "            if hit then
+                for _, entry in ipairs(block) do
+                    table.insert(kept, entry)
+                end
+            end" \
+    "            if hit then
+                for _, entry in ipairs(block) do
+                    if self:Matches(entry) then
+                        table.insert(kept, entry)
+                    end
+                end
+            end" \
+    "filtering shows a chain step without the goal it belongs to"
+
+mutate "UI/List.lua" \
+    "    if parent then
+        UI.listPanels[parent] = list
+    end" \
+    "    if false then
+        UI.listPanels[parent] = list
+    end" \
+    "the window forgets which tabs have a list at all"
+
+mutate "Core.lua" \
+    "    if seconds < 60 then
+        return \"just now\"
+    end" \
+    "    if seconds < 0 then
+        return \"just now\"
+    end" \
+    "a clock that moved backwards prints a negative age"
+
+mutate "Core.lua" \
+    "    return days .. (days == 1 and \" day ago\" or \" days ago\")" \
+    "    return days .. \" days ago\"" \
+    "one day ago is reported in the plural"
+
+mutate "UI.lua" \
+    "    if window and window:IsShown() and window.answer then
+        window.answer:SetText(CN.Body(text))" \
+    "    if false then
+        window.answer:SetText(CN.Body(text))" \
+    "a button answers into chat behind the window that was clicked"
+
+mutate "UI.lua" \
+    "                    elseif step.state == \"BLOCKED\" then
+                        marker = \"! \"" \
+    "                    elseif false then
+                        marker = \"! \"" \
+    "a blocked step is marked by its colour and nothing else"
+
+mutate "Modules/Welcome.lua" \
+    "    if UISpecialFrames then
+        table.insert(UISpecialFrames, \"CompletionNavigatorWelcome\")
+    end" \
+    "    if false then
+        table.insert(UISpecialFrames, \"CompletionNavigatorWelcome\")
+    end" \
+    "escape does not close the one frame every player is shown"
+
+# NOT `if held then` in place of `if held ~= nil then`: nothing stores `false`
+# in this cache any more, and in Lua zero is truthy -- so that mutation is
+# behaviourally identical and survived for the honest reason that it is not a
+# defect. Same shape as the math.fmod note above. What IS a defect is the
+# cache never being written, which the derived-count assertion catches.
+mutate "Modules/Travel.lua" \
+    "    costCache[key]  = cost
+    costCacheCount  = costCacheCount + 1" \
+    "    costCacheCount  = costCacheCount + 1" \
+    "a travel cost is derived again on every single read"
+
+mutate "UI/List.lua" \
+    "        text = text:gsub(\"|c%x%x%x%x%x%x%x%x\", \"\")" \
+    "        text = text" \
+    "the list sorts on the colour in front of a name instead of the name"
+
+mutate "UI/List.lua" \
+    "        text = text:gsub(\"^[%s%p%d]+\", \"\")" \
+    "        text = text" \
+    "a route number sorts ahead of the name it belongs to"
+
+mutate "UI.lua" \
+    "    if leavingList and not (CN.Settings() and CN.Settings().keepFilter) then
+        leavingList:SetFilter(\"\")
+    end" \
+    "    if false then
+        leavingList:SetFilter(\"\")
+    end" \
+    "the tab you leave keeps a filter its own box no longer shows"
+
+mutate "UI.lua" \
+    "        local held = UI.persistedFilter
+
+        window.search:SetText(\"\")
+        window.search:ClearFocus()
+
+        UI.persistedFilter = held" \
+    "        window.search:SetText(\"\")
+        window.search:ClearFocus()" \
+    "visiting a tab with no list throws away the filter you asked to keep"
+
+mutate "UI.lua" \
+    "                local ok, err = pcall(work)" \
+    "                local ok, err = true, work()" \
+    "a scan that throws disables its own button for the session"
+
+mutate "UI.lua" \
+    "    Stored(\"Quests known\", \"quests\", \"scanquests\"," \
+    "    Stored(\"Quests known\", \"quests\", \"discoveractive\"," \
+    "a source row runs a scan that cannot clear its own staleness"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -50824,6 +52241,38 @@ local function Frame()
             f:Hide()
         end
     end
+    -- AN EDIT BOX THAT LOSES FOCUS LOUDLY, LIKE THE CLIENT'S.
+    --
+    -- `SetText`/`GetText` and `ClearFocus` all fell through to the universal
+    -- stub, which accepts anything and remembers nothing -- so the window's
+    -- filter box could not be read by any test, and `ClearFocus` fired no
+    -- `OnEditFocusLost`. In the client it does, and 0.58.0 shipped a defect
+    -- that lived entirely inside that handler: clearing the box on a tab with
+    -- no list destroyed the filter the player had asked to keep.
+    --
+    -- Eleventh entry in the list of defects a stub simpler than the real
+    -- thing made invisible.
+    function f:SetText(value) f.text = value end
+    function f:GetText() return f.text or "" end
+
+    function f:SetFocus() f.focused = true end
+
+    function f:ClearFocus()
+        if f.focused then
+            f.focused = false
+
+            local handler = scripts.OnEditFocusLost
+
+            if handler then
+                handler(f)
+            end
+        end
+    end
+
+    function f:Enable() f.enabled = true end
+    function f:Disable() f.enabled = false end
+    function f:IsEnabled() return rawget(f, "enabled") ~= false end
+
     function f:CreateFontString()
         local fs = Frame()
 
@@ -55096,7 +56545,17 @@ end
 print("  pinned title appears as a candidate = " .. tostring(afterGoal == 1))
 
 assert(afterGoal == 1, "a pinned goal must become exactly one candidate, got " .. afterGoal)
-assert(goalObjective.isGoal, "a goal candidate must be flagged as one")
+-- THROUGH THE PATH THE GAME TAKES, NOT THROUGH A FLAG.
+--
+-- This asserted `goalObjective.isGoal`, and that flag was the ONLY reader of
+-- it in the project: three writers in Goals.lua and one assertion here, with
+-- nothing in the shipped tree ever looking at it. So the test passed by
+-- checking a field that existed to be checked, while the thing a player sees
+-- -- the sentence on the row saying why it is there -- went unasserted.
+local goalReasons = table.concat(CN.Reasons(goalObjective), " | ")
+
+assert(goalReasons:find("one of your goals", 1, true),
+    "a goal candidate must SAY it is one, got: " .. goalReasons)
 
 -- Precedence, stated rather than assumed.
 --
@@ -58301,6 +59760,226 @@ print("\nOne palette, and nothing outside it:")
     end
 
     print("  " .. #roles .. " roles, none of them mistakable for another")
+
+    ------------------------------------------------------------
+    -- AND THE OTHER SHAPE OF A COLOUR IS COVERED TOO.
+    --
+    -- The palette scan above reads `|cffRRGGBB` codes, which is how a colour
+    -- reaches CHAT. Everything drawn on a FRAME takes three floats instead --
+    -- `AddLine(text, r, g, b)`, `SetTextColor(r, g, b)` -- and eleven of those
+    -- were still carrying pre-palette numbers that the hex scan could never
+    -- see: a tooltip header at `0.2, 1.0, 0.6` that was a green the addon had
+    -- otherwise stopped using, and eight greys at `0.6, 0.6, 0.6`.
+    --
+    -- `CN.Rgb(role)` returns the palette's own three floats, so the fix is
+    -- always available and this can be a ban rather than a count.
+    --
+    -- DELIBERATELY NOT INCLUDED: `SetColorTexture`. Those are the window's
+    -- chrome -- a divider, a title bar, a close-button highlight -- and they
+    -- are near-black surfaces with alpha, not roles. Forcing them into CN.C
+    -- would add two greys within 0.05 of DISABLED and break the check above,
+    -- which is the palette telling us they are a different kind of thing.
+    ------------------------------------------------------------
+    local textColorCalls = {
+        "AddLine", "AddDoubleLine", "SetTextColor", "SetVertexColor",
+    }
+
+    local floats = {}
+
+    local function ScanFloats(path)
+        local handle = io.open(path, "r")
+
+        if not handle then
+            return
+        end
+
+        local number = 0
+
+        for chunk in handle:read("*a"):gmatch("[^\n]*\n?") do
+            number = number + 1
+
+            -- Comments describe the numbers as often as they use them.
+            local code = chunk:gsub("%-%-.*$", "")
+
+            for _, call in ipairs(textColorCalls) do
+                if code:find(call, 1, true)
+                    and code:match("[%d%.]+%s*,%s*[%d%.]+%s*,%s*[%d%.]+")
+                    and code:match("0%.%d") then
+
+                    table.insert(floats,
+                        path:gsub("^.*/", "") .. ":" .. number .. " " .. call)
+                end
+            end
+        end
+
+        handle:close()
+    end
+
+    local floatManifest = io.open(root .. "/CompletionNavigator.toc", "r")
+
+    assert(floatManifest, "the .toc must be readable")
+
+    for entry in floatManifest:read("*a"):gmatch("[^\r\n]+") do
+        if entry:match("%.lua$") and not entry:match("^#") then
+            ScanFloats(root .. "/" .. (entry:gsub("\\", "/")))
+        end
+    end
+
+    floatManifest:close()
+
+    for _, offender in ipairs(floats) do
+        print("  RAW TRIPLE: " .. offender)
+    end
+
+    assert(#floats == 0,
+        #floats .. " colour(s) are written as raw floats. Use CN.Rgb(\"ROLE\").")
+
+    print("  no colour reaches a frame as a number the palette does not own")
+end)()
+
+print("\nOne identity per answer:")
+
+;(function()
+    ------------------------------------------------------------
+    -- `CN.Print` STAMPS THE ADDON'S NAME. A LOOP MUST NOT.
+    --
+    -- `CN.Print` prefixes every line with "Completion Navigator:" and
+    -- `CN.PrintLine` prefixes a continuation instead. Eleven answers printed
+    -- their ROWS with `CN.Print`, so `/cn order` on a thirty-row list said the
+    -- addon's name thirty-one times and the eye had nothing to anchor on --
+    -- the headline looked exactly like every row under it.
+    --
+    -- The rule is structural, so it is checked structurally: one identity per
+    -- answer means no `CN.Print(` inside a `for`, `while` or `repeat`.
+    --
+    -- This is a block tracker rather than a pattern, because a pattern cannot
+    -- tell a loop body from the line after `end`. Strings and comments are
+    -- stripped first: this file is full of both, and either can carry the
+    -- word "end".
+    ------------------------------------------------------------
+    local function Strip(line)
+        local out, index, length = {}, 1, #line
+
+        while index <= length do
+            local char = line:sub(index, index)
+
+            if char == "-" and line:sub(index, index + 1) == "--" then
+                break
+            end
+
+            if char == "\"" or char == "'" then
+                local quote = char
+
+                index = index + 1
+
+                while index <= length do
+                    local inner = line:sub(index, index)
+
+                    if inner == "\\" then
+                        index = index + 2
+                    elseif inner == quote then
+                        index = index + 1
+                        break
+                    else
+                        index = index + 1
+                    end
+                end
+
+                table.insert(out, "\"\"")
+            else
+                table.insert(out, char)
+
+                index = index + 1
+            end
+        end
+
+        return table.concat(out)
+    end
+
+    local shouting = {}
+
+    local function ScanPrints(path)
+        local handle = io.open(path, "r")
+
+        if not handle then
+            return
+        end
+
+        -- Each entry is `true` for a loop and `false` for anything else that
+        -- closes on `end`, so "am I in a loop" is "is any entry true".
+        local blocks, number = {}, 0
+        local pendingLoop, pendingElseif = false, false
+
+        for chunk in handle:read("*a"):gmatch("[^\n]*\n?") do
+            number = number + 1
+
+            local code = Strip(chunk)
+
+            if code:find("CN.Print(", 1, true) then
+                for _, isLoop in ipairs(blocks) do
+                    if isLoop then
+                        table.insert(shouting,
+                            path:gsub("^.*/", "") .. ":" .. number)
+                        break
+                    end
+                end
+            end
+
+            for word in code:gmatch("[A-Za-z_][A-Za-z0-9_]*") do
+                if word == "for" or word == "while" then
+                    pendingLoop = true
+                elseif word == "do" then
+                    table.insert(blocks, pendingLoop)
+                    pendingLoop = false
+                elseif word == "repeat" then
+                    table.insert(blocks, true)
+                elseif word == "function" then
+                    table.insert(blocks, false)
+                elseif word == "elseif" then
+                    -- Reuses the frame `if` opened, so its `then` opens none.
+                    pendingElseif = true
+                elseif word == "then" then
+                    if pendingElseif then
+                        pendingElseif = false
+                    else
+                        table.insert(blocks, false)
+                    end
+                elseif word == "end" or word == "until" then
+                    table.remove(blocks)
+                end
+            end
+        end
+
+        handle:close()
+    end
+
+    local printManifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(printManifest, "the .toc must be readable")
+
+    local scanned = 0
+
+    for entry in printManifest:read("*a"):gmatch("[^\r\n]+") do
+        if entry:match("%.lua$") and not entry:match("^#") then
+            scanned = scanned + 1
+
+            ScanPrints(ROOT .. "/" .. (entry:gsub("\\", "/")))
+        end
+    end
+
+    printManifest:close()
+
+    for _, offender in ipairs(shouting) do
+        print("  REPEATED IDENTITY: " .. offender)
+    end
+
+    assert(#shouting == 0,
+        #shouting .. " loop(s) print the addon's name once per row. The rows "
+        .. "are continuations: use CN.PrintLine.")
+
+    assert(scanned > 20, "the scan must have read the tree, saw " .. scanned)
+
+    print("  " .. scanned .. " files, and no loop repeats the addon's name")
 end)()
 
 print("\nLocalization:")
@@ -59446,6 +61125,646 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
+print("\nWhat 0.58.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- ROWS THAT BELONG TO EACH OTHER SURVIVE A SORT AND A FILTER.
+    --
+    -- The three-mode sort treated every row as a peer, so "A to Z" on the
+    -- Goals tab interleaved every chain step of every goal into one
+    -- alphabetical column with the headings scattered through it. Filtering
+    -- was the same defect in the other direction: a match on a chain step
+    -- showed the step and dropped the goal it belonged to.
+    ------------------------------------------------------------
+    local list = CN.UI.CreateList(UIParent)
+
+    assert(list and list.SetEntries, "the list widget must build")
+
+    local entries = {
+        { text = "Zebra goal",  group = "g:1" },
+        { text = "  step one",  group = "g:1" },
+        { text = "  step two",  group = "g:1" },
+        { text = "Apple goal",  group = "g:2" },
+        { text = "  a step",    group = "g:2" },
+    }
+
+    -- As ranked: untouched, which is the default and the product.
+    local asRanked = list:ApplySort(entries)
+
+    assert(asRanked[1].text == "Zebra goal" and asRanked[4].text == "Apple goal",
+        "the default order must be the order the tab produced")
+
+    -- A to Z: the BLOCKS move, the steps inside one do not.
+    list:CycleSort()
+
+    assert(list:SortMode() == "name", "the second mode is A to Z")
+
+    local sorted = list:ApplySort(entries)
+
+    assert(sorted[1].text == "Apple goal",
+        "sorting must move whole goals, got " .. sorted[1].text)
+
+    assert(sorted[2].text == "  a step",
+        "and its own steps must follow it, got " .. sorted[2].text)
+
+    assert(sorted[3].text == "Zebra goal",
+        "before the next goal begins, got " .. sorted[3].text)
+
+    assert(sorted[4].text == "  step one" and sorted[5].text == "  step two",
+        "and a chain's steps keep the order you do them in")
+
+    -- AND FILTERING KEEPS THE PARENT.
+    list:SetFilter("step two")
+
+    local kept = list:Filter(entries)
+
+    assert(#kept == 3, "matching one step must keep its whole goal, got " .. #kept)
+
+    assert(kept[1].text == "Zebra goal",
+        "and the goal must be the first row of it, got " .. kept[1].text)
+
+    local missed = list:Filter({ { text = "nothing like it" } })
+
+    assert(#missed == 0, "a filter that matches nothing still matches nothing")
+
+    list:SetFilter("")
+
+    print("  a goal and its chain sort and filter as one thing")
+
+    ------------------------------------------------------------
+    -- A SECTION IS NOT A GROUP, AND THE DIFFERENCE IS THE POINT.
+    --
+    -- The Journey tab draws "Closest to finished" and then twelve
+    -- achievements. Those twelve are peers -- alphabetising them is exactly
+    -- what somebody asks for -- so freezing them the way a goal's chain is
+    -- frozen would take the sort away where it is most useful. What must not
+    -- move is the heading.
+    ------------------------------------------------------------
+    local sectioned = {
+        { text = "loose row" },
+        { text = "Closest to finished", section = "c", sectionHeader = true },
+        { text = "  Zebra",             section = "c" },
+        { text = "  Apple",             section = "c" },
+    }
+
+    local out = list:ApplySort(sectioned)
+
+    assert(out[1].text == "loose row",
+        "a row outside every section keeps its own run, got " .. out[1].text)
+
+    assert(out[2].text == "Closest to finished",
+        "the heading stays at the top of its section, got " .. out[2].text)
+
+    assert(out[3].text == "  Apple" and out[4].text == "  Zebra",
+        "and the rows under it DO sort, among themselves")
+
+    print("  a section's heading is pinned and its rows still sort")
+
+    ------------------------------------------------------------
+    -- AND THE SORT MUST NOT TWITCH.
+    --
+    -- `table.sort` is not stable, and two blocks whose first rows read the
+    -- same would swap places on every refresh -- on a tab that redraws every
+    -- two seconds, that is a list that will not sit still.
+    ------------------------------------------------------------
+    -- ENOUGH OF THEM THAT AN UNSTABLE SORT ACTUALLY REORDERS.
+    --
+    -- Two equal elements is not a test: `table.sort` leaves a pair of them
+    -- alone whatever the comparator says, so this passed with the tie-break
+    -- removed. Lua's quicksort reorders equal keys once there are enough to
+    -- partition, and twenty is comfortably enough.
+    local twins = {}
+
+    for index = 1, 20 do
+        table.insert(twins, { text = "same", group = "g" .. index })
+        table.insert(twins, { text = "  child " .. index, group = "g" .. index })
+    end
+
+    local once  = list:ApplySort(twins)
+    local twice = list:ApplySort(twins)
+
+    for index = 1, #once do
+        assert(once[index].text == twice[index].text,
+            "sorting the same list twice must give the same order")
+    end
+
+    -- The tie-break is the ONLY thing that can produce this: every parent
+    -- reads "same", so without it the children come back in whatever order
+    -- the partition happened to leave.
+    for index = 1, 20 do
+        assert(once[(index * 2) - 1].text == "same",
+            "every odd row is a parent")
+
+        assert(once[index * 2].text == "  child " .. index,
+            "and the tie must break on the order the tab produced -- row "
+            .. (index * 2) .. " is " .. once[index * 2].text)
+    end
+
+    print("  two rows that read the same do not swap on every refresh")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- SORTING MUST SORT ON THE WORDS, NOT ON THE COLOUR IN FRONT OF THEM.
+    --
+    -- `entry.text` is the RENDERED string, and `|` plus eight hex digits sort
+    -- against real letters. So "A to Z" on the Goals tab put every finished
+    -- goal (muted, `8a...`) above every unfinished one (accented, `ff...`)
+    -- whatever they were called, and on the Zone tab -- where every row
+    -- begins with its route number -- clicking the header did nothing at all.
+    ------------------------------------------------------------
+    local list = CN.UI.CreateList(UIParent)
+
+    local coloured = {
+        { text = CN.Muted("Zebra") },
+        { text = CN.Accent("Aardvark") },
+        { text = "|cff8a8f96 3.|r Mole" },
+    }
+
+    list:CycleSort()
+
+    assert(list:SortMode() == "name", "the second mode is A to Z")
+
+    local sorted = list:ApplySort(coloured)
+
+    assert(sorted[1].text:find("Aardvark", 1, true),
+        "A must come first whatever colour it is wearing, got "
+        .. sorted[1].text)
+
+    assert(sorted[2].text:find("Mole", 1, true),
+        "and a leading route number must not sort ahead of the name, got "
+        .. sorted[2].text)
+
+    assert(sorted[3].text:find("Zebra", 1, true),
+        "got " .. sorted[3].text)
+
+    -- AND THE FILTER SEARCHES THE SAME STRIPPED TEXT.
+    --
+    -- It shared the key, so typing "cff" matched every row in the addon.
+    list:SetFilter("cff")
+
+    assert(#list:Filter(coloured) == 0,
+        "a colour code is not something a player is searching for")
+
+    list:SetFilter("aardvark")
+
+    assert(#list:Filter(coloured) == 1,
+        "but the name inside it is")
+
+    list:SetFilter("")
+
+    print("  sorting and filtering read the words, not the markup")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- LEAVING A FILTERED TAB MUST CLEAR THE LIST, NOT ONLY THE BOX.
+    --
+    -- `UI.SetFilter` resolves through `UI.tabs[UI.selectedTab]`, and
+    -- `SelectTab` advanced that index BEFORE emptying the box -- so nothing
+    -- in the addon could reach the list being left. Emptying the widget
+    -- cleared the widget; the list behind it stayed filtered, which is the
+    -- exact state the `keepFilter` help text warns about.
+    ------------------------------------------------------------
+    CN.UI.Show()
+
+    local uiSettings = CN.Settings()
+
+    local heldKeep = uiSettings.keepFilter
+
+    uiSettings.keepFilter = false
+
+    -- Find two tabs that both have a list.
+    local first, second
+
+    for index, tab in ipairs(CN.UI.tabs) do
+        CN.UI.SelectTab(index)
+
+        if tab.panel and CN.UI.listPanels[tab.panel] then
+            if not first then
+                first = index
+            elseif not second then
+                second = index
+                break
+            end
+        end
+    end
+
+    assert(first and second, "two tabs with lists are needed for this")
+
+    CN.UI.SelectTab(first)
+
+    local leftList = CN.UI.listPanels[CN.UI.tabs[first].panel]
+
+    leftList:SetFilter("something nothing matches")
+
+    assert(leftList:GetFilter(), "the filter must have taken")
+
+    CN.UI.SelectTab(second)
+
+    assert(leftList:GetFilter() == nil,
+        "leaving a tab must clear ITS list, not just the box")
+
+    uiSettings.keepFilter = heldKeep
+
+    print("  the filter on the tab you leave is actually cleared")
+
+    ------------------------------------------------------------
+    -- AND GOING SOMEWHERE WITHOUT A LIST MUST NOT DESTROY WHAT IS KEPT.
+    --
+    -- `ClearFocus` fires `OnEditFocusLost`, which with `keepFilter` on writes
+    -- the now-empty box over `UI.persistedFilter`. So typing a filter and
+    -- then clicking the one tab with no list threw the remembered term away.
+    ------------------------------------------------------------
+    uiSettings.keepFilter = true
+
+    CN.UI.persistedFilter = "mount"
+
+    local listless
+
+    for index, tab in ipairs(CN.UI.tabs) do
+        CN.UI.SelectTab(index)
+
+        if tab.panel and not CN.UI.listPanels[tab.panel] then
+            listless = index
+            break
+        end
+    end
+
+    assert(listless, "one tab has no list; that is the case being tested")
+
+    -- FOCUSED FIRST, because the defect lives inside `OnEditFocusLost` and a
+    -- box that never had focus never loses it. This is the state a player is
+    -- in the moment they finish typing a filter: a Button click does not take
+    -- focus off a WoW EditBox, so they are still in the box when they reach
+    -- for a tab.
+    CN.UI.Frame().search:SetFocus()
+    CN.UI.Frame().search:SetText("mount")
+
+    CN.UI.SelectTab(listless)
+
+    assert(CN.UI.persistedFilter == "mount",
+        "a tab with no list must not eat the filter the player asked to "
+        .. "keep, got " .. tostring(CN.UI.persistedFilter))
+
+    uiSettings.keepFilter = heldKeep
+    CN.UI.persistedFilter = nil
+
+    print("  and a listless tab does not eat the filter you asked to keep")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCAN THAT THROWS MUST NOT WEDGE THE BUTTON THAT RAN IT.
+    --
+    -- The Collections buttons disable themselves, run the scan, and re-enable
+    -- afterwards. The work ran unprotected, so a scan that threw left the
+    -- button disabled and reading "Working..." until the player reloaded --
+    -- no retry, and nothing on screen saying why.
+    ------------------------------------------------------------
+    local source = assert(io.open(ROOT .. "/UI.lua", "r"))
+
+    local text = source:read("*a")
+
+    source:close()
+
+    local body = text:match("local function RunScans%(button, label, work%).-\n        end")
+
+    assert(body, "RunScans must still be there to check")
+
+    assert(body:find("pcall(work)", 1, true),
+        "the scan must run protected, or a failure disables its own button "
+        .. "for the rest of the session")
+
+    assert(body:find("button:SetEnabled(true)", 1, true),
+        "and the button comes back either way")
+
+    print("  a scan that throws gives its button back")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COST OF ZERO IS AN ANSWER, NOT A MISS.
+    --
+    -- `Travel.CostFor` reads its cache with `if held ~= nil`. A truth test
+    -- reads identically and is wrong for exactly one value: zero, which is
+    -- what standing on top of the destination costs -- and standing on top of
+    -- the destination is the single most common case in the game, because it
+    -- is where the addon has just navigated you.
+    --
+    -- Asserted by counting how many times the estimate is DERIVED, because
+    -- the returned number is the same either way. That is the whole point:
+    -- the defect is invisible in the answer.
+    ------------------------------------------------------------
+    local travel = CN:GetModule("Travel")
+
+    assert(travel and travel.CostFor, "Travel must be loaded")
+
+    travel.ForgetCosts()
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    assert(mapID and x and y, "the fixture player must have a position")
+
+    local real = travel.EstimateSeconds
+
+    local derived = 0
+
+    travel.EstimateSeconds = function(...)
+        derived = derived + 1
+
+        -- Zero seconds away: the destination is where the player is.
+        return 0
+    end
+
+    local first = travel.CostFor(mapID, x, y)
+
+    assert(first == 0, "standing on it must cost nothing, got " .. tostring(first))
+
+    assert(derived == 1, "the first read derives it, got " .. derived)
+
+    local second = travel.CostFor(mapID, x, y)
+
+    assert(second == 0, "and it still costs nothing, got " .. tostring(second))
+
+    assert(derived == 1,
+        "but a cost of zero must be SERVED from the cache, not re-derived -- "
+        .. "it was derived " .. derived .. " times")
+
+    travel.EstimateSeconds = real
+
+    travel.ForgetCosts()
+
+    print("  a travel cost of zero is cached like any other number")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- HOW OLD A STORED NUMBER IS, IN WORDS.
+    --
+    -- `Session.FormatDuration` renders four days as "97h 12m", which is the
+    -- right shape for "this will take 40m" and the wrong one for "this was
+    -- read four days ago". Everything the addon keeps between sessions is
+    -- measured in days.
+    ------------------------------------------------------------
+    local now = 1000000
+
+    assert(CN.Ago(nil) == nil, "no stamp is not an age")
+    assert(CN.Ago(0) == nil, "and neither is a zero stamp")
+
+    assert(CN.Ago(now - 5, now) == "just now", "under a minute is just now")
+    assert(CN.Ago(now - 600, now) == "10m ago", "got " .. tostring(CN.Ago(now - 600, now)))
+    assert(CN.Ago(now - 7200, now) == "2h ago", "got " .. tostring(CN.Ago(now - 7200, now)))
+    assert(CN.Ago(now - 86400, now) == "1 day ago",
+        "one day is singular, got " .. tostring(CN.Ago(now - 86400, now)))
+    assert(CN.Ago(now - (4 * 86400), now) == "4 days ago",
+        "got " .. tostring(CN.Ago(now - (4 * 86400), now)))
+
+    -- A CLOCK THAT MOVED BACKWARDS MUST NOT PRINT A NEGATIVE AGE.
+    --
+    -- A client restart across a timezone change is enough to produce one, and
+    -- "-3h ago" is the kind of thing a player screenshots.
+    assert(CN.Ago(now + 500, now) == "just now",
+        "a stamp in the future reads as now, got "
+        .. tostring(CN.Ago(now + 500, now)))
+
+    print("  a stored number can say how old it is without lying")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY SCAN THE SCANS TAB OFFERS MUST BE A COMMAND THAT EXISTS.
+    --
+    -- The tab is a list of sources and each row runs a slash command on
+    -- click. A row pointing at a command that was renamed is a button that
+    -- does nothing, and nothing else in the build would catch it.
+    ------------------------------------------------------------
+    local sources = CN.UI.Sources()
+
+    assert(#sources > 4, "the source list must not be empty, got " .. #sources)
+
+    local live, stored = 0, 0
+
+    for _, source in ipairs(sources) do
+        assert(source.label and source.label ~= "", "every source is named")
+        assert(source.detail and source.detail ~= "",
+            source.label .. " must say where its number comes from")
+
+        if source.kind == "live" then
+            live = live + 1
+
+            assert(source.command == nil,
+                "a live source is read from the client, so it has no scan")
+
+            assert(source.at == nil,
+                "and it has no age, because it was read just now")
+        else
+            stored = stored + 1
+
+            assert(CN.commands[source.command],
+                source.label .. " points at /cn " .. tostring(source.command)
+                .. ", which is not a command")
+        end
+    end
+
+    assert(live > 0 and stored > 0,
+        "both kinds must be present, got " .. live .. " live and "
+        .. stored .. " stored")
+
+    print("  " .. #sources .. " sources, and every scan they offer exists")
+
+    ------------------------------------------------------------
+    -- AND EACH ONE MUST CLEAR ITS OWN STALENESS.
+    --
+    -- Existing is not enough. A row's age is `steps[<module>]`, and the row
+    -- runs a command -- so the command has to be one that stamps THAT key.
+    -- `/cn discoveractive` reads the quest log and stamps nothing, and while
+    -- it was wired here the "Quests known" row did real work on every click
+    -- and stayed marked stale for ever, while "refresh what is stale" could
+    -- never reach zero.
+    --
+    -- Asserted by clearing the stamp, running the row's command, and looking
+    -- at the stamp -- which is the loop a player is actually in.
+    local stamps = (CN:GetModule("Setup")).Steps()
+
+    for _, source in ipairs(sources) do
+        if source.command then
+            -- Sources carry the age, not the key it came from, so recover it
+            -- the same way `UI.Sources` stored it: the row is stale iff its
+            -- stamp is old, and after the scan it must not be.
+            for key in pairs(stamps) do
+                stamps[key] = nil
+            end
+
+            CN.HandleSlashCommand(source.command)
+
+            local fresh = false
+
+            for _, at in pairs(stamps) do
+                if at and at > 0 then
+                    fresh = true
+                    break
+                end
+            end
+
+            assert(fresh,
+                source.label .. " runs /cn " .. source.command
+                .. ", which stamps nothing -- so the row can never stop "
+                .. "being stale and clicking it does the same thing for ever")
+        end
+    end
+
+    print("  and every one of them clears its own staleness when it runs")
+
+    ------------------------------------------------------------
+    -- AND "REFRESH WHAT IS STALE" MUST NOT RUN WHAT IS FRESH.
+    ------------------------------------------------------------
+    local setupModule = CN:GetModule("Setup")
+
+    assert(setupModule and setupModule.Steps,
+        "Setup must expose its per-step stamps")
+
+    local steps = setupModule.Steps()
+
+    -- Everything read one second ago.
+    for _, source in ipairs(sources) do
+        if source.command then
+            steps[string.lower(tostring(source.label))] = time()
+        end
+    end
+
+    -- The stamps are keyed on the MODULE, which is what Sources reads, so
+    -- stamp those too rather than assuming the label matches.
+    for _, key in ipairs({ "quests", "reputations", "mounts", "pets", "toys",
+                           "titles", "appearances", "achievements",
+                           "currencies", "professions" }) do
+        steps[key] = time()
+    end
+
+    assert(CN.UI.RefreshStaleSources() == 0,
+        "nothing read a second ago is stale")
+
+    -- And now everything is a week old.
+    for key in pairs(steps) do
+        steps[key] = time() - (7 * 86400)
+    end
+
+    assert(CN.UI.RefreshStaleSources() > 0,
+        "a source read a week ago must be refreshed")
+
+    print("  refreshing what is stale skips what is not")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CONTROL THAT CANNOT ACT MUST NOT LOOK LIKE IT CAN.
+    --
+    -- The filter box is one per window and applies to `panel.list`. Two tabs
+    -- draw controls rather than a list, so every keystroke typed into the box
+    -- on those tabs did nothing -- while the box stayed white, focusable and
+    -- captioned "filter".
+    ------------------------------------------------------------
+    CN.UI.Show()
+
+    local withList, withoutList
+
+    for index, tab in ipairs(CN.UI.tabs) do
+        CN.UI.SelectTab(index)
+
+        local usable = CN.UI.UpdateFilterAvailability(tab)
+
+        if usable then
+            withList = withList or tab.name
+        else
+            withoutList = withoutList or tab.name
+        end
+    end
+
+    assert(withList, "at least one tab must have a filterable list")
+
+    assert(withoutList,
+        "and the Settings tab has no list, so the box must go dead on it")
+
+    print("  the filter box goes dead on the tabs it cannot reach ("
+        .. withoutList .. ")")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A BUTTON'S ANSWER GOES WHERE THE BUTTON IS.
+    --
+    -- Eleven buttons in the window answered into the chat frame, behind the
+    -- window the player was looking at.
+    ------------------------------------------------------------
+    CN.UI.Show()
+
+    local answered = CN.UI.Answer("the scan finished")
+
+    assert(answered,
+        "with the window open, the answer belongs in the window")
+
+    CN.UI.Hide()
+
+    assert(CN.UI.Answer("the scan finished") == false,
+        "and with it closed, it belongs in chat -- the same handler runs "
+        .. "from a slash command")
+
+    print("  a button answers into the window, and a command into chat")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- BLOCKED IS NOT CARRIED BY RED ALONE.
+    --
+    -- Done was "x", next was ">", and blocked -- the one state that tells a
+    -- player to stop reading down the chain -- had only its colour. This
+    -- addon ships a colourblind mode for the arrow and states the rule in
+    -- Design.lua; the Goals tab was the exception.
+    ------------------------------------------------------------
+    local source = assert(io.open(ROOT .. "/UI.lua", "r"))
+
+    local text = source:read("*a")
+
+    source:close()
+
+    assert(text:find('step.state == "BLOCKED"', 1, true),
+        "the Goals tab must branch on BLOCKED")
+
+    assert(text:find('marker = "! "', 1, true),
+        "and give it a glyph, not only a colour")
+
+    print("  a blocked step carries a marker as well as a colour")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ESCAPE CLOSES EVERY FRAME THIS ADDON PUTS ON SCREEN.
+    --
+    -- Three were on `UISpecialFrames` and one was not: the welcome screen --
+    -- the only frame most players ever see, shown unasked on first login.
+    ------------------------------------------------------------
+    local welcome = CN:GetModule("Welcome")
+
+    assert(welcome and welcome.Build, "the welcome module must be loaded")
+
+    welcome.Build()
+
+    local listed = false
+
+    for _, name in ipairs(UISpecialFrames or {}) do
+        if name == "CompletionNavigatorWelcome" then
+            listed = true
+            break
+        end
+    end
+
+    assert(listed, "the welcome screen must close on Escape like anything else")
+
+    print("  Escape closes the welcome screen too")
+end)()
+
+
 print("\nWhat 0.57.0 changed, asserted through the paths the game takes:")
 
 ;(function()
@@ -59482,7 +61801,21 @@ print("\nWhat 0.57.0 changed, asserted through the paths the game takes:")
 
     assert(Row(), "the fixture row must be in the list")
 
-    assert(not Row().isGoal, "and must not start out as a goal")
+    -- ASSERTED THROUGH WHAT A PLAYER SEES, not through a flag kept for the
+    -- test's benefit. `objective.isGoal` was written three times in
+    -- Goals.lua and read only here; it is gone, and the row's own sentences
+    -- are the thing the window, the tooltip and `/cn why` all read.
+    local function SaysGoal()
+        for _, reason in ipairs(CN.Reasons(Row()) or {}) do
+            if reason:find("one of your goals", 1, true) then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    assert(not SaysGoal(), "and must not start out as a goal")
 
     local generation = CN.decoratorGeneration
 
@@ -59500,7 +61833,7 @@ print("\nWhat 0.57.0 changed, asserted through the paths the game takes:")
 
     CN.CollectCandidates()
 
-    assert(Row().isGoal,
+    assert(SaysGoal(),
         "pinning must reach a row the provider has not rebuilt")
 
     assert((Row().userPreference or 0) >= pinned.goalPreference,
@@ -59524,7 +61857,7 @@ print("\nWhat 0.57.0 changed, asserted through the paths the game takes:")
 
     CN.CollectCandidates()
 
-    assert(not Row().isGoal,
+    assert(not SaysGoal(),
         "unpinning must reach the same row, not wait for a rebuild")
 
     assert((Row().userPreference or 0) == 0,
@@ -59566,7 +61899,12 @@ end)()
 
     local held = CN.rankingGeneration
 
+    -- 0.58.0 added a route cache, and a cached call returns before it reaches
+    -- the hub comparison at all -- so a loop of identical calls proves only
+    -- that the cache works. Forget the cache each time: the route is genuinely
+    -- recomputed, lands on the same hubs, and must STILL not re-rank.
     for _ = 1, 5 do
+        CN.ForgetRoutes()
         CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
     end
 
@@ -59862,6 +62200,16 @@ end)()
         return realMount(itemID)
     end
 
+    -- An item that IS a mount is remembered; an item that is neither a mount
+    -- nor a pet is not, because a cold journal answers "neither" to
+    -- everything and remembering that hides every collectible in the bags
+    -- for the session.
+    CN_TEST_BAGS[0] = CN_TEST_BAGS[0] or {}
+
+    table.insert(CN_TEST_BAGS[0], { itemID = 800, stackCount = 1 })
+
+    inventory.Forget()
+
     inventory.UncollectedItems()
 
     local firstQuestPass = lookups
@@ -59871,9 +62219,42 @@ end)()
 
     C_MountJournal.GetMountFromItem = realMount
 
-    assert(lookups == firstQuestPass,
-        "asking what the same items are three times must ask the client "
-        .. "once: " .. firstQuestPass .. " became " .. lookups)
+    assert(lookups < firstQuestPass * 3,
+        "asking what the same items are three times must not ask the client "
+        .. "three times: " .. firstQuestPass .. " became " .. lookups)
+
+    -- AND A COLD JOURNAL'S "NO" IS NOT REMEMBERED.
+    --
+    -- Both journals answer nil until they are populated, which at login is
+    -- after the first bag scan. Remembering that made every caged pet and
+    -- mount item invisible for the session, recoverable only by a reload.
+    local coldAsked = 0
+
+    local realCold = C_MountJournal.GetMountFromItem
+
+    C_MountJournal.GetMountFromItem = function(itemID)
+        coldAsked = coldAsked + 1
+
+        return nil
+    end
+
+    inventory.Forget()
+    inventory.UncollectedItems()
+
+    local firstCold = coldAsked
+
+    inventory.Forget()
+    inventory.UncollectedItems()
+
+    C_MountJournal.GetMountFromItem = realCold
+
+    assert(coldAsked > firstCold,
+        "an item the client said nothing about must be asked again, or a "
+        .. "cold journal hides everything in your bags until you reload")
+
+    table.remove(CN_TEST_BAGS[0])
+
+    inventory.Forget()
 
     print("  a bag scan asks each slot about itself once")
 end)()
@@ -60817,8 +63198,6 @@ end)()
     assert(objective.userPreference == 1,
         "unpinning must give back the provider's own preference, got "
         .. tostring(objective.userPreference))
-
-    assert(not objective.isGoal, "and stop calling it a goal")
 
     for _, reason in ipairs(CN.Reasons(objective)) do
         assert(reason ~= "this is one of your goals",
@@ -69049,7 +71428,19 @@ print("\nThe paths a player triggers without meaning to:")
 do
     local mapID, x, y = CN.GetPlayerPosition()
 
+    -- FORCED, because 0.57.0's route cache would otherwise make this measure
+    -- a table lookup. A budget that measures the cached branch of the path it
+    -- is guarding is a budget that guards nothing -- which is the reasoning
+    -- this file already applies to `UI.Refresh`, and which four of these
+    -- budgets were failing in 0.56.0.
     bench("BuildZoneRoute()", 50, function()
+        CN.ForgetRoutes()
+        CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+    end)
+
+    -- AND THE SAME CALL WITH THE ROUTE ALREADY BUILT, which is what the Zone
+    -- tab's two-second refresh and follow mode's ticker actually do.
+    bench("BuildZoneRoute() unchanged", 500, function()
         CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
     end)
 
@@ -69181,6 +71572,7 @@ local BUDGETS = {
     -- meaning to: opening the window, and the router recomputing because they
     -- walked into a new zone.
     ["BuildZoneRoute()"]          = 8.0,
+    ["BuildZoneRoute() unchanged"] = 0.05,
     ["Chase.All() with 8 goals"]  = 5.0,
 
     -- Added in 0.46.0, and the reason the rebuild ceiling above is now
@@ -69195,7 +71587,13 @@ local BUDGETS = {
     -- reach the size at which either mattered, so neither had a budget and
     -- neither was measured -- which is how a thirty-three millisecond stutter
     -- lived in the file a player watches while walking.
-    ["ImproveRoute() over 90 stops"] = 6.0,
+    -- 2-opt is quadratic in stops and every comparison needs four real
+    -- distances, so ninety stops is genuinely expensive. 0.57.0 got it under
+    -- six by skipping work with don't-look bits, and those turned out not to
+    -- be exact -- 41 of 60 ninety-stop routes came out LONGER. Correct and
+    -- slower is the right trade; the cost is paid once per route now rather
+    -- than on every two-second refresh (see `routeCache`).
+    ["ImproveRoute() over 90 stops"] = 8.0,
     ["ClusterByProximity() over 110 objectives"] = 3.0,
 }
 

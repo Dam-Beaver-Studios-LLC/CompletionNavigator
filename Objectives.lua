@@ -131,18 +131,29 @@ CN.typeBadges = {
 -- unknown" and charged them a baseline for the journey.
 --
 -- Which produced the wrong answer TWICE, in opposite directions. Measured
--- over a real collection: `CN.unknownLocationCost` is 3, and the far side of
--- the player's own zone costs 3.3 -- so an objective with no location was
--- CHEAPER to reach than one you can see from where you are standing, and
--- twenty of the top thirty recommendations had no coordinates at all. And an
--- objective that genuinely should have a location and has not resolved one
--- was charged the same 3 as a currency, when the honest reading there is that
--- the addon does not know and should not be optimistic about it.
+-- over a real collection before 0.57.0: the unknown-journey cost was 3 and
+-- the far side of the player's own zone costs 3.3 -- so an objective with no
+-- location was CHEAPER to reach than one you can see from where you are
+-- standing, and twenty of the top thirty recommendations had no coordinates
+-- at all. And an objective that genuinely should have a location and has not
+-- resolved one was charged the same 3 as a currency, when the honest reading
+-- there is that the addon does not know and should not be optimistic.
 --
 -- Two different states, so two different costs. A thing that is not anywhere
 -- costs nothing to travel to, because there is no journey; a thing that is
 -- somewhere the addon cannot name is charged the pessimistic fallback, the
 -- same way `Travel.CostFor` charges one when it cannot cost a journey.
+-- WHICH IS EVERY TYPE WHOSE PROVIDER EMITS NO COORDINATES BY NATURE.
+--
+-- 0.57.0 listed seven and left out the five that matter most by volume:
+-- PET, MOUNT, TOY, APPEARANCE and RECIPE. Their own provider says so in as
+-- many words -- "1200 uncollected pets, say, none of which has a known
+-- location" -- and raising the unknown-journey cost from 3 to 8 therefore
+-- charged every one of them five points it should never have paid, against a
+-- completionValue that tops out around 8. Measured: an uncollected pet
+-- scored -6.0 where a reputation with the same completion value scored +2.0.
+-- The release meant to push things with no location DOWN and pushed exactly
+-- the wrong half of them off the list.
 CN.placelessTypes = {
     CURRENCY    = true,
     REPUTATION  = true,
@@ -151,6 +162,15 @@ CN.placelessTypes = {
     TITLE       = true,
     ACHIEVEMENT = true,
     COLLECTIBLE = true,
+
+    -- A collection entry is a thing you own or do not own. Where it can be
+    -- got is a separate question the chase chain answers; the row itself is
+    -- not a place, and it is not a journey.
+    PET         = true,
+    MOUNT       = true,
+    TOY         = true,
+    APPEARANCE  = true,
+    RECIPE      = true,
 }
 
 function CN.IsPlaceless(objective)

@@ -7,6 +7,104 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.58.0]
+
+A pass over the window, because the ranking has been the focus for four
+releases and the surface that shows it had drifted. Plus two accuracy fixes
+that change what the addon recommends, and one that changes what it counts.
+
+### Fixed
+
+- **Every mount sitting in your bags was recommended as uncollected, for
+  ever.** The check read `mount.collected`; the client's field is
+  `isCollected`. It was always nil, so every bag item that teaches a mount --
+  including ones learned years ago -- came back as something to go and do, and
+  no scan could clear it.
+- **A travel cost of zero was correct and a cost of zero was also "I have no
+  idea".** Things with no location at all were priced at the cost of walking
+  across a zone, so an item in your bags competed with a rare on the far side
+  of the map. Placeless work now costs nothing to reach, which is the truth,
+  and the type list that gets that treatment covers pets, mounts, toys,
+  appearances and recipes.
+- **Routing the same zone re-ranked the entire addon every two seconds.** The
+  Zone tab, every map open and follow mode's ticker all call the router, and
+  it ended by invalidating the ranked list unconditionally -- so the cache had
+  a hit rate of zero for as long as any of those was open. It now re-ranks only
+  when a route actually moves something. Measured: thirty Zone-tab ticks
+  produced thirty full re-ranks and zero changes.
+- **The route planner's pruning was not exact.** Three thousand random routes
+  were laid out with and without it; two hundred and ninety came out longer
+  with it on. A shortcut that produces a worse answer is not a shortcut.
+- **`/cn dbsize` counted a bank's bookkeeping as items.** A Warband bank
+  holding nothing was reported as three rows, and one holding four items as
+  seven -- wrong by an amount that looks plausible.
+- **A contribution another provider had stopped making could outlive it.** The
+  merge reset ran on the row it was merging into and not on the row being
+  merged, so a value withdrawn on one pass could survive to the next.
+- **Two rows with no id crashed the ranked sort** on the comparison that broke
+  the tie between them.
+
+### Changed
+
+- **The Scans tab is rebuilt as a provenance list.** It was one block of
+  concatenated text, two buttons and no list -- nothing to click, nothing to
+  sort, and its own filter box sat above it doing nothing. It now answers the
+  question no other tab does: where does each number in this addon come from,
+  how old is it, and what refreshes it. One row per source, live sources
+  separated from stored ones, a marker on anything read more than a day ago,
+  and a click runs that source's scan.
+- **Sorting and filtering no longer shred rows that belong together.** A goal
+  and its chain, a vault slot and its thresholds, a Remaining row and its
+  reasons now move as one unit; a heading stays at the top of its own section
+  while the rows under it still sort among themselves.
+- **Sorting reads the words, not the markup in front of them.** The key was
+  the rendered string, so "A to Z" sorted on colour codes and route numbers
+  first: on the Goals tab every finished goal sorted above every unfinished
+  one whatever they were called, and on the Zone tab clicking the header did
+  nothing at all. The filter shared the key, so typing `cff` matched every row
+  in the addon.
+- **The Collections tab says when each number was read.** Every percentage on
+  it is measured against the addon's own scan snapshot, which is the honest
+  denominator and one that goes stale the day the game adds collectibles.
+  Nothing on screen said when the snapshot was taken.
+- **A button's answer appears in the window, not behind it.** Eleven buttons
+  answered into the chat frame, which is somewhere else on the screen from
+  where the click happened. Slash commands still answer in chat, because that
+  is where those were typed.
+- **The filter box goes dead on the two tabs it cannot reach**, instead of
+  staying white and typeable while every keystroke did nothing.
+- **A blocked step in a goal chain carries a marker as well as a colour.**
+  Done was `x`, next was `>`, and blocked -- the one state that says stop
+  reading down the chain -- had only red text.
+- **Escape closes the welcome screen**, which was the only frame the addon
+  puts on screen that it did not close, and the only one most players see.
+- **Every panel edge is on the four-pixel grid.** Headers, lists, notes and
+  the footer used four different left edges.
+- **Every font is asked for by role.** Six widgets outside the window still
+  named `GameFont*` objects directly and had drifted apart; two roles that did
+  not exist are the reason, and now do.
+- **An answer printed in a loop no longer repeats the addon's name once per
+  row.** A thirty-row answer said "Completion Navigator:" thirty-one times.
+- **A scan that fails gives its button back.** The Collections buttons
+  disabled themselves, ran the scan and re-enabled afterwards -- so a scan
+  that threw left the button reading "Working..." until the next reload.
+- **Leaving a filtered tab clears that tab's filter**, rather than only the
+  box above it; and visiting the one tab without a list no longer throws away
+  the filter term you asked to keep.
+
+### Internal
+
+- Three build-time lints added, each of which fails the build: no colour may
+  reach a frame as a raw float triple, no loop may call `CN.Print`, and the
+  palette scan now covers both shapes of colour.
+- The offline frame stub now fires `OnEditFocusLost` on `ClearFocus` and
+  records edit-box text, which is the eleventh defect this project has traced
+  to a stub more forgiving than the client.
+- Eighteen mutations added; a hundred and fifty-nine now run and all are
+  killed. Two existing assertions were rewritten because they checked a flag
+  that existed only to be checked.
+
+
 ## [0.57.0]
 
 The reason-tracking machinery is rebuilt rather than patched again, because

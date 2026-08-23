@@ -376,7 +376,7 @@ CN.RegisterCandidateProvider("Instances", function()
 
             local reasons = {
                 lockout.defeated .. " of " .. lockout.encounters
-                    .. " already defeated -- those kills expire at the reset",
+                    .. " already defeated" .. CN.DASH .. "those kills expire at the reset",
                 lockout.remaining .. " "
                     .. (lockout.remaining == 1 and "boss" or "bosses") .. " left",
             }
@@ -486,7 +486,7 @@ CN:RegisterCommand{
         if Blizzard.IsEncounterJournalOpen() then
             -- Reading the journal moves its selection, which is what the
             -- player is looking at. Refuse rather than reach into it.
-            Print("Close the Adventure Guide first -- reading it would change "
+            Print("Close the Adventure Guide first" .. CN.DASH .. "reading it would change "
                 .. "what you are looking at.")
             return
         end
@@ -500,7 +500,7 @@ CN:RegisterCommand{
             return
         end
 
-        Print("\"" .. args .. "\" -- " .. #results
+        Print("\"" .. args .. "\"" .. CN.DASH .. "" .. #results
             .. (#results == 1 and " encounter:" or " encounters:"))
 
         for _, result in ipairs(results) do

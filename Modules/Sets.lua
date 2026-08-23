@@ -254,7 +254,7 @@ CN.RegisterCandidateProvider("Sets", function()
 
                 -- A REAL denominator, which this addon is normally short of.
                 completionValue  = 3 + (3 - math.min(3, set.missing)),
-                travelCost       = CN.unknownLocationCost,
+                travelCost       = CN.placelessCost,
                 reasons          = {
                     set.collected .. " of " .. set.total .. " pieces collected",
                 },

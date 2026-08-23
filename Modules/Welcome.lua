@@ -139,6 +139,17 @@ function Welcome.Build()
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
 
+    -- ESCAPE CLOSES IT, LIKE EVERY OTHER PANEL IN THE GAME.
+    --
+    -- Three frames this addon creates were on this list and one was not: the
+    -- welcome screen -- the only frame most players ever see, shown once, on
+    -- first login, over a character they have just logged into. Escape did
+    -- nothing, and the close button is a small X in a corner of a dialog that
+    -- appears without being asked for.
+    if UISpecialFrames then
+        table.insert(UISpecialFrames, "CompletionNavigatorWelcome")
+    end
+
     if frame.SetBackdrop then
         frame:SetBackdrop({
             bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
@@ -148,11 +159,11 @@ function Welcome.Build()
         })
     end
 
-    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    local title = frame:CreateFontString(nil, "OVERLAY", CN.FONT.TITLE)
     title:SetPoint("TOP", 0, -18)
     title:SetText("Completion Navigator")
 
-    local body = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    local body = frame:CreateFontString(nil, "OVERLAY", CN.FONT.BODY)
     body:SetPoint("TOPLEFT", 24, -48)
     body:SetPoint("TOPRIGHT", -24, -48)
     body:SetJustifyH("LEFT")
@@ -255,7 +266,7 @@ function Welcome.Build()
         previous = button
     end
 
-    local note = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    local note = frame:CreateFontString(nil, "OVERLAY", CN.FONT.LABEL)
     note:SetPoint("BOTTOMLEFT", 24, 46)
     note:SetPoint("BOTTOMRIGHT", -24, 46)
     note:SetJustifyH("LEFT")
@@ -268,7 +279,7 @@ function Welcome.Build()
     -- this is not a privacy defect -- it is a promise that needs one more
     -- clause to stay true.
     note:SetText("Nothing is scanned or sent until you ask. It does notice "
-        .. "which kinds of thing you go and do -- /cn learned shows what, and "
+        .. "which kinds of thing you go and do" .. CN.DASH .. "/cn learned shows what, and "
         .. "undoes it. This appears once.")
 
     local dismiss = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")

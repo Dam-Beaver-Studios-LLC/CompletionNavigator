@@ -780,6 +780,17 @@ local typicalCache, typicalGeneration = {}, nil
 
 function Session.NoteDurationsChanged()
     Session.durationGeneration = Session.durationGeneration + 1
+
+    -- AND SAY SO WHERE THE DECORATOR WILL HEAR IT.
+    --
+    -- The Session decorator stamps `estimatedTime` onto candidates, and a
+    -- provider whose rows are unchanged takes the unchanged-provider
+    -- shortcut and is never re-decorated -- which 0.57.0 made the COMMON
+    -- case. So a duration the addon had just learned was never applied to
+    -- anything already on the list, and `/cn mode fastest`'s second lever
+    -- stayed inert. `CN.decoratorGeneration` is the only thing that defeats
+    -- that shortcut; Goals and Harvest already use it.
+    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
 end
 
 function Session.TypicalSeconds(objectiveType)
@@ -1247,7 +1258,7 @@ CN:RegisterCommand{
         if plan.overran then
             Print("|cffffc74fThe nearest stop is longer than the time you "
                 .. "have.|r |cff8a8f96Nothing smaller was available, so it "
-                .. "is shown anyway -- but it will not fit.|r")
+                .. "is shown anyway" .. CN.DASH .. "but it will not fit.|r")
         end
 
         if not plan.confident then

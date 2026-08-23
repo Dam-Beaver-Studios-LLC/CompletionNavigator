@@ -287,7 +287,7 @@ CN.RegisterCandidateProvider("Waiting", function()
                 name             = row.name .. ": " .. row.remaining .. " left this week",
                 completionValue  = 5,
                 limitedTimeBonus = 2,
-                travelCost       = CN.unknownLocationCost,
+                travelCost       = CN.placelessCost,
                 expiresIn        = Blizzard.GetSecondsUntilWeeklyReset(),
                 reasons          = {
                     row.remaining .. " of " .. row.cap .. " still collectable this week",
@@ -322,7 +322,7 @@ CN:RegisterCommand{
             Print("|cff8a8f96Mail cannot be read in this client.|r")
         elseif #mail == 0 then
             Print("|cff8a8f96No mail, or the mailbox has not been opened this "
-                .. "session -- the client only hands the addon the inbox once "
+                .. "session" .. CN.DASH .. "the client only hands the addon the inbox once "
                 .. "you have looked at it.|r")
         else
             Print(#mail .. " message(s) in your mailbox:")

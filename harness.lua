@@ -96,6 +96,38 @@ local function Frame()
             f:Hide()
         end
     end
+    -- AN EDIT BOX THAT LOSES FOCUS LOUDLY, LIKE THE CLIENT'S.
+    --
+    -- `SetText`/`GetText` and `ClearFocus` all fell through to the universal
+    -- stub, which accepts anything and remembers nothing -- so the window's
+    -- filter box could not be read by any test, and `ClearFocus` fired no
+    -- `OnEditFocusLost`. In the client it does, and 0.58.0 shipped a defect
+    -- that lived entirely inside that handler: clearing the box on a tab with
+    -- no list destroyed the filter the player had asked to keep.
+    --
+    -- Eleventh entry in the list of defects a stub simpler than the real
+    -- thing made invisible.
+    function f:SetText(value) f.text = value end
+    function f:GetText() return f.text or "" end
+
+    function f:SetFocus() f.focused = true end
+
+    function f:ClearFocus()
+        if f.focused then
+            f.focused = false
+
+            local handler = scripts.OnEditFocusLost
+
+            if handler then
+                handler(f)
+            end
+        end
+    end
+
+    function f:Enable() f.enabled = true end
+    function f:Disable() f.enabled = false end
+    function f:IsEnabled() return rawget(f, "enabled") ~= false end
+
     function f:CreateFontString()
         local fs = Frame()
 
@@ -4368,7 +4400,17 @@ end
 print("  pinned title appears as a candidate = " .. tostring(afterGoal == 1))
 
 assert(afterGoal == 1, "a pinned goal must become exactly one candidate, got " .. afterGoal)
-assert(goalObjective.isGoal, "a goal candidate must be flagged as one")
+-- THROUGH THE PATH THE GAME TAKES, NOT THROUGH A FLAG.
+--
+-- This asserted `goalObjective.isGoal`, and that flag was the ONLY reader of
+-- it in the project: three writers in Goals.lua and one assertion here, with
+-- nothing in the shipped tree ever looking at it. So the test passed by
+-- checking a field that existed to be checked, while the thing a player sees
+-- -- the sentence on the row saying why it is there -- went unasserted.
+local goalReasons = table.concat(CN.Reasons(goalObjective), " | ")
+
+assert(goalReasons:find("one of your goals", 1, true),
+    "a goal candidate must SAY it is one, got: " .. goalReasons)
 
 -- Precedence, stated rather than assumed.
 --
@@ -7573,6 +7615,226 @@ print("\nOne palette, and nothing outside it:")
     end
 
     print("  " .. #roles .. " roles, none of them mistakable for another")
+
+    ------------------------------------------------------------
+    -- AND THE OTHER SHAPE OF A COLOUR IS COVERED TOO.
+    --
+    -- The palette scan above reads `|cffRRGGBB` codes, which is how a colour
+    -- reaches CHAT. Everything drawn on a FRAME takes three floats instead --
+    -- `AddLine(text, r, g, b)`, `SetTextColor(r, g, b)` -- and eleven of those
+    -- were still carrying pre-palette numbers that the hex scan could never
+    -- see: a tooltip header at `0.2, 1.0, 0.6` that was a green the addon had
+    -- otherwise stopped using, and eight greys at `0.6, 0.6, 0.6`.
+    --
+    -- `CN.Rgb(role)` returns the palette's own three floats, so the fix is
+    -- always available and this can be a ban rather than a count.
+    --
+    -- DELIBERATELY NOT INCLUDED: `SetColorTexture`. Those are the window's
+    -- chrome -- a divider, a title bar, a close-button highlight -- and they
+    -- are near-black surfaces with alpha, not roles. Forcing them into CN.C
+    -- would add two greys within 0.05 of DISABLED and break the check above,
+    -- which is the palette telling us they are a different kind of thing.
+    ------------------------------------------------------------
+    local textColorCalls = {
+        "AddLine", "AddDoubleLine", "SetTextColor", "SetVertexColor",
+    }
+
+    local floats = {}
+
+    local function ScanFloats(path)
+        local handle = io.open(path, "r")
+
+        if not handle then
+            return
+        end
+
+        local number = 0
+
+        for chunk in handle:read("*a"):gmatch("[^\n]*\n?") do
+            number = number + 1
+
+            -- Comments describe the numbers as often as they use them.
+            local code = chunk:gsub("%-%-.*$", "")
+
+            for _, call in ipairs(textColorCalls) do
+                if code:find(call, 1, true)
+                    and code:match("[%d%.]+%s*,%s*[%d%.]+%s*,%s*[%d%.]+")
+                    and code:match("0%.%d") then
+
+                    table.insert(floats,
+                        path:gsub("^.*/", "") .. ":" .. number .. " " .. call)
+                end
+            end
+        end
+
+        handle:close()
+    end
+
+    local floatManifest = io.open(root .. "/CompletionNavigator.toc", "r")
+
+    assert(floatManifest, "the .toc must be readable")
+
+    for entry in floatManifest:read("*a"):gmatch("[^\r\n]+") do
+        if entry:match("%.lua$") and not entry:match("^#") then
+            ScanFloats(root .. "/" .. (entry:gsub("\\", "/")))
+        end
+    end
+
+    floatManifest:close()
+
+    for _, offender in ipairs(floats) do
+        print("  RAW TRIPLE: " .. offender)
+    end
+
+    assert(#floats == 0,
+        #floats .. " colour(s) are written as raw floats. Use CN.Rgb(\"ROLE\").")
+
+    print("  no colour reaches a frame as a number the palette does not own")
+end)()
+
+print("\nOne identity per answer:")
+
+;(function()
+    ------------------------------------------------------------
+    -- `CN.Print` STAMPS THE ADDON'S NAME. A LOOP MUST NOT.
+    --
+    -- `CN.Print` prefixes every line with "Completion Navigator:" and
+    -- `CN.PrintLine` prefixes a continuation instead. Eleven answers printed
+    -- their ROWS with `CN.Print`, so `/cn order` on a thirty-row list said the
+    -- addon's name thirty-one times and the eye had nothing to anchor on --
+    -- the headline looked exactly like every row under it.
+    --
+    -- The rule is structural, so it is checked structurally: one identity per
+    -- answer means no `CN.Print(` inside a `for`, `while` or `repeat`.
+    --
+    -- This is a block tracker rather than a pattern, because a pattern cannot
+    -- tell a loop body from the line after `end`. Strings and comments are
+    -- stripped first: this file is full of both, and either can carry the
+    -- word "end".
+    ------------------------------------------------------------
+    local function Strip(line)
+        local out, index, length = {}, 1, #line
+
+        while index <= length do
+            local char = line:sub(index, index)
+
+            if char == "-" and line:sub(index, index + 1) == "--" then
+                break
+            end
+
+            if char == "\"" or char == "'" then
+                local quote = char
+
+                index = index + 1
+
+                while index <= length do
+                    local inner = line:sub(index, index)
+
+                    if inner == "\\" then
+                        index = index + 2
+                    elseif inner == quote then
+                        index = index + 1
+                        break
+                    else
+                        index = index + 1
+                    end
+                end
+
+                table.insert(out, "\"\"")
+            else
+                table.insert(out, char)
+
+                index = index + 1
+            end
+        end
+
+        return table.concat(out)
+    end
+
+    local shouting = {}
+
+    local function ScanPrints(path)
+        local handle = io.open(path, "r")
+
+        if not handle then
+            return
+        end
+
+        -- Each entry is `true` for a loop and `false` for anything else that
+        -- closes on `end`, so "am I in a loop" is "is any entry true".
+        local blocks, number = {}, 0
+        local pendingLoop, pendingElseif = false, false
+
+        for chunk in handle:read("*a"):gmatch("[^\n]*\n?") do
+            number = number + 1
+
+            local code = Strip(chunk)
+
+            if code:find("CN.Print(", 1, true) then
+                for _, isLoop in ipairs(blocks) do
+                    if isLoop then
+                        table.insert(shouting,
+                            path:gsub("^.*/", "") .. ":" .. number)
+                        break
+                    end
+                end
+            end
+
+            for word in code:gmatch("[A-Za-z_][A-Za-z0-9_]*") do
+                if word == "for" or word == "while" then
+                    pendingLoop = true
+                elseif word == "do" then
+                    table.insert(blocks, pendingLoop)
+                    pendingLoop = false
+                elseif word == "repeat" then
+                    table.insert(blocks, true)
+                elseif word == "function" then
+                    table.insert(blocks, false)
+                elseif word == "elseif" then
+                    -- Reuses the frame `if` opened, so its `then` opens none.
+                    pendingElseif = true
+                elseif word == "then" then
+                    if pendingElseif then
+                        pendingElseif = false
+                    else
+                        table.insert(blocks, false)
+                    end
+                elseif word == "end" or word == "until" then
+                    table.remove(blocks)
+                end
+            end
+        end
+
+        handle:close()
+    end
+
+    local printManifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(printManifest, "the .toc must be readable")
+
+    local scanned = 0
+
+    for entry in printManifest:read("*a"):gmatch("[^\r\n]+") do
+        if entry:match("%.lua$") and not entry:match("^#") then
+            scanned = scanned + 1
+
+            ScanPrints(ROOT .. "/" .. (entry:gsub("\\", "/")))
+        end
+    end
+
+    printManifest:close()
+
+    for _, offender in ipairs(shouting) do
+        print("  REPEATED IDENTITY: " .. offender)
+    end
+
+    assert(#shouting == 0,
+        #shouting .. " loop(s) print the addon's name once per row. The rows "
+        .. "are continuations: use CN.PrintLine.")
+
+    assert(scanned > 20, "the scan must have read the tree, saw " .. scanned)
+
+    print("  " .. scanned .. " files, and no loop repeats the addon's name")
 end)()
 
 print("\nLocalization:")
@@ -8718,6 +8980,646 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
+print("\nWhat 0.58.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- ROWS THAT BELONG TO EACH OTHER SURVIVE A SORT AND A FILTER.
+    --
+    -- The three-mode sort treated every row as a peer, so "A to Z" on the
+    -- Goals tab interleaved every chain step of every goal into one
+    -- alphabetical column with the headings scattered through it. Filtering
+    -- was the same defect in the other direction: a match on a chain step
+    -- showed the step and dropped the goal it belonged to.
+    ------------------------------------------------------------
+    local list = CN.UI.CreateList(UIParent)
+
+    assert(list and list.SetEntries, "the list widget must build")
+
+    local entries = {
+        { text = "Zebra goal",  group = "g:1" },
+        { text = "  step one",  group = "g:1" },
+        { text = "  step two",  group = "g:1" },
+        { text = "Apple goal",  group = "g:2" },
+        { text = "  a step",    group = "g:2" },
+    }
+
+    -- As ranked: untouched, which is the default and the product.
+    local asRanked = list:ApplySort(entries)
+
+    assert(asRanked[1].text == "Zebra goal" and asRanked[4].text == "Apple goal",
+        "the default order must be the order the tab produced")
+
+    -- A to Z: the BLOCKS move, the steps inside one do not.
+    list:CycleSort()
+
+    assert(list:SortMode() == "name", "the second mode is A to Z")
+
+    local sorted = list:ApplySort(entries)
+
+    assert(sorted[1].text == "Apple goal",
+        "sorting must move whole goals, got " .. sorted[1].text)
+
+    assert(sorted[2].text == "  a step",
+        "and its own steps must follow it, got " .. sorted[2].text)
+
+    assert(sorted[3].text == "Zebra goal",
+        "before the next goal begins, got " .. sorted[3].text)
+
+    assert(sorted[4].text == "  step one" and sorted[5].text == "  step two",
+        "and a chain's steps keep the order you do them in")
+
+    -- AND FILTERING KEEPS THE PARENT.
+    list:SetFilter("step two")
+
+    local kept = list:Filter(entries)
+
+    assert(#kept == 3, "matching one step must keep its whole goal, got " .. #kept)
+
+    assert(kept[1].text == "Zebra goal",
+        "and the goal must be the first row of it, got " .. kept[1].text)
+
+    local missed = list:Filter({ { text = "nothing like it" } })
+
+    assert(#missed == 0, "a filter that matches nothing still matches nothing")
+
+    list:SetFilter("")
+
+    print("  a goal and its chain sort and filter as one thing")
+
+    ------------------------------------------------------------
+    -- A SECTION IS NOT A GROUP, AND THE DIFFERENCE IS THE POINT.
+    --
+    -- The Journey tab draws "Closest to finished" and then twelve
+    -- achievements. Those twelve are peers -- alphabetising them is exactly
+    -- what somebody asks for -- so freezing them the way a goal's chain is
+    -- frozen would take the sort away where it is most useful. What must not
+    -- move is the heading.
+    ------------------------------------------------------------
+    local sectioned = {
+        { text = "loose row" },
+        { text = "Closest to finished", section = "c", sectionHeader = true },
+        { text = "  Zebra",             section = "c" },
+        { text = "  Apple",             section = "c" },
+    }
+
+    local out = list:ApplySort(sectioned)
+
+    assert(out[1].text == "loose row",
+        "a row outside every section keeps its own run, got " .. out[1].text)
+
+    assert(out[2].text == "Closest to finished",
+        "the heading stays at the top of its section, got " .. out[2].text)
+
+    assert(out[3].text == "  Apple" and out[4].text == "  Zebra",
+        "and the rows under it DO sort, among themselves")
+
+    print("  a section's heading is pinned and its rows still sort")
+
+    ------------------------------------------------------------
+    -- AND THE SORT MUST NOT TWITCH.
+    --
+    -- `table.sort` is not stable, and two blocks whose first rows read the
+    -- same would swap places on every refresh -- on a tab that redraws every
+    -- two seconds, that is a list that will not sit still.
+    ------------------------------------------------------------
+    -- ENOUGH OF THEM THAT AN UNSTABLE SORT ACTUALLY REORDERS.
+    --
+    -- Two equal elements is not a test: `table.sort` leaves a pair of them
+    -- alone whatever the comparator says, so this passed with the tie-break
+    -- removed. Lua's quicksort reorders equal keys once there are enough to
+    -- partition, and twenty is comfortably enough.
+    local twins = {}
+
+    for index = 1, 20 do
+        table.insert(twins, { text = "same", group = "g" .. index })
+        table.insert(twins, { text = "  child " .. index, group = "g" .. index })
+    end
+
+    local once  = list:ApplySort(twins)
+    local twice = list:ApplySort(twins)
+
+    for index = 1, #once do
+        assert(once[index].text == twice[index].text,
+            "sorting the same list twice must give the same order")
+    end
+
+    -- The tie-break is the ONLY thing that can produce this: every parent
+    -- reads "same", so without it the children come back in whatever order
+    -- the partition happened to leave.
+    for index = 1, 20 do
+        assert(once[(index * 2) - 1].text == "same",
+            "every odd row is a parent")
+
+        assert(once[index * 2].text == "  child " .. index,
+            "and the tie must break on the order the tab produced -- row "
+            .. (index * 2) .. " is " .. once[index * 2].text)
+    end
+
+    print("  two rows that read the same do not swap on every refresh")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- SORTING MUST SORT ON THE WORDS, NOT ON THE COLOUR IN FRONT OF THEM.
+    --
+    -- `entry.text` is the RENDERED string, and `|` plus eight hex digits sort
+    -- against real letters. So "A to Z" on the Goals tab put every finished
+    -- goal (muted, `8a...`) above every unfinished one (accented, `ff...`)
+    -- whatever they were called, and on the Zone tab -- where every row
+    -- begins with its route number -- clicking the header did nothing at all.
+    ------------------------------------------------------------
+    local list = CN.UI.CreateList(UIParent)
+
+    local coloured = {
+        { text = CN.Muted("Zebra") },
+        { text = CN.Accent("Aardvark") },
+        { text = "|cff8a8f96 3.|r Mole" },
+    }
+
+    list:CycleSort()
+
+    assert(list:SortMode() == "name", "the second mode is A to Z")
+
+    local sorted = list:ApplySort(coloured)
+
+    assert(sorted[1].text:find("Aardvark", 1, true),
+        "A must come first whatever colour it is wearing, got "
+        .. sorted[1].text)
+
+    assert(sorted[2].text:find("Mole", 1, true),
+        "and a leading route number must not sort ahead of the name, got "
+        .. sorted[2].text)
+
+    assert(sorted[3].text:find("Zebra", 1, true),
+        "got " .. sorted[3].text)
+
+    -- AND THE FILTER SEARCHES THE SAME STRIPPED TEXT.
+    --
+    -- It shared the key, so typing "cff" matched every row in the addon.
+    list:SetFilter("cff")
+
+    assert(#list:Filter(coloured) == 0,
+        "a colour code is not something a player is searching for")
+
+    list:SetFilter("aardvark")
+
+    assert(#list:Filter(coloured) == 1,
+        "but the name inside it is")
+
+    list:SetFilter("")
+
+    print("  sorting and filtering read the words, not the markup")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- LEAVING A FILTERED TAB MUST CLEAR THE LIST, NOT ONLY THE BOX.
+    --
+    -- `UI.SetFilter` resolves through `UI.tabs[UI.selectedTab]`, and
+    -- `SelectTab` advanced that index BEFORE emptying the box -- so nothing
+    -- in the addon could reach the list being left. Emptying the widget
+    -- cleared the widget; the list behind it stayed filtered, which is the
+    -- exact state the `keepFilter` help text warns about.
+    ------------------------------------------------------------
+    CN.UI.Show()
+
+    local uiSettings = CN.Settings()
+
+    local heldKeep = uiSettings.keepFilter
+
+    uiSettings.keepFilter = false
+
+    -- Find two tabs that both have a list.
+    local first, second
+
+    for index, tab in ipairs(CN.UI.tabs) do
+        CN.UI.SelectTab(index)
+
+        if tab.panel and CN.UI.listPanels[tab.panel] then
+            if not first then
+                first = index
+            elseif not second then
+                second = index
+                break
+            end
+        end
+    end
+
+    assert(first and second, "two tabs with lists are needed for this")
+
+    CN.UI.SelectTab(first)
+
+    local leftList = CN.UI.listPanels[CN.UI.tabs[first].panel]
+
+    leftList:SetFilter("something nothing matches")
+
+    assert(leftList:GetFilter(), "the filter must have taken")
+
+    CN.UI.SelectTab(second)
+
+    assert(leftList:GetFilter() == nil,
+        "leaving a tab must clear ITS list, not just the box")
+
+    uiSettings.keepFilter = heldKeep
+
+    print("  the filter on the tab you leave is actually cleared")
+
+    ------------------------------------------------------------
+    -- AND GOING SOMEWHERE WITHOUT A LIST MUST NOT DESTROY WHAT IS KEPT.
+    --
+    -- `ClearFocus` fires `OnEditFocusLost`, which with `keepFilter` on writes
+    -- the now-empty box over `UI.persistedFilter`. So typing a filter and
+    -- then clicking the one tab with no list threw the remembered term away.
+    ------------------------------------------------------------
+    uiSettings.keepFilter = true
+
+    CN.UI.persistedFilter = "mount"
+
+    local listless
+
+    for index, tab in ipairs(CN.UI.tabs) do
+        CN.UI.SelectTab(index)
+
+        if tab.panel and not CN.UI.listPanels[tab.panel] then
+            listless = index
+            break
+        end
+    end
+
+    assert(listless, "one tab has no list; that is the case being tested")
+
+    -- FOCUSED FIRST, because the defect lives inside `OnEditFocusLost` and a
+    -- box that never had focus never loses it. This is the state a player is
+    -- in the moment they finish typing a filter: a Button click does not take
+    -- focus off a WoW EditBox, so they are still in the box when they reach
+    -- for a tab.
+    CN.UI.Frame().search:SetFocus()
+    CN.UI.Frame().search:SetText("mount")
+
+    CN.UI.SelectTab(listless)
+
+    assert(CN.UI.persistedFilter == "mount",
+        "a tab with no list must not eat the filter the player asked to "
+        .. "keep, got " .. tostring(CN.UI.persistedFilter))
+
+    uiSettings.keepFilter = heldKeep
+    CN.UI.persistedFilter = nil
+
+    print("  and a listless tab does not eat the filter you asked to keep")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCAN THAT THROWS MUST NOT WEDGE THE BUTTON THAT RAN IT.
+    --
+    -- The Collections buttons disable themselves, run the scan, and re-enable
+    -- afterwards. The work ran unprotected, so a scan that threw left the
+    -- button disabled and reading "Working..." until the player reloaded --
+    -- no retry, and nothing on screen saying why.
+    ------------------------------------------------------------
+    local source = assert(io.open(ROOT .. "/UI.lua", "r"))
+
+    local text = source:read("*a")
+
+    source:close()
+
+    local body = text:match("local function RunScans%(button, label, work%).-\n        end")
+
+    assert(body, "RunScans must still be there to check")
+
+    assert(body:find("pcall(work)", 1, true),
+        "the scan must run protected, or a failure disables its own button "
+        .. "for the rest of the session")
+
+    assert(body:find("button:SetEnabled(true)", 1, true),
+        "and the button comes back either way")
+
+    print("  a scan that throws gives its button back")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COST OF ZERO IS AN ANSWER, NOT A MISS.
+    --
+    -- `Travel.CostFor` reads its cache with `if held ~= nil`. A truth test
+    -- reads identically and is wrong for exactly one value: zero, which is
+    -- what standing on top of the destination costs -- and standing on top of
+    -- the destination is the single most common case in the game, because it
+    -- is where the addon has just navigated you.
+    --
+    -- Asserted by counting how many times the estimate is DERIVED, because
+    -- the returned number is the same either way. That is the whole point:
+    -- the defect is invisible in the answer.
+    ------------------------------------------------------------
+    local travel = CN:GetModule("Travel")
+
+    assert(travel and travel.CostFor, "Travel must be loaded")
+
+    travel.ForgetCosts()
+
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    assert(mapID and x and y, "the fixture player must have a position")
+
+    local real = travel.EstimateSeconds
+
+    local derived = 0
+
+    travel.EstimateSeconds = function(...)
+        derived = derived + 1
+
+        -- Zero seconds away: the destination is where the player is.
+        return 0
+    end
+
+    local first = travel.CostFor(mapID, x, y)
+
+    assert(first == 0, "standing on it must cost nothing, got " .. tostring(first))
+
+    assert(derived == 1, "the first read derives it, got " .. derived)
+
+    local second = travel.CostFor(mapID, x, y)
+
+    assert(second == 0, "and it still costs nothing, got " .. tostring(second))
+
+    assert(derived == 1,
+        "but a cost of zero must be SERVED from the cache, not re-derived -- "
+        .. "it was derived " .. derived .. " times")
+
+    travel.EstimateSeconds = real
+
+    travel.ForgetCosts()
+
+    print("  a travel cost of zero is cached like any other number")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- HOW OLD A STORED NUMBER IS, IN WORDS.
+    --
+    -- `Session.FormatDuration` renders four days as "97h 12m", which is the
+    -- right shape for "this will take 40m" and the wrong one for "this was
+    -- read four days ago". Everything the addon keeps between sessions is
+    -- measured in days.
+    ------------------------------------------------------------
+    local now = 1000000
+
+    assert(CN.Ago(nil) == nil, "no stamp is not an age")
+    assert(CN.Ago(0) == nil, "and neither is a zero stamp")
+
+    assert(CN.Ago(now - 5, now) == "just now", "under a minute is just now")
+    assert(CN.Ago(now - 600, now) == "10m ago", "got " .. tostring(CN.Ago(now - 600, now)))
+    assert(CN.Ago(now - 7200, now) == "2h ago", "got " .. tostring(CN.Ago(now - 7200, now)))
+    assert(CN.Ago(now - 86400, now) == "1 day ago",
+        "one day is singular, got " .. tostring(CN.Ago(now - 86400, now)))
+    assert(CN.Ago(now - (4 * 86400), now) == "4 days ago",
+        "got " .. tostring(CN.Ago(now - (4 * 86400), now)))
+
+    -- A CLOCK THAT MOVED BACKWARDS MUST NOT PRINT A NEGATIVE AGE.
+    --
+    -- A client restart across a timezone change is enough to produce one, and
+    -- "-3h ago" is the kind of thing a player screenshots.
+    assert(CN.Ago(now + 500, now) == "just now",
+        "a stamp in the future reads as now, got "
+        .. tostring(CN.Ago(now + 500, now)))
+
+    print("  a stored number can say how old it is without lying")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY SCAN THE SCANS TAB OFFERS MUST BE A COMMAND THAT EXISTS.
+    --
+    -- The tab is a list of sources and each row runs a slash command on
+    -- click. A row pointing at a command that was renamed is a button that
+    -- does nothing, and nothing else in the build would catch it.
+    ------------------------------------------------------------
+    local sources = CN.UI.Sources()
+
+    assert(#sources > 4, "the source list must not be empty, got " .. #sources)
+
+    local live, stored = 0, 0
+
+    for _, source in ipairs(sources) do
+        assert(source.label and source.label ~= "", "every source is named")
+        assert(source.detail and source.detail ~= "",
+            source.label .. " must say where its number comes from")
+
+        if source.kind == "live" then
+            live = live + 1
+
+            assert(source.command == nil,
+                "a live source is read from the client, so it has no scan")
+
+            assert(source.at == nil,
+                "and it has no age, because it was read just now")
+        else
+            stored = stored + 1
+
+            assert(CN.commands[source.command],
+                source.label .. " points at /cn " .. tostring(source.command)
+                .. ", which is not a command")
+        end
+    end
+
+    assert(live > 0 and stored > 0,
+        "both kinds must be present, got " .. live .. " live and "
+        .. stored .. " stored")
+
+    print("  " .. #sources .. " sources, and every scan they offer exists")
+
+    ------------------------------------------------------------
+    -- AND EACH ONE MUST CLEAR ITS OWN STALENESS.
+    --
+    -- Existing is not enough. A row's age is `steps[<module>]`, and the row
+    -- runs a command -- so the command has to be one that stamps THAT key.
+    -- `/cn discoveractive` reads the quest log and stamps nothing, and while
+    -- it was wired here the "Quests known" row did real work on every click
+    -- and stayed marked stale for ever, while "refresh what is stale" could
+    -- never reach zero.
+    --
+    -- Asserted by clearing the stamp, running the row's command, and looking
+    -- at the stamp -- which is the loop a player is actually in.
+    local stamps = (CN:GetModule("Setup")).Steps()
+
+    for _, source in ipairs(sources) do
+        if source.command then
+            -- Sources carry the age, not the key it came from, so recover it
+            -- the same way `UI.Sources` stored it: the row is stale iff its
+            -- stamp is old, and after the scan it must not be.
+            for key in pairs(stamps) do
+                stamps[key] = nil
+            end
+
+            CN.HandleSlashCommand(source.command)
+
+            local fresh = false
+
+            for _, at in pairs(stamps) do
+                if at and at > 0 then
+                    fresh = true
+                    break
+                end
+            end
+
+            assert(fresh,
+                source.label .. " runs /cn " .. source.command
+                .. ", which stamps nothing -- so the row can never stop "
+                .. "being stale and clicking it does the same thing for ever")
+        end
+    end
+
+    print("  and every one of them clears its own staleness when it runs")
+
+    ------------------------------------------------------------
+    -- AND "REFRESH WHAT IS STALE" MUST NOT RUN WHAT IS FRESH.
+    ------------------------------------------------------------
+    local setupModule = CN:GetModule("Setup")
+
+    assert(setupModule and setupModule.Steps,
+        "Setup must expose its per-step stamps")
+
+    local steps = setupModule.Steps()
+
+    -- Everything read one second ago.
+    for _, source in ipairs(sources) do
+        if source.command then
+            steps[string.lower(tostring(source.label))] = time()
+        end
+    end
+
+    -- The stamps are keyed on the MODULE, which is what Sources reads, so
+    -- stamp those too rather than assuming the label matches.
+    for _, key in ipairs({ "quests", "reputations", "mounts", "pets", "toys",
+                           "titles", "appearances", "achievements",
+                           "currencies", "professions" }) do
+        steps[key] = time()
+    end
+
+    assert(CN.UI.RefreshStaleSources() == 0,
+        "nothing read a second ago is stale")
+
+    -- And now everything is a week old.
+    for key in pairs(steps) do
+        steps[key] = time() - (7 * 86400)
+    end
+
+    assert(CN.UI.RefreshStaleSources() > 0,
+        "a source read a week ago must be refreshed")
+
+    print("  refreshing what is stale skips what is not")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CONTROL THAT CANNOT ACT MUST NOT LOOK LIKE IT CAN.
+    --
+    -- The filter box is one per window and applies to `panel.list`. Two tabs
+    -- draw controls rather than a list, so every keystroke typed into the box
+    -- on those tabs did nothing -- while the box stayed white, focusable and
+    -- captioned "filter".
+    ------------------------------------------------------------
+    CN.UI.Show()
+
+    local withList, withoutList
+
+    for index, tab in ipairs(CN.UI.tabs) do
+        CN.UI.SelectTab(index)
+
+        local usable = CN.UI.UpdateFilterAvailability(tab)
+
+        if usable then
+            withList = withList or tab.name
+        else
+            withoutList = withoutList or tab.name
+        end
+    end
+
+    assert(withList, "at least one tab must have a filterable list")
+
+    assert(withoutList,
+        "and the Settings tab has no list, so the box must go dead on it")
+
+    print("  the filter box goes dead on the tabs it cannot reach ("
+        .. withoutList .. ")")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A BUTTON'S ANSWER GOES WHERE THE BUTTON IS.
+    --
+    -- Eleven buttons in the window answered into the chat frame, behind the
+    -- window the player was looking at.
+    ------------------------------------------------------------
+    CN.UI.Show()
+
+    local answered = CN.UI.Answer("the scan finished")
+
+    assert(answered,
+        "with the window open, the answer belongs in the window")
+
+    CN.UI.Hide()
+
+    assert(CN.UI.Answer("the scan finished") == false,
+        "and with it closed, it belongs in chat -- the same handler runs "
+        .. "from a slash command")
+
+    print("  a button answers into the window, and a command into chat")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- BLOCKED IS NOT CARRIED BY RED ALONE.
+    --
+    -- Done was "x", next was ">", and blocked -- the one state that tells a
+    -- player to stop reading down the chain -- had only its colour. This
+    -- addon ships a colourblind mode for the arrow and states the rule in
+    -- Design.lua; the Goals tab was the exception.
+    ------------------------------------------------------------
+    local source = assert(io.open(ROOT .. "/UI.lua", "r"))
+
+    local text = source:read("*a")
+
+    source:close()
+
+    assert(text:find('step.state == "BLOCKED"', 1, true),
+        "the Goals tab must branch on BLOCKED")
+
+    assert(text:find('marker = "! "', 1, true),
+        "and give it a glyph, not only a colour")
+
+    print("  a blocked step carries a marker as well as a colour")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ESCAPE CLOSES EVERY FRAME THIS ADDON PUTS ON SCREEN.
+    --
+    -- Three were on `UISpecialFrames` and one was not: the welcome screen --
+    -- the only frame most players ever see, shown unasked on first login.
+    ------------------------------------------------------------
+    local welcome = CN:GetModule("Welcome")
+
+    assert(welcome and welcome.Build, "the welcome module must be loaded")
+
+    welcome.Build()
+
+    local listed = false
+
+    for _, name in ipairs(UISpecialFrames or {}) do
+        if name == "CompletionNavigatorWelcome" then
+            listed = true
+            break
+        end
+    end
+
+    assert(listed, "the welcome screen must close on Escape like anything else")
+
+    print("  Escape closes the welcome screen too")
+end)()
+
+
 print("\nWhat 0.57.0 changed, asserted through the paths the game takes:")
 
 ;(function()
@@ -8754,7 +9656,21 @@ print("\nWhat 0.57.0 changed, asserted through the paths the game takes:")
 
     assert(Row(), "the fixture row must be in the list")
 
-    assert(not Row().isGoal, "and must not start out as a goal")
+    -- ASSERTED THROUGH WHAT A PLAYER SEES, not through a flag kept for the
+    -- test's benefit. `objective.isGoal` was written three times in
+    -- Goals.lua and read only here; it is gone, and the row's own sentences
+    -- are the thing the window, the tooltip and `/cn why` all read.
+    local function SaysGoal()
+        for _, reason in ipairs(CN.Reasons(Row()) or {}) do
+            if reason:find("one of your goals", 1, true) then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    assert(not SaysGoal(), "and must not start out as a goal")
 
     local generation = CN.decoratorGeneration
 
@@ -8772,7 +9688,7 @@ print("\nWhat 0.57.0 changed, asserted through the paths the game takes:")
 
     CN.CollectCandidates()
 
-    assert(Row().isGoal,
+    assert(SaysGoal(),
         "pinning must reach a row the provider has not rebuilt")
 
     assert((Row().userPreference or 0) >= pinned.goalPreference,
@@ -8796,7 +9712,7 @@ print("\nWhat 0.57.0 changed, asserted through the paths the game takes:")
 
     CN.CollectCandidates()
 
-    assert(not Row().isGoal,
+    assert(not SaysGoal(),
         "unpinning must reach the same row, not wait for a rebuild")
 
     assert((Row().userPreference or 0) == 0,
@@ -8838,7 +9754,12 @@ end)()
 
     local held = CN.rankingGeneration
 
+    -- 0.58.0 added a route cache, and a cached call returns before it reaches
+    -- the hub comparison at all -- so a loop of identical calls proves only
+    -- that the cache works. Forget the cache each time: the route is genuinely
+    -- recomputed, lands on the same hubs, and must STILL not re-rank.
     for _ = 1, 5 do
+        CN.ForgetRoutes()
         CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
     end
 
@@ -9134,6 +10055,16 @@ end)()
         return realMount(itemID)
     end
 
+    -- An item that IS a mount is remembered; an item that is neither a mount
+    -- nor a pet is not, because a cold journal answers "neither" to
+    -- everything and remembering that hides every collectible in the bags
+    -- for the session.
+    CN_TEST_BAGS[0] = CN_TEST_BAGS[0] or {}
+
+    table.insert(CN_TEST_BAGS[0], { itemID = 800, stackCount = 1 })
+
+    inventory.Forget()
+
     inventory.UncollectedItems()
 
     local firstQuestPass = lookups
@@ -9143,9 +10074,42 @@ end)()
 
     C_MountJournal.GetMountFromItem = realMount
 
-    assert(lookups == firstQuestPass,
-        "asking what the same items are three times must ask the client "
-        .. "once: " .. firstQuestPass .. " became " .. lookups)
+    assert(lookups < firstQuestPass * 3,
+        "asking what the same items are three times must not ask the client "
+        .. "three times: " .. firstQuestPass .. " became " .. lookups)
+
+    -- AND A COLD JOURNAL'S "NO" IS NOT REMEMBERED.
+    --
+    -- Both journals answer nil until they are populated, which at login is
+    -- after the first bag scan. Remembering that made every caged pet and
+    -- mount item invisible for the session, recoverable only by a reload.
+    local coldAsked = 0
+
+    local realCold = C_MountJournal.GetMountFromItem
+
+    C_MountJournal.GetMountFromItem = function(itemID)
+        coldAsked = coldAsked + 1
+
+        return nil
+    end
+
+    inventory.Forget()
+    inventory.UncollectedItems()
+
+    local firstCold = coldAsked
+
+    inventory.Forget()
+    inventory.UncollectedItems()
+
+    C_MountJournal.GetMountFromItem = realCold
+
+    assert(coldAsked > firstCold,
+        "an item the client said nothing about must be asked again, or a "
+        .. "cold journal hides everything in your bags until you reload")
+
+    table.remove(CN_TEST_BAGS[0])
+
+    inventory.Forget()
 
     print("  a bag scan asks each slot about itself once")
 end)()
@@ -10089,8 +11053,6 @@ end)()
     assert(objective.userPreference == 1,
         "unpinning must give back the provider's own preference, got "
         .. tostring(objective.userPreference))
-
-    assert(not objective.isGoal, "and stop calling it a goal")
 
     for _, reason in ipairs(CN.Reasons(objective)) do
         assert(reason ~= "this is one of your goals",

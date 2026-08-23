@@ -199,6 +199,23 @@ CN.FONT = {
     BODY  = "GameFontHighlightLeft",
     SMALL = "GameFontHighlightSmall",
     LABEL = "GameFontDisableSmall",
+
+    -- THE TWO ROLES THAT WERE MISSING, WHICH IS WHY SIX WIDGETS STILL NAMED
+    -- A FONT OBJECT DIRECTLY.
+    --
+    -- The five roles above covered the window and nothing else, so the arrow,
+    -- the map pins, the follow frame, the heads-up line and the welcome
+    -- screen went on typing `GameFont*` -- and drifted, because a name is not
+    -- a decision. A role nobody can express is a role everybody works around.
+    --
+    -- CAPTION: emphasised text at small size. A button's own label, and the
+    -- word under a map pin.
+    CAPTION = "GameFontNormalSmall",
+
+    -- LEAD: the one number on screen that is read at a glance while moving.
+    -- Exactly one widget uses it -- the arrow's distance -- and that is the
+    -- point of it having a name.
+    LEAD    = "GameFontHighlightLarge",
 }
 
 ------------------------------------------------------------

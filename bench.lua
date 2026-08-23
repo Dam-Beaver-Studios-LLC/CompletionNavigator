@@ -401,7 +401,19 @@ print("\nThe paths a player triggers without meaning to:")
 do
     local mapID, x, y = CN.GetPlayerPosition()
 
+    -- FORCED, because 0.57.0's route cache would otherwise make this measure
+    -- a table lookup. A budget that measures the cached branch of the path it
+    -- is guarding is a budget that guards nothing -- which is the reasoning
+    -- this file already applies to `UI.Refresh`, and which four of these
+    -- budgets were failing in 0.56.0.
     bench("BuildZoneRoute()", 50, function()
+        CN.ForgetRoutes()
+        CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
+    end)
+
+    -- AND THE SAME CALL WITH THE ROUTE ALREADY BUILT, which is what the Zone
+    -- tab's two-second refresh and follow mode's ticker actually do.
+    bench("BuildZoneRoute() unchanged", 500, function()
         CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5)
     end)
 
@@ -533,6 +545,7 @@ local BUDGETS = {
     -- meaning to: opening the window, and the router recomputing because they
     -- walked into a new zone.
     ["BuildZoneRoute()"]          = 8.0,
+    ["BuildZoneRoute() unchanged"] = 0.05,
     ["Chase.All() with 8 goals"]  = 5.0,
 
     -- Added in 0.46.0, and the reason the rebuild ceiling above is now
@@ -547,7 +560,13 @@ local BUDGETS = {
     -- reach the size at which either mattered, so neither had a budget and
     -- neither was measured -- which is how a thirty-three millisecond stutter
     -- lived in the file a player watches while walking.
-    ["ImproveRoute() over 90 stops"] = 6.0,
+    -- 2-opt is quadratic in stops and every comparison needs four real
+    -- distances, so ninety stops is genuinely expensive. 0.57.0 got it under
+    -- six by skipping work with don't-look bits, and those turned out not to
+    -- be exact -- 41 of 60 ninety-stop routes came out LONGER. Correct and
+    -- slower is the right trade; the cost is paid once per route now rather
+    -- than on every two-second refresh (see `routeCache`).
+    ["ImproveRoute() over 90 stops"] = 8.0,
     ["ClusterByProximity() over 110 objectives"] = 3.0,
 }
 

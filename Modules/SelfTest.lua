@@ -180,7 +180,7 @@ CN.RegisterSelfTest{
         local mapID, x, y = CN.GetPlayerPosition()
 
         if not mapID then
-            return SKIP, "no map -- are you in an instance or a loading screen?"
+            return SKIP, "no map" .. CN.DASH .. "are you in an instance or a loading screen?"
         end
 
         if not x or not y then
@@ -215,7 +215,7 @@ CN.RegisterSelfTest{
         local yards = nav.DistanceYards(mapID, x, y, x, math.max(0, y - 0.01))
 
         if not yards then
-            return FAIL, "the client would not convert -- every distance in "
+            return FAIL, "the client would not convert" .. CN.DASH .. "every distance in "
                 .. "the addon will read 'unknown'"
         end
 
@@ -240,7 +240,7 @@ CN.RegisterSelfTest{
         local parentID = info and info.parentMapID
 
         if not parentID or parentID == 0 then
-            return SKIP, "this map has no parent -- you are not indoors"
+            return SKIP, "this map has no parent" .. CN.DASH .. "you are not indoors"
         end
 
         local nav = CN:GetModule("Navigation")
@@ -336,7 +336,7 @@ CN.RegisterSelfTest{
         local state = nav.MotionState()
 
         if state.samples == 0 then
-            return SKIP, "no movement seen yet -- point the arrow at "
+            return SKIP, "no movement seen yet" .. CN.DASH .. "point the arrow at "
                 .. "something with /cn go, walk forward a few seconds, and "
                 .. "run this again"
         end
@@ -376,7 +376,7 @@ CN.RegisterSelfTest{
         local ratio = scaleX / scaleY
 
         return PASS, string.format(
-            "%.0f x %.0f yards, ratio %.2f -- angles adjusted by it",
+            "%.0f x %.0f yards, ratio %.2f" .. CN.DASH .. "angles adjusted by it",
             scaleX, scaleY, ratio)
     end,
 }
@@ -465,7 +465,7 @@ CN.RegisterSelfTest{
         end
 
         if sampled == 0 then
-            return SKIP, "nothing scanned yet -- run /cn setup"
+            return SKIP, "nothing scanned yet" .. CN.DASH .. "run /cn setup"
         end
 
         return PASS, string.format("%d criteria read, %d carry a counter",
@@ -503,7 +503,7 @@ CN.RegisterSelfTest{
 
         if resolved == 0 then
             return FAIL, "the pet journal named none of "
-                .. checked .. " -- the interface will show numbers"
+                .. checked .. "" .. CN.DASH .. "the interface will show numbers"
         end
 
         return PASS, resolved .. " of " .. checked .. " named by the client"
@@ -528,7 +528,7 @@ CN.RegisterSelfTest{
         -- unresolved fault, and it outlives the failure record that produced
         -- it -- so it is reported on its own rather than under it.
         if CN.db.rescuedCharacters ~= nil then
-            return FAIL, "some saved data was set aside as unreadable -- "
+            return FAIL, "some saved data was set aside as unreadable" .. CN.DASH .. ""
                 .. "/cn rescued"
         end
 
@@ -564,7 +564,7 @@ CN.RegisterSelfTest{
 
         if kb > 4096 then
             return FAIL, string.format(
-                "%.0f KB -- unusually large; run /cn dbsize to see where", kb)
+                "%.0f KB" .. CN.DASH .. "unusually large; run /cn dbsize to see where", kb)
         end
 
         return PASS, string.format("%.0f KB", kb)
@@ -580,7 +580,7 @@ CN.RegisterSelfTest{
         local results = CN.Recommend(1)
 
         if not results or #results == 0 then
-            return SKIP, "nothing actionable right now -- try /cn setup, or "
+            return SKIP, "nothing actionable right now" .. CN.DASH .. "try /cn setup, or "
                 .. "check /cn show in case everything is filtered out"
         end
 
@@ -628,7 +628,7 @@ CN.RegisterSelfTest{
         end
 
         if Blizzard.IsEncounterJournalOpen() then
-            return SKIP, "the Adventure Guide is open, so nothing was read -- "
+            return SKIP, "the Adventure Guide is open, so nothing was read" .. CN.DASH .. ""
                 .. "which is the intended behaviour, not a fault"
         end
 
@@ -687,7 +687,7 @@ CN:RegisterCommand{
 
         if rows.failed > 0 then
             Print("|cffffc74fA failure above is a real defect. Copy this "
-                .. "output into a bug report -- it says more than any "
+                .. "output into a bug report" .. CN.DASH .. "it says more than any "
                 .. "description could.|r")
         end
     end,

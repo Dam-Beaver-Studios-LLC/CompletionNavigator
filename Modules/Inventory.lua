@@ -244,7 +244,20 @@ local function KindOf(itemID)
         species = Blizzard.GetPetSpeciesFromItem(itemID),
     }
 
-    itemKinds[itemID] = held
+    -- A COLD JOURNAL'S "NO" IS NOT AN ANSWER.
+    --
+    -- Both calls return nil until their journal is populated, which at login
+    -- happens AFTER the first `BAG_UPDATE_DELAYED` scan. Remembering that
+    -- made every caged pet and every mount item in the player's bags
+    -- invisible to the addon for the whole session, recoverable only by a
+    -- reload -- where before this memo existed each scan re-asked and it
+    -- corrected itself within seconds.
+    --
+    -- So only a positive answer is remembered. An item that is genuinely
+    -- neither costs two client calls per scan, which is what it cost before.
+    if held.mount or held.species then
+        itemKinds[itemID] = held
+    end
 
     return held
 end
@@ -265,7 +278,20 @@ function Inventory.UncollectedItems()
 
         local mount = mountID and Blizzard.GetMountByID(mountID)
 
-        if mount and not mount.collected then
+        -- `isCollected`, NOT `collected`.
+        --
+        -- `Blizzard.GetMountByID` returns the field as `isCollected`, and
+        -- `Modules/Mounts.lua` reads it correctly. Here it was spelled
+        -- `collected`, which is always nil, so `not nil` was always true and
+        -- EVERY bag item that teaches a mount was emitted as uncollected --
+        -- at completionValue 4 with a travel cost of zero, which is close to
+        -- the strongest score shape the addon can produce. A mount you
+        -- already learned and kept the item for sat near the top of `/cn next`
+        -- telling you to learn it, for ever.
+        --
+        -- The comment three lines above says this check is what "keeps the
+        -- addon from telling somebody to learn what they already have".
+        if mount and not mount.isCollected then
             item.kind = CN.objectiveTypes.MOUNT
             item.collectibleID = mountID
 
@@ -652,7 +678,7 @@ CN.RegisterCandidateProvider("Inventory", function()
                 -- Zero, and it is the honest number: the item is in your bag.
                 travelCost       = 0,
                 reasons          = {
-                    "a quest starter in your bags -- right-click it",
+                    "a quest starter in your bags" .. CN.DASH .. "right-click it",
                 },
             }))
         end
@@ -675,9 +701,9 @@ CN.RegisterCandidateProvider("Inventory", function()
 
                 -- Worth more the closer it is, which is the entire point.
                 completionValue  = 2 + (Inventory.nearlyDoneRemaining - row.remaining),
-                travelCost       = CN.unknownLocationCost,
+                travelCost       = CN.placelessCost,
                 reasons          = {
-                    string.format("%s -- %d of %d done",
+                    string.format("%s" .. CN.DASH .. "%d of %d done",
                         tostring(row.text or "objective"), row.done, row.required),
                 },
             }))

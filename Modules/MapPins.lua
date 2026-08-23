@@ -381,14 +381,14 @@ local function ShowPinTooltip(frame)
     GameTooltip:AddLine(string.format("Stop %d", frame.pin.order), 1, 1, 1)
 
     if frame.pin.summary then
-        GameTooltip:AddLine(frame.pin.summary, 0.365, 0.824, 0.984)
+        GameTooltip:AddLine(frame.pin.summary, CN.Rgb("BRAND"))
     end
 
     for _, line in ipairs(MapPins.DescribeLines(frame.pin)) do
-        GameTooltip:AddLine(line, 0.8, 0.8, 0.8)
+        GameTooltip:AddLine(line, CN.Rgb("BODY"))
     end
 
-    GameTooltip:AddLine("Click to navigate here", 0.6, 0.6, 0.6)
+    GameTooltip:AddLine("Click to navigate here", CN.Rgb("MUTED"))
 
     GameTooltip:Show()
 end
@@ -453,7 +453,7 @@ local function AcquirePin(index, canvas)
         frame.texture:SetTexture("Interface\\Minimap\\MinimapArrow")
     end
 
-    frame.label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.label = frame:CreateFontString(nil, "OVERLAY", CN.FONT.CAPTION)
     frame.label:SetPoint("CENTER")
 
     -- Over map art, which is the same problem as over the world: a stop

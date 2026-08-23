@@ -358,11 +358,11 @@ local function BuildArrow()
         arrow.texture:SetTexture("Interface\\Minimap\\MinimapArrow")
     end
 
-    arrow.label = arrow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    arrow.label = arrow:CreateFontString(nil, "OVERLAY", CN.FONT.CAPTION)
     arrow.label:SetPoint("TOP", arrow, "BOTTOM", 0, -2)
     arrow.label:SetJustifyH("CENTER")
 
-    arrow.distance = arrow:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
+    arrow.distance = arrow:CreateFontString(nil, "OVERLAY", CN.FONT.LEAD)
     arrow.distance:SetPoint("TOP", arrow.label, "BOTTOM", 0, -2)
     arrow.distance:SetJustifyH("CENTER")
 
@@ -1166,7 +1166,7 @@ function Navigation.Diagnose()
     end
 
     if not target then
-        add("target", "none -- nothing is being tracked")
+        add("target", "none" .. CN.DASH .. "nothing is being tracked")
 
         return report
     end
@@ -1199,7 +1199,7 @@ function Navigation.Diagnose()
     add("facing sign", tostring(Navigation.FacingSign())
         .. " (flips if the arrow ever pointed backwards)")
     add("facing evidence", motionState.samples == 0
-        and "none yet -- walk a few yards with the arrow up"
+        and "none yet" .. CN.DASH .. "walk a few yards with the arrow up"
         or string.format("%d movement samples, %s",
             motionState.samples, tostring(motionState.verdict)))
 
@@ -1209,7 +1209,7 @@ function Navigation.Diagnose()
 
     add("relative bearing", state.relative
         and string.format("%.1f deg", math.deg(state.relative))
-        or "nil -- no bearing could be computed")
+        or "nil" .. CN.DASH .. "no bearing could be computed")
 
     if state.relative then
         add("rotation applied", string.format("%.1f deg", math.deg(-state.relative)))
@@ -1229,7 +1229,7 @@ function Navigation.Diagnose()
     -- The two settings that can change what the arrow means without the
     -- player doing anything.
     add("auto-advance", (CN.IsAutoWaypointEnabled and CN.IsAutoWaypointEnabled())
-        and "ON -- arriving re-points the arrow at the next thing"
+        and "ON" .. CN.DASH .. "arriving re-points the arrow at the next thing"
         or "off")
 
     local follow = CN:GetModule("Follow")
