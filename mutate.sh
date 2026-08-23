@@ -472,8 +472,8 @@ mutate "Modules/Travel.lua" \
     "another continent is cheaper than across your own zone"
 
 mutate "Modules/Session.lua" \
-    "    elapsed = elapsed - (started.travel or 0)" \
-    "    elapsed = elapsed - 0" \
+    "    local elapsed = span - (started.travel or 0)" \
+    "    local elapsed = span - 0" \
     "the journey is counted in the task time and again in the plan"
 
 mutate "Modules/Chase.lua" \
@@ -721,18 +721,110 @@ mutate "Modules/Quests.lua" \
     "arriving anywhere prompts, however little there is to do"
 
 mutate "Modules/Quests.lua" \
-    "    if not mapID or announcedZones[mapID] then
+    "    if announcedAt and (now - announcedAt) < Quests.arrivalMemorySeconds then
         return false
     end" \
-    "    if not mapID then
+    "    if announcedAt then
         return false
     end" \
-    "the arrival prompt repeats every time you re-enter a zone"
+    "a zone re-entered hours later never prompts again"
 
 mutate "UI/List.lua" \
     "                row.bar:SetWidth(math.max(1, (width - 12) * fraction))" \
     "                row.bar:SetWidth(math.max(1, width - 12))" \
     "a progress bar is always full"
+
+
+############################################################
+# 0.55.0
+############################################################
+
+mutate "Modules/Session.lua" \
+    "    if elapsed < Session.minimumWorkSeconds then
+        elapsed = Session.minimumWorkSeconds
+    end" \
+    "    if elapsed < Session.minimumWorkSeconds then
+        return nil
+    end" \
+    "a fast objective is discarded instead of floored"
+
+mutate "Modules/Preference.lua" \
+    "    if not Preference.IsCreditable(objectiveType) then
+        return 1, nil
+    end" \
+    "    if false then
+        return 1, nil
+    end" \
+    "a type the addon cannot watch is demoted for not being watched"
+
+mutate "Routing.lua" \
+    "CN.fallbackZoneYards = 2000" \
+    "CN.fallbackZoneYards = 1" \
+    "a zone whose size the client will not report becomes one hub"
+
+mutate "Dependencies.lua" \
+    "    if type(provider.IsAvailable) ~= \"function\" then" \
+    "    if false then" \
+    "a quest data provider with no IsAvailable is accepted and never asked"
+
+mutate "Modules/Capture.lua" \
+    "    if type(definition.name) ~= \"string\" or definition.name == \"\" then" \
+    "    if false then" \
+    "a capture with no name is filed under nil"
+
+mutate "Modules/Harvest.lua" \
+    "        return a.seen < b.seen" \
+    "        return a.id < b.id" \
+    "the harvest evicts the lowest quest ids, which is a levelling alt's zone"
+
+mutate "UI.lua" \
+    "        CN.Settings().selectedTabName = tab.name" \
+    "        CN.Settings().selectedTabName = nil" \
+    "the remembered tab is an array index again"
+
+mutate "Events.lua" \
+    "        Dispatch(event, ...)
+
+        return
+    end
+
+    if event == \"PLAYER_LOGIN\" then" \
+    "        return
+    end
+
+    if event == \"PLAYER_LOGIN\" then" \
+    "ADDON_LOADED handlers are accepted and never called"
+
+mutate "Modules/Harvest.lua" \
+    "            Count(record.requires)
+            Count(record.observedRequires)" \
+    "            Count(record.requires)" \
+    "what a quest unlocks ignores everything this addon harvested itself"
+
+mutate "Routing.lua" \
+    "        if ok and measured" \
+    "        if ok" \
+    "a refusal to convert is accepted as a scale of one yard per map unit"
+
+mutate "Modules/Session.lua" \
+    "    if span > 1200 then" \
+    "    if elapsed > 1200 then" \
+    "an implausible span passes once its journey is subtracted"
+
+mutate "Modules/Preference.lua" \
+    "        CN.ClearAdjusterReason(objective, \"preference\")" \
+    "        local withdrawn = nil" \
+    "a withdrawn preference keeps saying you rarely act on these"
+
+mutate "Scoring.lua" \
+    "        local leftCount  = a.providerReasons or #leftReasons" \
+    "        local leftCount  = #leftReasons" \
+    "a decorated reason defeats the unchanged-provider shortcut"
+
+mutate "UI.lua" \
+    "    UI.SelectTab(UI.RememberedTabIndex() or UI.selectedTab or 1)" \
+    "    UI.SelectTab(UI.selectedTab or UI.RememberedTabIndex() or 1)" \
+    "rebuilding the tab strip prefers a stale index over the remembered name"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

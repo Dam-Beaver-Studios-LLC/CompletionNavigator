@@ -465,6 +465,16 @@ C_Map = {
         assert(point and point.x and point.y and not point.uiMapID,
             "GetWorldPosFromMapPos needs a Vector2D, not a UiMapPoint")
 
+        -- THE CLIENT REFUSING TO CONVERT IS A STATE THE STUB COULD NOT
+        -- MODEL, and it is the state every fallback in the addon exists for:
+        -- a loading screen, an instance, a map with no world position. Until
+        -- 0.55.0 the stub always answered, so every fallback path in routing
+        -- and navigation was unreachable from the suite -- and one of them
+        -- shipped broken for a release because of it.
+        if CN_TEST_REFUSE_WORLD_POS then
+            return nil
+        end
+
         local span = CN_TEST_MAP_SPAN or { 1000, 1000 }
 
         -- The CONTINENT id matters as much as the position: two points on
@@ -1018,6 +1028,10 @@ CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
 -- distance figures elsewhere stay checkable by hand; tests that care about
 -- angles set it to something the shape of a real zone.
 CN_TEST_MAP_SPAN = { 1000, 1000 }
+
+-- When true, GetWorldPosFromMapPos answers nothing, as it does during a
+-- loading screen.
+CN_TEST_REFUSE_WORLD_POS = false
 
 -- The span is set through CN_TEST_SetMapSpan, which is defined once the addon
 -- has loaded: changing the shape of the world has to invalidate everything the
@@ -7781,10 +7795,16 @@ print("\nDungeons and raids:")
     ------------------------------------------------------------
     local instanceCandidates = CN.candidateProviders["Instances"].fn()
 
+    -- KEYED ON THE NAME FOR READABILITY, NOT ON THE ID.
+    --
+    -- The objective's id is the lockout SAVE id since 0.55.0: two lockouts of
+    -- the same instance at different difficulties are the ordinary case, and
+    -- keying an objective on the localized display name made them collide, so
+    -- the aggregate deduplicated one of the two out of existence.
     local names = {}
 
     for _, candidate in ipairs(instanceCandidates) do
-        names[candidate.id] = candidate
+        names[candidate.name:gsub("%s*%b()$", "")] = candidate
     end
 
     assert(names["Nerub-ar Palace"],
@@ -8446,6 +8466,740 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
+print("\nWhat 0.55.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE FLOOR AND THE DISCARD CANCELLED EACH OTHER OUT.
+    --
+    -- `NoteCompleted` clamped a short sample up to `minimumWorkSeconds` and
+    -- the very next line threw away anything at or below the same number. So
+    -- every fast objective -- a quest handed in on arrival, a treasure picked
+    -- up on the way past -- was measured, floored, and discarded, which is
+    -- the exact bias the floor was written to remove. Every learned duration
+    -- read long, and read long confidently.
+    ------------------------------------------------------------
+    local session = CN:GetModule("Session")
+
+    assert(session and session.NoteCompleted, "Session must expose NoteCompleted")
+
+    local durations = session.Durations()
+
+    durations[CN.objectiveTypes.TREASURE] = nil
+
+    local savedClock = CN_TEST_CLOCK
+
+    -- Offered now, finished in the same instant, with a travel estimate that
+    -- swallows the whole span. This is the shape the floor exists for.
+    session.NoteOffered({
+        type = CN.objectiveTypes.TREASURE, id = 55001, travelCost = 3,
+    })
+
+    local elapsed = session.NoteCompleted(CN.objectiveTypes.TREASURE, 55001)
+
+    assert(elapsed ~= nil,
+        "a sample floored to the minimum must be KEPT -- it was floored and "
+        .. "then discarded by the test on the next line")
+
+    assert(elapsed == session.minimumWorkSeconds,
+        "and it must be the floor itself, got " .. tostring(elapsed))
+
+    assert(#durations[CN.objectiveTypes.TREASURE] == 1,
+        "and it must reach the store")
+
+    -- The implausible sample is still rejected, and rejected on the RAW span.
+    durations[CN.objectiveTypes.TREASURE] = nil
+
+    session.NoteOffered({ type = CN.objectiveTypes.TREASURE, id = 55002 })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 4000
+
+    assert(session.NoteCompleted(CN.objectiveTypes.TREASURE, 55002) == nil,
+        "over twenty minutes is not a measurement of doing the thing")
+
+    -- A FORTY-MINUTE SPAN WITH A TWENTY-FIVE MINUTE JOURNEY IS STILL FORTY
+    -- MINUTES OF NOT DOING IT. Judging plausibility on the travel-adjusted
+    -- figure would let this through as a confident fifteen-minute sample.
+    durations[CN.objectiveTypes.TREASURE] = nil
+
+    session.NoteOffered({
+        type = CN.objectiveTypes.TREASURE, id = 55003, travelCost = 50,
+    })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 2400
+
+    assert(session.NoteCompleted(CN.objectiveTypes.TREASURE, 55003) == nil,
+        "an implausible span is implausible however far away it was")
+
+    -- And a clock that went backwards is not a negative duration.
+    durations[CN.objectiveTypes.TREASURE] = nil
+
+    session.NoteOffered({ type = CN.objectiveTypes.TREASURE, id = 55004 })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK - 60
+
+    assert(session.NoteCompleted(CN.objectiveTypes.TREASURE, 55004) == nil,
+        "a clock that went backwards is not a measurement")
+
+    CN_TEST_CLOCK = savedClock
+
+    durations[CN.objectiveTypes.TREASURE] = nil
+
+    print("  a fast objective is floored and KEPT, and a stale one is not")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- HALF THE SUBJECT MATTER WAS BEING DEMOTED FOR THE ADDON'S DEAFNESS.
+    --
+    -- `shown` was counted for every type; `acted` only for the five the
+    -- client announces a completion for. The other thirteen crossed the
+    -- observation threshold with a numerator nailed to zero, settled on the
+    -- 0.80 floor permanently, and `/cn learned` said "you rarely act on
+    -- these" -- a statement about the player that the addon had no way to
+    -- make.
+    ------------------------------------------------------------
+    local preference = CN:GetModule("Preference")
+
+    assert(preference and preference.IsCreditable,
+        "Preference must publish what it can credit")
+
+    assert(preference.IsCreditable(CN.objectiveTypes.QUEST),
+        "quests are announced by the client and must stay creditable")
+
+    for _, objectiveType in ipairs({
+        CN.objectiveTypes.REPUTATION, CN.objectiveTypes.APPEARANCE,
+        CN.objectiveTypes.RARE, CN.objectiveTypes.TREASURE,
+        CN.objectiveTypes.CURRENCY, CN.objectiveTypes.EXPLORATION,
+        CN.objectiveTypes.RENOWN, CN.objectiveTypes.TITLE,
+        CN.objectiveTypes.RECIPE, CN.objectiveTypes.PROFESSION,
+        CN.objectiveTypes.VENDOR, CN.objectiveTypes.COLLECTIBLE,
+        CN.objectiveTypes.INSTANCE,
+    }) do
+        assert(not preference.IsCreditable(objectiveType),
+            objectiveType .. " has no completion event, so it must not be "
+            .. "credited or punished")
+    end
+
+    -- EVERY TYPE WITH A COMPLETION EVENT MUST BE CREDITABLE, which is the
+    -- half of the contract that rots: add an event, forget the set, and the
+    -- type is punished for being watched.
+    for _, entry in ipairs(preference.completionEvents) do
+        assert(preference.IsCreditable(entry.type),
+            entry.type .. " is announced by " .. entry.event
+            .. " but is not in creditableTypes")
+    end
+
+    -- And the multiplier itself, through the path scoring takes: an
+    -- uncreditable type sat at three hundred sightings and no completions
+    -- must still be 1.00.
+    local store = preference.Store()
+
+    store[CN.objectiveTypes.APPEARANCE] = { shown = 300, acted = 0 }
+
+    preference.NoteStoreChanged()
+
+    local multiplier, reason = preference.Multiplier(CN.objectiveTypes.APPEARANCE)
+
+    assert(multiplier == 1,
+        "an uncreditable type must not be demoted, got " .. tostring(multiplier))
+
+    assert(reason == nil,
+        "and must not claim the player rarely acts on them, got "
+        .. tostring(reason))
+
+    store[CN.objectiveTypes.APPEARANCE] = nil
+
+    preference.NoteStoreChanged()
+
+    -- AND THE SENTENCE IS WITHDRAWN WHEN IT STOPS BEING TRUE.
+    --
+    -- The reason is stamped onto objectives that live in the per-provider
+    -- cache, and the cache outlives the opinion. `/cn learned reset` says
+    -- "Forgotten. The ranking is back to its defaults." -- and `/cn why` went
+    -- on printing the old verdict until some unrelated rebuild happened.
+    store[CN.objectiveTypes.TOY] = { shown = 300, acted = 0 }
+
+    preference.NoteStoreChanged()
+
+    local toy = { type = CN.objectiveTypes.TOY, id = 55200, name = "Judged" }
+
+    CN.scoreAdjusters["Preference"](toy, 10)
+
+    assert(toy.adjusterReasons and toy.adjusterReasons.preference,
+        "a demoted type must say why")
+
+    local stamped = #(toy.reasons or {})
+
+    assert(stamped > 0, "and the sentence must reach the reasons list")
+
+    -- Now the evidence goes away, exactly as `/cn learned reset` makes it.
+    store[CN.objectiveTypes.TOY] = nil
+
+    preference.NoteStoreChanged()
+
+    CN.scoreAdjusters["Preference"](toy, 10)
+
+    assert(not (toy.adjusterReasons and toy.adjusterReasons.preference),
+        "and it must be WITHDRAWN when it stops being true, not left on a "
+        .. "cached objective for the rest of the session")
+
+    assert(#(toy.reasons or {}) == stamped - 1,
+        "and taken back out of the reasons list")
+
+    print("  only what the client announces earns an opinion; the other "
+        .. "thirteen are left alone")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- CLUSTERING ON THE FALLBACK PATH MADE THE WHOLE ZONE ONE STOP.
+    --
+    -- The 0.54.0 grid compares a squared distance against the hub radius in
+    -- yards squared -- 4,900. With the old scale fallback of 1, the largest
+    -- possible squared distance across the entire map is 2. So when the
+    -- client would not give a scale, every objective in the zone joined the
+    -- first hub: one stop, containing everything, with a batch bonus to
+    -- match. Before 0.54.0 this path went through ObjectiveDistanceYards,
+    -- which has always had a 2000-yard fallback -- so this was a regression
+    -- introduced by making the clustering fast.
+    ------------------------------------------------------------
+    local saved = CN_TEST_MAP_SPAN
+
+    -- The client refusing to answer is what the fallback is for.
+    CN_TEST_SetMapSpan(nil)
+
+    CN.UseRouteMapScale(nil)
+
+    local far = {}
+
+    for index = 1, 6 do
+        table.insert(far, {
+            name  = "Far " .. index,
+            mapID = nil,
+            x     = 0.05 + (index * 0.15),
+            y     = 0.5,
+        })
+    end
+
+    local hubs = CN.ClusterByProximity(far)
+
+    assert(#hubs == 6,
+        "six things spread across a zone are six stops even when the client "
+        .. "will not say how big the zone is, got " .. #hubs)
+
+    -- And two things genuinely on top of each other are still one stop.
+    local together = CN.ClusterByProximity({
+        { name = "A", x = 0.500, y = 0.500 },
+        { name = "B", x = 0.505, y = 0.500 },
+    })
+
+    assert(#together == 1,
+        "two things ten yards apart are one stop, got " .. #together)
+
+    CN_TEST_SetMapSpan(saved)
+
+    CN.UseRouteMapScale(nil)
+
+    -- AND THE SENTINEL MUST NOT PASS FOR AN ANSWER.
+    --
+    -- `Navigation.MapScale` returns `1, 1` when the client will not convert,
+    -- which is the right shrug for a bearing (it only uses the ratio) and a
+    -- disaster for routing (it wants absolute yards). `UseMapScale` validated
+    -- with `scaleX > 0`, which `1` satisfies -- so the fallback above could
+    -- never fire for a REAL map during a loading screen, which is the only
+    -- situation it exists for. Asserted through a real mapID.
+    CN_TEST_REFUSE_WORLD_POS = true
+
+    local navigation = CN:GetModule("Navigation")
+
+    navigation.ForgetMapScales()
+
+    local shrugX, shrugY, measured = navigation.MapScale(94)
+
+    assert(shrugX == 1 and shrugY == 1,
+        "the bearing maths still wants 1,1 when the client will not convert")
+
+    assert(measured == false,
+        "and it must SAY that is a shrug rather than a measurement")
+
+    local routedX = select(1, CN.UseRouteMapScale(94))
+
+    assert(routedX == CN.fallbackZoneYards,
+        "routing must reject the shrug and use the yard fallback, got "
+        .. tostring(routedX))
+
+    local realFar = {}
+
+    for index = 1, 6 do
+        table.insert(realFar, {
+            name = "RealFar " .. index, mapID = 94,
+            x = 0.05 + (index * 0.15), y = 0.5,
+        })
+    end
+
+    assert(#CN.ClusterByProximity(realFar) == 6,
+        "and a real zone the client will not measure is still six stops, got "
+        .. #CN.ClusterByProximity(realFar))
+
+    CN_TEST_REFUSE_WORLD_POS = false
+
+    CN_TEST_SetMapSpan(saved)
+
+    CN.UseRouteMapScale(nil)
+
+    print("  the hub radius means yards on the fallback path too")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EXPLAINING A SCORE MUST NOT CHANGE IT.
+    --
+    -- `ExplainScore` re-invokes every adjuster, because an adjuster's
+    -- contribution is recorded nowhere else. That is safe only while every
+    -- adjuster is idempotent and never accumulates. Asserted rather than
+    -- assumed: explain the same objective twice and the reason list must not
+    -- grow.
+    ------------------------------------------------------------
+    local objective = {
+        type = CN.objectiveTypes.QUEST, id = 55010, name = "Explained",
+        completionValue = 5, travelCost = 0.2,
+    }
+
+    CN.ExplainScore(objective)
+
+    local first = #(objective.reasons or {})
+
+    CN.ExplainScore(objective)
+    CN.ExplainScore(objective)
+
+    assert(#(objective.reasons or {}) == first,
+        "explaining a score three times must not stamp three reasons, "
+        .. first .. " became " .. #(objective.reasons or {}))
+
+    -- And an adjuster that throws must not take the explanation with it.
+    CN.RegisterScoreAdjuster("MutationExplodes", function()
+        error("adjuster failure")
+    end)
+
+    local ok = pcall(CN.ExplainScore, objective)
+
+    CN.scoreAdjusters["MutationExplodes"] = nil
+
+    assert(ok, "/cn why must survive an adjuster that throws")
+
+    print("  explaining is idempotent, and survives an adjuster that throws")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A REGISTRY THAT ACCEPTS HALF A CONTRACT.
+    ------------------------------------------------------------
+    local accepted = CN.RegisterQuestDataProvider("MutationHalf", {
+        GetQuestData = function() return {} end,
+    })
+
+    assert(not accepted,
+        "a quest data provider with no IsAvailable must be refused -- every "
+        .. "read calls it")
+
+    assert(CN.questDataProviders["MutationHalf"] == nil,
+        "and must not be stored")
+
+    -- Registering twice must replace, not duplicate the priority row.
+    local function Whole()
+        return {
+            GetQuestData = function() return {} end,
+            IsAvailable  = function() return true end,
+            priority     = 5,
+        }
+    end
+
+    CN.RegisterQuestDataProvider("MutationTwice", Whole())
+    CN.RegisterQuestDataProvider("MutationTwice", Whole())
+
+    local rows = 0
+
+    for _, entry in ipairs(CN.questDataOrder) do
+        if entry.name == "MutationTwice" then
+            rows = rows + 1
+        end
+    end
+
+    assert(rows == 1,
+        "registering twice is a replacement, not a second row, got " .. rows)
+
+    -- A capture with no name would be filed under nil, which throws inside
+    -- the capture run and takes every later capture with it.
+    assert(not CN.RegisterCapture{ run = function() return {} end },
+        "a capture with no name must be refused")
+
+    for index = #CN.questDataOrder, 1, -1 do
+        if CN.questDataOrder[index].name == "MutationTwice" then
+            table.remove(CN.questDataOrder, index)
+        end
+    end
+
+    CN.questDataProviders["MutationTwice"] = nil
+
+    -- A packed route key must read back as the pair that went in, and
+    -- anything that is not one of our keys must read back as nothing rather
+    -- than as an invented pair.
+    local travel = CN:GetModule("Travel")
+
+    local packed = travel.RouteKey(1450, 88)
+
+    local fromID, toID = travel.UnpackRouteKey(packed)
+
+    assert(fromID == 88 and toID == 1450,
+        "a packed key must unpack to the pair it holds, got "
+        .. tostring(fromID) .. ", " .. tostring(toID))
+
+    assert(travel.UnpackRouteKey("88:1450") == nil,
+        "and a string is not one of our keys")
+
+    assert(travel.UnpackRouteKey(0) == nil,
+        "and neither is zero")
+
+    print("  a registry checks the whole contract, and twice is once")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE REMEMBERED TAB WAS AN ARRAY INDEX.
+    --
+    -- `UI.tabs` is sorted by order then name and rebuilt whenever a tab
+    -- registers. Index 7 is "Collections" only until the tab list changes --
+    -- so adding a tab silently reopens the window on somebody else's panel.
+    ------------------------------------------------------------
+    local tabSettings = CN.Settings()
+
+    local UI = CN.UI or CN:GetModule("UI")
+
+    local target = UI.tabs[#UI.tabs]
+
+    assert(target and target.name, "there must be tabs to remember")
+
+    -- THROUGH THE PATH A CLICK TAKES, not by writing the setting by hand:
+    -- the defect is that `SelectTab` recorded only the index, so a test that
+    -- writes the name itself passes with the fix removed.
+    UI.SelectTab(#UI.tabs)
+
+    assert(tabSettings.selectedTabName == target.name,
+        "selecting a tab must record its NAME, got "
+        .. tostring(tabSettings.selectedTabName))
+
+    -- Now the tab list changes shape underneath it, which is what actually
+    -- happens when a release adds a tab.
+    tabSettings.selectedTab = 1
+
+    assert(UI.RememberedTabIndex() == #UI.tabs,
+        "the NAME decides, not the stale index")
+
+    -- A database written before 0.55.0 has only the index, and must still
+    -- open somewhere sensible.
+    tabSettings.selectedTabName = nil
+    tabSettings.selectedTab     = 2
+
+    assert(UI.RememberedTabIndex() == 2,
+        "an older database still opens on its remembered index")
+
+    -- AND THE REBUILD PATH MUST PREFER THE NAME TOO.
+    --
+    -- `RebuildTabs` re-enters `SelectTab(UI.selectedTab or ...)`, and
+    -- `UI.selectedTab` is an index from the PREVIOUS sort -- so consulting it
+    -- first reintroduces the bug on the one path that triggers it: a tab
+    -- registering, which is what re-sorts the list.
+    local displaced = UI.tabs[1]
+
+    UI.selectedTab              = 1
+    tabSettings.selectedTab     = 1
+    tabSettings.selectedTabName = target.name
+
+    UI.RebuildTabs()
+
+    assert(UI.tabs[UI.selectedTab] and UI.tabs[UI.selectedTab].name
+        == target.name,
+        "rebuilding the tab strip must land on the remembered NAME, not on "
+        .. tostring(displaced and displaced.name))
+
+    -- A tab that no longer exists is not an error.
+    tabSettings.selectedTabName = "AGoneTab"
+    tabSettings.selectedTab     = nil
+
+    assert(UI.RememberedTabIndex() == nil,
+        "a removed tab falls back to the default rather than throwing")
+
+    tabSettings.selectedTabName = nil
+    tabSettings.selectedTab     = nil
+
+    print("  the window reopens on the tab you left, by name")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCORING TERM WITH ONE PRODUCER OUT OF TWENTY-TWO.
+    --
+    -- `unlockValue` carries the second-heaviest weight in the scorer and was
+    -- set by exactly one provider. It now reads the inverted prerequisite
+    -- graph the addon already harvests -- and only that, so a quest nothing
+    -- has been observed behind still scores zero.
+    ------------------------------------------------------------
+    local unlockHarvest = CN:GetModule("Harvest")
+
+    assert(unlockHarvest and unlockHarvest.UnlockCount, "Harvest must publish UnlockCount")
+
+    local store = unlockHarvest.Store()
+
+    store[55100] = { questID = 55100, lastSeen = 1 }
+    store[55101] = { questID = 55101, lastSeen = 1, observedRequires = { 55100 } }
+    store[55102] = { questID = 55102, lastSeen = 1, observedRequires = { 55100 } }
+
+    -- Named twice by one record is one unlock, not two.
+    store[55103] = {
+        questID = 55103, lastSeen = 1,
+        requires = { 55100 }, observedRequires = { 55100 },
+    }
+
+    unlockHarvest.NoteUnlocksChanged()
+
+    assert(unlockHarvest.UnlockCount(55100) == 3,
+        "three quests were observed behind it, got "
+        .. unlockHarvest.UnlockCount(55100))
+
+    assert(unlockHarvest.UnlockCount(55101) == 0,
+        "and nothing was observed behind a leaf")
+
+    -- Through the decorator, which is the path scoring actually takes.
+    local objective = { type = CN.objectiveTypes.QUEST, id = 55100 }
+
+    CN.candidateDecorators["Unlocks"](objective)
+
+    assert(objective.unlockValue
+        and objective.unlockValue > 0 and objective.unlockValue <= 1,
+        "the decorator must stamp a 0..1 unlock value, got "
+        .. tostring(objective.unlockValue))
+
+    local leaf = { type = CN.objectiveTypes.QUEST, id = 55101 }
+
+    CN.candidateDecorators["Unlocks"](leaf)
+
+    assert(leaf.unlockValue == nil,
+        "and must invent nothing for a quest with no observed followers")
+
+    -- A provider with its own opinion keeps it.
+    local owned = { type = CN.objectiveTypes.QUEST, id = 55100, unlockValue = 0.25 }
+
+    CN.candidateDecorators["Unlocks"](owned)
+
+    assert(owned.unlockValue == 0.25,
+        "the decorator fills a gap; it does not overrule a provider")
+
+    for id = 55100, 55103 do
+        store[id] = nil
+    end
+
+    unlockHarvest.NoteUnlocksChanged()
+
+    print("  what a quest unlocks is measured from this account's own play")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVICTION BY QUEST ID DELETED EXACTLY WHAT A LEVELLING ALT NEEDS.
+    --
+    -- The pruneHarvest store dropped its lowest ids on the reasoning that a low id
+    -- is old content. That describes a max-level character; it describes the
+    -- opposite of an alt levelling through classic zones, whose entire log is
+    -- low ids.
+    ------------------------------------------------------------
+    local pruneHarvest = CN:GetModule("Harvest")
+
+    local store = pruneHarvest.Store()
+
+    local savedCap = pruneHarvest.cap
+
+    for questID in pairs(store) do
+        store[questID] = nil
+    end
+
+    pruneHarvest.cap = 3
+
+    -- A low id seen just now, and high ids not seen in a long time.
+    store[100]   = { questID = 100,   lastSeen = 9000 }
+    store[90001] = { questID = 90001, lastSeen = 10 }
+    store[90002] = { questID = 90002, lastSeen = 20 }
+    store[90003] = { questID = 90003, lastSeen = 30 }
+    store[90004] = { questID = 90004, lastSeen = 40 }
+
+    pruneHarvest.Prune()
+
+    assert(store[100] ~= nil,
+        "the quest the player is standing next to must survive eviction")
+
+    assert(store[90001] == nil and store[90002] == nil,
+        "and the least recently seen must be the ones that go")
+
+    for questID in pairs(store) do
+        store[questID] = nil
+    end
+
+    pruneHarvest.cap = savedCap
+
+    pruneHarvest.NoteUnlocksChanged()
+
+    print("  the pruneHarvest evicts what has not been seen, not what is oldest")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A REGISTRY WITH A CLOSED SELECTOR IS NOT A REGISTRY.
+    --
+    -- `RegisterWaypointProvider` is published, but the only way to CHOOSE a
+    -- provider matched three names hardcoded in `SetPreference`. A fourth
+    -- provider could be used automatically and never chosen deliberately.
+    ------------------------------------------------------------
+    local navigation = CN:GetModule("Navigation")
+
+    CN.RegisterWaypointProvider("MutationPin", {
+        priority    = 500,
+        IsAvailable = function() return true end,
+        SetWaypoint = function() return true end,
+    })
+
+    local ok, resolved = navigation.SetPreference("mutationpin")
+
+    assert(ok and resolved == "MutationPin",
+        "a registered provider must be selectable by name, case-insensitively")
+
+    assert(navigation.Preference() == "MutationPin",
+        "and stored under the name the registry uses")
+
+    local offeredHere = false
+
+    for _, name in ipairs(navigation.PreferenceNames()) do
+        if name == "MutationPin" then
+            offeredHere = true
+        end
+    end
+
+    assert(offeredHere, "and named in what the command offers")
+
+    assert(not (navigation.SetPreference("nothingatall")),
+        "something nobody registered is still refused")
+
+    navigation.SetPreference("auto")
+
+    CN.waypointProviders["MutationPin"] = nil
+
+    for index = #CN.waypointOrder, 1, -1 do
+        if CN.waypointOrder[index].name == "MutationPin" then
+            table.remove(CN.waypointOrder, index)
+        end
+    end
+
+    print("  any registered waypoint provider can be chosen, not three names")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ADDON_LOADED WAS REGISTRABLE AND UNDISPATCHABLE.
+    --
+    -- It is in the registered-events list and `RegisterEvent` accepts a
+    -- handler for it, but the handler returned before `Dispatch`. Anything
+    -- registered that way was accepted and silently never called.
+    ------------------------------------------------------------
+    local loadedFired = 0
+
+    CN:RegisterEvent("ADDON_LOADED", function()
+        loadedFired = loadedFired + 1
+    end)
+
+    local eventFrame = CN.eventFrame
+
+    eventFrame.scripts.OnEvent(eventFrame, "ADDON_LOADED", "CompletionNavigator")
+
+    assert(loadedFired == 1,
+        "a handler registered for ADDON_LOADED must be called, loadedFired "
+        .. loadedFired .. " time(s)")
+
+    -- And not for somebody else's addon.
+    eventFrame.scripts.OnEvent(eventFrame, "ADDON_LOADED", "SomeOtherAddon")
+
+    assert(loadedFired == 1,
+        "and not for another addon loading, loadedFired " .. loadedFired .. " time(s)")
+
+    print("  ADDON_LOADED reaches the handlers the registry accepted")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MIGRATION THAT FAILED PART-WAY SAID SO ONCE AND CARRIED ON.
+    ------------------------------------------------------------
+    local saved = CN.migrations[3]
+
+    CN.migrations[3] = function()
+        error("deliberate migration failure")
+    end
+
+    local migrationDb = { version = 3, account = {}, characters = {} }
+
+    CN.RunMigrations(migrationDb)
+
+    assert(migrationDb.version == 3,
+        "a failed migration must not advance the version, got "
+        .. tostring(migrationDb.version))
+
+    assert(type(migrationDb.migrationFailure) == "table"
+        and migrationDb.migrationFailure.version == 3,
+        "and must record WHICH migration failed")
+
+    CN.migrations[3] = saved
+
+    CN.migrationFailure = nil
+
+    -- AND MIGRATION 9 ITSELF, which drops the preference rows the addon could
+    -- never have credited.
+    local ninth = {
+        version = 9,
+        account = {},
+        characters = {
+            ["Main-Realm"] = {
+                preference = {
+                    QUEST      = { shown = 40, acted = 12 },
+                    APPEARANCE = { shown = 300, acted = 0 },
+                    RARE       = { shown = 120, acted = 0 },
+                },
+            },
+
+            -- A row that is not a table at all must not throw.
+            ["Broken-Realm"] = true,
+        },
+    }
+
+    CN.RunMigrations(ninth)
+
+    local kept = ninth.characters["Main-Realm"].preference
+
+    assert(kept.QUEST, "a type the client announces keeps its record")
+
+    assert(not kept.APPEARANCE and not kept.RARE,
+        "and rows that could only ever read 0 of N are dropped")
+
+    assert(ninth.version == CN.dbVersion,
+        "and the ladder runs to the top, got " .. tostring(ninth.version))
+
+    -- A corrupt characters table is not a permanent migration failure.
+    local corrupt = { version = 9, account = {}, characters = "not a table" }
+
+    CN.RunMigrations(corrupt)
+
+    assert(corrupt.version == CN.dbVersion,
+        "a corrupt characters table must not pin the database for ever")
+
+    print("  a failed migration is recorded, not just printed once")
+end)()
+
 print("\nWhat 0.54.0 changed, asserted through the paths the game takes:")
 
 ;(function()
@@ -8762,8 +9516,14 @@ end)()
     -- reused and the departed provider's candidates survived the session.
     CN.candidateProviders["MutationSteady"] = nil
 
-    CN.InvalidateCandidates()
-
+    -- DELIBERATELY WITHOUT AN INVALIDATION.
+    --
+    -- Marking the survivors dirty would let some OTHER provider's rebuild
+    -- report a change and force a full pass, which would rebuild the
+    -- aggregate for a reason that has nothing to do with the departure -- and
+    -- the test would pass with the departure check deleted. Nothing is dirty
+    -- here, so `rebuilt` is zero and the provider COUNT is the only thing
+    -- that can notice.
     local survived = false
 
     for _, objective in ipairs(CN.CollectCandidates()) do
@@ -8774,6 +9534,52 @@ end)()
 
     assert(not survived,
         "a provider that has gone away must take its rows with it")
+
+    -- AND A DECORATOR'S OWN REASON MUST NOT DEFEAT IT.
+    --
+    -- `Identical` compares a freshly built, UNDECORATED list against the
+    -- previous, DECORATED one. Anything a decorator appends is therefore
+    -- present on one side and absent on the other, so the comparison always
+    -- failed and the shortcut silently stopped working for that provider --
+    -- the class of defect this project keeps finding: written, measured, and
+    -- off.
+    local decorated = 0
+
+    CN.RegisterCandidateProvider("MutationDecorated", function()
+        return {
+            { type = CN.objectiveTypes.TOY, id = 90003, name = "Decorated",
+              completionValue = 3 },
+        }
+    end)
+
+    CN.RegisterCandidateDecorator("MutationStamp", function(objective)
+        if objective.id ~= 90003 then
+            return
+        end
+
+        decorated = decorated + 1
+
+        objective.reasons = objective.reasons or {}
+
+        table.insert(objective.reasons, "stamped by a decorator")
+    end)
+
+    CN.CollectCandidates(true)
+
+    local decoratedGeneration = CN.GetCandidateCacheState().generation
+
+    CN.InvalidateProvider("MutationDecorated", true)
+    CN.CollectCandidates()
+
+    assert(CN.GetCandidateCacheState().generation == decoratedGeneration,
+        "a provider whose rows a decorator stamps must still short-circuit "
+        .. "when it returns the same rows")
+
+    CN.candidateDecorators["MutationStamp"] = nil
+    CN.candidateProviders["MutationDecorated"] = nil
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates(true)
 
     print("  an unchanged rebuild is not a change, and a departed provider "
         .. "leaves")
@@ -9110,6 +9916,35 @@ end)()
         assert(not output[index]:find("not picked up"),
             "and it must not say it twice")
     end
+
+    -- BUT NOT NEVER AGAIN.
+    --
+    -- The latch was a permanent per-session flag, so a player who cleared the
+    -- zone, flew to another continent and came back four hours later to the
+    -- quests they left behind was never told -- which is the moment the
+    -- prompt is most useful and the one moment it could not fire. A timestamp
+    -- and a long window instead.
+    local savedOffset = CN_TEST_TIME_OFFSET
+
+    CN_TEST_TIME_OFFSET = CN_TEST_TIME_OFFSET
+        + quests.arrivalMemorySeconds + 60
+
+    local returned = #output
+
+    quests.AnnounceArrival(94)
+
+    local returnedAnnounced = false
+
+    for index = returned + 1, #output do
+        if output[index]:find("not picked up") then
+            returnedAnnounced = true
+        end
+    end
+
+    assert(returnedAnnounced,
+        "coming back to a zone hours later must prompt again")
+
+    CN_TEST_TIME_OFFSET = savedOffset
 
     -- Never in combat.
     quests.ForgetArrivals()
@@ -13269,6 +14104,29 @@ print("\nA ghost is pointed at their body:")
         "the body must keep its full weight while dead -- the death penalty "
         .. "applies to everything that can wait, and the body cannot; got "
         .. string.format("%.2f", scored))
+
+    -- AND NO TYPE FILTER CAN HIDE IT.
+    --
+    -- The body is exempt from the type filter, because a filter is a
+    -- statement about what you want recommended and the body is not a
+    -- recommendation -- it is the only thing you can act on. Since 0.55.0 it
+    -- carries its own type, CORPSE, so hiding QUEST no longer touches it and
+    -- an assertion phrased against QUEST would pass with the exemption
+    -- deleted. Hide CORPSE itself, which is the only filter that could reach
+    -- it.
+    local corpseFilters = CN:GetModule("Filters")
+
+    corpseFilters.SetTypeEnabled(CN.objectiveTypes.CORPSE, false)
+
+    CN.CollectCandidates(true)
+
+    local hiddenList = CN.Recommend(1)
+
+    assert(hiddenList and hiddenList[1] and hiddenList[1].corpse,
+        "hiding every type must not hide your own body; got "
+        .. tostring(hiddenList and hiddenList[1] and hiddenList[1].name))
+
+    corpseFilters.SetTypeEnabled(CN.objectiveTypes.CORPSE, true)
 
     CN_TEST_GHOST = false
     CN_TEST_DEAD  = false

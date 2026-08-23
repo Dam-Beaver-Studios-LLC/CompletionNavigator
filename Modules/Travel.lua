@@ -755,8 +755,7 @@ Travel.Routes = Routes
 --
 -- Node ids are integers well under the multiplier, so packing them into one
 -- number is exact and costs nothing. The stored keys change shape, so
--- migration 8 rewrites them; `RouteKeyText` remains for anything that wants
--- to read a key back.
+-- migration 8 rewrites them; `Travel.UnpackRouteKey` reads one back.
 Travel.routeKeyStride = 1000000
 
 local function RouteKey(fromID, toID)
@@ -774,6 +773,27 @@ local function RouteKey(fromID, toID)
 end
 
 Travel.RouteKey = RouteKey
+
+-- The two node ids back out of a packed key, for anything that has to read
+-- the store rather than write it -- `/cn dbsize`, a future export, and the
+-- migration's own verification. Returns nil for anything that is not one of
+-- our keys rather than inventing a pair out of arithmetic.
+function Travel.UnpackRouteKey(key)
+    if type(key) ~= "number" or key < 0 or key ~= math.floor(key) then
+        return nil
+    end
+
+    local stride = Travel.routeKeyStride
+
+    local fromID = math.floor(key / stride)
+    local toID   = key - (fromID * stride)
+
+    if fromID <= 0 or toID <= 0 then
+        return nil
+    end
+
+    return fromID, toID
+end
 
 function Travel.NoteRoute(fromID, toID)
     local key = RouteKey(fromID, toID)
@@ -1544,11 +1564,26 @@ function Travel.CostFor(mapID, x, y)
         return nil
     end
 
+    -- THE PLAYER'S OWN POSITION HAS TO BE KNOWN, TOO.
+    --
+    -- The guard checked the DESTINATION's coordinates and not the player's,
+    -- and `CN.GetPlayerPosition` routinely answers `mapID, nil, nil` for a
+    -- moment after a loading screen. So the cache was stamped with a nil
+    -- origin, every estimate failed, and the failures were remembered.
+    if not playerX or not playerY then
+        return nil
+    end
+
     -- Has the player moved far enough for the answers to be about somewhere
     -- else? A different map always counts; on the same map, compare in yards.
     local moved = costCacheMap ~= playerMap
 
-    if not moved and costCacheX then
+    if not moved and not costCacheX then
+        -- No origin was recorded, so nothing in the cache is about anywhere
+        -- in particular. Fail open: a cache whose premise is unknown is a
+        -- cache that has to be rebuilt.
+        moved = true
+    elseif not moved then
         local yards = Travel.YardsBetween(playerMap, costCacheX, costCacheY,
             playerMap, playerX, playerY)
 
@@ -1561,9 +1596,28 @@ function Travel.CostFor(mapID, x, y)
         costCacheX, costCacheY = playerX, playerY
     end
 
-    local key = (mapID * 1000000)
-        + (math.floor((x or 0) * 1000) * 1000)
-        + math.floor((y or 0) * 1000)
+    -- CLAMPED BEFORE PACKING.
+    --
+    -- The packing is exact for coordinates in [0, 1), which is where the
+    -- client's own APIs stay -- but a third-party data provider is not the
+    -- client, and at exactly 1.0 the coordinate term is a full 1,000,000 and
+    -- collides with the next map's origin. A negative coordinate floors
+    -- downward and collides with the previous map's far corner.
+    local function Packed(value)
+        local scaled = math.floor((value or 0) * 1000)
+
+        if scaled < 0 then
+            return 0
+        end
+
+        if scaled > 999 then
+            return 999
+        end
+
+        return scaled
+    end
+
+    local key = (mapID * 1000000) + (Packed(x) * 1000) + Packed(y)
 
     local held = costCache[key]
 
@@ -1582,13 +1636,21 @@ function Travel.CostFor(mapID, x, y)
     end
 
     if not seconds then
-        -- Remembered as a refusal rather than not remembered at all: a
-        -- destination the model cannot cost is asked about once per rebuild
-        -- for every objective there, and re-deriving the same nil is the
-        -- most expensive way to learn nothing.
-        costCache[key] = false
-        costCacheCount = costCacheCount + 1
-
+        -- NOT REMEMBERED.
+        --
+        -- 0.54.0 cached the refusal, reasoning that re-deriving the same nil
+        -- is the most expensive way to learn nothing. That was wrong for the
+        -- same reason `Travel.WorldPoint` fourteen hundred lines above
+        -- refuses to cache ITS miss, in a comment that says so plainly: a
+        -- failure here is almost never a property of the destination, it is a
+        -- property of the moment. The client refuses every coordinate
+        -- conversion for a window after a loading screen, and remembering
+        -- that made the whole ranking travel-blind for the rest of the
+        -- session -- at exactly the moment a player is most likely to be
+        -- looking at it.
+        --
+        -- Re-deriving a nil costs one failed estimate. Remembering it cost
+        -- the feature.
         return nil
     end
 

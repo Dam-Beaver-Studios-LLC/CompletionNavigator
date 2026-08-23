@@ -707,8 +707,31 @@ end
 -- be worth a detour, and never while the player is busy.
 Quests.arrivalMinimum = 3
 
+-- ONCE PER SESSION WAS TOO ONCE.
+--
+-- The latch was a permanent per-session flag, so a player who logs in at nine
+-- and plays until two is told about a zone the first time they enter it and
+-- never again -- including after clearing it, flying to another continent,
+-- and coming back four hours later to the quests they left behind. That is
+-- the moment the prompt is most useful and the one moment it could not fire.
+--
+-- A timestamp instead of a boolean, and a long window. Long enough that
+-- crossing a zone border twice while running a loop cannot re-prompt; short
+-- enough that a genuine return counts as a return.
 local announcedZones = {}
 
+Quests.arrivalMemorySeconds = 7200
+
+-- Called when the PLAYER asks the addon to rediscover what is out there --
+-- `/cn discoveractive`, or the Quests tab's rescan button. The latch is a
+-- record of what they have already been told, and somebody deliberately
+-- asking to be told again is the one thing that clearly overrides it.
+--
+-- DELIBERATELY NOT CALLED FROM `DiscoverActive` ITSELF. That runs off
+-- `QUEST_LOG_UPDATE` on a ten-second throttle, so wiping the latch there
+-- would have replaced a seven-thousand-second window with a ten-second one --
+-- and stepping into a cave and back out would re-prompt. A worse bug than the
+-- one it was meant to fix, dressed as a fix.
 function Quests.ForgetArrivals()
     announcedZones = {}
 end
@@ -716,22 +739,44 @@ end
 function Quests.AnnounceArrival(mapID)
     mapID = mapID or CN.GetPlayerPosition()
 
-    if not mapID or announcedZones[mapID] then
+    if not mapID then
         return false
     end
 
-    -- In a fight, on a boat, or mid-flight is not a moment for a suggestion.
+    local announcedAt = announcedZones[mapID]
+
+    local now = (time and time()) or 0
+
+    if announcedAt and (now - announcedAt) < Quests.arrivalMemorySeconds then
+        return false
+    end
+
+    -- In a fight is not a moment for a suggestion, and neither is a flight
+    -- path: `ZONE_CHANGED_NEW_AREA` fires for every zone a taxi crosses, so a
+    -- cross-continent flight was prompting about zones being flown OVER --
+    -- and latching out the zone actually being flown to.
     if InCombatLockdown and InCombatLockdown() then
+        return false
+    end
+
+    if UnitOnTaxi and UnitOnTaxi("player") then
         return false
     end
 
     local available = Quests.AvailableOnMap(mapID)
 
-    announcedZones[mapID] = true
-
+    -- THE LATCH IS SET ONLY IF SOMETHING WAS SAID.
+    --
+    -- It used to be set before the threshold test, and this runs on a
+    -- three-second timer whose own comment concedes the quest pins may not
+    -- have arrived. So a slow load meant the count was short, the zone was
+    -- marked announced for the session, and the prompt never fired for it --
+    -- silently, and for the zones a player most wants it in.
     if #available < Quests.arrivalMinimum then
         return false
     end
+
+    announcedZones[mapID] = now
 
     local zone = Blizzard.GetMapName(mapID) or "This zone"
 
@@ -749,11 +794,29 @@ end
 CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
     -- Delayed: the map is not reliable in the frame the event fires, and the
     -- quest pins arrive after it.
-    if C_Timer and C_Timer.After then
-        C_Timer.After(3, function()
-            pcall(Quests.AnnounceArrival)
-        end)
+    --
+    -- The map is captured NOW rather than read at fire time. Read three
+    -- seconds later it resolves against wherever the player happens to be,
+    -- which on a taxi is a different zone entirely.
+    if not C_Timer or not C_Timer.After then
+        return
     end
+
+    local arrivedAt = CN.GetPlayerPosition()
+
+    if not arrivedAt then
+        return
+    end
+
+    C_Timer.After(3, function()
+        -- Still there? A player who zoned again inside three seconds is not
+        -- being told about the zone they left.
+        if CN.GetPlayerPosition() ~= arrivedAt then
+            return
+        end
+
+        pcall(Quests.AnnounceArrival, arrivedAt)
+    end)
 end)
 
 function Quests.DiscoverActive()
@@ -763,6 +826,7 @@ function Quests.DiscoverActive()
         Print("Quest Log API is unavailable.")
         return 0, 0
     end
+
 
     local seen = 0
     local new  = 0
@@ -1581,6 +1645,10 @@ CN:RegisterCommand{
     order   = 26,
     help    = "Discover quests currently in the Quest Log.",
     handler = function()
+        -- Somebody asking to be told what is out there overrides the record
+        -- of having already told them.
+        Quests.ForgetArrivals()
+
         local seen, recorded = Quests.DiscoverActive()
 
         local available = Quests.AvailableCount()

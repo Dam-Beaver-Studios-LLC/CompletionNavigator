@@ -206,6 +206,14 @@ end
 -- exists for.
 CN.hubRadiusYards = 70
 
+-- WHEN THE CLIENT WILL NOT SAY HOW BIG THE ZONE IS.
+--
+-- Both fallbacks in this file read this, so they cannot drift apart. It is
+-- crude -- a real zone is anywhere from 700 to 5,000 yards across -- but it is
+-- a number of YARDS, and the alternative that shipped in 0.54.0 was 1, which
+-- is not.
+CN.fallbackZoneYards = 2000
+
 -- Distance between two objectives in real yards where the client can convert,
 -- falling back to normalized map units scaled to a plausible zone size.
 --
@@ -233,26 +241,58 @@ function CN.ObjectiveDistanceYards(a, b)
     end
 
     -- Fallback: assume a zone is about 2000 yards across. Crude, and only
-    -- used when the client will not convert.
+    -- used when the client will not convert. Read from the constant below
+    -- rather than written out again, so the two fallbacks in this file agree
+    -- by construction rather than by somebody remembering to change both.
     local dx = a.x - b.x
     local dy = a.y - b.y
 
-    return math.sqrt((dx * dx) + (dy * dy)) * 2000
+    return math.sqrt((dx * dx) + (dy * dy)) * CN.fallbackZoneYards
 end
 
+-- The scale is resolved once per route rather than per comparison: it is a
 -- property of the map being routed, and asking the client per pair would be
 -- thousands of calls for one answer.
-local routeScaleX, routeScaleY = 1, 1
+--
+-- THE FALLBACK USED TO BE 1, which is not a number of yards -- it is "leave
+-- the map units alone". Two consequences, and the second is a correctness bug
+-- I shipped in 0.54.0:
+--
+--   * `RouteLength` documents itself as returning yards and returned a figure
+--     between 0 and 2 whenever the scale was unavailable. Every "34m of
+--     walking" line computed from it was silently a map-unit count.
+--
+--   * Clustering compares a squared distance against `radiusYards`, squared
+--     -- 4,900 for the default 70-yard hub. With a scale of 1, the largest
+--     possible squared distance on the map is 2. So EVERY objective in the
+--     zone joined the first hub: one stop, containing the whole zone, with a
+--     batch bonus to match. Before 0.54.0 the comparison went through
+--     `CN.ObjectiveDistanceYards`, which has always had a 2000-yard fallback
+--     of its own, so this path was correct until I made it fast.
+--
+-- Both now read `CN.fallbackZoneYards`, so they agree by construction.
+local routeScaleX, routeScaleY = CN.fallbackZoneYards, CN.fallbackZoneYards
 
 local function UseMapScale(mapID)
-    routeScaleX, routeScaleY = 1, 1
+    routeScaleX, routeScaleY = CN.fallbackZoneYards, CN.fallbackZoneYards
 
     local navigation = CN:GetModule("Navigation")
 
     if mapID and navigation and navigation.MapScale then
-        local ok, scaleX, scaleY = pcall(navigation.MapScale, mapID)
+        -- THE THIRD RETURN, AND WHY THE FIRST TWO ARE NOT ENOUGH.
+        --
+        -- `MapScale` answers `1, 1` when the client will not convert -- a
+        -- loading screen, an instance, a map with no world position. That is
+        -- the correct shrug for the bearing maths, which uses only the ratio
+        -- of the two. Here it is a disaster: `1 > 0` passed the validation
+        -- below, so a refusal was accepted as "one yard per map unit" and
+        -- every distance stayed in map units. `measured` is the only thing
+        -- that separates the two.
+        local ok, scaleX, scaleY, measured =
+            pcall(navigation.MapScale, mapID)
 
-        if ok and type(scaleX) == "number" and type(scaleY) == "number"
+        if ok and measured
+            and type(scaleX) == "number" and type(scaleY) == "number"
             and scaleX > 0 and scaleY > 0 then
 
             routeScaleX, routeScaleY = scaleX, scaleY
@@ -293,7 +333,16 @@ local PHASE_ORDER = { PICKUP = 1, ACTIVE = 2, TURNIN = 3 }
 -- hundred and ten located objectives that was 10.7 ms, and it grew as the
 -- square.
 --
--- Two changes, both of which preserve the answer exactly:
+-- Two changes. The first preserves the answer exactly. The second preserves
+-- the JOIN TEST exactly -- nothing joins that could not have joined, and
+-- nothing that could have joined is missed, because single-link clustering
+-- cannot be decided by a member more than one radius away and the nine-cell
+-- window covers every such member. What it does NOT preserve is the ORDER in
+-- which a candidate meets the hubs it could join: the old scan tried hubs in
+-- creation order, this one tries them in cell order. A candidate within
+-- radius of two hubs at once can therefore land in the other one, which then
+-- changes which subsequent candidates join what. Both answers are valid
+-- single-link clusterings; they are not always the same clustering.
 --
 --   * The map scale is asked for ONCE, and comparisons are done on squared
 --     yards so there is no square root in the loop. `UseMapScale` and
@@ -322,8 +371,22 @@ function CN.ClusterByProximity(objectives, radiusYards)
         scaleX, scaleY = UseMapScale(objectives[1].mapID)
     end
 
+    -- THE GRID WAS INERT ON THE FALLBACK PATH.
+    --
+    -- `math.max(1, scaleX)` existed to stop a division by zero, but the only
+    -- scale that ever reached it below 1 was the old fallback of exactly 1 --
+    -- which made the cell 70 MAP UNITS wide, seventy times the whole map. One
+    -- cell, one bucket, and the quadratic scan the grid was written to remove.
+    -- The fallback is a real yard count now, so the guard only has to be a
+    -- guard.
     local cellX = radiusYards / math.max(1, scaleX)
     local cellY = radiusYards / math.max(1, scaleY)
+
+    -- And a cell can never usefully exceed the map. A zone the client reports
+    -- as smaller than the hub radius is one hub by definition; clamping keeps
+    -- the arithmetic below in range rather than relying on it.
+    cellX = math.min(cellX, 1)
+    cellY = math.min(cellY, 1)
 
     local radiusSquared = radiusYards * radiusYards
 
@@ -932,6 +995,27 @@ local function CurrentIsStale()
             or state == states.DEFERRED
             or state == states.UNOBTAINABLE then
             return true
+        end
+
+        -- "NOBODY REGISTERED A CHECKER" IS NOT "STILL WORTH DOING".
+        --
+        -- Eligibility checkers exist for ten objective types. Providers emit
+        -- seventeen. For the other seven -- currencies, lockouts, vault rows,
+        -- keystones, appearances, exploration and renown -- `CN.Explain`
+        -- returns UNKNOWN, and this treated UNKNOWN as "keep going". So the
+        -- waypoint could never retire any of them: it sat on a currency the
+        -- player had already spent until some unrelated event moved it.
+        --
+        -- The addon does know whether they are still on offer, though: a
+        -- provider that no longer emits an objective has answered the
+        -- question. Falling back to the candidate list is a real check, and
+        -- it costs a lookup against a list that is already built.
+        if state == states.UNKNOWN and CN.FindCandidate then
+            local still = CN.FindCandidate(current.type, current.id)
+
+            if not still then
+                return true
+            end
         end
     end
 

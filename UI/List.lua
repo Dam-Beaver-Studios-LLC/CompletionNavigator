@@ -88,7 +88,6 @@ local function CreateList(parent)
         -- Two anchored fontstrings do what padding cannot.
         row.value = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
         row.value:SetPoint("RIGHT", -6, 0)
-        row.value:SetWidth(170)
         row.value:SetJustifyH("RIGHT")
 
         row.label = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
@@ -260,8 +259,23 @@ local function CreateList(parent)
     -- already written.
     local sortButton = CreateFrame("Button", nil, parent)
 
-    sortButton:SetSize(96, 16)
-    sortButton:SetPoint("BOTTOMRIGHT", list, "TOPRIGHT", -26, 2)
+    -- INSIDE THE LIST, NOT IN THE BAND ABOVE IT.
+    --
+    -- Anchored above the list, it sat in the eighteen pixels most panels
+    -- already use for their header -- and on the Next tab, over the last line
+    -- of the "why this recommendation" text. There is no free band above a
+    -- list; there is a free corner inside one, because the first row starts
+    -- below the scroll frame's own inset.
+    sortButton:SetSize(96, 14)
+    sortButton:SetPoint("TOPRIGHT", list, "TOPRIGHT", -28, 3)
+    -- Above the rows, so the caption is not painted over by a stripe.
+    if list.GetFrameLevel and sortButton.SetFrameLevel then
+        local level = list:GetFrameLevel()
+
+        if type(level) == "number" then
+            sortButton:SetFrameLevel(level + 4)
+        end
+    end
 
     list.sortCaption = sortButton:CreateFontString(nil, "ARTWORK",
         "GameFontHighlightSmall")
@@ -363,6 +377,19 @@ local function CreateList(parent)
 
             row.label:SetText(entry.text or "")
             row.value:SetText(entry.value or "")
+
+            -- THE COLUMN TAKES NO ROOM WHEN THERE IS NOTHING IN IT.
+            --
+            -- 0.54.0 gave it a fixed width, and the label's right edge is
+            -- anchored to it -- so every row on every tab that sets no value
+            -- lost a hundred and seventy-eight pixels of label to an empty
+            -- fontstring. Of forty-three entry sites in the window, nine set
+            -- a value; the other thirty-four were paying for a column that
+            -- was not there.
+            --
+            -- Wide enough for the widest thing any tab puts in it, which is
+            -- the reputation row's "412 account-wide, 96 this character".
+            row.value:SetWidth(entry.value and CN.UI.VALUE_WIDTH or 0.001)
 
             row.selected:SetShown(entry.selected and true or false)
 

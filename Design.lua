@@ -15,16 +15,26 @@
 --
 -- THE RULE.
 --
--- Nothing outside this file defines a colour. Call sites use the wrappers
--- below, and a build-time check fails on a new literal `|cff` anywhere else.
--- The rule is the point: a palette with an exception is a palette that is
--- sixteen colours again in three releases, which is exactly how this one got
--- there.
+-- Nothing outside this file defines a colour. Call sites should use the
+-- wrappers below.
+--
+-- WHAT IS ACTUALLY ENFORCED, precisely, because a rule stated more strongly
+-- than it is checked is a rule nobody trusts twice: the harness reads every
+-- `.lua` named in the `.toc`, collects every `|cffRRGGBB` literal in it, and
+-- fails if any one of them is a code that is not in `CN.C`. It does NOT fail
+-- on the literal itself -- roughly five hundred of them remain in the tree,
+-- all spelling out a palette colour by hand. Writing one more of those is
+-- untidy. Writing a NEW colour is the thing that cost sixteen colours last
+-- time, and that is the thing the check catches.
+--
+-- A second check requires every pair of roles to differ by more than 0.05 in
+-- RGB distance, so a palette cannot quietly become five greys again either.
 --
 -- WHAT THE COLOURS MEAN.
 --
--- Seven roles, and no more. If something does not fit one of them, the
--- answer is almost always that it should read as body text.
+-- Eight roles, and no more -- plus DISABLED, which is a control state rather
+-- than a voice. If something does not fit one of them, the answer is almost
+-- always that it should read as body text.
 --
 --   BRAND    the addon's own voice, and the value the player asked for
 --   ACCENT   a thing to type, and a section heading

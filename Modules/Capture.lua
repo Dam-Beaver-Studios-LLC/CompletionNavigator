@@ -54,9 +54,28 @@ CN.captures = CN.captures or {}
 --     name = "GetSavedInstanceInfo",
 --     run  = function() return <plain data>, note end,
 -- }
+-- THE NAME IS THE KEY THE RESULT IS FILED UNDER, AND IT WAS NOT CHECKED.
+--
+-- `Capture.Run` writes `records[definition.name]`. A definition registered
+-- without a name made that `records[nil] = value`, which throws -- inside the
+-- capture run, taking every later capture with it. A definition registered
+-- with a name another one already uses silently overwrote it, so a capture
+-- ran, cost its time, and produced nothing anybody could find.
 function CN.RegisterCapture(definition)
     if type(definition) ~= "table" or type(definition.run) ~= "function" then
-        return false
+        return false, "a capture needs a run function"
+    end
+
+    if type(definition.name) ~= "string" or definition.name == "" then
+        return false, "a capture needs a name -- it is the key its result is "
+            .. "filed under"
+    end
+
+    for _, existing in ipairs(CN.captures) do
+        if existing.name == definition.name then
+            return false, "a capture named " .. definition.name
+                .. " is already registered"
+        end
     end
 
     table.insert(CN.captures, definition)

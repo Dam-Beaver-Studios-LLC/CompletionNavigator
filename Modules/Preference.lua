@@ -343,6 +343,14 @@ CN.RegisterRecommendationHook("Preference", function(results)
     for _, objective in ipairs(results or {}) do
         local objectiveType = objective and objective.type
 
+        -- Don't count sightings the addon can never pair with a completion.
+        -- A row that can only ever read "0 of 300" is not data; it is a
+        -- persisted misunderstanding, and it was being spent on every one of
+        -- the thirteen uncreditable types. See `Preference.creditableTypes`.
+        if objectiveType and not Preference.IsCreditable(objectiveType) then
+            objectiveType = nil
+        end
+
         if objectiveType then
             local row = store[objectiveType]
 
@@ -450,6 +458,61 @@ Preference.exactIdEvents = {
     [CN.objectiveTypes.QUEST]       = true,
     [CN.objectiveTypes.ACHIEVEMENT] = true,
 }
+
+------------------------------------------------------------
+-- WHAT THE ADDON CAN ACTUALLY WATCH YOU DO
+------------------------------------------------------------
+
+-- THE HALF OF THE SUBJECT MATTER THAT WAS BEING PUNISHED FOR THE ADDON'S OWN
+-- DEAFNESS.
+--
+-- `shown` was counted for every type a provider emits. `acted` was counted
+-- only for the five types the client announces a completion for -- quests,
+-- achievements, pets, mounts and toys. For the other thirteen the ratio was
+-- structurally, permanently zero: not "you ignore these", but "nobody is
+-- listening". Past `minimumObservations` sightings, every one of them settled
+-- on the 0.80 floor and stayed there for the life of the character.
+--
+-- Two things were wrong with that, and the second is worse than the first.
+--
+--   * A uniform, invisible, unearned demotion of reputations, renown,
+--     appearances, recipes, professions, rares, treasures, exploration,
+--     titles, currencies, vendors, collectibles and lockouts -- against
+--     quests and achievements, which could be credited. The addon's own
+--     ranking quietly decided that half of what it recommends is not worth
+--     doing, on no evidence at all.
+--
+--   * `/cn learned` then printed "you rarely act on these" beside them. That
+--     is a statement about the player, and it is false. The addon has never
+--     been able to see whether you collected that appearance. Saying
+--     otherwise on the strength of a counter that cannot move is the one
+--     thing this addon promises never to do.
+--
+-- So: a type earns an opinion only if there is a path by which it could be
+-- credited. Everything else returns a flat 1 and says nothing. When a future
+-- release learns to observe a type -- a currency threshold crossed, a rare's
+-- loot received -- it is added here in the same commit that starts crediting
+-- it, and not before.
+Preference.creditableTypes = {
+    [CN.objectiveTypes.QUEST]       = true,
+    [CN.objectiveTypes.ACHIEVEMENT] = true,
+    [CN.objectiveTypes.PET]         = true,
+    [CN.objectiveTypes.MOUNT]       = true,
+    [CN.objectiveTypes.TOY]         = true,
+
+    -- The refinements of QUEST, which are credited through the same event.
+    QUEST_CAMPAIGN = true,
+    QUEST_SIDE     = true,
+}
+
+-- Whether a preference multiplier may be computed for this type at all.
+function Preference.IsCreditable(objectiveType)
+    if not objectiveType then
+        return false
+    end
+
+    return Preference.creditableTypes[objectiveType] == true
+end
 
 -- Called when something is genuinely finished. Credited only if the addon had
 -- recommended it recently -- otherwise every quest anybody turns in would
@@ -659,6 +722,11 @@ function Preference.Compute(objectiveType)
         return 1, nil
     end
 
+    -- No completion path, no opinion. See `Preference.creditableTypes`.
+    if not Preference.IsCreditable(objectiveType) then
+        return 1, nil
+    end
+
     local store = Store()
 
     local row = store and store[objectiveType]
@@ -705,7 +773,18 @@ CN.RegisterScoreAdjuster("Preference", function(objective, score)
         multiplier, reason = Preference.Multiplier(objective and objective.type)
     end
 
+    -- WHAT IS NO LONGER TRUE IS WITHDRAWN FIRST, which this adjuster never
+    -- did and the Group adjuster has since 0.51.0.
+    --
+    -- The sentence is stamped onto objectives that live in the per-provider
+    -- cache, and the cache outlives the opinion. So `/cn learned reset` said
+    -- "Forgotten. The ranking is back to its defaults." while `/cn why` went
+    -- on printing "you rarely act on these" until some unrelated rebuild
+    -- happened to produce a different list. `/cn learned off` did the same,
+    -- and so does anything that stops being creditable.
     if multiplier == 1 then
+        CN.ClearAdjusterReason(objective, "preference")
+
         return score
     end
 
@@ -823,7 +902,13 @@ CN:RegisterCommand{
             local line = string.format("  %-16s %d of %d acted on",
                 label, entry.row.acted, entry.row.shown)
 
-            if multiplier == 1 then
+            if not Preference.IsCreditable(entry.type) then
+                -- Only reachable from a database written before 0.55.0 and
+                -- not yet migrated. Say what it is rather than implying the
+                -- counter is on its way somewhere.
+                line = line .. " |cff8a8f96(not watched -- the addon cannot "
+                    .. "see when you finish one of these)|r"
+            elseif multiplier == 1 then
                 local short = Preference.minimumObservations - entry.row.shown
 
                 line = line .. " |cff8a8f96(no effect"

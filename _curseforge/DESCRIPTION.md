@@ -203,6 +203,8 @@ Reading the game's Adventure Guide changes what it is displaying, so the addon w
 
 The addon notices which kinds of objective you go and do, and leans that way. The guardrails matter more than the learning: nothing moves until a type has been shown 25 times, the adjustment is clamped so a type you skip gets quieter but never silent, and every adjusted line **says on the line** that it was adjusted. The counters decay, so it tracks how you play now rather than how you played in June. A focus you set with `/cn mode` always beats a habit it inferred.
 
+**And it only learns from what it can actually see you finish.** The game announces a quest turned in, an achievement earned, and a pet, mount or toy collected â€” so those are the types it forms an opinion about. It cannot see the moment you collect an appearance or cross a reputation threshold, so it forms no opinion about those and says nothing about them. That distinction is the whole guardrail: a counter that can only ever read zero is not evidence that you ignore something, and an addon that treated it as evidence would be quietly telling you something about yourself that it made up.
+
 `/cn learned reset` forgets it. `/cn learned off` switches it off. Hiding a type outright is still `/cn types`.
 
 ## It looks in your bags

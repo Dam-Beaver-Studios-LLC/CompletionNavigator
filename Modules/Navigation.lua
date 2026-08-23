@@ -121,15 +121,31 @@ end
 -- map and scale the deltas into yards before taking the angle.
 local mapScales = {}
 
+-- Returns yards-per-map-unit on each axis, and a THIRD value saying whether
+-- that is a measurement or a shrug.
+--
+-- THE SENTINEL WAS INDISTINGUISHABLE FROM AN ANSWER.
+--
+-- `1, 1` means "no distortion", which is the right shrug for the bearing
+-- maths -- that only ever uses the RATIO of the two, and a ratio of one is
+-- exactly "assume the map is square". But routing asks this for an ABSOLUTE
+-- number of yards, and `1` is not a number of yards; it leaves distances in
+-- map units, where the whole map is one unit across. `UseMapScale` in
+-- Routing.lua validated the answer with `scaleX > 0`, which `1` satisfies, so
+-- its 2000-yard fallback could never fire on the one path it was written for:
+-- a real map the client would not convert during a loading screen.
+--
+-- Callers that want a ratio keep ignoring the third value. Callers that want
+-- yards must check it.
 function Navigation.MapScale(mapID)
     if not mapID then
-        return 1, 1
+        return 1, 1, false
     end
 
     local cached = mapScales[mapID]
 
     if cached then
-        return cached[1], cached[2]
+        return cached[1], cached[2], true
     end
 
     -- A tenth of the map, measured across the middle, where a map is least
@@ -143,7 +159,7 @@ function Navigation.MapScale(mapID)
         -- Do NOT cache a failure. A map the client would not convert during a
         -- loading screen will convert a second later, and caching 1,1 would
         -- keep the distortion for the rest of the session.
-        return 1, 1
+        return 1, 1, false
     end
 
     xYards = xYards / span
@@ -151,7 +167,7 @@ function Navigation.MapScale(mapID)
 
     mapScales[mapID] = { xYards, yYards }
 
-    return xYards, yYards
+    return xYards, yYards, true
 end
 
 function Navigation.ForgetMapScales()
@@ -1237,6 +1253,22 @@ CN:RegisterCommand{
             Print(string.format("  |cff8a8f96%-18s|r %s", row.label, row.value))
         end
 
+        -- THE ONE THING THAT MAKES EVERY OTHER LINE HERE UNTRUSTWORTHY.
+        --
+        -- A migration that threw leaves the saved data in neither the old
+        -- shape nor the new one, and everything below reads that data. It
+        -- used to be a single line at login and nothing else; this is where
+        -- the player was told to look, so this is where it has to appear.
+        local failure = (CN.db and CN.db.migrationFailure) or CN.migrationFailure
+
+        if type(failure) == "table" then
+            Print(CN.Bad("Your saved data did not finish upgrading."))
+            Print("  " .. CN.Muted("step " .. tostring(failure.version)
+                .. ": " .. tostring(failure.error)))
+            Print("  " .. CN.Muted("Everything above is read from that data. "
+                .. "Copy this line into a bug report."))
+        end
+
         if not target then
             Print("|cff8a8f96Set one with |cffffc74f/cn go|r"
                 .. "|cff8a8f96 and run this again.|r")
@@ -1378,26 +1410,58 @@ Navigation.provider = provider
 function Navigation.SetPreference(name)
     local settings = Settings()
 
-    if name == "auto" or name == nil then
+    -- Lowercased first: `auto` was the one value that stayed case-sensitive,
+    -- so `/cn nav Auto` was refused against a help line that offers `auto`.
+    if name == nil or string.lower(name) == "auto" then
         settings.navigation = nil
         return true, "automatic"
     end
 
+    -- THE REGISTRY WAS OPEN AND THIS LIST WAS NOT.
+    --
+    -- `CN.RegisterWaypointProvider` is a published extension point: another
+    -- addon, or a later module of this one, can register a fourth provider
+    -- and `CN.GetPreferredWaypointProvider` will honour it. But the only way
+    -- to EXPRESS a preference is this command, and it matched against three
+    -- names hardcoded here -- so a registered fourth provider could be used
+    -- automatically and could never be chosen deliberately. A registry with a
+    -- closed selector is three special cases wearing a registry's name.
+    --
+    -- Matched against what is actually registered now, case-insensitively,
+    -- and the registered name is what gets stored so the lookup on the other
+    -- side is exact.
     local key = string.lower(name)
 
-    local known = {
-        native  = "Native",
-        tomtom  = "TomTom",
-        blizzard = "Blizzard",
-    }
+    local resolved
 
-    if not known[key] then
+    for registered in pairs(CN.waypointProviders or {}) do
+        if string.lower(registered) == key then
+            resolved = registered
+            break
+        end
+    end
+
+    if not resolved then
         return false, nil
     end
 
-    settings.navigation = known[key]
+    settings.navigation = resolved
 
-    return true, known[key]
+    return true, resolved
+end
+
+-- The names `/cn nav <name>` will accept, for the command's own help and its
+-- error message. Sorted, so the list does not reorder itself between logins.
+function Navigation.PreferenceNames()
+    local names = {}
+
+    for registered in pairs(CN.waypointProviders or {}) do
+        table.insert(names, registered)
+    end
+
+    table.sort(names)
+
+    return names
 end
 
 function Navigation.Preference()
@@ -1494,7 +1558,14 @@ CN:RegisterCommand{
 
             if not ok then
                 Print("Not a navigation provider: " .. args)
-                Print("|cff8a8f96Choose auto, native, tomtom or blizzard.|r")
+
+                -- Named from the registry rather than from a sentence, so a
+                -- provider registered by another addon is offered here the
+                -- moment it exists.
+                Print("|cff8a8f96Choose auto, or one of: "
+                    .. table.concat(Navigation.PreferenceNames(), ", ")
+                    .. ".|r")
+
                 return
             end
 

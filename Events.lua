@@ -91,6 +91,19 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
 
         DebugPrint("Initialization hooks complete.")
 
+        -- AND THEN DISPATCH IT, WHICH THIS NEVER DID.
+        --
+        -- `ADDON_LOADED` is in the registered-events list and `RegisterEvent`
+        -- accepts a handler for it, so the registry advertises something the
+        -- handler could not deliver: this branch returned before `Dispatch`.
+        -- Anything registered that way was written, accepted, and silently
+        -- never called -- the same defect class as a feature that is off.
+        --
+        -- Dispatched only for our own addon, after the database exists, which
+        -- is the only moment at which a handler for it could do anything
+        -- useful anyway.
+        Dispatch(event, ...)
+
         return
     end
 

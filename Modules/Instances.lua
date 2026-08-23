@@ -345,14 +345,30 @@ CN.RegisterCandidateProvider("Instances", function()
     local candidates = {}
 
     for _, lockout in ipairs(Instances.Lockouts()) do
+        -- THE LOCKOUT'S OWN ID, NOT ITS LOCALIZED NAME.
+        --
+        -- The objective's `id` was `lockout.name` -- the display string. Two
+        -- lockouts of the same instance at different difficulties are the
+        -- ordinary case in retail, and both produced the key INSTANCE:<name>,
+        -- so the aggregate deduplicated them and ONE OF THE TWO SILENTLY
+        -- VANISHED from every list -- with the loser's reasons ("3 of 8
+        -- already defeated") merged onto the wrong difficulty.
+        --
+        -- It also meant the ignore store was keyed on a translated string:
+        -- ignoring Heroic ignored Normal too, and every ignore was lost the
+        -- day the player changed client language.
+        local key = lockout.id
+            or (tostring(lockout.instanceID or lockout.name) .. ":"
+                .. tostring(lockout.difficultyID or 0))
+
         -- A cleared lockout is not an objective, and a lockout nobody has
         -- started is a decision about the evening rather than a next action.
         if not lockout.complete
             and lockout.defeated > 0
             and lockout.remaining > 0
             and lockout.remaining <= Instances.maxRemaining
-            and not CN.IsIgnored(CN.objectiveTypes.INSTANCE, lockout.name)
-            and not CN.IsDeferred(CN.objectiveTypes.INSTANCE, lockout.name) then
+            and not CN.IsIgnored(CN.objectiveTypes.INSTANCE, key)
+            and not CN.IsDeferred(CN.objectiveTypes.INSTANCE, key) then
 
             local reasons = {
                 lockout.defeated .. " of " .. lockout.encounters
@@ -370,7 +386,7 @@ CN.RegisterCandidateProvider("Instances", function()
             end
 
             table.insert(candidates, CN.NewObjective({
-                id               = lockout.name,
+                id               = key,
                 type             = CN.objectiveTypes.INSTANCE,
                 name             = lockout.name
                     .. (lockout.difficulty and (" (" .. lockout.difficulty .. ")") or ""),

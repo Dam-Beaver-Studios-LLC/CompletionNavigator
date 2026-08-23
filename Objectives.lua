@@ -34,6 +34,18 @@ CN.objectiveTypes = {
     -- A dungeon or raid lockout you are part-way through. Not a place; a
     -- deadline with progress already spent on it.
     INSTANCE    = "INSTANCE",
+
+    -- YOUR BODY, WHICH IS NOT A QUEST.
+    --
+    -- The corpse run was emitted as `QUEST` with `id = 1`, and quest 1 is a
+    -- real id in the client's namespace. Three things went wrong with that:
+    -- the auto-advance staleness check asked the quest checker whether quest
+    -- 1 was complete and moved the arrow off the player's body if it said
+    -- yes; any other provider emitting QUEST:1 could win the dedup and take
+    -- the `corpse` flag with it, which is what exempts the body from the type
+    -- filter and from the death penalty; and every corpse run was filed as
+    -- quest-habit data by the preference learner.
+    CORPSE      = "CORPSE",
 }
 
 -- HOW A PERSON READS A TYPE, AS OPPOSED TO HOW THE CODE THINKS ABOUT ONE.
@@ -65,6 +77,7 @@ CN.typeLabels = {
     VENDOR      = "Vendors",
     COLLECTIBLE = "Collectibles",
     INSTANCE    = "Dungeons & raids",
+    CORPSE      = "Corpse runs",
 }
 
 function CN.TypeLabel(objectiveType)
@@ -96,6 +109,7 @@ CN.typeBadges = {
     VENDOR      = "Vendor",
     COLLECTIBLE = "Collectible",
     INSTANCE    = "Dungeon",
+    CORPSE      = "Corpse run",
 }
 
 -- ONE PLACE THAT TURNS WHAT A PLAYER TYPED INTO AN ID.

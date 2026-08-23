@@ -354,21 +354,35 @@ local function HandleSlashCommand(message)
     --
     -- The status is still there, under `/cn status`, which is a name that
     -- says what it is.
-    if command == "" then
-        local next_ = CN.commands["next"]
+    local definition = CN.commands[command]
 
-        if next_ and next_.handler then
-            next_.handler("")
+    -- BARE `/cn` ANSWERS THE QUESTION THE ADDON EXISTS FOR.
+    --
+    -- It used to print a status dump -- version, mode, and a list of all
+    -- forty-seven internal module names -- and the login banner told every
+    -- new player to type it. So the addon's front door, advertised in its own
+    -- first line of output, answered a question nobody asked in vocabulary
+    -- nobody shares, and never mentioned `/cn next`, `/cn help` or
+    -- `/cn setup`.
+    --
+    -- The status is still there, under `/cn status`, which is a name that
+    -- says what it is.
+    --
+    -- Resolved to a DEFINITION rather than called directly, so it goes
+    -- through the same guarded dispatch as everything else. 0.54.0 called the
+    -- handler raw, which made the one command every player types the one
+    -- command whose failures were neither caught nor recorded.
+    if command == "" then
+        definition = CN.commands["next"]
+
+        arguments = ""
+
+        if not definition then
+            ShowStatus()
 
             return
         end
-
-        ShowStatus()
-
-        return
     end
-
-    local definition = CN.commands[command]
 
     -- LONGEST MATCH FIRST, SO A MULTI-WORD NAME CAN BE TYPED.
     --

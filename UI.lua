@@ -28,6 +28,12 @@ CN.UI = UI
 UI.WINDOW_WIDTH = 560
 UI.ROW_HEIGHT   = 20
 
+-- How wide the right-aligned value column is on the rows that use one. Wide
+-- enough for the longest thing any tab puts there -- the reputation row's
+-- "412 account-wide, 96 this character" -- and zero on the rows that do not,
+-- which is most of them.
+UI.VALUE_WIDTH  = 210
+
 -- LATE-BOUND ON PURPOSE.
 --
 -- The tab builders below call UI.CreateList rather than a local, because
@@ -563,9 +569,55 @@ function UI.RebuildTabs()
         window.body:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 34)
     end
 
-    UI.SelectTab(UI.selectedTab
-        or (CN.Settings() and CN.Settings().selectedTab)
-        or 1)
+    -- THE REMEMBERED NAME FIRST, then the in-memory index.
+    --
+    -- `UI.selectedTab` is an index captured from a PREVIOUS sort of
+    -- `UI.tabs`, and this line is re-entered by `RebuildTabs` every time a tab
+    -- registers -- which is the exact moment the sort changes. Consulting it
+    -- first would reintroduce the bug `RememberedTabIndex` exists to fix, on
+    -- the one path that triggers it.
+    UI.SelectTab(UI.RememberedTabIndex() or UI.selectedTab or 1)
+end
+
+-- THE INDEX IS NOT A NAME, AND IT WAS BEING SAVED AS IF IT WERE ONE.
+--
+-- `UI.tabs` is sorted by `order` then by name, and it is rebuilt whenever a
+-- tab registers -- which happens at load, and can happen later. So index 7 is
+-- "Collections" only until the tab list changes: add a tab, change an order,
+-- or ship a release that does either, and the window reopens on whatever tab
+-- now happens to sit at 7. There is no error and nothing to notice; the
+-- window simply opens on the wrong tab from then on.
+--
+-- The name is stable and is what the player actually meant. It is written
+-- alongside the index and preferred on read, so a database saved by an older
+-- version still opens somewhere sensible.
+function UI.RememberedTabIndex()
+    local settings = CN.Settings()
+
+    if not settings then
+        return nil
+    end
+
+    local name = settings.selectedTabName
+
+    if type(name) == "string" then
+        for index, tab in ipairs(UI.tabs) do
+            if tab.name == name then
+                return index
+            end
+        end
+
+        -- A remembered tab that no longer exists is not an error worth a
+        -- message; it is a tab that was removed. Fall through to the index.
+    end
+
+    local index = settings.selectedTab
+
+    if type(index) == "number" and UI.tabs[index] then
+        return index
+    end
+
+    return nil
 end
 
 function UI.SelectTab(index)
@@ -581,7 +633,8 @@ function UI.SelectTab(index)
     -- the first tab, which for a player who lives in Collections meant one
     -- extra click every single time.
     if CN.Settings() then
-        CN.Settings().selectedTab = index
+        CN.Settings().selectedTab     = index
+        CN.Settings().selectedTabName = tab.name
     end
 
     if window.footer then
@@ -1069,6 +1122,12 @@ UI.RegisterTab{
             local module = CN:GetModule("Quests")
 
             if module then
+                -- A deliberate rescan overrides the arrival latch, the same
+                -- way `/cn discoveractive` does.
+                if module.ForgetArrivals then
+                    module.ForgetArrivals()
+                end
+
                 local seen, recorded = module.DiscoverActive()
                 local scanned        = module.ScanKnown()
 

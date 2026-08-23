@@ -41,32 +41,74 @@ end
 -- Every quest accepted, turned in, or seen at login gets a permanent record,
 -- and there was no cap and no prune. Migration 6 gave `questPins` a ceiling
 -- of 600 for exactly this reason and did not touch this store, whose rows are
--- larger. Same rule, same shape: over the ceiling, the lowest quest ids go --
--- the oldest content, and the least likely to be what anybody is working on.
+-- larger.
 Harvest.cap = 2000
 
+-- AND THE EVICTION ORDER WAS BACKWARDS FOR THE PLAYER MOST LIKELY TO HIT IT.
+--
+-- It dropped the lowest quest ids, on the reasoning that a low id is old
+-- content nobody is working on. That reasoning describes a max-level
+-- character doing current content. It describes the exact opposite of a
+-- levelling alt, whose entire quest log is low ids -- so the store threw away
+-- the records for the zones that character is standing in, kept the main's
+-- endgame chains, and did it again on the next capture.
+--
+-- Least-recently-seen instead. `lastSeen` is stamped on every capture, so it
+-- means "the addon has not touched this quest in a while" regardless of which
+-- expansion it belongs to -- which is the actual question. A record with no
+-- `lastSeen` is from before it was recorded and goes first.
+--
+-- Ties break on the quest id so the result is deterministic; two records
+-- written in the same second must not evict in table order, which is not an
+-- order.
 function Harvest.Prune()
     local store = Store()
 
-    local ids = {}
+    -- COUNT FIRST, ALLOCATE SECOND.
+    --
+    -- `Prune` runs at the end of every `Capture`, and `Capture` runs in a loop
+    -- over the whole quest log at login. Building the sort array before
+    -- checking the cap meant two thousand table allocations per captured
+    -- quest, thrown away immediately in the overwhelmingly common case where
+    -- there is nothing to prune. `Session.Prune` and `Preference.Prune` both
+    -- check a cheap counter first, for exactly this reason.
+    local held = 0
 
-    for questID in pairs(store) do
-        table.insert(ids, questID)
+    for _ in pairs(store) do
+        held = held + 1
     end
 
-    if #ids <= Harvest.cap then
+    if held <= Harvest.cap then
         return 0
     end
 
-    table.sort(ids)
+    local rows = {}
 
-    local dropped = #ids - Harvest.cap
-
-    for index = 1, dropped do
-        store[ids[index]] = nil
+    for questID, record in pairs(store) do
+        table.insert(rows, {
+            id   = questID,
+            seen = (type(record) == "table" and record.lastSeen) or 0,
+        })
     end
 
-    DebugPrint("Pruned " .. dropped .. " harvested quests over the ceiling.")
+    table.sort(rows, function(a, b)
+        if a.seen == b.seen then
+            return a.id < b.id
+        end
+
+        return a.seen < b.seen
+    end)
+
+    local dropped = #rows - Harvest.cap
+
+    for index = 1, dropped do
+        store[rows[index].id] = nil
+    end
+
+    Harvest.unlockGeneration = (Harvest.unlockGeneration or 0) + 1
+
+    DebugPrint("Pruned " .. dropped .. " least-recently-seen harvested "
+        .. "quest(s) over the ceiling.")
 
     return dropped
 end
@@ -147,6 +189,8 @@ function Harvest.Capture(questID, reason)
 
             if external.requires then
                 record.requires  = external.requires
+
+                Harvest.NoteUnlocksChanged()
 
                 -- `requiresFrom`: which addons answered. It was written as
                 -- `requiredBy`, a name meaning the opposite -- the quests
@@ -338,6 +382,9 @@ function Harvest.PublishConfident()
 
         if record and not record.observedRequires and #prerequisites > 0 then
             record.observedRequires = prerequisites
+
+            -- The unlock index is an inversion of exactly this field.
+            Harvest.NoteUnlocksChanged()
 
             recorded = recorded + 1
         end
@@ -713,5 +760,126 @@ CN:RegisterCommand{
         end
     end,
 }
+
+------------------------------------------------------------
+-- WHAT A QUEST UNLOCKS
+------------------------------------------------------------
+
+-- A SCORING TERM WITH ONE PRODUCER OUT OF TWENTY-TWO.
+--
+-- `unlockValue` carries a weight of 1.5 -- the second-heaviest term in the
+-- scorer, above urgency and well above travel. Exactly one provider ever set
+-- it: `Modules/Inventory.lua`, which writes a flat 1 for an item that teaches
+-- something. Every quest, reputation, renown, profession and dungeon in the
+-- addon contributed zero to "what it unlocks", for ever -- so the term did
+-- not rank anything, it just sat in the explanation printing 0.00 and made
+-- the arithmetic look thorough.
+--
+-- The addon already collects the evidence. `observedRequires` records, per
+-- quest, which quests were seen completed before it across the player's own
+-- characters. Invert that and you have, for a given quest, how many other
+-- quests have been observed to sit behind it. That is what "unlocks" means,
+-- measured, from this account's own play.
+--
+-- NO INVENTION. A quest nothing has been observed behind scores zero, exactly
+-- as it does today. This raises a quest only on evidence the player generated
+-- themselves, and `/cn why` names the count.
+
+-- Rebuilt when the harvest changes rather than on every scoring pass: the
+-- inversion is a full walk of a store that can hold two thousand rows, and
+-- the ranking scores two hundred candidates.
+Harvest.unlockGeneration = Harvest.unlockGeneration or 0
+
+local unlockIndex, unlockIndexGeneration
+
+-- Above this many, one more unlocked quest tells the ranking nothing it did
+-- not already know, and a hub quest with forty followers must not out-score
+-- everything else in the zone on its own.
+Harvest.unlockCap = 6
+
+function Harvest.NoteUnlocksChanged()
+    Harvest.unlockGeneration = Harvest.unlockGeneration + 1
+end
+
+function Harvest.UnlockIndex()
+    if unlockIndex and unlockIndexGeneration == Harvest.unlockGeneration then
+        return unlockIndex
+    end
+
+    local index = {}
+
+    for _, record in pairs(Store()) do
+        if type(record) == "table" then
+            -- Both sources, and deduplicated per record: a prerequisite named
+            -- by the external provider AND observed in play is one unlock,
+            -- not two.
+            local counted = {}
+
+            -- NOT `ipairs({ record.requires, record.observedRequires })`.
+            --
+            -- A record with no `requires` makes that a table whose first
+            -- element is nil, and `ipairs` stops at the hole -- so the
+            -- observed list, which is the one this addon actually harvests,
+            -- would be skipped for every record that has no external data.
+            -- Which is nearly all of them.
+            local function Count(list)
+                for _, prerequisiteID in ipairs(list or {}) do
+                    if not counted[prerequisiteID] then
+                        counted[prerequisiteID] = true
+
+                        index[prerequisiteID] = (index[prerequisiteID] or 0) + 1
+                    end
+                end
+            end
+
+            Count(record.requires)
+            Count(record.observedRequires)
+        end
+    end
+
+    unlockIndex           = index
+    unlockIndexGeneration = Harvest.unlockGeneration
+
+    return index
+end
+
+-- How many quests this account has observed sitting behind a given quest.
+function Harvest.UnlockCount(questID)
+    questID = CN.ToID(questID)
+
+    if not questID then
+        return 0
+    end
+
+    return Harvest.UnlockIndex()[questID] or 0
+end
+
+CN.RegisterCandidateDecorator("Unlocks", function(objective)
+    if not objective or objective.type ~= CN.objectiveTypes.QUEST then
+        return
+    end
+
+    -- A provider that has its own opinion keeps it. This fills a gap; it does
+    -- not overrule anybody.
+    if objective.unlockValue ~= nil then
+        return
+    end
+
+    local count = Harvest.UnlockCount(objective.id)
+
+    if count <= 0 then
+        return
+    end
+
+    -- Scaled to the same 0..1 range every other term uses, so the weight in
+    -- `CN.scoreWeights` means what it says.
+    objective.unlockValue = math.min(1, count / Harvest.unlockCap)
+
+    objective.reasons = objective.reasons or {}
+
+    table.insert(objective.reasons, count == 1
+        and "one quest you have seen comes after this one"
+        or (count .. " quests you have seen come after this one"))
+end)
 
 -- CN:APPEND -- cn.ps1 inserts generated commands and event handlers above this line.

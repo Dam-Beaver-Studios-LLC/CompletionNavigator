@@ -283,7 +283,7 @@ CN.migrations = {
             local store = db.account[name]
 
             if type(store) == "table" then
-                local nested, moved = {}, 0
+                local nested, moved, dropped = {}, 0, 0
 
                 for key, entry in pairs(store) do
                     -- Already nested (a type name maps to a table of ids)
@@ -295,8 +295,26 @@ CN.migrations = {
                         nested[objectiveType] = nested[objectiveType] or {}
                         nested[objectiveType][tonumber(id) or id] = entry
                         moved = moved + 1
-                    else
+                    elseif type(entry) == "table" then
+                        -- Already nested: a type name mapping to a table of
+                        -- ids. Carried across as it is.
                         nested[key] = entry
+                    else
+                        -- AND THE THIRD CASE, WHICH USED TO BE FOLDED INTO
+                        -- THE SECOND AND PRODUCED A STORE NOTHING COULD READ.
+                        --
+                        -- A key with no colon whose value is not a table is
+                        -- neither an old flat row nor a new nested one. The
+                        -- old branch copied it straight across, so the
+                        -- migrated store came out as a mix of `[type] =
+                        -- table` and `[junk] = true` -- and `Ignored()`
+                        -- indexes `store[type][id]`, which throws on the
+                        -- second shape the moment anything of that name is
+                        -- filtered.
+                        --
+                        -- There is nothing to recover here: the value carries
+                        -- no id. Dropped, and counted.
+                        dropped = dropped + 1
                     end
                 end
 
@@ -305,6 +323,11 @@ CN.migrations = {
                 if moved > 0 then
                     CN.DebugPrint("Renested " .. moved .. " row(s) in "
                         .. name .. ".")
+                end
+
+                if dropped > 0 then
+                    CN.DebugPrint("Dropped " .. dropped
+                        .. " unreadable row(s) from " .. name .. ".")
                 end
             end
         end
@@ -332,6 +355,55 @@ CN.migrations = {
             if moved > 0 then
                 CN.DebugPrint("Repacked " .. moved .. " flight route key(s).")
             end
+        end
+    end,
+
+    -- 9 -> 10. Preference rows for types the addon can never credit.
+    --
+    -- Every type a provider emits was counted as "shown"; only the five the
+    -- client announces a completion for could ever be counted as "acted". The
+    -- other thirteen accumulated sightings against a numerator that was nailed
+    -- to zero, crossed the observation threshold, and settled permanently on
+    -- the 0.80 floor -- while `/cn learned` reported "you rarely act on
+    -- these", which the addon had no way to know.
+    --
+    -- 0.55.0 stops counting them. These rows are the residue: they cannot be
+    -- corrected, because the sightings they hold were never paired with
+    -- anything, and leaving them would keep them on screen. Dropped.
+    --
+    -- Quests, achievements, pets, mounts, toys and the two quest refinements
+    -- are kept -- those were being measured properly.
+    [9] = function(db)
+        -- `or {}` replaces nil and passes a corrupt non-table straight to
+        -- `pairs`, which throws -- and a migration that throws every login
+        -- pins the database at this version for ever.
+        if type(db.characters) ~= "table" then
+            db.characters = {}
+        end
+
+        local keep = {
+            QUEST = true, ACHIEVEMENT = true, PET = true, MOUNT = true,
+            TOY = true, QUEST_CAMPAIGN = true, QUEST_SIDE = true,
+        }
+
+        local dropped = 0
+
+        for _, character in pairs(db.characters) do
+            local store = type(character) == "table" and character.preference
+
+            if type(store) == "table" then
+                for objectiveType in pairs(store) do
+                    if not keep[objectiveType] then
+                        store[objectiveType] = nil
+                        dropped = dropped + 1
+                    end
+                end
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " preference row(s) the addon could never have credited.")
         end
     end,
 
@@ -448,6 +520,9 @@ CN.migrations = {
     end,
 }
 
+-- Published so the harness can drive it against a hand-built database. A
+-- migration path that is only reachable through a real login is a migration
+-- path nothing tests until it has already run on somebody's saved data.
 local function Migrate(db)
     local from = db.version or 1
 
@@ -458,8 +533,40 @@ local function Migrate(db)
             local ok, err = pcall(migration, db)
 
             if not ok then
+                -- A HALF-APPLIED MIGRATION IS NOT A THING TO BE QUIET ABOUT.
+                --
+                -- This printed once, at login, into a chat frame that is
+                -- usually mid-scroll, and then the addon carried on reading a
+                -- database that is now in neither the old shape nor the new
+                -- one. Every subsequent login retries the same migration
+                -- against data it has already partly rewritten.
+                --
+                -- Record it, so `/cn navdiag` and the self-test can see it and
+                -- say so rather than reporting a clean bill of health over a
+                -- database that is not.
+                db.migrationFailure = {
+                    version = from,
+                    error   = tostring(err),
+                }
+
+                CN.migrationFailure = db.migrationFailure
+
                 Print("Database migration " .. from .. " failed: " .. tostring(err))
+
+                -- NOT "your data is unchanged". A migration that threw
+                -- part-way through has already rewritten some of it, which is
+                -- the whole reason this is worth telling anybody about.
+                Print("This step may have half-finished. Nothing further will "
+                    .. "be upgraded until it succeeds. Run "
+                    .. "|cffffc74f/cn navdiag|r for the details.")
+
                 return
+            end
+
+            -- Cleared only by the migration that failed actually succeeding.
+            if db.migrationFailure and db.migrationFailure.version == from then
+                db.migrationFailure = nil
+                CN.migrationFailure = nil
             end
 
             DebugPrint("Migrated database from version " .. from .. ".")
@@ -469,6 +576,8 @@ local function Migrate(db)
         db.version = from
     end
 end
+
+CN.RunMigrations = Migrate
 
 ------------------------------------------------------------
 -- INITIALIZATION

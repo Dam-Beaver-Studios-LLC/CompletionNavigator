@@ -7,6 +7,132 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.55.0]
+
+An adversarial review of everything 0.54.0 changed, plus the registry
+contracts and the data the addon keeps about you. Four of the defects below
+were shipped by the release that was supposed to make things faster, and are
+named as such.
+
+### Fixed
+
+- **Learned durations were biased long, and said so confidently.** A
+  completion faster than the addon's own travel estimate was clamped up to a
+  floor of 0.05 seconds -- and then discarded by a test on the very next line
+  that rejected anything at or below 0.05. Every sample the floor existed to
+  preserve was thrown away, which is the precise bias the floor was written to
+  remove. Every `/cn plan`, every hub estimate, every "this will take" line
+  read long. The order of the two tests is now correct: reject the
+  implausible span first, floor what survives.
+- **Half the addon's subject matter was being demoted for the addon's own
+  deafness.** Preference learning counted a "sighting" for every objective
+  type but could only count an "action" for the five the client announces --
+  quests, achievements, pets, mounts and toys. The other thirteen crossed the
+  observation threshold with a numerator nailed to zero, settled permanently
+  on the 0.80 penalty, and `/cn learned` reported "you rarely act on these" --
+  a claim about the player that the addon had no way to make. Only types with
+  a completion path are credited now; the rest are left alone, and the rows
+  that could never have been earned are dropped on upgrade.
+- **A zone whose size the client would not report became one stop.** The
+  0.54.0 clustering grid compares squared distances against the hub radius in
+  yards. When the map scale was unavailable the fallback left distances in map
+  units, where the largest possible value is smaller than the radius squared
+  by three orders of magnitude -- so every objective in the zone joined the
+  first hub, with a batch bonus to match. The fallback is now the same
+  2000-yard assumption the distance helper has always used, which also means
+  `RouteLength` reports yards on that path instead of map units.
+- **And the scale lookup could not tell a refusal from an answer.** The map
+  scale helper returns `1, 1` when the client will not convert -- correct for
+  the arrow, which uses only the ratio of the two, and useless for routing,
+  which wants absolute yards. Routing validated it with "greater than zero",
+  which `1` satisfies, so the fallback above could never fire for a real map
+  during a loading screen -- the one situation it exists for. The helper now
+  says whether its answer is a measurement.
+- **The unchanged-provider shortcut was off for any provider a decorator had
+  touched.** The comparison that decides "this provider returned the same
+  rows" ran a freshly built list against the previously *decorated* one, so
+  anything a decorator had added was present on one side and absent on the
+  other and the comparison could only disagree. Measured at 0.2 ms per
+  collect, every five seconds, for no change on screen.
+- **A preference verdict was never withdrawn.** `/cn learned reset` reported
+  "Forgotten. The ranking is back to its defaults." while `/cn why` went on
+  printing "you rarely act on these" from the sentence stamped on cached
+  objectives.
+- **The clustering grid was inert on that same path**, so the optimisation it
+  was written for -- one cell per hub radius -- degenerated to the quadratic
+  scan it replaced.
+- **`ADDON_LOADED` handlers were accepted and never called.** The event is in
+  the registry and `RegisterEvent` takes a handler for it; the dispatcher
+  returned before dispatching. Anything registered that way ran never.
+- **A migration that failed part-way printed one line and carried on.** The
+  saved data was then in neither the old shape nor the new one, and every
+  later login retried the same step against data it had already partly
+  rewritten. The failure is recorded now, and `/cn navdiag` and `/cn selftest`
+  say which step failed and why before reporting on anything read from that
+  data.
+- **Migration 8 could produce a store nothing could read** -- a key with no
+  colon whose value was not a table was copied straight across, mixing two
+  incompatible row shapes in one table.
+
+### Changed
+
+- **What a quest unlocks is now measured.** `unlockValue` carries the
+  second-heaviest weight in the scorer and had exactly one producer out of
+  twenty-two: a flat 1 for an item that teaches something. Every quest,
+  reputation, profession and dungeon contributed nothing to it, so the term
+  printed 0.00 and ranked nothing. It now reads the prerequisite graph the
+  addon already harvests from your own play, inverted: how many quests have
+  been observed sitting behind this one. A quest nothing has been seen behind
+  still scores zero -- nothing is invented.
+- **The harvest store evicts what it has not seen, not what is oldest.** It
+  dropped the lowest quest IDs, on the reasoning that a low ID is old content.
+  That describes a max-level character; it describes the exact opposite of an
+  alt levelling through classic zones, whose entire log is low IDs -- so the
+  store threw away the records for the zone that character was standing in and
+  kept the main's endgame chains.
+- **Any registered waypoint provider can be chosen.** The registry was open
+  and the selector was not: `/cn nav` matched three names hardcoded in the
+  command, so a fourth provider could be used automatically and never picked
+  deliberately. The command now offers what is actually registered.
+- **The window reopens on the tab you left, by name.** It stored an array
+  index into a list that is sorted and rebuilt whenever a tab registers, so
+  adding a tab silently moved everybody's remembered position.
+- **The arrival prompt can fire again.** It latched once per zone per session,
+  so clearing a zone, crossing a continent and coming back four hours later to
+  the quests you left behind was met with silence -- the moment it is most
+  useful, and the one moment it could not fire. Two hours, and a deliberate
+  rescan clears it.
+- **The harvest store counts before it allocates.** Pruning built its sort
+  array before checking whether there was anything to prune, on every single
+  captured quest -- and quests are captured in a loop over the whole log at
+  login.
+- **Quest data providers sort deterministically.** The priority list was
+  re-sorted on every registration with a comparator that does not break ties,
+  so two third-party providers that omit a priority could swap places because
+  a third one registered -- silently changing which of them supplies a quest's
+  name or coordinates.
+
+### Internal
+
+- Quest data providers must supply both halves of their contract. A provider
+  registered without `IsAvailable` was accepted and then silently reported
+  unavailable for ever, because the call on nil happened inside a `pcall`.
+  Registering twice replaces rather than duplicating the priority row.
+- Captures must be named. The name is the key the result is filed under, so a
+  nameless one threw inside the capture run and took every later capture with
+  it; a duplicate name silently overwrote another capture's result.
+- `/cn why` re-runs the score adjusters, because an adjuster's contribution is
+  recorded nowhere else. That is safe only while adjusters are idempotent, so
+  the suite now asserts it -- and the re-run is guarded, so an adjuster that
+  throws no longer takes the explanation with it.
+- The offline test harness can now model the client REFUSING to convert a map
+  position -- a loading screen, an instance, a map with no world position.
+  Every fallback path in routing and navigation was unreachable from the
+  suite until this release, which is why one of them shipped broken.
+- Sixteen new mutations and eighteen new assertions covering the above.
+  Mutation score: 109 of 109.
+
+
 ## [0.54.0]
 
 Three audits: what it costs, what it looks like, and what the first five

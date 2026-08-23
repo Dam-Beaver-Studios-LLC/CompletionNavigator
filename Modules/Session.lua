@@ -597,26 +597,60 @@ function Session.NoteCompleted(objectiveType, id)
         return nil
     end
 
-    local elapsed = Session.Now() - started.at
+    -- THE FLOOR AND THE DISCARD USED TO CANCEL EACH OTHER OUT.
+    --
+    -- Until 0.55.0 this subtracted the journey first, clamped anything short
+    -- up to `Session.minimumWorkSeconds`, and then threw away everything at or
+    -- below 0.05 -- the same number the clamp had just produced. Every sample
+    -- the floor exists to preserve was floored and then discarded, which is
+    -- the precise bias the floor was written to remove, and `/cn plan` read
+    -- long, confidently, in every version that shipped it.
+    --
+    -- THREE QUANTITIES, IN THE RIGHT ORDER. The mistake was doing all the
+    -- reasoning on one variable that had already been adjusted.
+    --
+    --   `span`    how long the objective was actually on the list. This is
+    --             the only quantity plausibility can be judged on: it comes
+    --             from the clock and from nothing the addon guessed.
+    --
+    --   `elapsed` the span with the addon's own travel estimate removed, so
+    --             the planner can add a real leg back without counting the
+    --             journey twice.
+    --
+    --   the floor which applies to `elapsed` alone.
+    local span = Session.Now() - started.at
+
+    -- A clock that went backwards. `GetTime` is monotonic, so this means the
+    -- offer was recorded against a different clock -- a reload, or a stored
+    -- timestamp that outlived the session it was taken in.
+    --
+    -- NOT `<= 0`. Zero is an objective offered and completed inside one frame,
+    -- which is a real thing -- accepting a quest from an item that completes
+    -- it -- and it is precisely what the floor below is for. Rejecting it
+    -- would reintroduce the bias this release exists to remove.
+    if span < 0 then
+        return nil
+    end
+
+    -- Over twenty minutes was not "doing the thing", it was living your life
+    -- with the thing still on the list. Judged on the SPAN: judging it on the
+    -- travel-adjusted figure let a forty-minute span with a twenty-five minute
+    -- estimated journey through as a confident fifteen-minute sample.
+    if span > 1200 then
+        return nil
+    end
 
     -- The journey out, which the caller will add back separately.
-    elapsed = elapsed - (started.travel or 0)
+    local elapsed = span - (started.travel or 0)
 
     -- A floor rather than a discard: something finished faster than the model
     -- said the journey would take is a fast objective, not a corrupt sample.
+    -- A floored sample says "the work itself was negligible next to getting
+    -- there", which for a quest handed in on arrival is exactly true -- and
+    -- unlike the raw span, this figure being at or below zero is an ordinary,
+    -- expected outcome rather than a broken clock.
     if elapsed < Session.minimumWorkSeconds then
         elapsed = Session.minimumWorkSeconds
-    end
-
-    -- Anything over twenty minutes was not "doing the thing", it was living
-    -- your life with the thing still on the list.
-    --
-    -- The lower bound is now a fraction of a second rather than a whole one.
-    -- With a one-second clock, anything finished in the same second it was
-    -- offered read as zero elapsed and was thrown away -- which quietly
-    -- discarded exactly the fast turn-ins a quest grinder produces most of.
-    if elapsed <= 0.05 or elapsed > 1200 then
-        return nil
     end
 
     local store = Durations()

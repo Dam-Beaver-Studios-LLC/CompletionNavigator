@@ -522,6 +522,15 @@ CN.RegisterSelfTest{
 
         local version = CN.db.version
 
+        -- The specific reason, when there is one. "Version 7, expected 10" is
+        -- true and useless; "migration 7 threw X" is the actual fault.
+        local failure = CN.db.migrationFailure or CN.migrationFailure
+
+        if type(failure) == "table" and failure.version then
+            return FAIL, "migration " .. tostring(failure.version)
+                .. " failed: " .. tostring(failure.error)
+        end
+
         if version ~= CN.dbVersion then
             return FAIL, "database is version " .. tostring(version)
                 .. ", this build expects " .. tostring(CN.dbVersion)

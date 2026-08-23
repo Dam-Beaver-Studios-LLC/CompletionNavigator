@@ -430,7 +430,30 @@ function CN.ScoreObjective(objective)
             -- 1.25 lowered it. The contract is now "here is what this is
             -- worth; return what you think it is worth", which is what both
             -- of them were written to express.
-            local adjusted = adjuster(objective, worth)
+            -- GUARDED, LIKE EVERY OTHER CALLBACK IN THE ADDON.
+            --
+            -- Providers, decorators, recommendation hooks, quest data
+            -- providers, breakdown categories, self-tests and tab builders
+            -- are all pcall'd. Adjusters were the one exception, and they sit
+            -- on the hottest path: a throw here propagates out of
+            -- `ScoreObjective`, out of `Ranked()`, and out to the command
+            -- boundary -- where it is caught, so `/cn next` prints an error
+            -- and returns an EMPTY LIST, which is indistinguishable from
+            -- "you have done everything". Nothing is recorded, so
+            -- `ExplainEmptyList` cannot say otherwise either.
+            local ok, adjusted = pcall(adjuster, objective, worth)
+
+            if not ok then
+                local errors = CN:GetModule("Errors")
+
+                if errors and errors.Record then
+                    pcall(errors.Record,
+                        "adjuster:" .. tostring(CN.scoreAdjusterOrder[index]),
+                        tostring(adjusted))
+                end
+
+                adjusted = nil
+            end
 
             -- An adjuster that returns nothing, or something that is not a
             -- number, is ignored rather than allowed to zero the score.
@@ -526,8 +549,40 @@ end
 
 CN.candidateProviders = CN.candidateProviders or {}
 
+-- ORDERED BY REGISTRATION, for the same reason the adjusters are.
+--
+-- `CollectCandidates` walked `pairs(CN.candidateProviders)`, so when two
+-- providers emit the same objective the winner was decided by hash order --
+-- which differs between clients, between sessions, and between Lua versions.
+-- Two players with the same data got different lists, and neither could be
+-- told why.
+--
+-- It matters more here than for adjusters, because the aggregate's dedup
+-- keeps the FIRST row it meets and merges only two fields from the loser: the
+-- coordinates, the travel cost and the expiry of whichever provider lost were
+-- discarded. `Opportunities` and `Quests` both emit a world quest -- one with
+-- coordinates and an expiry, the other with a phase and a state -- and which
+-- half survived was a coin toss.
+CN.candidateProviderOrder = CN.candidateProviderOrder or {}
+
 function CN.RegisterCandidateProvider(name, provider, options)
     options = options or {}
+
+    -- VALIDATED. This stored anything, so a provider registered with a nil
+    -- function failed inside `pcall` every five seconds forever, recorded
+    -- once and counted thereafter -- and `ExplainEmptyList` then blamed the
+    -- empty list on the addon in general.
+    if type(name) ~= "string" or type(provider) ~= "function" then
+        local errors = CN:GetModule("Errors")
+
+        if errors and errors.Record then
+            pcall(errors.Record, "RegisterCandidateProvider",
+                "refused a provider called " .. tostring(name)
+                .. " because it is not a function")
+        end
+
+        return false
+    end
 
     local events
 
@@ -539,6 +594,10 @@ function CN.RegisterCandidateProvider(name, provider, options)
         end
     end
 
+    if not CN.candidateProviders[name] then
+        table.insert(CN.candidateProviderOrder, name)
+    end
+
     CN.candidateProviders[name] = {
         name     = name,
         fn       = provider,
@@ -546,6 +605,23 @@ function CN.RegisterCandidateProvider(name, provider, options)
         volatile = options.volatile and true or false,
         cooldown = options.cooldown,
     }
+
+    -- A PROVIDER REGISTERED AFTER LOGIN STILL GETS ITS EVENTS.
+    --
+    -- The subscription pass runs once, at initialisation, and wires every
+    -- event every provider declared. A provider registered later was never
+    -- subscribed -- and because `InvalidateCandidates(reason)` skips any
+    -- provider that HAS an events table and was not named, its declared
+    -- events were its only invalidation path. It refreshed only if it also
+    -- declared `volatile`, and otherwise never at all.
+    --
+    -- The header on the subscription pass describes this exact failure as
+    -- fixed. The fix closed the registry instead of opening it.
+    if CN.subscribedToInvalidation and CN.SubscribeToInvalidationEvents then
+        CN.SubscribeToInvalidationEvents()
+    end
+
+    return true
 end
 
 -- Decorators get a pass over every candidate after collection and before
@@ -572,11 +648,19 @@ CN.candidateDecorators = CN.candidateDecorators or {}
 CN.decoratorGeneration = 0
 
 function CN.RegisterCandidateDecorator(name, decorator)
-    if type(decorator) == "function" then
+    if type(name) == "string" and type(decorator) == "function" then
+        if not CN.candidateDecorators[name] then
+            table.insert(CN.candidateDecoratorOrder, name)
+        end
+
         CN.candidateDecorators[name] = decorator
 
         CN.decoratorGeneration = CN.decoratorGeneration + 1
+
+        return true
     end
+
+    return false
 end
 
 ------------------------------------------------------------
@@ -724,7 +808,17 @@ CN.baseInvalidationEvents = {
     "ZONE_CHANGED_NEW_AREA",
 }
 
+-- IDEMPOTENT, so a provider registering after login can call it again.
+--
+-- The event registry already allows many handlers per event, so subscribing
+-- twice would fire the invalidation twice -- which is harmless but wasteful,
+-- and would grow without bound if a module registered providers in a loop.
+-- Tracked, so only genuinely new events are wired.
+CN.subscribedInvalidationEvents = CN.subscribedInvalidationEvents or {}
+
 function CN.SubscribeToInvalidationEvents()
+    CN.subscribedToInvalidation = true
+
     local wanted = {}
 
     for _, event in ipairs(CN.baseInvalidationEvents) do
@@ -735,6 +829,10 @@ function CN.SubscribeToInvalidationEvents()
         for event in pairs(provider.events or {}) do
             wanted[event] = true
         end
+    end
+
+    for event in pairs(CN.subscribedInvalidationEvents) do
+        wanted[event] = nil
     end
 
     local subscribed = {}
@@ -749,6 +847,8 @@ function CN.SubscribeToInvalidationEvents()
     table.sort(subscribed)
 
     for _, event in ipairs(subscribed) do
+        CN.subscribedInvalidationEvents[event] = true
+
         CN:RegisterEvent(event, function()
             CN.InvalidateCandidates(event)
         end)
@@ -817,20 +917,78 @@ end
 -- the aggregate is mostly the SAME objective tables as last time -- so a
 -- decorator that appends a reason (Warband's does) appended it again, and
 -- again, and the recommendation grew a stack of identical lines.
+-- ONE BAD OBJECTIVE COSTS ONE OBJECTIVE.
+--
+-- The `break` here exited the CANDIDATES loop, not the decorator loop, so a
+-- decorator that threw on the third of forty candidates left the other
+-- thirty-seven undecorated -- and `Errors.Record` deduplicates, so it looked
+-- like one isolated failure rather than thirty-seven silent ones.
+--
+-- That is not cosmetic: `Session`'s decorator sets `estimatedTime` and
+-- `Warband`'s sets `characterSuitability`, both of which are scored. The
+-- undecorated tail was scored as though every task were instant and no
+-- character were better suited, and outranked the head of its own list.
+--
+-- Ordered by registration for the same reason the providers and adjusters
+-- are: three decorators writing disjoint fields is true today and is not a
+-- contract.
+CN.candidateDecoratorOrder = CN.candidateDecoratorOrder or {}
+
+-- HOW MANY REASONS THE PROVIDER ITSELF WROTE.
+--
+-- `Identical` compares a freshly built, UNDECORATED list against a previous,
+-- DECORATED one, so anything a decorator adds makes every comparison fail --
+-- and the whole reuse shortcut, which is worth 0.2 ms every five seconds,
+-- silently stops working for that provider. Recording the boundary lets the
+-- comparison ask the only question it actually means: did the PROVIDER change
+-- its answer?
+--
+-- Decorators only ever append, so a count is enough.
+local function MarkProviderReasons(candidates)
+    for index = 1, #candidates do
+        local objective = candidates[index]
+
+        if type(objective) == "table" then
+            objective.providerReasons = #(objective.reasons or {})
+        end
+    end
+end
+
 local function Decorate(candidates)
-    for name, decorator in pairs(CN.candidateDecorators) do
-        for index = 1, #candidates do
-            local ok, err = pcall(decorator, candidates[index])
+    MarkProviderReasons(candidates)
 
-            if not ok then
-                local errors = CN:GetModule("Errors")
+    for _, name in ipairs(CN.candidateDecoratorOrder) do
+        local decorator = CN.candidateDecorators[name]
 
-                if errors and errors.Record then
-                    pcall(errors.Record, "decorator:" .. name, tostring(err))
+        if decorator then
+            local failures = 0
+
+            for index = 1, #candidates do
+                local ok, err = pcall(decorator, candidates[index])
+
+                if not ok then
+                    failures = failures + 1
+
+                    -- Recorded once per pass with a count, rather than once
+                    -- per objective: forty identical entries would push
+                    -- everything else out of the ring buffer.
+                    if failures == 1 then
+                        local errors = CN:GetModule("Errors")
+
+                        if errors and errors.Record then
+                            pcall(errors.Record, "decorator:" .. name,
+                                tostring(err))
+                        end
+
+                        CN.DebugPrint("Candidate decorator " .. name
+                            .. " failed: " .. tostring(err))
+                    end
                 end
+            end
 
-                CN.DebugPrint("Candidate decorator " .. name .. " failed: " .. tostring(err))
-                break
+            if failures > 1 then
+                CN.DebugPrint("Candidate decorator " .. name .. " failed on "
+                    .. failures .. " of " .. #candidates .. " objectives.")
             end
         end
     end
@@ -840,9 +998,60 @@ end
 -- provider's output, which is capped, against scoring and sorting every
 -- candidate in the addon.
 --
--- Compares what a consumer can actually see. Two lists holding the same
--- objectives in the same order with the same completion values produce the
--- same ranking, whatever else is hanging off the tables.
+-- REWRITTEN IN 0.55.0, BECAUSE 0.54.0's VERSION WAS WRONG.
+--
+-- The original compared five fields and, on a match, kept the PREVIOUS tables
+-- and discarded the ones the provider had just built. That is only sound if
+-- the compared fields are the only ones a consumer reads. They were not, and
+-- one of the five did not exist at all.
+--
+-- What it missed:
+--
+--   * `travelCost`. Providers recompute it on every build, and the scorer
+--     reads it without recomputing. So a rebuild triggered by walking into a
+--     new zone -- which is when travel costs change most -- was thrown away
+--     precisely because the quest set had not changed. Costs were measured
+--     once, at the first build, and survived the session.
+--   * `expiresIn`, which drives the urgency term at the heaviest weight in
+--     the table. A world quest froze the value it had when it entered its
+--     current urgency bucket, so the steep last-hour ramp never fired.
+--   * `mapID`, `x`, `y`. A quest whose coordinates resolve from nil to real
+--     kept the nil, so the waypoint and the map pin pointed at nothing.
+--   * `name`. A title the client caches a moment later stayed "Quest 84321".
+--   * `phase`. PICKUP to ACTIVE changes no other compared field, so the hub
+--     kept sorting by the old one.
+--
+-- And `urgency` is not a field. Nothing in the addon has ever written one:
+-- the comparison was `nil ~= nil`, a dead clause standing exactly where
+-- `expiresIn` should have been.
+--
+-- So: compare everything the scorer, the router and the display actually
+-- read. That is a longer list and it means the shortcut fires less often --
+-- notably not at all while the player is moving, which is the honest answer,
+-- because that is exactly when the re-score is needed.
+--
+-- The optimisation still earns its place. Standing still with the window
+-- open, which is the case it was written for, every volatile provider still
+-- short-circuits.
+-- WHAT THE PROVIDER SAID, AND NOTHING ELSE.
+--
+-- `unlockValue` and `hubSize` were in this list and are written by a
+-- DECORATOR and by `BuildZoneRoute` respectively -- after the build, onto the
+-- objects in the previous list. The fresh list therefore always had nil where
+-- the previous one had a number, every comparison failed, and the reuse
+-- shortcut could never fire for any provider whose rows had been routed or
+-- carried an unlock count. The optimisation was present, documented, measured
+-- -- and off, which is this project's most repeated defect.
+--
+-- Both are RESTORED by the reuse rather than lost by it: reusing the previous
+-- table keeps the decoration that is already on it, which is the whole point.
+local IDENTITY_FIELDS = {
+    "type", "id", "name", "phase", "state",
+    "completionValue", "limitedTimeBonus", "expiresIn",
+    "travelCost", "mapID", "x", "y",
+    "accountWide",
+}
+
 local function Identical(left, right)
     if #left ~= #right then
         return false
@@ -851,13 +1060,33 @@ local function Identical(left, right)
     for index = 1, #left do
         local a, b = left[index], right[index]
 
-        if a.type ~= b.type
-            or a.id ~= b.id
-            or a.completionValue ~= b.completionValue
-            or a.urgency ~= b.urgency
-            or a.limitedTimeBonus ~= b.limitedTimeBonus then
+        for _, field in ipairs(IDENTITY_FIELDS) do
+            if a[field] ~= b[field] then
+                return false
+            end
+        end
 
+        -- Reasons are what `/cn why` prints, and a provider that changes its
+        -- mind about why something is worth doing has changed the answer.
+        --
+        -- ONLY THE PROVIDER'S OWN, though. `a` has been through the
+        -- decorators and `b` has not, so comparing the full lists compares a
+        -- decorated list against an undecorated one and can only ever
+        -- disagree. `providerReasons` is the count as the provider left it.
+        local leftReasons  = a.reasons or {}
+        local rightReasons = b.reasons or {}
+
+        local leftCount  = a.providerReasons or #leftReasons
+        local rightCount = b.providerReasons or #rightReasons
+
+        if leftCount ~= rightCount then
             return false
+        end
+
+        for reason = 1, leftCount do
+            if leftReasons[reason] ~= rightReasons[reason] then
+                return false
+            end
         end
     end
 
@@ -868,7 +1097,13 @@ local function RefreshProviders(force)
     local now     = time()
     local rebuilt = 0
 
-    for name, provider in pairs(CN.candidateProviders) do
+    for _, name in ipairs(CN.candidateProviderOrder) do
+        local provider = CN.candidateProviders[name]
+
+        -- A provider can be removed from the table without being removed from
+        -- the order -- the test suite does exactly that.
+        if provider then
+
         local entry = Entry(name)
 
         local cooled = entry.urgent
@@ -943,6 +1178,8 @@ local function RefreshProviders(force)
 
             rebuilt = rebuilt + 1
         end
+
+        end
     end
 
     return rebuilt
@@ -998,8 +1235,19 @@ function CN.CollectCandidates(force)
     local candidates = {}
     local byKey      = {}
 
-    for name in pairs(CN.candidateProviders) do
-        local list = providerCache[name] and providerCache[name].candidates
+    -- REGISTRATION ORDER, NOT HASH ORDER.
+    --
+    -- The dedup below keeps the first row it meets, so which provider "wins"
+    -- an objective two of them know about decided which coordinates, which
+    -- travel cost and which expiry survived -- and `pairs` made that a
+    -- different answer on different clients.
+    for _, name in ipairs(CN.candidateProviderOrder) do
+        -- Only providers that are still registered. The order array is
+        -- append-only, so a provider removed from the table would otherwise
+        -- keep contributing whatever its cache last held.
+        local list = CN.candidateProviders[name]
+            and providerCache[name]
+            and providerCache[name].candidates
 
         if list then
             for index = 1, #list do
@@ -1360,13 +1608,46 @@ function CN.ExplainScore(objective)
         worth = after
     end
 
+    -- YES, THIS RUNS THE ADJUSTERS AGAIN, AND IT HAS TO.
+    --
+    -- An adjuster is a function of the objective and the running total; there
+    -- is nowhere else its contribution is recorded, so the only way to show
+    -- the player what it did is to ask it. The alternative -- caching each
+    -- adjuster's delta at scoring time -- would put a second copy of the
+    -- number in the objective and reintroduce exactly the drift this function
+    -- was fixed to remove.
+    --
+    -- The contract that makes it safe is that an adjuster must be idempotent
+    -- and must not accumulate: both shipped adjusters withdraw the reasons
+    -- that no longer apply and add each reason at most once, keyed. The
+    -- harness asserts this by explaining the same objective twice and
+    -- requiring the reason list not to grow.
+    --
+    -- Guarded, because an adjuster that throws must not take `/cn why` down
+    -- with it -- the same guard `ScoreObjective` has had since 0.55.0.
     for index = 1, #CN.scoreAdjusterOrder do
         local name = CN.scoreAdjusterOrder[index]
 
         local adjuster = CN.scoreAdjusters[name]
 
         if adjuster then
-            local adjusted = adjuster(objective, worth)
+            local ran, adjusted = pcall(adjuster, objective, worth)
+
+            if not ran then
+                -- RECORDED, like `ScoreObjective` does. An adjuster that
+                -- throws only here -- it is handed a different running total
+                -- than the scorer hands it -- would otherwise leave no trace
+                -- anywhere, and `/cn why` would quietly print an explanation
+                -- missing a term.
+                local errors = CN:GetModule("Errors")
+
+                if errors and errors.Record then
+                    pcall(errors.Record, "explain:" .. tostring(name),
+                        tostring(adjusted))
+                end
+
+                adjusted = nil
+            end
 
             if type(adjusted) == "number" then
                 if math.abs(adjusted - worth) > 0.0005 then

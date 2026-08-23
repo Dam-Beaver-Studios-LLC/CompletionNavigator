@@ -77,18 +77,77 @@ end
 CN.questDataProviders = CN.questDataProviders or {}
 CN.questDataOrder     = CN.questDataOrder or {}
 
+-- THE CONTRACT IS TWO FUNCTIONS; ONLY ONE OF THEM WAS CHECKED.
+--
+-- `GetAvailableQuestDataProviders` calls `provider.IsAvailable()` on every
+-- registered provider, unconditionally. A provider registered without one --
+-- which this accepted -- made that a call on nil inside a pcall, so it did
+-- not crash: it silently reported the provider as unavailable, for ever, with
+-- no message anywhere. A third-party data source that shipped a typo in one
+-- field name would simply never be consulted and nobody would ever find out.
+--
+-- Both halves are required now, and a rejection says so.
+--
+-- Re-registration under a live name is a replacement, not a second row. It
+-- used to append to the order list either way, so registering twice put the
+-- name in the priority order twice and every consumer iterating the order got
+-- the provider twice.
 function CN.RegisterQuestDataProvider(name, provider)
-    if type(provider) ~= "table" or type(provider.GetQuestData) ~= "function" then
-        return
+    if type(name) ~= "string" or name == "" then
+        return false, "a quest data provider needs a name"
     end
+
+    if type(provider) ~= "table" then
+        return false, "provider must be a table"
+    end
+
+    if type(provider.GetQuestData) ~= "function" then
+        return false, name .. " has no GetQuestData"
+    end
+
+    if type(provider.IsAvailable) ~= "function" then
+        return false, name .. " has no IsAvailable, which is asked before "
+            .. "every read"
+    end
+
+    local replacing = CN.questDataProviders[name] ~= nil
 
     CN.questDataProviders[name] = provider
 
-    table.insert(CN.questDataOrder, { name = name, priority = provider.priority or 100 })
+    if replacing then
+        for index = #CN.questDataOrder, 1, -1 do
+            if CN.questDataOrder[index].name == name then
+                table.remove(CN.questDataOrder, index)
+            end
+        end
+    end
+
+    -- A STABLE ORDER, BECAUSE `table.sort` IS NOT STABLE.
+    --
+    -- The list is re-sorted on every registration, so two providers that omit
+    -- `priority` -- which every third-party provider will -- can swap places
+    -- merely because a third one registered. `QueryQuestDataProviders` merges
+    -- on "first answer per field wins", so that silently changes which
+    -- provider supplies a quest's name or coordinates. Tie-break on
+    -- registration order, which is deterministic and is what the priorities
+    -- were expressing in the first place.
+    CN.questDataSequence = (CN.questDataSequence or 0) + 1
+
+    table.insert(CN.questDataOrder, {
+        name     = name,
+        priority = provider.priority or 100,
+        sequence = CN.questDataSequence,
+    })
 
     table.sort(CN.questDataOrder, function(a, b)
+        if a.priority == b.priority then
+            return (a.sequence or 0) < (b.sequence or 0)
+        end
+
         return a.priority < b.priority
     end)
+
+    return true
 end
 
 function CN.GetAvailableQuestDataProviders()
@@ -97,7 +156,16 @@ function CN.GetAvailableQuestDataProviders()
     for _, entry in ipairs(CN.questDataOrder) do
         local provider = CN.questDataProviders[entry.name]
 
-        local ok, isAvailable = pcall(provider.IsAvailable)
+        -- Not `provider and pcall(...)`: `and` truncates a multiple return to
+        -- its first value, so the second result would always be nil and every
+        -- provider would read as unavailable.
+        local ok, isAvailable = false, false
+
+        if type(provider) == "table"
+            and type(provider.IsAvailable) == "function" then
+
+            ok, isAvailable = pcall(provider.IsAvailable)
+        end
 
         if ok and isAvailable then
             table.insert(available, entry.name)
@@ -115,7 +183,16 @@ function CN.QueryQuestDataProviders(questID)
     for _, entry in ipairs(CN.questDataOrder) do
         local provider = CN.questDataProviders[entry.name]
 
-        local ok, isAvailable = pcall(provider.IsAvailable)
+        -- The index happens BEFORE the pcall, so `pcall(provider.IsAvailable)`
+        -- on a provider that has gone away throws out of whatever called this
+        -- -- which includes a `QUEST_ACCEPTED` handler.
+        local ok, isAvailable = false, false
+
+        if type(provider) == "table"
+            and type(provider.IsAvailable) == "function" then
+
+            ok, isAvailable = pcall(provider.IsAvailable)
+        end
 
         if ok and isAvailable then
             local gotData, data = pcall(provider.GetQuestData, questID)

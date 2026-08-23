@@ -525,6 +525,22 @@ CN.RegisterCandidateProvider("Loremaster", function()
         return candidates
     end
 
+    -- THE ONE PROVIDER THAT DID NOT HONOUR THE IGNORE LIST.
+    --
+    -- Twenty-one of the twenty-two check these at build time; nothing
+    -- downstream filters an ignored objective, so a provider that skips the
+    -- check makes Ignore a silent no-op for its rows.
+    --
+    -- Worse here than elsewhere: this emits a real achievement id in the same
+    -- namespace the Achievements provider uses, so hiding a zone achievement
+    -- removed it from Achievements, this re-emitted it, and the aggregate
+    -- kept it. The player hid something and it stayed.
+    if CN.IsIgnored(CN.objectiveTypes.ACHIEVEMENT, zone.id)
+        or CN.IsDeferred(CN.objectiveTypes.ACHIEVEMENT, zone.id) then
+
+        return candidates
+    end
+
     local mapID = select(1, CN.GetPlayerPosition())
 
     table.insert(candidates, CN.NewObjective({

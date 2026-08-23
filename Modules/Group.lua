@@ -281,8 +281,8 @@ CN.RegisterCandidateProvider("Corpse", function()
 
     return {
         CN.NewObjective({
-            id              = 1,
-            type            = CN.objectiveTypes.QUEST,
+            id              = "body",
+            type            = CN.objectiveTypes.CORPSE,
             name            = "Run to your body",
             completionValue = 40,
             travelCost      = 0,
