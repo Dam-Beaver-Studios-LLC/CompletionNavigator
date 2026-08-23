@@ -744,16 +744,27 @@ function Chase.DescribeEstimate(chain)
             .. "often enough to time|r"
     end
 
-    local text = "roughly " .. format(estimate.low) .. " to " .. format(estimate.high)
+    -- THROUGH THE CONVENTION, like every other number this addon prints.
+    --
+    -- "roughly X to Y" was a fourth grammar for hedging, alongside
+    -- `CN.WithConfidence`, "(searched on Normal)" and a bare number -- and
+    -- the whole point of a convention is that a player learns it once. A
+    -- range IS an estimate; saying so with the addon's own word for it costs
+    -- nothing and means the word keeps meaning one thing.
+    local text = CN.WithConfidence(
+        format(estimate.low) .. " to " .. format(estimate.high),
+        CN.confidence.ESTIMATED)
 
     if estimate.travel > 60 then
-        text = text .. " |cff8a8f96including " .. format(estimate.travel)
-            .. " to get there|r"
+        text = text .. " " .. CN.Muted("including " .. format(estimate.travel)
+            .. " to get there")
     end
 
     if estimate.unknown > 0 then
-        text = text .. " |cff8a8f96(" .. estimate.unknown
-            .. " step(s) untimed, charged at the rate of the rest)|r"
+        text = text .. " " .. CN.Muted("(" .. estimate.unknown
+            .. (estimate.unknown == 1 and " step untimed, charged at the "
+                or " steps untimed, charged at the ")
+            .. "rate of the rest)")
     end
 
     return text

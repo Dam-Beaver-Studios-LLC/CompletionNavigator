@@ -7,6 +7,167 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.56.0]
+
+An adversarial review of everything 0.55.0 changed, a pass over the words the
+addon puts in front of you, and two features from the backlog. Four of the
+defects below were introduced by the release that was supposed to make things
+correct, and are named as such.
+
+### Added
+
+- **Work your group shares ranks higher.** The addon has known you are in a
+  group since 0.44.0 and used it for exactly one thing: pushing solo detours
+  down while you are in a dungeon. Four people standing in a zone and one of
+  the six quests on the list is one all four are carrying â€” that one is worth
+  four times the work, every player already knows it, and the addon had the
+  information and said nothing. It reads your own client about people already
+  in your group, so nothing is sent, no other machine has to be running this
+  addon, and outside a group it says nothing at all. `/cn why` names the
+  count.
+- **The Warband bank.** The account-wide bank tabs were never read. They are
+  now, as a **separate** store from your character's own bank, because the two
+  are different claims: one is reachable by this character, the other by every
+  character on the account, and reachability is the addon's whole subject.
+- **Every empty tab says what would fill it.** A tab with nothing to show drew
+  literally nothing â€” a one-line header above 380 pixels of void, which reads
+  as broken rather than as empty. Each one now names the step that fills it.
+- **Sixteen more buttons have tooltips**, including "Re-route", "Refresh" and
+  "Next step" â€” the three whose labels say least about what they do.
+
+### Fixed
+
+- **A pinned goal's weighting compounded on every rebuild, without bound.**
+  The goals decorator read its own field and added eight to it â€” harmless
+  while every rebuild produced fresh objects, and not harmless since 0.55.0
+  started reusing them. After twenty quest turn-ins a pinned goal outweighed
+  everything else on the list by thirty to one, `/cn next` returned it and
+  nothing could displace it â€” including something about to despawn â€” and
+  `/cn breakdown` showed the inflated figure as though it were deliberate.
+  Only a reload cleared it. Unpinning now gives the weight back too, which it
+  never did.
+- **The first rebuild after a decoration deleted every explanation on an
+  objective, permanently.** Rolling the reason list back to what the provider
+  said is right; leaving the bookkeeping that says "I already said this" in
+  place is not, because nothing could then say it again. The multipliers those
+  sentences described went on applying, so `/cn why` printed a score with
+  nothing under it. The new group-shared line was the most visible casualty:
+  it appeared for exactly one rebuild.
+- **A sentence carrying a number froze at the first number.** Three party
+  members leaving one at a time left "3 others here are on this quest" on
+  screen while the ranking tracked the truth.
+- **Every learned task duration was collapsing to a twentieth of a second.**
+  A journey estimate saturates at exactly 1200 seconds; 0.55.0 rejected any
+  span over exactly 1200 as implausible. The window in which a far-away
+  objective could produce anything but the floor was arithmetically empty, so
+  every cross-zone completion stored 0.05s, the median settled at 0.05s, and
+  `/cn plan` reported a zone as four minutes of work â€” confidently, because
+  0.05 is not nil. An estimate the model will not stand behind is no longer
+  subtracted at all, and the floor is gated on the measured span rather than
+  on the estimate.
+- **A quest two providers knew about accumulated every state it had ever been
+  in.** The merge of one provider's reasons onto another's rows was harmless
+  only by accident: the comparison that decides "this provider returned the
+  same rows" always failed, so the merged set was rebuilt every pass.
+  Repairing that comparison in 0.55.0 made the union permanent, and `/cn why`
+  printed "available to pick up", "quest is ACTIVE" and "ready to turn in"
+  about the same quest, at the same time.
+- **The journey estimate was frozen at the first sighting.** It was stamped
+  once, from wherever the addon thought you were when the objective first
+  appeared on the list, and never revised â€” so an objective you flew to and
+  finished was measured against a cost from the continent you left, and
+  discarded. It is re-costed as you close on it now; the clock is not, because
+  that is the measurement.
+- **The dedup raised the winner's value into its live row and could not let
+  go.** Unpin a goal and the quest kept the pinned-era value for the rest of
+  the session, and the losing provider could stop emitting the row entirely
+  with the number still there.
+- **Saying the unlock count changed did not make anything recompute it.** The
+  guard added for this was correct and unreachable: the decorator only
+  consults it when a provider re-decorates, which the unchanged-provider
+  shortcut skips, which is the normal case.
+- **The Warband bank ended up holding whichever tab you looked at last.** The
+  client does not describe a bank tab until it has been switched to, and the
+  scan rewrote the whole store from what it could see â€” so moving one item at
+  the bank rewrote both banks from whatever happened to be visible.
+- **The shared-quest count asked the client once per candidate per ranking
+  pass.** Measured at 8,151 client calls and 7.2ms for one pass in a
+  forty-person raid, against a 0.4ms budget â€” the cache was keyed on the very
+  thing that triggers a re-rank, so it was cleared exactly when it would have
+  been used.
+- **A quest's unlock count froze for the session** â€” on the second-heaviest
+  term in the ranking, with `/cn why` stating a number the addon knew was
+  wrong. Same cause: rows are reused now, and the decorator's "already set,
+  leave it" guard made the first answer permanent.
+- **A caching provider's rows collected a decorator's sentence once per
+  rebuild.** The boundary between "what the provider said" and "what the addon
+  added" was recorded blindly, so it crept upward every pass.
+- **`/cn keepfilter off` did not clear the filter it was turning off.** The
+  command looked the window up by the wrong name, so the branch never ran â€” it
+  printed "a filter that persists invisibly is how a list looks empty when it
+  is not" while leaving exactly that filter in memory. The checkbox in the
+  window always worked.
+- **`/cn help <word>` did not search aliases.** The worked example in the
+  code's own comment â€” half-remembering "the one about lockouts" â€” was the
+  exact query that returned nothing, because `lockouts` is an alias. Forty-nine
+  aliases were invisible to the search.
+- **A deferred objective could not be individually restored.** `/cn hidden`
+  printed the time left and not the id, and `/cn unhide` matches on the id.
+- **A corrupt character table was silently replaced with an empty one** â€” every
+  character profile destroyed, version advanced, clean bill of health reported.
+- **The harvest sorted its entire store on every captured quest** once at the
+  ceiling, inside a loop over your whole quest log at login.
+- **Rebuilding the tab strip could move you off the tab you were reading** and
+  discard what you had typed in the search box.
+- **A quest data provider that re-registers keeps its place in the queue**
+  rather than dropping to the back of its priority band and silently handing
+  over which addon answers first.
+
+### Changed
+
+- **The addon's internal vocabulary stopped reaching you.** `State:
+  REQUIRES_OTHER_CHARACTER` now reads "another character has to do this". The
+  Zone tab's header said "3 collectible, 2 exploration, 7 quest" â€” the type
+  enum, lowercased, with the wrong plural. "No eligibility checker registered
+  for CURRENCY" named a registry you have never heard of. "The Mounts module
+  is not loaded" named a file.
+- **The ranking weight and the focus stopped sharing a name.** `/cn mode` said
+  "Focus: Collecting" and `/cn order` said "Focus: collections" about two
+  different settings in the same session.
+- **The first-run screen describes the focuses the same way every other
+  surface does.** It carried its own four descriptions, all of which had
+  drifted â€” and one was wrong: it called Levelling "quests first, collections
+  quiet" when Levelling hides seventeen of the nineteen types. Quiet and gone
+  are not the same promise.
+- **It also names the focus you picked**, rather than the internal key: the
+  button marked "Reputation" answered "Focus: reputation", and "Levelling"
+  answered "Focus: leveling".
+- **`/cn list` explains an empty list** the way the other five surfaces that
+  show one already did, instead of being a dead end.
+- **The required first step is no longer printed in the disabled grey.**
+- **One grammar for a number that is not a measurement.** "roughly X to Y" and
+  "(searched on Normal)" were two more private dialects beside the convention
+  built for exactly this. The build now fails on a new one.
+- **One unit per quantity.** `/cn plan` said "Planning 45 minutes" and then
+  "32m of the 45m you have", four lines apart.
+- **Ignore and Defer name the way back**, and Defer says how long.
+- **The window's geometry agrees between tabs**: one header size, one button
+  baseline, one gap, one list inset. None of it is visible on one tab and all
+  of it is visible when you click between them.
+
+### Internal
+
+- The offline harness can now model a group, a shared quest, and a Warband
+  bank tab, so all three are asserted through the path the game takes.
+- A build-time check that a number which is not a measurement is hedged in the
+  addon's one convention rather than in a private phrasing.
+- A migration that refuses to destroy data it cannot read is no longer undone
+  by the defaults merge three lines later, which replaced the same value and
+  erased the evidence.
+- Twenty-five new mutations and nineteen new assertions. Mutation score: 134
+  of 134.
+
+
 ## [0.55.0]
 
 An adversarial review of everything 0.54.0 changed, plus the registry

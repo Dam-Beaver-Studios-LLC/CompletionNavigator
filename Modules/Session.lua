@@ -460,6 +460,14 @@ Session.durationSampleCap  = 25
 -- for a quest handed in on arrival is exactly true.
 Session.minimumWorkSeconds = 0.05
 
+-- How long an objective can sit on the list and still be called instant.
+--
+-- A minute. Long enough to cover "it was already in front of me and I clicked
+-- it", short enough that no real piece of work fits inside it -- and it is
+-- measured from the clock rather than inferred from the travel model, which
+-- is the whole point of the gate it guards.
+Session.instantSpanSeconds = 60
+
 -- When each objective was first put in front of the player. A completion
 -- timed from here is "how long it took once it was the thing to do", which is
 -- the number a plan needs.
@@ -549,10 +557,6 @@ function Session.NoteOffered(objective)
 
     local key = tostring(objective.type) .. ":" .. tostring(objective.id)
 
-    if offeredAt[key] then
-        return
-    end
-
     -- WHAT THE JOURNEY WAS EXPECTED TO COST, RECORDED WITH THE CLOCK.
     --
     -- The elapsed span between "this was recommended" and "this was finished"
@@ -567,13 +571,71 @@ function Session.NoteOffered(objective)
     -- addon's own model rather than a measurement keeps the two consistent
     -- even where the model is imperfect: the same quantity is removed here
     -- and added back there.
-    local travelSeconds = 0
+    -- AND WHETHER THAT ESTIMATE IS WORTH ANYTHING, which 0.55.0 did not ask.
+    --
+    -- An objective with no known location has no travel cost, and this
+    -- recorded zero -- which says "you were standing on it". The whole span
+    -- then went into the store as WORK time, inflating every estimate for
+    -- that type. An objective whose cost saturates at the ceiling records
+    -- `Travel.maximumCost` (40) x `CN.secondsPerCostPoint` (30) = 1200
+    -- seconds, and 1200 is also the span this addon rejects as implausible --
+    -- so the window in which a saturated sample could produce anything but
+    -- the floor was arithmetically EMPTY. Every cross-continent completion
+    -- stored 0.05 seconds, the median collapsed to 0.05, and `/cn plan`
+    -- reported a zone as four minutes of work.
+    --
+    -- Three states, not two:
+    --
+    --   a real cost        subtract it
+    --   no cost at all     nothing to subtract; an objective with no location
+    --                      is not a journey, and the planner adds no leg for
+    --                      it either, so zero is the consistent answer
+    --   a SATURATED cost   the model saying "far away, I stopped counting" --
+    --                      not a measurement, and not subtractable
+    local travelSeconds, travelKnown = 0, true
 
-    if objective.travelCost and CN.secondsPerCostPoint then
+    if type(objective.travelCost) == "number" and CN.secondsPerCostPoint then
         travelSeconds = objective.travelCost * CN.secondsPerCostPoint
+
+        local travel = CN:GetModule("Travel")
+
+        local ceiling = (travel and travel.maximumCost) or 40
+
+        travelKnown = objective.travelCost < ceiling
     end
 
-    offeredAt[key] = { at = Session.Now(), travel = travelSeconds }
+    local held = offeredAt[key]
+
+    -- THE CLOCK IS STAMPED ONCE; THE JOURNEY IS RE-STAMPED AS IT SHORTENS.
+    --
+    -- This returned early the moment the key existed, so the travel estimate
+    -- was frozen at whatever it was the FIRST time the objective appeared on
+    -- the list -- from wherever the addon thought you were then. Fly to that
+    -- zone, quest for eight minutes, hand it in, and the sample was compared
+    -- against a journey cost from the continent you left. Those samples were
+    -- rejected, so a whole class of ordinary completions taught nothing and
+    -- the ones that survived were the ones where the work outlasted a
+    -- generous estimate -- which biases the median LONG, the mirror of the
+    -- defect 0.55.0 fixed.
+    --
+    -- The SMALLEST estimate seen while it was on the list is the right one:
+    -- it is how far you had left to go at the closest you got, which is the
+    -- part of the span that was actually journey. `at` is never touched --
+    -- that is the measurement.
+    if held then
+        if travelKnown and (not held.known or travelSeconds < held.travel) then
+            held.travel = travelSeconds
+            held.known  = true
+        end
+
+        return
+    end
+
+    offeredAt[key] = {
+        at     = Session.Now(),
+        travel = travelSeconds,
+        known  = travelKnown,
+    }
     offeredCount   = offeredCount + 1
 
     Prune()
@@ -632,6 +694,17 @@ function Session.NoteCompleted(objectiveType, id)
         return nil
     end
 
+    -- A SATURATED JOURNEY ESTIMATE IS NOT A JOURNEY ESTIMATE.
+    --
+    -- The stored number is meant to be WORK time, which is the span with the
+    -- journey taken out. When the cost hit its own ceiling there is nothing
+    -- honest to take out, and no way to tell a two-minute quest reached after
+    -- ten minutes of flying from a twelve-minute quest. The addon's standing
+    -- rule is to report nothing rather than to invent a denominator.
+    if not started.known then
+        return nil
+    end
+
     -- Over twenty minutes was not "doing the thing", it was living your life
     -- with the thing still on the list. Judged on the SPAN: judging it on the
     -- travel-adjusted figure let a forty-minute span with a twenty-five minute
@@ -643,13 +716,31 @@ function Session.NoteCompleted(objectiveType, id)
     -- The journey out, which the caller will add back separately.
     local elapsed = span - (started.travel or 0)
 
-    -- A floor rather than a discard: something finished faster than the model
-    -- said the journey would take is a fast objective, not a corrupt sample.
-    -- A floored sample says "the work itself was negligible next to getting
-    -- there", which for a quest handed in on arrival is exactly true -- and
-    -- unlike the raw span, this figure being at or below zero is an ordinary,
-    -- expected outcome rather than a broken clock.
+    -- THE FLOOR IS FOR THINGS THAT WERE GENUINELY INSTANT, AND ONLY THOSE.
+    --
+    -- 0.55.0 floored every sample whose journey estimate exceeded the span.
+    -- That is right for the case it was written for -- a quest handed in on
+    -- arrival, where the work really was negligible -- and wrong for the case
+    -- that is far more common: `NoteOffered` stamps the cost ONCE, from
+    -- wherever the addon thought you were when the objective first entered
+    -- the list, and never revises it. Fly to that zone, quest for eight
+    -- minutes, hand it in, and the sample is compared against a journey cost
+    -- from the continent you left. Every one of those became 0.05 seconds.
+    --
+    -- Filed by type and taken as a median over 25 samples, enough of them
+    -- pin the median at the floor -- and then `/cn plan` reports a zone as
+    -- four minutes of work, confidently, because 0.05 is not nil.
+    --
+    -- So the floor is gated on the SPAN, which is a measurement and not an
+    -- estimate. Under a minute on the list is instant however far the model
+    -- thought you had to go. Over a minute with an estimate that swallowed
+    -- the whole span means the estimate was stale, the split is unknowable,
+    -- and the sample is dropped rather than flattened.
     if elapsed < Session.minimumWorkSeconds then
+        if span > Session.instantSpanSeconds then
+            return nil
+        end
+
         elapsed = Session.minimumWorkSeconds
     end
 
@@ -1048,7 +1139,11 @@ CN:RegisterCommand{
 
             minutes = typical
 
-            Print("Planning " .. minutes .. " minutes -- "
+            -- ONE UNIT PER QUANTITY. This said "Planning 45 minutes" and
+            -- then "3 stops, about 32m of the 45m you have" four lines
+            -- later -- the same quantity, two units, in one command.
+            Print("Planning " .. Session.FormatDuration(minutes * 60)
+                .. " " .. CN.DASH .. " "
                 .. (measured
                     and ("|cff8a8f96your usual session on this character|r")
                     or ("|cff8a8f96a default; play a few sessions and this "
@@ -1095,7 +1190,8 @@ CN:RegisterCommand{
 
         if plan.skipped > 0 then
             Print("|cff8a8f96" .. plan.skipped
-                .. " further stop(s) did not fit.|r")
+                .. (plan.skipped == 1 and " further stop did not fit.|r"
+                    or " further stops did not fit.|r"))
         end
 
         if plan.overran then

@@ -156,6 +156,7 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 | **Profession knowledge** | Weekly, capped, and gone if the week passes |
 | **Appearance sets** | Which are nearly complete, with a real count of pieces |
 | **Your bank** | Recorded when you open one, so what is in it stays findable |
+| **The Warband bank** | Kept separate from your own, because one is reachable by this character and the other by all of them |
 | **Flight paths you have flown** | So a route the addon suggests is one you can actually take |
 | **World events** | Timewalking and holidays, weighted by when they end |
 | **Your Warband** | Every character, what each has earned, and which unlocks are account-wide |
@@ -270,6 +271,8 @@ Dead, in a group, in an instance, or out in the world alone are four different s
 ```
 
 Dead, and it says so before anything else. In a dungeon with four other people, outside work ranks down until you leave â€” down, never hidden, because hiding something is your decision and not a counter's.
+
+**And a quest your group shares outranks one only you are on.** Four of you standing in a zone, one of the six quests on the list is one all four are carrying: that one is worth four times the work, and every player already knows it â€” it is why people ask "anyone else need this?" out loud. The addon reads *your own client* about people already in your group. Nothing is sent, no protocol is agreed, nobody else has to be running this addon, and outside a group it says nothing at all.
 
 ## Quests you walked past
 

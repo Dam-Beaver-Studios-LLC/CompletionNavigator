@@ -86,11 +86,11 @@ local function CreateList(parent)
         -- dashboard.
         --
         -- Two anchored fontstrings do what padding cannot.
-        row.value = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        row.value = row:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
         row.value:SetPoint("RIGHT", -6, 0)
         row.value:SetJustifyH("RIGHT")
 
-        row.label = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightLeft")
+        row.label = row:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
         row.label:SetPoint("LEFT", 4, 0)
         row.label:SetPoint("RIGHT", row.value, "LEFT", -8, 0)
         row.label:SetJustifyH("LEFT")
@@ -233,6 +233,21 @@ local function CreateList(parent)
     list.sortModes = { "ranked", "name", "reverse" }
     list.sortIndex = 1
 
+    -- WHAT THE THREE MODES ARE CALLED IN FRONT OF A PLAYER.
+    --
+    -- The caption printed the internal key, so it read "sort: reverse" --
+    -- reverse of what? -- while the tooltip two lines away said "As ranked,
+    -- by name, or reversed", which is a third vocabulary for three states.
+    local sortLabels = {
+        ranked  = "as ranked",
+        name    = "A to Z",
+        reverse = "Z to A",
+    }
+
+    function list.SortLabel(mode)
+        return sortLabels[mode] or tostring(mode)
+    end
+
     function list:SortMode()
         return self.sortModes[self.sortIndex] or "ranked"
     end
@@ -245,7 +260,8 @@ local function CreateList(parent)
         end
 
         if list.sortCaption then
-            list.sortCaption:SetText(CN.Muted("sort: " .. self:SortMode()))
+            list.sortCaption:SetText(CN.Muted("sort: "
+                .. list.SortLabel(self:SortMode())))
         end
 
         return self:SortMode()
@@ -278,10 +294,10 @@ local function CreateList(parent)
     end
 
     list.sortCaption = sortButton:CreateFontString(nil, "ARTWORK",
-        "GameFontHighlightSmall")
+        CN.FONT.SMALL)
     list.sortCaption:SetPoint("RIGHT")
     list.sortCaption:SetJustifyH("RIGHT")
-    list.sortCaption:SetText(CN.Muted("sort: ranked"))
+    list.sortCaption:SetText(CN.Muted("sort: as ranked"))
 
     sortButton:SetScript("OnClick", function()
         list:CycleSort()
@@ -289,9 +305,9 @@ local function CreateList(parent)
 
     if CN.UI and CN.UI.AttachTooltip then
         CN.UI.AttachTooltip(sortButton,
-            "As ranked, by name, or reversed. \"As ranked\" is the order the "
-            .. "addon thinks you should do things in, which is the point of "
-            .. "the addon.")
+            "Sort: as ranked, A to Z, or Z to A. \"As ranked\" is the order "
+            .. "the addon thinks you should do things in, which is the point "
+            .. "of the addon.")
     end
 
     list.sortButton = sortButton
@@ -357,6 +373,43 @@ local function CreateList(parent)
         entries = self:ApplySort(entries)
 
         local width = scroll:GetWidth() or (WINDOW_WIDTH - 60)
+
+        -- AN EMPTY LIST DREW LITERALLY NOTHING.
+        --
+        -- `SetEntries({})` hid every row and returned, so a tab with nothing
+        -- to show was a one-line header above three hundred and eighty pixels
+        -- of void -- which reads as broken rather than as empty. Every tab
+        -- inherits this; each sets `list.emptyText` to the step that would
+        -- fill it.
+        if #entries == 0 then
+            local row = self:GetRow(1)
+
+            content:SetSize(width, ROW_HEIGHT)
+
+            row.label:SetText(CN.Muted(self.emptyText
+                or "Nothing to show here."))
+            row.value:SetText("")
+            row.value:SetWidth(0.001)
+            row.selected:SetShown(false)
+
+            -- AND THE PROGRESS BAR, which the filled path hides and this one
+            -- did not -- so a search that matched nothing on a tab with bars
+            -- drew the message with the previous row's bar still under it.
+            if row.bar then
+                row.bar:Hide()
+            end
+
+            row.entry = nil
+
+            row:EnableMouse(false)
+            row:Show()
+
+            for index = 2, #self.rows do
+                self.rows[index]:Hide()
+            end
+
+            return
+        end
 
         local shown = math.min(#entries, self.maxRows)
 

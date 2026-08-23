@@ -231,8 +231,21 @@ function CN.AddAdjusterReason(objective, key, text)
 
     objective.adjusterReasons = objective.adjusterReasons or {}
 
-    if objective.adjusterReasons[key] then
+    local held = objective.adjusterReasons[key]
+
+    if held == text then
         return false
+    end
+
+    -- SAME KEY, DIFFERENT SENTENCE, IS AN UPDATE.
+    --
+    -- The guard was on the key alone, so a sentence that carries a NUMBER
+    -- froze at whatever the number was the first time. Three party members
+    -- leaving one at a time left "3 others here are on this quest" on screen
+    -- while the multiplier tracked the truth, and the singular branch was
+    -- unreachable in practice. Withdraw the old sentence, then add the new.
+    if held then
+        CN.ClearAdjusterReason(objective, key)
     end
 
     -- The text itself, not a boolean, so it can be taken back out again --
@@ -241,6 +254,70 @@ function CN.AddAdjusterReason(objective, key, text)
     objective.reasons = objective.reasons or {}
 
     table.insert(objective.reasons, text)
+
+    return true
+end
+
+------------------------------------------------------------
+-- THE SAME THING, FOR DECORATORS
+------------------------------------------------------------
+
+-- DECORATORS HAD NO WAY TO TAKE A SENTENCE BACK, AND NOW THEY NEED ONE.
+--
+-- Until 0.55.0 a decorator could append blindly, because every rebuild
+-- produced fresh objective tables and the sentence went with the old one.
+-- Repairing the unchanged-provider shortcut means a provider's tables are
+-- REUSED -- so a decorator that appends is a decorator that repeats, and a
+-- decorator whose answer stops being true is a decorator that lies.
+--
+-- Keyed, replaceable and withdrawable, exactly like the adjuster reasons
+-- above. The two live in separate tables because they are rolled back at
+-- different moments: a decorator's output is rolled back when the provider
+-- rebuilds, and an adjuster's when the situation changes.
+function CN.AddDecoratorReason(objective, key, text)
+    if type(objective) ~= "table" or not text then
+        return false
+    end
+
+    objective.decoratorReasons = objective.decoratorReasons or {}
+
+    local held = objective.decoratorReasons[key]
+
+    if held == text then
+        return false
+    end
+
+    if held then
+        CN.ClearDecoratorReason(objective, key)
+    end
+
+    objective.decoratorReasons[key] = text
+    objective.reasons = objective.reasons or {}
+
+    table.insert(objective.reasons, text)
+
+    return true
+end
+
+function CN.ClearDecoratorReason(objective, key)
+    if type(objective) ~= "table" or not objective.decoratorReasons then
+        return false
+    end
+
+    local text = objective.decoratorReasons[key]
+
+    if text == nil then
+        return false
+    end
+
+    objective.decoratorReasons[key] = nil
+
+    for index = #(objective.reasons or {}), 1, -1 do
+        if objective.reasons[index] == text then
+            table.remove(objective.reasons, index)
+            break
+        end
+    end
 
     return true
 end
@@ -949,10 +1026,77 @@ local function MarkProviderReasons(candidates)
         local objective = candidates[index]
 
         if type(objective) == "table" then
-            objective.providerReasons = #(objective.reasons or {})
+            -- A PROVIDER MAY HAND BACK THE SAME TABLE IT HANDED BACK LAST
+            -- TIME, and several do.
+            --
+            -- Marking the count blindly would absorb the previous pass's
+            -- decorator output into "what the provider said", so the boundary
+            -- would creep upward one sentence per rebuild and `/cn why` would
+            -- repeat the Warband line once per rebuild -- the exact defect
+            -- the decorator contract exists to prevent.
+            --
+            -- `decorated` says this table has been through the decorators
+            -- before. Take that output back, so decorating a table twice
+            -- produces what decorating it once produces.
+            if objective.decorated and objective.providerReasons then
+                local held = objective.reasons or {}
+
+                for reason = #held, objective.providerReasons + 1, -1 do
+                    table.remove(held, reason)
+                end
+
+                -- ROLLING THE LIST BACK ROLLS EVERYTHING KEYED TO IT BACK.
+                --
+                -- The truncation removes the sentences that decorators,
+                -- adjusters and the aggregate merge appended -- and every one
+                -- of those keeps a KEY saying "I already said this", which
+                -- then refuses to say it again. So the first rebuild after a
+                -- decoration silently deleted every explanation on the
+                -- objective and nothing could ever restore them, while the
+                -- multipliers those sentences described went on applying.
+                -- `/cn why` printed a score with no reasons under it.
+                --
+                -- Rolling back the list without rolling back the bookkeeping
+                -- is the whole bug. They go together.
+                objective.decoratorReasons = nil
+                objective.adjusterReasons  = nil
+                objective.mergedReasons    = nil
+                objective.unlockGeneration = nil
+                objective.unlockReason     = nil
+
+                -- And the value the aggregate raised, back to the one the
+                -- provider itself built. Same reasoning: a number another
+                -- provider contributed is not this provider's answer, and it
+                -- must not survive into a pass where that provider has
+                -- changed its mind or gone away.
+                if objective.ownCompletionValue ~= nil then
+                    objective.completionValue = objective.ownCompletionValue
+
+                    objective.ownCompletionValue = nil
+                end
+
+                objective.decorated = nil
+            else
+                objective.providerReasons = #(objective.reasons or {})
+            end
         end
     end
 end
+
+local function MarkDecorated(candidates)
+    for index = 1, #candidates do
+        local objective = candidates[index]
+
+        if type(objective) == "table" then
+            objective.decorated = true
+        end
+    end
+end
+
+-- Published so the suite can drive the rollback directly. A rollback that is
+-- only reachable through a full rebuild is a rollback nothing tests until it
+-- has already deleted somebody's explanations.
+CN.MarkProviderReasons = MarkProviderReasons
 
 local function Decorate(candidates)
     MarkProviderReasons(candidates)
@@ -992,6 +1136,8 @@ local function Decorate(candidates)
             end
         end
     end
+
+    MarkDecorated(candidates)
 end
 
 -- Cheap enough to be worth doing before a full re-rank: one pass over one
@@ -1059,6 +1205,13 @@ local function Identical(left, right)
 
     for index = 1, #left do
         local a, b = left[index], right[index]
+
+        -- A provider is allowed to be wrong; it is not allowed to take
+        -- `CN.CollectCandidates` down with it, and this is not inside a
+        -- pcall.
+        if type(a) ~= "table" or type(b) ~= "table" then
+            return false
+        end
 
         for _, field in ipairs(IDENTITY_FIELDS) do
             if a[field] ~= b[field] then
@@ -1260,11 +1413,54 @@ function CN.CollectCandidates(force)
                 local existing = key and byKey[key]
 
                 if existing then
+                    -- WHAT THE WINNER SAID ON ITS OWN, RESTORED FIRST.
+                    --
+                    -- This raises the winner's value to the loser's when the
+                    -- loser thinks the objective is worth more -- into the
+                    -- winner's LIVE CACHED TABLE, with no way back. Unpin a
+                    -- goal and the quest kept the pinned-era value for the
+                    -- rest of the session; the losing provider could stop
+                    -- emitting the row entirely and the number stayed.
+                    --
+                    -- `ownCompletionValue` is what the provider itself last
+                    -- built, so each pass raises from that rather than from
+                    -- the last pass's raised figure.
+                    if existing.ownCompletionValue == nil then
+                        existing.ownCompletionValue = existing.completionValue
+                    end
+
+                    existing.completionValue = existing.ownCompletionValue
+
                     if (objective.completionValue or 0)
                         > (existing.completionValue or 0) then
 
                         existing.completionValue = objective.completionValue
                     end
+
+                    -- WHAT WAS MERGED LAST TIME IS TAKEN BACK FIRST.
+                    --
+                    -- This merges the losing provider's sentences onto the
+                    -- WINNER'S LIVE TABLE, and until 0.55.0 that was harmless
+                    -- only by accident: the identity comparison always failed,
+                    -- so the winner's table was rebuilt every pass and the
+                    -- union reset with it. Repairing that comparison made the
+                    -- union permanent -- and a quest two providers know about
+                    -- accumulated every state it had ever been in, so
+                    -- `/cn why` printed "available to pick up", "quest is
+                    -- ACTIVE" and "ready to turn in" at the same time, about
+                    -- the same quest.
+                    --
+                    -- The merge is append-only and always runs to completion,
+                    -- so a count is enough to undo it.
+                    if existing.mergedReasons then
+                        local held = existing.reasons or {}
+
+                        for merged = #held, existing.mergedReasons + 1, -1 do
+                            table.remove(held, merged)
+                        end
+                    end
+
+                    existing.mergedReasons = #(existing.reasons or {})
 
                     for _, reason in ipairs(objective.reasons or {}) do
                         local seen = false
@@ -1555,7 +1751,9 @@ function CN.ExplainScore(objective)
 
     if objective.hubSize and objective.hubSize > 1 then
         table.insert(terms, {
-            label = "batches with " .. (objective.hubSize - 1) .. " other thing(s)",
+            label = "batches with " .. (objective.hubSize - 1)
+              .. ((objective.hubSize - 1) == 1 and " other thing"
+                  or " other things"),
             value = math.min(CN.batchBonusCap,
                 (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus,
         })
@@ -1757,9 +1955,14 @@ CN:RegisterCommand{
 
         local settings = CN.Settings()
 
-        CN.Print("Focus: |cffffc74f"
-            .. tostring((settings and settings.priorityMode) or "balanced")
-            .. "|r")
+        -- "Ranking weight", NOT "Focus".
+        --
+        -- `/cn mode` calls the PRESET the focus, so labelling the weighting
+        -- with the same word meant `/cn mode` said "Focus: Collecting" and
+        -- `/cn order` said "Focus: collections" about two different settings,
+        -- in the same session, with no way to tell them apart.
+        CN.Print("Ranking weight: " .. CN.Accent(
+            tostring((settings and settings.priorityMode) or "balanced")))
 
         for index, objective in ipairs(results) do
             CN.Print(string.format("%d. |cfff2f4f6%s|r |cff8a8f96%.1f|r",
@@ -1806,7 +2009,8 @@ function CN.ExplainEmptyList()
     if hidden > 0 then
         table.insert(lines, hidden .. " objective type"
             .. (hidden == 1 and " is" or "s are")
-            .. " hidden by your filter. /cn show lists them.")
+            .. " hidden by your filter. " .. CN.Accent("/cn show")
+            .. " lists them.")
     end
 
     -- A FAILURE IS NOT AN EMPTY RESULT, AND MUST NOT READ AS ONE.
@@ -1818,19 +2022,29 @@ function CN.ExplainEmptyList()
         table.insert(lines, failures .. " thing"
             .. (failures == 1 and " has" or "s have")
             .. " gone wrong inside the addon this session, which is enough "
-            .. "to empty this list. /cn errors has the detail.")
+            .. "to empty this list. " .. CN.Accent("/cn errors")
+            .. " has the detail.")
     end
 
     local setup = CN:GetModule("Setup")
 
     if setup and setup.HasRun and not setup.HasRun() then
-        table.insert(lines, "Nothing has been scanned yet. /cn setup reads "
-            .. "everything the client will answer for on its own.")
+        -- THE ONE REQUIRED FIRST ACTION, IN THE COLOUR RESERVED FOR A THING
+        -- TO TYPE.
+        --
+        -- Every caller wrapped these lines in MUTED, which `Design.lua`
+        -- reserves for hints and parentheticals -- so on a fresh install the
+        -- single step that makes the addon work rendered in the same grey as
+        -- a disabled control. The commands carry ACCENT themselves now and
+        -- the callers have stopped wrapping.
+        table.insert(lines, "Nothing has been scanned yet. "
+            .. CN.Accent("/cn setup")
+            .. " reads everything the client will answer for on its own.")
     elseif #lines == 0 then
         table.insert(lines, "Every provider answered and none of them had "
             .. "anything to offer, which usually means you are between "
-            .. "things: try a different zone, or /cn waiting for what is on "
-            .. "a timer.")
+            .. "things: try a different zone, or "
+            .. CN.Accent("/cn waiting") .. " for what is on a timer.")
     end
 
     return lines
@@ -1847,7 +2061,7 @@ CN:RegisterCommand{
             CN.Print("No actionable objectives are known yet.")
 
             for _, line in ipairs(CN.ExplainEmptyList()) do
-                CN.Print("|cff8a8f96" .. line .. "|r")
+                CN.PrintLine(line)
             end
             return
         end
@@ -1908,7 +2122,7 @@ CN:RegisterCommand{
             CN.PrintLine("Costed journeys held: " .. travel.CostCacheSize()
                 .. "|cff8a8f96 of " .. travel.costCacheCap
                 .. ", thrown away when you move more than "
-                .. travel.costCacheYards .. " yards|r")
+                .. travel.costCacheYards .. "yd|r")
         end
 
         local rows = {}
@@ -1977,7 +2191,19 @@ CN:RegisterCommand{
         local results = CN.Recommend(limit)
 
         if #results == 0 then
+            -- THE SAME EXPLANATION EVERY OTHER SURFACE GIVES.
+            --
+            -- `CN.ExplainEmptyList` exists under the banner "one explanation
+            -- for an empty list, used by every surface that shows one", and
+            -- five surfaces used it. `/cn list` -- one of the ten commands in
+            -- the essentials block, and the one a new player is most likely
+            -- to type first -- was a dead end that named no next step.
             CN.Print("No actionable objectives are known yet.")
+
+            for _, line in ipairs(CN.ExplainEmptyList()) do
+                CN.PrintLine(line)
+            end
+
             return
         end
 

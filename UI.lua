@@ -168,7 +168,7 @@ UI.tabFooters = {
     Journey     = "/cn zones  Â·  /cn elsewhere  Â·  /cn loremaster",
     Zone        = "/cn zone  Â·  /cn follow  Â·  /cn unpicked",
     Now         = "/cn clock  Â·  /cn rares  Â·  /cn vault",
-    Goals       = "/cn goal <type> <name>  Â·  /cn chase  Â·  /cn gogoal",
+    Goals       = "/cn goal <type> <name or id>  Â·  /cn chase  Â·  /cn gogoal",
     Warband     = "/cn alts  Â·  /cn who <type> <name>  Â·  /cn recipes",
     Vault       = "/cn vault  Â·  /cn instances  Â·  /cn clock",
     Collections = "/cn breakdown  Â·  /cn closest  Â·  /cn drops <name>",
@@ -569,14 +569,32 @@ function UI.RebuildTabs()
         window.body:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 34)
     end
 
-    -- THE REMEMBERED NAME FIRST, then the in-memory index.
+    -- REBUILDING THE STRIP MUST NOT MOVE THE PLAYER.
     --
-    -- `UI.selectedTab` is an index captured from a PREVIOUS sort of
-    -- `UI.tabs`, and this line is re-entered by `RebuildTabs` every time a tab
-    -- registers -- which is the exact moment the sort changes. Consulting it
-    -- first would reintroduce the bug `RememberedTabIndex` exists to fix, on
-    -- the one path that triggers it.
-    UI.SelectTab(UI.RememberedTabIndex() or UI.selectedTab or 1)
+    -- `RebuildTabs` runs whenever a tab registers, which can happen after the
+    -- window exists. Re-selecting unconditionally therefore yanks the player
+    -- off whatever tab they are reading and -- because `SelectTab` clears the
+    -- search box unless `keepFilter` is on -- throws away what they were
+    -- typing. Harmless while every shipped tab registers before the window is
+    -- built; live the moment anything registers one later.
+    --
+    -- BY NAME, NOT BY INDEX. `UI.selectedTab` is an index into the sort that
+    -- was in force when the player clicked, and the sort has just changed --
+    -- so reading a name back out of it names a different tab. `SelectTab`
+    -- records the name in memory for exactly this.
+    if UI.selectedTabName then
+        for index, tab in ipairs(UI.tabs) do
+            if tab.name == UI.selectedTabName then
+                UI.selectedTab = index
+
+                UI.HighlightTab(index)
+
+                return
+            end
+        end
+    end
+
+    UI.SelectTab(UI.RememberedTabIndex() or 1)
 end
 
 -- THE INDEX IS NOT A NAME, AND IT WAS BEING SAVED AS IF IT WERE ONE.
@@ -620,6 +638,31 @@ function UI.RememberedTabIndex()
     return nil
 end
 
+-- Which button carries the "you are here" rule. Split out of `SelectTab` so
+-- `RebuildTabs` can move the mark to follow a re-sort without re-selecting the
+-- panel, which would throw away the player's place and their search box.
+function UI.HighlightTab(index)
+    if not window or not window.tabButtons then
+        return false
+    end
+
+    for buttonIndex, button in ipairs(window.tabButtons) do
+        if not button.selectMark then
+            button.selectMark = button:CreateTexture(nil, "OVERLAY")
+            button.selectMark:SetHeight(2)
+            button.selectMark:SetPoint("BOTTOMLEFT", 2, 1)
+            button.selectMark:SetPoint("BOTTOMRIGHT", -2, 1)
+            button.selectMark:SetColorTexture(CN.Rgb("BRAND"))
+        end
+
+        button.selectMark:SetShown(buttonIndex == index)
+
+        button:SetEnabled(true)
+    end
+
+    return true
+end
+
 function UI.SelectTab(index)
     local tab = UI.tabs[index]
 
@@ -627,7 +670,8 @@ function UI.SelectTab(index)
         return
     end
 
-    UI.selectedTab = index
+    UI.selectedTab     = index
+    UI.selectedTabName = tab.name
 
     -- Persisted, so the window reopens where it was left. It always opened on
     -- the first tab, which for a player who lives in Collections meant one
@@ -674,19 +718,7 @@ function UI.SelectTab(index)
     -- the bottom edge, which is how a tab has said "you are here" since long
     -- before this addon. The button stays enabled, so it still highlights on
     -- hover and clicking it is a harmless refresh.
-    for buttonIndex, button in ipairs(window.tabButtons) do
-        if not button.selectMark then
-            button.selectMark = button:CreateTexture(nil, "OVERLAY")
-            button.selectMark:SetHeight(2)
-            button.selectMark:SetPoint("BOTTOMLEFT", 2, 1)
-            button.selectMark:SetPoint("BOTTOMRIGHT", -2, 1)
-            button.selectMark:SetColorTexture(CN.Rgb("BRAND"))
-        end
-
-        button.selectMark:SetShown(buttonIndex == index)
-
-        button:SetEnabled(true)
-    end
+    UI.HighlightTab(index)
 
     for _, other in ipairs(UI.tabs) do
         if other.panel then
@@ -865,8 +897,9 @@ UI.RegisterTab{
             end
 
             CN.NavigateToObjective(objective)
-        end)
-        panel.navigate:SetPoint("BOTTOMLEFT", 8, 8)
+        end,
+            "Puts a waypoint and the on-screen arrow on this objective.")
+        panel.navigate:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
 
         panel.skip = AddButton(panel, "Defer 1 hour", 110, function()
             local objective = CN.currentRecommendation
@@ -876,10 +909,15 @@ UI.RegisterTab{
             end
 
             CN.SetDeferred(objective.type, objective.id, 3600)
-            Print("Deferred: " .. tostring(objective.name))
+            -- SAY HOW LONG, AND SAY THE WAY BACK. The button says "1 hour"
+            -- and the message did not; nothing named the undo.
+            Print("Deferred for an hour: " .. tostring(objective.name)
+                .. CN.Aside(CN.Accent("/cn unhide " .. tostring(objective.id))
+                    .. " brings it back now"))
             UI.Refresh()
-        end)
-        panel.skip:SetPoint("LEFT", panel.navigate, "RIGHT", 6, 0)
+        end,
+            "Hides this one for an hour, then it comes back on its own. /cn hidden lists what is deferred.")
+        panel.skip:SetPoint("LEFT", panel.navigate, "RIGHT", CN.SPACE.S, 0)
 
         panel.ignore = AddButton(panel, "Ignore", 110, function()
             local objective = CN.currentRecommendation
@@ -889,10 +927,15 @@ UI.RegisterTab{
             end
 
             CN.SetIgnored(objective.type, objective.id, true)
-            Print("Ignored: " .. tostring(objective.name))
+            -- Ignore is permanent and one click, so the message it prints is
+            -- the only place the way back can appear.
+            Print("Ignored: " .. tostring(objective.name)
+                .. CN.Aside(CN.Accent("/cn unhide " .. tostring(objective.id))
+                    .. " restores it"))
             UI.Refresh()
-        end)
-        panel.ignore:SetPoint("LEFT", panel.skip, "RIGHT", 6, 0)
+        end,
+            "Hides this one permanently. /cn unhide <id> restores it.")
+        panel.ignore:SetPoint("LEFT", panel.skip, "RIGHT", CN.SPACE.S, 0)
 
         -- Type filter. A dropdown would need a menu library; a button that
         -- opens a scrollable checklist in the same list widget the rest of the
@@ -900,10 +943,12 @@ UI.RegisterTab{
         panel.filter = AddButton(panel, "Filter types", 110, function()
             panel.filtering = not panel.filtering
             UI.Refresh()
-        end)
-        panel.filter:SetPoint("LEFT", panel.ignore, "RIGHT", 6, 0)
+        end,
+            "Choose which kinds of objective the addon recommends at all.")
+        panel.filter:SetPoint("LEFT", panel.ignore, "RIGHT", CN.SPACE.S, 0)
 
         panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "Nothing actionable is known yet. /cn setup reads everything the client will answer for."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", panel.why, "BOTTOMLEFT", -4, -14)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -1026,25 +1071,28 @@ UI.RegisterTab{
     order = 20,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
         panel.header:SetPoint("TOPLEFT", 8, -8)
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "Nothing left here that the addon knows about. Press Re-route, or try another zone."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
 
         panel.route = AddButton(panel, "Re-route", 110, function()
             UI.Refresh()
-        end)
-        panel.route:SetPoint("BOTTOMLEFT", 8, 8)
+        end,
+            "Recomputes the sweep of this zone from where you are standing now.")
+        panel.route:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
 
         panel.clear = AddButton(panel, "Clear waypoints", 130, function()
             CN.ClearWaypoints()
-        end)
-        panel.clear:SetPoint("LEFT", panel.route, "RIGHT", 6, 0)
+        end,
+            "Removes the waypoints and map pins this addon set. Other addons' waypoints are left alone.")
+        panel.clear:SetPoint("LEFT", panel.route, "RIGHT", CN.SPACE.S, 0)
     end,
 
     refresh = function(panel)
@@ -1065,13 +1113,21 @@ UI.RegisterTab{
         local parts = {}
 
         for _, key in ipairs(order) do
-            table.insert(parts, counts[key] .. " " .. string.lower(key))
+            -- THE LABEL, NOT THE ENUM. This lowercased the internal type
+            -- name, so the Zone tab's header read "3 collectible, 2
+            -- exploration, 7 quest" -- the addon's own vocabulary, and the
+            -- wrong plural. `CN.TypeLabel` has returned "Collectibles" since
+            -- 0.49.0.
+            table.insert(parts, counts[key] .. " "
+                .. string.lower(CN.TypeLabel(key)))
         end
 
         if #parts == 0 then
-            panel.header:SetText(zoneName .. " - nothing actionable is known here.")
+            panel.header:SetText(zoneName .. " " .. CN.DASH
+                .. " nothing actionable is known here.")
         else
-            panel.header:SetText(zoneName .. " - remaining: " .. table.concat(parts, ", "))
+            panel.header:SetText(zoneName .. " " .. CN.DASH .. " remaining: "
+                .. table.concat(parts, ", "))
         end
 
         local entries = {}
@@ -1140,8 +1196,9 @@ UI.RegisterTab{
             end
 
             UI.Refresh()
-        end)
-        quests:SetPoint("BOTTOMLEFT", 8, 8)
+        end,
+            "Reads your quest log and the quest givers on the map you are on.")
+        quests:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
 
         local reps = AddButton(panel, "Scan reputations", 150, function()
             local module = CN:GetModule("Reputations")
@@ -1153,8 +1210,9 @@ UI.RegisterTab{
             end
 
             UI.Refresh()
-        end)
-        reps:SetPoint("LEFT", quests, "RIGHT", 6, 0)
+        end,
+            "Reads every faction standing the client will report for this character.")
+        reps:SetPoint("LEFT", quests, "RIGHT", CN.SPACE.S, 0)
     end,
 
     refresh = function(panel)
@@ -1240,20 +1298,22 @@ UI.RegisterTab{
     order = 15,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
         panel.header:SetPoint("TOPLEFT", 8, -8)
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "Nothing is on a timer right now."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
 
         panel.refresh = AddButton(panel, "Refresh", 110, function()
             UI.Refresh()
-        end)
-        panel.refresh:SetPoint("BOTTOMLEFT", 8, 8)
+        end,
+            "Reads the timers and lockouts again and redraws this list.")
+        panel.refresh:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
 
         panel.scanCurrency = AddButton(panel, "Rescan currencies", 150, function()
             local module = CN:GetModule("Currencies")
@@ -1263,8 +1323,9 @@ UI.RegisterTab{
             end
 
             UI.Refresh()
-        end)
-        panel.scanCurrency:SetPoint("LEFT", panel.refresh, "RIGHT", 6, 0)
+        end,
+            "Reads your currencies and their caps again.")
+        panel.scanCurrency:SetPoint("LEFT", panel.refresh, "RIGHT", CN.SPACE.S, 0)
     end,
 
     refresh = function(panel)
@@ -1390,17 +1451,18 @@ UI.RegisterTab{
     order = 22,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
         panel.header:SetPoint("TOPLEFT", 8, -8)
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "No other characters recorded yet. Log in on one and this fills itself."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
 
-        panel.note = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
         panel.note:SetPoint("BOTTOMLEFT", 12, 12)
         panel.note:SetPoint("RIGHT", -12, 0)
         panel.note:SetJustifyH("LEFT")
@@ -1410,7 +1472,7 @@ UI.RegisterTab{
         local module = CN:GetModule("Warband")
 
         if not module then
-            panel.header:SetText("Warband module not loaded.")
+            panel.header:SetText("This part of the addon did not load. /cn selftest says what is missing.")
             panel.list:SetEntries({})
             return
         end
@@ -1471,17 +1533,18 @@ UI.RegisterTab{
     order = 14,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
         panel.header:SetPoint("TOPLEFT", 8, -8)
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "The Great Vault has nothing to report on this character yet."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
 
-        panel.note = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
         panel.note:SetPoint("BOTTOMLEFT", 12, 12)
         panel.note:SetPoint("RIGHT", -12, 0)
         panel.note:SetJustifyH("LEFT")
@@ -1567,14 +1630,19 @@ UI.RegisterTab{
     order = 15,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
         panel.header:SetPoint("TOPLEFT", 8, -8)
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "Nothing pinned. /cn goal <type> <name or id> pins something so it stays at the top."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
+
+        -- Deeper than the other tabs' 38, because this one has a note row
+        -- under its buttons. The buttons themselves sit on the same baseline
+        -- as every other tab's.
         panel.list:SetPoint("BOTTOMRIGHT", -8, 64)
 
         -- "Next step", not "Navigate". They are different destinations and
@@ -1588,8 +1656,9 @@ UI.RegisterTab{
             end
 
             chase.NavigateNext(chase.Chain(panel.selected))
-        end)
-        panel.navigate:SetPoint("BOTTOMLEFT", 8, 34)
+        end,
+            "Points the arrow at the next step of this chase.")
+        panel.navigate:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
 
         panel.remove = AddButton(panel, "Remove goal", 110, function()
             local goals = CN:GetModule("Goals")
@@ -1603,12 +1672,17 @@ UI.RegisterTab{
             panel.selected = nil
 
             UI.Refresh()
-        end)
-        panel.remove:SetPoint("LEFT", panel.navigate, "RIGHT", 6, 0)
+        end,
+            "Unpins this goal. It goes back to being ranked like anything else.")
+        panel.remove:SetPoint("LEFT", panel.navigate, "RIGHT", CN.SPACE.S, 0)
 
-        panel.note = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
-        panel.note:SetPoint("BOTTOMLEFT", 12, 12)
-        panel.note:SetPoint("RIGHT", -12, 0)
+        -- `CN.FONT.SMALL`, not LABEL. This row carries real information --
+        -- what a goal does and how to pin one -- and Design.lua reserves the
+        -- disabled font for labels because it sits at roughly 2.8:1 contrast
+        -- on this background.
+        panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M + 26)
+        panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.note:SetJustifyH("LEFT")
     end,
 
@@ -1616,7 +1690,7 @@ UI.RegisterTab{
         local goals = CN:GetModule("Goals")
 
         if not goals then
-            panel.header:SetText("Goals module not loaded.")
+            panel.header:SetText("This part of the addon did not load. /cn selftest says what is missing.")
             panel.list:SetEntries({})
             return
         end
@@ -1628,10 +1702,16 @@ UI.RegisterTab{
 
         if #list == 0 then
             panel.list:SetEntries({})
-            panel.note:SetText("|cffffc74fNothing pinned. Use |r/cn goal <type> <id>|cffffc74f "
-                .. "to pin something to work toward. A goal becomes actionable even "
-                .. "when nothing else would surface it, and anything leading to it "
-                .. "ranks higher.|r")
+            -- THE COLOURS WERE THE WRONG WAY ROUND. The `|r` before the
+            -- command cleared the accent, so the PROSE was gold and the
+            -- thing to type was plain -- exactly backwards from the one rule
+            -- Design.lua states about ACCENT. And the signature disagreed
+            -- with the command's own: it takes a name or an id.
+            panel.note:SetText(CN.Muted("Nothing pinned. ")
+                .. CN.Accent("/cn goal <type> <name or id>")
+                .. CN.Muted(" pins something to work toward. A goal becomes "
+                    .. "actionable even when nothing else would surface it, "
+                    .. "and anything leading to it ranks higher."))
             return
         end
 
@@ -1783,7 +1863,9 @@ UI.RegisterTab{
     order = 12,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+        -- `CN.FONT.HEAD`, like the other seven. This one was a size larger
+        -- than every other tab's header for no reason anybody recorded.
+        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
         panel.header:SetPoint("TOPLEFT", 8, -8)
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
@@ -1793,9 +1875,10 @@ UI.RegisterTab{
         panel.sub:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "No route yet. Press Rescan zones, or open the Zone tab."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -52)
-        panel.list:SetPoint("BOTTOMRIGHT", -8, 40)
+        panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
 
         panel.follow = AddButton(panel, "Follow the route", 150, function()
             local follow = CN:GetModule("Follow")
@@ -1805,20 +1888,23 @@ UI.RegisterTab{
             end
 
             UI.Refresh()
-        end)
-        panel.follow:SetPoint("BOTTOMLEFT", 8, 10)
+        end,
+            "Walks the route one stop at a time, moving the arrow as you clear each one.")
+        panel.follow:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
 
         -- The three session lengths people actually have. A text field
         -- asking for a number would be more general and less used.
         panel.plan30 = AddButton(panel, "30 min", 70, function()
             CN.HandleSlashCommand("plan 30")
-        end)
-        panel.plan30:SetPoint("BOTTOMRIGHT", -8, 10)
+        end,
+            "Plans what fits in thirty minutes, from measured travel and learned task times.")
+        panel.plan30:SetPoint("BOTTOMRIGHT", -CN.SPACE.M, CN.SPACE.M)
 
         panel.plan60 = AddButton(panel, "1 hour", 70, function()
             CN.HandleSlashCommand("plan 60")
-        end)
-        panel.plan60:SetPoint("RIGHT", panel.plan30, "LEFT", -4, 0)
+        end,
+            "Plans what fits in an hour, from measured travel and learned task times.")
+        panel.plan60:SetPoint("RIGHT", panel.plan30, "LEFT", -CN.SPACE.S, 0)
 
         panel.rescan = AddButton(panel, "Rescan zones", 130, function()
             local lore = CN:GetModule("Loremaster")
@@ -1828,8 +1914,9 @@ UI.RegisterTab{
             end
 
             UI.Refresh()
-        end)
-        panel.rescan:SetPoint("LEFT", panel.follow, "RIGHT", 6, 0)
+        end,
+            "Reads what is left in every zone this addon knows about.")
+        panel.rescan:SetPoint("LEFT", panel.follow, "RIGHT", CN.SPACE.S, 0)
     end,
 
     refresh = function(panel)
@@ -1937,27 +2024,29 @@ UI.RegisterTab{
     order = 27,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
         panel.header:SetPoint("TOPLEFT", 8, -8)
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "Nothing outstanding that the addon can count."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
 
         panel.refresh = AddButton(panel, "Refresh", 110, function()
             UI.Refresh()
-        end)
-        panel.refresh:SetPoint("BOTTOMLEFT", 8, 8)
+        end,
+            "Counts what is left again and redraws this list.")
+        panel.refresh:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
     end,
 
     refresh = function(panel)
         local module = CN:GetModule("Breakdown")
 
         if not module then
-            panel.header:SetText("Breakdown module not loaded.")
+            panel.header:SetText("This part of the addon did not load. /cn selftest says what is missing.")
             panel.list:SetEntries({})
             return
         end
@@ -2039,12 +2128,13 @@ UI.RegisterTab{
     order = 25,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
         panel.header:SetPoint("TOPLEFT", 8, -8)
         panel.header:SetPoint("TOPRIGHT", -8, -8)
         panel.header:SetJustifyH("LEFT")
 
         panel.list = UI.CreateList(panel)
+        panel.list.emptyText = "Nothing scanned yet. Press Scan my collections."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", 4, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -8, 38)
@@ -2123,7 +2213,8 @@ UI.RegisterTab{
 
                 Print("Read " .. CN.Comma(scanned) .. " achievements, "
                     .. CN.Comma(completed) .. " of them done.")
-            end)
+            end,
+                "Reads your achievement criteria again.")
         end, "Read the achievement tree, so the addon can say which ones you "
             .. "are close to finishing.")
 
@@ -2637,7 +2728,10 @@ UI.RegisterTab{
 
         local hud = CN:GetModule("Hud")
 
-        panel.scale:SetText(string.format("Size %.2g",
+        -- `%.2f`, not `%.2g`: two SIGNIFICANT digits render the 1.25 step as
+        -- "Size 1.2" and 1.0 as "Size 1", so the button built with the
+        -- literal "Size 1.0" changed its own label on the first refresh.
+        panel.scale:SetText(string.format("Size %.2f",
             (hud and hud.Scale and hud.Scale()) or 1))
 
         for _, control in ipairs({ panel.learn, panel.minimap, panel.arrow,

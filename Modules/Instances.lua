@@ -232,7 +232,11 @@ function Instances.DescribeSource(name)
     -- shown only when the journal's setting is genuinely what was queried,
     -- and is named as such rather than presented as a property of the drop.
     if first.difficulty then
-        text = text .. " |cff8a8f96(searched on " .. first.difficulty .. ")|r"
+        -- The convention's own word, not a fifth phrasing of it. This is an
+        -- answer about one difficulty presented as an answer about the drop,
+        -- which is exactly what "estimated" is for.
+        text = CN.WithConfidence(text, CN.confidence.ESTIMATED)
+            .. " " .. CN.Muted("(searched on " .. first.difficulty .. ")")
     end
 
     if #results > 1 then

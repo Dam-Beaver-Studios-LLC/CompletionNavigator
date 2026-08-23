@@ -45,6 +45,16 @@ Inventory.bagIDs = { 0, 1, 2, 3, 4, 5 }
 -- claim the addon cannot support.
 Inventory.bankIDs = { -1, 6, 7, 8, 9, 10, 11, 12 }
 
+-- AND THE WARBAND BANK, WHICH IS A DIFFERENT CLAIM ABOUT A DIFFERENT THING.
+--
+-- The tabs above 12 are the account-wide bank. The distinction is not
+-- cosmetic and it is the entire reason these are two lists rather than one:
+-- an item in your character bank is reachable by ONE character, and an item
+-- in the Warband bank is reachable by every character on the account. This
+-- addon's whole subject is what is reachable, so merging the two would make
+-- the store say something false about half its rows.
+Inventory.accountBankIDs = { 13, 14, 15, 16, 17 }
+
 function Inventory.IsAvailable()
     return C_Container ~= nil
         and C_Container.GetContainerNumSlots ~= nil
@@ -346,14 +356,69 @@ end
 -- honest shape is therefore: scan when it is open, remember what was seen,
 -- and report the remembered set with the date it was taken -- never
 -- presenting a week-old snapshot as current.
+-- PER CHARACTER, WHICH IT WAS NOT.
+--
+-- This was `CN.Account("bank")` -- one table, account-wide, overwritten
+-- wholesale by whichever character last opened a bank. So every alt read the
+-- main's bank as its own, `/cn bags` reported items that character cannot
+-- reach, and opening the bank on the alt destroyed the main's record. The
+-- same defect, in the same shape, that migration 7 removed from
+-- `questStatus`.
 function Inventory.BankStore()
-    return CN.Account("bank")
+    local character = CN.character
+
+    -- Nil only before the character table exists, which is before any bank
+    -- frame can be open. Returning a throwaway means a scan that lands there
+    -- is discarded -- correct, and it must not be mistaken for a real store,
+    -- so nothing downstream reports on it.
+    if not character then
+        return {}
+    end
+
+    character.bank = character.bank or {}
+
+    return character.bank
 end
 
-function Inventory.ScanBank()
-    local items = Inventory.Scan(Inventory.bankIDs)
+-- The Warband bank is genuinely account-wide, so this one genuinely is.
+function Inventory.WarbandStore()
+    return CN.Account("warbandBank")
+end
 
-    local store = Inventory.BankStore()
+-- WIPING THE STORE ON EVERY SCAN MADE IT HOLD THE LAST TAB LOOKED AT.
+--
+-- The client does not describe a bank tab until it has been switched to, so a
+-- scan sees the visible tab and reports the rest as empty. Rewriting the
+-- whole store from that means the Warband bank ends up holding whichever tab
+-- the player clicked last -- and moving one item at the bank rewrites both
+-- stores from whatever happens to be described at that moment.
+--
+-- So the session holds a snapshot PER CONTAINER, updated only for containers
+-- that actually answered, and the store is the union of those. A container
+-- that says nothing leaves what was already known about it alone. Nothing
+-- extra is written to disk: the snapshot is in memory and the store keeps the
+-- same shape it always had.
+local snapshots = {}
+
+local function Fill(store, containers, items, answered)
+    local held = snapshots[store] or {}
+
+    -- Only the containers the client described this time.
+    for _, bag in ipairs(containers) do
+        if answered[bag] then
+            held[bag] = {}
+        end
+    end
+
+    for _, item in ipairs(items) do
+        local bag = held[item.bag]
+
+        if bag then
+            bag[item.itemID] = (bag[item.itemID] or 0) + (item.count or 1)
+        end
+    end
+
+    snapshots[store] = held
 
     for key in pairs(store) do
         store[key] = nil
@@ -361,13 +426,57 @@ function Inventory.ScanBank()
 
     -- Item ids and counts only. The bag and slot of something in a bank is
     -- not worth a byte on disk: it moves, and the player is looking at it.
-    for _, item in ipairs(items) do
-        store[item.itemID] = (store[item.itemID] or 0) + (item.count or 1)
+    local seen = 0
+
+    for _, bag in pairs(held) do
+        for itemID, count in pairs(bag) do
+            store[itemID] = (store[itemID] or 0) + count
+
+            seen = seen + 1
+        end
     end
 
     store.scannedAt = time()
 
-    return #items
+    return seen
+end
+
+-- Which containers the client was willing to describe. A container with no
+-- slots is one that has not been opened, not one that is empty, and the
+-- difference is the whole reason the snapshot above exists.
+local function Answered(containers)
+    local answered = {}
+
+    if not Inventory.IsAvailable() then
+        return answered
+    end
+
+    for _, bag in ipairs(containers) do
+        local ok, slots = pcall(C_Container.GetContainerNumSlots, bag)
+
+        if ok and type(slots) == "number" and slots > 0 then
+            answered[bag] = true
+        end
+    end
+
+    return answered
+end
+
+-- Returns the character-bank count and the Warband count separately, because
+-- the two answer different questions and a caller that adds them up is
+-- claiming something the addon cannot support.
+function Inventory.ScanBank()
+    local mine = Inventory.Scan(Inventory.bankIDs)
+
+    local held = Fill(Inventory.BankStore(), Inventory.bankIDs, mine,
+        Answered(Inventory.bankIDs))
+
+    local warband = Inventory.Scan(Inventory.accountBankIDs)
+
+    local heldWarband = Fill(Inventory.WarbandStore(),
+        Inventory.accountBankIDs, warband, Answered(Inventory.accountBankIDs))
+
+    return held, heldWarband
 end
 
 CN:RegisterEvent("BAG_UPDATE_DELAYED", function()
@@ -375,10 +484,47 @@ CN:RegisterEvent("BAG_UPDATE_DELAYED", function()
 end)
 
 CN:RegisterEvent("BANKFRAME_OPENED", function()
-    local counted = Inventory.ScanBank()
+    local mine, warband = Inventory.ScanBank()
 
-    DebugPrint("Bank scanned: " .. counted .. " stacks.")
+    DebugPrint("Bank scanned: " .. mine .. " stacks, "
+        .. tostring(warband) .. " in the Warband bank.")
 end)
+
+-- THE WARBAND TABS ARE NOT ALL VISIBLE WHEN THE FRAME OPENS.
+--
+-- The client does not describe a bank tab until it has been switched to, so a
+-- single scan at `BANKFRAME_OPENED` sees the tab that happened to be selected
+-- and reports the rest as empty -- which is worse than not reading them,
+-- because an empty row looks like an answer.
+--
+-- `BAG_UPDATE_DELAYED` fires when any container the client is describing
+-- changes, which includes switching tabs, so re-reading on it WHILE THE FRAME
+-- IS OPEN fills the picture in as the player moves around the bank. Only
+-- while it is open: asking otherwise returns nothing and would blank a real
+-- record with a false one.
+--
+-- Only events this addon can prove exist. `harness.lua` refuses an invented
+-- event name, which is how the two speculative ones in the first draft of
+-- this block were caught before they shipped as three handlers that never
+-- fired.
+CN:RegisterEvent("BAG_UPDATE_DELAYED", function()
+    if not Inventory.BankIsOpen() then
+        return
+    end
+
+    Inventory.ScanBank()
+end)
+
+-- Only while the frame the client requires is actually open.
+function Inventory.BankIsOpen()
+    if BankFrame and BankFrame.IsShown then
+        local ok, shown = pcall(BankFrame.IsShown, BankFrame)
+
+        return ok and shown and true or false
+    end
+
+    return false
+end
 
 function Inventory.Summary()
     local items = Inventory.Scan()
@@ -551,15 +697,30 @@ CN:RegisterCommand{
             end
         end
 
+        -- TWO BANKS, REPORTED AS TWO, because they answer different
+        -- questions. What is in this character's bank is reachable by this
+        -- character; what is in the Warband bank is reachable by all of them,
+        -- and that difference is the whole reason to mention either.
+        local function Age(store)
+            return math.floor(math.max(0, time() - store.scannedAt) / 3600)
+        end
+
         local bank = Inventory.BankStore()
 
         if bank.scannedAt then
-            local age = math.max(0, time() - bank.scannedAt)
+            CN.PrintLine(CN.Muted("Your bank: " .. (CN.CountKeys(bank) - 1)
+                .. " kinds of item, seen " .. Age(bank) .. "h ago " .. CN.DASH
+                .. " the client only describes it while you are standing at "
+                .. "one."))
+        end
 
-            Print("|cff8a8f96Bank: " .. (CN.CountKeys(bank) - 1)
-                .. " kinds of item, seen "
-                .. math.floor(age / 3600) .. "h ago -- the client only "
-                .. "describes it while you are standing at one.|r")
+        local warband = Inventory.WarbandStore()
+
+        if warband.scannedAt then
+            CN.PrintLine(CN.Muted("Warband bank: "
+                .. (CN.CountKeys(warband) - 1)
+                .. " kinds of item, seen " .. Age(warband) .. "h ago "
+                .. CN.DASH .. " reachable from every character."))
         end
 
         if #starters == 0 and #uncollected == 0 and #recipes == 0

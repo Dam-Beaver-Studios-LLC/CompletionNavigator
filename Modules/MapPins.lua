@@ -653,7 +653,7 @@ CN:RegisterCommand{
 
             local placed = MapPins.Refresh(true)
 
-            Print(string.format("Redrew %d stop(s).", placed))
+            Print("Redrew " .. placed .. (placed == 1 and " stop." or " stops."))
             return
         end
 
@@ -677,7 +677,8 @@ CN:RegisterCommand{
             return
         end
 
-        Print(string.format("%d stop(s) on this map:", #pins))
+        Print(#pins .. (#pins == 1 and " stop on this map:"
+            or " stops on this map:"))
 
         for _, pin in ipairs(pins) do
             Print(string.format("  %d. %s (%d)",

@@ -374,11 +374,22 @@ CN.migrations = {
     -- Quests, achievements, pets, mounts, toys and the two quest refinements
     -- are kept -- those were being measured properly.
     [9] = function(db)
-        -- `or {}` replaces nil and passes a corrupt non-table straight to
-        -- `pairs`, which throws -- and a migration that throws every login
-        -- pins the database at this version for ever.
-        if type(db.characters) ~= "table" then
+        -- NOT `db.characters = {}`.
+        --
+        -- Replacing a corrupt value silently DESTROYS every character profile
+        -- and then reports success, so `/cn navdiag` gives a clean bill of
+        -- health over a database that just lost the lot. Nothing here is
+        -- worth that. A missing table is created; a table that is something
+        -- else is a fault, and this release already has machinery for
+        -- recording a fault safely -- the `pcall` in `Migrate` catches this,
+        -- files it, and stops the ladder.
+        if db.characters == nil then
             db.characters = {}
+        end
+
+        if type(db.characters) ~= "table" then
+            error("db.characters is a " .. type(db.characters)
+                .. ", not a table -- refusing to replace it")
         end
 
         local keep = {
@@ -404,6 +415,32 @@ CN.migrations = {
         if dropped > 0 then
             CN.DebugPrint("Dropped " .. dropped
                 .. " preference row(s) the addon could never have credited.")
+        end
+    end,
+
+    -- 10 -> 11. The bank was a per-character fact in an account-wide table.
+    --
+    -- `db.account.bank` was written wholesale by whichever character last
+    -- opened a bank and read by every character as its own -- so `/cn bags`
+    -- on an alt reported items it cannot reach, and opening the bank on that
+    -- alt destroyed the main's record. Exactly the defect migration 7 removed
+    -- from `questStatus`, in exactly the same shape.
+    --
+    -- Dropped rather than migrated: there is no field anywhere saying whose
+    -- bank it was, so it cannot be attributed, and the next time the player
+    -- stands at a bank it is replaced by a correct one. Guessing an owner
+    -- would be inventing a fact.
+    [10] = function(db)
+        db.account = db.account or {}
+
+        if type(db.account.bank) == "table" then
+            local held = CN.CountKeys(db.account.bank)
+
+            db.account.bank = nil
+
+            CN.DebugPrint("Dropped an account-wide bank record holding "
+                .. tostring(held) .. " row(s); it belonged to one character "
+                .. "and was read by all of them.")
         end
     end,
 
@@ -604,6 +641,26 @@ function CN.InitializeDatabase()
         -- destroy exactly the values a migration exists to read, and it would
         -- do so silently.
         Migrate(raw)
+
+        -- AND WHAT A MIGRATION REFUSED TO DESTROY, `CopyDefaults` WOULD.
+        --
+        -- Migration 9 raises rather than replacing a corrupt `characters`
+        -- value, which stops the ladder and files the fault -- and then
+        -- `CopyDefaults` three lines below replaces any stored value whose
+        -- type no longer matches its default, which is exactly that value.
+        -- So the refusal was announced and then quietly undone, the evidence
+        -- was overwritten, and the next login found a clean `{}` and cleared
+        -- the failure record. The whole point of refusing is that the data is
+        -- still there afterwards.
+        --
+        -- Moved aside under its own key, which `CopyDefaults` has no default
+        -- for and therefore leaves alone.
+        if raw.migrationFailure and raw.characters ~= nil
+            and type(raw.characters) ~= "table" then
+
+            raw.rescuedCharacters = raw.characters
+            raw.characters        = nil
+        end
     end
 
     CompletionNavigatorDB = CN.CopyDefaults(CN.defaults, raw)

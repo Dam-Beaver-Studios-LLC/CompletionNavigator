@@ -509,8 +509,12 @@ CN:RegisterCommand{
             Print("Ignored (" .. #ignored .. "):")
 
             for _, row in ipairs(ignored) do
-                Print("  " .. row.name .. " |cff8a8f96[" .. tostring(row.type)
-                    .. " " .. tostring(row.id) .. "]|r")
+                -- THE BADGE, NOT THE ENUM. `row.type` is the internal name --
+                -- "COLLECTIBLE", "EXPLORATION" -- and this is a list a player
+                -- reads to decide what to restore.
+                CN.PrintLine(row.name .. " " .. CN.Muted("["
+                    .. CN.TypeBadge(row.type) .. " " .. tostring(row.id)
+                    .. "]"))
             end
         end
 
@@ -518,8 +522,17 @@ CN:RegisterCommand{
             Print("Deferred (" .. #deferred .. "):")
 
             for _, row in ipairs(deferred) do
-                Print("  " .. row.name .. " |cff8a8f96["
-                    .. FormatRemaining(row.remaining) .. " left]|r")
+                -- AND THE ID, WHICH WAS MISSING.
+                --
+                -- The footer two lines below says `/cn unhide <id>` restores
+                -- one, and `Filters.Restore` matches on the id -- so a
+                -- deferred objective could not be restored individually,
+                -- because the only place its id would have appeared did not
+                -- print it. Every other row in this command carried one.
+                CN.PrintLine(row.name .. " " .. CN.Muted("["
+                    .. CN.TypeBadge(row.type) .. " " .. tostring(row.id)
+                    .. CN.DOT .. " " .. FormatRemaining(row.remaining)
+                    .. " left]"))
             end
         end
 

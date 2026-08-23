@@ -113,10 +113,17 @@ local function PrintCommand(definition, indent)
     line = line .. "|r"
 
     if definition.help and definition.help ~= "" then
-        line = line .. " - " .. definition.help
+        line = line .. " " .. CN.DASH .. " " .. definition.help
     end
 
-    Print(line)
+    -- `PrintLine`, NOT `Print`.
+    --
+    -- The rule at the top of Core.lua is that the addon's name appears once
+    -- per ANSWER, not once per line -- and `/cn help` is the longest answer
+    -- the addon gives. Every one of those lines carried twenty-two characters
+    -- of "Completion Navigator: " in front of it, which is precisely the wall
+    -- of chrome the header of this file says was fixed.
+    CN.PrintLine(line)
 end
 
 local function Find(name)
@@ -151,7 +158,16 @@ local function SearchHelp(term)
     local matches = {}
 
     for _, definition in ipairs(CN.commandList) do
+        -- ALIASES TOO, WHICH WERE THE HALF THIS SEARCH EXISTED FOR.
+        --
+        -- The header on this file says the search is here so that "somebody
+        -- who half-remembers 'the one about lockouts' should not have to read
+        -- a hundred and twenty lines to find `/cn instances`" -- and
+        -- `lockouts` is one of that command's aliases, which this did not
+        -- read. So the worked example in the comment was the exact query that
+        -- returned nothing. Forty-nine aliases were invisible to it.
         local haystack = string.lower(definition.name .. " "
+            .. table.concat(definition.aliases or {}, " ") .. " "
             .. tostring(definition.help or ""))
 
         if haystack:find(term, 1, true) then
@@ -161,11 +177,15 @@ local function SearchHelp(term)
 
     if #matches == 0 then
         Print("Nothing matches \"" .. term .. "\".")
-        Print("|cff8a8f96/cn help all|r lists everything.")
+        Print(CN.Muted("Try a word from what you want to do -- "
+            .. CN.Accent("/cn help mount") .. CN.Muted(", ")
+            .. CN.Accent("/cn help time") .. CN.Muted(". ")
+            .. CN.Accent("/cn help all") .. CN.Muted(" lists everything.")))
         return
     end
 
-    Print(#matches .. " command(s) matching \"" .. term .. "\":")
+    Print(#matches .. (#matches == 1 and " command matching \""
+        or " commands matching \"") .. term .. "\":")
 
     for _, definition in ipairs(matches) do
         PrintCommand(definition, "  ")
@@ -551,7 +571,7 @@ CN:RegisterCommand{
                 Print("|cff8a8f96" .. active.note .. "|r")
                 Print("|cff8a8f96/cn mode off|r restores what you had before.")
             else
-                Print("Priority mode: |cffffc74f"
+                Print("Ranking weight: |cffffc74f"
                     .. tostring(settings.priorityMode) .. "|r")
             end
 
@@ -608,7 +628,7 @@ CN:RegisterCommand{
 
                 CN.InvalidateCandidates("mode")
 
-                Print("Priority mode set to |cffffc74f" .. requested .. "|r.")
+                Print("Ranking weight set to |cffffc74f" .. requested .. "|r.")
                 Print("|cff8a8f96Weighting only; your type filters are "
                     .. "untouched.|r")
                 return

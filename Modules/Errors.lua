@@ -219,7 +219,10 @@ CN:RegisterCommand{
     help    = "Anything that went wrong inside the addon this session.",
     handler = function(args)
         if string.lower(CN.Trim(args or "")) == "clear" then
-            Print("Cleared " .. Errors.Clear() .. " recorded error(s).")
+            local cleared = Errors.Clear()
+
+            Print("Cleared " .. cleared
+                .. (cleared == 1 and " recorded error." or " recorded errors."))
             return
         end
 
@@ -247,8 +250,8 @@ CN:RegisterCommand{
 
             rejected = rejected + 1
 
-            Print("  |cffe2564c" .. tostring(event) .. "|r")
-            Print("    |cff8a8f96" .. tostring(why) .. "|r")
+            CN.PrintLine(CN.Bad(tostring(event)))
+            CN.PrintLine("  " .. CN.Muted(tostring(why)))
         end
 
         if #ring == 0 then
@@ -258,10 +261,10 @@ CN:RegisterCommand{
                 Print("Nothing this session. From the previous one:")
 
                 for _, entry in ipairs(previous) do
-                    Print("  |cffe2564c" .. tostring(entry.context) .. "|r"
+                    CN.PrintLine(CN.Bad(tostring(entry.context))
                         .. ((entry.count or 1) > 1
                             and (" |cffffc74fx" .. entry.count .. "|r") or ""))
-                    Print("    |cff8a8f96" .. tostring(entry.message) .. "|r")
+                    CN.PrintLine("  " .. CN.Muted(tostring(entry.message)))
                 end
 
                 Errors.ForgetPrevious()
@@ -282,12 +285,13 @@ CN:RegisterCommand{
             return
         end
 
-        Print(#ring .. " error(s) recorded this session:")
+        Print(#ring .. (#ring == 1 and " error" or " errors")
+            .. " recorded this session:")
 
         for _, entry in ipairs(ring) do
-            Print("  |cffe2564c" .. entry.context .. "|r"
+            CN.PrintLine(CN.Bad(entry.context)
                 .. (entry.count > 1 and (" |cffffc74fx" .. entry.count .. "|r") or ""))
-            Print("    |cff8a8f96" .. entry.message .. "|r")
+            CN.PrintLine("  " .. CN.Muted(entry.message))
         end
 
         Print("|cff8a8f96Paste this into a bug report along with "

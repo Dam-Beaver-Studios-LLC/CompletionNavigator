@@ -149,9 +149,12 @@ function CN.NavigateToObjective(objective)
         end
 
         CN.Print("No coordinates are known for " .. name .. ".")
-        CN.Print("The client exposes none for this quest and it is not in your log. "
-            .. "Add them with |cffffc74f/cn setloc " .. tostring(objective.id)
-            .. " <mapID> <x> <y>|r.")
+        CN.PrintLine(CN.Muted("The client exposes none for this quest and it "
+            .. "is not in your log. Add them with ")
+            .. CN.Accent("/cn setloc " .. tostring(objective.id)
+                .. " <mapID> <x> <y>")
+            .. CN.Muted(" -- ") .. CN.Accent("/cn where am i")
+            .. CN.Muted(" prints the map id."))
 
         return false
     end
@@ -1206,7 +1209,7 @@ CN:RegisterCommand{
             -- them irrelevant, and no mention of `/cn setup`, which the
             -- addon's own first-run flow calls the required first step.
             for _, line in ipairs(CN.ExplainEmptyList()) do
-                CN.Print("|cff8a8f96" .. line .. "|r")
+                CN.PrintLine(line)
             end
 
             return
@@ -1307,7 +1310,7 @@ CN:RegisterCommand{
             local quests = CN:GetModule("Quests")
 
             if not quests then
-                CN.Print("The quest module is not loaded.")
+                CN.Print("This addon cannot read quests right now. /cn selftest says what is missing.")
                 return
             end
 

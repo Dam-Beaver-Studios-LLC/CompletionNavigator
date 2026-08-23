@@ -1732,7 +1732,7 @@ function Travel.Describe(detail, seconds, confident)
 
     local text = session and session.FormatDuration
         and session.FormatDuration(seconds)
-        or (math.floor(seconds / 60) .. " min")
+        or (math.floor(seconds / 60) .. "m")
 
     if detail and detail.mode == "self" then
         text = text .. " |cff8a8f96flying yourself|r"

@@ -805,6 +805,27 @@ function IsInRaid()
     return CN_TEST_INSTANCE == "raid"
 end
 
+-- WHO ELSE IN THE GROUP IS ON A QUEST.
+--
+-- Keyed by questID -> a set of unit tokens, so a fixture can put two of four
+-- party members on one quest and nobody on another and the difference is
+-- visible in the ranking.
+CN_TEST_QUEST_SHARED = {}
+
+-- Which raid slot the player occupies. The client lists you among the raid
+-- units and NOT among the party ones, and the shared-quest count has to
+-- respect that or it credits you with being somebody else on your own quest.
+CN_TEST_PLAYER_UNIT = "raid1"
+
+function UnitIsUnit(left, right)
+    if left == right then
+        return true
+    end
+
+    return (left == CN_TEST_PLAYER_UNIT and right == "player")
+        or (right == CN_TEST_PLAYER_UNIT and left == "player")
+end
+
 function IsInInstance()
     if not CN_TEST_INSTANCE then
         return false, "none"
@@ -1042,6 +1063,15 @@ CN_TEST_REFUSE_WORLD_POS = false
 CN_TEST_PLAYER_MAPS = { [94] = true }
 
 C_QuestLog = {
+    -- Whether a unit already in your group is on a quest. Answered from the
+    -- client, about people the client can already see -- no comms, no
+    -- protocol, and nil-safe for a unit that is not there.
+    IsUnitOnQuest = function(unit, questID)
+        local sharing = CN_TEST_QUEST_SHARED[questID]
+
+        return (sharing and sharing[unit]) and true or false
+    end,
+
     -- BUILDS A FRESH TABLE, because the client does.
     --
     -- The stub used to hand back the same table every call, which made
@@ -7196,6 +7226,117 @@ end)()
 
 
 
+print("\nOne convention for a number that is not a measurement:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A CONVENTION WITH FOUR COMPETING GRAMMARS IS NOT A CONVENTION.
+    --
+    -- `CN.WithConfidence` was built in 0.47.0 so that "measured" and
+    -- "estimated" would look the same everywhere -- and then three other
+    -- phrasings went on being written beside it: "roughly X to Y", "(searched
+    -- on Normal)", and a bare number with no marking at all. A player has to
+    -- learn each of them separately, which is the cost the convention exists
+    -- to remove.
+    --
+    -- So the competing phrasings are banned by the build, the same way a
+    -- colour outside the palette is. This does NOT ban hedging -- it bans
+    -- hedging in a private dialect.
+    ------------------------------------------------------------
+    local banned = {
+        ["roughly "]   = "say it with CN.WithConfidence(..., ESTIMATED)",
+        ["approximately "] = "say it with CN.WithConfidence(..., ESTIMATED)",
+        ["about-ish"]  = "say it with CN.WithConfidence(..., ESTIMATED)",
+        ["probably around "] = "say it with CN.WithConfidence(..., ESTIMATED)",
+    }
+
+    local offenders = {}
+
+    local manifest = io.open(ROOT .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the .toc must be readable")
+
+    local scanned = 0
+
+    for entry in manifest:read("*a"):gmatch("[^\r\n]+") do
+        if entry:match("%.lua$") and not entry:match("^#") then
+            local path = ROOT .. "/" .. (entry:gsub("\\", "/"))
+
+            local handle = io.open(path, "r")
+
+            if handle then
+                local text = handle:read("*a")
+
+                handle:close()
+
+                scanned = scanned + 1
+
+                local line = 1
+
+                for chunk in text:gmatch("[^\n]*\n?") do
+                    -- CODE ONLY, NOT COMMENTS.
+                    --
+                    -- A file explaining why a phrasing is banned quotes that
+                    -- phrasing, and a lint that cannot tell the difference
+                    -- makes its own documentation a build failure -- which is
+                    -- how a rule ends up undocumented.
+                    local code = chunk
+
+                    local commentAt = code:find("%-%-")
+
+                    if commentAt then
+                        code = code:sub(1, commentAt - 1)
+                    end
+
+                    for literal in code:gmatch('"([^"]*)"') do
+                        for phrase, advice in pairs(banned) do
+                            if string.lower(literal):find(phrase, 1, true) then
+                                table.insert(offenders,
+                                    path:gsub("^.*/", "") .. ":" .. line
+                                    .. " \"" .. literal .. "\" -- " .. advice)
+                            end
+                        end
+                    end
+
+                    line = line + 1
+                end
+            end
+        end
+    end
+
+    manifest:close()
+
+    for index, offender in ipairs(offenders) do
+        if index > 8 then
+            print("  ... and " .. (#offenders - 8) .. " more")
+            break
+        end
+
+        print("  OFF-CONVENTION: " .. offender)
+    end
+
+    assert(#offenders == 0,
+        #offenders .. " string(s) hedge in a private dialect. The addon has "
+        .. "one way to say a number is not a measurement.")
+
+    assert(scanned > 40, "the scan must have read the tree, read " .. scanned)
+
+    -- AND THE CONVENTION ITSELF MUST STILL WORK.
+    assert(CN.WithConfidence("12m", CN.confidence.MEASURED) == "12m",
+        "a measured value is printed plain")
+
+    assert(CN.WithConfidence("12m", CN.confidence.ESTIMATED):find("12m", 1, true),
+        "an estimate still shows its number")
+
+    assert(CN.WithConfidence("12m", CN.confidence.ESTIMATED) ~= "12m",
+        "and is marked as an estimate")
+
+    assert(not CN.WithConfidence(nil, CN.confidence.UNKNOWN):find("12m", 1, true),
+        "an unknown value prints no number at all")
+
+    print("  " .. scanned .. " files, one grammar for an estimate")
+end)()
+
 print("\nOne palette, and nothing outside it:")
 
 ;(function()
@@ -8466,6 +8607,1104 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
+print("\nWhat 0.56.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A SATURATED JOURNEY ESTIMATE POISONED EVERY LEARNED DURATION.
+    --
+    -- `Travel.maximumCost` is 40 and `CN.secondsPerCostPoint` is 30, so a
+    -- journey estimate tops out at exactly 1200 seconds -- which is also the
+    -- span 0.55.0 rejected as implausible. The window in which a saturated
+    -- sample could produce anything but the 0.05-second floor was
+    -- arithmetically EMPTY, so every cross-continent completion stored 0.05,
+    -- the median collapsed to 0.05, and `/cn plan` reported a zone as four
+    -- minutes of work. Confidently, because 0.05 is not nil.
+    ------------------------------------------------------------
+    local session = CN:GetModule("Session")
+    local travel  = CN:GetModule("Travel")
+
+    local durations = session.Durations()
+
+    durations[CN.objectiveTypes.RARE] = nil
+
+    local savedClock = CN_TEST_CLOCK
+
+    -- A cost at the ceiling: the model saying "far away, I stopped counting".
+    session.NoteOffered({
+        type = CN.objectiveTypes.RARE, id = 56001,
+        travelCost = travel.maximumCost,
+    })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 300
+
+    assert(session.NoteCompleted(CN.objectiveTypes.RARE, 56001) == nil,
+        "a journey estimate that hit its own ceiling cannot be subtracted, "
+        .. "so the sample teaches nothing and must be dropped rather than "
+        .. "flattened to the floor")
+
+    assert(durations[CN.objectiveTypes.RARE] == nil,
+        "and must not reach the store")
+
+    -- AND ESPECIALLY NOT WHEN THE SPAN IS SHORT, which is the case the two
+    -- rules disagree about: a short span would otherwise be floored and kept,
+    -- so this is where "the estimate is unusable" has to win on its own.
+    session.NoteOffered({
+        type = CN.objectiveTypes.RARE, id = 56005,
+        travelCost = travel.maximumCost,
+    })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 5
+
+    assert(session.NoteCompleted(CN.objectiveTypes.RARE, 56005) == nil,
+        "five seconds against a ceilinged estimate is still a sample with no "
+        .. "separable journey in it")
+
+    -- A REAL COST STILL WORKS, and still subtracts.
+    session.NoteOffered({
+        type = CN.objectiveTypes.RARE, id = 56002, travelCost = 2,
+    })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 300
+
+    local real = session.NoteCompleted(CN.objectiveTypes.RARE, 56002)
+
+    assert(real and math.abs(real - (300 - 60)) < 0.01,
+        "a real journey is taken out of the span, got " .. tostring(real))
+
+    -- AND THE FLOOR IS GATED ON THE SPAN, NOT ON THE ESTIMATE.
+    --
+    -- Under a minute on the list is instant however far the model thought you
+    -- had to go. Over a minute with an estimate that swallowed the span means
+    -- the estimate is stale -- `NoteOffered` stamps it once, from wherever
+    -- the addon thought you were -- and the split is unknowable.
+    durations[CN.objectiveTypes.RARE] = nil
+
+    session.NoteOffered({
+        type = CN.objectiveTypes.RARE, id = 56003, travelCost = 20,
+    })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 10
+
+    assert(session.NoteCompleted(CN.objectiveTypes.RARE, 56003)
+        == session.minimumWorkSeconds,
+        "ten seconds on the list is instant whatever the model expected")
+
+    session.NoteOffered({
+        type = CN.objectiveTypes.RARE, id = 56004, travelCost = 20,
+    })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 500
+
+    assert(session.NoteCompleted(CN.objectiveTypes.RARE, 56004) == nil,
+        "but eight minutes on the list against a ten-minute estimate is a "
+        .. "stale estimate, not an instant objective")
+
+    CN_TEST_CLOCK = savedClock
+
+    durations[CN.objectiveTypes.RARE] = nil
+
+    print("  a learned duration comes from a journey the model stands behind")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE AGGREGATE'S REASON UNION BECAME PERMANENT.
+    --
+    -- The dedup merges the losing provider's sentences onto the WINNER'S LIVE
+    -- TABLE. That was harmless only by accident: the identity comparison
+    -- always failed, so the winner's table was rebuilt every pass and the
+    -- union reset with it. Repairing that comparison in 0.55.0 made the union
+    -- accumulate -- so a quest two providers know about collected every state
+    -- it had ever been in, and `/cn why` printed "available to pick up",
+    -- "quest is ACTIVE" and "ready to turn in" at once, about one quest.
+    ------------------------------------------------------------
+    local phase = "PICKUP"
+
+    CN.RegisterCandidateProvider("MutationWinner", function()
+        return {
+            { type = CN.objectiveTypes.QUEST, id = 56100, name = "Contested",
+              completionValue = 9, reasons = { "the winner says so" } },
+        }
+    end)
+
+    CN.RegisterCandidateProvider("MutationLoser", function()
+        return {
+            { type = CN.objectiveTypes.QUEST, id = 56100, name = "Contested",
+              completionValue = 1, reasons = { "quest is " .. phase } },
+        }
+    end)
+
+    local function Reasons()
+        for _, objective in ipairs(CN.CollectCandidates()) do
+            if objective.id == 56100 then
+                return objective.reasons or {}
+            end
+        end
+
+        return {}
+    end
+
+    CN.CollectCandidates(true)
+
+    local first = #Reasons()
+
+    for _, next in ipairs({ "ACTIVE", "TURNIN", "PICKUP", "ACTIVE" }) do
+        phase = next
+
+        CN.InvalidateProvider("MutationLoser", true)
+        CN.CollectCandidates()
+    end
+
+    local held = Reasons()
+
+    assert(#held == first,
+        "a merged reason is withdrawn before the next merge, " .. first
+        .. " became " .. #held .. ": " .. table.concat(held, " | "))
+
+    -- And the CURRENT one is the one that survives, not the first one.
+    local saidActive = false
+
+    for _, reason in ipairs(held) do
+        if reason == "quest is ACTIVE" then
+            saidActive = true
+        end
+    end
+
+    assert(saidActive,
+        "and it is the current sentence that is merged, not a stale one: "
+        .. table.concat(held, " | "))
+
+    CN.candidateProviders["MutationWinner"] = nil
+    CN.candidateProviders["MutationLoser"]  = nil
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates(true)
+
+    print("  a quest two providers know about does not collect contradictions")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- DECORATING A REUSED TABLE TWICE MUST PRODUCE WHAT DECORATING IT ONCE
+    -- PRODUCES.
+    --
+    -- `MarkProviderReasons` recorded the count blindly, so a provider that
+    -- hands back the same table it handed back last time -- several do -- had
+    -- the previous pass's decorator output absorbed into "what the provider
+    -- said". The boundary crept up one sentence per rebuild and `/cn why`
+    -- repeated the line once per rebuild.
+    ------------------------------------------------------------
+    -- The same OBJECTIVE table every time, in a list that grows -- which is
+    -- what a caching provider that discovers a new row looks like. The
+    -- growing list is what makes the identity comparison fail and the shared
+    -- object get decorated a second time; a provider whose list never changes
+    -- short-circuits and never reaches this at all.
+    local cached = { type = CN.objectiveTypes.TOY, id = 56200, name = "Cached",
+        completionValue = 4, reasons = { "the provider says so" } }
+
+    local extra = 0
+
+    CN.RegisterCandidateProvider("MutationCachedTable", function()
+        local list = { cached }
+
+        for index = 1, extra do
+            table.insert(list, {
+                type = CN.objectiveTypes.TOY, id = 56210 + index,
+                name = "Extra " .. index, completionValue = 1,
+            })
+        end
+
+        return list
+    end)
+
+    CN.RegisterCandidateDecorator("MutationStamps", function(objective)
+        if objective.id ~= 56200 then
+            return
+        end
+
+        objective.reasons = objective.reasons or {}
+
+        table.insert(objective.reasons, "the decorator says so")
+    end)
+
+    CN.CollectCandidates(true)
+
+    local afterOne = #(cached.reasons or {})
+
+    assert(afterOne == 2,
+        "one provider sentence and one decorator sentence, got " .. afterOne)
+
+    for _ = 1, 5 do
+        extra = extra + 1
+
+        CN.InvalidateProvider("MutationCachedTable", true)
+        CN.CollectCandidates()
+    end
+
+    assert(#(cached.reasons or {}) == afterOne,
+        "decorating a reused object six times must not stamp six sentences, "
+        .. afterOne .. " became " .. #(cached.reasons or {}) .. ": "
+        .. table.concat(cached.reasons or {}, " | "))
+
+    assert(cached.providerReasons == 1,
+        "and the provider's own count must stay where the provider left it, "
+        .. "got " .. tostring(cached.providerReasons))
+
+    CN.candidateDecorators["MutationStamps"] = nil
+    CN.candidateProviders["MutationCachedTable"] = nil
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates(true)
+
+    print("  a caching provider's rows do not accumulate decorator sentences")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN UNLOCK COUNT FROZEN FOR THE SESSION.
+    --
+    -- Repairing the identity comparison means a provider's tables are REUSED
+    -- across rebuilds, and the decorator's "already set, leave it" guard then
+    -- made the first answer permanent -- on the second-heaviest term in the
+    -- scorer, with `/cn why` stating a count the addon knew was wrong.
+    ------------------------------------------------------------
+    local unlockHarvest = CN:GetModule("Harvest")
+
+    local store = unlockHarvest.Store()
+
+    for questID in pairs(store) do
+        store[questID] = nil
+    end
+
+    store[56300] = { questID = 56300, lastSeen = 1 }
+    store[56301] = { questID = 56301, lastSeen = 1, observedRequires = { 56300 } }
+
+    unlockHarvest.NoteUnlocksChanged()
+
+    local objective = { type = CN.objectiveTypes.QUEST, id = 56300 }
+
+    CN.candidateDecorators["Unlocks"](objective)
+
+    local unlockBefore = objective.unlockValue
+
+    assert(unlockBefore and unlockBefore > 0, "one observed follower is an unlock value")
+
+    -- Four more quests are harvested behind it.
+    for questID = 56302, 56305 do
+        store[questID] = {
+            questID = questID, lastSeen = 1, observedRequires = { 56300 },
+        }
+    end
+
+    unlockHarvest.NoteUnlocksChanged()
+
+    CN.candidateDecorators["Unlocks"](objective)
+
+    assert(objective.unlockValue > unlockBefore,
+        "and the same objective must pick up the new ones, "
+        .. tostring(unlockBefore) .. " stayed " .. tostring(objective.unlockValue))
+
+    -- The sentence is REPLACED, not appended to.
+    local unlockSaid = 0
+
+    for _, reason in ipairs(objective.reasons or {}) do
+        if reason:find("come after this one", 1, true)
+            or reason:find("comes after this one", 1, true) then
+
+            unlockSaid = unlockSaid + 1
+        end
+    end
+
+    assert(unlockSaid == 1,
+        "and it says so once, not once per rebuild, got " .. unlockSaid)
+
+    for questID in pairs(store) do
+        store[questID] = nil
+    end
+
+    unlockHarvest.NoteUnlocksChanged()
+
+    print("  what a quest unlocks keeps up with what has been harvested")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- WORK THE GROUP SHARES.
+    --
+    -- The addon has known you are in a group since 0.44.0 and used it only to
+    -- push solo detours down. Four people in a zone, one quest all four are
+    -- carrying: that one is worth four times the work, every player already
+    -- knows it, and the addon had the information and said nothing.
+    ------------------------------------------------------------
+    local group = CN:GetModule("Group")
+
+    local savedSize     = CN_TEST_GROUP_SIZE
+    local savedInstance = CN_TEST_INSTANCE
+
+    CN_TEST_GROUP_SIZE = 1
+    CN_TEST_INSTANCE   = nil
+
+    group.ForgetShared()
+
+    assert(group.SharedWith(56400) == nil,
+        "solo, the question cannot be asked -- and nil is not zero")
+
+    CN_TEST_GROUP_SIZE = 4
+
+    CN_TEST_QUEST_SHARED[56400] = { party1 = true, party2 = true }
+    CN_TEST_QUEST_SHARED[56401] = {}
+
+    group.ForgetShared()
+
+    assert(group.SharedWith(56400) == 2,
+        "two of the three others are on it, got "
+        .. tostring(group.SharedWith(56400)))
+
+    assert(group.SharedWith(56401) == 0,
+        "and nobody is on the other one")
+
+    -- Through the scorer, which is the path that matters.
+    local shared = { type = CN.objectiveTypes.QUEST, id = 56400 }
+    local alone  = { type = CN.objectiveTypes.QUEST, id = 56401 }
+
+    local adjuster = CN.scoreAdjusters["GroupShared"]
+
+    assert(adjuster, "the adjuster must be registered")
+
+    assert(adjuster(shared, 10) > 10,
+        "work the group shares ranks higher")
+
+    assert(adjuster(alone, 10) == 10,
+        "work only you have is left exactly alone")
+
+    assert(shared.adjusterReasons and shared.adjusterReasons.groupShared,
+        "and the line says why, because every line in this addon does")
+
+    -- THE GROUP LEAVING TAKES THE SENTENCE WITH IT.
+    CN_TEST_GROUP_SIZE = 1
+
+    group.ForgetShared()
+
+    adjuster(shared, 10)
+
+    assert(not (shared.adjusterReasons and shared.adjusterReasons.groupShared),
+        "and a sentence about a group you are no longer in is withdrawn")
+
+    -- A raid must not credit the player with their own quest.
+    CN_TEST_GROUP_SIZE = 2
+    CN_TEST_INSTANCE   = "raid"
+
+    CN_TEST_QUEST_SHARED[56402] = { raid1 = true, raid2 = true }
+
+    group.ForgetShared()
+
+    assert(group.SharedWith(56402) == 1,
+        "the client lists you among the raid units; you are not somebody "
+        .. "else on your own quest, got " .. tostring(group.SharedWith(56402)))
+
+    -- AND THE CLIENT IS ASKED ONCE, NOT ONCE PER CANDIDATE PER PASS.
+    --
+    -- The first version keyed the cache on `CN.rankingGeneration`, which is
+    -- bumped by the very thing that triggers a re-rank -- so it was cleared
+    -- at exactly the moment it would have been used. Measured at 8,151 client
+    -- calls and 7.2 ms for one pass over two hundred candidates in a
+    -- forty-person raid, against a 0.4 ms budget for `Recommend(25)`.
+    CN_TEST_GROUP_SIZE = 5
+    CN_TEST_INSTANCE   = nil
+
+    CN_TEST_QUEST_SHARED[56403] = { party1 = true }
+
+    group.ForgetShared()
+
+    local asked = 0
+
+    local realIsOnQuest = C_QuestLog.IsUnitOnQuest
+
+    C_QuestLog.IsUnitOnQuest = function(unit, questID)
+        asked = asked + 1
+
+        return realIsOnQuest(unit, questID)
+    end
+
+    for _ = 1, 50 do
+        CN.InvalidateRanking()
+
+        group.SharedWith(56403)
+    end
+
+    C_QuestLog.IsUnitOnQuest = realIsOnQuest
+
+    assert(asked <= 4,
+        "fifty passes over one quest must ask the client once per group "
+        .. "member, not once per pass -- asked " .. asked .. " times")
+
+    -- And the roster changing does clear it.
+    group.ForgetShared()
+
+    CN_TEST_QUEST_SHARED = {}
+    CN_TEST_GROUP_SIZE   = savedSize
+    CN_TEST_INSTANCE     = savedInstance
+
+    group.ForgetShared()
+
+    print("  a quest the group shares outranks one only you are on")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- TWO BANKS, WHICH ARE TWO DIFFERENT CLAIMS.
+    --
+    -- The bank store was `CN.Account("bank")` -- account-wide, written
+    -- wholesale by whichever character last opened one -- so every alt read
+    -- the main's bank as its own and opening the bank on the alt destroyed
+    -- the main's record. And the Warband tabs, which genuinely ARE
+    -- account-wide, were not read at all.
+    ------------------------------------------------------------
+    local inventory = CN:GetModule("Inventory")
+
+    assert(inventory.accountBankIDs and #inventory.accountBankIDs > 0,
+        "the Warband tabs must be a list of their own")
+
+    for _, bag in ipairs(inventory.bankIDs) do
+        for _, warbandBag in ipairs(inventory.accountBankIDs) do
+            assert(bag ~= warbandBag,
+                "a container cannot be in both banks -- " .. bag)
+        end
+    end
+
+    local mineBag    = inventory.bankIDs[2]
+    local warbandBag = inventory.accountBankIDs[1]
+
+    CN_TEST_BAGS[mineBag]    = { { itemID = 56500, stackCount = 3 } }
+    CN_TEST_BAGS[warbandBag] = { { itemID = 56501, stackCount = 7 } }
+
+    local mine, warband = inventory.ScanBank()
+
+    assert(mine == 1 and warband == 1,
+        "each bank is counted separately, got " .. tostring(mine) .. " and "
+        .. tostring(warband))
+
+    assert(inventory.BankStore()[56500] == 3,
+        "your own bank holds what is in your own bank")
+
+    assert(inventory.BankStore()[56501] == nil,
+        "and not what is in the Warband bank -- one is reachable by this "
+        .. "character and one by all of them, which is the whole point")
+
+    assert(inventory.WarbandStore()[56501] == 7,
+        "and the Warband bank holds the Warband bank")
+
+    -- PER CHARACTER, which is what the account-wide store got wrong.
+    assert(CN.character and CN.character.bank,
+        "your own bank is a fact about your own character")
+
+    assert(CN.db and CN.db.account and CN.db.account.bank == nil,
+        "and must not be sitting in the account-wide table for every alt to "
+        .. "read as its own")
+
+    CN_TEST_BAGS[mineBag]    = nil
+    CN_TEST_BAGS[warbandBag] = nil
+
+    print("  your bank and the Warband bank are two answers, not one")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LIST WITH NOTHING IN IT DREW NOTHING AT ALL.
+    --
+    -- `SetEntries({})` hid every row and returned, so a tab with nothing to
+    -- show was a one-line header above three hundred and eighty pixels of
+    -- void -- which reads as broken rather than as empty.
+    ------------------------------------------------------------
+    local UI = CN.UI
+
+    local panel = CreateFrame("Frame", nil, UIParent)
+
+    local list = UI.CreateList(panel)
+
+    list.emptyText = "Nothing pinned yet."
+
+    list:SetEntries({})
+
+    local row = list.rows and list.rows[1]
+
+    assert(row and row:IsShown(),
+        "an empty list must still draw one row saying so")
+
+    local text = row.label and row.label:GetText() or ""
+
+    assert(text:find("Nothing pinned yet.", 1, true),
+        "and it must be the tab's own sentence, got " .. tostring(text))
+
+    -- And every tab that has a list says what would fill it.
+    local without = {}
+
+    for _, tab in ipairs(UI.tabs) do
+        if tab.panel and tab.panel.list and not tab.panel.list.emptyText then
+            table.insert(without, tab.name)
+        end
+    end
+
+    assert(#without == 0,
+        "every list must say what would fill it: " ..
+        table.concat(without, ", ") .. " does not")
+
+    print("  an empty tab says what would fill it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE HELP SEARCH DID NOT READ ALIASES, WHICH IS WHAT IT WAS FOR.
+    --
+    -- Commands.lua's own header says the search exists so that "somebody who
+    -- half-remembers 'the one about lockouts' should not have to read a
+    -- hundred and twenty lines to find /cn instances" -- and `lockouts` is
+    -- one of that command's aliases, which the search did not read. The
+    -- worked example in the comment was the query that returned nothing.
+    ------------------------------------------------------------
+    local aliasBefore = #output
+
+    CN.HandleSlashCommand("help lockouts")
+
+    local found = false
+
+    for index = aliasBefore + 1, #output do
+        if output[index]:find("/cn instances", 1, true) then
+            found = true
+        end
+    end
+
+    assert(found,
+        "searching an alias must find the command it is an alias for")
+
+    -- And the failure path still names a way forward.
+    local missAt = #output
+
+    CN.HandleSlashCommand("help zzzznothing")
+
+    local advised = false
+
+    for index = missAt + 1, #output do
+        if output[index]:find("/cn help all", 1, true) then
+            advised = true
+        end
+    end
+
+    assert(advised, "and a search that finds nothing points somewhere")
+
+    print("  half-remembering an alias is enough to find the command")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ADDON'S OWN VOCABULARY WAS REACHING PLAYERS.
+    ------------------------------------------------------------
+    assert(CN.StateLabel,
+        "an objective state must have a name a person can read")
+
+    for _, state in pairs(CN.objectiveStates) do
+        local label = CN.StateLabel(state)
+
+        assert(label and label ~= state,
+            state .. " is printed to players and has no readable label")
+
+        assert(not label:find("_", 1, true),
+            "and a label with an underscore in it is the enum wearing a hat: "
+            .. label)
+    end
+
+    -- `/cn queststatus` prints it, so assert through that.
+    local stateBefore = #output
+
+    CN.HandleSlashCommand("queststatus 9001")
+
+    for index = stateBefore + 1, #output do
+        assert(not output[index]:find("REQUIRES_OTHER_CHARACTER", 1, true)
+            and not output[index]:find("TEMPORARILY_UNAVAILABLE", 1, true),
+            "the enum must not reach the player: " .. output[index])
+    end
+
+    -- And a filter is refused stateBefore an eligibility answer is invented.
+    local state, reason = CN.Explain(CN.objectiveTypes.CURRENCY, 1)
+
+    assert(state == CN.objectiveStates.UNKNOWN, "no checker, no answer")
+
+    assert(reason and not reason:find("eligibility checker", 1, true),
+        "and the registry's name is not an explanation: " .. tostring(reason))
+
+    print("  states and registries are described, not named")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn keepfilter off DID NOT CLEAR THE FILTER IT WAS TURNING OFF.
+    --
+    -- UI.lua publishes itself as `CN.UI` and never calls `RegisterModule`, so
+    -- `CN:GetModule("UI")` returned nil, the branch never ran, and the
+    -- command printed "a filter that persists invisibly is how a list looks
+    -- empty when it is not" while leaving exactly that filter in memory.
+    ------------------------------------------------------------
+    local filterSettings = CN.Settings()
+
+    filterSettings.keepFilter    = true
+    CN.UI.persistedFilter  = "mount"
+
+    CN.HandleSlashCommand("keepfilter off")
+
+    assert(filterSettings.keepFilter ~= true,
+        "the setting must actually go off")
+
+    assert(CN.UI.persistedFilter == nil,
+        "and the term it was holding must go with it, got "
+        .. tostring(CN.UI.persistedFilter))
+
+    print("  turning off a persisting filter forgets what it was holding")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE HARVEST SORTED ITS WHOLE STORE ON EVERY CAPTURE AT THE CEILING.
+    --
+    -- "Count before allocating" fixed the case below the cap and did nothing
+    -- at it: `held == cap + 1` on every capture, so each one built a 2001-row
+    -- array and sorted it to drop one row -- inside a loop over the whole
+    -- quest log at login. Hysteresis, the same way the offer memory has had
+    -- it since 0.28.0.
+    ------------------------------------------------------------
+    local slackHarvest = CN:GetModule("Harvest")
+
+    assert(slackHarvest.pruneSlack and slackHarvest.pruneSlack > 0,
+        "the prune must be allowed to overshoot")
+
+    local store = slackHarvest.Store()
+
+    for questID in pairs(store) do
+        store[questID] = nil
+    end
+
+    local savedCap   = slackHarvest.cap
+    local savedSlack = slackHarvest.pruneSlack
+
+    slackHarvest.cap        = 10
+    slackHarvest.pruneSlack = 4
+
+    for questID = 1, slackHarvest.cap + 2 do
+        store[questID] = { questID = questID, lastSeen = questID }
+    end
+
+    assert(slackHarvest.Prune() == 0,
+        "two rows over the cap is inside the slack and must not sort")
+
+    for questID = 100, 103 do
+        store[questID] = { questID = questID, lastSeen = questID }
+    end
+
+    assert(slackHarvest.Prune() > 0,
+        "and past the slack it prunes back to the cap")
+
+    assert(CN.CountKeys(store) == slackHarvest.cap,
+        "all the way back to the cap, not just under the slack, got "
+        .. CN.CountKeys(store))
+
+    for questID in pairs(store) do
+        store[questID] = nil
+    end
+
+    slackHarvest.cap        = savedCap
+    slackHarvest.pruneSlack = savedSlack
+
+    slackHarvest.NoteUnlocksChanged()
+
+    print("  the slackHarvest sorts once per two hundred captures, not once each")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A REPLACEMENT PROVIDER KEEPS ITS PLACE IN THE QUEUE.
+    --
+    -- Removing the row and minting a fresh sequence moved the provider to the
+    -- back of its priority band -- the exact symptom the tiebreak was added
+    -- to prevent, on the path 0.55.0 opened up.
+    ------------------------------------------------------------
+    local function Provider()
+        return {
+            GetQuestData = function() return {} end,
+            IsAvailable  = function() return true end,
+            priority     = 500,
+        }
+    end
+
+    for _, name in ipairs({ "MutationA", "MutationB", "MutationC" }) do
+        CN.RegisterQuestDataProvider(name, Provider())
+    end
+
+    local function PositionOf(name)
+        for index, entry in ipairs(CN.questDataOrder) do
+            if entry.name == name then
+                return index
+            end
+        end
+    end
+
+    local was = PositionOf("MutationB")
+
+    CN.RegisterQuestDataProvider("MutationB", Provider())
+
+    assert(PositionOf("MutationB") == was,
+        "re-registering must not hand over which addon answers first, "
+        .. tostring(was) .. " became " .. tostring(PositionOf("MutationB")))
+
+    for _, name in ipairs({ "MutationA", "MutationB", "MutationC" }) do
+        CN.questDataProviders[name] = nil
+
+        for index = #CN.questDataOrder, 1, -1 do
+            if CN.questDataOrder[index].name == name then
+                table.remove(CN.questDataOrder, index)
+            end
+        end
+    end
+
+    print("  a provider that re-registers keeps its priority position")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DECORATOR THAT ADDS TO ITSELF IS A DECORATOR THAT COMPOUNDS.
+    --
+    -- `Goals.Decorate` read `userPreference` and added eight to it. That was
+    -- harmless only while every rebuild produced fresh tables; since 0.55.0
+    -- reuses them, a pinned goal's preference climbed by eight per rebuild
+    -- without bound -- 8, 16, 24, 32 -- until it outweighed everything else
+    -- on the list by thirty to one and nothing could displace it, including
+    -- something about to despawn. `/cn breakdown` showed the inflated figure
+    -- as though it were deliberate, and only a reload cleared it.
+    ------------------------------------------------------------
+    local pinnedGoals = CN:GetModule("Goals")
+
+    pinnedGoals.Add(CN.objectiveTypes.TOY, 56600)
+
+    local objective = { type = CN.objectiveTypes.TOY, id = 56600,
+        name = "Pinned", completionValue = 3, userPreference = 1 }
+
+    for _ = 1, 6 do
+        pinnedGoals.Decorate(objective)
+    end
+
+    assert(objective.userPreference == 1 + pinnedGoals.goalPreference,
+        "six passes must weigh the same as one, got "
+        .. tostring(objective.userPreference))
+
+    local saidPinned = 0
+
+    for _, reason in ipairs(objective.reasons or {}) do
+        if reason == "this is one of your goals" then
+            saidPinned = saidPinned + 1
+        end
+    end
+
+    assert(saidPinned == 1, "and say so once, got " .. saidPinned)
+
+    -- AND UNPINNING TAKES IT BACK.
+    pinnedGoals.Remove(CN.objectiveTypes.TOY, 56600)
+
+    pinnedGoals.Decorate(objective)
+
+    assert(objective.userPreference == 1,
+        "unpinning must give back the provider's own preference, got "
+        .. tostring(objective.userPreference))
+
+    assert(not objective.isGoal, "and stop calling it a goal")
+
+    for _, reason in ipairs(objective.reasons or {}) do
+        assert(reason ~= "this is one of your goals",
+            "and stop saying it is one")
+    end
+
+    print("  a pinned goal is worth the same on the sixth pass as the first")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ROLLING THE REASON LIST BACK MUST ROLL BACK WHAT IS KEYED TO IT.
+    --
+    -- The truncation that keeps a reused table honest removes the sentences
+    -- adjusters and decorators appended -- and each of those keeps a key
+    -- saying "I already said this", which then refuses to say it again. So
+    -- the first rebuild after a decoration deleted every explanation on the
+    -- objective and nothing could restore them, while the multipliers those
+    -- sentences described went on applying. `/cn why` printed a score with
+    -- nothing under it.
+    ------------------------------------------------------------
+    local objective = { type = CN.objectiveTypes.QUEST, id = 56700,
+        name = "Explained", reasons = { "the provider says so" } }
+
+    CN.AddDecoratorReason(objective, "test", "a decorator says so")
+    CN.AddAdjusterReason(objective, "test", "an adjuster says so")
+
+    assert(#objective.reasons == 3, "three sentences, got " .. #objective.reasons)
+
+    -- One rebuild's worth of rollback.
+    objective.providerReasons = 1
+    objective.decorated       = true
+
+    CN.MarkProviderReasons({ objective })
+
+    assert(#objective.reasons == 1,
+        "the rollback keeps what the provider said, got "
+        .. #objective.reasons)
+
+    assert(objective.decoratorReasons == nil
+        and objective.adjusterReasons == nil,
+        "and forgets that it had said the rest, or they can never come back")
+
+    -- Which means they CAN come back.
+    CN.AddDecoratorReason(objective, "test", "a decorator says so")
+    CN.AddAdjusterReason(objective, "test", "an adjuster says so")
+
+    assert(#objective.reasons == 3,
+        "and they do come back, got " .. #objective.reasons .. ": "
+        .. table.concat(objective.reasons, " | "))
+
+    -- AND A SENTENCE THAT CARRIES A NUMBER UPDATES RATHER THAN FREEZING.
+    CN.AddAdjusterReason(objective, "count", "3 others here are on this quest")
+    CN.AddAdjusterReason(objective, "count", "1 other here is on this quest")
+
+    local froze = false
+    local held  = 0
+
+    for _, reason in ipairs(objective.reasons) do
+        if reason:find("others here", 1, true) then froze = true end
+        if reason:find("here is on this quest", 1, true) then held = held + 1 end
+    end
+
+    assert(not froze,
+        "a sentence with a number in it must not freeze at the first number")
+
+    assert(held == 1, "and must not be said twice, got " .. held)
+
+    print("  taking a reason back lets it be said again, and said correctly")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE MERGE RATCHETED THE WINNER'S VALUE AND COULD NOT LET GO.
+    --
+    -- The dedup raises the winner's `completionValue` to the loser's, into
+    -- the winner's LIVE CACHED TABLE, with no way back. Unpin a goal and the
+    -- quest kept the pinned-era value for the rest of the session; the losing
+    -- provider could stop emitting the row entirely and the number stayed.
+    ------------------------------------------------------------
+    local loserValue = 9
+
+    CN.RegisterCandidateProvider("MutationHigh", function()
+        return {
+            { type = CN.objectiveTypes.QUEST, id = 56800, name = "Contested",
+              completionValue = 2 },
+        }
+    end)
+
+    CN.RegisterCandidateProvider("MutationLow", function()
+        return {
+            { type = CN.objectiveTypes.QUEST, id = 56800, name = "Contested",
+              completionValue = loserValue },
+        }
+    end)
+
+    local function ValueOf()
+        for _, objective in ipairs(CN.CollectCandidates()) do
+            if objective.id == 56800 then
+                return objective.completionValue
+            end
+        end
+    end
+
+    CN.CollectCandidates(true)
+
+    assert(ValueOf() == 9,
+        "the higher of the two wins, got " .. tostring(ValueOf()))
+
+    -- The other provider changes its mind.
+    loserValue = 1
+
+    CN.InvalidateProvider("MutationLow", true)
+    CN.CollectCandidates()
+
+    assert(ValueOf() == 2,
+        "and when it changes its mind the winner goes back to its own value, "
+        .. "got " .. tostring(ValueOf()))
+
+    CN.candidateProviders["MutationHigh"] = nil
+    CN.candidateProviders["MutationLow"]  = nil
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates(true)
+
+    print("  a value another provider contributed is given back when it goes")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- SAYING THE UNLOCK COUNT CHANGED MUST MAKE SOMETHING REDECORATE.
+    --
+    -- `NoteUnlocksChanged` bumped a counter, and the decorator only consults
+    -- the counter if `Decorate` runs -- which the unchanged-provider shortcut
+    -- skips, which is the normal case. So the guard was correct and
+    -- unreachable, and the count stayed frozen exactly as before.
+    ------------------------------------------------------------
+    local unlockHarvest = CN:GetModule("Harvest")
+
+    local store = unlockHarvest.Store()
+
+    for questID in pairs(store) do
+        store[questID] = nil
+    end
+
+    store[56900] = { questID = 56900, lastSeen = 1 }
+    store[56901] = { questID = 56901, lastSeen = 1, observedRequires = { 56900 } }
+
+    CN.RegisterCandidateProvider("MutationUnlocked", function()
+        return {
+            { type = CN.objectiveTypes.QUEST, id = 56900, name = "Hub",
+              completionValue = 5 },
+        }
+    end)
+
+    unlockHarvest.NoteUnlocksChanged()
+
+    CN.CollectCandidates(true)
+
+    local function UnlockOf()
+        for _, objective in ipairs(CN.CollectCandidates()) do
+            if objective.id == 56900 then
+                return objective.unlockValue
+            end
+        end
+    end
+
+    local was = UnlockOf()
+
+    assert(was and was > 0, "one observed follower is an unlock value")
+
+    for questID = 56902, 56905 do
+        store[questID] = {
+            questID = questID, lastSeen = 1, observedRequires = { 56900 },
+        }
+    end
+
+    unlockHarvest.NoteUnlocksChanged()
+
+    CN.CollectCandidates()
+
+    assert(UnlockOf() and UnlockOf() > was,
+        "and harvesting four more behind it must reach the ranked list, "
+        .. tostring(was) .. " stayed " .. tostring(UnlockOf()))
+
+    CN.candidateProviders["MutationUnlocked"] = nil
+
+    for questID in pairs(store) do
+        store[questID] = nil
+    end
+
+    unlockHarvest.NoteUnlocksChanged()
+
+    CN.CollectCandidates(true)
+
+    print("  a harvested unlock reaches the ranking, not just the index")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE BANK STORE HELD WHICHEVER TAB WAS LOOKED AT LAST.
+    --
+    -- The client does not describe a bank tab until it has been switched to,
+    -- and the scan rewrote the whole store from what it could see -- so the
+    -- Warband bank ended up holding one tab, and moving a single item
+    -- rewrote both stores from whatever happened to be described.
+    ------------------------------------------------------------
+    local inventory = CN:GetModule("Inventory")
+
+    local first  = inventory.accountBankIDs[1]
+    local second = inventory.accountBankIDs[2]
+
+    CN_TEST_BAGS[first]  = { { itemID = 57000, stackCount = 2 } }
+    CN_TEST_BAGS[second] = nil
+
+    inventory.ScanBank()
+
+    assert(inventory.WarbandStore()[57000] == 2,
+        "the tab that was described is recorded")
+
+    -- The player switches tabs. The first is no longer described; the second
+    -- now is.
+    CN_TEST_BAGS[first]  = nil
+    CN_TEST_BAGS[second] = { { itemID = 57001, stackCount = 5 } }
+
+    inventory.ScanBank()
+
+    assert(inventory.WarbandStore()[57001] == 5,
+        "the new tab is recorded")
+
+    assert(inventory.WarbandStore()[57000] == 2,
+        "and a tab the client has stopped describing is not the same thing "
+        .. "as a tab that is empty")
+
+    CN_TEST_BAGS[first]  = nil
+    CN_TEST_BAGS[second] = nil
+
+    print("  a bank tab the client stops describing is not emptied")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE JOURNEY IS RE-STAMPED AS IT SHORTENS.
+    --
+    -- `NoteOffered` returned early the moment the key existed, so the travel
+    -- estimate was frozen at whatever it was the FIRST time the objective
+    -- appeared -- from wherever the addon thought you were then. Fly to that
+    -- zone, quest for eight minutes, hand it in, and the sample was compared
+    -- against a cost from the continent you left, and rejected.
+    ------------------------------------------------------------
+    local session = CN:GetModule("Session")
+
+    local durations = session.Durations()
+
+    durations[CN.objectiveTypes.TREASURE] = nil
+
+    local savedClock = CN_TEST_CLOCK
+
+    -- Offered from a long way off.
+    session.NoteOffered({
+        type = CN.objectiveTypes.TREASURE, id = 57100, travelCost = 20,
+    })
+
+    -- The player flies there. It is offered again, from next door.
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 400
+
+    session.NoteOffered({
+        type = CN.objectiveTypes.TREASURE, id = 57100, travelCost = 1,
+    })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 200
+
+    local elapsed = session.NoteCompleted(CN.objectiveTypes.TREASURE, 57100)
+
+    assert(elapsed,
+        "an objective reached and finished must produce a sample, not be "
+        .. "compared against a journey from the continent you left")
+
+    assert(math.abs(elapsed - (600 - 30)) < 0.01,
+        "and the journey taken out is the closest the model got, got "
+        .. tostring(elapsed))
+
+    -- And the clock is NOT re-stamped: that is the measurement.
+    durations[CN.objectiveTypes.TREASURE] = nil
+
+    CN_TEST_CLOCK = savedClock
+
+    print("  the journey is re-costed as you close on it; the clock is not")
+end)()
+
 print("\nWhat 0.55.0 changed, asserted through the paths the game takes:")
 
 ;(function()
@@ -8904,24 +10143,45 @@ end)()
     assert(UI.RememberedTabIndex() == 2,
         "an older database still opens on its remembered index")
 
-    -- AND THE REBUILD PATH MUST PREFER THE NAME TOO.
+    -- AND REBUILDING THE STRIP MUST NOT MOVE THE PLAYER.
     --
-    -- `RebuildTabs` re-enters `SelectTab(UI.selectedTab or ...)`, and
-    -- `UI.selectedTab` is an index from the PREVIOUS sort -- so consulting it
-    -- first reintroduces the bug on the one path that triggers it: a tab
-    -- registering, which is what re-sorts the list.
-    local displaced = UI.tabs[1]
+    -- `RebuildTabs` runs whenever a tab registers, which can happen after the
+    -- window exists. Re-selecting unconditionally yanks the player off the tab
+    -- they are reading and throws away what they had typed in the search box.
+    -- What it must do is follow them across the re-sort, by name.
+    UI.SelectTab(1)
 
-    UI.selectedTab              = 1
-    tabSettings.selectedTab     = 1
+    tabSettings.selectedTab     = #UI.tabs
     tabSettings.selectedTabName = target.name
+
+    local standingOn = UI.tabs[1].name
+
+    -- The list re-sorts underneath them, which is exactly what registering a
+    -- tab does.
+    local moved = table.remove(UI.tabs, 1)
+
+    table.insert(UI.tabs, moved)
+
+    UI.RebuildTabs()
+
+    assert(UI.tabs[UI.selectedTab] and UI.tabs[UI.selectedTab].name
+        == standingOn,
+        "a rebuild must leave the player on the tab they were reading, got "
+        .. tostring(UI.tabs[UI.selectedTab] and UI.tabs[UI.selectedTab].name))
+
+    table.insert(UI.tabs, 1, table.remove(UI.tabs))
+
+    -- With nothing selected -- the first time the window is built -- the
+    -- remembered NAME decides.
+    UI.selectedTab     = nil
+    UI.selectedTabName = nil
 
     UI.RebuildTabs()
 
     assert(UI.tabs[UI.selectedTab] and UI.tabs[UI.selectedTab].name
         == target.name,
-        "rebuilding the tab strip must land on the remembered NAME, not on "
-        .. tostring(displaced and displaced.name))
+        "a first build must open on the remembered name, got "
+        .. tostring(UI.tabs[UI.selectedTab] and UI.tabs[UI.selectedTab].name))
 
     -- A tab that no longer exists is not an error.
     tabSettings.selectedTabName = "AGoneTab"
@@ -9023,7 +10283,10 @@ end)()
         store[questID] = nil
     end
 
-    pruneHarvest.cap = 3
+    local savedSlack = pruneHarvest.pruneSlack
+
+    pruneHarvest.cap        = 3
+    pruneHarvest.pruneSlack = 1
 
     -- A low id seen just now, and high ids not seen in a long time.
     store[100]   = { questID = 100,   lastSeen = 9000 }
@@ -9044,7 +10307,8 @@ end)()
         store[questID] = nil
     end
 
-    pruneHarvest.cap = savedCap
+    pruneHarvest.cap        = savedCap
+    pruneHarvest.pruneSlack = savedSlack
 
     pruneHarvest.NoteUnlocksChanged()
 
@@ -9189,13 +10453,27 @@ end)()
     assert(ninth.version == CN.dbVersion,
         "and the ladder runs to the top, got " .. tostring(ninth.version))
 
-    -- A corrupt characters table is not a permanent migration failure.
+    -- A CORRUPT CHARACTERS TABLE IS A FAULT, NOT A THING TO PAPER OVER.
+    --
+    -- 0.55.0 replaced it with an empty table, which destroys every character
+    -- profile, advances the version, and reports a clean bill of health. The
+    -- migration refuses now, and refusing is recorded -- which is recoverable,
+    -- because the data is still there.
     local corrupt = { version = 9, account = {}, characters = "not a table" }
 
     CN.RunMigrations(corrupt)
 
-    assert(corrupt.version == CN.dbVersion,
-        "a corrupt characters table must not pin the database for ever")
+    assert(corrupt.characters == "not a table",
+        "a migration must not silently destroy what it cannot read")
+
+    assert(corrupt.version == 9,
+        "and must not claim to have upgraded it, got "
+        .. tostring(corrupt.version))
+
+    assert(type(corrupt.migrationFailure) == "table",
+        "and must record the refusal where /cn navdiag can find it")
+
+    CN.migrationFailure = nil
 
     print("  a failed migration is recorded, not just printed once")
 end)()

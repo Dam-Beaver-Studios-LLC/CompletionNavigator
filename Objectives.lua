@@ -123,6 +123,25 @@ CN.typeBadges = {
 -- Returns the id, or nil and a sentence saying why not. The sentence matters:
 -- "that recipe does not exist" and "recipes are looked up by id" send the
 -- player to completely different places.
+-- AND WHICH SCAN FILLS EACH ONE.
+--
+-- "It may need scanning first" was the whole of the advice, in an addon with
+-- eleven scans. Naming the one that applies turns a dead end into a step.
+CN.scanCommands = {
+    MOUNT       = "mountscan",
+    PET         = "petscan",
+    TOY         = "toyscan",
+    TITLE       = "titlescan",
+    REPUTATION  = "repscan",
+    RENOWN      = "repscan",
+    CURRENCY    = "currencyscan",
+    ACHIEVEMENT = "achievescan",
+    APPEARANCE  = "appearancescan",
+    RECIPE      = "profscan",
+    PROFESSION  = "profscan",
+    EXPLORATION = "explorescan",
+}
+
 CN.objectiveResolvers = {
     MOUNT       = "Mounts",
     PET         = "Pets",
@@ -158,7 +177,13 @@ function CN.ResolveObjective(objectiveType, text)
     local module = CN:GetModule(moduleName)
 
     if not module or not module.Resolve then
-        return nil, "The " .. moduleName .. " module is not loaded."
+        -- "MODULE" IS THIS ADDON'S WORD FOR ITS OWN FILES. A player who reads
+        -- "The Mounts module is not loaded" has been told the name of
+        -- something they cannot see, act on, or report.
+        return nil, "This addon cannot look up "
+            .. string.lower(CN.TypeBadge(objectiveType))
+            .. "s right now. " .. CN.Accent("/cn selftest")
+            .. " says what is missing."
     end
 
     local resolved = module.Resolve(text)
@@ -167,8 +192,17 @@ function CN.ResolveObjective(objectiveType, text)
         return resolved
     end
 
-    return nil, "Nothing " .. moduleName:lower() .. " matches \"" .. text
-        .. "\". It may need scanning first."
+    -- "Nothing mounts matches" -- the module's own name dropped into a
+    -- sentence as though it were a noun, on the failure path of `/cn goal`
+    -- and `/cn chase`, which is the store page's headline feature. And "it
+    -- may need scanning first" named no scan, in an addon with eleven of
+    -- them.
+    local scan = CN.scanCommands and CN.scanCommands[objectiveType]
+
+    return nil, "No " .. string.lower(CN.TypeBadge(objectiveType))
+        .. " matches \"" .. text .. "\"."
+        .. (scan and (" " .. CN.Accent("/cn " .. scan)
+            .. " reads them from the client.") or "")
 end
 
 function CN.TypeBadge(objectiveType)
@@ -193,6 +227,36 @@ CN.objectiveStates = {
     UNOBTAINABLE              = "UNOBTAINABLE",
     REQUIRES_OTHER_CHARACTER  = "REQUIRES_OTHER_CHARACTER",
 }
+
+-- AND WHAT EACH OF THEM IS CALLED IN FRONT OF A PLAYER.
+--
+-- The enum is the addon's vocabulary. `/cn queststatus` and `/cn why` printed
+-- it raw, so a player read "State: REQUIRES_OTHER_CHARACTER" and
+-- "State: TEMPORARILY_UNAVAILABLE" -- SHOUTING, in underscores, about
+-- something they are perfectly capable of being told in words.
+--
+-- The same split `CN.typeLabels` and `CN.typeBadges` already make: one table
+-- is what the code compares against, another is what a person reads.
+CN.stateLabels = {
+    UNKNOWN                  = "not known",
+    AVAILABLE                = "available",
+    COMPLETED                = "done",
+    LOCKED                   = "locked behind something else",
+    DEFERRED                 = "deferred by you",
+    IGNORED                  = "ignored by you",
+    INELIGIBLE               = "not for this character",
+    TEMPORARILY_UNAVAILABLE  = "not available right now",
+    UNOBTAINABLE             = "no longer obtainable",
+    REQUIRES_OTHER_CHARACTER = "another character has to do this",
+}
+
+function CN.StateLabel(state)
+    if not state then
+        return CN.stateLabels.UNKNOWN
+    end
+
+    return CN.stateLabels[state] or string.lower(tostring(state))
+end
 
 ------------------------------------------------------------
 -- SOURCE CONFIDENCE

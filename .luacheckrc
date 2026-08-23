@@ -36,6 +36,11 @@ read_globals = {
     "GetZoneText", "IsTitleKnown", "PlayerHasToy", "UnitClass", "UnitExists",
     "UnitFactionGroup", "UnitGUID", "UnitLevel", "UnitName", "UnitRace",
     "UnitSex", "PlaySound", "GetTime",
+
+    -- 0.56.0. `UnitIsUnit` tells the shared-quest count that the raid unit it
+    -- is asking about is the player themselves; `BankFrame` is the frame the
+    -- client requires to be open before it will describe a bank container.
+    "UnitIsUnit", "BankFrame",
     "GetPlayerFacing", "InCombatLockdown", "IsInInstance",
     "GetLocale",
 

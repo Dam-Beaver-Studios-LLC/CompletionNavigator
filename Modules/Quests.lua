@@ -1232,7 +1232,9 @@ CN.RegisterCandidateProvider("Quests", function()
 
         if static and static.unlocks and #static.unlocks > 0 then
             value = value + #static.unlocks
-            table.insert(reasons, "unlocks " .. #static.unlocks .. " further quest(s)")
+            table.insert(reasons, "unlocks " .. #static.unlocks
+                .. (#static.unlocks == 1 and " further quest"
+                    or " further quests"))
         end
 
         if mapID and playerMap then
@@ -1439,7 +1441,8 @@ CN:RegisterCommand{
 
         local state, reason, detail = CN.Explain(CN.objectiveTypes.QUEST, questID)
 
-        Print("State: " .. state .. (reason and (" - " .. reason) or "")
+        Print("State: " .. CN.StateLabel(state)
+            .. (reason and (" " .. CN.DASH .. " " .. reason) or "")
             .. (detail and (" (" .. detail .. ")") or ""))
     end,
 }
@@ -1566,7 +1569,7 @@ CN:RegisterCommand{
         else
             Print(#available .. " quest" .. (#available == 1 and "" or "s")
                 .. " available in this zone, none within "
-                .. CN.nearbyYards .. " yards:")
+                .. CN.nearbyYards .. "yd:")
         end
 
         for _, poi in ipairs(#near > 0 and near or zone) do
@@ -1707,8 +1710,12 @@ CN:RegisterCommand{
 
         if not questID or not mapID or not x or not y then
             Print("Usage: /cn setloc <questID> <mapID> <x> <y>")
-            Print("Coordinates may be 0-1 or 0-100. Find the map ID with "
-                .. "|cffffc74f/cn where|r or /dump C_Map.GetBestMapForUnit(\"player\")")
+            -- `/cn where` WANTS A QUEST ID AND ANSWERS ABOUT THAT QUEST'S
+            -- MAP, so it could never answer "what map am I on" -- and the
+            -- fallback was a raw Lua dump. `/cn where am i` prints the id now.
+            CN.PrintLine(CN.Muted("Coordinates may be 0-1 or 0-100. ")
+                .. CN.Accent("/cn where am i")
+                .. CN.Muted(" prints the map id you are standing on."))
             return
         end
 
@@ -1767,7 +1774,7 @@ CN:RegisterCommand{
         local state, reason, detail = CN.Explain(CN.objectiveTypes.QUEST, questID)
 
         Print("Quest " .. questID .. " - " .. (Quests.GetName(questID, true) or "unknown name"))
-        Print("State: " .. state)
+        Print("State: " .. CN.StateLabel(state))
 
         if reason then
             Print("Reason: " .. reason .. (detail and (" (" .. detail .. ")") or ""))

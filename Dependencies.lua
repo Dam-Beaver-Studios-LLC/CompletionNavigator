@@ -114,9 +114,20 @@ function CN.RegisterQuestDataProvider(name, provider)
 
     CN.questDataProviders[name] = provider
 
+    -- A REPLACEMENT KEEPS ITS PLACE IN THE QUEUE.
+    --
+    -- Removing the row and minting a fresh sequence moved the provider to the
+    -- back of its priority band, which is the exact symptom the tiebreak was
+    -- added to prevent -- and it only happens on the path this release opened
+    -- up. An addon that re-registers to swap in a better implementation must
+    -- not thereby hand over which addon supplies a quest's name.
+    local heldSequence
+
     if replacing then
         for index = #CN.questDataOrder, 1, -1 do
             if CN.questDataOrder[index].name == name then
+                heldSequence = CN.questDataOrder[index].sequence or heldSequence
+
                 table.remove(CN.questDataOrder, index)
             end
         end
@@ -131,12 +142,16 @@ function CN.RegisterQuestDataProvider(name, provider)
     -- provider supplies a quest's name or coordinates. Tie-break on
     -- registration order, which is deterministic and is what the priorities
     -- were expressing in the first place.
-    CN.questDataSequence = (CN.questDataSequence or 0) + 1
+    if not heldSequence then
+        CN.questDataSequence = (CN.questDataSequence or 0) + 1
+
+        heldSequence = CN.questDataSequence
+    end
 
     table.insert(CN.questDataOrder, {
         name     = name,
         priority = provider.priority or 100,
-        sequence = CN.questDataSequence,
+        sequence = heldSequence,
     })
 
     table.sort(CN.questDataOrder, function(a, b)
@@ -305,17 +320,26 @@ end
 
 function CN.Explain(objectiveType, id)
     if CN.IsIgnored(objectiveType, id) then
-        return CN.objectiveStates.IGNORED, "Ignored by user", nil
+        return CN.objectiveStates.IGNORED,
+            "you ignored this -- /cn unhide " .. tostring(id) .. " restores it",
+            nil
     end
 
     if CN.IsDeferred(objectiveType, id) then
-        return CN.objectiveStates.DEFERRED, "Deferred by user", nil
+        return CN.objectiveStates.DEFERRED,
+            "you deferred this -- /cn unhide " .. tostring(id)
+            .. " restores it now", nil
     end
 
     local checker = CN.eligibilityCheckers[objectiveType]
 
     if not checker then
-        return CN.objectiveStates.UNKNOWN, "No eligibility checker registered for " .. tostring(objectiveType), nil
+        -- NOT "no eligibility checker registered for CURRENCY", which names
+        -- a registry the player has never heard of and cannot act on.
+        return CN.objectiveStates.UNKNOWN,
+            "this addon cannot check whether "
+            .. string.lower(CN.TypeLabel(objectiveType))
+            .. " are still available", nil
     end
 
     return checker(id)

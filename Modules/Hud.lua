@@ -452,7 +452,7 @@ CN:RegisterCommand{
             Hud.SetEnabled(not Hud.IsEnabled())
         end
 
-        Print("Heads-up display: " .. CN.YesNo(Hud.IsEnabled()))
+        Print("Heads-up line: " .. CN.YesNo(Hud.IsEnabled()))
 
         if Hud.IsEnabled() then
             Print("|cff8a8f96Drag it where you want it.|r")
@@ -469,7 +469,7 @@ CN:RegisterCommand{
         local scale = tonumber(CN.Trim(args or ""))
 
         if not scale then
-            Print("Scale: " .. Hud.Scale())
+            Print(string.format("Size: %.2f", Hud.Scale()))
             Print("|cff8a8f96Usage: /cn scale 1.25|r")
             return
         end
@@ -531,10 +531,16 @@ CN:RegisterCommand{
             -- Turning it off forgets what it was holding. Leaving the term
             -- behind means turning the setting back on later silently applies
             -- a filter the player typed in another session.
-            local ui = CN:GetModule("UI")
-
-            if ui then
-                ui.persistedFilter = nil
+            -- `CN.UI`, NOT `CN:GetModule("UI")`.
+            --
+            -- UI.lua publishes itself as `CN.UI` (UI.lua:24) and never calls
+            -- `RegisterModule`, so the lookup returned nil, the branch never
+            -- ran, and this command printed "a filter that persists invisibly
+            -- is how a list looks empty when it is not" while leaving exactly
+            -- that filter in memory. The checkbox path did it correctly, so
+            -- the setting worked from the window and not from the command.
+            if CN.UI then
+                CN.UI.persistedFilter = nil
             end
 
             Print("|cff8a8f96Off is the safer default: a filter that persists "
@@ -559,7 +565,7 @@ CN:RegisterCommand{
             Preferences().cues = (not Preferences().cues) or nil
         end
 
-        Print("Completion cues: " .. CN.YesNo(Preferences().cues))
+        Print("Sound when you clear a stop: " .. CN.YesNo(Preferences().cues))
     end,
 }
 

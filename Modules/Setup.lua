@@ -164,7 +164,7 @@ function Setup.Report(results)
         if result.ok then
             scanned = scanned + 1
 
-            Print("  " .. result.label .. ": "
+            CN.PrintLine(result.label .. ": "
                 .. (type(result.value) == "number" and result.value or "done"))
         elseif result.error == "module not loaded" then
             -- "UNAVAILABLE" AND "IT THREW" ARE DIFFERENT STATEMENTS.
@@ -175,13 +175,13 @@ function Setup.Report(results)
             -- nothing to report.
             absent = absent + 1
 
-            Print("  " .. result.label
-                .. ": |cff8a8f96not available on this client|r")
+            CN.PrintLine(result.label .. ": "
+                .. CN.Muted("not available on this client"))
         else
             broke = broke + 1
 
-            Print("  " .. result.label .. ": |cffe2564cfailed: "
-                .. tostring(result.error) .. "|r")
+            CN.PrintLine(result.label .. ": "
+                .. CN.Bad("failed: " .. tostring(result.error)))
         end
     end
 
@@ -410,10 +410,12 @@ function Setup.RemindOutstanding()
 
     account.outstandingRemindedAt = time()
 
-    Print("Completion Navigator cannot see everything yet:")
+    -- `CN.Print` ALREADY PREFIXES THE ADDON'S NAME, so this rendered as
+    -- "Completion Navigator: Completion Navigator cannot see everything yet:".
+    Print("There are things it still cannot see:")
 
     for _, line in ipairs(lines) do
-        Print("  |cffffc74f" .. line .. "|r")
+        CN.PrintLine(CN.Accent(line))
     end
 
     return true

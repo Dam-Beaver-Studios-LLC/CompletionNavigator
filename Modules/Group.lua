@@ -149,6 +149,161 @@ Group.instancedTypes = {
 -- pretending the player can act on it this second.
 Group.deadPenalty = 0.2
 
+------------------------------------------------------------
+-- WORK THE GROUP SHARES
+------------------------------------------------------------
+
+-- THE OTHER HALF OF PARTY AWARENESS, WHICH WAS NEVER BUILT.
+--
+-- The addon has known since 0.44.0 that you are in a group and has used that
+-- to stop offering solo detours mid-dungeon. It has never used it for the
+-- thing a group is actually for: four people standing in a zone, and one of
+-- the six quests on the list is one all four of them are carrying.
+--
+-- That one is worth four times the work of a quest only you have, and every
+-- player already knows it -- it is why people say "anyone else need Bloodfen?"
+-- out loud. The addon had the information and said nothing.
+--
+-- LOCAL ONLY, WHICH IS THE WHOLE DESIGN. `C_QuestLog.IsUnitOnQuest` answers
+-- from your own client about a unit already in your group. Nothing is sent,
+-- no protocol is agreed, no other machine has to be running this addon, and
+-- it degrades to silence outside a group. The DECLINED backlog item is
+-- addon-to-addon route sharing; this is not that.
+Group.sharedBonusPerMember = 0.12
+Group.sharedBonusCap       = 0.45
+
+-- HELD ACROSS RANKING PASSES, NOT WITHIN ONE.
+--
+-- The first version keyed this on `CN.rankingGeneration`, which is bumped by
+-- `InvalidateRanking` -- the very thing that triggers a re-rank. So the cache
+-- was cleared at exactly the moment it would have been used, and every pass
+-- asked the client afresh: measured at 8,151 `IsUnitOnQuest` calls and 7.2 ms
+-- for one pass over two hundred candidates in a forty-person raid, against a
+-- 0.4 ms budget for `Recommend(25)`.
+--
+-- The answer changes when the ROSTER changes or when somebody accepts or
+-- turns in a quest, and both of those already announce themselves. So the
+-- cache lives until one of them does.
+local sharedCache = {}
+local unitCache   = nil
+
+function Group.ForgetShared()
+    sharedCache = {}
+    unitCache   = nil
+end
+
+-- The unit tokens of the rest of the group, in the order the client lists
+-- them. Empty when solo, which is what makes every path below free.
+-- Built once per roster rather than once per candidate. This was called
+-- before the cache lookup, so a forty-person raid allocated a forty-entry
+-- table and forty concatenated strings for every objective on every pass --
+-- 8,400 transient strings per ranking, for a list that changes when somebody
+-- joins or leaves.
+function Group.Units()
+    if unitCache then
+        return unitCache
+    end
+
+    local size = Group.Size()
+
+    if size < 2 then
+        unitCache = {}
+
+        return unitCache
+    end
+
+    local units = {}
+
+    if Group.InRaid() then
+        for index = 1, math.min(size, 40) do
+            table.insert(units, "raid" .. index)
+        end
+    else
+        for index = 1, math.min(size - 1, 4) do
+            table.insert(units, "party" .. index)
+        end
+    end
+
+    unitCache = units
+
+    return units
+end
+
+-- How many OTHER people in your group are on this quest.
+--
+-- Nil rather than zero when the question cannot be asked -- solo, or a client
+-- without the API -- because "nobody else needs this" and "there is nobody
+-- else" are different statements and only one of them should reach the
+-- scorer.
+function Group.SharedWith(questID)
+    questID = CN.ToID(questID)
+
+    if not questID then
+        return nil
+    end
+
+    if not C_QuestLog or not C_QuestLog.IsUnitOnQuest then
+        return nil
+    end
+
+    local units = Group.Units()
+
+    if #units == 0 then
+        return nil
+    end
+
+    local held = sharedCache[questID]
+
+    if held ~= nil then
+        return held
+    end
+
+    local sharing = 0
+
+    for _, unit in ipairs(units) do
+        -- Not the player themselves: `raid1` may be you.
+        local isSelf = UnitIsUnit and UnitIsUnit(unit, "player")
+
+        if not isSelf then
+            local ok, onIt = pcall(C_QuestLog.IsUnitOnQuest, unit, questID)
+
+            if ok and onIt then
+                sharing = sharing + 1
+            end
+        end
+    end
+
+    sharedCache[questID] = sharing
+
+    return sharing
+end
+
+CN.RegisterScoreAdjuster("GroupShared", function(objective, score)
+    if not objective or objective.type ~= CN.objectiveTypes.QUEST then
+        return score
+    end
+
+    local sharing = Group.SharedWith(objective.id)
+
+    -- WITHDRAWN FIRST, like every other adjuster reason in this addon. A
+    -- party member logging out has to take their sentence with them, and the
+    -- objectives it was stamped on outlive the group.
+    if not sharing or sharing <= 0 then
+        CN.ClearAdjusterReason(objective, "groupShared")
+
+        return score
+    end
+
+    local bonus = math.min(Group.sharedBonusCap,
+        sharing * Group.sharedBonusPerMember)
+
+    CN.AddAdjusterReason(objective, "groupShared",
+        sharing == 1 and "one other person here is on this quest"
+        or (sharing .. " others here are on this quest"))
+
+    return score * (1 + bonus)
+end)
+
 CN.RegisterScoreAdjuster("Group", function(objective, score)
     local situation = Group.Situation()
 
@@ -334,7 +489,19 @@ for _, event in ipairs({
     "GROUP_ROSTER_UPDATE", "PLAYER_ENTERING_WORLD",
 }) do
     CN:RegisterEvent(event, function()
+        Group.ForgetShared()
+
         CN.InvalidateRanking()
+    end)
+end
+
+-- AND WHEN SOMEBODY'S QUEST LOG CHANGES, which is the other thing that can
+-- change the answer. Held across ranking passes otherwise: the cache exists
+-- because a forty-person raid is forty client calls per quest, and clearing
+-- it on the event that triggers the re-rank would mean it never hit.
+for _, event in ipairs({ "QUEST_ACCEPTED", "QUEST_TURNED_IN" }) do
+    CN:RegisterEvent(event, function()
+        Group.ForgetShared()
     end)
 end
 

@@ -482,6 +482,13 @@ end
 
 Goals.zoneGeneration = 0
 
+-- What pinning something is worth, and what leading to something pinned is
+-- worth. Named rather than written into the arithmetic, so the decorator can
+-- take its own contribution back out again.
+Goals.goalPreference        = 8
+Goals.unlocksGoalPreference = 5
+Goals.zonePreference        = 2
+
 function Goals.Decorate(objective)
     if type(objective) ~= "table" or not objective.type or not objective.id then
         return objective
@@ -489,19 +496,42 @@ function Goals.Decorate(objective)
 
     local store = Store()
 
+    -- NOTHING PINNED MEANS NOTHING PINNED, INCLUDING WHAT WAS.
+    --
+    -- Returning early here left the last pin's preference and sentence on
+    -- every cached objective it had ever been stamped on -- so `/cn goal
+    -- remove` took the goal out of the list and left its weighting behind.
     if not store or next(store) == nil then
-        return objective
+        return Goals.Withdraw(objective)
     end
 
     -- 1. It IS a goal.
     if Goals.IsGoal(objective.type, objective.id) then
-        objective.userPreference = (objective.userPreference or 0) + 8
+        -- SET, NEVER ADD TO ITSELF.
+        --
+        -- This read the field and incremented it, which was harmless only
+        -- while every rebuild produced fresh objective tables. Since 0.55.0
+        -- repaired the unchanged-provider shortcut, a provider's tables are
+        -- REUSED across rebuilds -- so a pinned goal's preference compounded
+        -- by eight on every rebuild, without bound: 8, 16, 24, 32. After
+        -- twenty quest turn-ins the goal outweighed everything else on the
+        -- list by thirty to one, `/cn next` returned it and nothing could
+        -- ever displace it -- including a world boss about to despawn -- and
+        -- `/cn breakdown` showed the inflated number as though it were
+        -- deliberate. Only a reload cleared it.
+        --
+        -- `goalPreference` records what this decorator contributed, so the
+        -- contribution can be replaced rather than repeated, and so a
+        -- provider's own preference underneath it survives.
+        local own = (objective.userPreference or 0)
+            - (objective.goalPreference or 0)
 
-        if not objective.isGoal then
-            objective.isGoal  = true
-            objective.reasons = objective.reasons or {}
-            table.insert(objective.reasons, "this is one of your goals")
-        end
+        objective.goalPreference = Goals.goalPreference
+        objective.userPreference = own + Goals.goalPreference
+
+        objective.isGoal = true
+
+        CN.AddDecoratorReason(objective, "goal", "this is one of your goals")
 
         return objective
     end
@@ -518,9 +548,17 @@ function Goals.Decorate(objective)
                     or tonumber(tostring(unlocked):match(":(%d+)$"))
 
                 if unlockedID and Goals.IsGoal(CN.objectiveTypes.QUEST, unlockedID) then
-                    objective.userPreference = (objective.userPreference or 0) + 5
-                    objective.reasons = objective.reasons or {}
-                    table.insert(objective.reasons, "unlocks a goal")
+                    -- Same rule as above: replace this decorator's own
+                    -- contribution rather than adding to it again.
+                    local own = (objective.userPreference or 0)
+                        - (objective.goalPreference or 0)
+
+                    objective.goalPreference = Goals.unlocksGoalPreference
+                    objective.userPreference = own
+                        + Goals.unlocksGoalPreference
+
+                    CN.AddDecoratorReason(objective, "goal",
+                        "unlocks a goal")
 
                     return objective
                 end
@@ -546,13 +584,44 @@ function Goals.Decorate(objective)
         local zones = GoalZones()
 
         if zones[objective.mapID] then
-            objective.userPreference = (objective.userPreference or 0) + 2
-            objective.reasons = objective.reasons or {}
-            table.insert(objective.reasons, "in the same zone as a goal")
+            local own = (objective.userPreference or 0)
+                - (objective.goalPreference or 0)
+
+            objective.goalPreference = Goals.zonePreference
+            objective.userPreference = own + Goals.zonePreference
+
+            CN.AddDecoratorReason(objective, "goal",
+                "in the same zone as a goal")
 
             return objective
         end
     end
+
+    -- None of the three applied, so anything a previous pass stamped is no
+    -- longer true.
+    return Goals.Withdraw(objective)
+end
+
+-- Takes back everything this decorator contributed, so an objective that
+-- stops being a goal -- or stops leading to one -- stops carrying its weight
+-- and its sentence. Every adjuster in this addon has done this since 0.51.0;
+-- the decorators did not, because until 0.55.0 their tables were thrown away
+-- between passes and the question never arose.
+function Goals.Withdraw(objective)
+    if type(objective) ~= "table" then
+        return objective
+    end
+
+    if objective.goalPreference then
+        objective.userPreference = (objective.userPreference or 0)
+            - objective.goalPreference
+
+        objective.goalPreference = nil
+    end
+
+    objective.isGoal = nil
+
+    CN.ClearDecoratorReason(objective, "goal")
 
     return objective
 end

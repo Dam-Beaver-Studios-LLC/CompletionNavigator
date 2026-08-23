@@ -201,11 +201,9 @@ mutate "Modules/Sets.lua" \
 # UI/List.lua loads after UI.lua and a local captured there is nil forever.
 mutate "UI.lua" \
     "        panel.list = UI.CreateList(panel)
-        panel.list:ClearAllPoints()
-        panel.list:SetPoint(\"TOPLEFT\", panel.why, \"BOTTOMLEFT\", -4, -14)" \
+        panel.list.emptyText = \"Nothing actionable is known yet. /cn setup reads everything the client will answer for.\"" \
     "        panel.list = CreateList(panel)
-        panel.list:ClearAllPoints()
-        panel.list:SetPoint(\"TOPLEFT\", panel.why, \"BOTTOMLEFT\", -4, -14)" \
+        panel.list.emptyText = \"Nothing actionable is known yet. /cn setup reads everything the client will answer for.\"" \
     "a tab builder calls the list constructor as a global"
 
 # The two caches added in 0.46.0, after measuring them at realistic scale. A
@@ -415,12 +413,16 @@ mutate "Modules/Hud.lua" \
     "the options-panel registration indexes a local function"
 
 mutate "Scoring.lua" \
-    "    if objective.adjusterReasons[key] then
-        return false
-    end" \
-    "    if false then
-        return false
-    end" \
+    "    if held then
+        CN.ClearAdjusterReason(objective, key)
+    end
+
+    -- The text itself, not a boolean, so it can be taken back out again --
+    -- see CN.ClearAdjusterReason.
+    objective.adjusterReasons[key] = text" \
+    "    -- The text itself, not a boolean, so it can be taken back out again --
+    -- see CN.ClearAdjusterReason.
+    objective.adjusterReasons[key] = text" \
     "an adjuster's reason is appended on every rescore"
 
 mutate "Database.lua" \
@@ -740,12 +742,16 @@ mutate "UI/List.lua" \
 ############################################################
 
 mutate "Modules/Session.lua" \
-    "    if elapsed < Session.minimumWorkSeconds then
-        elapsed = Session.minimumWorkSeconds
-    end" \
-    "    if elapsed < Session.minimumWorkSeconds then
-        return nil
-    end" \
+    "        if span > Session.instantSpanSeconds then
+            return nil
+        end
+
+        elapsed = Session.minimumWorkSeconds" \
+    "        if span > Session.instantSpanSeconds then
+            return nil
+        end
+
+        return nil" \
     "a fast objective is discarded instead of floored"
 
 mutate "Modules/Preference.lua" \
@@ -822,9 +828,202 @@ mutate "Scoring.lua" \
     "a decorated reason defeats the unchanged-provider shortcut"
 
 mutate "UI.lua" \
-    "    UI.SelectTab(UI.RememberedTabIndex() or UI.selectedTab or 1)" \
-    "    UI.SelectTab(UI.selectedTab or UI.RememberedTabIndex() or 1)" \
-    "rebuilding the tab strip prefers a stale index over the remembered name"
+    "        CN.Settings().selectedTabName = tab.name" \
+    "        CN.Settings().selectedTabName = nil" \
+    "the remembered tab name is not recorded"
+
+
+############################################################
+# 0.56.0
+############################################################
+
+mutate "Modules/Session.lua" \
+    "        travelKnown = objective.travelCost < ceiling" \
+    "        travelKnown = true" \
+    "a journey estimate that hit its ceiling is subtracted anyway"
+
+mutate "Modules/Session.lua" \
+    "        if span > Session.instantSpanSeconds then" \
+    "        if false then" \
+    "a stale journey estimate flattens a real sample to the floor"
+
+mutate "Scoring.lua" \
+    "                    if existing.mergedReasons then" \
+    "                    if false then" \
+    "a merged reason is never withdrawn, so a quest collects contradictions"
+
+mutate "Scoring.lua" \
+    "            if objective.decorated and objective.providerReasons then" \
+    "            if false then" \
+    "a reused table absorbs the last pass's decorator sentences"
+
+mutate "Modules/Harvest.lua" \
+    "    if objective.unlockGeneration == Harvest.unlockGeneration then
+        return
+    end" \
+    "    if objective.unlockValue ~= nil then
+        return
+    end" \
+    "an unlock count is frozen for the session"
+
+mutate "Modules/Group.lua" \
+    "        local isSelf = UnitIsUnit and UnitIsUnit(unit, \"player\")" \
+    "        local isSelf = false" \
+    "you are counted as somebody else on your own quest"
+
+mutate "Modules/Group.lua" \
+    "    if not sharing or sharing <= 0 then
+        CN.ClearAdjusterReason(objective, \"groupShared\")
+
+        return score
+    end" \
+    "    if not sharing or sharing <= 0 then
+        return score
+    end" \
+    "a sentence about a group you have left is never withdrawn"
+
+mutate "Modules/Group.lua" \
+    "    if #units == 0 then
+        return nil
+    end" \
+    "    if #units == 0 then
+        return 0
+    end" \
+    "solo reads as nobody-else-needs-this rather than as nobody-else"
+
+mutate "Modules/Inventory.lua" \
+    "    character.bank = character.bank or {}
+
+    return character.bank" \
+    "    return CN.Account(\"bank\")" \
+    "every alt reads the main's bank as its own"
+
+mutate "Modules/Harvest.lua" \
+    "    if held <= (Harvest.cap + Harvest.pruneSlack) then" \
+    "    if held <= Harvest.cap then" \
+    "the harvest sorts its whole store on every capture at the ceiling"
+
+mutate "Dependencies.lua" \
+    "                heldSequence = CN.questDataOrder[index].sequence or heldSequence" \
+    "                heldSequence = nil" \
+    "a provider that re-registers loses its place in the queue"
+
+mutate "Commands.lua" \
+    "            .. table.concat(definition.aliases or {}, \" \") .. \" \"" \
+    "            .. \" \"" \
+    "the help search cannot find a command by its alias"
+
+mutate "UI/List.lua" \
+    "        if #entries == 0 then
+            local row = self:GetRow(1)" \
+    "        if false then
+            local row = self:GetRow(1)" \
+    "an empty tab draws nothing at all"
+
+mutate "Modules/Hud.lua" \
+    "            if CN.UI then
+                CN.UI.persistedFilter = nil
+            end" \
+    "            if false then
+                CN.UI.persistedFilter = nil
+            end" \
+    "keepfilter off leaves the filter it says it forgot"
+
+mutate "Objectives.lua" \
+    "    return CN.stateLabels[state] or string.lower(tostring(state))" \
+    "    return tostring(state)" \
+    "the state enum is printed to the player"
+
+mutate "Database.lua" \
+    "        if db.characters == nil then
+            db.characters = {}
+        end
+
+        if type(db.characters) ~= \"table\" then
+            error(\"db.characters is a \" .. type(db.characters)
+                .. \", not a table -- refusing to replace it\")
+        end" \
+    "        if type(db.characters) ~= \"table\" then
+            db.characters = {}
+        end" \
+    "a corrupt characters table is silently replaced with an empty one"
+
+
+mutate "Modules/Goals.lua" \
+    "        objective.goalPreference = Goals.goalPreference
+        objective.userPreference = own + Goals.goalPreference" \
+    "        objective.goalPreference = Goals.goalPreference
+        objective.userPreference = (objective.userPreference or 0)
+            + Goals.goalPreference" \
+    "a pinned goal's preference compounds on every rebuild"
+
+mutate "Modules/Goals.lua" \
+    "    if not store or next(store) == nil then
+        return Goals.Withdraw(objective)
+    end" \
+    "    if not store or next(store) == nil then
+        return objective
+    end" \
+    "unpinning every goal leaves their weighting behind"
+
+mutate "Scoring.lua" \
+    "                objective.decoratorReasons = nil
+                objective.adjusterReasons  = nil" \
+    "                objective.decoratorReasons = objective.decoratorReasons
+                objective.adjusterReasons  = objective.adjusterReasons" \
+    "a rolled-back reason can never be said again"
+
+mutate "Scoring.lua" \
+    "    if held then
+        CN.ClearAdjusterReason(objective, key)
+    end" \
+    "    if held then
+        return false
+    end" \
+    "a reason carrying a number freezes at the first number"
+
+mutate "Scoring.lua" \
+    "                    existing.completionValue = existing.ownCompletionValue" \
+    "                    existing.ownCompletionValue = existing.completionValue" \
+    "a value another provider contributed is never given back"
+
+mutate "Modules/Harvest.lua" \
+    "    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+
+    if CN.InvalidateCandidates then
+        CN.InvalidateCandidates()
+    end" \
+    "    if false then
+        CN.InvalidateCandidates()
+    end" \
+    "a harvested unlock never reaches the ranking"
+
+mutate "Modules/Inventory.lua" \
+    "        if answered[bag] then
+            held[bag] = {}
+        end" \
+    "        if true then
+            held[bag] = {}
+        end" \
+    "a bank tab the client stops describing is emptied"
+
+mutate "Modules/Session.lua" \
+    "        if travelKnown and (not held.known or travelSeconds < held.travel) then" \
+    "        if false then" \
+    "the journey estimate is frozen at the first sighting"
+
+mutate "Modules/Group.lua" \
+    "    local held = sharedCache[questID]
+
+    if held ~= nil then
+        return held
+    end" \
+    "    local held = nil
+
+    if held ~= nil then
+        return held
+    end" \
+    "the shared-quest answer is asked of the client once per candidate"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

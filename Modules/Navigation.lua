@@ -1263,6 +1263,12 @@ CN:RegisterCommand{
 
         if type(failure) == "table" then
             Print(CN.Bad("Your saved data did not finish upgrading."))
+
+            if CN.db and CN.db.rescuedCharacters ~= nil then
+                Print("  " .. CN.Muted("Your character records were the "
+                    .. "wrong shape and have been set aside rather than "
+                    .. "replaced -- nothing was destroyed."))
+            end
             Print("  " .. CN.Muted("step " .. tostring(failure.version)
                 .. ": " .. tostring(failure.error)))
             Print("  " .. CN.Muted("Everything above is read from that data. "
@@ -1607,8 +1613,16 @@ CN:RegisterCommand{
             return
         end
 
+        -- THE MAP ID, WHICH IS THE ONE THING THIS COMMAND WAS ASKED FOR AND
+        -- DID NOT SAY.
+        --
+        -- `/cn setloc <questID> <mapID> <x> <y>` pointed players here to find
+        -- a map id, and here printed the zone's NAME -- so the advice was a
+        -- loop, and the fallback was `/dump C_Map.GetBestMapForUnit`.
         Print("You are in " .. tostring(Blizzard.GetMapName(mapID))
-            .. (x and y and string.format(" at %.1f, %.1f", x * 100, y * 100) or ""))
+            .. CN.Muted(" (map " .. tostring(mapID) .. ")")
+            .. (x and y and string.format(" at %.1f, %.1f", x * 100, y * 100)
+                or ""))
 
         if not target then
             Print("Nothing is being tracked.")

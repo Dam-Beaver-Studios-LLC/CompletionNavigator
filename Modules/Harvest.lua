@@ -44,6 +44,21 @@ end
 -- larger.
 Harvest.cap = 2000
 
+-- HYSTERESIS, WHICH IS NOT OPTIONAL AT THE CEILING.
+--
+-- "Count before allocating" fixed the case below the cap and did nothing at
+-- it: once the store holds `cap + 1` rows, EVERY capture builds a 2001-row
+-- array and sorts it to drop exactly one row -- and `Capture` runs in a loop
+-- over the whole quest log at login. Measured: 82 ms of blocked frames for
+-- forty captures, against 1.6 ms below the cap. It also threw away the unlock
+-- inversion forty times in the process.
+--
+-- Let it overshoot by a tenth, then prune back to the cap. One sort per two
+-- hundred captures instead of one per capture, for two hundred rows of slack
+-- on a store that holds two thousand. `Session.offerMemoryCap` has had this
+-- since 0.28.0 for the same reason.
+Harvest.pruneSlack = 200
+
 -- AND THE EVICTION ORDER WAS BACKWARDS FOR THE PLAYER MOST LIKELY TO HIT IT.
 --
 -- It dropped the lowest quest ids, on the reasoning that a low id is old
@@ -78,7 +93,7 @@ function Harvest.Prune()
         held = held + 1
     end
 
-    if held <= Harvest.cap then
+    if held <= (Harvest.cap + Harvest.pruneSlack) then
         return 0
     end
 
@@ -797,8 +812,25 @@ local unlockIndex, unlockIndexGeneration
 -- everything else in the zone on its own.
 Harvest.unlockCap = 6
 
+-- AND SAY SO LOUDLY ENOUGH THAT SOMETHING ACTUALLY REDECORATES.
+--
+-- Bumping the counter was the whole of this, and the decorator only consults
+-- the counter if `Decorate` runs at all -- which the unchanged-provider
+-- shortcut skips, which is the normal case. So the count the release claims
+-- to have unfrozen stayed frozen: the guard was correct and unreachable.
+--
+-- `CN.decoratorGeneration` is exactly the hook. The reuse condition requires
+-- `entry.decorated == CN.decoratorGeneration`, so bumping it makes every
+-- provider re-decorate on its next rebuild, and invalidating the candidates
+-- makes that rebuild happen.
 function Harvest.NoteUnlocksChanged()
     Harvest.unlockGeneration = Harvest.unlockGeneration + 1
+
+    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+
+    if CN.InvalidateCandidates then
+        CN.InvalidateCandidates()
+    end
 end
 
 function Harvest.UnlockIndex()
@@ -861,13 +893,29 @@ CN.RegisterCandidateDecorator("Unlocks", function(objective)
 
     -- A provider that has its own opinion keeps it. This fills a gap; it does
     -- not overrule anybody.
-    if objective.unlockValue ~= nil then
+    if objective.unlockValue ~= nil and objective.unlockGeneration == nil then
         return
     end
+
+    -- MEASURED AGAINST THE GENERATION, NOT AGAINST NIL.
+    --
+    -- A plain "already set, leave it" froze the first answer for the session:
+    -- since 0.55.0 a provider's tables are REUSED across rebuilds, so the
+    -- objective carrying a count of two still carried two after ten more
+    -- quests were harvested behind it -- on a weight-1.5 term, with `/cn why`
+    -- stating a number the addon knew was wrong.
+    if objective.unlockGeneration == Harvest.unlockGeneration then
+        return
+    end
+
+    objective.unlockGeneration = Harvest.unlockGeneration
+    objective.unlockValue      = nil
 
     local count = Harvest.UnlockCount(objective.id)
 
     if count <= 0 then
+        CN.ClearDecoratorReason(objective, "unlocks")
+
         return
     end
 
@@ -875,9 +923,11 @@ CN.RegisterCandidateDecorator("Unlocks", function(objective)
     -- `CN.scoreWeights` means what it says.
     objective.unlockValue = math.min(1, count / Harvest.unlockCap)
 
-    objective.reasons = objective.reasons or {}
-
-    table.insert(objective.reasons, count == 1
+    -- Through the keyed mechanism, so the sentence is REPLACED when the count
+    -- changes and WITHDRAWN when it goes to zero -- rather than appended to
+    -- once per rebuild, which is what an unkeyed insert does now that tables
+    -- are reused.
+    CN.AddDecoratorReason(objective, "unlocks", count == 1
         and "one quest you have seen comes after this one"
         or (count .. " quests you have seen come after this one"))
 end)

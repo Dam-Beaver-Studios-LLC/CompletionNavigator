@@ -58,28 +58,35 @@ end
 -- Four, because five is a menu and three leaves out collecting or levelling,
 -- which are the two most common answers. Each maps onto a focus that already
 -- exists rather than inventing new behaviour for the occasion.
+-- ONE SOURCE FOR WHAT A FOCUS IS CALLED AND WHAT IT DOES.
+--
+-- These carried their own `label` and `note`, and all four had drifted from
+-- `CN.modes` -- which is what the Settings tab, `/cn mode` and `/cn status`
+-- all read. Three of the four were merely different words for the same thing.
+-- The fourth was wrong: the first-run screen described Levelling as "Quests
+-- first, collections quiet", and `leveling.show` is `{ QUEST, EXPLORATION }`,
+-- which HIDES seventeen of the nineteen types. "Quiet" and "gone" are not the
+-- same promise, and this is the screen where the promise is made.
+--
+-- Names and descriptions come from `CN.modes` now. A mode renamed there is
+-- renamed here, and cannot say two things at once.
 Welcome.choices = {
-    {
-        mode  = "leveling",
-        label = "Levelling",
-        note  = "Quests first, collections quiet.",
-    },
-    {
-        mode  = "collecting",
-        label = "Collecting",
-        note  = "Mounts, pets, toys and appearances.",
-    },
-    {
-        mode  = "reputation",
-        label = "Reputation & renown",
-        note  = "Factions, paragon and renown tracks.",
-    },
-    {
-        mode  = "everything",
-        label = "A bit of everything",
-        note  = "Balanced. The default.",
-    },
+    { mode = "leveling" },
+    { mode = "collecting" },
+    { mode = "reputation" },
+    { mode = "everything" },
 }
+
+-- What the button says, and what the line under it says.
+function Welcome.Describe(mode)
+    local definition = CN.modes and CN.modes[mode]
+
+    if not definition then
+        return tostring(mode), nil
+    end
+
+    return definition.label or tostring(mode), definition.note
+end
 
 function Welcome.Choose(mode)
     Welcome.MarkSeen()
@@ -194,8 +201,10 @@ function Welcome.Build()
         local button = CreateFrame("Button", nil, frame,
             "UIPanelButtonTemplate")
 
+        local label = Welcome.Describe(choice.mode)
+
         button:SetSize(180, 24)
-        button:SetText(choice.label)
+        button:SetText(label)
 
         if index == 1 then
             button:SetPoint("TOPLEFT", 24, -140)
@@ -223,7 +232,21 @@ function Welcome.Build()
                     .. CN.Muted(" does that once."))
             end
 
-            CN.PrintBlock("Focus: " .. CN.Accent(mode)
+            -- THE LABEL THE PLAYER CLICKED, NOT THE TABLE KEY.
+            --
+            -- This printed `mode`, which is the internal key -- so clicking
+            -- the button marked "Reputation" answered "Focus: reputation",
+            -- and clicking "Levelling" answered "Focus: leveling", in
+            -- American spelling, in an addon that writes colour and
+            -- levelling everywhere else. `/cn mode` has always done this
+            -- correctly.
+            local chosenLabel, chosenNote = Welcome.Describe(mode)
+
+            if chosenNote then
+                table.insert(lines, 1, CN.Muted(chosenNote))
+            end
+
+            CN.PrintBlock("Focus: " .. CN.Accent(chosenLabel)
                 .. CN.Aside(CN.Accent("/cn mode off") .. " undoes it"), lines)
 
             frame:Hide()
@@ -236,8 +259,17 @@ function Welcome.Build()
     note:SetPoint("BOTTOMLEFT", 24, 46)
     note:SetPoint("BOTTOMRIGHT", -24, 46)
     note:SetJustifyH("LEFT")
-    note:SetText("Nothing is scanned, sent or changed until you ask. "
-        .. "This appears once.")
+    -- SAY WHAT IS ACTUALLY TRUE OF ALL THREE VERBS.
+    --
+    -- "Nothing is scanned, sent or changed until you ask" is exactly right
+    -- about scanning and sending, and a player will read it as covering the
+    -- third: preference learning is on by default and does quietly reweight
+    -- the ranking from what they go and do. Nothing leaves the machine, so
+    -- this is not a privacy defect -- it is a promise that needs one more
+    -- clause to stay true.
+    note:SetText("Nothing is scanned or sent until you ask. It does notice "
+        .. "which kinds of thing you go and do -- /cn learned shows what, and "
+        .. "undoes it. This appears once.")
 
     local dismiss = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     dismiss:SetSize(120, 22)
@@ -277,7 +309,7 @@ function Welcome.Show()
     -- No frame available -- a headless test, or a client that refuses to
     -- create one. Say the same thing in chat rather than silently doing
     -- nothing.
-    Print("Completion Navigator is installed. |cffffc74f/cn mode leveling|r, "
+    Print("Installed. |cffffc74f/cn mode leveling|r, "
         .. "|cffffc74fcollecting|r, |cffffc74freputation|r or just "
         .. "|cffffc74f/cn|r to begin.")
 
