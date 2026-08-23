@@ -120,7 +120,16 @@ function Harvest.Prune()
         store[rows[index].id] = nil
     end
 
-    Harvest.unlockGeneration = (Harvest.unlockGeneration or 0) + 1
+    -- THROUGH `NoteUnlocksChanged`, NOT BY TOUCHING THE COUNTER.
+    --
+    -- That function's own header explains why bumping `unlockGeneration`
+    -- alone is not enough: the Unlocks decorator only consults it if
+    -- `Decorate` runs at all, and the unchanged-provider shortcut skips
+    -- that. So after a prune dropped rows, quests kept an `unlockValue` --
+    -- weight 1.5, the second-heaviest term -- and a `/cn why` sentence
+    -- reading "4 quests you have seen come after this one", derived from
+    -- records that no longer existed.
+    Harvest.NoteUnlocksChanged()
 
     DebugPrint("Pruned " .. dropped .. " least-recently-seen harvested "
         .. "quest(s) over the ceiling.")
@@ -721,7 +730,7 @@ CN:RegisterCommand{
                 end
             end
 
-            Print("  " .. entry.name .. ": " .. status .. detail)
+            CN.PrintLine("  " .. entry.name .. ": " .. status .. detail)
         end
 
         Print("Waypoint providers:")
@@ -731,7 +740,7 @@ CN:RegisterCommand{
 
             local ok, isAvailable = pcall(provider.IsAvailable)
 
-            Print("  " .. entry.name .. ": "
+            CN.PrintLine("  " .. entry.name .. ": "
                 .. ((ok and isAvailable) and "|cff73b873available|r" or "|cff8a8f96unavailable|r"))
         end
     end,

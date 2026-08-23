@@ -413,6 +413,8 @@ Navigation.BuildArrow = BuildArrow
 -- brand blue, the accent gold and the bad red, which is what they always
 -- were; writing them out again is how the two drifted apart in the first
 -- place.
+-- CN_PALETTE_EXEMPT: UNKNOWN below is deliberately not a palette role -- it
+-- is the ABSENCE of a bearing and must not read as any of the three states.
 Navigation.colors = {
     ON_COURSE = CN.RGB.BRAND,
     DRIFTING  = CN.RGB.ACCENT,
@@ -438,6 +440,9 @@ Navigation.colors = {
 -- Chosen so that the three differ by at least 0.27 in relative luminance --
 -- checked by the suite, not by eye. Lightness is what survives when hue does
 -- not.
+-- CN_PALETTE_EXEMPT: this is an alternate palette by design, separated by
+-- luminance rather than by hue, and the suite checks that separation. Making
+-- it use the addon's own roles would delete the feature.
 Navigation.colorblindColors = {
     ON_COURSE = { 0.980, 0.980, 0.980 },   -- near-white, luminance 0.98
     DRIFTING  = { 0.400, 0.760, 1.000 },   -- light blue,  luminance 0.70
@@ -674,16 +679,48 @@ Navigation.motionMaxYards  = 60
 Navigation.motionAgree     = math.rad(25)
 Navigation.motionExclude   = math.rad(60)
 
+-- ARITHMETIC, NOT A LOOP.
+--
+-- `Navigation.RelativeBearing` was rewritten to use `CN.Mod` for exactly this
+-- reason, and its comment says so: "the loops were also unbounded: a
+-- non-finite bearing spins the client". This copy -- used by `Smooth()` on
+-- the arrow's ten-per-second ticker and by `SignFromMotion` -- was left
+-- behind. Every current input is bounded by `CN.Atan2` and
+-- `GetPlayerFacing`, so it is not reachable today; a hang the file's own rule
+-- forbids is not something to leave sitting on the hottest path in the addon
+-- waiting for a fifth caller.
+--
+-- `CN.Mod` is the floored modulo, so its range is [0, full) and the shift
+-- lands in [-pi, pi). The loops produced (-pi, pi], so exactly one input
+-- changes: a bearing of precisely pi now comes back as -pi. Both mean
+-- "directly behind you", every consumer takes `math.abs` of the difference,
+-- and the one that does not -- the easing in `Smooth` -- snaps rather than
+-- eases at a reversal of that size.
+--
+-- `Navigation.RelativeBearing` maps -pi back to +pi and so returns (-pi, pi],
+-- which is the opposite convention at that one point. Both are correct for
+-- their consumers and neither boundary is depended on; recording the
+-- difference here rather than claiming they agree, which an earlier draft of
+-- this comment did.
 local function Normalize(angle)
-    while angle > math.pi do
-        angle = angle - (2 * math.pi)
+    if type(angle) ~= "number" then
+        return 0
     end
 
-    while angle <= -math.pi do
-        angle = angle + (2 * math.pi)
+    -- A NaN survives every comparison and every arithmetic operation, so it
+    -- has to be caught by the one test it fails: equality with itself.
+    --
+    -- AND AN INFINITY, which is the case the first version still got wrong:
+    -- `CN.Mod(inf + pi, 2pi)` is `inf - inf`, which is NaN -- so the guard
+    -- that exists because "a non-finite bearing spins the client" passed one
+    -- straight through to `SetRotation`.
+    if angle ~= angle or angle == math.huge or angle == -math.huge then
+        return 0
     end
 
-    return angle
+    local full = 2 * math.pi
+
+    return CN.Mod(angle + math.pi, full) - math.pi
 end
 
 Navigation.NormalizeAngle = Normalize
@@ -1250,7 +1287,7 @@ CN:RegisterCommand{
         Print("Arrow diagnosis:")
 
         for _, row in ipairs(report) do
-            Print(string.format("  |cff8a8f96%-18s|r %s", row.label, row.value))
+            CN.PrintLine(string.format("  |cff8a8f96%-18s|r %s", row.label, row.value))
         end
 
         -- THE ONE THING THAT MAKES EVERY OTHER LINE HERE UNTRUSTWORTHY.
@@ -1600,7 +1637,7 @@ CN:RegisterCommand{
             local available = candidate and candidate.IsAvailable
                 and candidate.IsAvailable()
 
-            Print("  " .. entry.name .. " " .. CN.YesNo(available)
+            CN.PrintLine("  " .. entry.name .. " " .. CN.YesNo(available)
                 .. " |cff8a8f96priority " .. entry.priority .. "|r")
         end
     end,

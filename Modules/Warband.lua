@@ -268,12 +268,12 @@ CN:RegisterCommand{
         for _, row in ipairs(rows) do
             local marker = row.isCurrent and "|cff73b873>|r " or "  "
 
-            Print(marker .. row.key
+            CN.PrintLine(marker .. row.key
                 .. " |cff8a8f96" .. tostring(row.level) .. " "
                 .. tostring(row.class or "?")
                 .. (row.faction and (" " .. row.faction) or "") .. "|r")
 
-            Print("      professions " .. row.professions
+            CN.PrintLine("      professions " .. row.professions
                 .. ", recipes " .. row.recipes
                 .. ", titles " .. row.titles
                 .. ", reputations " .. row.reputations)
@@ -402,11 +402,25 @@ CN:RegisterCommand{
 --
 -- `CN.decoratorGeneration` is the hook that defeats the shortcut; Goals,
 -- Harvest and Session all use it for the same reason.
+--
+-- DEBOUNCED, because `UPDATE_FACTION` is in this list and it fires on nearly
+-- every reputation tick -- which this addon states in three other files, one
+-- of which gives its own provider a five-second cooldown for exactly this
+-- reason. Bumping `decoratorGeneration` on every tick turns the
+-- unchanged-provider shortcut permanently off while the player is questing,
+-- which is when they are gaining reputation continuously and also when they
+-- most want `/cn next` to be fast.
+-- Five seconds, matching the Reputations provider's own cooldown: the two
+-- are answering the same burst.
+Warband.rescanSeconds = 5
+
 for _, event in ipairs({
     "PLAYER_ENTERING_WORLD", "UPDATE_FACTION", "SKILL_LINES_CHANGED",
 }) do
     CN:RegisterEvent(event, function()
-        CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+        CN.Debounce("Warband.suitability", Warband.rescanSeconds, function()
+            CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+        end)
     end)
 end
 

@@ -427,7 +427,7 @@ CN:RegisterCommand{
                 line = line .. " |cffffc74f(recipes not captured)|r"
             end
 
-            Print(line)
+            CN.PrintLine(line)
         end
 
         local waiting = Professions.AwaitingRecipeCapture()
@@ -458,7 +458,7 @@ CN:RegisterCommand{
             local count = CN.CountKeys(character.recipes)
 
             if count > 0 then
-                Print("  " .. key .. ": " .. count .. " known")
+                CN.PrintLine("  " .. key .. ": " .. count .. " known")
             end
         end
     end,

@@ -117,7 +117,7 @@ function Broker.Install()
 
             if not asked then
                 tooltip:AddLine("Something went wrong; /cn errors has it.",
-                    0.96, 0.42, 0.38)
+                    CN.Rgb("BAD"))
                 return
             end
 

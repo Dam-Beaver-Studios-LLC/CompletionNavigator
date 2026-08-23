@@ -484,6 +484,70 @@ CN.migrations = {
         end
     end,
 
+    -- 12 -> 13. Three fields per discovered quest, all of them write-only.
+    --
+    -- `discoveredQuests[id]` held `{ firstSeen, lastSeen, source }` and every
+    -- reader in the tree -- the completion scan, the breakdown, the window,
+    -- `/cn queststatus` -- counts or iterates KEYS. On a mature account that
+    -- is tens of thousands of three-field tables rewritten in full on every
+    -- logout for information nothing has ever asked for.
+    --
+    -- Deliberately NOT capped, unlike the two stores beside it. `questPins`
+    -- and `questHarvest` have ceilings because a stale pin and a stale
+    -- ordering are worth less than a fresh one, so dropping the oldest loses
+    -- nothing. A discovery is not like that: the set is what "this account
+    -- has seen this quest offered" MEANS, the client will not re-supply it,
+    -- and a ceiling would quietly make `/cn queststatus` and the harvest
+    -- ordering answer a smaller question than the one asked. As booleans the
+    -- store is a fraction of its former size, and `/cn dbsize` reports it.
+    --
+    -- `questMetadata` loses the same way: `questID` duplicated the key it is
+    -- filed under, and `lastSeen` had no reader. `source` is kept -- it
+    -- decides which of two names wins.
+    [12] = function(db)
+        db.account = db.account or {}
+
+        local discovered = db.account.discoveredQuests
+
+        if type(discovered) == "table" then
+            local collapsed = 0
+
+            for questID, record in pairs(discovered) do
+                if type(record) == "table" then
+                    discovered[questID] = true
+                    collapsed = collapsed + 1
+                end
+            end
+
+            if collapsed > 0 then
+                CN.DebugPrint("Collapsed " .. collapsed .. " discovered quest "
+                    .. "record(s) to the one fact anything reads.")
+            end
+        end
+
+        local metadata = db.account.questMetadata
+
+        if type(metadata) == "table" then
+            local trimmed = 0
+
+            for _, record in pairs(metadata) do
+                if type(record) == "table"
+                    and (record.questID ~= nil or record.lastSeen ~= nil) then
+
+                    record.questID  = nil
+                    record.lastSeen = nil
+
+                    trimmed = trimmed + 1
+                end
+            end
+
+            if trimmed > 0 then
+                CN.DebugPrint("Dropped two write-only fields from "
+                    .. trimmed .. " quest name record(s).")
+            end
+        end
+    end,
+
     -- 7 -> 8. `questStatus` was a per-character fact kept in an account-wide
     -- table, which is two defects at once.
     --
@@ -628,12 +692,12 @@ local function Migrate(db)
 
                 CN.migrationFailure = db.migrationFailure
 
-                Print("Database migration " .. from .. " failed: " .. tostring(err))
+                CN.PrintLine("Database migration " .. from .. " failed: " .. tostring(err))
 
                 -- NOT "your data is unchanged". A migration that threw
                 -- part-way through has already rewritten some of it, which is
                 -- the whole reason this is worth telling anybody about.
-                Print("This step may have half-finished. Nothing further will "
+                CN.PrintLine("This step may have half-finished. Nothing further will "
                     .. "be upgraded until it succeeds. Run "
                     .. "|cffffc74f/cn navdiag|r for the details.")
 
@@ -1034,7 +1098,7 @@ CN:RegisterCommand{
 
         for _, row in ipairs(rows) do
             if row.bytes > 4096 and shown < 12 then
-                Print(string.format("  %-20s %6.0f KB  |cff8a8f96%d rows|r",
+                CN.PrintLine(string.format("  %-20s %6.0f KB  |cff8a8f96%d rows|r",
                     row.name, row.bytes / 1024, row.count))
 
                 shown = shown + 1

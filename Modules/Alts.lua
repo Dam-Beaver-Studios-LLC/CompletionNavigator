@@ -269,7 +269,7 @@ CN:RegisterCommand{
                 .. "|r")
 
             for _, item in ipairs(best.items) do
-                Print("  |cffffc74f" .. tostring(item.objective.name)
+                CN.PrintLine("  |cffffc74f" .. tostring(item.objective.name)
                     .. "|r |cff8a8f96" .. tostring(item.reason) .. "|r")
             end
         end
@@ -281,7 +281,7 @@ CN:RegisterCommand{
             local character = CN.db and CN.db.characters
                 and CN.db.characters[row.key]
 
-            Print(string.format("  %s%-18s|r %-4s %-10s |cff8a8f96%s|r",
+            CN.PrintLine(string.format("  %s%-18s|r %-4s %-10s |cff8a8f96%s|r",
                 row.isCurrent and "|cff73b873" or "|cfff2f4f6",
                 tostring(row.name),
                 tostring(row.level or "?"),

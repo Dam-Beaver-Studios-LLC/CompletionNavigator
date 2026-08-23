@@ -7,6 +7,146 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.59.0]
+
+The largest accuracy pass since 0.54.0. Six things the addon was getting
+quietly wrong, two of them in the ranking itself; a performance pass that
+removes work the addon was doing on every reputation tick; and the chat and
+window surfaces held to the rules the project already states about them.
+
+### Fixed
+
+- **Glancing at the next zone over took the batch bonus off the zone you were
+  standing in.** Batching was written onto the objective tables themselves,
+  which are shared, so the router had to clear it everywhere before stamping
+  this map's â€” and the map pins re-route on every world-map pan. The bonus is
+  worth up to three points, comparable to the entire range of an objective's
+  own value, and the route cache meant it could not come back: re-routing your
+  own zone returned a cached route whose hubs were still drawn as a group of
+  four while nothing in the ranking knew about them. Batching now belongs to
+  the router and describes exactly one map.
+- **Rares and treasures were priced by a formula nothing else used.** Straight
+  line, in map units, times ten â€” which asserts that a map unit is the same
+  number of yards north-south as east-west (the defect behind the arrow bug of
+  0.40.0, in a different file), that every zone is about 2,100 yards across,
+  and that you are on foot. They go through the travel model now, like quests,
+  vendors and everything else with a location. A rare the client will not place
+  was also priced at zero, which the addon reads as "you are standing on it".
+- **A quest with no location was cheaper than one you could see.** The quest
+  provider carried its own price for "no idea where this is" â€” 5, against the
+  8 the rest of the addon uses. And for a second or two after every loading
+  screen, when the client will not say where you are, every located quest in
+  your log was scored as though you were standing on top of it.
+- **A world event's deadline could be half an hour stale.** The countdown was
+  computed when the calendar was read and the list is held for thirty minutes,
+  so the addon printed "ends in 40m" about an event that finished ten minutes
+  ago â€” and the urgency weighting, whose steep ramp lives entirely inside the
+  last two hours, was fed that figure exactly where it matters most.
+- **A world event was filed under its translated name**, so ignoring one was
+  lost the day you changed client language, and two events sharing a title on
+  one day collapsed into a single row.
+- **Pruning the harvest store left quests carrying an unlock bonus** derived
+  from records that no longer existed â€” the second-heaviest term in the
+  ranking, and a `/cn why` sentence describing rows that had been deleted.
+- **`/cn plan 12.5` errored on one interpreter and lied on the other.** The
+  same class of defect as the two-argument `math.atan` bug of 0.43.1, with the
+  polarity reversed: the offline suite would have caught it if anything had
+  ever passed a fraction.
+- **The heads-up line named one thing and acted on another.** Its click and
+  right-click read a value only the window, `/cn next` and the minimap ever
+  set â€” so if you turned the line on and never opened the window, its tooltip
+  promised two actions and both did nothing, silently.
+- **Two Settings controls were drawn on top of two others**, including the
+  text-size button sitting on the "announce rares" checkbox and taking its
+  clicks. The same defect this file recorded as fixed for another pair four
+  releases ago, reintroduced by inserting two controls above the anchor.
+- **A search that matched nothing told you to run a scan.** On the Collections
+  tab a typo produced "Nothing scanned yet. Press Scan everything." â€” which
+  freezes the client for several seconds and leaves the list just as empty.
+- **"Clear waypoints" said nothing and left the map pins.** The button
+  discarded the answer to "did that work?", which the command form has always
+  reported, and its tooltip named pins it never removed.
+- **The Now tab said "daily in 4h left"**, on every visit, and "in unknown
+  time left" when the client would not answer.
+
+### Changed
+
+- **Nothing is re-decorated on a reputation tick.** Two handlers bumped the
+  one counter that defeats the addon's unchanged-provider shortcut, and
+  `UPDATE_FACTION` fires many times a second while you are questing â€” so the
+  shortcut was permanently off exactly when it was most needed. The first
+  event of a burst is still answered immediately; the rest collapse into one.
+- **Learning that is switched off now costs nothing.** The preference adjuster
+  asked the client whether each quest belonged to a campaign before checking
+  whether learning was enabled: measured at 130 protected calls per re-rank,
+  repeated on every re-rank, whether or not the feature was on. The answer
+  cannot change while the client is running, so it is worked out once per row.
+- **The route optimiser is 14% faster** on a ninety-stop zone, and its pruning
+  bound is now provably sound rather than empirically safe.
+- **The hearthstone is costed, once you have used one.** The client reports a
+  bind point as a localized inn name and the addon has no way to turn that into
+  a map â€” so the one teleport every player owns was listed and never priced.
+  It now notices where you land after a hearth and remembers it. Until that
+  happens the row says so rather than staying silently uncosted.
+- **The Scans tab says what its two odd rows mean.** Currencies and
+  professions report a different shape from the other six and came out blank â€”
+  on the tab whose header is "where every number comes from".
+- **Every row that does something carries a marker**, not two steps of
+  brightness â€” which is this addon's first rule, broken in the widget every
+  tab is built out of, and defeated entirely wherever a tab colours its whole
+  label.
+- **The Next tab's three buttons go dead when they cannot act.** On a fresh
+  install the first thing you see is "Nothing actionable yet" above three
+  live-looking buttons, and in the type-filter mode they acted on something
+  off screen.
+- **A checkbox's label is part of its hit area.** Twelve settings carried
+  their only explanation on a 24-pixel square, so hovering the words â€” the
+  obvious target â€” showed nothing.
+- **`/cn setup` says what each of its eleven numbers counted.** Three of them
+  count something other than the label: "Appearances: 17" was slot categories,
+  beside "Mounts: 1104". Its block also read bottom-up, with the headline
+  after the detail.
+- **Eighty-two answers stopped repeating the addon's name once per row**, and
+  the build check that was meant to catch that now sees the spelling the
+  codebase actually uses â€” it was matching `CN.Print(` while thirty files
+  alias it. `/cn help flat` said "Completion Navigator:" a hundred and
+  twenty-six times.
+- **The em dash got its spaces back** at thirteen places where a mechanical
+  replacement had removed them.
+- **The Journey tab's progress bars are real bars**, not runs of `=` and `-`
+  that got shorter as they filled, and its counts are in the value column with
+  every other tab's.
+- **Three tabs had an empty state that could never appear**, each shadowed by
+  a differently-worded row; the Zone tab now says the client has not placed you
+  yet rather than offering a button that cannot help.
+- **Answering the welcome screen no longer closes it**, which used to take the
+  scan button â€” the one thing on it that matters â€” with it.
+- **The Warband column says "titles" rather than "tit"**, matching the two
+  places on the same tab that spell it out.
+- **A discovered quest is one fact rather than three fields**, none of which
+  anything read, on a store that holds tens of thousands of rows on a mature
+  account. Deliberately still uncapped: unlike the two stores beside it, the
+  set IS the answer, and a ceiling would quietly make it a smaller one.
+
+### Internal
+
+- Three build-time checks added, each of which fails the build: no panel field
+  may be cleared to `nil` (a frame can answer for an absent key, which this
+  project has now shipped three defects of), no colour may be written as a
+  raw float triple in a table constructor, and the loop check above.
+- The offline frame stub now models an edit box losing focus, a font string
+  reporting its width, a client that will not say where the player is, a
+  calendar event with a real end time, and a hearthstone bind location. Five
+  more entries in the running list of defects hidden by a stub more forgiving
+  than the client â€” including the one that made the Next tab's main branch
+  unreachable offline for eleven releases.
+- Thirty-five mutations added; a hundred and ninety-five now run and all are
+  killed. One was removed with a written argument for why it is not a defect.
+- An adversarial review of this release's own changes found nine more defects
+  in them, two of which were regressions this release introduced. Both are
+  fixed and both have mutations.
+
+
 ## [0.58.0]
 
 A pass over the window, because the ranking has been the focus for four

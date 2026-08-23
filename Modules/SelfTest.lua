@@ -503,7 +503,7 @@ CN.RegisterSelfTest{
 
         if resolved == 0 then
             return FAIL, "the pet journal named none of "
-                .. checked .. "" .. CN.DASH .. "the interface will show numbers"
+                .. checked .. " " .. CN.DASH .. "the interface will show numbers"
         end
 
         return PASS, resolved .. " of " .. checked .. " named by the client"
@@ -528,7 +528,7 @@ CN.RegisterSelfTest{
         -- unresolved fault, and it outlives the failure record that produced
         -- it -- so it is reported on its own rather than under it.
         if CN.db.rescuedCharacters ~= nil then
-            return FAIL, "some saved data was set aside as unreadable" .. CN.DASH .. ""
+            return FAIL, "some saved data was set aside as unreadable" .. " " .. CN.DASH .. " "
                 .. "/cn rescued"
         end
 
@@ -628,7 +628,7 @@ CN.RegisterSelfTest{
         end
 
         if Blizzard.IsEncounterJournalOpen() then
-            return SKIP, "the Adventure Guide is open, so nothing was read" .. CN.DASH .. ""
+            return SKIP, "the Adventure Guide is open, so nothing was read" .. " " .. CN.DASH .. " "
                 .. "which is the intended behaviour, not a fault"
         end
 
@@ -664,7 +664,7 @@ CN:RegisterCommand{
             if check.area ~= area then
                 area = check.area
 
-                Print("|cffffc74f" .. area .. "|r")
+                CN.PrintLine("|cffffc74f" .. area .. "|r")
             end
 
             local colour = "|cff73b873"
@@ -675,10 +675,10 @@ CN:RegisterCommand{
                 colour = "|cff8a8f96"
             end
 
-            Print(string.format("  %s%-4s|r %s", colour, check.status, check.name))
+            CN.PrintLine(string.format("  %s%-4s|r %s", colour, check.status, check.name))
 
             if check.detail then
-                Print("        |cff8a8f96" .. check.detail .. "|r")
+                CN.PrintLine("        |cff8a8f96" .. check.detail .. "|r")
             end
         end
 

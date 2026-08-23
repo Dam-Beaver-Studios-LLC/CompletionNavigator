@@ -570,7 +570,7 @@ CN:RegisterCommand{
         for _, row in ipairs(Filters.ListIgnored()) do
             if tostring(row.id) == wanted then
                 if Filters.Restore(row.key) then
-                    Print("Restored: " .. row.name)
+                    CN.PrintLine("Restored: " .. row.name)
                     restored = restored + 1
                 end
             end
@@ -579,7 +579,7 @@ CN:RegisterCommand{
         for _, row in ipairs(Filters.ListDeferred()) do
             if tostring(row.id) == wanted then
                 if Filters.Restore(row.key) then
-                    Print("Restored: " .. row.name)
+                    CN.PrintLine("Restored: " .. row.name)
                     restored = restored + 1
                 end
             end
@@ -758,7 +758,7 @@ CN:RegisterCommand{
         for _, objectiveType in ipairs(Filters.TypeOrder()) do
             local enabled = Filters.IsTypeEnabled(objectiveType)
 
-            Print("  " .. CN.YesNo(enabled) .. " " .. Filters.TypeLabel(objectiveType)
+            CN.PrintLine("  " .. CN.YesNo(enabled) .. " " .. Filters.TypeLabel(objectiveType)
                 .. " |cff8a8f96" .. string.lower(objectiveType) .. "|r")
         end
 
@@ -858,7 +858,7 @@ CN:RegisterCommand{
         for _, key in ipairs(overridable) do
             local overridden = CN.IsOverridden(key)
 
-            Print("  " .. key .. " = " .. tostring(settings[key])
+            CN.PrintLine("  " .. key .. " = " .. tostring(settings[key])
                 .. (overridden
                     and " |cffffc74fthis character only|r"
                     or " |cff8a8f96account-wide|r"))

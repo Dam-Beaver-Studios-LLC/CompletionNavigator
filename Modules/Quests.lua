@@ -52,11 +52,12 @@ function Quests.SetMetadata(questID, name, source)
         return false
     end
 
+    -- `questID` duplicated the key this is filed under and `lastSeen` had no
+    -- reader; `source` decides which of two names wins, so it stays. The same
+    -- field migration 5 stripped from achievements, pets and toys.
     metadata[questID] = {
-        questID  = questID,
-        name     = name,
-        lastSeen = time(),
-        source   = source,
+        name   = name,
+        source = source,
     }
 
     return true
@@ -115,11 +116,14 @@ function Quests.RecordDiscovered(questID, source)
     local discovered = CN.Account("discoveredQuests")
     local existing   = discovered[questID]
 
-    discovered[questID] = {
-        firstSeen = existing and existing.firstSeen or time(),
-        lastSeen  = time(),
-        source    = source or (existing and existing.source) or "manual",
-    }
+    -- ONE FACT, WHICH IS ALL ANYTHING EVER READ.
+    --
+    -- This stored `{ firstSeen, lastSeen, source }`, and every reader in the
+    -- tree -- the completion scan, the breakdown, the window, the two
+    -- commands -- counts or iterates keys. Three fields per row, rewritten in
+    -- full on every logout, for information nothing has ever asked for. See
+    -- migration 12.
+    discovered[questID] = true
 
     if not existing then
         DebugPrint("Discovered quest " .. questID .. " (" .. tostring(source or "manual") .. ").")
@@ -436,15 +440,15 @@ CN:RegisterCommand{
         if args ~= "" then
             for _, zone in ipairs(zones) do
                 if zone.name and string.lower(zone.name):find(string.lower(args), 1, true) then
-                    Print(zone.name .. ": " .. zone.count .. " left behind")
+                    CN.PrintLine(zone.name .. ": " .. zone.count .. " left behind")
 
                     for index, entry in ipairs(Quests.RememberedInZone(zone.mapID)) do
                         if index > 20 then
-                            Print("  |cff8a8f96... and more|r")
+                            CN.PrintLine("  |cff8a8f96... and more|r")
                             break
                         end
 
-                        Print("  " .. (Quests.GetName(entry.questID)
+                        CN.PrintLine("  " .. (Quests.GetName(entry.questID)
                             or ("quest " .. entry.questID)))
                     end
 
@@ -460,11 +464,11 @@ CN:RegisterCommand{
 
         for index, zone in ipairs(zones) do
             if index > 12 then
-                Print("  |cff8a8f96... and " .. (#zones - 12) .. " more zones|r")
+                CN.PrintLine("  |cff8a8f96... and " .. (#zones - 12) .. " more zones|r")
                 break
             end
 
-            Print(string.format("  %-28s %d",
+            CN.PrintLine(string.format("  %-28s %d",
                 tostring(zone.name or zone.mapID), zone.count))
         end
 
@@ -1173,7 +1177,17 @@ CN.RegisterCandidateProvider("Quests", function()
 
         local reasons = {}
         local value   = 1
-        local travel  = 0
+
+        -- NIL, NOT ZERO.
+        --
+        -- Zero means "you are standing on it", and `CN.IsPlaceless` reads a
+        -- travelCost of zero exactly that way. `playerMap` is nil for a
+        -- second or two after every loading screen -- `Travel.CostFor` says
+        -- so in its own comment -- and neither branch below ran in that case,
+        -- so every located quest in the log was scored as though the player
+        -- were standing on top of it. It healed on the next rebuild, but
+        -- arriving in a zone is precisely when somebody types `/cn next`.
+        local travel
 
         -- An available quest carries its own pin, which is more current than
         -- anything recorded earlier.
@@ -1248,17 +1262,28 @@ CN.RegisterCandidateProvider("Quests", function()
             -- flat 25 for anywhere else -- so the zone over the ridge and the
             -- far side of the continent cost exactly the same, and a zone
             -- with a flight master in it cost the same as one without.
+            -- `CN.TravelCost` never answers nil, so the old `or travel`
+            -- could only ever read the nil this starts as -- which luacheck
+            -- correctly called reading an uninitialised variable.
             local measured, fromTravel = CN.TravelCost(mapID, x, y)
 
-            travel = measured or travel
+            travel = measured
 
             if fromTravel and mapID ~= playerMap then
                 table.insert(reasons, "another zone, costed by how long the "
                     .. "journey actually takes")
             end
         elseif not mapID then
-            -- Unknown location: usable as a suggestion, useless for routing.
-            travel = 5
+            -- "I DO NOT KNOW WHERE THIS IS" IS ONE PRICE, SET IN ONE PLACE.
+            --
+            -- This hard-coded 5 while `CN.unknownLocationCost` is 8 -- raised
+            -- from 3 in 0.57.0 with a long note explaining that anything
+            -- below the cost of crossing a zone lets "no idea where this is"
+            -- outrank "I can see it from here". The highest-volume provider
+            -- in the addon was bypassing that decision, so a quest with NO
+            -- location was cheaper than one in your own zone whose
+            -- coordinates had not resolved yet.
+            travel = CN.unknownLocationCost
         end
 
         table.insert(candidates, CN.NewObjective({
@@ -1584,7 +1609,7 @@ CN:RegisterCommand{
                     poi.x * 100, poi.y * 100)
             end
 
-            Print("  |cffffc74f" .. title .. "|r" .. where)
+            CN.PrintLine("  |cffffc74f" .. title .. "|r" .. where)
         end
 
         if #near > 0 and #zone > 0 then
@@ -1623,7 +1648,7 @@ CN:RegisterCommand{
             .. " (" .. tostring(Blizzard.GetMapName(report.mapID) or "?") .. "):")
 
         for _, row in ipairs(report.maps) do
-            Print(string.format("  %-28s %3d pins, %2d starts, %2d usable",
+            CN.PrintLine(string.format("  %-28s %3d pins, %2d starts, %2d usable",
                 tostring(row.name or row.mapID),
                 row.pois, row.starts, row.usable))
         end

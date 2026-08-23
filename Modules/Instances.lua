@@ -438,16 +438,16 @@ CN:RegisterCommand{
             .. (#lockouts == 1 and " instance:" or " instances:"))
 
         for _, lockout in ipairs(lockouts) do
-            Print("  " .. Instances.Describe(lockout))
+            CN.PrintLine("  " .. Instances.Describe(lockout))
 
             local bosses, note = Instances.RemainingBosses(lockout)
 
             for _, boss in ipairs(bosses) do
-                Print("      |cff8a8f96" .. boss.name .. "|r")
+                CN.PrintLine("      |cff8a8f96" .. boss.name .. "|r")
             end
 
             if note then
-                Print("      |cff8a8f96" .. note .. "|r")
+                CN.PrintLine("      |cff8a8f96" .. note .. "|r")
             end
         end
 
@@ -500,7 +500,7 @@ CN:RegisterCommand{
             return
         end
 
-        Print("\"" .. args .. "\"" .. CN.DASH .. "" .. #results
+        Print("\"" .. args .. "\" " .. CN.DASH .. " " .. #results
             .. (#results == 1 and " encounter:" or " encounters:"))
 
         for _, result in ipairs(results) do
@@ -522,7 +522,7 @@ CN:RegisterCommand{
                 end
             end
 
-            Print(line)
+            CN.PrintLine(line)
         end
     end,
 }

@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.58.0"
-CN.dbVersion   = 12
+CN.version     = "0.59.0"
+CN.dbVersion   = 13
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -269,7 +269,7 @@ function CN.RunHooks(list, ...)
         local ok, err = pcall(handler, ...)
 
         if not ok then
-            Print("Error: " .. tostring(err))
+            CN.PrintLine("Error: " .. tostring(err))
         end
     end
 end
@@ -460,6 +460,80 @@ function CN.RegisterSelfTest(definition)
     table.insert(CN.selfTests, definition)
 
     return true
+end
+
+-- AN EVENT THAT FIRES MANY TIMES A SECOND, ANSWERED ONCE.
+--
+-- `UPDATE_FACTION` fires on nearly every reputation tick -- this addon says
+-- so in three separate files -- and two handlers used it to bump a
+-- generation counter. `CN.decoratorGeneration` is the ONE thing that defeats
+-- the unchanged-provider shortcut, so bumping it on every tick meant that
+-- while a player was questing, i.e. gaining reputation continuously, the
+-- shortcut was permanently off and every provider re-decorated on every pass:
+-- the measured 0.007 ms to 0.221 ms regression the shortcut exists to remove,
+-- back in full, plus a five-decorator sweep over every candidate.
+--
+-- LEADING EDGE PLUS A TRAILING RUN, not a plain throttle. The first tick is
+-- answered immediately, because the common case is one event and a plain
+-- throttle would delay it; a burst collapses to one more run at the end,
+-- because the LAST tick of a burst is the one that crossed a rank.
+--
+-- Returns whether the work ran now, so a caller that needs to know can tell.
+local debounced = {}
+
+function CN.Debounce(key, seconds, work)
+    if type(key) ~= "string" or type(work) ~= "function" then
+        return false
+    end
+
+    local now   = (GetTime and GetTime()) or (time and time()) or 0
+    local state = debounced[key]
+
+    if state and (now - state.ranAt) < seconds then
+        -- Inside the window. One trailing run is enough however many events
+        -- arrive, so a pending timer is never replaced by a second one.
+        if not state.pending and C_Timer and C_Timer.After then
+            state.pending = true
+
+            -- The timer's closure holds THIS state table, and
+            -- `CN.ForgetDebounces` replaces the whole registry -- so without
+            -- this check a forgotten timer would fire against an orphan while
+            -- a fresh state, seeing `pending = false`, scheduled a second
+            -- one: the work would run twice inside one window, which is the
+            -- single thing this function exists to prevent.
+            C_Timer.After(seconds - (now - state.ranAt), function()
+                if debounced[key] ~= state then
+                    return
+                end
+
+                state.pending = false
+                state.ranAt   = (GetTime and GetTime()) or (time and time()) or 0
+
+                -- `CN.Guard` if Errors.lua has loaded, which it has by the
+                -- time any event fires; pcall otherwise, because a callback
+                -- that throws inside a timer is invisible.
+                if CN.Guard then
+                    CN.Guard("Debounce:" .. key, work)
+                else
+                    pcall(work)
+                end
+            end)
+        end
+
+        return false
+    end
+
+    debounced[key] = { ranAt = now, pending = false }
+
+    work()
+
+    return true
+end
+
+-- For the tests, and for a reload: a stale timestamp would swallow the first
+-- event of a new session.
+function CN.ForgetDebounces()
+    debounced = {}
 end
 
 -- HOW OLD A STORED NUMBER IS, IN WORDS A PLAYER USES.

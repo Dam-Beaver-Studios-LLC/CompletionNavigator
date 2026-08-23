@@ -515,9 +515,15 @@ function CN.ScoreObjective(objective)
     -- difficultyCost and dependencyCost.
 
     -- Everything else at the same place makes this stop worth more.
-    if objective.hubSize and objective.hubSize > 1 then
+    -- `CN.batchSizes`, not `objective.hubSize`: batching belongs to the
+    -- router and to one map, and writing it onto shared candidate tables is
+    -- what let panning the world map strip it off the zone you are in. See
+    -- the header above `Publish` in Routing.lua.
+    local batched = CN.batchSizes[objective]
+
+    if batched and batched > 1 then
         worth = worth + math.min(CN.batchBonusCap,
-            (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus
+            (batched - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus
     end
     worth = worth + (objective.userPreference       or 0) * w.userPreference
     worth = worth + (objective.characterSuitability or 0) * w.characterSuitability
@@ -1782,13 +1788,23 @@ function CN.ExplainScore(objective)
         })
     end
 
-    if objective.hubSize and objective.hubSize > 1 then
+    -- `CN.batchSizes`, like `ScoreObjective` fifteen hundred lines above.
+    --
+    -- This read `objective.hubSize`, which 0.59.0 stopped writing when
+    -- batching moved onto a table the router owns -- so the batch term
+    -- silently stopped appearing, AND the focus term below it, which is
+    -- computed as `after - worth`, was wrong by the same amount. This
+    -- function's own header says "It is the same arithmetic ScoreObjective
+    -- does; if the two ever disagree, this is wrong."
+    local batched = CN.batchSizes[objective]
+
+    if batched and batched > 1 then
         table.insert(terms, {
-            label = "batches with " .. (objective.hubSize - 1)
-              .. ((objective.hubSize - 1) == 1 and " other thing"
+            label = "batches with " .. (batched - 1)
+              .. ((batched - 1) == 1 and " other thing"
                   or " other things"),
             value = math.min(CN.batchBonusCap,
-                (objective.hubSize - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus,
+                (batched - 1) * CN.batchBonusPerNeighbour) * w.nearbyBonus,
         })
     end
 

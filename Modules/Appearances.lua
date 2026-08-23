@@ -239,7 +239,7 @@ CN:RegisterCommand{
         for index = 1, math.min(5, #rows) do
             local row = rows[index]
 
-            Print("  " .. row.name .. ": " .. row.collected .. " / " .. row.total
+            CN.PrintLine("  " .. row.name .. ": " .. row.collected .. " / " .. row.total
                 .. " |cff8a8f96(" .. row.remaining .. " left)|r")
         end
 

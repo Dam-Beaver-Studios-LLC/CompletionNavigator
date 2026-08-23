@@ -253,7 +253,7 @@ CN:RegisterCommand{
                 local missing = Blizzard.GetIncompleteCriteria(here.achievementID, 6)
 
                 for _, name in ipairs(missing) do
-                    Print("  missing: " .. name)
+                    CN.PrintLine("  missing: " .. name)
                 end
             end
         end
@@ -264,7 +264,7 @@ CN:RegisterCommand{
             Print("Closest to finishing:")
 
             for _, row in ipairs(closest) do
-                Print("  " .. row.name .. " |cff8a8f96("
+                CN.PrintLine("  " .. row.name .. " |cff8a8f96("
                     .. row.done .. "/" .. row.criteria .. ")|r")
             end
         end

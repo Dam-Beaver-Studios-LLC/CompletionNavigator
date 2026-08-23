@@ -1001,7 +1001,8 @@ function Session.Plan(minutes)
 
     if situation == "dead" or situation == "instanced" then
         return {
-            minutes   = (requested or Session.TypicalSessionMinutes()),
+            minutes   = math.floor(((requested
+                or Session.TypicalSessionMinutes()) or 0) + 0.5),
             stops     = {},
             seconds   = 0,
             confident = true,
@@ -1013,12 +1014,36 @@ function Session.Plan(minutes)
 
     -- No number given: use however long this character usually plays, rather
     -- than a round thirty that was only ever a placeholder.
-    local budget = (requested or Session.TypicalSessionMinutes()) * 60
+    --
+    -- ROUNDED HERE, so the budget and the headline are the same number.
+    --
+    -- Lua 5.3 and later make `/` always produce a float, so `/cn plan 12.5`
+    -- gave `minutes = 12.5` and `string.format("%dm", 12.5)` -- an error on
+    -- 5.4, and on the game's 5.1 a silent "12m" printed above a plan built
+    -- against 750 seconds. Rounding only the DISPLAY fixed the throw and left
+    -- the disagreement, in the other direction: "13m" above a 12.5-minute
+    -- plan. One quantity, one rounding, at the top.
+    local budgetMinutes = math.floor(((requested
+        or Session.TypicalSessionMinutes()) or 0) + 0.5)
+
+    -- A request that rounds to nothing is not a plan. `/cn plan 0.4` passed
+    -- the command's own `<= 0` guard and produced a zero-minute budget.
+    if budgetMinutes < 1 then
+        budgetMinutes = 1
+    end
+
+    local budget = budgetMinutes * 60
 
     local mapID, x, y = CN.GetPlayerPosition()
 
     local plan = {
-        minutes   = budget / 60,
+        -- The number the budget above was built from, not a second derivation
+        -- of it -- and the budget itself beside it, so the invariant that the
+        -- headline describes the plan is one a test can state rather than
+        -- infer. `/cn plan 12.5` printed "13m" above a plan built against
+        -- twelve and a half, and nothing could see the difference.
+        minutes       = budgetMinutes,
+        budgetSeconds = budget,
         stops     = {},
         seconds   = 0,
         confident = true,
@@ -1242,7 +1267,7 @@ CN:RegisterCommand{
             plan.minutes))
 
         for index, stop in ipairs(plan.stops) do
-            Print(string.format("  %d. |cffffc74f%s|r |cff8a8f96%s|r",
+            CN.PrintLine(string.format("  %d. |cffffc74f%s|r |cff8a8f96%s|r",
                 index,
                 tostring(stop.summary or "stop"),
                 stop.confident and Session.FormatDuration(stop.seconds)

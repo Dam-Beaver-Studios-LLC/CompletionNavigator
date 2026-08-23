@@ -681,7 +681,7 @@ CN:RegisterCommand{
             or " stops on this map:"))
 
         for _, pin in ipairs(pins) do
-            Print(string.format("  %d. %s (%d)",
+            CN.PrintLine(string.format("  %d. %s (%d)",
                 pin.order,
                 tostring(pin.summary or "do " .. pin.hubSize),
                 pin.hubSize))

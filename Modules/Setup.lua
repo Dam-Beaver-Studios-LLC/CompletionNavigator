@@ -24,18 +24,27 @@ local DebugPrint = CN.DebugPrint
 
 -- Ordered so the cheap scans report first and the journal scans -- which
 -- open and filter collection UIs -- come last.
+-- A UNIT PER STEP, because the numbers are not the same quantity.
+--
+-- `Setup.Report` printed each scan's first return value and nothing else, and
+-- three of them count something other than what the label says:
+-- `Appearances.Scan` returns the number of slot CATEGORIES (about seventeen),
+-- `Professions.Scan` the number of profession LINES (two to four), and the
+-- rest return thousands of rows. So a player who had just told the addon to
+-- read their transmog was shown "Appearances: 17" beside "Mounts: 1104" and
+-- concluded it had found seventeen appearances.
 Setup.steps = {
-    { key = "reputations", label = "Reputations", module = "Reputations", fn = "Scan" },
-    { key = "currencies",  label = "Currencies",  module = "Currencies",  fn = "Scan" },
-    { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan" },
-    { key = "professions", label = "Professions", module = "Professions", fn = "Scan" },
-    { key = "exploration", label = "Exploration", module = "Exploration", fn = "Scan" },
-    { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown" },
-    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan" },
-    { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan" },
-    { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan" },
-    { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan" },
-    { key = "appearances", label = "Appearances", module = "Appearances", fn = "Scan" },
+    { key = "reputations", label = "Reputations", module = "Reputations", fn = "Scan",     unit = "factions" },
+    { key = "currencies",  label = "Currencies",  module = "Currencies",  fn = "Scan",     unit = "currencies" },
+    { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan",     unit = "titles" },
+    { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines" },
+    { key = "exploration", label = "Exploration", module = "Exploration", fn = "Scan",     unit = "zones" },
+    { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
+    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements" },
+    { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },
+    { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan",     unit = "mounts" },
+    { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan",     unit = "species" },
+    { key = "appearances", label = "Appearances", module = "Appearances", fn = "Scan",     unit = "slot categories" },
 }
 
 function Setup.RunStep(step)
@@ -157,15 +166,39 @@ function Setup.Run(onComplete)
     return true
 end
 
+-- THE HEADLINE FIRST, WHICH IS WHAT A HEADLINE IS.
+--
+-- This printed eleven continuations, THEN the "Setup complete" headline, then
+-- two more headlines -- so the block read bottom-up and stamped the addon's
+-- name three times in one answer.
 function Setup.Report(results)
     local scanned, absent, broke = 0, 0, 0
+
+    local units = {}
+
+    for _, step in ipairs(Setup.steps) do
+        units[step.label] = step.unit
+    end
+
+    local lines = {}
 
     for _, result in ipairs(results) do
         if result.ok then
             scanned = scanned + 1
 
-            CN.PrintLine(result.label .. ": "
-                .. (type(result.value) == "number" and result.value or "done"))
+            local value = "done"
+
+            if type(result.value) == "number" then
+                value = CN.Comma(result.value)
+
+                local unit = units[result.label]
+
+                if unit then
+                    value = value .. " " .. unit
+                end
+            end
+
+            table.insert(lines, result.label .. ": " .. value)
         elseif result.error == "module not loaded" then
             -- "UNAVAILABLE" AND "IT THREW" ARE DIFFERENT STATEMENTS.
             --
@@ -175,30 +208,31 @@ function Setup.Report(results)
             -- nothing to report.
             absent = absent + 1
 
-            CN.PrintLine(result.label .. ": "
+            table.insert(lines, result.label .. ": "
                 .. CN.Muted("not available on this client"))
         else
             broke = broke + 1
 
-            CN.PrintLine(result.label .. ": "
+            table.insert(lines, result.label .. ": "
                 .. CN.Bad("failed: " .. tostring(result.error)))
         end
     end
 
-    Print("Setup complete: " .. scanned .. " scanned"
-        .. (absent > 0 and (", " .. absent .. " unavailable") or "")
-        .. (broke > 0 and (", " .. broke .. " failed") or "") .. ".")
-
     if broke > 0 then
-        Print("|cff8a8f96A failure is a defect, not a missing feature. "
-            .. "|cffffc74f/cn errors|r has the detail.|r")
+        table.insert(lines, CN.Muted("A failure is a defect, not a missing "
+            .. "feature. ") .. CN.Accent("/cn errors") .. CN.Muted(" has the "
+            .. "detail."))
     end
 
     for _, line in ipairs(Setup.Outstanding()) do
-        Print("|cffffc74f" .. line .. "|r")
+        table.insert(lines, CN.Accent(line))
     end
 
-    Print("Now try |cffffc74f/cn next|r.")
+    table.insert(lines, "Now try " .. CN.Accent("/cn next") .. ".")
+
+    CN.PrintBlock("Setup complete: " .. scanned .. " scanned"
+        .. (absent > 0 and (", " .. absent .. " unavailable") or "")
+        .. (broke > 0 and (", " .. broke .. " failed") or "") .. ".", lines)
 end
 
 ------------------------------------------------------------
@@ -468,7 +502,7 @@ CN:RegisterCommand{
             Print("Still outside what the addon can read on its own:")
 
             for _, line in ipairs(lines) do
-                Print("  |cffffc74f" .. line .. "|r")
+                CN.PrintLine("  |cffffc74f" .. line .. "|r")
             end
 
             return

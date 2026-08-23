@@ -473,7 +473,7 @@ local function PrintRow(row)
     end
 
     for _, reason in ipairs(CN.Reasons(row)) do
-        Print("    " .. reason)
+        CN.PrintLine("    " .. reason)
     end
 
     if row.action then
@@ -528,13 +528,36 @@ CN:RegisterCommand{
 -- to produce numbers that are identical until the player collects something
 -- -- and every collection already announces itself. The Remaining tab asked
 -- for it every two seconds.
+--
+-- TWO OF THEM ARE TICKERS, NOT ANNOUNCEMENTS. `UPDATE_FACTION` fires on
+-- nearly every reputation tick and `CURRENCY_DISPLAY_UPDATE` on every coin
+-- picked up, so while a player was earning anything the Remaining tab's
+-- two-second refresh found the 0.63 ms report cache stale on every single
+-- tick -- which is the cache doing nothing at all, in the one place it was
+-- written for. The other seven fire when something is genuinely collected
+-- and stay immediate.
+local bursty = {
+    UPDATE_FACTION          = true,
+    CURRENCY_DISPLAY_UPDATE = true,
+}
+
+Breakdown.burstSeconds = 5
+
 for _, event in ipairs({
     "NEW_PET_ADDED", "NEW_MOUNT_ADDED", "NEW_TOY_ADDED",
     "ACHIEVEMENT_EARNED", "TRANSMOG_COLLECTION_UPDATED",
     "QUEST_TURNED_IN", "UPDATE_FACTION", "CURRENCY_DISPLAY_UPDATE",
     "PLAYER_ENTERING_WORLD",
 }) do
+    local burst = bursty[event]
+
     CN:RegisterEvent(event, function()
+        if burst then
+            CN.Debounce("Breakdown." .. event, Breakdown.burstSeconds,
+                Breakdown.NoteChanged)
+            return
+        end
+
         Breakdown.NoteChanged()
     end)
 end

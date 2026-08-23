@@ -233,9 +233,8 @@ mutate "Modules/Inventory.lua" \
 # cheaper, which is exactly the kind of change that returns a slightly wrong
 # answer forever without ever erroring.
 mutate "Modules/Travel.lua" \
-    "            if not cheapestArrival
-                or (bestPossibleDiscount * floor) >= bestRanking then" \
-    "            if walkOut > (bestRanking * 0.5) then" \
+    "            if (bestPossibleDiscount * floor) < bestRanking then" \
+    "            if walkOut < (bestRanking * 0.5) then" \
     "the pruning bound discards a route that would have won"
 
 mutate "Modules/Travel.lua" \
@@ -274,9 +273,31 @@ end" \
 # The 0.47.0 fixes. Each of these was a real defect found by an end-to-end
 # audit, and each was invisible to the suite that existed at the time.
 mutate "Modules/Travel.lua" \
-    "                or (bestPossibleDiscount * floor) >= bestRanking then" \
-    "                or floor >= bestRanking then" \
+    "            if (bestPossibleDiscount * floor) < bestRanking then" \
+    "            if floor < bestRanking then" \
     "the pruning bound ignores the known-route discount"
+
+# NOT a mutation, and here is why, because the absence of one is a decision.
+#
+# 0.59.0 split the pruning bound: the early exit now uses a floor that is
+# MONOTONE in `walkOut` -- the continent-wide minimum outgoing edge rather
+# than the origin's own -- and the per-origin floor became an exact filter.
+# The obvious mutation is to put `minOutgoing[i]` back into the break.
+#
+# It survives, and it survives honestly. Reaching a case where it changes the
+# answer requires a later origin whose floor is lower, i.e. a saving of
+# `m / flightSpeed` exceeding an extra walk of `d / runSpeed` -- so
+# `m > 3.6 * d`. But `m` is bounded by the distance from that origin to its
+# nearest node, and the triangle inequality bounds THAT by `d` plus the later
+# origin's own minimum. The two constraints cannot both hold. An independent
+# search over five and a half thousand randomised continents found no case
+# either.
+#
+# So the unsound break was almost certainly harmless. It was still changed,
+# because "almost certainly" is not an argument you can check, the correct
+# version is two lines, and it measured FASTER. Same shape as the math.fmod
+# note above: a mutation that cannot be killed because it is not a defect
+# does not belong in this file.
 
 mutate "Modules/Travel.lua" \
     "for _, event in ipairs({ \"ZONE_CHANGED_NEW_AREA\", \"PLAYER_ENTERING_WORLD\" }) do
@@ -341,14 +362,30 @@ mutate "Routing.lua" \
     "routing assumes every map is square"
 
 mutate "Routing.lua" \
-    "        previousHub[objective]  = objective.hub
-        previousSize[objective] = objective.hubSize
-
-        objective.hub     = nil
-        objective.hubSize = nil" \
-    "    for _, objective in ipairs(candidates) do
+    "    if mapID == nil or playerMap == nil or mapID ~= playerMap then
+        return false
     end" \
-    "last zone's batching survives into this one"
+    "    if mapID == nil or playerMap == nil then
+        return false
+    end" \
+    "looking at another zone's map strips the batching off the one you are in"
+
+mutate "Routing.lua" \
+    "        Publish(mapID, held.sizes)
+
+        return held.route, held.skipped, held.hubs" \
+    "        return held.route, held.skipped, held.hubs" \
+    "a cached route is drawn as batched while nothing is scored as batched"
+
+mutate "Routing.lua" \
+    "    CN.batchSizes = setmetatable({}, { __mode = \"k\" })
+    CN.batchMapID = nil
+
+    CN.InvalidateRanking()
+
+    return true" \
+    "    return true" \
+    "the zone you walked out of keeps its batch bonus"
 
 mutate "Modules/Harvest.lua" \
     "        if record.observed and next(record.observed) then
@@ -823,9 +860,30 @@ mutate "Modules/Session.lua" \
     "an implausible span passes once its journey is subtracted"
 
 mutate "Modules/Preference.lua" \
-    "        CN.ClearAdjusterReason(objective, \"preference\")" \
-    "        local withdrawn = nil" \
+    "    if multiplier == 1 then
+        CN.ClearAdjusterReason(objective, \"preference\")
+
+        return score
+    end" \
+    "    if multiplier == 1 then
+        return score
+    end" \
     "a withdrawn preference keeps saying you rarely act on these"
+
+# 0.59.0 moved the enabled check above the work. Both halves matter: the gate
+# must withdraw the sentence, and it must run before the client call.
+mutate "Modules/Preference.lua" \
+    "    if not Preference.IsEnabled() then
+        CN.ClearAdjusterReason(objective, \"preference\")
+
+        return score
+    end" \
+    "    if false then
+        CN.ClearAdjusterReason(objective, \"preference\")
+
+        return score
+    end" \
+    "learning that is switched off is still paid for on every pass"
 
 
 mutate "UI.lua" \
@@ -1280,6 +1338,248 @@ mutate "UI.lua" \
     "    Stored(\"Quests known\", \"quests\", \"scanquests\"," \
     "    Stored(\"Quests known\", \"quests\", \"discoveractive\"," \
     "a source row runs a scan that cannot clear its own staleness"
+
+############################################################
+# 0.59.0
+############################################################
+
+mutate "Modules/Opportunities.lua" \
+    "            if event.endsAt then
+                local left = event.endsAt - now
+
+                event.endsIn = (left > 0) and left or nil
+            end" \
+    "            if false then
+                local left = event.endsAt - now
+
+                event.endsIn = (left > 0) and left or nil
+            end" \
+    "a world event's deadline is frozen for half an hour at a time"
+
+mutate "Modules/Opportunities.lua" \
+    "                event.endsIn = (left > 0) and left or nil" \
+    "                event.endsIn = left" \
+    "an event that has finished is given a negative amount of time left"
+
+mutate "Modules/Opportunities.lua" \
+    "        local id = Opportunities.EventKey(event)" \
+    "        local id = event.title" \
+    "a world event is filed under its translated name"
+
+mutate "Modules/Quests.lua" \
+    "            travel = CN.unknownLocationCost" \
+    "            travel = 5" \
+    "a quest with no location is cheaper than one you can see"
+
+mutate "Modules/Rares.lua" \
+    "                travel = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)" \
+    "                travel = 1" \
+    "a rare is priced by a number rather than by the journey"
+
+mutate "Core.lua" \
+    "    if state and (now - state.ranAt) < seconds then" \
+    "    if false then" \
+    "a reputation tick re-decorates every candidate in the addon"
+
+mutate "Core.lua" \
+    "    debounced[key] = { ranAt = now, pending = false }
+
+    work()" \
+    "    debounced[key] = { ranAt = now, pending = false }" \
+    "the first event of a burst is swallowed instead of answered"
+
+mutate "Modules/Session.lua" \
+    "    local budgetMinutes = math.floor(((requested
+        or Session.TypicalSessionMinutes()) or 0) + 0.5)" \
+    "    local budgetMinutes = (requested or Session.TypicalSessionMinutes()) or 0" \
+    "a fractional plan budget throws on one interpreter and lies on the other"
+
+mutate "Modules/Travel.lua" \
+    "    if unit == \"player\" and Travel.hearthSpells[spellID] then
+        hearthPending = true
+    end" \
+    "    if Travel.hearthSpells[spellID] then
+        hearthPending = true
+    end" \
+    "somebody else hearthing teaches the addon where YOUR bind point is"
+
+mutate "Modules/Travel.lua" \
+    "    if Travel.NoteHearthArrival() then
+        hearthPending = false
+
+        return
+    end" \
+    "    if Travel.NoteHearthArrival() then
+        return
+    end" \
+    "every loading screen after one hearth is recorded as a bind point"
+
+mutate "Modules/Navigation.lua" \
+    "    if angle ~= angle or angle == math.huge or angle == -math.huge then
+        return 0
+    end" \
+    "    if false then
+        return 0
+    end" \
+    "a non-finite bearing reaches the arrow's ten-per-second ticker"
+
+mutate "Modules/Quests.lua" \
+    "    discovered[questID] = true" \
+    "    discovered[questID] = { firstSeen = time(), source = source }" \
+    "a discovered quest carries three fields nothing reads"
+
+mutate "Database.lua" \
+    "                    discovered[questID] = true
+                    collapsed = collapsed + 1" \
+    "                    collapsed = collapsed + 1" \
+    "the migration counts records it did not collapse"
+
+mutate "Database.lua" \
+    "                    record.questID  = nil
+                    record.lastSeen = nil" \
+    "                    record.lastSeen = nil" \
+    "a quest name record keeps the key it is already filed under"
+
+mutate "UI/List.lua" \
+    "            if filterText and #(lastEntries or {}) > 0 then" \
+    "            if false then" \
+    "a search that matched nothing tells you to run a scan"
+
+mutate "UI/List.lua" \
+    "            row.chevron:SetShown(actionable)" \
+    "            row.chevron:SetShown(false)" \
+    "whether a row does anything is carried by brightness alone"
+
+mutate "Modules/Hud.lua" \
+    "        local objective = clicked.objective or CN.currentRecommendation" \
+    "        local objective = CN.currentRecommendation" \
+    "the heads-up line names one thing and acts on another"
+
+mutate "UI.lua" \
+    "        UI.SetActionsEnabled(panel, #results > 0)" \
+    "        UI.SetActionsEnabled(panel, true)" \
+    "three buttons stay live above an empty list"
+
+mutate "Modules/Setup.lua" \
+    "                if unit then
+                    value = value .. \" \" .. unit
+                end" \
+    "                if false then
+                    value = value .. \" \" .. unit
+                end" \
+    "setup reports eleven numbers that count different things"
+
+mutate "Modules/Preference.lua" \
+    "    objective.preferenceBucket = bucket
+
+    return bucket" \
+    "    return bucket" \
+    "what a quest is is asked of the client once per scoring pass"
+
+mutate "Modules/Tooltips.lua" \
+    "        local isToy = CN.Account(\"toys\")[itemID] ~= nil" \
+    "        local isToy = false" \
+    "a toy hovers without saying why it matters"
+
+mutate "UI.lua" \
+    "        panel.selected = false
+
+        for _, objective in ipairs(results) do" \
+    "        panel.selected = nil
+
+        for _, objective in ipairs(results) do" \
+    "clearing a panel field lets the frame answer for it again"
+
+mutate "UI.lua" \
+    "        panel.filtering = false
+
+        -- Type filter." \
+    "        -- Type filter." \
+    "the Next tab reads a field before anything has written it"
+
+# The regressions the 0.59.0 review found in 0.59.0's own changes.
+
+mutate "Modules/Opportunities.lua" \
+    "        if not CN.IsIgnored(CN.objectiveTypes.CURRENCY, id)
+            and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, id) then" \
+    "        if not CN.IsIgnored(CN.objectiveTypes.CURRENCY, event.title)
+            and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, event.title) then" \
+    "hiding a world event does nothing, because the key is read twice"
+
+mutate "Modules/Opportunities.lua" \
+    "        .. \":\" .. tostring(event.title or \"?\")" \
+    "        .. \"\"" \
+    "two world events on one day collapse into a single row"
+
+mutate "Modules/Opportunities.lua" \
+    "    if type(event.eventID) == \"number\" and event.eventID > 0 then" \
+    "    if event.eventID then" \
+    "an eventID of zero gives every holiday the same id"
+
+mutate "Scoring.lua" \
+    "    local batched = CN.batchSizes[objective]
+
+    if batched and batched > 1 then
+        table.insert(terms, {" \
+    "    local batched = objective.hubSize
+
+    if batched and batched > 1 then
+        table.insert(terms, {" \
+    "the ranking explanation leaves out the term worth the most"
+
+mutate "Modules/Travel.lua" \
+    "    if Travel.NoteHearthArrival() then
+        hearthPending = false
+
+        return
+    end" \
+    "    hearthPending = false
+
+    Travel.NoteHearthArrival()
+
+    if true then
+        return
+    end" \
+    "a hearth that lands before the client is ready is thrown away"
+
+mutate "Modules/Travel.lua" \
+    "    if hearthAttempts >= Travel.hearthRetries then
+        hearthPending  = false
+        hearthAttempts = 0
+
+        return
+    end" \
+    "    if false then
+        hearthPending  = false
+        hearthAttempts = 0
+
+        return
+    end" \
+    "a hearth the client cannot place leaves the flag armed for ever"
+
+mutate "Modules/Travel.lua" \
+    "    if held == nil and CN.CountKeys(BindPoints()) >= Travel.bindPointCap then" \
+    "    if false then" \
+    "the bind point store grows without a ceiling"
+
+mutate "Modules/Session.lua" \
+    "    if budgetMinutes < 1 then
+        budgetMinutes = 1
+    end" \
+    "    if false then
+        budgetMinutes = 1
+    end" \
+    "a plan is built for no time at all"
+
+mutate "Modules/Session.lua" \
+    "    local budget = budgetMinutes * 60" \
+    "    local budget = (requested or Session.TypicalSessionMinutes()) * 60" \
+    "the plan's headline and its budget are two different numbers"
+
+mutate "Modules/Navigation.lua" \
+    "    if angle ~= angle or angle == math.huge or angle == -math.huge then" \
+    "    if angle ~= angle then" \
+    "an infinite bearing becomes a NaN on the arrow's ticker"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

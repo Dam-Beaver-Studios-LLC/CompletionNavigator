@@ -460,13 +460,13 @@ CN:RegisterCommand{
         Print("Zones worth doing next:")
 
         for index, row in ipairs(rows) do
-            Print(string.format("  %d. %s%s|r  |cff8a8f96%d/%d|r",
+            CN.PrintLine(string.format("  %d. %s%s|r  |cff8a8f96%d/%d|r",
                 index,
                 row.here and "|cff5dd2fb" or "|cffffc74f",
                 tostring(row.name),
                 row.done, row.criteria))
 
-            Print("     " .. CN.Muted(table.concat(CN.Reasons(row), "; ")))
+            CN.PrintLine("     " .. CN.Muted(table.concat(CN.Reasons(row), "; ")))
         end
 
         Print("|cff8a8f96Ordered by what is cheapest to finish, not by size. "
@@ -636,7 +636,7 @@ CN:RegisterCommand{
 
         for _, key in ipairs(order) do
             if not filter or string.find(string.lower(key), filter, 1, true) then
-                Print("|cffffc74f" .. key .. "|r")
+                CN.PrintLine("|cffffc74f" .. key .. "|r")
 
                 for _, entry in ipairs(groups[key]) do
                     PrintAchievement(entry, "    ")

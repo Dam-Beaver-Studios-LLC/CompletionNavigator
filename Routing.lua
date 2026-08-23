@@ -153,7 +153,7 @@ function CN.NavigateToObjective(objective)
             .. "is not in your log. Add them with ")
             .. CN.Accent("/cn setloc " .. tostring(objective.id)
                 .. " <mapID> <x> <y>")
-            .. CN.Muted("" .. CN.DASH .. "") .. CN.Accent("/cn where am i")
+            .. CN.Muted(" " .. CN.DASH .. " ") .. CN.Accent("/cn where am i")
             .. CN.Muted(" prints the map id."))
 
         return false
@@ -312,6 +312,26 @@ local function Distance2(ax, ay, bx, by)
     local dy = ((ay or 0.5) - (by or 0.5)) * routeScaleY
 
     return (dx * dx) + (dy * dy)
+end
+
+-- THE SAME DISTANCE, WITHOUT THE FOUR GUARDS AND THE GLOBAL LOOKUP.
+--
+-- `ImproveRoute` normalises its coordinates into two flat arrays before it
+-- starts, so every `or 0.5` in `Distance2` is a test that can never fire --
+-- and it makes three or four calls per candidate swap over roughly four
+-- thousand pairs per pass. `math.sqrt` is a table index on the global `math`
+-- at every one of them, which in Lua 5.1 is a hash lookup.
+--
+-- Measured on the ninety-stop fixture: 7.4 ms to 6.4 ms, same route. The
+-- guarded version stays for every other caller, where the inputs come
+-- straight off objectives and genuinely can be nil.
+local sqrt = math.sqrt
+
+local function Span(ax, ay, bx, by)
+    local dx = (ax - bx) * routeScaleX
+    local dy = (ay - by) * routeScaleY
+
+    return sqrt((dx * dx) + (dy * dy))
 end
 
 -- The order you would naturally do things at one stop: collect the quests,
@@ -678,7 +698,7 @@ function CN.ImproveRoute(route, startX, startY)
 
                 local firstX, firstY = xs[i], ys[i]
 
-                local entering = math.sqrt(Distance2(prevX, prevY, firstX, firstY))
+                local entering = Span(prevX, prevY, firstX, firstY)
 
                 for k = i + 1, count do
                     local lastX, lastY = xs[k], ys[k]
@@ -689,14 +709,14 @@ function CN.ImproveRoute(route, startX, startY)
 
                     if k < count then
                         afterX, afterY = xs[k + 1], ys[k + 1]
-                        leaving = math.sqrt(Distance2(lastX, lastY, afterX, afterY))
+                        leaving = Span(lastX, lastY, afterX, afterY)
                     end
 
-                    local swapped = math.sqrt(Distance2(prevX, prevY, lastX, lastY))
+                    local swapped = Span(prevX, prevY, lastX, lastY)
 
                     if k < count then
                         swapped = swapped
-                            + math.sqrt(Distance2(firstX, firstY, afterX, afterY))
+                            + Span(firstX, firstY, afterX, afterY)
                     end
 
                     if swapped < (entering + leaving) - 1e-9 then
@@ -720,8 +740,7 @@ function CN.ImproveRoute(route, startX, startY)
                         -- before the next k.
                         firstX, firstY = xs[i], ys[i]
 
-                        entering = math.sqrt(
-                            Distance2(prevX, prevY, firstX, firstY))
+                        entering = Span(prevX, prevY, firstX, firstY)
                     end
                 end
             end
@@ -809,6 +828,74 @@ function CN.ForgetRoutes()
     routeCache = {}
 end
 
+-- WHAT IS BATCHED RIGHT NOW, AND WHERE.
+--
+-- The scorer reads `CN.batchSizes`; nothing else does. It describes exactly
+-- one map -- `CN.batchMapID` -- and it is replaced only when THAT map is
+-- routed, so routing or previewing anywhere else cannot touch it.
+CN.batchSizes = setmetatable({}, { __mode = "k" })
+CN.batchMapID = nil
+
+function CN.ForgetBatching()
+    if next(CN.batchSizes) == nil and CN.batchMapID == nil then
+        return false
+    end
+
+    CN.batchSizes = setmetatable({}, { __mode = "k" })
+    CN.batchMapID = nil
+
+    CN.InvalidateRanking()
+
+    return true
+end
+
+-- Applies a route's batching, but only when the route is about the map the
+-- player is standing on. The Zone tab, the map pins and `/cn zone` all route
+-- whatever map is being LOOKED at, which is frequently not that one.
+local function Publish(mapID, sizes)
+    local playerMap = CN.GetPlayerPosition()
+
+    if mapID == nil or playerMap == nil or mapID ~= playerMap then
+        return false
+    end
+
+    -- NOTHING CHANGING IS NOT A CHANGE.
+    --
+    -- This runs from the Zone tab's two-second refresh, from every map open
+    -- and from follow mode's three-second ticker. Invalidating the ranking
+    -- unconditionally gave the ranked cache a hit rate of zero for as long as
+    -- any of those was open: thirty Zone-tab ticks produced thirty full
+    -- re-ranks, four and a half thousand scorings and zero hub changes.
+    local moved = (CN.batchMapID ~= mapID)
+
+    if not moved then
+        for objective, size in pairs(sizes) do
+            if CN.batchSizes[objective] ~= size then
+                moved = true
+                break
+            end
+        end
+    end
+
+    if not moved then
+        for objective, size in pairs(CN.batchSizes) do
+            if sizes[objective] ~= size then
+                moved = true
+                break
+            end
+        end
+    end
+
+    CN.batchSizes = sizes
+    CN.batchMapID = mapID
+
+    if moved then
+        CN.InvalidateRanking()
+    end
+
+    return moved
+end
+
 function CN.BuildZoneRoute(mapID, startX, startY)
     local candidates = CN.CollectCandidates()
 
@@ -823,33 +910,18 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     local held = routeCache[key]
 
     if held then
+        -- A CACHE HIT STILL HAS TO PUBLISH ITS BATCHING.
+        --
+        -- This returned early, before anything below ran -- so the batching
+        -- the route describes was not applied. Combined with the old
+        -- clear-everything pass, re-routing your own zone after glancing at
+        -- the next one over returned a cached route whose hubs the Zone tab
+        -- and the map pins still drew at size four, while the objectives
+        -- themselves carried no batch bonus at all and could not recover:
+        -- standing still, the cache key is stable for minutes.
+        Publish(mapID, held.sizes)
+
         return held.route, held.skipped, held.hubs
-    end
-
-    -- LAST ZONE'S BATCHING IS NOT THIS ZONE'S.
-    --
-    -- `hub` and `hubSize` are stamped onto live candidate objects at the end
-    -- of this function and were never cleared, so an objective routed once
-    -- carried its batch bonus for the rest of the session -- including while
-    -- a different zone was being routed, and including in the ranked list,
-    -- which is not about zones at all.
-    -- AND CHANGING NOTHING MUST NOT COUNT AS A CHANGE.
-    --
-    -- What is stamped below is compared against what was already there, and
-    -- the ranking is invalidated only if a pair actually moved. This function
-    -- runs from the Zone tab's two-second refresh, from every map open, and
-    -- from follow mode's three-second ticker -- and it ended with an
-    -- unconditional `InvalidateRanking()`, so the ranked cache had a hit rate
-    -- of ZERO for as long as any of those was open. Measured: 30 Zone-tab
-    -- ticks produced 30 full re-ranks, 4,590 scorings, and 0 hub changes.
-    local previousHub, previousSize = {}, {}
-
-    for _, objective in ipairs(candidates) do
-        previousHub[objective]  = objective.hub
-        previousSize[objective] = objective.hubSize
-
-        objective.hub     = nil
-        objective.hubSize = nil
     end
 
     -- Every distance below is now in yards, which means knowing how many
@@ -912,10 +984,38 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     -- working -- but the ORDER now keeps each place together.
     local route = {}
 
+    -- BATCHING IS THE ROUTER'S STATE, KEYED ON THE OBJECTIVE.
+    --
+    -- `hub` and `hubSize` were stamped onto the candidate tables themselves,
+    -- which are shared: one aggregate list, every zone's objectives in it.
+    -- So this function had to clear the field on EVERY candidate before
+    -- stamping the ones on this map -- and `MapPins.Refresh` calls it on
+    -- `WorldMapOnMapChanged`, meaning panning the world map to the next zone
+    -- over silently took the batch bonus off the zone the player was standing
+    -- in. `hubSize` is worth up to three points at weight 1.0, comparable to
+    -- the entire range of `completionValue`.
+    --
+    -- A table the router owns cannot be stripped by routing somewhere else,
+    -- because routing somewhere else writes a different table.
+    -- WEAK KEYS.
+    --
+    -- This table holds every objective of the last routed map and is replaced
+    -- only by a later route of the player's own map or cleared on a zone
+    -- change. A candidate generation that is superseded without either
+    -- happening -- the player never opens the map or the Zone tab again --
+    -- would be pinned for the session while every lookup missed. Twelve lines
+    -- above, `CN.currentRoute` was removed for exactly this.
+    local sizes = setmetatable({}, { __mode = "k" })
+
     for hubIndex, hub in ipairs(orderedHubs) do
         for _, objective in ipairs(hub.objectives) do
-            objective.hub      = hubIndex
-            objective.hubSize  = #hub.objectives
+            sizes[objective] = #hub.objectives
+
+            -- `objective.hub` was stamped here and read by nothing anywhere
+            -- in the tree -- the route is a list, and every caller has the
+            -- hub it came from. Removed with the rest of the batching state
+            -- rather than left as a second field on a shared table that goes
+            -- stale the moment another zone is routed.
 
             table.insert(route, objective)
         end
@@ -942,21 +1042,8 @@ function CN.BuildZoneRoute(mapID, startX, startY)
     -- it carrying a hubSize forever, so routing a second zone scored the
     -- first zone's objectives as though they were still batched.
     --
-    -- ONLY WHEN SOMETHING MOVED, though. See the comparison set up above.
-    local moved = false
-
-    for _, objective in ipairs(candidates) do
-        if previousHub[objective] ~= objective.hub
-            or previousSize[objective] ~= objective.hubSize then
-
-            moved = true
-            break
-        end
-    end
-
-    if moved then
-        CN.InvalidateRanking()
-    end
+    -- ONLY WHEN SOMETHING MOVED, though -- `Publish` compares.
+    Publish(mapID, sizes)
 
     -- One entry per (map, candidate generation, quantised position). The
     -- generation is in the key, so a new candidate set never reads an old
@@ -969,7 +1056,12 @@ function CN.BuildZoneRoute(mapID, startX, startY)
         routeCache = {}
     end
 
-    routeCache[key] = { route = route, skipped = skipped, hubs = orderedHubs }
+    routeCache[key] = {
+        route   = route,
+        skipped = skipped,
+        hubs    = orderedHubs,
+        sizes   = sizes,
+    }
 
     return route, skipped, orderedHubs
 end
@@ -1206,6 +1298,19 @@ for _, event in ipairs({
 }) do
     CN:RegisterEvent(event, function()
         CN.AutoAdvance(event)
+    end)
+end
+
+-- LEAVING A ZONE ENDS ITS BATCHING.
+--
+-- `CN.batchSizes` describes one map. Nothing clears it when the player walks
+-- out, and the router only replaces it when the NEW map is routed -- which
+-- may not happen for minutes if the player never opens the map or the Zone
+-- tab. Until then every objective in the zone behind them would keep a bonus
+-- for standing next to things they have walked away from.
+for _, event in ipairs({ "ZONE_CHANGED_NEW_AREA", "PLAYER_ENTERING_WORLD" }) do
+    CN:RegisterEvent(event, function()
+        CN.ForgetBatching()
     end)
 end
 

@@ -759,7 +759,7 @@ CN:RegisterCommand{
             Print(#starters .. " of them start a quest:")
 
             for _, item in ipairs(starters) do
-                Print("  " .. (Blizzard.GetItemName(item.itemID)
+                CN.PrintLine("  " .. (Blizzard.GetItemName(item.itemID)
                     or ("item " .. item.itemID))
                     .. " |cff8a8f96bag " .. item.bag .. ", slot " .. item.slot .. "|r")
             end
@@ -771,7 +771,7 @@ CN:RegisterCommand{
             Print(#uncollected .. " are collectibles you have not learned:")
 
             for _, item in ipairs(uncollected) do
-                Print("  " .. (Blizzard.GetItemName(item.itemID)
+                CN.PrintLine("  " .. (Blizzard.GetItemName(item.itemID)
                     or ("item " .. item.itemID))
                     .. " |cff8a8f96" .. tostring(item.kind) .. "|r")
             end
@@ -783,7 +783,7 @@ CN:RegisterCommand{
             Print(#recipes .. " recipe(s) carried:")
 
             for _, item in ipairs(recipes) do
-                Print("  " .. (Blizzard.GetItemName(item.itemID)
+                CN.PrintLine("  " .. (Blizzard.GetItemName(item.itemID)
                     or ("item " .. item.itemID)))
             end
         end
@@ -799,12 +799,12 @@ CN:RegisterCommand{
                     -- Hardcoded English two lines from a CN.L lookup of the
                     -- same words is how a locale file ends up complete and
                     -- the addon still English.
-                    Print("  |cff8a8f96"
+                    CN.PrintLine("  |cff8a8f96"
                         .. string.format(CN.L["%d more"], #nearly - 8) .. "|r")
                     break
                 end
 
-                Print(string.format("  |cffffc74f" .. CN.L["%d more"]
+                CN.PrintLine(string.format("  |cffffc74f" .. CN.L["%d more"]
                     .. "|r %s |cff8a8f96(%d/%d)|r",
                     row.remaining, tostring(row.text or row.title),
                     row.done, row.required))

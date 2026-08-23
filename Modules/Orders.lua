@@ -247,7 +247,7 @@ CN:RegisterCommand{
                             or "soon") .. "|r"
                 end
 
-                Print(line)
+                CN.PrintLine(line)
             end
         end
 

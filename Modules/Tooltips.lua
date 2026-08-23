@@ -283,15 +283,30 @@ function Tooltips.ItemLines(itemID, itemName)
         local mountID = Blizzard.GetMountFromItem(itemID)
         local speciesID = Blizzard.GetPetSpeciesFromItem(itemID)
 
-        local goalType = mountID and CN.objectiveTypes.MOUNT
-            or (speciesID and CN.objectiveTypes.PET)
+        -- TOYS AND APPEARANCES TOO, which hovered silently.
+        --
+        -- The "why you should care" line fired only for mounts and pets,
+        -- because those are the two the client will resolve from an item id
+        -- into a collection id. A toy IS its item id -- that is the key the
+        -- addon's own store uses -- and so is an appearance source, so both
+        -- were one branch away the whole time.
+        local isToy = CN.Account("toys")[itemID] ~= nil
 
-        local goalID = mountID or speciesID
+        local isAppearance = (not isToy)
+            and Blizzard.HasTransmogByItem(itemID) ~= nil
+
+        local goalType = (mountID and CN.objectiveTypes.MOUNT)
+            or (speciesID and CN.objectiveTypes.PET)
+            or (isToy and CN.objectiveTypes.TOY)
+            or (isAppearance and CN.objectiveTypes.APPEARANCE)
+            or nil
+
+        local goalID = mountID or speciesID or itemID
 
         if goals and goalType and goalID and goals.IsGoal
             and goals.IsGoal(goalType, goalID) then
 
-            Add(lines, "You are chasing this.", { 0.365, 0.824, 0.984 })
+            Add(lines, "You are chasing this.", CN.RGB.BRAND)
         else
             local candidate = CN.FindCandidate and goalType
                 and CN.FindCandidate(goalType, goalID)
@@ -299,7 +314,7 @@ function Tooltips.ItemLines(itemID, itemName)
             local reason = candidate and CN.FirstReason(candidate)
 
             if reason then
-                Add(lines, reason, { 0.6, 0.6, 0.6 })
+                Add(lines, reason, GREY)
             end
 
             -- ONE MORE LINE, WHERE IT SAYS SOMETHING THE FIRST DID NOT.
@@ -314,7 +329,7 @@ function Tooltips.ItemLines(itemID, itemName)
                 local ok, source = pcall(instances.DescribeSource, itemName)
 
                 if ok and source then
-                    Add(lines, "Drops from " .. source, { 0.6, 0.6, 0.6 })
+                    Add(lines, "Drops from " .. source, GREY)
                 end
             end
         end

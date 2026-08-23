@@ -383,7 +383,7 @@ function Blizzard.GetTodaysEvents()
             -- in four hours" are different pieces of advice. Some builds omit
             -- the end time entirely, and nil is then the right answer rather
             -- than a guessed week.
-            local endsIn
+            local endsAt, endsIn
 
             -- Gated on the end time itself, which is all this block reads.
             -- It used to also require C_DateAndTime.GetSecondsUntilWeeklyReset
@@ -405,16 +405,33 @@ function Blizzard.GetTodaysEvents()
                 })
 
                 if okStamp and stamp and stamp > nowStamp then
+                    endsAt = stamp
                     endsIn = stamp - nowStamp
                 end
             end
 
+            -- THE ABSOLUTE TIME AS WELL AS THE RELATIVE ONE.
+            --
+            -- `endsIn` is computed here, at SCAN time, and the caller caches
+            -- the whole list for thirty minutes -- so a deadline could be
+            -- half an hour stale on the heaviest-weighted term in the
+            -- scorer, whose steep ramp lives entirely inside the last two
+            -- hours. "Ends in 40m" printed ten minutes after it ended.
+            --
+            -- `endsAt` does not go stale, so the reader can derive a fresh
+            -- `endsIn` from it however long the list has been held.
             table.insert(events, {
                 title        = event.title,
+                -- The client supplies one on retail; carried through so the
+                -- consumer can key on it rather than on a translated title.
+                -- Nil elsewhere, and the consumer composes a stable key from
+                -- the three type fields in that case.
+                eventID      = event.eventID,
                 eventType    = event.eventType,
                 calendarType = event.calendarType,
                 sequenceType = event.sequenceType,
                 ongoing      = ongoing,
+                endsAt       = endsAt,
                 endsIn       = endsIn,
             })
         end

@@ -519,20 +519,43 @@ end
 -- count as the addon's advice being taken, which would teach it that its
 -- opinion is always right.
 -- The sub-bucket an objective belongs in, or its plain type when it has none.
+--
+-- MEMOISED ON THE OBJECTIVE, like `preferenceKey` twenty lines below and for
+-- exactly the same reason. This is one protected client call --
+-- `C_CampaignInfo.GetCampaignID` -- and the adjuster's first statement, so
+-- it ran once per quest candidate per scoring pass: measured at 130 calls
+-- for `Recommend(5)` over 148 candidates, and 130 again on the next re-rank
+-- with nothing changed, while `BuildZoneRoute` bumps the ranking generation
+-- from the Zone tab's two-second refresh, follow mode's ticker and every map
+-- open.
+--
+-- Whether a quest is part of a campaign is a fact about the quest and does
+-- not change while the client is running, so the answer is kept for the
+-- session -- on the objective, so it dies with the candidate.
 function Preference.Refine(objective)
     if not objective or objective.type ~= CN.objectiveTypes.QUEST then
         return objective and objective.type
     end
 
+    local held = objective.preferenceBucket
+
+    if held then
+        return held
+    end
+
     -- The game's own campaign data, which is what Loremaster already uses to
     -- keep "the story" and "everything else" apart.
+    local bucket = "QUEST_SIDE"
+
     if CN.Blizzard and CN.Blizzard.IsQuestCampaign
         and CN.Blizzard.IsQuestCampaign(objective.id) then
 
-        return "QUEST_CAMPAIGN"
+        bucket = "QUEST_CAMPAIGN"
     end
 
-    return "QUEST_SIDE"
+    objective.preferenceBucket = bucket
+
+    return bucket
 end
 
 -- Which sub-bucket a recorded sighting belonged to.
@@ -758,6 +781,18 @@ end
 -- Applied in scoring, after the profile's own type weighting, so a focus you
 -- chose deliberately always outranks a habit the addon inferred.
 CN.RegisterScoreAdjuster("Preference", function(objective, score)
+    -- THE GATE BEFORE THE WORK.
+    --
+    -- `Refine` was called first and `IsEnabled` afterwards, so a player who
+    -- had turned learning OFF paid the whole cost of it on every pass and
+    -- got nothing. Withdraw first, because a sentence stamped while learning
+    -- was on must not outlive it.
+    if not Preference.IsEnabled() then
+        CN.ClearAdjusterReason(objective, "preference")
+
+        return score
+    end
+
     -- The finer bucket first, and only if it has earned an opinion of its
     -- own. Falling back to the type means a player whose quest habits are
     -- undifferentiated is treated exactly as before.
@@ -912,7 +947,7 @@ CN:RegisterCommand{
                 local short = Preference.minimumObservations - entry.row.shown
 
                 line = line .. " |cff8a8f96(no effect"
-                    .. (short > 0 and ("" .. CN.DASH .. "" .. short .. " more sightings needed")
+                    .. (short > 0 and (" " .. CN.DASH .. " " .. short .. " more sightings needed")
                         or "")
                     .. ")|r"
             else
@@ -920,7 +955,7 @@ CN:RegisterCommand{
                     multiplier, reason or "")
             end
 
-            Print(line)
+            CN.PrintLine(line)
         end
 
         Print("|cff8a8f96" .. "/cn learned reset" .. " forgets all of it. "

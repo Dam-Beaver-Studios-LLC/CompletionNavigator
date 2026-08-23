@@ -508,7 +508,7 @@ CN:RegisterCommand{
 
         for name, value in pairs(records) do
             if type(value) == "table" and value.skipped then
-                Print("  |cff8a8f96" .. name .. "" .. CN.DASH .. "" .. value.skipped .. "|r")
+                CN.PrintLine("  |cff8a8f96" .. name .. " " .. CN.DASH .. " " .. value.skipped .. "|r")
             end
         end
 

@@ -177,7 +177,7 @@ local function SearchHelp(term)
 
     if #matches == 0 then
         Print("Nothing matches \"" .. term .. "\".")
-        Print(CN.Muted("Try a word from what you want to do" .. CN.DASH .. ""
+        Print(CN.Muted("Try a word from what you want to do" .. " " .. CN.DASH .. " "
             .. CN.Accent("/cn help mount") .. CN.Muted(", ")
             .. CN.Accent("/cn help time") .. CN.Muted(". ")
             .. CN.Accent("/cn help all") .. CN.Muted(" lists everything.")))
@@ -196,7 +196,7 @@ local function ShowGrouped()
     local shown = {}
 
     for _, group in ipairs(CN.helpGroups) do
-        Print("|cffffc74f" .. group.title .. "|r")
+        CN.PrintLine("|cffffc74f" .. group.title .. "|r")
 
         for _, name in ipairs(group.names) do
             local definition = Find(name)
@@ -274,7 +274,7 @@ local function ShowFullHelp()
             line = line .. " - " .. definition.help
         end
 
-        Print(line)
+        CN.PrintLine(line)
     end
 end
 
@@ -314,7 +314,7 @@ local function ShowStatus()
 
         if current and active then
             table.insert(lines, "Focus " .. CN.Accent(active.label)
-                .. CN.Muted("" .. CN.DASH .. "" .. active.note))
+                .. CN.Muted(" " .. CN.DASH .. " " .. active.note))
         end
 
         table.insert(lines, "Ranking weight "
@@ -339,7 +339,7 @@ local function ShowStatus()
 
         if #missing > 0 then
             table.insert(lines, CN.Accent("/cn setup")
-                .. CN.Muted("" .. CN.DASH .. "" .. #missing .. " thing"
+                .. CN.Muted(" " .. CN.DASH .. " " .. #missing .. " thing"
                     .. (#missing == 1 and "" or "s")
                     .. " here has never been read"))
         end
@@ -621,7 +621,7 @@ CN:RegisterCommand{
             local ok, preset = filters.ApplyMode(requested)
 
             if ok then
-                Print("Focus: |cffffc74f" .. preset.label .. "|r" .. CN.DASH .. ""
+                Print("Focus: |cffffc74f" .. preset.label .. "|r" .. " " .. CN.DASH .. " "
                     .. preset.note)
                 Print("|cff8a8f96/cn mode off|r puts it back.")
                 return
@@ -635,8 +635,8 @@ CN:RegisterCommand{
 
                 CN.InvalidateCandidates("mode")
 
-                Print("Ranking weight set to |cffffc74f" .. requested .. "|r.")
-                Print("|cff8a8f96Weighting only; your type filters are "
+                CN.PrintLine("Ranking weight set to |cffffc74f" .. requested .. "|r.")
+                CN.PrintLine("|cff8a8f96Weighting only; your type filters are "
                     .. "untouched.|r")
                 return
             end

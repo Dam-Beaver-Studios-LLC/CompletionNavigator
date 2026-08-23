@@ -52,13 +52,27 @@ Chase.stateLabels = {
     NOTE    = "",
 }
 
-Chase.stateColors = {
-    NEXT    = { 0.365, 0.824, 0.984 },
-    TODO    = { 0.85, 0.85, 0.85 },
-    BLOCKED = { 0.96, 0.42, 0.38 },
-    DONE    = { 0.45, 0.72, 0.45 },
-    NOTE    = { 0.6, 0.6, 0.6 },
+-- THE ROLE PER STATE, NOT A SECOND PALETTE.
+--
+-- This held five hand-written RGB triples, three of them colours Design.lua
+-- says were retired -- a complete second palette in a file that is not
+-- allowed to have one, and read by nothing: the same five states are declared
+-- again with palette codes in the Goals tab. Roles are named here so the two
+-- cannot drift, and so the one place that renders them has something to ask.
+Chase.stateRoles = {
+    NEXT    = "BRAND",
+    TODO    = "BODY",
+    BLOCKED = "BAD",
+    DONE    = "GOOD",
+    NOTE    = "MUTED",
 }
+
+-- And as a wrapped string, for chat and for a list label.
+function Chase.StateText(state, text)
+    local role = Chase.stateRoles[state] or "BODY"
+
+    return "|cff" .. CN.C[role] .. tostring(text) .. "|r"
+end
 
 local function NewStep(state, text, extra)
     local step = extra or {}
@@ -441,10 +455,10 @@ function Chase.Summarize(chain)
         table.insert(parts, "next: " .. tostring(nextStep.text))
     elseif #parts == 0 then
         return tostring(chain.name)
-            .. "" .. CN.DASH .. "the game does not say how this is obtained."
+            .. " " .. CN.DASH .. "the game does not say how this is obtained."
     end
 
-    return tostring(chain.name) .. "" .. CN.DASH .. "" .. table.concat(parts, ", ")
+    return tostring(chain.name) .. " " .. CN.DASH .. " " .. table.concat(parts, ", ")
 end
 
 -- Percent complete, or nil. Nil is a real answer and callers must render it
@@ -789,28 +803,20 @@ local function PrintChain(chain)
 
     for _, step in ipairs(chain.steps) do
         if shown >= 12 then
-            Print("  |cff8a8f96... and " .. (#chain.steps - shown) .. " more|r")
+            CN.PrintLine("  |cff8a8f96... and " .. (#chain.steps - shown) .. " more|r")
             break
         end
 
+        -- THE THIRD DECLARATION OF THE SAME FIVE STATES, now the only one.
+        --
+        -- This file held one as RGB triples, the Goals tab held one as
+        -- palette hex, and this chain of `elseif`s held a third -- so a state
+        -- could be given a colour in one place and keep two old ones.
         local label = Chase.stateLabels[step.state] or ""
 
-        local colour = "|cffc8ccd2"
-
-        if step.state == Chase.states.DONE then
-            colour = "|cff73b873"
-        elseif step.state == Chase.states.NEXT then
-            colour = "|cff5dd2fb"
-        elseif step.state == Chase.states.BLOCKED then
-            colour = "|cffe2564c"
-        elseif step.state == Chase.states.NOTE then
-            colour = "|cff8a8f96"
-        end
-
-        Print(string.format("  %s%s%s|r",
-            colour,
-            label ~= "" and ("[" .. label .. "] ") or "",
-            step.text))
+        CN.PrintLine(Chase.StateText(step.state,
+            "  " .. (label ~= "" and ("[" .. label .. "] ") or "")
+            .. tostring(step.text)))
 
         shown = shown + 1
     end

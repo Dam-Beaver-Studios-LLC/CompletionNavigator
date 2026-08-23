@@ -644,7 +644,7 @@ CN:RegisterCommand{
         local function report(store, scopeLabel)
             for factionID, record in pairs(store) do
                 if record.paragon and record.paragon.pending then
-                    Print(record.name .. " |cff8a8f96(" .. scopeLabel .. ")|r"
+                    CN.PrintLine(record.name .. " |cff8a8f96(" .. scopeLabel .. ")|r"
                         .. " - reward ready")
                     found = found + 1
                 end

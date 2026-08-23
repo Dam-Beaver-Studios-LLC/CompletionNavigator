@@ -46,6 +46,36 @@ function Opportunities.Urgency(secondsLeft)
     return 0.25
 end
 
+-- THE BARE FIGURE, WITH NO CLAUSE ATTACHED.
+--
+-- `FormatTimeLeft` returns strings that already end in " left", and three
+-- callers prepend "in " -- so the Now tab's header read "Resets: daily in 4h
+-- left, weekly in 3d left", on every visit, and "daily in unknown time left"
+-- when the client would not answer. A formatter that owns the preposition
+-- cannot be reused with a different one.
+--
+-- Same shape as `Vault.FormatReset`, which is what the Vault tab uses for the
+-- same clock -- two formats for one quantity in one window.
+function Opportunities.FormatSpan(seconds)
+    if not seconds then
+        return nil
+    end
+
+    if seconds <= 0 then
+        return nil
+    end
+
+    if seconds < HOUR then
+        return math.floor(seconds / 60) .. "m"
+    end
+
+    if seconds < DAY then
+        return math.floor(seconds / HOUR) .. "h"
+    end
+
+    return math.floor(seconds / DAY) .. "d"
+end
+
 function Opportunities.FormatTimeLeft(seconds)
     -- "UNKNOWN" AND "EXPIRED" ARE DIFFERENT ANSWERS.
     --
@@ -139,9 +169,66 @@ end
 -- minute to minute.
 local eventCache, eventCachedAt = nil, 0
 
+-- KEYED ON SOMETHING THE CLIENT'S LANGUAGE CANNOT CHANGE.
+--
+-- `id = event.title` was a localized string, and Instances.lua carries a
+-- header describing that same defect as fixed for lockouts, in as many words:
+-- every ignore was lost the day the player changed client language.
+--
+-- THE FALLBACK STILL HAS TO IDENTIFY THE EVENT. A triple of eventType,
+-- calendarType and sequenceType is a description of a KIND of event, not of
+-- one -- two ongoing holidays on the same day compose the identical key, and
+-- the aggregate dedups on it, so one of them is silently dropped. That is
+-- exactly the collapse this was meant to fix. The title goes back into the
+-- fallback: it is not stable across languages, but a key that is unstable is
+-- better than a key that is not unique, and where the client supplies an
+-- eventID neither problem arises.
+--
+-- `> 0` rather than truthiness: zero is truthy in Lua, so an eventID of 0
+-- would give every holiday the same id.
+function Opportunities.EventKey(event)
+    if type(event) ~= "table" then
+        return nil
+    end
+
+    if type(event.eventID) == "number" and event.eventID > 0 then
+        return event.eventID
+    end
+
+    return tostring(event.eventType or "?")
+        .. ":" .. tostring(event.calendarType or "?")
+        .. ":" .. tostring(event.sequenceType or "?")
+        .. ":" .. tostring(event.title or "?")
+end
+
 function Opportunities.GetActiveEvents(force)
+    -- A DEADLINE IS DERIVED AT READ TIME, NOT AT SCAN TIME.
+    --
+    -- `endsIn` is a countdown, computed when the calendar was read, and this
+    -- list is held for thirty minutes. So the addon printed "ends in 40m"
+    -- about an event that had finished ten minutes earlier, and the urgency
+    -- ramp -- weight 4.0, and steepest inside the last two hours -- was fed a
+    -- figure that could be half an hour wrong exactly where it matters most.
+    -- `expiresIn` is an identity field, so the frozen value also let the
+    -- provider take the reuse shortcut and nothing corrected it.
+    --
+    -- `endsAt` is an absolute stamp and cannot go stale.
+    local function Freshen(events)
+        local now = time()
+
+        for _, event in ipairs(events) do
+            if event.endsAt then
+                local left = event.endsAt - now
+
+                event.endsIn = (left > 0) and left or nil
+            end
+        end
+
+        return events
+    end
+
     if not force and eventCache and (time() - eventCachedAt) < 1800 then
-        return eventCache
+        return Freshen(eventCache)
     end
 
     local active = {}
@@ -151,6 +238,8 @@ function Opportunities.GetActiveEvents(force)
             table.insert(active, event)
         end
     end
+
+    Freshen(active)
 
     eventCache    = active
     eventCachedAt = time()
@@ -220,8 +309,17 @@ CN.RegisterCandidateProvider("Opportunities", function()
     -- gone on a known date and it is not coming back for a year -- so it
     -- belongs in the list rather than in a separate command.
     for _, event in ipairs(Opportunities.GetActiveEvents()) do
-        if not CN.IsIgnored(CN.objectiveTypes.CURRENCY, event.title)
-            and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, event.title) then
+        -- THE KEY IS WORKED OUT FIRST, because two things need it.
+        --
+        -- The ignore and defer guards read one key and the objective was
+        -- built with another, so `CN.IsIgnored` looked up a title while
+        -- `CN.SetIgnored` had stored an id: hiding a world event did nothing
+        -- at all, for ever. Before 0.59.0 the two happened to be the same
+        -- string, which is how a change to one of them broke the other.
+        local id = Opportunities.EventKey(event)
+
+        if not CN.IsIgnored(CN.objectiveTypes.CURRENCY, id)
+            and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, id) then
 
             local reasons = { "world event, on now" }
 
@@ -234,7 +332,7 @@ CN.RegisterCandidateProvider("Opportunities", function()
             -- does not know which of its quests you have done, so claiming
             -- this is your most valuable next action would be a guess.
             table.insert(candidates, CN.NewObjective({
-                id               = event.title,
+                id               = id,
                 type             = CN.objectiveTypes.CURRENCY,
                 name             = event.title,
                 completionValue  = 2,
@@ -290,7 +388,7 @@ CN:RegisterCommand{
             Print("Active events:")
 
             for _, event in ipairs(events) do
-                Print("  " .. event.title)
+                CN.PrintLine("  " .. event.title)
             end
         end
 
@@ -306,7 +404,7 @@ CN:RegisterCommand{
         for index = 1, math.min(#worldQuests, 10) do
             local worldQuest = worldQuests[index]
 
-            Print("  " .. index .. ". " .. worldQuest.name
+            CN.PrintLine("  " .. index .. ". " .. worldQuest.name
                 .. " |cff8a8f96(" .. Opportunities.FormatTimeLeft(worldQuest.secondsLeft)
                 .. (worldQuest.tagName and (", " .. worldQuest.tagName) or "") .. ")|r")
         end
@@ -331,7 +429,7 @@ CN:RegisterCommand{
         end
 
         for _, event in ipairs(events) do
-            Print("  " .. event.title
+            CN.PrintLine("  " .. event.title
                 .. " |cff8a8f96(" .. tostring(event.sequenceType) .. ")|r")
         end
     end,

@@ -223,7 +223,7 @@ CN:RegisterCommand{
                 .. "session:")
 
             for _, key in ipairs(stats.sample) do
-                Print("  |cff8a8f96" .. key .. "|r")
+                CN.PrintLine("  |cff8a8f96" .. key .. "|r")
             end
 
             if stats.missing > #stats.sample then
@@ -260,7 +260,7 @@ CN:RegisterCommand{
                 .. "fill in the right-hand side:")
 
             for _, key in ipairs(keys) do
-                Print('    ["' .. key .. '"] = "",')
+                CN.PrintLine('    ["' .. key .. '"] = "",')
             end
 
             Print("|cff8a8f96" .. #keys .. " keys. Leave anything you are not "

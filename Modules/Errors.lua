@@ -244,7 +244,7 @@ CN:RegisterCommand{
 
         for event, why in pairs(CN.rejectedEvents or {}) do
             if rejected == 0 then
-                Print("|cffe2564cThe client refused to register these "
+                CN.PrintLine("|cffe2564cThe client refused to register these "
                     .. "events, so nothing listening for them ever runs:|r")
             end
 

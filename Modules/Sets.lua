@@ -298,11 +298,11 @@ CN:RegisterCommand{
 
                 for index, set in ipairs(nearly) do
                     if index > 10 then
-                        Print("  |cff8a8f96... and " .. (#nearly - 10) .. " more|r")
+                        CN.PrintLine("  |cff8a8f96... and " .. (#nearly - 10) .. " more|r")
                         break
                     end
 
-                    Print(string.format("  |cffffc74f%d left|r %s |cff8a8f96(%d/%d)|r",
+                    CN.PrintLine(string.format("  |cffffc74f%d left|r %s |cff8a8f96(%d/%d)|r",
                         set.missing, tostring(set.name or set.setID),
                         set.collected, set.total))
                 end

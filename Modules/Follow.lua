@@ -482,7 +482,12 @@ function Follow.HeaderText()
 
     local total = #(current.objectives or {})
 
-    return string.format("Stop: %d of %d left", remaining, total)
+    -- "Stop: 3 of 5 left" reads at a glance as "stop 3 of 5", and the
+    -- heads-up line says "stop 4 of 12" about a different quantity -- hubs in
+    -- the route rather than objectives at this one. Two frames, one activity,
+    -- two numbers that look like the same number. This one counts what is
+    -- left HERE and says so.
+    return string.format("%d of %d left here", remaining, total)
 end
 
 local function BuildFrame()

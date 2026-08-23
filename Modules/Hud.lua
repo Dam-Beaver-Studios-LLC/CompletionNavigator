@@ -157,8 +157,17 @@ local function Build()
     -- fights the drag: `OnMouseUp` fires on a click, not on a drag.
     frame:RegisterForDrag("LeftButton")
 
-    frame:SetScript("OnMouseUp", function(_, button)
-        local objective = CN.currentRecommendation
+    frame:SetScript("OnMouseUp", function(clicked, button)
+        -- THE ONE IT IS SHOWING, NOT THE ONE SOMETHING ELSE SELECTED.
+        --
+        -- This read `CN.currentRecommendation`, which only the Next tab,
+        -- `/cn next`, the minimap right-click and auto-advance ever write.
+        -- A player who turned the heads-up line on and never opened the
+        -- window had it nil for the whole session: the line named an
+        -- objective, its tooltip promised two clicks, and both did nothing
+        -- with no message. And when they diverged -- row 7 selected on the
+        -- Next tab -- the line showed #1 and clicking it navigated to 7.
+        local objective = clicked.objective or CN.currentRecommendation
 
         if not objective then
             return
@@ -207,11 +216,16 @@ function Hud.Refresh()
     local objective = results and results[1]
 
     if not objective then
+        frame.objective = nil
+
         frame.label:SetText("|cff8a8f96nothing actionable|r")
         frame.detail:SetText("")
 
         return true
     end
+
+    -- What the line is showing IS what clicking it acts on. See OnMouseUp.
+    frame.objective = objective
 
     frame.label:SetText(tostring(objective.name or objective.id))
 
@@ -226,6 +240,14 @@ function Hud.Refresh()
     local follow = CN:GetModule("Follow")
 
     if follow and follow.active and (follow.startedWith or 0) > 0 then
+        -- ONE PHRASING PER QUANTITY.
+        --
+        -- This said "stop 4 of 12" -- counted over hubs in the route -- while
+        -- the follow frame two inches away said "Stop: 3 of 5 left", counted
+        -- over objectives at the current hub. Two frames on screen at once,
+        -- describing the same activity in near-identical words with unrelated
+        -- numbers. The follow frame now says "3 left here"; this one keeps
+        -- the route-level count, which is the one a glanceable line wants.
         detail = string.format("stop %d of %d",
             math.min((follow.completed or 0) + 1, follow.startedWith),
             follow.startedWith)
@@ -419,7 +441,7 @@ function Hud.RegisterOptionsPanel()
     body:SetPoint("TOPLEFT", 16, -48)
     body:SetPoint("TOPRIGHT", -16, -48)
     body:SetJustifyH("LEFT")
-    body:SetText("Answers \"what should I do next?\"" .. CN.DASH .. "ranks what is worth "
+    body:SetText("Answers \"what should I do next?\" " .. CN.DASH .. "ranks what is worth "
         .. "doing now, costs the journey the way you would really make it, "
         .. "and shows its working when you ask why.\n\n"
         .. "1.  Scan once, so it knows what you have.\n"

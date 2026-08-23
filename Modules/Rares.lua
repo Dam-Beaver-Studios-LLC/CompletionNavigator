@@ -342,19 +342,34 @@ CN.RegisterCandidateProvider("Rares", function()
             and not CN.IsDeferred(objectiveType, id) then
 
             local reasons = {}
-            local travel  = 0
 
             table.insert(reasons, vignette.kind == "TREASURE"
                 and "treasure is up right now"
                 or "rare is up right now")
 
-            if vignette.x and vignette.y and playerX and playerY then
-                local dx = vignette.x - playerX
-                local dy = vignette.y - playerY
+            -- THROUGH THE TRAVEL MODEL, LIKE EVERY OTHER LOCATED PROVIDER.
+            --
+            -- This did raw Pythagoras on normalized map units and multiplied
+            -- by ten, which asserts three things that are not true: that a
+            -- map unit is the same number of yards north-south as east-west
+            -- (the bearing defect of 0.40.0, in a different file), that every
+            -- zone is about 2,100 yards across, and that the player is on
+            -- foot. Quests, opportunities, vendors, toys and goals all go
+            -- through `CN.TravelCost`, which knows the zone's real scale, the
+            -- flight network and the player's own measured speed.
+            --
+            -- Left NIL rather than zero when there are no coordinates: zero
+            -- means "you are standing on it", and `CN.IsPlaceless` reads it
+            -- that way, so a rare the client would not place was scored as
+            -- free AND exempt from the unknown-location cost.
+            local travel
 
-                travel = math.sqrt((dx * dx) + (dy * dy)) * 10
+            if vignette.x and vignette.y then
+                travel = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)
 
-                table.insert(reasons, "in your current zone")
+                if playerX and playerY then
+                    table.insert(reasons, "in your current zone")
+                end
             end
 
             table.insert(candidates, CN.NewObjective({
@@ -471,7 +486,7 @@ CN:RegisterCommand{
             local cleared = vignette.vignetteID
                 and Rares.IsClearedByCharacter(vignette.vignetteID)
 
-            Print("  " .. index .. ". " .. tostring(vignette.name)
+            CN.PrintLine("  " .. index .. ". " .. tostring(vignette.name)
                 .. " |cff8a8f96[" .. tostring(vignette.kind) .. "]|r"
                 .. (cleared and " |cff8a8f96(already cleared)|r" or "")
                 .. (vignette.x and string.format(" |cff8a8f96%.1f, %.1f|r",

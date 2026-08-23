@@ -329,13 +329,13 @@ CN:RegisterCommand{
 
             for index, entry in ipairs(mail) do
                 if index > 5 then
-                    Print("  |cff8a8f96... and " .. (#mail - 5) .. " more|r")
+                    CN.PrintLine("  |cff8a8f96... and " .. (#mail - 5) .. " more|r")
                     break
                 end
 
                 local colour = entry.expiring and "|cffe2564c" or "|cff8a8f96"
 
-                Print(string.format("  %s%.1f days|r %s |cff8a8f96from %s|r",
+                CN.PrintLine(string.format("  %s%.1f days|r %s |cff8a8f96from %s|r",
                     colour, entry.daysLeft or 0,
                     tostring(entry.subject or "(no subject)"),
                     tostring(entry.sender or "?")))
@@ -356,7 +356,7 @@ CN:RegisterCommand{
         local knowledge = Waiting.Knowledge()
 
         for _, row in ipairs(knowledge) do
-            Print(row.name .. ": |cffffc74f" .. row.remaining
+            CN.PrintLine(row.name .. ": |cffffc74f" .. row.remaining
                 .. "|r of " .. row.cap .. " still collectable this week")
 
             said = true

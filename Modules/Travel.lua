@@ -1041,8 +1041,14 @@ end
 --   * The hearthstone and Astral Recall go wherever the player set them. The
 --     client reports that as a zone NAME, and this addon has no name-to-map
 --     index -- building one means walking the whole map tree, which is a
---     client call per zone for a fact that is worth less than its cost. They
---     are still listed as available; they are not costed.
+--     client call per zone for a fact that is worth less than its cost.
+--
+--     LEARNED INSTEAD, from 0.59.0. The addon watches for the hearth being
+--     cast and records where the player lands. That is one observation of
+--     one fact the player performs anyway, it cannot be wrong the way a
+--     curated table of localized inn names can, and it costs nothing until
+--     it happens. Until it does, the option is listed and not costed --
+--     exactly as before.
 --   * The Flight Master's Whistle lands at the nearest flight point in the
 --     zone you are already standing in. It is not a cross-continent option at
 --     all.
@@ -1151,6 +1157,101 @@ end
 
 -- Every teleport this character has, with seconds of cooldown remaining.
 -- Ready ones first, because that is the order they are useful in.
+-- WHERE THE PLAYER'S HEARTHSTONE ACTUALLY GOES, LEARNED BY WATCHING.
+--
+-- `GetBindLocation()` is a localized inn name. Turning that into a map means
+-- either walking the whole map tree looking for a match -- a client call per
+-- zone, for a name that may not be a zone name at all -- or a curated table
+-- of inn names in ten languages, which is wrong the moment Blizzard renames
+-- one.
+--
+-- Watching is exact and free: the player hearths, the addon notes the map
+-- they arrived on, and files it under the bind name the client reports. If
+-- they rebind, the name changes and the old entry simply stops being asked
+-- for. Persisted because it is an observation the client will not repeat --
+-- the standing rule -- and keyed on the name so a wrong one cannot outlive
+-- the binding it describes.
+local function BindPoints()
+    local account = CN.Account()
+
+    account.bindPoints = account.bindPoints or {}
+
+    return account.bindPoints
+end
+
+function Travel.BindName()
+    if not GetBindLocation then
+        return nil
+    end
+
+    local ok, name = pcall(GetBindLocation)
+
+    if not ok or type(name) ~= "string" or name == "" then
+        return nil
+    end
+
+    return name
+end
+
+function Travel.BindMap()
+    local name = Travel.BindName()
+
+    return name and BindPoints()[name] or nil
+end
+
+-- Called once, after a hearth lands. Returns the map it recorded, or nil.
+-- A CEILING, like the two stores beside it.
+--
+-- `questPins` is capped at 600 and `questHarvest` at 2000, both by explicit
+-- migration, both with headers saying an uncapped store is the defect. This
+-- one is keyed on a localized bind name and written on every hearth, so a
+-- player who rebinds often accumulates names that will never be asked for
+-- again. Small per entry and unbounded in principle, which is the same thing
+-- the neighbours were.
+Travel.bindPointCap = 32
+
+function Travel.NoteHearthArrival()
+    local name = Travel.BindName()
+
+    if not name then
+        return nil
+    end
+
+    local mapID = CN.GetPlayerPosition()
+
+    if not mapID then
+        return nil
+    end
+
+    local held = BindPoints()[name]
+
+    -- Past the cap the whole store goes, which costs one hearth to relearn
+    -- the binding actually in use -- cheaper than keeping an order nobody
+    -- reads in order to evict by it.
+    if held == nil and CN.CountKeys(BindPoints()) >= Travel.bindPointCap then
+        CN.Account().bindPoints = {}
+
+        CN.DebugPrint("Bind point store was full; cleared it.")
+    end
+
+    BindPoints()[name] = mapID
+
+    if held ~= mapID then
+        -- A journey that could not be costed a moment ago can be now.
+        CN.InvalidateRanking()
+
+        CN.DebugPrint("Hearthstone bind \"" .. name .. "\" lands on map "
+            .. tostring(mapID) .. ".")
+    end
+
+    return mapID
+end
+
+-- How many bind points have been observed, for `/cn travel` and the tests.
+function Travel.BindPointCount()
+    return CN.CountKeys(BindPoints())
+end
+
 function Travel.ReadyTeleports()
     local available = {}
 
@@ -1173,8 +1274,13 @@ function Travel.ReadyTeleports()
                 ready     = remaining <= 0,
                 -- Where a hearthstone actually goes. A name, because that is
                 -- all the client offers; deliberately not turned into a map.
-                bound     = (entry.id == 6948 and GetBindLocation)
-                    and GetBindLocation() or nil,
+                bound     = entry.bindPoint and Travel.BindName() or nil,
+
+                -- Where that bind point has been observed to land, if the
+                -- player has hearthed once with the addon loaded. See
+                -- `Travel.NoteHearthArrival`.
+                learnedMap = entry.bindPoint
+                    and Travel.BindMap() or nil,
             })
         end
     end
@@ -1230,11 +1336,15 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         local best
 
         for _, teleport in ipairs(teleports) do
-            local landing = teleport.mapID and Travel.WorldPoint(teleport.mapID, 0.5, 0.5)
+            -- The curated destination, or the one the player's own hearth
+            -- taught the addon.
+            local destination = teleport.mapID or teleport.learnedMap
+
+            local landing = destination and Travel.WorldPoint(destination, 0.5, 0.5)
 
             if landing and landing.continent == to.continent then
                 local onward, _, onwardDetail = Travel.EstimateSeconds(
-                    teleport.mapID, 0.5, 0.5, toMapID, toX, toY)
+                    destination, 0.5, 0.5, toMapID, toX, toY)
 
                 if onward then
                     local seconds = onward + Travel.castSeconds
@@ -1449,26 +1559,54 @@ function Travel.EstimateSeconds(fromMapID, fromX, fromY, toMapID, toX, toY)
         -- bound did -- became a much larger lie.
         local minOutgoing = Neighbours(continent, nodes).minOutgoing or {}
 
+        -- THE SMALLEST FLIGHT LEG ANYWHERE ON THIS CONTINENT.
+        --
+        -- The per-origin floor below uses `minOutgoing[i]`, which varies by
+        -- origin -- so it is NOT monotone in `walkOut`, and the `break` that
+        -- claimed "every remaining origin has a floor at least this high" was
+        -- unsound as written. (Five and a half thousand randomised continents
+        -- failed to produce a case where it changed the answer, which is why
+        -- it survived; the triangle inequality and the 25:7 speed ratio make
+        -- it very nearly true. Very nearly true is not an argument.)
+        --
+        -- So: a floor that IS monotone -- the same expression with the
+        -- continent-wide minimum substituted -- keeps a sound early exit, and
+        -- the per-origin floor becomes a filter, which is exact.
+        local globalOutgoing
+
+        for _, value in pairs(minOutgoing) do
+            if not globalOutgoing or value < globalOutgoing then
+                globalOutgoing = value
+            end
+        end
+
+        globalOutgoing = globalOutgoing or 0
+
         for _, i in ipairs(order) do
             local walkOut = originSeconds[i]
 
-            -- Nothing beyond this point can be free, no flight out of here is
+            -- MONOTONE IN `walkOut`, so `order` being sorted by it means
+            -- every remaining origin's floor really is at least this high.
+            local soundFloor = walkOut + Travel.flightOverheadSeconds
+                + (globalOutgoing / flightSpeed)
+                + (cheapestArrival or 0)
+
+            if not cheapestArrival
+                or (bestPossibleDiscount * soundFloor) >= bestRanking then
+
+                break
+            end
+
+            -- Nothing beyond this point can be free, no flight out of HERE is
             -- shorter than the shortest edge leaving it, and nothing can be
             -- discounted further than a known route discounts it -- so an
             -- origin whose best conceivable total already loses cannot win.
+            -- A filter, not a break: this one is about one origin.
             local floor = walkOut + Travel.flightOverheadSeconds
                 + ((minOutgoing[i] or 0) / flightSpeed)
                 + (cheapestArrival or 0)
 
-            if not cheapestArrival
-                or (bestPossibleDiscount * floor) >= bestRanking then
-
-                -- Sorted by `walkOut`, so every remaining origin has a floor
-                -- at least this high.
-                break
-            end
-
-            do
+            if (bestPossibleDiscount * floor) < bestRanking then
                 local origin = nodes[i]
 
                 -- THE WAY THE BIRD ACTUALLY GOES.
@@ -1828,6 +1966,89 @@ end
 -- taxi map. `Travel.KnownNodes` already refuses to remember an empty list, so
 -- the "client was not ready yet" case that the event was covering is handled
 -- where it belongs.
+-- WATCHING FOR THE HEARTH.
+--
+-- `UNIT_SPELLCAST_SUCCEEDED` fires the moment the cast completes and before
+-- the loading screen, so the arrival is the next `PLAYER_ENTERING_WORLD`.
+-- Two spell ids: the hearthstone's own, and Astral Recall, which goes to the
+-- same bind point.
+--
+-- Deliberately narrow. A flag, one event deep, cleared whether or not the
+-- arrival produced a map -- a pending flag that can survive an unrelated
+-- loading screen would file the wrong zone under the player's bind name and
+-- then cost journeys against it.
+Travel.hearthSpells = {
+    [8690] = true,   -- Hearthstone
+    [556]  = true,   -- Astral Recall
+}
+
+local hearthPending  = false
+local hearthAttempts = 0
+
+-- Three loading screens, or three seconds of retries after one. Past that the
+-- client is not going to place the player and the observation is dropped
+-- rather than filed against whatever map eventually answers.
+Travel.hearthRetries = 3
+
+CN:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED", function(_, unit, _, spellID)
+    if unit == "player" and Travel.hearthSpells[spellID] then
+        hearthPending = true
+    end
+end)
+
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    if not hearthPending then
+        return
+    end
+
+    -- THE FLAG IS NOT CLEARED UNTIL THE OBSERVATION SUCCEEDS.
+    --
+    -- `CN.GetPlayerPosition()` returns nil whenever the client will not place
+    -- the player, which this addon documents in three places as routine for a
+    -- moment after a loading screen -- and `PLAYER_ENTERING_WORLD` IS that
+    -- moment. Clearing first meant the one observation was thrown away
+    -- exactly when it was most likely to fail, and nothing re-armed until the
+    -- next hearth: the bind point stayed unknown and every cross-continent
+    -- journey stayed uncosted.
+    if Travel.NoteHearthArrival() then
+        hearthPending = false
+
+        return
+    end
+
+    -- One retry a frame later, by which time the map has resolved. Bounded,
+    -- so a hearth into a zone the client will never place does not leave a
+    -- flag armed for the rest of the session waiting to record the wrong map.
+    hearthAttempts = (hearthAttempts or 0) + 1
+
+    if hearthAttempts >= Travel.hearthRetries then
+        hearthPending  = false
+        hearthAttempts = 0
+
+        return
+    end
+
+    if C_Timer and C_Timer.After then
+        C_Timer.After(1, function()
+            if not hearthPending then
+                return
+            end
+
+            if Travel.NoteHearthArrival() then
+                hearthPending  = false
+                hearthAttempts = 0
+            end
+        end)
+    end
+end)
+
+-- Rebinding invalidates nothing -- the store is keyed on the bind NAME, so a
+-- new binding is simply a name that has not been observed yet. What it does
+-- change is whether a journey can be costed, so the ranking is told.
+CN:RegisterEvent("HEARTHSTONE_BOUND", function()
+    CN.InvalidateRanking()
+end)
+
 CN:RegisterEvent("TAXIMAP_OPENED", function()
     Travel.ForgetNodes()
 
@@ -1940,6 +2161,9 @@ CN:RegisterCommand{
             Print("|cff8a8f96The client will not say which continent this is.|r")
         end
 
+        Print("Bind points learned: " .. Travel.BindPointCount()
+            .. CN.Aside("recorded by watching where your hearth lands"))
+
         local results = CN.Recommend(1)
 
         local target = results and results[1]
@@ -1981,7 +2205,7 @@ CN:RegisterCommand{
                 Print(string.format("  |cff8a8f96%d legs:|r", #legs))
 
                 for index, leg in ipairs(legs) do
-                    Print(string.format("    |cff8a8f96%d. %s to %s, %.0f yd|r",
+                    CN.PrintLine(string.format("    |cff8a8f96%d. %s to %s, %.0f yd|r",
                         index, tostring(leg.from), tostring(leg.to),
                         leg.yards or 0))
                 end
@@ -2019,7 +2243,18 @@ CN:RegisterCommand{
                 local line = "  " .. teleport.label
 
                 if teleport.bound then
-                    line = line .. " |cff8a8f96to " .. teleport.bound .. "|r"
+                    line = line .. CN.Muted(" to " .. teleport.bound)
+
+                    -- SAY WHETHER THE ADDON CAN PRICE IT.
+                    --
+                    -- A bind point is a name until the player hearths once
+                    -- with the addon loaded; after that it is a map and the
+                    -- journey costs like any other. Both states are honest;
+                    -- only one of them was visible.
+                    if not teleport.learnedMap then
+                        line = line .. CN.Muted(" (not costed yet"
+                            .. CN.DASH .. " hearth once and it will be)")
+                    end
                 end
 
                 if teleport.ready then
@@ -2029,7 +2264,7 @@ CN:RegisterCommand{
                         .. Travel.FormatReset(teleport.remaining) .. "|r"
                 end
 
-                Print(line)
+                CN.PrintLine(line)
             end
         end
     end,

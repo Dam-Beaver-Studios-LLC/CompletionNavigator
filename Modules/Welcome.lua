@@ -196,15 +196,38 @@ function Welcome.Build()
             scan:SetText("Reading" .. CN.DOT .. CN.DOT .. CN.DOT)
 
             setup.Run(function()
-                if scan and scan.SetText then
-                    scan:SetText("Read. " .. CN.Accent("/cn")
-                        .. " asks what is next.")
+                -- A STATUS MESSAGE IS NOT A BUTTON.
+                --
+                -- This left a permanently disabled, greyed 384-pixel control
+                -- reading "Read. /cn asks what is next." -- a sentence shaped
+                -- like something you press.
+                if scan and scan.Hide then
+                    scan:Hide()
+                end
+
+                if frame and frame.scanNote then
+                    frame.scanNote:SetText(CN.Good("Read.") .. " "
+                        .. CN.Muted("Close this and try ")
+                        .. CN.Accent("/cn") .. CN.Muted("."))
+                end
+
+                -- The scan is the thing this screen was open for. Once it has
+                -- run there is nothing left to do here.
+                if frame and frame.Hide then
+                    frame:Hide()
                 end
             end)
         end
     end)
 
     frame.scan = scan
+
+    -- Where the scan reports, so the button does not have to become a label.
+    frame.scanNote = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
+    frame.scanNote:SetPoint("TOPLEFT", scan, "BOTTOMLEFT", 0, -2)
+    frame.scanNote:SetPoint("RIGHT", scan, "RIGHT")
+    frame.scanNote:SetJustifyH("LEFT")
+    frame.scanNote:SetText("")
 
     local previous
 
@@ -260,8 +283,28 @@ function Welcome.Build()
             CN.PrintBlock("Focus: " .. CN.Accent(chosenLabel)
                 .. CN.Aside(CN.Accent("/cn mode off") .. " undoes it"), lines)
 
-            frame:Hide()
+            -- ANSWERING THE QUESTION MUST NOT DESTROY THE CALL TO ACTION.
+            --
+            -- This screen's primary action is the scan button at the top, and
+            -- every focus button closed the frame -- so a player who answered
+            -- the question it asked lost the button that does the one setup
+            -- step the addon needs, and the only recovery was a chat line
+            -- that scrolls away under login chatter.
+            --
+            -- The choice is marked instead, and the frame stays open until
+            -- the scan runs, "Not now" is pressed, or Escape is.
+            for _, other in ipairs(frame.choiceButtons or {}) do
+                other:SetText(Welcome.Describe(other.cnMode))
+            end
+
+            button:SetText(CN.Good("|cff73b873>|r ") .. label)
         end)
+
+        button.cnMode = choice.mode
+
+        frame.choiceButtons = frame.choiceButtons or {}
+
+        table.insert(frame.choiceButtons, button)
 
         previous = button
     end

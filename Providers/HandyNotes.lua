@@ -259,11 +259,11 @@ CN:RegisterCommand{
 
         for index, node in ipairs(nodes) do
             if index > 20 then
-                Print("  |cff8a8f96and " .. (#nodes - 20) .. " more|r")
+                CN.PrintLine("  |cff8a8f96and " .. (#nodes - 20) .. " more|r")
                 break
             end
 
-            Print(string.format("  %d. %s |cff8a8f96%s at %.1f, %.1f|r",
+            CN.PrintLine(string.format("  %d. %s |cff8a8f96%s at %.1f, %.1f|r",
                 index, tostring(node.label or "unnamed"),
                 tostring(node.plugin), (node.x or 0) * 100, (node.y or 0) * 100))
         end

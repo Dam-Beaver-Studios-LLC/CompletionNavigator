@@ -422,7 +422,7 @@ CN:RegisterCommand{
         Print("Item " .. itemID .. " is sold by:")
 
         for index, seller in ipairs(sellers) do
-            Print("  " .. index .. ". " .. tostring(seller.name)
+            CN.PrintLine("  " .. index .. ". " .. tostring(seller.name)
                 .. (seller.zone and (" |cff8a8f96in " .. seller.zone .. "|r") or "")
                 .. (seller.x and string.format(" |cff8a8f96%.1f, %.1f|r",
                     seller.x * 100, seller.y * 100) or ""))

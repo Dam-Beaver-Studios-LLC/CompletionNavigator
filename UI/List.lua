@@ -106,6 +106,19 @@ local function CreateList(parent)
         row.value:SetPoint("RIGHT", -6, 0)
         row.value:SetJustifyH("RIGHT")
 
+        -- THE CLICKABLE MARKER, in its own gutter to the right of the value
+        -- column so it never collides with either. See the header where it is
+        -- shown, in the fill loop below.
+        row.chevron = row:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        row.chevron:SetPoint("RIGHT", 0, 0)
+        row.chevron:SetWidth(8)
+        row.chevron:SetJustifyH("RIGHT")
+        row.chevron:SetText(CN.Muted(">"))
+        row.chevron:Hide()
+
+        row.value:ClearAllPoints()
+        row.value:SetPoint("RIGHT", row.chevron, "LEFT", -2, 0)
+
         row.label = row:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
         row.label:SetPoint("LEFT", 4, 0)
         row.label:SetPoint("RIGHT", row.value, "LEFT", -8, 0)
@@ -581,11 +594,25 @@ local function CreateList(parent)
 
             content:SetSize(width, ROW_HEIGHT)
 
-            row.label:SetText(CN.Muted(self.emptyText
-                or "Nothing to show here."))
+            -- "NOTHING MATCHED" IS NOT "YOU HAVE NEVER SCANNED".
+            --
+            -- The filter runs first, so a search that matched nothing fell
+            -- into this branch and printed the tab's own empty text. On
+            -- Collections that reads "Nothing scanned yet. Press Scan my
+            -- collections." -- so a player who typed a name with a typo was
+            -- told to run a scan that freezes the client for several seconds,
+            -- and the list was still empty afterwards.
+            local message = self.emptyText or "Nothing to show here."
+
+            if filterText and #(lastEntries or {}) > 0 then
+                message = "Nothing here matches \"" .. filterText .. "\"."
+            end
+
+            row.label:SetText(CN.Muted(message))
             row.value:SetText("")
             row.value:SetWidth(0.001)
             row.selected:SetShown(false)
+            row.chevron:Hide()
 
             -- AND THE PROGRESS BAR, which the filled path hides and this one
             -- did not -- so a search that matched nothing on a tab with bars
@@ -655,6 +682,24 @@ local function CreateList(parent)
                 row.label:SetTextColor(CN.Rgb("BODY"))
             end
 
+            -- AND NOT BY COLOUR ALONE.
+            --
+            -- Whether a row navigates you across a continent or does nothing
+            -- at all was carried by two steps of brightness -- f2f4f6 against
+            -- c8ccd2 -- which is this addon's first rule broken in the widget
+            -- every tab is built out of. It was also defeated wherever a tab
+            -- wraps its whole label in an inline colour code, which several
+            -- do, so those rows were indistinguishable at any brightness.
+            --
+            -- A chevron in the value column's own gutter: present when the
+            -- row acts, absent when it does not, and unaffected by whatever
+            -- the label is wearing.
+            row.chevron:SetShown(actionable)
+
+            -- The hover highlight is reserved for rows that do something too:
+            -- a highlight under an inert row says "this is clickable".
+            row.highlight:SetAlpha(actionable and 1 or 0)
+
             if entry.fraction then
                 local fraction = math.max(0, math.min(1, entry.fraction))
 
@@ -682,6 +727,7 @@ local function CreateList(parent)
             row.value:SetText("")
             row.selected:Hide()
             row.bar:Hide()
+            row.chevron:Hide()
 
             row.entry = nil
 

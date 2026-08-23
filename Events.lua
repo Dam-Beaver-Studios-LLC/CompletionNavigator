@@ -59,7 +59,7 @@ local function Dispatch(event, ...)
         local ok, err = pcall(handler, event, ...)
 
         if not ok then
-            Print("Error in " .. event .. " handler: " .. tostring(err))
+            CN.PrintLine("Error in " .. event .. " handler: " .. tostring(err))
 
             -- And keep it, so a bug report can carry the text rather than a
             -- description of the text.

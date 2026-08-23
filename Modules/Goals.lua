@@ -653,7 +653,7 @@ local function PrintPlan(index, goal)
     end
 
     for _, step in ipairs(plan.steps) do
-        Print("   - " .. step)
+        CN.PrintLine("   - " .. step)
     end
 
     if plan.character then
@@ -817,7 +817,7 @@ CN:RegisterCommand{
             Print("No location is known for " .. tostring(plan.name) .. ".")
 
             for _, step in ipairs(plan.steps) do
-                Print("  - " .. step)
+                CN.PrintLine("  - " .. step)
             end
 
             return
