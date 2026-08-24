@@ -115,7 +115,7 @@ function Vendors.CaptureOpenMerchant()
     store[npcID] = record
 
     -- The reverse index is now stale.
-    itemIndex = nil
+    Vendors.ForgetItemIndex()
 
     CN.MarkScanned("vendors")
 
@@ -139,6 +139,20 @@ local function BuildItemIndex()
     itemIndex = index
 
     return index
+end
+
+-- Published, because the recipe provider wants the same set: the items some
+-- known vendor actually sells. Built on demand and held until the vendor
+-- store changes, exactly as `FirstLocatedSeller` already relied on.
+function Vendors.ItemIndex()
+    return itemIndex or BuildItemIndex()
+end
+
+-- The one writer of the vendor store outside this file is a test, and a
+-- reverse index nothing can invalidate is a cache that lies. Published for
+-- the same reason `Sets.Forget` is.
+function Vendors.ForgetItemIndex()
+    itemIndex = nil
 end
 
 -- The candidate provider asks this question thousands of times per rebuild,
@@ -300,9 +314,29 @@ CN.RegisterCandidateProvider("Vendors", function()
 
     local playerMap = select(1, CN.GetPlayerPosition())
 
-    local candidates, considered, dropped = CN.CollectBounded(names, nil,
+    -- WALK WHAT CAN PRODUCE A ROW, NOT WHAT CANNOT. 0.61.0.
+    --
+    -- This walked `RecipeNames` -- every recipe the addon has ever seen a
+    -- name for, 2,503 of them on an established account -- and asked
+    -- `FirstLocatedSeller` about each. The answer is nil for all but a
+    -- handful, because a recipe only produces a row if some vendor in the
+    -- player's own captured vendor data sells it. Measured: 2,503 index
+    -- lookups per rebuild to emit one candidate.
+    --
+    -- The item index is the set of items a KNOWN vendor sells, which is the
+    -- necessary condition. It is built from the vendor store either way --
+    -- `FirstLocatedSeller` builds it on its first call -- so iterating it
+    -- costs nothing extra and skips the 2,400 recipes that could never have
+    -- qualified.
+    --
+    -- The name is still required, so the check moves inside rather than
+    -- disappearing: a recipe with a seller and no name has nothing to put on
+    -- a row.
+    local sellable = Vendors.ItemIndex()
+
+    local candidates, considered, dropped = CN.CollectBounded(sellable, nil,
         function(itemID)
-            if known[itemID] then
+            if known[itemID] or not names[itemID] then
                 return nil
             end
 
@@ -321,12 +355,27 @@ CN.RegisterCandidateProvider("Vendors", function()
             -- continent, and that is the only distinction worth ranking here.
             return (seller.mapID == playerMap) and 3 or 2
         end,
-        function(itemID, recipeName)
+        -- THE SECOND ARGUMENT IS THE SOURCE'S VALUE, AND THE SOURCE CHANGED.
+        --
+        -- `CN.CollectBounded` calls `build(id, source[id], value)`. While the
+        -- source was `RecipeNames` that second argument was the name; now the
+        -- source is the item index, it is the ARRAY OF NPC IDS that sell the
+        -- item. Assigning it to `name` did not throw -- every reader wraps the
+        -- name in `tostring` -- it rendered `table: 0x...` on the recommended
+        -- row, in the HUD, on the map pin and in the data-broker feed.
+        --
+        -- A defect that shows a table address to the player and passes every
+        -- test, because nothing asserts what a recipe row is CALLED. The name
+        -- comes from `names`, which `evaluate` above has already required to
+        -- be present.
+        function(itemID)
             local seller = Vendors.FirstLocatedSeller(itemID)
 
             if not seller then
                 return nil
             end
+
+            local recipeName = names[itemID]
 
             local reasons = { "sold by " .. tostring(seller.name) }
 

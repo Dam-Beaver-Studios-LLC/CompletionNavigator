@@ -255,18 +255,20 @@ CN:RegisterCommand{
             return
         end
 
-        Print(#nodes .. " node(s) on this map:")
+        local rows = {}
 
-        for index, node in ipairs(nodes) do
-            if index > 20 then
-                CN.PrintLine("  |cff8a8f96and " .. (#nodes - 20) .. " more|r")
-                break
-            end
-
-            CN.PrintLine(string.format("  %d. %s |cff8a8f96%s at %.1f, %.1f|r",
-                index, tostring(node.label or "unnamed"),
-                tostring(node.plugin), (node.x or 0) * 100, (node.y or 0) * 100))
+        for _, node in ipairs(nodes) do
+            table.insert(rows, {
+                text  = tostring(node.label or "unnamed"),
+                value = string.format("%.1f, %.1f",
+                    (node.x or 0) * 100, (node.y or 0) * 100),
+                state = "MUTED",
+                note  = tostring(node.plugin),
+            })
         end
+
+        CN.PrintRows(CN.Count(#nodes, "node") .. " on this map:", rows,
+            { limit = 20 })
 
         Print("|cff8a8f96Shown, not scored: this is another addon's view of "
             .. "the same world.|r")

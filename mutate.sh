@@ -1426,11 +1426,25 @@ mutate "Database.lua" \
     "                    collapsed = collapsed + 1" \
     "the migration counts records it did not collapse"
 
+# RETARGETED IN 0.61.0, ONTO THE MIGRATION THAT NOW OBSERVABLY DOES THIS.
+#
+# The old target was migration 12's strip, and it went stale twice over: a
+# second `record.questID = nil` appeared in migration 15 so the text matched
+# twice, and once re-anchored the mutation SURVIVED -- because migration 15
+# replaces a client-supplied row with the name itself, so whether migration 12
+# stripped its fields first is no longer observable from outside. A mutation
+# that survives because the code it targets is now dead is not a hole in the
+# suite; it is a mutation pointed at the wrong line.
+#
+# Migration 15's strip is the one that still matters, on the one row shape
+# that survives as a table: a name the player typed.
 mutate "Database.lua" \
-    "                    record.questID  = nil
+    "                if record.source == \"manual\" then
+                    -- Left as a table, but without the fields nothing reads.
+                    record.questID  = nil
                     record.lastSeen = nil" \
-    "                    record.lastSeen = nil" \
-    "a quest name record keeps the key it is already filed under"
+    "                if record.source == \"manual\" then" \
+    "a quest name the player typed keeps the key it is already filed under"
 
 mutate "UI/List.lua" \
     "            if filterText and #(lastEntries or {}) > 0 then" \
@@ -1793,6 +1807,224 @@ mutate "Modules/Appearances.lua" \
             collected = held.collected
         end" \
     "a wardrobe that has not loaded erases every scanned count"
+
+# ------------------------------------------------------------
+# 0.61.0
+# ------------------------------------------------------------
+
+mutate "Core.lua" \
+    "    if percent >= 100 and fraction < 1 then
+        percent = 100 - (1 / scale)
+    end" \
+    "    if false then
+        percent = 100 - (1 / scale)
+    end" \
+    "999 of 1,000 reads as finished"
+
+mutate "Core.lua" \
+    "    if filled >= width and fraction < 1 then
+        filled = width - 1
+    end" \
+    "    if false then
+        filled = width - 1
+    end" \
+    "a bar 39 of 40 full is drawn as a finished one"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "            if limit and #criteria >= limit then
+                summary.truncated = true
+            else" \
+    "            if false then
+                summary.truncated = true
+            else" \
+    "the criteria list ignores its own cap"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "            summary.total = summary.total + 1" \
+    "            summary.total = summary.total" \
+    "an achievement reports a denominator of zero"
+
+mutate "Modules/Reputations.lua" \
+    "            cycles = math.floor(value / threshold)
+            within = value % threshold" \
+    "            cycles = math.floor(value / threshold)
+            within = value" \
+    "paragon prints the sum of every cache ever earned"
+
+mutate "Modules/Reputations.lua" \
+    "            if pending then
+                -- The finished cycle, not the one it has already rolled into.
+                within = threshold" \
+    "            if false then
+                within = threshold" \
+    "a paragon cache that is ready shows a nearly empty bar"
+
+mutate "Modules/Sets.lua" \
+    "        local key = \"set:\" .. tostring(set.setID)" \
+    "        local key = set.setID" \
+    "a transmog set is filed under an appearance category's id"
+
+mutate "Modules/Waiting.lua" \
+    "            local knowledge = Waiting.knowledgeCurrencies[currencyID] == true
+
+            if not knowledge and name then
+                knowledge = name:find(Waiting.knowledgePattern) and true or false
+            end" \
+    "            local knowledge = false
+
+            if name then
+                knowledge = name:find(Waiting.knowledgePattern) and true or false
+            end" \
+    "knowledge is identified only by an English word"
+
+# NOT MUTATED: the `open` preference in `LockoutFor`.
+#
+# `Instances.Lockouts` sorts incomplete lockouts first, so in every path the
+# game takes, the first name match IS the open one and removing the
+# preference changes nothing observable. The preference stays -- relying on
+# another function's sort order for correctness here is precisely the "two
+# lists, one of which nobody checks" defect this project keeps finding -- but
+# a mutation that cannot be killed by construction does not belong in this
+# file. The difficulty match below is the part that is observable.
+mutate "Modules/Instances.lua" \
+    "            if difficulty and lockout.difficulty == difficulty then
+                exact = exact or lockout
+            end" \
+    "            if false then
+                exact = exact or lockout
+            end" \
+    "a lockout answers for a difficulty other than the one asked about"
+
+mutate "Modules/Instances.lua" \
+    "        local text = vault.FormatReset(seconds)
+
+        if text then
+            return text
+        end" \
+    "        return vault.FormatReset(seconds)" \
+    "an unknown reset time is concatenated as a nil"
+
+mutate "Modules/Achievements.lua" \
+    "            names[record] = NameOf(achievementID, record) or \"\"" \
+    "            record.resolvedName = NameOf(achievementID, record) or \"\"
+            names[record] = record.resolvedName" \
+    "a client-supplied achievement name is written to the database"
+
+mutate "Modules/Loremaster.lua" \
+    "    if characterKey == (CN.characterKey or CN.GetCharacterKey()) then
+        return record.done or 0
+    end
+
+    return nil" \
+    "    return record.done or 0" \
+    "another character is shown whichever character scanned last"
+
+mutate "Modules/Loremaster.lua" \
+    "            elseif #record.name ~= #bestRecord.name then
+                better = #record.name < #bestRecord.name" \
+    "            elseif false then
+                better = #record.name < #bestRecord.name" \
+    "a zone picks a different achievement on every login"
+
+mutate "Modules/Progress.lua" \
+    "    elseif Progress.knownResetAt then" \
+    "    elseif false then" \
+    "a loading screen moves today's count into yesterday"
+
+mutate "Modules/Capture.lua" \
+    "        elseif type(key) == \"string\" then
+            if described < width then
+                described = described + 1" \
+    "        elseif type(key) == \"string\" then
+            if shape.count <= width then
+                described = described + 1" \
+    "a capture spends its field budget on array entries"
+
+mutate "Providers/TomTom.lua" \
+    "            if current.position and not samePlace then" \
+    "            if false then" \
+    "a pin the player dragged is deleted as though it were the addon's"
+
+mutate "Routing.lua" \
+    "        CN.ForgetBatching()
+        CN.ForgetRoutes()" \
+    "        CN.ForgetBatching()" \
+    "the routes for the zone behind you are held for the session"
+
+mutate "Modules/Breakdown.lua" \
+    "    if held and held.size == size then
+        return held.completed
+    end" \
+    "    if false then
+        return held.completed
+    end" \
+    "the Remaining tab walks thirty thousand quests on every refresh"
+
+# The five defects the 0.61.0 review found in 0.61.0's own changes.
+
+mutate "Modules/Vendors.lua" \
+    "            local recipeName = names[itemID]" \
+    "            local recipeName = sellable[itemID]" \
+    "a recipe row is named after the table of vendors that sell it"
+
+mutate "Database.lua" \
+    "    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1" \
+    "    CN.collectionGeneration = (CN.collectionGeneration or 0)" \
+    "the Scans tab says not scanned after you scan"
+
+mutate "Modules/Breakdown.lua" \
+    "    if not quests.IsCompletedByCharacter(questID) then
+        return
+    end" \
+    "    if false then
+        return
+    end" \
+    "a repeatable turn-in counts as a completed quest"
+
+mutate "Modules/Breakdown.lua" \
+    "    if held.counted[questID] then
+        return
+    end" \
+    "    if false then
+        return
+    end" \
+    "handing the same quest in twice counts it twice"
+
+mutate "Modules/Progress.lua" \
+    "    if seconds then
+        Progress.resetIsEstimate = false
+    end" \
+    "    if false then
+        Progress.resetIsEstimate = false
+    end" \
+    "the estimated day key is never promoted to the real one"
+
+mutate "Modules/Progress.lua" \
+    "    if store.dayKey ~= today and estimatedKey
+        and not Progress.resetIsEstimate then
+
+        store.dayKey = today
+    end" \
+    "    if false then
+        store.dayKey = today
+    end" \
+    "correcting an estimated day key is treated as a new day"
+
+# And the two defects the SECOND review found in the first review's fixes.
+
+mutate "Modules/Progress.lua" \
+    "    if store.dayKey ~= today and estimatedKey" \
+    "    if store.dayKey ~= today and store.dayKeyWasEstimate" \
+    "the provisional day-key flag is read from the database"
+
+mutate "Modules/Breakdown.lua" \
+    "    if force then
+        Breakdown.ForgetQuestCounts()
+    end" \
+    "    if false then
+        Breakdown.ForgetQuestCounts()
+    end" \
+    "pressing Refresh does not recount the quests"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

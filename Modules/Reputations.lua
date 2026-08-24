@@ -97,9 +97,53 @@ local function BuildRecord(data)
     if Blizzard.IsFactionParagon(factionID) then
         local value, threshold, questID, pending = Blizzard.GetParagonInfo(factionID)
 
+        -- PARAGON VALUE IS CUMULATIVE. THE BAR IS NOT. FIXED IN 0.61.0.
+        --
+        -- `C_Reputation.GetFactionParagonInfo` returns the total reputation
+        -- earned since the faction went Paragon, ACROSS every cache already
+        -- collected -- it does not reset. The addon stored it raw and printed
+        -- it against the threshold, so a player three caches in read
+        -- "Paragon: 34500/10000". Nonsense on its face, and worse than
+        -- nonsense as a progress source: anything reading it as a fraction
+        -- saw 345% and clamped to a full bar forever.
+        --
+        -- The threshold is the size of ONE cycle, so the position inside the
+        -- current cycle is the remainder, and the number of completed cycles
+        -- is the quotient -- which is itself worth showing, because "you have
+        -- had eleven caches out of this" is exactly the kind of thing a
+        -- completionist wants to know.
+        --
+        -- One subtlety: when a cache is PENDING the value has already crossed
+        -- the threshold and the remainder has wrapped to near zero. Showing a
+        -- nearly empty bar next to "REWARD READY" reads as a contradiction,
+        -- so a pending cycle is reported as full.
+        local within, cycles = value, 0
+
+        if type(value) == "number" and type(threshold) == "number"
+            and threshold > 0 then
+
+            cycles = math.floor(value / threshold)
+            within = value % threshold
+
+            if pending then
+                -- The finished cycle, not the one it has already rolled into.
+                within = threshold
+                cycles = math.max(0, cycles - 1)
+            end
+        end
+
         record.paragon = {
-            value     = value,
+            -- What to draw and print.
+            value     = within,
             threshold = threshold,
+
+            -- How many caches this faction has already produced.
+            cycles    = cycles,
+
+            -- Kept because it is the only thing the client actually said,
+            -- and `/cn navdiag` compares stored values against live ones.
+            rawValue  = value,
+
             questID   = questID,
             pending   = pending and true or false,
         }
@@ -426,7 +470,8 @@ CN.RegisterCandidateProvider("Reputations", function()
 
             if fraction >= 0.75 then
                 table.insert(reasons, string.format(
-                    "%d%% of the way to the next standing", math.floor(fraction * 100)))
+                    "%s of the way to the next standing",
+                    CN.PercentText(fraction)))
             end
         end
 
@@ -440,16 +485,34 @@ CN.RegisterCandidateProvider("Reputations", function()
         })
     end
 
+    -- AND THE WRAPPERS WENT TOO. 0.61.0.
+    --
+    -- 0.57.0 stopped BUILDING five hundred objectives to keep sixty, which
+    -- was the expensive half. What it left behind was five hundred little
+    -- `{ record, accountWide, value }` tables -- one per surviving faction,
+    -- allocated on every rebuild, existing only to be sorted and then
+    -- dropped. Measured at retail scale: 138 KB of the 482 KB this addon
+    -- allocated per cold rebuild came from this one loop.
+    --
+    -- An index array with two parallel flat arrays sorts exactly as well and
+    -- allocates three tables instead of five hundred. The comparator reads
+    -- the same two fields; it just reaches them by index.
+    local order       = {}
+    local scoredValue = {}
+    local scoredWide  = {}
+
     local function gather(store, accountWide)
         for _, record in pairs(store or {}) do
             local value = evaluate(record, accountWide)
 
             if value then
-                scored[#scored + 1] = {
-                    record      = record,
-                    accountWide = accountWide,
-                    value       = value,
-                }
+                local slot = #scored + 1
+
+                scored[slot]      = record
+                scoredValue[slot] = value
+                scoredWide[slot]  = accountWide
+
+                order[#order + 1] = slot
             end
         end
     end
@@ -459,27 +522,28 @@ CN.RegisterCandidateProvider("Reputations", function()
 
     -- Highest value first, ties broken by faction so the cut is stable
     -- between rebuilds rather than shuffling.
-    table.sort(scored, function(a, b)
-        if a.value == b.value then
-            return (a.record.factionID or 0) < (b.record.factionID or 0)
+    table.sort(order, function(a, b)
+        if scoredValue[a] == scoredValue[b] then
+            return (scored[a].factionID or 0) < (scored[b].factionID or 0)
         end
 
-        return a.value > b.value
+        return scoredValue[a] > scoredValue[b]
     end)
 
-    local limit = math.min(#scored, CN.providerCandidateCap)
+    local limit = math.min(#order, CN.providerCandidateCap)
 
     local candidates = {}
 
     for index = 1, limit do
-        local entry = scored[index]
+        local slot = order[index]
 
-        candidates[index] = build(entry.record, entry.accountWide, entry.value)
+        candidates[index] =
+            build(scored[slot], scoredWide[slot], scoredValue[slot])
     end
 
     CN.providerTruncation["Reputations"] = {
-        considered = #scored,
-        dropped    = #scored - limit,
+        considered = #order,
+        dropped    = #order - limit,
     }
 
     return candidates
@@ -614,8 +678,14 @@ CN:RegisterCommand{
         end
 
         if record.paragon then
+            local cycles = record.paragon.cycles or 0
+
             Print("Paragon: " .. tostring(record.paragon.value)
                 .. "/" .. tostring(record.paragon.threshold)
+                .. (cycles > 0 and CN.Muted(
+                    "  (" .. cycles .. (cycles == 1
+                        and " cache already earned)"
+                        or " caches already earned)")) or "")
                 .. (record.paragon.pending and " |cff73b873REWARD READY|r" or ""))
         end
 

@@ -47,7 +47,9 @@ Travel time is **computed** from the journey you would actually make, weighing t
 
 The flight itself is costed through the **network**, not across it. A bird hops from flight master to flight master, so a pair at opposite ends of a continent is reached through the ones in between â€” and measuring the straight line between the two ends understates every long flight, always in the same direction. Routes are the shortest path through the flight points you have discovered, `/cn travel` prints the chain leg by leg so you can check it against your own map, and a route that needs more than one hop is never reported as measured: the connections between flight masters are inferred, and inferred is not the same as known.
 
-A journey it cannot model â€” another continent, reached by a portal â€” still refuses to invent a duration, but it lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. Where a teleport lands somewhere fixed, the whole journey is costed straight through it â€” *"hearth, then four minutes"* rather than a list to work from yourself. The three that go wherever you happen to be bound say so instead of guessing. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
+A journey it cannot model â€” another continent, reached by a portal â€” still refuses to invent a duration, but it lists what you actually have: every hearthstone and teleport you know, with the cooldown left on each. Where a teleport lands somewhere fixed, the whole journey is costed straight through it â€” *"hearth, then four minutes"* rather than a list to work from yourself.
+
+**Your own hearthstone included, once you have used one.** The client reports a bind point as the name of an inn, and a name does not convert to a place â€” so the one teleport every player owns was the one it could list and not price. It watches where you land after a hearth and remembers it. Until that has happened the row says it is not costed yet, rather than staying quietly absent from the arithmetic. `/cn travel` shows the whole calculation: how far to the flight point, how far in the air, how far at the far end, and what running it would have cost.
 
 ## Aim it in one command
 
@@ -163,6 +165,24 @@ Everything below is read from your own client. Nothing is downloaded, and nothin
 
 Where the game does not supply a trustworthy total, it reports **counts rather than a percentage**. That is a deliberate rule, not a gap â€” an invented denominator is a number that looks like a fact.
 
+And where there is a real percentage, it is honest at both ends. **999 of 1,000 does not read as 100%**, and neither does a full progress bar â€” the last percent is the part a completionist is here for, so nothing rounds its way past it. One item still to go reads as one item still to go.
+
+## It works in your language
+
+The addon stores what the game gives it as **ids**, and reads names back from the client in whatever language you play in. Nothing it decides is decided by matching an English word, so features do not quietly disappear on a non-English client â€” weekly profession knowledge, class and race restrictions, and every count on the Scans tab read the same way in every locale the game ships.
+
+## Where every number comes from
+
+```
+/cn â€” Scans tab
+```
+
+Some of what the addon shows is asked of the client the moment you look at it. The rest is a snapshot it took when you last scanned, and a snapshot goes out of date the day the game adds something. Both look identical on screen unless somebody says which is which.
+
+The Scans tab is that list. One row per source, live sources separated from stored ones, each with its count, when it was last read, and a marker on anything older than a day. Clicking a row runs that source's scan; one button runs everything that has gone stale.
+
+The Collections tab carries the same information per row, because every percentage on it is measured against the addon's own snapshot â€” which is the honest denominator and also the one that quietly ages.
+
 ## What it does with it
 
 | | |
@@ -179,6 +199,15 @@ Where the game does not supply a trustworthy total, it reports **counts rather t
 | **Learns** | Quest prerequisites inferred from your own play, never guessed from a single sighting |
 | **Adapts** | Which kinds of objective you actually go and do, within clamped limits, and it says so on the line |
 | **Shows its working** | `/cn order` breaks the ranking into the terms that produced it |
+| **Keeps up** | Finish something and it leaves the list, the route and the plan at once â€” not on a timer, and not when some unrelated thing happens along |
+
+## When you finish something
+
+The whole point of a list of what to do next is that finishing something changes it. That is easy to say and surprisingly easy to get wrong: a part of the addon that reads your quest log has to be told when your quest log changes, and there is nothing to notice when nobody wired that up.
+
+So the addon is built so it cannot be quiet about it. Every part that reads something â€” your quest log, your bags, your collections, where you are standing â€” has to declare what it reads, and the build refuses to produce a release where one of them does not. It is the same argument as never inventing a percentage: the addon would rather fail loudly than be confidently out of date.
+
+Concretely, this is what stops being true the moment you act: a quest handed in, a goal completed, a mount or toy collected, a deferral you set an hour ago running out, a currency the game has retired, a zone you have finished exploring, and a character on your Warband you have not played for a month. None of them wait for a timer.
 
 ## Dungeons and raids
 
@@ -295,7 +324,11 @@ A scale for everything it draws, and a colourblind mode that changes the arrow's
 
 Both of those are in the Settings tab now, along with everything else the addon can be told â€” grouped by what the setting is about rather than by the order it was written, and every control says what it does when you hover it. They used to be typing-only, which is the sharpest version of an accessibility problem: the people who most need a larger interface are the least likely to find `/cn scale 1.4` in a hundred-line help listing.
 
-An optional one-line heads-up display, a filter box in the window, keybindings for the things you do often, and a real entry in the game's own options list rather than only inside a window you have to know how to open.
+An optional one-line heads-up display â€” drag it anywhere, click it to navigate, right-click to put that one off for an hour, and close it with the **x** in its corner â€” a filter box in the window, keybindings for the things you do often, and a real entry in the game's own options list rather than only inside a window you have to know how to open.
+
+Every list can be sorted A to Z or reversed, and sorting reads the words rather than the colour in front of them â€” so a finished goal does not sort above an unfinished one because of how it is tinted. Rows that belong together stay together: a goal moves with its chain, a vault slot with its thresholds. The filter box greys itself out on the two tabs that have no list, instead of accepting text that could not go anywhere. Anything a button does is answered in the window, where the click happened; anything you type is answered in chat, where you typed it. And Escape closes every frame the addon puts on screen.
+
+A row that does something carries a marker, not just a slightly brighter grey â€” colour alone is not an explanation, and it is no explanation at all to the one player in twelve who cannot see the difference. A button that cannot act is drawn as unavailable rather than left looking live. A checkbox's words are part of what you can hover, not just the box. And a search that matches nothing says so, instead of falling back to the message about never having scanned.
 
 ## When something goes wrong
 

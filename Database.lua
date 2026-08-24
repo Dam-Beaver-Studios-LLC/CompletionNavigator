@@ -695,6 +695,149 @@ CN.migrations = {
         CN.DebugPrint("Trimmed " .. (#ids - ceiling)
             .. " remembered quest pins over the ceiling.")
     end,
+
+    -- 14 -> 15. TWO THINGS THAT WERE WRITTEN TO DISK AND SHOULD NOT HAVE
+    -- BEEN, AND ONE THAT WAS WRITTEN WITHOUT SAYING WHOSE IT WAS.
+    --
+    -- 1. `achievements[id].resolvedName`. `Achievements.Closest` wrote a
+    --    client-supplied achievement name onto the live SavedVariables row so
+    --    a sort comparator could read it, permanently, for every achievement
+    --    the command ever touched. 0.36.0 deliberately stopped storing
+    --    achievement names; this put them back one `/cn closest` at a time.
+    --    The comparator holds them in a local now.
+    --
+    -- 2. `loremaster[id].done`. Criteria progress on a quest achievement is
+    --    CHARACTER-specific and was stored account-wide under the achievement
+    --    id alone, so the last character to scan overwrote every other
+    --    character's figure -- in a store whose own comment says it exists so
+    --    the Warband view can show what other characters have finished.
+    --
+    --    The flat field is kept and is now the current character's value; the
+    --    per-character map is what the Warband view reads. This migration
+    --    cannot know WHICH character wrote the existing number, so it does not
+    --    guess: the flat value is left where it is, unattributed, and the
+    --    first scan on each character fills in that character's entry. A
+    --    wrong attribution would be worse than an absent one, because it
+    --    would look authoritative.
+    [14] = function(db)
+        db.account = db.account or {}
+
+        local names = 0
+
+        for _, record in pairs(db.account.achievements or {}) do
+            if type(record) == "table" and record.resolvedName ~= nil then
+                record.resolvedName = nil
+
+                names = names + 1
+            end
+        end
+
+        if names > 0 then
+            CN.DebugPrint("Dropped " .. names .. " achievement name(s) the "
+                .. "client re-supplies for free.")
+        end
+
+        local split = 0
+
+        for _, record in pairs(db.account.loremaster or {}) do
+            if type(record) == "table" and record.progress == nil then
+                record.progress = {}
+
+                split = split + 1
+            end
+        end
+
+        if split > 0 then
+            CN.DebugPrint("Gave " .. split .. " loremaster row(s) a character "
+                .. "dimension; each character's first scan fills in its own.")
+        end
+
+        -- AND THE LARGEST STORE IN THE ADDON LOSES ITS WRAPPER.
+        --
+        -- `questMetadata` was 708 KB of a 2.0 MB file, and the game rewrites
+        -- that file in full on every logout. Every row was a two-field table
+        -- and 30,000 of them said `source = "blizzard"` -- the default, which
+        -- carries no information at all.
+        --
+        -- A row is the name itself now. Only a name the PLAYER typed keeps a
+        -- table, because that one has something to say: it must not be
+        -- clobbered the next time the client offers its own.
+        local collapsed = 0
+
+        for questID, record in pairs(db.account.questMetadata or {}) do
+            if type(record) == "table" then
+                if record.source == "manual" then
+                    -- Left as a table, but without the fields nothing reads.
+                    record.questID  = nil
+                    record.lastSeen = nil
+                elseif record.name then
+                    db.account.questMetadata[questID] = record.name
+
+                    collapsed = collapsed + 1
+                else
+                    db.account.questMetadata[questID] = nil
+                end
+            end
+        end
+
+        if collapsed > 0 then
+            CN.DebugPrint("Collapsed " .. collapsed .. " quest name row(s) to "
+                .. "the name itself.")
+        end
+
+        -- AND THE SETS THE PLAYER HAD ALREADY HIDDEN MOVE WITH THEIR IDS.
+        --
+        -- Transmog set objectives are filed under `"set:" .. setID` from
+        -- 0.61.0, because a bare set id collided with an appearance CATEGORY
+        -- id in the same namespace. Without this, a set the player hid before
+        -- upgrading reappears -- and its old entry goes on hiding an
+        -- unrelated appearance slot, which is precisely the collateral damage
+        -- the fix was written to stop, now stranded where nobody can connect
+        -- the two.
+        --
+        -- WHICH NUMERIC ENTRIES WERE SETS. Appearance category ids come from
+        -- `Enum.TransmogCollectionType`, a small enumeration -- head,
+        -- shoulder, chest and so on, under thirty of them. Set ids run to the
+        -- thousands. So an entry above the ceiling was certainly a set and is
+        -- moved; one at or below it is genuinely ambiguous, and this migration
+        -- does not guess: a wrong re-key would hide something the player
+        -- never hid, which is worse than leaving a small id where it is.
+        --
+        -- This runs at ADDON_LOADED, before the transmog APIs are reliable,
+        -- so the ceiling is a constant rather than a client call.
+        local CATEGORY_CEILING = 60
+
+        local rekeyed = 0
+
+        for _, store in ipairs({
+            db.account.ignoredObjectives,
+            db.account.deferredObjectives,
+        }) do
+            local appearances = type(store) == "table" and store.APPEARANCE
+
+            if type(appearances) == "table" then
+                local moves = {}
+
+                for id, entry in pairs(appearances) do
+                    if type(id) == "number" and id > CATEGORY_CEILING then
+                        moves[id] = entry
+                    end
+                end
+
+                for id, entry in pairs(moves) do
+                    appearances[id] = nil
+                    appearances["set:" .. id] = entry
+
+                    rekeyed = rekeyed + 1
+                end
+            end
+        end
+
+        if rekeyed > 0 then
+            CN.DebugPrint("Moved " .. rekeyed .. " hidden or deferred "
+                .. "appearance set(s) onto their own key.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A
@@ -902,6 +1045,25 @@ CN.scanProviders = {
 -- the right place to tell the candidate caches they are stale.
 function CN.MarkScanned(key)
     CN.Account("collectionScans")[key] = time()
+
+    -- A SCAN IS THE LOUDEST THING THAT CHANGES A COLLECTION COUNT. 0.61.0.
+    --
+    -- `CN.collectionGeneration` guards the memoized `Summary()` calls on the
+    -- Collections, Scans and Warband tabs. It was bumped by the eleven CLIENT
+    -- events that announce a collection changing -- and not by the addon's
+    -- own scans, which are what actually POPULATE the stores those summaries
+    -- read.
+    --
+    -- The result was the addon contradicting itself on its own onboarding
+    -- screen: a player presses "Scan everything", the stores fill, the "last
+    -- read" stamp beside each row updates to "just now" -- because that reads
+    -- `Setup.Steps` directly and is not memoized -- and the count beside it
+    -- still says "not scanned", until a zone change happens along.
+    --
+    -- Every scan in the addon routes through here, which is exactly why this
+    -- is the right place: one line, and no scan can be added later that
+    -- forgets to do it.
+    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1
 
     -- Every scan in the addon already routes through here, so this is where
     -- the setup record learns that a step is done -- rather than only the

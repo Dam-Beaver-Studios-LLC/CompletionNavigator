@@ -96,6 +96,20 @@ end
 --
 -- Anything that ASKED for a recount gets one.
 function Breakdown.Report(categoryName, force)
+    -- AND A FORCED RECOUNT RECOUNTS THE QUESTS TOO. 0.61.0.
+    --
+    -- The quest figure is maintained incrementally against a snapshot, and
+    -- the snapshot is only rebuilt when the discovered set GROWS. That is
+    -- correct for ordinary play and wrong for the one case this parameter
+    -- exists for: the player pressed Refresh, or ran a scan, and is asking to
+    -- be told the truth rather than the remembered answer.
+    --
+    -- Same rule as the paragraph above, applied to the one figure in this
+    -- file that does not live in `reportCache`.
+    if force then
+        Breakdown.ForgetQuestCounts()
+    end
+
     if not categoryName and not force then
         if reportCache and reportGeneration == Breakdown.generation then
             return reportCache
@@ -382,6 +396,130 @@ Breakdown.Register{
     end,
 }
 
+-- THIRTY THOUSAND CLIENT CALLS, FOR A NUMBER THAT MOVES BY ONE. 0.61.0.
+--
+-- This walked every quest the addon has ever discovered -- around 30,000 on
+-- an established account -- calling `IsQuestFlaggedCompleted` on each, and it
+-- ran on every invalidated Remaining refresh. Measured on the game's own Lua
+-- 5.1 at that scale: 13.65 ms, which is most of a frame, for a figure that
+-- changes by exactly one when a quest is handed in.
+--
+-- It is now counted once and then MAINTAINED. A turn-in adds one; a rescan
+-- that grows the discovered set recounts. The count is per character, because
+-- `IsQuestFlaggedCompleted` answers for the character asking -- the same
+-- mistake this category's own comment says it was fixing.
+--
+-- Held in memory, not on disk: it is derived from something the client
+-- re-supplies for free, so persisting it would be the other standing rule
+-- broken to fix this one.
+local questCounts = {}
+
+function Breakdown.ForgetQuestCounts()
+    questCounts = {}
+end
+
+function Breakdown.CompletedQuestCount()
+    local quests = CN:GetModule("Quests")
+
+    if not quests or not quests.IsCompletedByCharacter then
+        return 0
+    end
+
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    local discovered = CN.Account("discoveredQuests")
+    local size       = CN.CountKeys(discovered)
+
+    local held = questCounts[key]
+
+    -- The discovered set only ever grows, so its size is a sufficient key:
+    -- a set that has not grown cannot have gained a completable quest, and a
+    -- turn-in is credited below rather than by rewalking.
+    if held and held.size == size then
+        return held.completed
+    end
+
+    local completed = 0
+
+    -- The set of ids this figure includes, so a later turn-in cannot credit
+    -- one of them twice. Built here rather than lazily: the walk is happening
+    -- anyway and the alternative is a second walk later.
+    local counted = {}
+
+    for questID in pairs(discovered) do
+        if quests.IsCompletedByCharacter(questID) then
+            completed = completed + 1
+
+            counted[questID] = true
+        end
+    end
+
+    questCounts[key] = {
+        size      = size,
+        completed = completed,
+        counted   = counted,
+    }
+
+    return completed
+end
+
+-- Called from the turn-in hook. Cheap, exact, and it does not touch the
+-- 30,000-entry walk.
+--
+-- "+1 ON EVERY TURN-IN" IS WRONG, AND WRONG IN THE COMMON CASE.
+--
+-- The first version of this incremented for any turn-in of a discovered
+-- quest. Most turn-ins in a modern evening are REPEATABLE -- a token hand-in,
+-- an assault, a holiday daily -- and `IsQuestFlaggedCompleted` stays false for
+-- those, so they contribute nothing to the true count while adding one here
+-- every single time. Twenty hand-ins is twenty phantom completions, and the
+-- Remaining tab could report more quests completed than discovered.
+--
+-- A daily crossing its reset mid-session is the same shape, once.
+--
+-- So the client is asked about the ONE quest that just changed -- which is a
+-- single call, not a thirty-thousand-entry walk -- and the credit is only
+-- taken if the answer moved. `counted` remembers which ids this figure
+-- already includes, so a second turn-in of the same quest cannot add a second
+-- one.
+function Breakdown.NoteQuestCompleted(questID)
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    local held = questCounts[key]
+
+    if not held or not questID then
+        return
+    end
+
+    -- Only a quest the addon had already discovered was in the denominator
+    -- this count walks; one it has not seen will be picked up by the size
+    -- change when it is discovered.
+    if not CN.Account("discoveredQuests")[questID] then
+        return
+    end
+
+    held.counted = held.counted or {}
+
+    if held.counted[questID] then
+        return
+    end
+
+    local quests = CN:GetModule("Quests")
+
+    if not quests or not quests.IsCompletedByCharacter then
+        return
+    end
+
+    -- The client is the authority on whether this actually completed. A
+    -- repeatable quest answers false here and is correctly not credited.
+    if not quests.IsCompletedByCharacter(questID) then
+        return
+    end
+
+    held.counted[questID] = true
+    held.completed        = held.completed + 1
+end
+
 Breakdown.Register{
     name  = "Quests",
     order = 18,
@@ -395,17 +533,7 @@ Breakdown.Register{
         -- scanned, so a fresh alt was shown the main's progress. The client
         -- answers per character, for free, and `discoveredQuests` is the set
         -- worth asking about.
-        local quests = CN:GetModule("Quests")
-
-        local completed = 0
-
-        if quests and quests.IsCompletedByCharacter then
-            for questID in pairs(CN.Account("discoveredQuests")) do
-                if quests.IsCompletedByCharacter(questID) then
-                    completed = completed + 1
-                end
-            end
-        end
+        local completed = Breakdown.CompletedQuestCount()
 
         return {
             collected    = completed,
@@ -461,8 +589,9 @@ local function PrintRow(row)
     local percentage = Percentage(row.collected, row.total)
 
     if percentage then
-        Print(string.format("|cffffc74f%s|r  %d / %d  (%.1f%%)",
-            row.name, row.collected, row.total, percentage))
+        Print(string.format("|cffffc74f%s|r  %d / %d  (%s)",
+            row.name, row.collected, row.total,
+            CN.PercentText(percentage / 100, 1)))
     else
         Print(string.format("|cffffc74f%s|r  %d collected",
             row.name, row.collected or 0))
@@ -539,6 +668,17 @@ CN:RegisterCommand{
 local bursty = {
     UPDATE_FACTION          = true,
     CURRENCY_DISPLAY_UPDATE = true,
+
+    -- AND TURN-INS COME IN RUNS. 0.61.0.
+    --
+    -- A campaign chain, a bonus objective, a world-quest cluster: four to
+    -- eight of these arrive within a couple of seconds, and each one made the
+    -- next Remaining refresh walk every store in the addon again for a report
+    -- that differs by one row. The exact count is maintained incrementally by
+    -- `NoteQuestCompleted` above, which runs BEFORE this debounce and is not
+    -- subject to it -- so the number stays right while the expensive recount
+    -- of everything else waits for the run to finish.
+    QUEST_TURNED_IN         = true,
 }
 
 Breakdown.burstSeconds = 5
@@ -551,7 +691,21 @@ for _, event in ipairs({
 }) do
     local burst = bursty[event]
 
-    CN:RegisterEvent(event, function()
+    CN:RegisterEvent(event, function(_, questID)
+        if event == "QUEST_TURNED_IN" then
+            Breakdown.NoteQuestCompleted(questID)
+        end
+
+        -- NOT CLEARED ON PLAYER_ENTERING_WORLD, though the first draft was.
+        --
+        -- That event fires on every instance zone-in and every loading
+        -- screen, so clearing there rebuilt the thirty-thousand-entry walk
+        -- several times an evening -- which is the exact cost this cache was
+        -- written to remove. The clear was there to handle a character
+        -- switch, and it was never needed for that: the count is keyed by
+        -- character key, so another character simply reads its own entry, and
+        -- switching characters in this game ends the session anyway.
+
         if burst then
             CN.Debounce("Breakdown." .. event, Breakdown.burstSeconds,
                 Breakdown.NoteChanged)

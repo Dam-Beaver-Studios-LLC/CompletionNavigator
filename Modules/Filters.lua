@@ -286,6 +286,48 @@ function Filters.DescribeObjective(objectiveType, id)
         return record and record.name or (objectiveType .. " " .. numericID)
     end
 
+    -- APPEARANCE COVERS TWO ID SPACES, AND SAYS WHICH. 0.61.0.
+    --
+    -- Transmog sets and appearance categories are both filed under
+    -- APPEARANCE, distinguished by a `set:` prefix since the two collided.
+    -- Without a branch here, a hidden set showed up in `/cn hidden` as
+    -- "APPEARANCE set:2314" -- the addon's own internals, offered to the
+    -- player as the name of the thing they hid.
+    if objectiveType == types.APPEARANCE then
+        local setID = type(id) == "string" and tonumber(id:match("^set:(%d+)$"))
+
+        if setID then
+            -- The addon's own reader, not a fresh client call: `Sets.All`
+            -- already holds a name per set and is cached until a transmog is
+            -- collected. Asking the client again here would be a second way
+            -- to get the same answer, which is how the two drift.
+            local sets = CN:GetModule("Sets")
+
+            for _, set in ipairs(sets and (sets.All()) or {}) do
+                if set.setID == setID and set.name then
+                    return set.name
+                end
+            end
+
+            return "Appearance set " .. setID
+        end
+
+        if numericID then
+            local categories = CN.Blizzard.GetAppearanceCategories
+                and CN.Blizzard.GetAppearanceCategories() or nil
+
+            if type(categories) == "table" then
+                for _, category in ipairs(categories) do
+                    if category.categoryID == numericID and category.name then
+                        return category.name
+                    end
+                end
+            end
+
+            return "Appearance slot " .. numericID
+        end
+    end
+
     if objectiveType == types.ACHIEVEMENT and numericID then
         local record = CN.Account("achievements")[numericID]
 

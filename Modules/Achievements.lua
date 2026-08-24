@@ -194,11 +194,28 @@ end
 function Achievements.Closest(limit)
     local rows = {}
 
+    -- THE NAME WENT ON THE RECORD, AND THE RECORD IS ON DISK. FIXED 0.61.0.
+    --
+    -- `record` here is the live SavedVariables row -- `Store()` hands back
+    -- the saved table itself, not a copy -- so writing `resolvedName` onto it
+    -- persisted a client-supplied achievement name into the player's
+    -- database, permanently, for every achievement this function ever
+    -- touched. 0.36.0 deliberately STOPPED storing achievement names for
+    -- exactly this reason, and this line quietly put them back one `/cn
+    -- closest` at a time.
+    --
+    -- Both callers resolve the name themselves anyway. The only thing that
+    -- ever read `resolvedName` was the comparator two lines below, so the
+    -- names live in a local for the length of the sort and are then gone.
+    --
+    -- The addon's standing rule, restated: persist only what the client
+    -- cannot re-supply. A name it hands over instantly is the clearest case
+    -- there is.
+    local names = {}
+
     for achievementID, record in pairs(Store()) do
         if record.criteria and record.criteria > 0 and record.done > 0 then
-            -- The name is resolved once, here, rather than left nil for the
-            -- caller to trip over. It is not read from disk any more.
-            record.resolvedName = NameOf(achievementID, record)
+            names[record] = NameOf(achievementID, record) or ""
 
             table.insert(rows, record)
         end
@@ -209,7 +226,7 @@ function Achievements.Closest(limit)
         local bLeft = b.criteria - b.done
 
         if aLeft == bLeft then
-            return (a.resolvedName or "") < (b.resolvedName or "")
+            return (names[a] or "") < (names[b] or "")
         end
 
         return aLeft < bLeft
@@ -457,18 +474,25 @@ CN:RegisterCommand{
         end
 
         Print("Achievements: " .. counts.completed .. " / " .. counts.total
-            .. string.format(" (%.1f%%)",
-                counts.total > 0 and (counts.completed / counts.total * 100) or 0))
+            .. " (" .. CN.PercentText(
+                counts.total > 0 and (counts.completed / counts.total) or 0, 1)
+            .. ")")
 
         Print("Tracked in progress: " .. counts.inProgress)
         Print("Within two criteria of finishing: " .. counts.nearlyDone)
 
         local closest = Achievements.Closest(5)
 
+        local rows = {}
+
         for _, record in ipairs(closest) do
-            CN.PrintLine("  " .. NameOf(record.achievementID or 0, record) .. " |cff8a8f96("
-                .. record.done .. "/" .. record.criteria .. ")|r")
+            table.insert(rows, {
+                text  = NameOf(record.achievementID or 0, record),
+                value = record.done .. " / " .. record.criteria,
+            })
         end
+
+        CN.PrintRows(nil, rows, { limit = 5 })
     end,
 }
 
@@ -486,7 +510,9 @@ CN:RegisterCommand{
             return
         end
 
-        for index, record in ipairs(closest) do
+        local rows = {}
+
+        for _, record in ipairs(closest) do
             -- `points` HAS BEEN NIL SINCE 0.36.0.
             --
             -- That release stopped storing it, correctly -- the client
@@ -502,10 +528,13 @@ CN:RegisterCommand{
             local points = record.points
                 or Blizzard.GetAchievementPoints(record.achievementID)
 
-            CN.PrintLine(index .. ". " .. NameOf(record.achievementID or 0, record)
-                .. " |cff8a8f96(" .. record.done .. "/" .. record.criteria
-                .. (points and (", " .. points .. " points") or "")
-                .. ")|r")
+            table.insert(rows, {
+                text  = NameOf(record.achievementID or 0, record),
+                value = record.done .. " / " .. record.criteria,
+                note  = points and CN.Count(points, "point") or nil,
+            })
         end
+
+        CN.PrintRows(nil, rows, { limit = limit })
     end,
 }

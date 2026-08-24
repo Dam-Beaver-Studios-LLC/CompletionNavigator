@@ -116,13 +116,40 @@ function Capture.Shape(value, depth, width)
 
     -- Methods matter as much as fields: the 0.19.0 bug was a Vector2D whose
     -- GetXY the stub did not have.
+    -- THE BUDGET WAS SPENT ON ROWS IT DID NOT RECORD. FIXED IN 0.61.0.
+    --
+    -- `shape.count` counted EVERY key, array entries included, and the
+    -- `count <= width` gate then decided whether to describe a named field.
+    -- So a client table with sixty array entries and eight named fields --
+    -- which is the ordinary shape of a POI list, a criteria list, a bag --
+    -- had its entire field budget consumed before a single named field was
+    -- looked at, and the capture recorded none of them.
+    --
+    -- Worse, it depended on `pairs` ORDER: array entries and named fields
+    -- come back interleaved in an order Lua does not promise, so the same
+    -- table captured twice produced different field sets. This is the tool
+    -- the project uses to write stubs that match the client, and it was
+    -- handing back a different answer each run for the tables most worth
+    -- capturing.
+    --
+    -- The budget now counts what it is a budget FOR. `count` still reports
+    -- the true size, and `dropped` says what the width cost, so a capture
+    -- that hit the limit says so instead of looking complete.
+    local described = 0
+
     for key, entry in pairs(value) do
         shape.count = shape.count + 1
 
         if type(key) == "number" then
             shape.array = shape.array + 1
-        elseif type(key) == "string" and shape.count <= width then
-            shape.fields[key] = Capture.Shape(entry, depth - 1, width)
+        elseif type(key) == "string" then
+            if described < width then
+                described = described + 1
+
+                shape.fields[key] = Capture.Shape(entry, depth - 1, width)
+            else
+                shape.dropped = (shape.dropped or 0) + 1
+            end
         end
     end
 

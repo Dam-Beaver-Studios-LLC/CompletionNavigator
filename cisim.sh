@@ -170,7 +170,11 @@ while IFS= read -r line; do
                 else
                     printf '  FAIL  %s\n' "$label"
                     echo ''
-                    sed 's/^/        /' step.log | tail -25
+                    # OK lines are the ones that did NOT fail, and a
+                    # 25-line tail of a 200-file lint run shows nothing but
+                    # those -- which is how a failing step got reported with
+                    # no failure visible in it. 0.61.0.
+                    grep -vE 'OK$' step.log | sed 's/^/        /' | tail -40
                     status=1
                     break
                 fi

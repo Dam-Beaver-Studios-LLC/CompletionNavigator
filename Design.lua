@@ -290,4 +290,121 @@ function CN.Aside(text)
     return " " .. CN.Muted(CN.DASH .. " " .. tostring(text))
 end
 
+------------------------------------------------------------
+-- THE BLOCK
+------------------------------------------------------------
+
+-- ONE RENDERER FOR THE SHAPE EVERY COMMAND IN THIS ADDON ALREADY HAD.
+--
+-- The 0.59.0 interface audit named this as the single most valuable change
+-- available and it has been deferred twice. The finding, restated: 126
+-- commands, and almost every one of them answers in the same shape -- a
+-- headline, a list of things, a value per thing, a note when the list was cut
+-- short, a sentence when it is empty. Each one built that shape by hand.
+--
+-- The result was not ugly so much as INCONSISTENT, which is worse, because a
+-- player learns a layout once and then has to relearn it per command:
+--
+--   * Some lists said "... and 4 more", some "and 4 more", some nothing at
+--     all and simply stopped.
+--   * The value -- the count, the percentage, the time left, the thing the
+--     player is actually scanning for -- was sometimes gold, sometimes muted,
+--     sometimes inline in the sentence, sometimes in brackets at the end.
+--   * An empty list was sometimes a muted sentence, sometimes a headline with
+--     nothing under it, and sometimes silence.
+--   * Truncation limits ranged from 5 to 20 with no reason behind any of them.
+--
+-- `CN.PrintRows` is that shape, once. Every call site that adopts it gets the
+-- same grammar, and changing the grammar becomes one edit rather than 126.
+--
+-- ON COLUMNS. WoW's chat font is proportional, so true column alignment with
+-- spaces is not available -- padding to a width produces a ragged edge that
+-- looks like a bug rather than a table. What IS available, and is what the
+-- eye actually uses to scan a list, is a consistent POSITION and a consistent
+-- COLOUR: the label reads in body, the value trails it in accent, every row,
+-- every command. That is the column.
+--
+--   rows[i] = {
+--       text    = "Nerub-ar Palace",     -- required
+--       value   = "6 left",              -- optional, trails in accent
+--       state   = "GOOD",                -- optional palette role for `value`
+--       note    = "resets in 2d 3h",     -- optional, muted aside
+--       marker  = ">",                   -- optional leading glyph
+--   }
+--
+--   options = {
+--       limit = 12,                      -- rows shown before "and N more"
+--       more  = "/cn instances",         -- what to type to see the rest
+--       empty = "Nothing on a lockout.", -- shown instead of the rows
+--       total = 40,                      -- overrides #rows in "and N more"
+--   }
+--
+-- Returns how many rows were printed, so a caller can decide whether it has
+-- said anything at all.
+CN.blockLimit = 12
+
+function CN.PrintRows(headline, rows, options)
+    options = options or {}
+
+    rows = rows or {}
+
+    if headline then
+        CN.Print(headline)
+    end
+
+    if #rows == 0 then
+        if options.empty then
+            CN.PrintLine(CN.Muted(options.empty))
+        end
+
+        return 0
+    end
+
+    local limit = options.limit or CN.blockLimit
+
+    local shown = 0
+
+    for index = 1, math.min(limit, #rows) do
+        local row = rows[index]
+
+        if type(row) == "string" then
+            row = { text = row }
+        end
+
+        local line = ""
+
+        if row.marker then
+            line = CN.Muted(row.marker) .. " "
+        end
+
+        line = line .. CN.Body(row.text)
+
+        if row.value ~= nil and row.value ~= "" then
+            local paint = CN.C[row.state or "ACCENT"] and (row.state or "ACCENT")
+                or "ACCENT"
+
+            line = line .. "  |cff" .. CN.C[paint]
+                .. tostring(row.value) .. "|r"
+        end
+
+        if row.note then
+            line = line .. CN.Aside(row.note)
+        end
+
+        CN.PrintLine(line)
+
+        shown = shown + 1
+    end
+
+    local total = options.total or #rows
+
+    if total > shown then
+        CN.PrintLine(CN.Muted(CN.DASH .. " and "
+            .. CN.Count(total - shown, "more row")
+            .. (options.more and (", " .. options.more) or "")))
+    end
+
+    return shown
+end
+
 return CN.C

@@ -36,35 +36,82 @@ CN.IsQuestCompletedOnAccount   = Quests.IsCompletedOnAccount
 
 -- Writes a name only when the incoming source is at least as
 -- authoritative as the stored one. Manual entries never clobber Blizzard.
+-- A ROW IS A STRING UNLESS IT HAS SOMETHING ELSE TO SAY. 0.61.0.
+--
+-- `questMetadata` is the largest store in the addon: 708 KB of a 2.0 MB
+-- SavedVariables file, and the game rewrites that file in full on every
+-- logout. Every row was a two-field TABLE -- `{ name = ..., source = ... }`
+-- -- and on an established account 30,000 of them said `source = "blizzard"`,
+-- which is the default and carries no information.
+--
+-- The name itself does have to be kept. `GetTitleForQuestID` answers only for
+-- quests the CLIENT has cached, and returns nil with an async request for
+-- everything else -- so without this store the addon shows "Quest 84213" for
+-- anything the player has not looked at this session. That is a real thing
+-- the client will not re-supply on demand, and the standing rule permits it.
+--
+-- What the rule does NOT permit is the wrapper. So a row is now the name
+-- itself, and only a name the PLAYER typed -- which must survive being
+-- offered a Blizzard one -- keeps a table to say so. That is a handful of
+-- rows against thirty thousand.
+--
+-- Both readers below accept either shape, and migration 15 collapses the
+-- existing ones on first login.
+local function NameFrom(record)
+    if type(record) == "string" then
+        return record, "blizzard"
+    end
+
+    if type(record) == "table" then
+        return record.name, record.source
+    end
+
+    return nil, nil
+end
+
+Quests.NameFrom = NameFrom
+
+-- Writes a name only when the incoming source is at least as
+-- authoritative as the stored one. Manual entries never clobber Blizzard.
 function Quests.SetMetadata(questID, name, source)
     if not questID or not name or name == "" then
         return false
     end
 
     local metadata = CN.Account("questMetadata")
-    local existing = metadata[questID]
+
+    local heldName, heldSource = NameFrom(metadata[questID])
 
     source = source or "manual"
 
-    if existing and existing.name and not CN.IsBetterSource(source, existing.source) then
-        DebugPrint("Kept existing " .. tostring(existing.source)
+    if heldName and not CN.IsBetterSource(source, heldSource) then
+        DebugPrint("Kept existing " .. tostring(heldSource)
             .. " name for quest " .. questID .. "; rejected " .. source .. ".")
         return false
     end
 
     -- `questID` duplicated the key this is filed under and `lastSeen` had no
-    -- reader; `source` decides which of two names wins, so it stays. The same
-    -- field migration 5 stripped from achievements, pets and toys.
-    metadata[questID] = {
-        name   = name,
-        source = source,
-    }
+    -- reader. The same fields migration 5 stripped from achievements, pets
+    -- and toys.
+    if source == "manual" then
+        metadata[questID] = { name = name, source = source }
+    else
+        metadata[questID] = name
+    end
 
     return true
 end
 
+-- Kept in the table shape callers already expect, built on read rather than
+-- stored. Two fields on a handful of lookups is not worth 708 KB on disk.
 function Quests.GetMetadata(questID)
-    return CN.Account("questMetadata")[questID]
+    local name, source = NameFrom(CN.Account("questMetadata")[questID])
+
+    if not name then
+        return nil
+    end
+
+    return { name = name, source = source }
 end
 
 -- Resolution order: cache -> live client -> static data -> async request.

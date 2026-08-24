@@ -269,7 +269,31 @@ local function AttachTooltip(frame, tooltip)
         end
 
         GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
-        GameTooltip:SetText(tooltip, 1, 1, 1, 1, true)
+
+        -- A FUNCTION IS ALLOWED HERE TOO. 0.61.0.
+        --
+        -- `UI/List.lua` resolves a function tooltip and carries a comment
+        -- explaining why that is the cheaper shape. This one did not, so the
+        -- addon had two tooltip paths with different contracts and nothing
+        -- checking one against the other -- and a caller that passed a
+        -- function got the string "function: 0x..." on screen rather than an
+        -- error, which is the kind of defect that ships.
+        --
+        -- Same theme as the invalidator and the window's refresh events:
+        -- two lists, one of which nobody checks against the other.
+        local text = tooltip
+
+        if type(text) == "function" then
+            local ok, built = pcall(text)
+
+            text = ok and built or nil
+        end
+
+        if not text then
+            return
+        end
+
+        GameTooltip:SetText(text, 1, 1, 1, 1, true)
         GameTooltip:Show()
     end)
 
@@ -1509,8 +1533,22 @@ UI.RegisterTab{
                     index, tostring(objective.name or objective.id),
                     CN.TypeBadge(objective.type)),
 
-                tooltip = "Click to set a waypoint.\n"
-                    .. table.concat(CN.ExplainRecommendation(objective), "\n"),
+                -- BUILT ON HOVER, LIKE THE NEXT TAB'S. 0.61.0.
+                --
+                -- `ExplainRecommendation` sorts three keyed tables per call,
+                -- and the Zone tab composed one for every stop on the route
+                -- -- 160 on a busy map -- on every one of its two-second
+                -- refreshes, whether the mouse went near a row or not. The
+                -- Next tab was given a function for exactly this reason in
+                -- 0.57.0 and this one was missed. Measured: 4.02 ms of a
+                -- 5.31 ms Zone tab refresh.
+                --
+                -- `AttachTooltip` already accepts a function.
+                tooltip = function()
+                    return "Click to set a waypoint.\n"
+                        .. table.concat(
+                            CN.ExplainRecommendation(objective), "\n")
+                end,
 
                 onClick = function()
                     CN.currentRecommendation = objective
@@ -1776,8 +1814,8 @@ function UI.Sources()
             counts.renown .. " renown tracks (" .. counts.maxedRenown
             .. " maxed), " .. counts.exalted .. " exalted"
             .. (counts.paragonPending > 0
-                and (", " .. counts.paragonPending
-                    .. " Paragon reward(s) waiting")
+                and (", " .. CN.Count(counts.paragonPending, "Paragon reward")
+                    .. " waiting")
                 or ""))
     end
 
@@ -2120,8 +2158,22 @@ UI.RegisterTab{
             return
         end
 
-        local rows     = module.Roster()
-        local coverage = module.Coverage()
+        -- O(CHARACTERS x RECIPES), EVERY TWO SECONDS. 0.61.0.
+        --
+        -- `Coverage` walks every recipe, title and profession of every
+        -- character to build three sets, and `Roster` counts four tables per
+        -- character. On a twelve-character account with full recipe books
+        -- that is 2.30 ms per redraw, and this tab redraws every two seconds
+        -- while it is open -- for numbers that change when a character learns
+        -- something, which is not something a player does while looking at
+        -- this tab.
+        --
+        -- Alts.lua and `/cn warband` call these once per command and are left
+        -- alone; the cost was only ever the repeat.
+        local rows     = CN.Memo("warband:roster",
+            CN.collectionGeneration, module.Roster)
+        local coverage = CN.Memo("warband:coverage",
+            CN.collectionGeneration, module.Coverage)
 
         panel.header:SetText(string.format(
             "%d character%s  |cff8a8f96combined: %d professions, %d recipes, %d titles|r",
@@ -2432,8 +2484,7 @@ UI.RegisterTab{
             if chain.done then
                 progressText = CN.Good("done")
             elseif fraction then
-                progressText = CN.Brand(string.format("%d%%",
-                    math.floor(fraction * 100 + 0.5)))
+                progressText = CN.Brand(CN.PercentText(fraction))
             end
 
             -- The goal and every row of its chain carry one group key, so
@@ -2784,7 +2835,7 @@ UI.RegisterTab{
                 fraction = (row.collected or 0) / row.total
 
                 value = CN.Body((row.collected or 0) .. " / " .. row.total)
-                    .. "  " .. CN.Muted(string.format("%.1f%%", fraction * 100))
+                    .. "  " .. CN.Muted(CN.PercentText(fraction, 1))
             else
                 value = CN.Body((row.collected or 0) .. " collected")
             end
@@ -2993,6 +3044,18 @@ UI.RegisterTab{
     refresh = function(panel)
         local entries = {}
 
+        -- EIGHT STORE WALKS, EVERY TWO SECONDS, FOR SIXTEEN INTEGERS. 0.61.0.
+        --
+        -- Each `Summary()` below walks its module's whole store -- three
+        -- thousand achievement rows, eighteen hundred pets, and so on -- to
+        -- produce a collected count and a total. This tab refreshes every two
+        -- seconds for as long as the window is open, and none of those
+        -- numbers can move unless the player collects something, which fires
+        -- an event the addon already subscribes to. Measured at retail scale:
+        -- 4.40 ms per refresh, indefinitely.
+        --
+        -- `CN.collectionGeneration` is bumped by exactly those events. See
+        -- Scoring.lua, where the addon's generation counters live.
         local setup = CN:GetModule("Setup")
 
         -- WHEN THE DENOMINATOR WAS READ.
@@ -3024,7 +3087,7 @@ UI.RegisterTab{
                 table.insert(entries, {
                     text     = label .. stamp,
                     value    = CN.Body(collected .. " / " .. total) .. "  "
-                        .. CN.Muted(string.format("%.1f%%", fraction * 100)),
+                        .. CN.Muted(CN.PercentText(fraction, 1)),
                     fraction = fraction,
                     tooltip  = age
                         and ("Counted against what the addon read " .. age
@@ -3042,49 +3105,56 @@ UI.RegisterTab{
         local pets = CN:GetModule("Pets")
 
         if pets then
-            local counts = pets.Summary()
+            local counts = CN.Memo("summary:Pets",
+                CN.collectionGeneration, pets.Summary)
             row("Pets", counts.collected, counts.known)
         end
 
         local mounts = CN:GetModule("Mounts")
 
         if mounts then
-            local counts = mounts.Summary()
+            local counts = CN.Memo("summary:Mounts",
+                CN.collectionGeneration, mounts.Summary)
             row("Mounts", counts.collected, counts.known)
         end
 
         local toys = CN:GetModule("Toys")
 
         if toys then
-            local counts = toys.Summary()
+            local counts = CN.Memo("summary:Toys",
+                CN.collectionGeneration, toys.Summary)
             row("Toys", counts.collected, counts.known)
         end
 
         local appearances = CN:GetModule("Appearances")
 
         if appearances then
-            local counts = appearances.Summary()
+            local counts = CN.Memo("summary:Appearances",
+                CN.collectionGeneration, appearances.Summary)
             row("Appearances", counts.collected, counts.total)
         end
 
         local titles = CN:GetModule("Titles")
 
         if titles then
-            local counts = titles.Summary()
+            local counts = CN.Memo("summary:Titles",
+                CN.collectionGeneration, titles.Summary)
             row("Titles", counts.onAccount, counts.known)
         end
 
         local achievements = CN:GetModule("Achievements")
 
         if achievements then
-            local counts = achievements.Summary()
+            local counts = CN.Memo("summary:Achievements",
+                CN.collectionGeneration, achievements.Summary)
             row("Achievements", counts.completed, counts.total)
         end
 
         local reputations = CN:GetModule("Reputations")
 
         if reputations then
-            local counts = reputations.Summary()
+            local counts = CN.Memo("summary:Reputations",
+                CN.collectionGeneration, reputations.Summary)
 
             table.insert(entries, {
                 text  = "Reputations"
@@ -3111,7 +3181,8 @@ UI.RegisterTab{
         local professions = CN:GetModule("Professions")
 
         if professions then
-            for _, record in ipairs(professions.Summary()) do
+            for _, record in ipairs(CN.Memo("summary:Professions",
+                CN.collectionGeneration, professions.Summary)) do
                 local note = record.recipesSeen
                     and CN.Muted(record.recipeKnown .. " of "
                         .. record.recipeTotal .. " recipes")

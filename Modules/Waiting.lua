@@ -146,7 +146,43 @@ end
 -- exposes it as a currency, which is why this reads currencies rather than
 -- the profession API -- fewer moving parts, and it works for every expansion
 -- that has used the pattern.
+--
+-- THE ENGLISH WORD WAS THE GATE, AND IT SHOULD NEVER HAVE BEEN. FIXED 0.61.0.
+--
+-- `knowledgePattern = "[Kk]nowledge"` was matched against the currency's
+-- LOCALIZED name. On a German client the currency is "Wissen", on French
+-- "Connaissance", on Spanish "Conocimiento" -- so this section, and every
+-- candidate it produces, returned exactly zero rows on every non-English
+-- client in the world. That is roughly half the player base being silently
+-- denied the feature this file's own header calls "the most permanently
+-- missable thing in modern professions".
+--
+-- It is also the second locale bug of this shape the project has found, and
+-- the lesson is the same: a localized string is a thing to DISPLAY, never a
+-- thing to BRANCH ON.
+--
+-- What replaces it is a fact the client vouches for in every locale: the
+-- currency has a weekly cap and there is room left under it. That is already
+-- what the loop below tests, and it was the honest gate all along. A weekly
+-- cap on a currency is the game saying "this is gone on Tuesday", which is
+-- precisely the question `/cn clock` asks.
+--
+-- The pattern survives, demoted to what it can actually do -- flag a row as
+-- profession knowledge on a client where the word happens to match, so the
+-- ordering can put it first. It decides nothing.
 Waiting.knowledgePattern = "[Kk]nowledge"
+
+-- Locale-free reinforcement: the profession knowledge currencies the addon
+-- knows by id. An id is the same in every locale. This is a HINT for
+-- ordering, not a gate -- a currency missing from this list is still
+-- reported, because the weekly cap is what makes it missable and a hard-coded
+-- list of ids goes stale on every content patch.
+Waiting.knowledgeCurrencies = {
+    -- The War Within profession knowledge.
+    [2915] = true, [2916] = true, [2917] = true, [2918] = true,
+    [2919] = true, [2920] = true, [2921] = true, [2922] = true,
+    [2923] = true, [2924] = true, [2925] = true,
+}
 
 function Waiting.Knowledge()
     local rows = {}
@@ -170,22 +206,36 @@ function Waiting.Knowledge()
         if record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0
             and (record.weeklyRemaining or 0) > 0 then
 
-            local name = Blizzard.GetCurrency(currencyID)
+            local info = Blizzard.GetCurrency(currencyID)
+            local name = info and info.name
 
-            name = name and name.name
+            -- No name is not a reason to drop a capped currency: the row is
+            -- still true, and the id can carry it.
+            local knowledge = Waiting.knowledgeCurrencies[currencyID] == true
 
-            if name and name:find(Waiting.knowledgePattern) then
-                table.insert(rows, {
-                    currencyID = currencyID,
-                    name       = name,
-                    remaining  = record.weeklyRemaining,
-                    cap        = record.maxWeeklyQuantity,
-                })
+            if not knowledge and name then
+                knowledge = name:find(Waiting.knowledgePattern) and true or false
             end
+
+            table.insert(rows, {
+                currencyID = currencyID,
+                name       = name or ("Currency " .. tostring(currencyID)),
+                knowledge  = knowledge,
+                remaining  = record.weeklyRemaining,
+                cap        = record.maxWeeklyQuantity,
+            })
         end
     end
 
-    table.sort(rows, function(a, b) return a.currencyID < b.currencyID end)
+    -- Knowledge first where it is identifiable, then by id so the order is
+    -- stable across sessions and locales.
+    table.sort(rows, function(a, b)
+        if a.knowledge ~= b.knowledge then
+            return a.knowledge
+        end
+
+        return a.currencyID < b.currencyID
+    end)
 
     return rows
 end
@@ -245,8 +295,8 @@ CN.RegisterCandidateProvider("Waiting", function()
             travelCost       = 3,
             expiresIn        = math.max(0, (soonest.daysLeft or 0) * 86400),
             reasons          = {
-                string.format("%d message(s) with attachments, the first in "
-                    .. "%.1f days", #expiring, soonest.daysLeft or 0),
+                string.format("%s with attachments, the first in %.1f days",
+                    CN.Count(#expiring, "message"), soonest.daysLeft or 0),
                 "expired mail is destroyed, not returned",
             },
         }))
@@ -325,21 +375,19 @@ CN:RegisterCommand{
                 .. "session" .. CN.DASH .. "the client only hands the addon the inbox once "
                 .. "you have looked at it.|r")
         else
-            Print(#mail .. " message(s) in your mailbox:")
+            local rows = {}
 
-            for index, entry in ipairs(mail) do
-                if index > 5 then
-                    CN.PrintLine("  |cff8a8f96... and " .. (#mail - 5) .. " more|r")
-                    break
-                end
-
-                local colour = entry.expiring and "|cffe2564c" or "|cff8a8f96"
-
-                CN.PrintLine(string.format("  %s%.1f days|r %s |cff8a8f96from %s|r",
-                    colour, entry.daysLeft or 0,
-                    tostring(entry.subject or "(no subject)"),
-                    tostring(entry.sender or "?")))
+            for _, entry in ipairs(mail) do
+                table.insert(rows, {
+                    text  = tostring(entry.subject or "(no subject)"),
+                    value = string.format("%.1f days", entry.daysLeft or 0),
+                    state = entry.expiring and "BAD" or "MUTED",
+                    note  = "from " .. tostring(entry.sender or "?"),
+                })
             end
+
+            CN.PrintRows(CN.Count(#mail, "message") .. " in your mailbox:",
+                rows, { limit = 5, more = "open your mailbox for the rest" })
 
             said = true
         end
@@ -355,9 +403,19 @@ CN:RegisterCommand{
 
         local knowledge = Waiting.Knowledge()
 
-        for _, row in ipairs(knowledge) do
-            CN.PrintLine(row.name .. ": |cffffc74f" .. row.remaining
-                .. "|r of " .. row.cap .. " still collectable this week")
+        if #knowledge > 0 then
+            local rows = {}
+
+            for _, row in ipairs(knowledge) do
+                table.insert(rows, {
+                    text  = row.name,
+                    value = row.remaining .. " of " .. row.cap,
+                    state = "ACCENT",
+                    note  = "still collectable this week",
+                })
+            end
+
+            CN.PrintRows(nil, rows)
 
             said = true
         end

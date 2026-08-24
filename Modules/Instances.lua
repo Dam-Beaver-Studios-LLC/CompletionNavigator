@@ -249,29 +249,80 @@ end
 
 -- Is the player locked to the instance a drop comes from? This is the
 -- difference between "go and kill it" and "not until Tuesday".
-function Instances.LockoutFor(instanceName)
+-- ONE NAME, SEVERAL LOCKOUTS. FIXED IN 0.61.0.
+--
+-- The client returns one saved-instance row PER DIFFICULTY, and they all
+-- carry the same name. This returned the first one it walked past, so a
+-- player who had cleared Heroic and never set foot in Normal was told they
+-- were locked out of the drop -- and a player who had cleared Mythic but not
+-- Normal was told they could still go. Wrong in both directions, and the
+-- direction depended on the order the client happened to hand back its rows.
+--
+-- The caller knows the difficulty only sometimes, so:
+--
+--   * given a difficulty, match it exactly;
+--   * otherwise prefer a lockout that is NOT complete, because an open
+--     difficulty means the answer to "can I go and kill it" is yes;
+--   * otherwise the first, which is now known to be one of several closed
+--     ones and says the same thing whichever it is.
+--
+-- Returns lockout, count -- where count is how many share the name, so a
+-- caller can say "on this difficulty" rather than implying there is only one.
+function Instances.LockoutFor(instanceName, difficulty)
     if not instanceName then
-        return nil
+        return nil, 0
     end
+
+    local matches, first, open, exact = 0, nil, nil, nil
 
     for _, lockout in ipairs(Instances.Lockouts()) do
         if lockout.name == instanceName then
-            return lockout
+            matches = matches + 1
+
+            first = first or lockout
+
+            if difficulty and lockout.difficulty == difficulty then
+                exact = exact or lockout
+            end
+
+            if not lockout.complete then
+                open = open or lockout
+            end
         end
     end
 
-    return nil
+    if matches == 0 then
+        return nil, 0
+    end
+
+    return exact or open or first, matches
 end
 
 ------------------------------------------------------------
 -- FORMATTING
 ------------------------------------------------------------
 
+-- ALWAYS A STRING. FIXED IN 0.61.0.
+--
+-- `Vault.FormatReset` returns nil for a nil input -- deliberately, so the
+-- Vault can decide whether to print a row at all -- and this delegated to it
+-- and returned that nil straight through, past its own "unknown" fallback.
+-- Both call sites below CONCATENATE the answer, so any lockout the client
+-- had not yet given a reset time for threw
+-- "attempt to concatenate a nil value" out of `/cn drops` and out of the
+-- instance list, which is exactly the moment right after a loading screen
+-- when a player is most likely to be looking at either.
+--
+-- The nil check goes AFTER the delegation, not instead of it.
 function Instances.FormatReset(seconds)
     local vault = CN:GetModule("Vault")
 
     if vault and vault.FormatReset then
-        return vault.FormatReset(seconds)
+        local text = vault.FormatReset(seconds)
+
+        if text then
+            return text
+        end
     end
 
     if not seconds then
@@ -510,12 +561,34 @@ CN:RegisterCommand{
                 line = line .. " |cff8a8f96in " .. result.instance .. "|r"
             end
 
-            local lockout = result.instance and Instances.LockoutFor(result.instance)
+            -- `x and f()` TRUNCATES TO ONE VALUE.
+            --
+            -- Written as `local a, b = cond and f()`, Lua adjusts the `and`
+            -- expression to a single result, so `sharing` was always nil and
+            -- the "on Heroic" clause below could never appear. Caught by
+            -- luacheck as "variable is never set", which is exactly what it
+            -- was -- and would have been invisible in play, because a missing
+            -- clause looks like a lockout that is simply not shared.
+            local lockout, sharing
+
+            if result.instance then
+                lockout, sharing = Instances.LockoutFor(result.instance)
+            end
 
             if lockout then
                 if lockout.complete then
-                    line = line .. " |cffe2564clocked until "
-                        .. Instances.FormatReset(lockout.resetsIn) .. "|r"
+                    -- "locked until 2d 3h" reads as a date and is a
+                    -- DURATION. `FormatReset` returns "2d 3h"; the only
+                    -- preposition that fits it is "for", and "resets in" is
+                    -- the phrasing every other lockout line in the addon
+                    -- already uses. 0.61.0.
+                    line = line .. " |cffe2564clocked, resets in "
+                        .. Instances.FormatReset(lockout.resetsIn)
+                        .. ((sharing or 1) > 1
+                            and (" on " .. tostring(lockout.difficulty
+                                or "this difficulty"))
+                            or "")
+                        .. "|r"
                 else
                     line = line .. " |cffffc74f" .. lockout.remaining
                         .. " left on your lockout|r"

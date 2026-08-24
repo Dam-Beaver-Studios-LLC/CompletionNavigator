@@ -187,7 +187,11 @@ function Vault.DescribeRow(row)
     local text = row.label .. ": " .. row.progress
 
     if row.capped then
-        return text .. " |cff73b873all " .. row.unlocked .. " unlocked|r"
+        -- "Dungeons: 8 all 3 unlocked" -- two numbers jammed together with no
+        -- word between them, and the reader has to guess which is which.
+        -- 0.61.0.
+        return text .. " |cff73b873" .. CN.DASH .. "all "
+            .. CN.Count(row.unlocked, "reward") .. " unlocked|r"
     end
 
     return text .. " of " .. row.next

@@ -796,7 +796,7 @@ CN:RegisterCommand{
         local recipes = Inventory.Recipes()
 
         if #recipes > 0 then
-            Print(#recipes .. " recipe(s) carried:")
+            Print(CN.Count(#recipes, "recipe") .. " carried:")
 
             for _, item in ipairs(recipes) do
                 CN.PrintLine("  " .. (Blizzard.GetItemName(item.itemID)

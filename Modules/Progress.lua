@@ -140,13 +140,143 @@ function Progress.CurrentDayKey()
     -- uses the same day-index arithmetic with no offset. It can be off by
     -- one against the game's day; it cannot be off by six orders of
     -- magnitude.
-    if not seconds then
-        return math.floor(time() / 86400)
+    --
+    -- SAME SCALE WAS NOT ENOUGH. 0.61.0.
+    --
+    -- The two branches are now the same KIND of integer, which fixed the six-
+    -- orders-of-magnitude version of this bug. They are still not the same
+    -- NUMBER: `time() / 86400` and `(time() + seconds) / 86400` land on
+    -- different day indices for every hour of the day after the reset offset
+    -- pushes past midnight UTC -- which is most of the day, for most realms.
+    --
+    -- So the smaller version of the original bug survived: one nil answer
+    -- during a loading screen still flipped the key, moved today's count into
+    -- yesterday, and restarted today at one. A player who zoned into a
+    -- dungeon watched their daily total reset, which is precisely the
+    -- complaint the first fix was written for.
+    --
+    -- The reset instant is an ABSOLUTE time and it does not move. Read it
+    -- once and it can be carried forward through any number of silent
+    -- moments, rolled forward a day at a time as it passes. The client's
+    -- silence stops being an event.
+    local now = time()
+
+    if seconds then
+        Progress.knownResetAt = now + seconds
+    elseif Progress.knownResetAt then
+        -- Carried forward. A day at a time, so a session left running over
+        -- several resets still lands on the right one.
+        while Progress.knownResetAt <= now do
+            Progress.knownResetAt = Progress.knownResetAt + 86400
+        end
+    else
+        -- NEVER READ ONE THIS SESSION, AND THE FALLBACK MUST NOT BE A
+        -- DIFFERENT KIND OF ANSWER.
+        --
+        -- The first version of this returned `math.floor(now / 86400)` while
+        -- the normal path returns `math.floor((now + secondsToReset) / 86400)`
+        -- -- and those land on different day indices for most of the day on
+        -- most realms. So the original bug survived, narrowed: a quest handed
+        -- in during the seconds before the client first answers was filed
+        -- under one key, the client then answered, the key moved, and the
+        -- rollover branch dutifully shovelled today's count into "yesterday"
+        -- and restarted today at one. That is the complaint this was written
+        -- to fix, in a smaller window.
+        --
+        -- The fix is to assume a boundary rather than to assume none. The
+        -- reset is somewhere in the next 24 hours by definition, so half a
+        -- day is the estimate with the smallest worst-case error -- and it is
+        -- REMEMBERED, so every reader this session agrees with every other.
+        -- The moment the client speaks, the branch above replaces it with the
+        -- real instant.
+        --
+        -- Replacing an estimate with the truth can still move the key once,
+        -- which is a real rollover as far as `NoteCompleted` is concerned. So
+        -- the estimate is recorded, and the rollover check below skips a
+        -- transition out of it: one provisional key, promoted, not a day
+        -- boundary crossed.
+        Progress.knownResetAt   = now + 43200
+        Progress.resetIsEstimate = true
+
+        return math.floor(Progress.knownResetAt / 86400)
+    end
+
+    -- Reached only via the two branches above; the client has now spoken at
+    -- some point this session.
+    --
+    -- WRITTEN AS AN `if`, NOT AS `seconds and false or held`.
+    --
+    -- That idiom cannot produce `false`: `seconds and false` is `false`, and
+    -- `false or held` is `held` -- so the flag stayed true forever and the
+    -- provisional key was never promoted. It is the single most common Lua
+    -- trap there is and I walked straight into it while fixing a different
+    -- bug; the suite caught it because the assertion was written first.
+    if seconds then
+        Progress.resetIsEstimate = false
     end
 
     -- The reset that is coming, as an absolute time, identifies the day
     -- unambiguously without needing to know the server's timezone.
-    return math.floor((time() + seconds) / 86400)
+    return math.floor(Progress.knownResetAt / 86400)
+end
+
+-- Whether the day key this session has handed out so far was the estimate
+-- rather than the client's own reset instant. In memory deliberately: see
+-- `RollDay`.
+local estimatedKey = false
+
+-- ONE ROLLOVER, IN ONE PLACE. 0.61.0.
+--
+-- The day-boundary rule was written out twice -- once in `NoteCompleted` and
+-- once in `BeginSession` -- and 0.61.0 was about to make that three times.
+-- This project has now found the same "two copies of a rule, one of which
+-- nobody updates" defect in the invalidator, the window's refresh events and
+-- the collection generation. It is not going to be introduced here on
+-- purpose.
+--
+-- Returns the current day key, having rolled the store over if the day has
+-- genuinely changed.
+function Progress.RollDay(store)
+    local today = Progress.CurrentDayKey()
+
+    if not store then
+        return today
+    end
+
+    -- A PROVISIONAL KEY BEING REPLACED IS NOT A NEW DAY.
+    --
+    -- Before the client has said when the reset is, the key is an estimate
+    -- (see `CurrentDayKey`). When the real instant arrives the key can move
+    -- once, and shovelling today's count into "yesterday" over that is the
+    -- exact bug this whole area exists to prevent. Adopt the corrected key
+    -- and keep the count.
+    --
+    -- THE FLAG IS SESSION STATE, NOT SAVED STATE. This lived on `store` for
+    -- one draft, and `store` is SavedVariables -- so a session that ended
+    -- while the key was still provisional left the flag set on disk, and the
+    -- FOLLOWING day's login promoted a genuinely stale key instead of rolling
+    -- it over. The player would come back the next morning and find
+    -- yesterday's number labelled "today", which is the bug the login
+    -- rollover exists to prevent, reintroduced by the fix for a different
+    -- one. It is a local, and a new session starts with it clear.
+    if store.dayKey ~= today and estimatedKey
+        and not Progress.resetIsEstimate then
+
+        store.dayKey = today
+    end
+
+    estimatedKey = Progress.resetIsEstimate and true or false
+
+    if store.dayKey ~= today then
+        -- A new day. Keep yesterday so "yesterday you did 84" is possible
+        -- later, but do not accumulate an unbounded history.
+        store.previousDay    = store.today or 0
+        store.previousDayKey = store.dayKey
+        store.today          = 0
+        store.dayKey         = today
+    end
+
+    return today
 end
 
 ------------------------------------------------------------
@@ -161,16 +291,7 @@ function Progress.NoteCompleted(questID)
         return
     end
 
-    local today = Progress.CurrentDayKey()
-
-    if store.dayKey ~= today then
-        -- A new day. Keep yesterday so "yesterday you did 84" is possible
-        -- later, but do not accumulate an unbounded history.
-        store.previousDay      = store.today or 0
-        store.previousDayKey   = store.dayKey
-        store.today            = 0
-        store.dayKey           = today
-    end
+    local today = Progress.RollDay(store)
 
     store.today   = (store.today or 0) + 1
     store.session = (store.session or 0) + 1
@@ -193,14 +314,7 @@ function Progress.BeginSession()
 
         -- Roll the day over at login too, so a player who logs in the next
         -- morning does not see yesterday's number labelled "today".
-        local today = Progress.CurrentDayKey()
-
-        if store.dayKey ~= today then
-            store.previousDay    = store.today or 0
-            store.previousDayKey = store.dayKey
-            store.today          = 0
-            store.dayKey         = today
-        end
+        Progress.RollDay(store)
     end
 
     sessionStart.completed = Progress.LifetimeCompleted()

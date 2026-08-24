@@ -379,6 +379,19 @@ F.mapTree = {
     [1978] = { name = "Dragon Isles",   parentMapID = 0,     mapType = 2 },
 }
 
+-- Zone names are read back by name-matching code, so a test needs to be able
+-- to stand somewhere with a name it chose.
+function CN_TEST_SetMapName(mapID, name)
+    if not name then
+        F.mapTree[mapID] = nil
+
+        return
+    end
+
+    F.mapTree[mapID] = F.mapTree[mapID] or { mapType = 3 }
+    F.mapTree[mapID].name = name
+end
+
 F.mapChildren = {
     [2022] = { { mapID = 2112 } },
     [1941] = { { mapID = 94 } },
@@ -509,6 +522,59 @@ function CreateVector2D(x, y)
 
     return vector
 end
+
+-- CLASS AND RACE TOKENS, AND WHAT THE CLIENT CALLS THEM.
+--
+-- The addon stores the uppercase token everywhere, correctly -- a token is
+-- stable across locales and a name is not. What it did with the token was
+-- print it: "class only: WARRIOR, PALADIN" went onto a player's screen.
+--
+-- These are the two client tables that map back. Modelled with a locale that
+-- is NOT English so that anything reading the token and calling it a name
+-- fails here rather than looking plausible.
+LOCALIZED_CLASS_NAMES_MALE = {
+    WARRIOR     = "Krieger",
+    PALADIN     = "Paladin",
+    HUNTER      = "Jaeger",
+    ROGUE       = "Schurke",
+    PRIEST      = "Priester",
+    DEATHKNIGHT = "Todesritter",
+    SHAMAN      = "Schamane",
+    MAGE        = "Magier",
+    WARLOCK     = "Hexenmeister",
+    MONK        = "Moench",
+    DRUID       = "Druide",
+    DEMONHUNTER = "Daemonenjaeger",
+    EVOKER      = "Rufer",
+}
+
+-- Sparse on purpose: the real id space has gaps, and a scan that assumes a
+-- dense range walks off the end of it.
+local RACE_ROWS = {
+    [1]  = { clientFileString = "Human",     raceName = "Mensch" },
+    [2]  = { clientFileString = "Orc",       raceName = "Orc" },
+    [3]  = { clientFileString = "Dwarf",     raceName = "Zwerg" },
+    [4]  = { clientFileString = "NightElf",  raceName = "Nachtelf" },
+    [11] = { clientFileString = "Draenei",   raceName = "Draenei" },
+    [52] = { clientFileString = "DarkIronDwarf", raceName = "Dunkeleisenzwerg" },
+    [70] = { clientFileString = "Dracthyr",  raceName = "Dracthyr" },
+}
+
+C_CreatureInfo = {
+    GetRaceInfo = function(raceID)
+        local row = RACE_ROWS[raceID]
+
+        if not row then
+            return nil
+        end
+
+        return {
+            raceID           = raceID,
+            clientFileString = row.clientFileString,
+            raceName         = row.raceName,
+        }
+    end,
+}
 
 C_Map = {
     -- A CLIENT THAT WILL NOT SAY WHERE YOU ARE.
@@ -1029,6 +1095,36 @@ CN_TEST_SAVED_INSTANCES = {
       true, false, "Normal", 3, 0, false, 1296 },
 }
 
+-- Held so a test that replaces the list can put the fixture back.
+CN_TEST_DEFAULT_SAVED_INSTANCES = CN_TEST_SAVED_INSTANCES
+
+-- ONE ROW PER DIFFICULTY, ALL CARRYING THE SAME NAME.
+--
+-- That is what the client returns, and the fixture had no instance saved on
+-- two difficulties -- so `LockoutFor`, which matched on the name alone and
+-- answered with whichever came first, looked correct.
+function CN_TEST_SetLockouts(rows)
+    if not rows then
+        CN_TEST_SAVED_INSTANCES = CN_TEST_DEFAULT_SAVED_INSTANCES
+
+        return
+    end
+
+    local built = {}
+
+    for _, row in ipairs(rows) do
+        table.insert(built, {
+            row.name, row.id or 2147483100, row.resetsIn or 86400,
+            row.difficultyID or 14, row.locked ~= false, row.extended or false,
+            false, row.raid ~= false, false, row.difficulty or "Normal",
+            row.encounters or 0, row.defeated or 0, false,
+            row.instanceID or 1273,
+        })
+    end
+
+    CN_TEST_SAVED_INSTANCES = built
+end
+
 function GetNumSavedInstances()
     return #CN_TEST_SAVED_INSTANCES
 end
@@ -1541,6 +1637,24 @@ local paragonFactions     = { [2590] = true }
 
 local expandCalls, collapseCalls = 0, 0
 
+-- Per-faction paragon overrides, so a test can express a player several
+-- caches deep. Empty means the default single-cycle answer below.
+CN_TEST_PARAGON = {}
+
+function CN_TEST_SetParagon(factionID, value, threshold, pending)
+    if not value then
+        CN_TEST_PARAGON[factionID] = nil
+
+        return
+    end
+
+    CN_TEST_PARAGON[factionID] = {
+        value     = value,
+        threshold = threshold,
+        pending   = pending and true or false,
+    }
+end
+
 C_Reputation = {
     GetNumFactions          = function() return #factions end,
     GetFactionDataByIndex   = function(i) return factions[i] end,
@@ -1552,8 +1666,29 @@ C_Reputation = {
     end,
     IsAccountWideReputation = function(id) return accountWideFactions[id] == true end,
     IsMajorFaction          = function(id) return majorFactions[id] == true end,
-    IsFactionParagon        = function(id) return paragonFactions[id] == true end,
-    GetFactionParagonInfo   = function(id) return 7500, 10000, 80001, true end,
+    IsFactionParagon        = function(id)
+        if CN_TEST_PARAGON[id] then
+            return true
+        end
+
+        return paragonFactions[id] == true
+    end,
+    -- PARAGON VALUE IS CUMULATIVE IN THE REAL CLIENT AND WAS A CONSTANT HERE.
+    --
+    -- 7,500 of 10,000 is a first cycle, which is the only case where storing
+    -- the raw value and printing it against the threshold happens to be
+    -- right. A player three caches in reads "34500/10000", and the stub could
+    -- not express that, so the suite agreed with the bug.
+    GetFactionParagonInfo   = function(id)
+        local held = CN_TEST_PARAGON[id]
+
+        if held then
+            return held.value, held.threshold, held.questID or 80001,
+                held.pending and true or false
+        end
+
+        return 7500, 10000, 80001, true
+    end,
     -- NOT PURE COUNTERS. These used to increment and change nothing, so the
     -- round trip -- and the index shifting a real expand causes -- went
     -- untested. They now move the state the addon reads back.
@@ -1888,6 +2023,28 @@ end
 
 function GetAchievementNumCriteria(id)
     return achievementData[id] and achievementData[id].criteria or 0
+end
+
+-- A META ACHIEVEMENT, WHICH IS THE SHAPE THE CAP WAS WRONG FOR.
+--
+-- The fixture's achievements all have a handful of criteria, so a reader
+-- that capped its own loop at 25 and then counted the rows looked correct
+-- for every one of them. Every meta achievement in the game is past that cap
+-- and none was representable here.
+local wideAchievementID = 990000
+
+function CN_TEST_MakeWideAchievement(criteria, done)
+    wideAchievementID = wideAchievementID + 1
+
+    achievementData[wideAchievementID] = {
+        name      = "Glory of Something Large",
+        points    = 10,
+        completed = false,
+        criteria  = criteria,
+        done      = done,
+    }
+
+    return wideAchievementID
 end
 
 -- The real signature carries a quantity and a requirement after the
@@ -2317,6 +2474,27 @@ C_CurrencyInfo = {
     end,
 }
 
+-- A WEEKLY-CAPPED CURRENCY WHOSE NAME IS NOT ENGLISH.
+--
+-- Profession knowledge was gated on the English word "knowledge" appearing in
+-- the currency's LOCALIZED name, and every currency in this fixture is named
+-- in English -- so the gate looked correct here and returned zero rows on
+-- every non-English client in the world.
+function CN_TEST_SetCurrencyRow(id, name, maxWeekly)
+    if not name then
+        currencyByID[id] = nil
+
+        return
+    end
+
+    currencyByID[id] = {
+        currencyID        = id,
+        name              = name,
+        quantity          = 0,
+        maxWeeklyQuantity = maxWeekly or 0,
+    }
+end
+
 ------------------------------------------------------------
 -- VIGNETTE STUBS (rares and treasures)
 ------------------------------------------------------------
@@ -2362,7 +2540,20 @@ worldQuests = {   -- global on purpose: C_TaskQuest above closes over it
     { questID = 70003, mapID = 94, x = 0.50, y = 0.90, seconds = 4 * 86400 },
 }
 
-function GetQuestResetTime() return 5 * 3600 end
+-- THE CLIENT GOES QUIET DURING A LOADING SCREEN.
+--
+-- This returned a constant, so `Progress.CurrentDayKey`'s no-answer branch --
+-- which flipped the day key, moved today's count into yesterday, and
+-- restarted today at one -- was unreachable from the suite.
+function GetQuestResetTime()
+    if CN_TEST_DAILY_RESET_IN == nil then
+        return nil
+    end
+
+    return CN_TEST_DAILY_RESET_IN
+end
+
+CN_TEST_DAILY_RESET_IN = 5 * 3600
 
 C_DateAndTime = {
     GetSecondsUntilWeeklyReset = function() return 3 * 86400 end,
@@ -2456,6 +2647,26 @@ end
 toc:close()
 
 io.stdout:setvbuf("line")
+
+-- SOME RULES ARE ABOUT WHAT THE SOURCE MUST NOT SAY.
+--
+-- "Nothing expensive on the login frame" is not observable from behaviour --
+-- an eager refresh and a deferred one produce the same text -- so it is
+-- asserted against the file. Used sparingly and only where the rule really is
+-- structural.
+function CN_TEST_ReadAddonFile(relative)
+    local handle = io.open(ROOT .. "/" .. relative, "r")
+
+    if not handle then
+        return nil
+    end
+
+    local text = handle:read("*a")
+
+    handle:close()
+
+    return text
+end
 
 local ADDON_NAME = "CompletionNavigator"
 local CN = {}
@@ -2787,11 +2998,27 @@ print("  questStatus          = " .. count(db.account.questStatus))
 
 assert(count(db.characters) == 1, "expected one character profile")
 assert(count(db.account.discoveredQuests) >= 3, "expected discovered quests")
-assert(db.account.questMetadata[8237].name == "Vanquish the Invaders!",
+-- A ROW IS THE NAME ITSELF UNLESS IT WAS TYPED BY THE PLAYER. 0.61.0.
+--
+-- The store used to be 30,000 two-field tables, of which 30,000 said
+-- `source = "blizzard"` -- the default, carrying no information, in the
+-- largest store the addon keeps. Asserted through the accessor the addon
+-- uses, plus the raw shape, so the saving is not quietly undone later.
+local questNames = CN:GetModule("Quests")
+
+assert(questNames.GetMetadata(8237).name == "Vanquish the Invaders!",
     "manual setquest must not overwrite the questlog name, got: "
-    .. tostring(db.account.questMetadata[8237].name))
-assert(db.account.questMetadata[4242].name == "Manually Named Quest",
+    .. tostring(questNames.GetMetadata(8237)
+        and questNames.GetMetadata(8237).name))
+assert(questNames.GetMetadata(4242).name == "Manually Named Quest",
     "manual name should be stored when nothing better exists")
+
+assert(type(db.account.questMetadata[8237]) == "string",
+    "a client-supplied name is stored as the name, with no wrapper: "
+    .. type(db.account.questMetadata[8237]))
+assert(type(db.account.questMetadata[4242]) == "table"
+    and db.account.questMetadata[4242].source == "manual",
+    "and a name the PLAYER typed keeps the table that says so")
 
 print("  reputations(account)  = " .. count(db.account.reputations))
 
@@ -4946,8 +5173,13 @@ assert(migrated.settings.priorityMode == "quests",
     "unrelated settings must not be reset")
 assert(count(migrated.account.discoveredQuests) == 1,
     "completion history must never be destroyed by a migration")
-assert(migrated.account.questMetadata[123].name == "Legacy Quest",
-    "existing metadata must survive")
+-- Migration 15 collapses a client-supplied row to the name itself, so the
+-- assertion is on the NAME rather than on the shape it used to be kept in.
+-- A migration that silently dropped a name would be the worst kind of data
+-- loss this project can ship, so it is asserted through the accessor too.
+assert(migrated.account.questMetadata[123] == "Legacy Quest",
+    "existing metadata must survive, collapsed to the name: "
+    .. tostring(migrated.account.questMetadata[123]))
 assert(type(migrated.account.pets) == "table",
     "new account tables must be created")
 assert(migrated.characters["Old-Char"].name == "Old",
@@ -7868,6 +8100,7 @@ print("\nOne palette, and nothing outside it:")
     assert(counted > 100,
         "the scan must actually have read the tree, found " .. counted)
 
+
     print("  " .. counted .. " colour codes, all of them from the palette")
 
     ------------------------------------------------------------
@@ -8035,6 +8268,122 @@ print("\nOne palette, and nothing outside it:")
         #floats .. " colour(s) are written as raw floats. Use CN.Rgb(\"ROLE\").")
 
     print("  no colour reaches a frame as a number the palette does not own")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LOCAL FUNCTION CALLED ABOVE ITS OWN DECLARATION.
+    --
+    -- I HAVE SHIPPED THIS TWICE. 0.60.0 put `IdBefore` in Objectives.lua at
+    -- line 479 with its first call site at 438, and 0.61.0 put
+    -- `Vendors.ItemIndex` above the `local function BuildItemIndex` it
+    -- calls. Both would have resolved to a nil global in the game.
+    --
+    -- Neither was caught, and the reason is worth stating: Lua does not
+    -- error at load. The name is simply not in scope yet, so the reference
+    -- becomes a GLOBAL lookup, which is legal, returns nil, and only throws
+    -- when the line actually runs. If the suite never exercises that path --
+    -- and in both cases it did not -- everything passes and the addon breaks
+    -- in the game.
+    --
+    -- So it is checked structurally instead. For every `local function NAME`
+    -- in a file, any call to `NAME(` on an earlier line is an error. Calls
+    -- through a table (`x.NAME(`, `x:NAME(`) are not this bug and are
+    -- skipped; a comment line is not code.
+    ------------------------------------------------------------
+    local root = ROOT
+
+    local offenders = {}
+    local scanned   = 0
+
+    local function Scan(relative, path)
+        local handle = io.open(path, "r")
+
+        if not handle then
+            return
+        end
+
+        local lines = {}
+
+        for line in handle:read("*a"):gmatch("[^\n]*") do
+            table.insert(lines, line)
+        end
+
+        handle:close()
+
+        scanned = scanned + 1
+
+        -- Where each file-local function is declared.
+        local declaredAt = {}
+
+        for number, line in ipairs(lines) do
+            local name = line:match("^%s*local%s+function%s+([%w_]+)%s*%(")
+
+            if name and not declaredAt[name] then
+                declaredAt[name] = number
+            end
+
+            -- `local NAME = function(` and the forward-declaration idiom
+            -- `local NAME` followed later by `function NAME(` are both
+            -- correct and must not be flagged, so a bare `local NAME`
+            -- counts as the declaration point.
+            local bare = line:match("^%s*local%s+([%w_]+)%s*$")
+                or line:match("^%s*local%s+([%w_]+)%s*=")
+
+            if bare and not declaredAt[bare] then
+                declaredAt[bare] = number
+            end
+        end
+
+        for name, declaration in pairs(declaredAt) do
+            for number = 1, declaration - 1 do
+                local line = lines[number]
+
+                -- Not a comment, and not reached through a table.
+                if not line:match("^%s*%-%-") then
+                    local callAt = line:match("()" .. name .. "%s*%(")
+
+                    if callAt then
+                        local previous = callAt > 1
+                            and line:sub(callAt - 1, callAt - 1) or ""
+
+                        if previous ~= "." and previous ~= ":"
+                            and not previous:match("[%w_]") then
+
+                            table.insert(offenders, relative .. ":" .. number
+                                .. " calls " .. name
+                                .. ", declared local at line " .. declaration)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local manifest = io.open(root .. "/CompletionNavigator.toc", "r")
+
+    assert(manifest, "the .toc must be readable")
+
+    for entry in manifest:read("*a"):gmatch("[^\r\n]+") do
+        if entry:match("%.lua$") and not entry:match("^#") then
+            Scan(entry, root .. "/" .. (entry:gsub("\\", "/")))
+        end
+    end
+
+    manifest:close()
+
+    for _, offender in ipairs(offenders) do
+        print("  FORWARD REFERENCE: " .. offender)
+    end
+
+    assert(#offenders == 0,
+        #offenders .. " local function(s) are called above their own "
+        .. "declaration. In the game that is a nil global, and it throws only "
+        .. "when the line runs.")
+
+    assert(scanned > 20, "the scan must have read the tree, read " .. scanned)
+
+    print("  " .. scanned .. " files, no local function called before it exists")
 end)()
 
 print("\nOne identity per answer:")
@@ -9354,6 +9703,944 @@ print("\nStubs, audited against a real client:")
             or ""))
 end)()
 
+
+print("\nWhat 0.61.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A PERCENTAGE THAT DOES NOT LIE AT EITHER END.
+    --
+    -- Four places rounded, so 999 of 1,000 printed "100%" on a row that was
+    -- still outstanding, and 1 of 400 printed "0%" for real progress. Both
+    -- are the addon contradicting itself on one line.
+    ------------------------------------------------------------
+    assert(CN.PercentText(1) == "100%", "finished is 100%")
+    assert(CN.PercentText(0) == "0%", "and nothing done is 0%")
+
+    assert(CN.PercentText(999 / 1000) == "99%",
+        "999 of 1,000 must not read as finished: "
+        .. CN.PercentText(999 / 1000))
+
+    assert(CN.PercentText(1 / 400) == "1%",
+        "and 1 of 400 must not read as nothing: " .. CN.PercentText(1 / 400))
+
+    assert(CN.PercentText(0.9999, 1) == "99.9%",
+        "the same at one decimal: " .. CN.PercentText(0.9999, 1))
+
+    assert(CN.PercentText(0.5) == "50%", "and the middle still rounds")
+    assert(CN.PercentText(nil) == "--%", "no number is not a percentage")
+
+    -- The bar makes the same claim and had the same bug.
+    local nearly = CN.ProgressBar(39 / 40, 20)
+
+    assert(nearly:find("-", 1, true),
+        "a bar 39/40 full must not be indistinguishable from a finished one: "
+        .. nearly)
+
+    assert(CN.ProgressBar(1, 20) == string.rep("=", 20),
+        "and a finished one is full")
+
+    assert(CN.ProgressBar(0.001, 20):sub(1, 1) == "=",
+        "and real progress shows at least one cell")
+
+    print("  a percentage never reads as finished until it is")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ACHIEVEMENT DENOMINATOR IS THE ACHIEVEMENT, NOT THE WINDOW.
+    --
+    -- `GetAchievementCriteriaList(id, 25)` used to break out of its own loop
+    -- at the cap, so a caller that counted the rows counted 25 and called it
+    -- a total. Every meta achievement in the game is past that cap.
+    ------------------------------------------------------------
+    local id = CN_TEST_MakeWideAchievement and CN_TEST_MakeWideAchievement(31, 9)
+
+    assert(id, "the harness must be able to build a 31-criterion achievement")
+
+    local criteria, summary = CN.Blizzard.GetAchievementCriteriaList(id, 25)
+
+    assert(#criteria == 25, "the LIST is still capped: " .. #criteria)
+
+    assert(summary.total == 31,
+        "and the COUNT is the achievement's: " .. tostring(summary.total))
+
+    assert(summary.completed == 9,
+        "with the completed ones counted past the cap: "
+        .. tostring(summary.completed))
+
+    assert(summary.truncated, "and it says the list was shortened")
+
+    -- Through the path the game takes: the chain builder's progress table.
+    local chase = CN:GetModule("Chase")
+
+    local chain = chase.Chain({
+        type = CN.objectiveTypes.ACHIEVEMENT,
+        id   = id,
+        name = "Glory of Something Large",
+    })
+
+    assert(chain.progress and chain.progress.total == 31
+        and chain.progress.done == 9,
+        "the chain reports 9 of 31, not 9 of 25: "
+        .. tostring(chain.progress and chain.progress.done) .. " of "
+        .. tostring(chain.progress and chain.progress.total))
+
+    local sawNote = false
+
+    for _, step in ipairs(chain.steps) do
+        if step.state == chase.states.NOTE
+            and tostring(step.text):find("more criteria") then
+
+            sawNote = true
+        end
+    end
+
+    assert(sawNote, "and it says how many rows it did not show")
+
+    print("  an achievement 9 of 31 done does not report 9 of 25")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- PARAGON IS CUMULATIVE, AND THE BAR IS NOT.
+    --
+    -- The client's paragon value never resets: it is everything earned since
+    -- the faction went Paragon. Stored raw and printed against the threshold
+    -- it read "34500/10000".
+    ------------------------------------------------------------
+    local reputations = CN:GetModule("Reputations")
+
+    CN_TEST_SetParagon(2600, 34500, 10000, false)
+
+    local record = reputations.BuildRecord(
+        CN.Blizzard.GetFactionByID(2600))
+
+    assert(record.paragon, "the faction is paragon")
+
+    assert(record.paragon.value == 4500,
+        "the value is the position inside the current cycle: "
+        .. tostring(record.paragon.value))
+
+    assert(record.paragon.cycles == 3,
+        "and three caches have already been earned: "
+        .. tostring(record.paragon.cycles))
+
+    assert(record.paragon.rawValue == 34500,
+        "with what the client actually said kept alongside")
+
+    -- Pending: the value has crossed and wrapped, and a nearly empty bar
+    -- beside "REWARD READY" is a contradiction.
+    CN_TEST_SetParagon(2600, 40100, 10000, true)
+
+    local waiting = reputations.BuildRecord(
+        CN.Blizzard.GetFactionByID(2600))
+
+    assert(waiting.paragon.value == 10000,
+        "a pending cache reports the FINISHED cycle: "
+        .. tostring(waiting.paragon.value))
+
+    assert(waiting.paragon.cycles == 3,
+        "and does not count the pending one as collected: "
+        .. tostring(waiting.paragon.cycles))
+
+    CN_TEST_SetParagon(2600, nil, nil, false)
+
+    print("  paragon reports the cycle you are in, not the sum of all of them")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- TWO ID SPACES MUST NOT SHARE ONE NAMESPACE.
+    --
+    -- Transmog set ids and appearance category ids are both small integers
+    -- from unrelated Blizzard tables, and both were emitted under type
+    -- APPEARANCE. The aggregate dedup silently dropped whichever came second.
+    ------------------------------------------------------------
+    local sets = CN:GetModule("Sets")
+
+    local setCandidates = CN.candidateProviders["Sets"].fn()
+
+    local checked = 0
+
+    for _, objective in ipairs(setCandidates) do
+        assert(type(objective.id) == "string"
+            and objective.id:sub(1, 4) == "set:",
+            "a set candidate must carry a prefixed key, not a bare id: "
+            .. tostring(objective.id))
+
+        assert(objective.setID, "and the raw id alongside it")
+
+        checked = checked + 1
+    end
+
+    assert(checked > 0, "the fixture must produce at least one set candidate")
+
+    print("  a transmog set cannot collide with an appearance category")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LOCALIZED STRING IS A THING TO DISPLAY, NEVER A THING TO BRANCH ON.
+    --
+    -- Weekly profession knowledge was gated on the English word "knowledge"
+    -- in the currency's LOCALIZED name, so the whole section returned zero
+    -- rows on every non-English client.
+    ------------------------------------------------------------
+    local waiting = CN:GetModule("Waiting")
+
+    CN_TEST_SetCurrencyRow(2915, "Wissen", 500)
+
+    local currencyModule = CN:GetModule("Currencies")
+
+    currencyModule.CharacterStore()[2915] = {
+        quantity          = 250,
+        maxWeeklyQuantity = 500,
+        weeklyRemaining   = 250,
+    }
+
+    local rows = waiting.Knowledge()
+
+    local found
+
+    for _, row in ipairs(rows) do
+        if row.currencyID == 2915 then
+            found = row
+        end
+    end
+
+    assert(found,
+        "a weekly-capped currency must be reported whatever it is called")
+
+    assert(found.knowledge,
+        "and the id says it is knowledge even when the name does not")
+
+    currencyModule.CharacterStore()[2915] = nil
+    CN_TEST_SetCurrencyRow(2915, nil)
+
+    print("  weekly knowledge is found on a client that does not speak English")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE INSTANCE NAME, SEVERAL LOCKOUTS.
+    --
+    -- The client returns one row per difficulty and they all carry the same
+    -- name. Matching on the name alone answered for whichever the client
+    -- happened to list first.
+    ------------------------------------------------------------
+    local instances = CN:GetModule("Instances")
+
+    CN_TEST_SetLockouts({
+        { name = "Nerub-ar Palace", difficulty = "Heroic",
+          encounters = 8, defeated = 8, remaining = 0, complete = true,
+          resetsIn = 200000 },
+        { name = "Nerub-ar Palace", difficulty = "Normal",
+          encounters = 8, defeated = 2, remaining = 6, complete = false,
+          resetsIn = 200000 },
+    })
+
+    local open, sharing = instances.LockoutFor("Nerub-ar Palace")
+
+    assert(open and open.difficulty == "Normal",
+        "with one difficulty still open, the answer is you can go: "
+        .. tostring(open and open.difficulty))
+
+    assert(sharing == 2, "and it says how many share the name: "
+        .. tostring(sharing))
+
+    local exact = instances.LockoutFor("Nerub-ar Palace", "Heroic")
+
+    assert(exact and exact.complete,
+        "and a caller that knows the difficulty gets that one")
+
+    -- FormatReset must never hand a nil to a concatenation.
+    assert(type(instances.FormatReset(nil)) == "string",
+        "an unknown reset is a word, not a nil")
+
+    CN_TEST_SetLockouts(nil)
+
+    print("  a lockout answers for the difficulty asked about")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- NAMES THE CLIENT RE-SUPPLIES DO NOT GO ON DISK.
+    --
+    -- `Achievements.Closest` wrote `resolvedName` onto the live SavedVariables
+    -- row so a comparator could read it.
+    ------------------------------------------------------------
+    local achievements = CN:GetModule("Achievements")
+
+    achievements.Closest(10)
+
+    for id, record in pairs(achievements.Store()) do
+        assert(record.resolvedName == nil,
+            "achievement " .. tostring(id)
+            .. " must not carry a name the client hands over for free")
+    end
+
+    print("  ranking achievements by name writes nothing to the database")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SAME ZONE MUST PICK THE SAME ACHIEVEMENT EVERY TIME.
+    --
+    -- The match is a substring and the tie-break was `pairs` order, so the
+    -- Journey tab showed a different achievement for the same zone on
+    -- different logins with nothing in the game having changed.
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    local store = lore.Records()
+
+    -- The ids are DELIBERATELY not in name-length order. A tie-break that
+    -- fell through to "lowest id" would pick 900001 here and the test would
+    -- pass while the shortest-name rule was gone -- which is exactly what a
+    -- mutation of that rule proved, the first time this fixture was written
+    -- with the ids the other way round.
+    store[900001] = { name = "Loremaster of Isle of Dorn and Beyond",
+        category = "Zones", completed = false, criteria = 90, done = 0 }
+    store[900002] = { name = "Isle of Dorn Explorer", category = "Zones",
+        completed = false, criteria = 40, done = 1 }
+    store[900003] = { name = "Isle of Dorn", category = "Zones",
+        completed = false, criteria = 10, done = 3 }
+
+    CN_TEST_SetMapName(2248, "Isle of Dorn")
+
+    local first = lore.ForZone(2248)
+
+    assert(first and first.id == 900003,
+        "the shortest matching name is the one about the zone: "
+        .. tostring(first and first.name))
+
+    for _ = 1, 20 do
+        local again = lore.ForZone(2248)
+
+        assert(again.id == first.id,
+            "and it is the same answer every time")
+    end
+
+    -- Finished beats nothing, but unfinished beats finished.
+    store[900003].completed = true
+
+    local unfinished = lore.ForZone(2248)
+
+    assert(unfinished.id == 900002,
+        "a completed zone achievement is not what you want while standing "
+        .. "in the zone: " .. tostring(unfinished.name))
+
+    store[900001], store[900002], store[900003] = nil, nil, nil
+
+    print("  a zone picks the same achievement on every login")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- LOREMASTER PROGRESS IS PER CHARACTER.
+    --
+    -- The store's own comment says it exists so the Warband view can show
+    -- what other characters have finished. It was keyed by achievement id
+    -- alone, so the last character to scan overwrote everybody.
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    local store = lore.Records()
+
+    store[900010] = {
+        name = "Zone A", category = "Zones", completed = false,
+        criteria = 20, done = 7,
+        progress = { ["Realm-Alt"] = 19 },
+    }
+
+    local mine = lore.DoneFor(store[900010])
+
+    assert(mine == 7,
+        "this character falls back to the flat field: " .. tostring(mine))
+
+    assert(lore.DoneFor(store[900010], "Realm-Alt") == 19,
+        "and another character reads its own figure")
+
+    assert(lore.DoneFor(store[900010], "Realm-Nobody") == nil,
+        "and a character that has never scanned is UNKNOWN, not this "
+        .. "character's number wearing somebody else's name")
+
+    store[900010] = nil
+
+    print("  loremaster progress is attributed to the character that earned it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CAPTURE'S FIELD BUDGET IS FOR FIELDS.
+    --
+    -- `count` counted array entries too, so a table with sixty array entries
+    -- and eight named fields spent its whole budget before looking at one --
+    -- and which fields survived depended on `pairs` order.
+    ------------------------------------------------------------
+    local capture = CN:GetModule("Capture")
+
+    local wide = { alpha = 1, beta = 2, gamma = 3, delta = 4 }
+
+    for index = 1, 60 do
+        wide[index] = index
+    end
+
+    local shape = capture.Shape(wide, 2, 8)
+
+    assert(shape.array == 60, "the array entries are counted: "
+        .. tostring(shape.array))
+
+    for _, field in ipairs({ "alpha", "beta", "gamma", "delta" }) do
+        assert(shape.fields[field],
+            "every named field within the budget must be described, whatever "
+            .. "order pairs walked the table in: " .. field)
+    end
+
+    -- And the budget still bites, and says so.
+    local many = {}
+
+    for index = 1, 20 do
+        many["field" .. index] = index
+    end
+
+    local bounded = capture.Shape(many, 2, 8)
+
+    assert(CN.CountKeys(bounded.fields) == 8,
+        "the budget still bounds the description")
+
+    assert(bounded.dropped == 12,
+        "and a bounded capture says what it left out: "
+        .. tostring(bounded.dropped))
+
+    print("  a capture describes the fields it has budget for, not the first "
+        .. "eight keys pairs handed back")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- TOKENS ARE FOR CODE. NAMES ARE FOR PLAYERS.
+    --
+    -- "class only: WARRIOR, PALADIN" went onto a player's screen. The client
+    -- holds the mapping back, in whatever locale it is running in.
+    ------------------------------------------------------------
+    CN.ForgetRaceNames()
+
+    assert(CN.TokenLabel("WARRIOR") == "Krieger",
+        "a class token resolves to what the client calls it: "
+        .. CN.TokenLabel("WARRIOR"))
+
+    assert(CN.TokenLabel("NightElf") == "Nachtelf",
+        "and so does a race token, whatever its case: "
+        .. CN.TokenLabel("NightElf"))
+
+    assert(CN.TokenLabel("SOME_NEW_THING") == "Some New Thing",
+        "and something the client has never heard of is title-cased rather "
+        .. "than shouted: " .. CN.TokenLabel("SOME_NEW_THING"))
+
+    assert(CN.Series({ "a" }) == "a", "one thing is one word")
+    assert(CN.Series({ "a", "b" }) == "a and b", "two are joined")
+    assert(CN.Series({ "a", "b", "c" }) == "a, b and c", "three are a series")
+
+    print("  a class restriction reads as a sentence, in the player's language")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "1 piece(s) left" IS WHAT AN UNFINISHED SENTENCE LOOKS LIKE.
+    ------------------------------------------------------------
+    assert(CN.Count(1, "piece") == "1 piece", "one is singular")
+    assert(CN.Count(3, "piece") == "3 pieces", "three are plural")
+    assert(CN.Count(0, "piece") == "0 pieces", "and so is none")
+
+    assert(CN.Count(2, "entry", "entries") == "2 entries",
+        "irregulars are given rather than guessed")
+
+    assert(CN.Count(1200, "quest") == "1,200 quests",
+        "and the number is grouped, like every other count in the addon: "
+        .. CN.Count(1200, "quest"))
+
+    print("  counts are written the way a person writes them")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE DAY KEY MUST NOT MOVE BECAUSE THE CLIENT WENT QUIET.
+    --
+    -- One nil answer during a loading screen flipped the key, moved today's
+    -- count into yesterday, and restarted today at one.
+    ------------------------------------------------------------
+    local progress = CN:GetModule("Progress")
+
+    progress.knownResetAt    = nil
+    progress.resetIsEstimate = nil
+
+    CN_TEST_DAILY_RESET_IN = 3600 * 20
+
+    local known = progress.CurrentDayKey()
+
+    -- The reset instant the client's answer implies. Carried forward, not
+    -- recomputed: asserted directly, because "the key did not change" is true
+    -- of a recomputed estimate too, for most of any given day.
+    local instant = progress.knownResetAt
+
+    assert(instant, "the client's answer is remembered as an instant")
+
+    -- The loading screen: the client answers nothing.
+    CN_TEST_DAILY_RESET_IN = nil
+
+    for _ = 1, 10 do
+        assert(progress.CurrentDayKey() == known,
+            "a silent client is not a new day")
+
+        assert(progress.knownResetAt == instant,
+            "and the reset instant is carried forward untouched, not "
+            .. "re-estimated: " .. tostring(progress.knownResetAt)
+            .. " from " .. tostring(instant))
+    end
+
+    -- And it comes back the same when the client speaks again.
+    CN_TEST_DAILY_RESET_IN = 3600 * 20
+
+    assert(progress.CurrentDayKey() == known,
+        "and the day is unchanged when the client answers again")
+
+    -- AND THE CLIENT THAT HAS NEVER SPOKEN AT ALL.
+    --
+    -- The fallback used to be `time() / 86400` while the real path is
+    -- `(time() + secondsToReset) / 86400` -- different day indices for most
+    -- of the day on most realms. So a quest handed in before the client first
+    -- answered was filed under one key, the client answered, the key moved,
+    -- and the rollover shovelled today's count into yesterday. The window was
+    -- narrow; the bug was the same one.
+    progress.knownResetAt    = nil
+    progress.resetIsEstimate = nil
+
+    CN_TEST_DAILY_RESET_IN = nil
+
+    local store = progress.Store()
+
+    store.dayKey    = nil
+    store.today     = 0
+    store.session   = 0
+    store.previousDay = nil
+
+    -- A turn-in while the client is still silent.
+    progress.NoteCompleted(9001)
+
+    assert(store.today == 1, "the quest is counted under the estimated key")
+
+    local provisional = store.dayKey
+
+    -- The provisional flag is session state, not saved state: it must NOT
+    -- appear in SavedVariables, or a session that ended while the key was
+    -- still provisional would promote a genuinely stale key the next day and
+    -- label yesterday's number "today".
+    assert(store.dayKeyWasEstimate == nil,
+        "the provisional flag must not be written to the database")
+
+    -- The client speaks, and it says something that MOVES the key.
+    --
+    -- Chosen rather than assumed: the estimate is now + 12h, so a reset just
+    -- past the next day boundary above that is guaranteed to land on the next
+    -- day index. Picking a fixed twenty hours would agree with the estimate
+    -- for most of any given day and the test would pass with the promotion
+    -- deleted.
+    local now      = time()
+    local estimate = math.floor((now + 43200) / 86400)
+
+    CN_TEST_DAILY_RESET_IN = ((estimate + 1) * 86400) - now + 60
+
+    assert(math.floor((now + CN_TEST_DAILY_RESET_IN) / 86400) ~= estimate,
+        "the fixture must actually move the day key")
+
+    progress.NoteCompleted(9002)
+
+    assert(store.today == 2,
+        "replacing an estimate with the truth is not a new day: today is "
+        .. tostring(store.today) .. ", was 1")
+
+    assert((store.previousDay or 0) == 0,
+        "and nothing was shovelled into yesterday: "
+        .. tostring(store.previousDay))
+
+    assert(store.dayKeyWasEstimate == nil,
+        "and it is still not written to the database")
+
+
+    -- AND A NEW SESSION DOES NOT INHERIT IT.
+    --
+    -- Simulated the way the game does it: the saved store survives, the
+    -- module's session state does not.
+    local saved = {
+        dayKey      = store.dayKey,
+        today       = store.today,
+        previousDay = store.previousDay,
+    }
+
+    assert(saved.dayKeyWasEstimate == nil,
+        "nothing in the saved shape carries the flag")
+
+    -- A GENUINE rollover still rolls. A day later, expressed the way the
+    -- client would: the reset that is coming is a day further out.
+    -- (A NEGATIVE value would not do it -- the provider requires seconds > 0
+    -- and treats anything else as no answer, which is the carry-forward path,
+    -- not a rollover.)
+    CN_TEST_DAILY_RESET_IN = CN_TEST_DAILY_RESET_IN + 86400
+
+    progress.NoteCompleted(9003)
+
+    assert(store.today == 1 and store.previousDay == 2,
+        "a real day boundary still moves today into yesterday: "
+        .. tostring(store.today) .. " today, "
+        .. tostring(store.previousDay) .. " yesterday")
+    -- AND READING IT FROM THE DATABASE MUST NOT WORK EITHER.
+    --
+    -- A draft kept the flag on `store`, which is SavedVariables -- so a
+    -- session that ended while the key was provisional left it set on disk,
+    -- and the NEXT day's login promoted a genuinely stale key instead of
+    -- rolling it over. The player comes back the next morning and finds
+    -- yesterday's number labelled "today", which is the bug the login
+    -- rollover exists to prevent, reintroduced by a fix for a different one.
+    store.dayKeyWasEstimate = true
+
+    local staleKey = store.dayKey
+
+    CN_TEST_DAILY_RESET_IN = CN_TEST_DAILY_RESET_IN + 86400
+
+    progress.NoteCompleted(9004)
+
+    assert(store.dayKey ~= staleKey,
+        "a flag left in the database must not promote a stale key")
+
+    store.dayKeyWasEstimate = nil
+    store.today             = 0
+    store.previousDay       = nil
+    store.dayKey            = nil
+
+    provisional = nil
+
+    CN_TEST_DAILY_RESET_IN  = nil
+    progress.knownResetAt    = nil
+    progress.resetIsEstimate = nil
+
+    store.dayKey            = nil
+    store.dayKeyWasEstimate = nil
+    store.today             = 0
+    store.previousDay       = nil
+
+    print("  a loading screen does not reset your daily count")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ROUTE CACHE IS RELEASED WHEN THE ZONE IS.
+    --
+    -- `CN.ForgetRoutes` was written in 0.54.0 and never given a caller, so
+    -- sixty-four routes -- each a strong reference to every objective in the
+    -- zone it described -- were held for the whole session.
+    ------------------------------------------------------------
+    assert(CN.ForgetRoutes, "the function exists")
+
+    assert(CN.routeOptimizePasses == 3,
+        "twelve passes was a guess; three is measured: "
+        .. tostring(CN.routeOptimizePasses))
+
+    local dispatched = false
+
+    local realForget = CN.ForgetRoutes
+
+    CN.ForgetRoutes = function()
+        dispatched = true
+
+        return realForget()
+    end
+
+    CN.Dispatch("ZONE_CHANGED_NEW_AREA")
+
+    CN.ForgetRoutes = realForget
+
+    assert(dispatched,
+        "walking into a new zone releases the routes for the old one")
+
+    print("  leaving a zone releases the routes that described it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- NOTHING EXPENSIVE ON THE LOGIN FRAME THAT ANOTHER HOOK ALREADY DOES.
+    --
+    -- `Broker.Install` refreshed the feed from a login hook that runs before
+    -- the collection scans, so it settled on the placeholder it was created
+    -- with -- for 15.34 ms of an 18.35 ms PLAYER_LOGIN.
+    ------------------------------------------------------------
+    local source = CN_TEST_ReadAddonFile("Modules/Broker.lua")
+
+    assert(source, "the Broker module must be readable")
+
+    local installStart = source:find("function Broker.Install", 1, true)
+    local installEnd   = source:find("RARE ALERTS", installStart or 1, true)
+
+    assert(installStart and installEnd, "and its Install function locatable")
+
+    local body = source:sub(installStart, installEnd)
+
+    assert(not body:find("Broker.Refresh()", 1, true),
+        "Install must not rebuild every candidate on the login frame")
+
+    print("  the login frame does not rank the whole game to fill a text feed")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THIRTY THOUSAND CLIENT CALLS FOR A NUMBER THAT MOVES BY ONE.
+    --
+    -- The Remaining tab's quest row walked every discovered quest, calling
+    -- the client on each, on every invalidated refresh -- 13.65 ms at retail
+    -- scale for a figure that changes by exactly one when a quest is handed
+    -- in. Counted once and maintained since 0.61.0.
+    ------------------------------------------------------------
+    local breakdown = CN:GetModule("Breakdown")
+    local quests    = CN:GetModule("Quests")
+
+    breakdown.ForgetQuestCounts()
+
+    local discovered = CN.Account("discoveredQuests")
+
+    for id = 970001, 970200 do
+        discovered[id] = true
+    end
+
+    -- Count the client calls the way the provider makes them.
+    local real = quests.IsCompletedByCharacter
+    local asked = 0
+
+    quests.IsCompletedByCharacter = function(questID)
+        asked = asked + 1
+
+        return real(questID)
+    end
+
+    local first = breakdown.CompletedQuestCount()
+
+    local walked = asked
+
+    assert(walked >= 200,
+        "the first count must actually walk the set, walked " .. walked)
+
+    asked = 0
+
+    for _ = 1, 20 do
+        assert(breakdown.CompletedQuestCount() == first,
+            "and every repeat gives the same answer")
+    end
+
+    assert(asked == 0,
+        "twenty refreshes must not ask the client again, asked " .. asked)
+
+    -- A turn-in credits the count without rewalking.
+    --
+    -- The count is read AFTER the event, and `asked` is zeroed in between:
+    -- other handlers on QUEST_TURNED_IN legitimately ask the client about
+    -- the one quest that was handed in, and this is a claim about the walk,
+    -- not about the whole event.
+    CN_TEST_COMPLETED[970001] = true
+
+    CN.Dispatch("QUEST_TURNED_IN", 970001)
+
+    asked = 0
+
+    assert(breakdown.CompletedQuestCount() == first + 1,
+        "a turn-in moves the count by one: "
+        .. breakdown.CompletedQuestCount() .. " from " .. first)
+
+    assert(asked <= 1,
+        "and without walking the set again, asked " .. asked)
+
+    -- A REPEATABLE TURN-IN IS NOT A COMPLETION.
+    --
+    -- Most turn-ins in a modern evening are repeatable -- a token hand-in, an
+    -- assault, a holiday daily -- and `IsQuestFlaggedCompleted` stays false
+    -- for them. A "+1 per turn-in" count adds one every time, so twenty
+    -- hand-ins is twenty phantom completions and the tab can report more
+    -- quests completed than discovered.
+    local credited = breakdown.CompletedQuestCount()
+
+    for _ = 1, 20 do
+        CN.Dispatch("QUEST_TURNED_IN", 970002)
+    end
+
+    assert(breakdown.CompletedQuestCount() == credited,
+        "a repeatable turn-in the client does not flag as completed must "
+        .. "not be counted, twenty times or once: "
+        .. breakdown.CompletedQuestCount() .. " from " .. credited)
+
+    -- And handing the SAME completed quest in again cannot credit it twice.
+    for _ = 1, 5 do
+        CN.Dispatch("QUEST_TURNED_IN", 970001)
+    end
+
+    assert(breakdown.CompletedQuestCount() == credited,
+        "and a quest already counted is not counted again: "
+        .. breakdown.CompletedQuestCount() .. " from " .. credited)
+
+    CN_TEST_COMPLETED[970001] = nil
+
+    -- A quest the addon has never seen is not in the denominator, so it must
+    -- not be credited to it. Asserted against the credit function directly:
+    -- dispatching the event would ALSO discover the quest -- `RecordDiscovered`
+    -- is on the same event -- which grows the set and correctly triggers a
+    -- recount, so the event is the wrong seam for this particular claim.
+    local heldCount = breakdown.CompletedQuestCount()
+
+    breakdown.NoteQuestCompleted(979999)
+
+    asked = 0
+
+    assert(breakdown.CompletedQuestCount() == heldCount,
+        "an undiscovered quest is not credited to a set it is not in: "
+        .. breakdown.CompletedQuestCount() .. " from " .. heldCount)
+
+    -- Pressing Refresh asks to be told the truth rather than the remembered
+    -- answer, and the quest figure is the one number in this file that does
+    -- not live in the report cache.
+    asked = 0
+
+    breakdown.Report(nil, true)
+
+    assert(asked >= 200,
+        "a forced recount must recount the quests, asked " .. asked)
+
+    quests.IsCompletedByCharacter = real
+
+    for id = 970001, 970200 do
+        discovered[id] = nil
+    end
+
+    breakdown.ForgetQuestCounts()
+
+    print("  the Remaining tab counts thirty thousand quests once, then "
+        .. "maintains it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A RECOMMENDED RECIPE IS CALLED SOMETHING.
+    --
+    -- The recipe provider was changed to iterate the vendor item index rather
+    -- than every known recipe name. `CN.CollectBounded` hands the build
+    -- callback `source[id]` as its second argument -- which under the new
+    -- source is the ARRAY OF NPC IDS, not the name. Assigning that to `name`
+    -- did not throw, because every reader wraps a name in `tostring`. It put
+    -- `table: 0x...` on the recommended row, in the heads-up line, on the map
+    -- pin and in the data-broker feed.
+    --
+    -- Nothing in the suite asserted what a recipe row is CALLED, which is how
+    -- a defect that renders a pointer to the player passed every test.
+    ------------------------------------------------------------
+    local provider = CN.candidateProviders["Vendors"]
+
+    assert(provider, "the recipe provider must be registered")
+
+    -- THE FIXTURE NEVER PRODUCED A ROW FROM THIS PROVIDER.
+    --
+    -- Which is why the defect above was invisible: a provider whose output is
+    -- always empty asserts nothing. Its two conditions are a located seller
+    -- who sells the item, and a recipe name for it that this character does
+    -- not know. Both are set up here, explicitly.
+    local merchantModule = CN:GetModule("Vendors")
+
+    local vendorStore = CN.Account("vendors")
+
+    vendorStore[912345] = {
+        name  = "Trader Halkaz",
+        mapID = 94,
+        x     = 0.31,
+        y     = 0.62,
+        zone  = "Eversong Woods",
+        items = { [880001] = 25000 },
+    }
+
+    CN.Account("recipeNames")[880001] = "Recipe: Flask of Assertion"
+
+    merchantModule.ForgetItemIndex()
+
+    local rows = provider.fn() or {}
+
+    local checked = 0
+
+    for _, objective in ipairs(rows) do
+        assert(type(objective.name) == "string" and objective.name ~= "",
+            "a recipe row must be named, got a "
+            .. type(objective.name) .. ": " .. tostring(objective.name))
+
+        assert(not tostring(objective.name):find("table: ", 1, true),
+            "and the name must not be a table address: "
+            .. tostring(objective.name))
+
+        checked = checked + 1
+    end
+
+    assert(checked > 0,
+        "the fixture must produce at least one recipe candidate to check")
+
+    vendorStore[912345] = nil
+    CN.Account("recipeNames")[880001] = nil
+
+    merchantModule.ForgetItemIndex()
+
+    print("  a recommended recipe is named after the recipe")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCAN IS THE LOUDEST THING THAT CHANGES A COLLECTION COUNT.
+    --
+    -- The Collections, Scans and Warband tabs memoize their `Summary()` calls
+    -- against `CN.collectionGeneration`, which was bumped by the CLIENT
+    -- events that announce a collection changing -- and not by the addon's
+    -- own scans, which are what actually populate the stores those summaries
+    -- read.
+    --
+    -- So on the onboarding screen: press "Scan everything", the stores fill,
+    -- the "last read" stamp beside each row updates to "just now" because it
+    -- is not memoized -- and the count beside it still says "not scanned".
+    -- The tab contradicts itself until a zone change happens along.
+    ------------------------------------------------------------
+    local scanGeneration = CN.collectionGeneration or 0
+
+    CN.MarkScanned("pets")
+
+    assert((CN.collectionGeneration or 0) > scanGeneration,
+        "a scan must move the generation the tabs are memoized against: "
+        .. tostring(CN.collectionGeneration) .. " from " .. scanGeneration)
+
+    -- And through the memo itself, which is the thing that was wrong.
+    local rebuilds = 0
+
+    local function Count()
+        return CN.Memo("harness:scan-memo", CN.collectionGeneration, function()
+            rebuilds = rebuilds + 1
+
+            return rebuilds
+        end)
+    end
+
+    Count()
+    Count()
+
+    assert(rebuilds == 1, "the memo holds while nothing has changed")
+
+    CN.MarkScanned("mounts")
+
+    Count()
+
+    assert(rebuilds == 2,
+        "and a scan releases it, so the tab shows what the scan found")
+
+    print("  scanning something changes what the tabs say about it")
+end)()
 
 print("\nWhat 0.60.0 changed, asserted through the paths the game takes:")
 
@@ -11209,15 +12496,33 @@ end)()
 
     assert(probeDb.account.discoveredQuests[2] == true, "and a boolean is left alone")
 
+    -- 0.61.0: migration 15 goes further. `source` is only read to stop a
+    -- Blizzard name clobbering one the PLAYER typed, so a row from any other
+    -- source has nothing to say beyond the name -- and this store is 708 KB
+    -- of a 2.0 MB file the game rewrites on every logout.
     local kept = probeDb.account.questMetadata[3]
 
-    assert(kept.name == "Kept" and kept.source == "api",
-        "a name and where it came from are both still read, so both stay")
+    assert(kept == "Kept",
+        "a client-supplied name collapses to the name itself: "
+        .. tostring(kept))
 
-    assert(kept.questID == nil and kept.lastSeen == nil,
+    -- And the one shape that must NOT collapse.
+    probeDb.version = 14
+    probeDb.account.questMetadata[4] =
+        { questID = 4, name = "Mine", lastSeen = 9, source = "manual" }
+
+    CN.RunMigrations(probeDb)
+
+    local mine = probeDb.account.questMetadata[4]
+
+    assert(type(mine) == "table" and mine.name == "Mine"
+        and mine.source == "manual",
+        "a name the player typed keeps the table that protects it")
+
+    assert(mine.questID == nil and mine.lastSeen == nil,
         "the two fields nothing reads are dropped")
 
-    print("  a discovery is one fact, and the old shape migrates to it")
+    print("  a discovery is one fact, and a quest name is a string")
 end)()
 
 ;(function()
@@ -16251,6 +17556,46 @@ end)()
     CN_TEST_USER_WAYPOINT = nil
 
     print("  and a hand-placed pin survives /cn clearway")
+
+    ------------------------------------------------------------
+    -- AND A PIN THIS ADDON SET, THAT THE PLAYER THEN MOVED.
+    --
+    -- The ownership guard compared only `uiMapID`, and dragging a pin leaves
+    -- it on the same map -- so the one case the guard exists for was the one
+    -- case it could not see. Asserted through the provider the way the game
+    -- reaches it: set, then have the client report a different position.
+    ------------------------------------------------------------
+    local blizzardPins = CN.waypointProviders["Blizzard"]
+
+    assert(blizzardPins, "the Blizzard pin provider must be registered")
+
+    assert(blizzardPins.SetWaypoint(94, 0.42, 0.42, "Ours"),
+        "the addon sets its own pin")
+
+    -- The player drags it. Same map, different place.
+    CN_TEST_USER_WAYPOINT = UiMapPoint.CreateFromCoordinates(94, 0.61, 0.19)
+
+    assert(blizzardPins.ClearAll() == false,
+        "a pin the player has MOVED is theirs again and must not be cleared")
+
+    assert(CN_TEST_USER_WAYPOINT ~= nil, "and must still be there")
+
+    -- Unmoved, it is still ours to remove. The client round-trips
+    -- coordinates, so a hair of drift must not read as a drag.
+    assert(blizzardPins.SetWaypoint(94, 0.42, 0.42, "Ours"),
+        "set again")
+
+    CN_TEST_USER_WAYPOINT =
+        UiMapPoint.CreateFromCoordinates(94, 0.42 + 1e-7, 0.42 - 1e-7)
+
+    assert(blizzardPins.ClearAll() == true,
+        "a pin still where the addon put it is still the addon's to clear")
+
+    assert(CN_TEST_USER_WAYPOINT == nil, "and is gone")
+
+    CN_TEST_USER_WAYPOINT = nil
+
+    print("  and a pin the player dragged is theirs again")
 end)()
 
 ;(function()

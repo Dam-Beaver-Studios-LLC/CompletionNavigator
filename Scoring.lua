@@ -224,6 +224,43 @@ end
 -- moved in would cost milliseconds to achieve nothing.
 CN.rankingGeneration = CN.rankingGeneration or 0
 
+-- AND ONE FOR THE COLLECTION COUNTS. 0.61.0.
+--
+-- The tabs that show "1,204 of 1,842 pets" call `Summary()` on eight
+-- collection modules on every two-second refresh, and each of those walks its
+-- whole store to produce two integers. Those integers cannot change unless
+-- the player collected something -- and every collection announces itself.
+--
+-- Declared here rather than in Core so that all the generation counters this
+-- addon runs on are in one file, which is the only reason anybody ever finds
+-- the one they need.
+for _, event in ipairs({
+    "NEW_PET_ADDED", "NEW_MOUNT_ADDED", "NEW_TOY_ADDED",
+    "ACHIEVEMENT_EARNED", "TRANSMOG_COLLECTION_UPDATED",
+    "UPDATE_FACTION", "QUEST_TURNED_IN", "PLAYER_ENTERING_WORLD",
+
+    -- AND THE THREE THE WARBAND TAB READS.
+    --
+    -- The list above is what the collection COUNTS depend on. The Warband
+    -- tab's roster and coverage are memoized against the same counter and
+    -- depend on recipes, titles and professions as well -- so those events
+    -- belong here or that tab goes stale for a session after a player learns
+    -- a recipe.
+    --
+    -- This is the third time in this project that a cache and its
+    -- invalidation list have been written in two places and drifted. The rule
+    -- that keeps coming out of it: whatever a generation guards, the events
+    -- that move it are listed beside it, not near the reader.
+    "TRADE_SKILL_LIST_UPDATE", "SKILL_LINES_CHANGED", "KNOWN_TITLES_UPDATE",
+
+    -- The Warband roster shows a level per character.
+    "PLAYER_LEVEL_UP",
+}) do
+    CN:RegisterEvent(event, function()
+        CN.collectionGeneration = (CN.collectionGeneration or 0) + 1
+    end)
+end
+
 ------------------------------------------------------------
 -- WHY SOMETHING IS ON THE LIST
 ------------------------------------------------------------

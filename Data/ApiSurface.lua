@@ -25,6 +25,7 @@ CN.apiSurface = {
     "C_Container.GetContainerNumSlots",
     "C_CraftingOrders.GetClaimedOrder",
     "C_CraftingOrders.GetMyOrders",
+    "C_CreatureInfo.GetRaceInfo",
     "C_CurrencyInfo.ExpandCurrencyList",
     "C_CurrencyInfo.GetCurrencyInfo",
     "C_CurrencyInfo.GetCurrencyListInfo",

@@ -753,35 +753,62 @@ end
 -- whole path, and where on it am I" -- the done ones are what make progress
 -- legible, and dropping them means the player sees five things left and no
 -- sense of whether that is five out of six or five out of fifty.
+--
+-- `limit` BOUNDS THE LIST, NOT THE COUNT. FIXED IN 0.61.0.
+--
+-- The loop used to `break` at the limit, so a caller that passed 25 and then
+-- counted the returned rows was counting a WINDOW and calling it a total.
+-- Chase.lua did exactly that: "Glory of the Dragonflight Raider" has 31
+-- criteria, so an achievement 9 of 31 done printed 9/25 -- 36% for something
+-- 29% done -- and the moment a player crossed 25 criteria it printed 100%
+-- with steps still outstanding. Every meta achievement in the game is past
+-- the cap, and metas are precisely what a chase list is for.
+--
+-- The walk is cheap and bounded by the client (no achievement has more than
+-- a few dozen criteria), so it now always completes and the limit is applied
+-- only to what is APPENDED. The second return value carries the honest
+-- figures.
+--
+-- Returns: criteria, summary
+--   summary = { total = n, completed = c, truncated = bool }
 function Blizzard.GetAchievementCriteriaList(achievementID, limit)
     local criteria = {}
+    local summary  = { total = 0, completed = 0, truncated = false }
 
     if not GetAchievementNumCriteria or not GetAchievementCriteriaInfo then
-        return criteria
+        return criteria, summary
     end
 
-    local total = GetAchievementNumCriteria(achievementID) or 0
+    local count = GetAchievementNumCriteria(achievementID) or 0
 
-    for index = 1, total do
+    for index = 1, count do
         local ok, description, _, completed, quantity, required =
             pcall(GetAchievementCriteriaInfo, achievementID, index)
 
         if ok and description and description ~= "" then
-            table.insert(criteria, {
-                index       = index,
-                description = description,
-                completed   = completed and true or false,
-                quantity    = quantity,
-                required    = required,
-            })
+            completed = completed and true or false
+
+            summary.total = summary.total + 1
+
+            if completed then
+                summary.completed = summary.completed + 1
+            end
 
             if limit and #criteria >= limit then
-                break
+                summary.truncated = true
+            else
+                table.insert(criteria, {
+                    index       = index,
+                    description = description,
+                    completed   = completed,
+                    quantity    = quantity,
+                    required    = required,
+                })
             end
         end
     end
 
-    return criteria
+    return criteria, summary
 end
 
 -- How much standing remains before the next rank, and what that rank is.

@@ -264,8 +264,9 @@ CN:RegisterCommand{
         end
 
         Print("Appearances: " .. counts.collected .. " / " .. counts.total
-            .. string.format(" (%.1f%%)",
-                counts.total > 0 and (counts.collected / counts.total * 100) or 0))
+            .. " (" .. CN.PercentText(
+                counts.total > 0 and (counts.collected / counts.total) or 0, 1)
+            .. ")")
 
         Print("Categories complete: " .. counts.complete .. " / " .. counts.categories)
 

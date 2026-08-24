@@ -19,7 +19,8 @@ self = false
 read_globals = {
     -- Namespaced client API.
     "C_Calendar", "C_CurrencyInfo", "C_DateAndTime",
-    "C_CampaignInfo", "C_GossipInfo", "C_Item", "C_MajorFactions", "C_Map",
+    "C_CampaignInfo", "C_CreatureInfo", "C_GossipInfo", "C_Item",
+    "C_MajorFactions", "C_Map",
     "C_MerchantFrame",
     "C_MountJournal", "C_PetJournal", "C_QuestLog", "C_Reputation",
     "C_SuperTrack", "C_TaskQuest", "C_Timer", "C_ToyBox", "C_TradeSkillUI",

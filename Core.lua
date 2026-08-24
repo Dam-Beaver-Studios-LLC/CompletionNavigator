@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.60.0"
-CN.dbVersion   = 14
+CN.version     = "0.61.0"
+CN.dbVersion   = 15
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -621,8 +621,259 @@ function CN.ProgressBar(fraction, width)
 
     local filled = math.floor(fraction * width + 0.5)
 
+    -- A FULL BAR IS A CLAIM, AND ROUNDING MUST NOT MAKE IT. 0.61.0.
+    --
+    -- At width 20 anything from 0.975 up rounded to twenty filled cells, so
+    -- an achievement 39 of 40 done drew the same bar as one that was finished
+    -- -- in a list whose whole job is telling you what is still outstanding.
+    -- Same at the bottom: 0.024 drew an empty bar for real progress.
+    if filled >= width and fraction < 1 then
+        filled = width - 1
+    end
+
+    if filled <= 0 and fraction > 0 then
+        filled = 1
+    end
+
     return string.rep("=", filled) .. string.rep("-", width - filled)
 end
+
+-- A COMPLETION PERCENTAGE THAT DOES NOT LIE AT EITHER END.
+--
+-- Four places rendered their own, and every one of them rounded: 999 of
+-- 1,000 printed "100%" next to a row that was still on the outstanding list,
+-- and 1 of 400 printed "0%" for work already done. Both are the addon
+-- contradicting itself on the same line, and both are exactly the cases a
+-- completionist notices, because the last percent is the part they are here
+-- for.
+--
+-- Round normally in the middle; clamp away from 100 and 0 at the ends.
+-- `decimals` defaults to 0.
+function CN.PercentText(fraction, decimals)
+    if type(fraction) ~= "number" then
+        return "--%"
+    end
+
+    decimals = decimals or 0
+
+    if fraction < 0 then fraction = 0 end
+    if fraction > 1 then fraction = 1 end
+
+    local scale   = 10 ^ decimals
+    local percent = math.floor(fraction * 100 * scale + 0.5) / scale
+
+    if percent >= 100 and fraction < 1 then
+        percent = 100 - (1 / scale)
+    end
+
+    if percent <= 0 and fraction > 0 then
+        percent = 1 / scale
+    end
+
+    return string.format("%." .. decimals .. "f%%", percent)
+end
+
+-- "1 piece(s) left" IS WHAT AN UNFINISHED SENTENCE LOOKS LIKE.
+--
+-- Twenty-odd lines across the addon wrote "(s)" rather than deciding, and the
+-- ones a player reads most are the worst of them -- "3 piece(s) left" is on
+-- the row that is supposed to persuade them the set is nearly done. The
+-- debug-only ones can stay lazy; the ones a player sees cannot.
+--
+-- `CN.Count(3, "piece")` -> "3 pieces"
+-- `CN.Count(1, "piece")` -> "1 piece"
+-- `CN.Count(2, "entry", "entries")` for the irregulars.
+function CN.Count(number, singular, plural)
+    number = tonumber(number) or 0
+
+    local word = singular
+
+    if number ~= 1 then
+        word = plural or (singular .. "s")
+    end
+
+    return CN.Comma(number) .. " " .. word
+end
+
+-- The word alone, where the caller has already written the number (a
+-- coloured count, usually).
+function CN.Pluralize(number, singular, plural)
+    if (tonumber(number) or 0) == 1 then
+        return singular
+    end
+
+    return plural or (singular .. "s")
+end
+
+-- THE CLIENT'S TOKENS ARE FOR CODE. THE CLIENT'S NAMES ARE FOR PLAYERS.
+--
+-- `UnitClass` and `UnitRace` return a localized name AND an uppercase token,
+-- and the token is what everything in this addon stores, because a token is
+-- stable and a name is not. That is correct -- and it means anything that
+-- prints one is printing "class only: WARRIOR, PALADIN" at somebody.
+--
+-- The client keeps the mapping back. `LOCALIZED_CLASS_NAMES_MALE` covers the
+-- classes; races come back from `C_CreatureInfo`. Where neither answers, the
+-- token is title-cased rather than shouted, which is wrong in a small way
+-- instead of a loud one.
+-- Built once, from the client, in whatever locale it is running in.
+--
+-- `C_CreatureInfo.GetRaceInfo` hands back `clientFileString` (the token this
+-- addon stores) alongside `raceName` (what a player calls it), so the map is
+-- read out of the game rather than hard-coded -- a hard-coded race table goes
+-- stale on the next allied race, and the token is the part that must not.
+--
+-- The scan is bounded and the gaps in the id space are ordinary; it runs at
+-- most once per session and only when something actually needs to print a
+-- race.
+CN.raceScanCeiling = 100
+
+local raceNames
+
+function CN.RaceNamesByToken()
+    if raceNames then
+        return raceNames
+    end
+
+    raceNames = {}
+
+    if not C_CreatureInfo or not C_CreatureInfo.GetRaceInfo then
+        return raceNames
+    end
+
+    for id = 1, CN.raceScanCeiling do
+        local ok, info = pcall(C_CreatureInfo.GetRaceInfo, id)
+
+        if ok and type(info) == "table"
+            and info.clientFileString and info.raceName then
+
+            raceNames[string.upper(info.clientFileString)] = info.raceName
+        end
+    end
+
+    return raceNames
+end
+
+-- For the harness, and for anything that changes locale mid-session.
+function CN.ForgetRaceNames()
+    raceNames = nil
+end
+
+function CN.TokenLabel(token)
+    if type(token) ~= "string" or token == "" then
+        return tostring(token)
+    end
+
+    -- Class tokens are uppercase and race tokens are not ("NightElf"), so
+    -- both maps are keyed uppercase and both lookups normalize. Getting this
+    -- wrong is silent: the fall-through below produces something that reads
+    -- almost right, which is the worst kind of wrong to debug.
+    local upper = string.upper(token)
+
+    local classes = _G.LOCALIZED_CLASS_NAMES_MALE
+
+    if type(classes) == "table" and classes[upper] then
+        return classes[upper]
+    end
+
+    local races = CN.RaceNamesByToken()
+
+    if races[upper] then
+        return races[upper]
+    end
+
+    -- Title case from a SHOUTED_TOKEN, underscores to spaces.
+    local words = {}
+
+    for word in string.gmatch(token, "[^_]+") do
+        table.insert(words,
+            string.upper(string.sub(word, 1, 1))
+                .. string.lower(string.sub(word, 2)))
+    end
+
+    if #words == 0 then
+        return token
+    end
+
+    return table.concat(words, " ")
+end
+
+-- "a, b and c" -- the shape a person writes, from the shape code holds.
+-- Every caller that used `table.concat(list, ", ")` on something a player
+-- reads was producing a list and calling it a sentence.
+function CN.Series(list, conjunction)
+    if type(list) ~= "table" or #list == 0 then
+        return ""
+    end
+
+    if #list == 1 then
+        return tostring(list[1])
+    end
+
+    conjunction = conjunction or "and"
+
+    if #list == 2 then
+        return tostring(list[1]) .. " " .. conjunction .. " " .. tostring(list[2])
+    end
+
+    local head = {}
+
+    for index = 1, #list - 1 do
+        table.insert(head, tostring(list[index]))
+    end
+
+    return table.concat(head, ", ") .. " " .. conjunction .. " "
+        .. tostring(list[#list])
+end
+
+-- A RESULT HELD AGAINST A GENERATION.
+--
+-- The addon has three of these written by hand already -- the shortlist
+-- cache, the report cache, the route cache -- and every one of them is the
+-- same six lines: hold the answer, hold the generation it was built at,
+-- rebuild when they differ.
+--
+-- The tabs are the reason this one exists. The Collections and Scans tabs
+-- call `Summary()` on eight collection modules on every two-second refresh,
+-- and each of those walks its whole store to produce two integers that cannot
+-- have changed unless the player collected something -- which fires an event
+-- the addon already subscribes to. Measured at retail scale: 3.28 ms and
+-- 4.40 ms per refresh, every two seconds, for the life of the window.
+--
+-- `build` is called only when the generation has moved. A generation of nil
+-- means "do not cache this", which is how a caller opts out without a branch.
+local memos = {}
+
+function CN.Memo(key, generation, build)
+    if generation == nil then
+        return build()
+    end
+
+    local held = memos[key]
+
+    if held and held.generation == generation then
+        return held.value
+    end
+
+    local value = build()
+
+    memos[key] = { generation = generation, value = value }
+
+    return value
+end
+
+function CN.ForgetMemos(key)
+    if key then
+        memos[key] = nil
+    else
+        memos = {}
+    end
+end
+
+-- Bumped by anything that can change what a collection Summary answers.
+-- Maintained in Scoring.lua, next to the other generation counters, so there
+-- is one place to look for all of them.
+CN.collectionGeneration = 0
 
 function CN.Trim(text)
     if not text then

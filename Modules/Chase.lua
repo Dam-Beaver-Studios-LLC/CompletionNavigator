@@ -98,13 +98,24 @@ local builders = {}
 builders.ACHIEVEMENT = function(goal)
     local steps = {}
 
-    local criteria = Blizzard.GetAchievementCriteriaList(goal.id, 25) or {}
+    -- THE SECOND RETURN IS THE HONEST COUNT. 0.61.0.
+    --
+    -- The list is capped at 25 rows because a chain with sixty lines in it is
+    -- not a chain any more, it is a wall. But the PROGRESS must describe the
+    -- achievement, not the window -- see the note on
+    -- `Blizzard.GetAchievementCriteriaList`, which used to break out of its
+    -- own loop at the cap and hand back a total of 25 for a 31-criterion
+    -- meta. This printed 36% for something 29% done, and 100% for anything
+    -- whose first 25 criteria happened to be finished.
+    local criteria, summary = Blizzard.GetAchievementCriteriaList(goal.id, 25)
 
-    if #criteria == 0 then
+    criteria = criteria or {}
+    summary  = summary or { total = #criteria, completed = 0 }
+
+    if summary.total == 0 then
         return steps, nil
     end
 
-    local done = 0
     local first = true
 
     for _, criterion in ipairs(criteria) do
@@ -118,8 +129,6 @@ builders.ACHIEVEMENT = function(goal)
         end
 
         if criterion.completed then
-            done = done + 1
-
             table.insert(steps, NewStep(Chase.states.DONE, text))
         else
             local state = Chase.states.TODO
@@ -133,7 +142,22 @@ builders.ACHIEVEMENT = function(goal)
         end
     end
 
-    return steps, { done = done, total = #criteria, unit = "criteria" }
+    -- SAY SO WHEN THE LIST IS SHORTER THAN THE ACHIEVEMENT.
+    --
+    -- Without this the last visible row reads as the end of the chain, and a
+    -- player who counts the rows gets the same wrong denominator by hand that
+    -- the code used to compute.
+    if summary.truncated then
+        table.insert(steps, NewStep(Chase.states.NOTE, string.format(
+            "%d more criteria not shown.",
+            summary.total - #criteria)))
+    end
+
+    return steps, {
+        done  = summary.completed,
+        total = summary.total,
+        unit  = "criteria",
+    }
 end
 
 builders.REPUTATION = function(goal)
@@ -794,9 +818,9 @@ local function PrintChain(chain)
     local fraction = Chase.Fraction(chain)
 
     if fraction then
-        Print(string.format("  |cff5dd2fb%s|r %d%%",
+        Print(string.format("  |cff5dd2fb%s|r %s",
             CN.ProgressBar and CN.ProgressBar(fraction, 20) or "",
-            math.floor(fraction * 100 + 0.5)))
+            CN.PercentText(fraction)))
     end
 
     local shown = 0

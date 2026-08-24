@@ -7,6 +7,108 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.61.0]
+
+Numbers, and what they cost. Two themes ran through this release: figures that
+were wrong in ways nobody could see from inside the addon, and work the addon
+was doing repeatedly for answers that had not changed.
+
+### Fixed â€” figures that were wrong
+
+- **A percentage never reads as finished until it is.** Four places rounded,
+  so 999 of 1,000 printed "100%" on a row that was still outstanding, and
+  1 of 400 printed "0%" for real progress. The progress bar made the same
+  claim: at twenty cells wide, anything from 39 of 40 up drew a full one. Both
+  now clamp away from the ends, and every percentage in the addon goes through
+  one place.
+- **An achievement 9 of 31 done reported 9 of 25.** The criteria reader capped
+  its own loop at twenty-five and handed back the number of rows it had
+  collected as the total â€” so every meta achievement in the game, which is
+  precisely what a chase list is for, was measured against a window instead of
+  against itself. The list is still capped, and says how many rows it did not
+  show; the count is the achievement's.
+- **Paragon read "34500/10000".** The client's paragon value is cumulative
+  across every cache already collected and never resets. It is now reported as
+  the position inside the current cycle, with the number of caches already
+  earned said plainly beside it.
+- **Weekly profession knowledge found nothing on a non-English client.** It
+  was gated on the English word "knowledge" appearing in the currency's
+  localized name. The gate is now the fact the client vouches for in every
+  locale â€” a weekly cap with room left under it.
+- **A nearly-complete transmog set could vanish from the list.** Set ids and
+  appearance category ids are both small integers from unrelated Blizzard
+  tables, and both were filed under the same type, so the aggregate dedup
+  silently dropped whichever arrived second. Ignoring one ignored the other,
+  too.
+- **A lockout answered for the wrong difficulty.** The client returns one row
+  per difficulty and they all carry the same name; the match was on the name
+  alone. With one difficulty still open, the answer to "can I go and kill it"
+  is now yes.
+- **Your daily count no longer resets when you zone.** One silent moment from
+  the client â€” a loading screen â€” moved today's progress into yesterday and
+  restarted today at one.
+- **Loremaster progress is attributed to the character that earned it.** The
+  store had no character dimension, in a store whose purpose is showing what
+  other characters have finished, so whichever character scanned last
+  overwrote everybody.
+- **The same zone picks the same achievement every time.** The match is a
+  substring and the tie-break was table order, so the Journey tab could show a
+  different achievement for the same zone on different logins.
+- **A map pin you dragged is yours again.** The guard that stops
+  `/cn clearway` deleting a hand-placed pin compared only the map â€” and
+  dragging a pin leaves it on the same map, so the one case the guard existed
+  for was the one case it could not see.
+- **Three self-tests could not fail.** The facing check reported "confirmed"
+  during the exact window in which it had already seen evidence the arrow was
+  backwards; two others counted something and then passed regardless.
+- **A lockout with no reset time crashed `/cn drops`** rather than saying
+  "unknown".
+
+### Faster
+
+- **15.3 ms off the login frame.** The data-broker feed rebuilt every
+  candidate in the game from a login hook that runs before anything has been
+  scanned â€” for a result it then almost always discarded.
+- **13.7 ms off the Remaining tab.** It walked all thirty thousand discovered
+  quests, asking the client about each, for a number that changes by one when
+  you hand a quest in. It is counted once and maintained.
+- **4.4 ms off every route.** The 2-opt pass ran twelve times; measured over
+  three thousand routes, passes four through twelve changed nothing.
+- **4.0 ms off the Zone tab, 4.4 ms off Scans, 2.3 ms off Warband.** All three
+  rebuilt, every two seconds, answers that only change when you collect
+  something.
+- **1.4 MB a minute of garbage off the arrow.** It built a fresh state table
+  ten times a second for as long as it was on screen.
+- **2.3 MB of memory released when you leave a zone**, and 138 KB less
+  allocated on every rebuild.
+- **The performance gate now runs on the interpreter the game runs.** Every
+  budget in this project was enforced under Lua 5.4, which is about twice as
+  fast as the 5.1 the client uses â€” so a path at 60% of its ceiling was at
+  120% of it in the game.
+
+### Smaller on disk
+
+- **The largest store in the addon lost its wrapper.** Quest names were kept
+  as two-field tables, thirty thousand of which said only that the name came
+  from the client. A row is the name itself now.
+- **Achievement names stopped being written to your database.** Sorting the
+  "closest to finishing" list wrote a name the client hands over for free onto
+  the saved row, permanently, for every achievement it touched.
+
+### Changed
+
+- **Chat answers share one shape.** A headline, the rows, the value, a note
+  when the list was cut short â€” written once instead of in every command.
+- **"3 piece(s) left" is now "3 pieces left".** Counts read the way a person
+  writes them, and a class restriction reads as "class only: Warrior and
+  Paladin" rather than as the client's uppercase tokens.
+
+### Internal
+
+- **The build now fails if a local function is called above its own
+  declaration.** In Lua that is a nil global and it throws only when the line
+  runs, which is why it shipped twice.
+
 ## [0.60.0]
 
 A player reported that a quest they had handed in stayed on the list. It did,

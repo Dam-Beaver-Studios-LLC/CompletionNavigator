@@ -143,7 +143,42 @@ function blizzardProvider.ClearAll()
         local asked, current = pcall(C_Map.GetUserWaypoint)
 
         if asked and current then
-            local sameMap = current.uiMapID == blizzardProvider.owned.mapID
+            -- THE MAP WAS THE WHOLE COMPARISON, AND IT IS THE PART THAT
+            -- DOES NOT CHANGE. FIXED IN 0.61.0.
+            --
+            -- The comment above says "a player who has moved the pin since
+            -- owns it again" -- and then the code checked only the map id.
+            -- Moving a pin almost always leaves it on the SAME map: that is
+            -- what moving a pin means. So the one case this guard exists for
+            -- was the one case it could not detect, and `/cn clearway` went
+            -- on deleting a hand-placed pin in the zone the player was
+            -- standing in. It caught only the case where the player had
+            -- placed a pin in a different zone entirely, which is rare and
+            -- which the map-id check would have caught by accident.
+            --
+            -- The coordinates are compared with a tolerance because the
+            -- client round-trips them through its own packing and hands back
+            -- values that differ in the last few digits. A hundredth of a map
+            -- unit is well inside "the player did not move this" and well
+            -- outside any deliberate drag.
+            local owned = blizzardProvider.owned
+
+            local sameMap = current.uiMapID == owned.mapID
+
+            local samePlace = sameMap
+                and owned.x and owned.y
+                and current.position
+                and math.abs((current.position.x or -1) - owned.x) < 0.01
+                and math.abs((current.position.y or -1) - owned.y) < 0.01
+
+            -- No position from the client is not evidence the pin moved, so
+            -- the map check stands alone in that case rather than the
+            -- addon refusing to clean up after itself forever.
+            if current.position and not samePlace then
+                blizzardProvider.owned = nil
+
+                return false
+            end
 
             if not sameMap then
                 blizzardProvider.owned = nil

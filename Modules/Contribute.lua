@@ -232,7 +232,8 @@ CN:RegisterCommand{
         verb = verb and string.lower(verb) or ""
 
         if verb == "forget" then
-            Print("Forgot " .. Contribute.Forget() .. " imported chain(s).")
+            Print("Forgot " .. CN.Count(Contribute.Forget(), "imported chain")
+                .. ".")
             return
         end
 
@@ -244,7 +245,8 @@ CN:RegisterCommand{
                 return
             end
 
-            Print("Imported " .. count .. " chain(s), " .. added .. " new.")
+            Print("Imported " .. CN.Count(count, "chain")
+                .. ", " .. added .. " new.")
             Print("|cff8a8f96They are recorded as observations, not as facts: "
                 .. "|cffffc74f/cn why|r will say the chain came from a "
                 .. "contribution rather than from curated data.|r")
@@ -259,7 +261,8 @@ CN:RegisterCommand{
             return
         end
 
-        Print(count .. " chain(s) ready to share. This text and nothing else:")
+        Print(CN.Count(count, "chain")
+            .. " ready to share. This text and nothing else:")
         Print("|cffffc74f" .. export .. "|r")
         Print("|cff8a8f96It contains quest IDs and orderings. No character "
             .. "name, no realm, no timestamps, no coordinates" .. CN.DASH .. "read it "

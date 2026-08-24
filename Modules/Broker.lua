@@ -156,7 +156,21 @@ function Broker.Install()
     dataObject      = object
     Broker.available = true
 
-    Broker.Refresh()
+    -- NO EAGER REFRESH HERE. 0.61.0.
+    --
+    -- `Install` runs from a login hook, and the refresh it used to do called
+    -- `CN.Recommend` -- a cold rebuild of every candidate, 15.34 ms of an
+    -- 18.35 ms `PLAYER_LOGIN` frame. It bought nothing:
+    --
+    --   1. It ran before the collection scans in their own login hooks had
+    --      populated anything, so it almost always settled on the same
+    --      "nothing actionable" the feed was CREATED with two lines above.
+    --   2. The `OnLogin` timer at the bottom of this file refreshes ten
+    --      seconds later, after those scans, from a real database.
+    --   3. The recommendation hook refreshes on every recompute thereafter.
+    --
+    -- Deleting it moves the cost off the frame the player watches the world
+    -- fade in on, and the feed's first real text arrives no later than before.
 
     DebugPrint("LibDataBroker feed registered.")
 

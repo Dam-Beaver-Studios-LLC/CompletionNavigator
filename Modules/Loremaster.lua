@@ -114,6 +114,52 @@ end
 
 Loremaster.Records = Records
 
+-- THE STORE HAD NO CHARACTER DIMENSION, AND SAID IT DID. FIXED IN 0.61.0.
+--
+-- `Loremaster.Scan`'s own comment says the store exists "so the Warband view
+-- can show what other characters have finished". It could not: every row was
+-- written into the ACCOUNT store under the achievement id alone, so whichever
+-- character logged in last overwrote every other character's progress.
+--
+-- Two players on two characters saw the second one's numbers attributed to
+-- both, and the Warband column that this was built for showed the same figure
+-- in every row. Nothing caught it because the fixture has one character, and
+-- one character cannot overwrite anybody.
+--
+-- The split follows what the game actually scopes:
+--
+--   name, category, criteria  -- properties of the achievement. Account.
+--   completed                 -- achievements are earned account-wide. Account.
+--   done                      -- criteria progress on quest achievements is
+--                                CHARACTER-specific. Per character.
+--
+-- `progress` is a table keyed by character key. `record.done` is kept as the
+-- current character's value so nothing downstream had to change shape, and so
+-- a database written by an older version still reads correctly until the
+-- migration runs.
+function Loremaster.DoneFor(record, characterKey)
+    if type(record) ~= "table" then
+        return 0
+    end
+
+    characterKey = characterKey or CN.characterKey or CN.GetCharacterKey()
+
+    if record.progress and record.progress[characterKey] ~= nil then
+        return record.progress[characterKey]
+    end
+
+    -- No per-character figure: either this character has never scanned, or
+    -- the row predates the split. Only the CURRENT character may fall back to
+    -- the flat field, because that field holds whoever scanned last -- which
+    -- is exactly the bug, and attributing it to a named other character would
+    -- keep telling the lie in a new place.
+    if characterKey == (CN.characterKey or CN.GetCharacterKey()) then
+        return record.done or 0
+    end
+
+    return nil
+end
+
 -- Reads every quest achievement and stores what the client says about it.
 -- Stored rather than recomputed because walking the achievement tree is not
 -- something to do on every frame, and because it lets the Warband view show
@@ -135,13 +181,21 @@ function Loremaster.Scan()
 
                 local done, criteria = Blizzard.GetAchievementProgress(id)
 
-                store[id] = {
-                    name      = achievement.name,
-                    category  = category.name,
-                    completed = achievement.completed and true or false,
-                    done      = done,
-                    criteria  = criteria,
-                }
+                local held = store[id] or {}
+
+                held.name      = achievement.name
+                held.category  = category.name
+                held.completed = achievement.completed and true or false
+                held.criteria  = criteria
+
+                -- The current character's figure, in both places: the map
+                -- for the Warband view, and the flat field so every existing
+                -- reader keeps working without a lookup.
+                held.progress  = held.progress or {}
+                held.progress[CN.characterKey or CN.GetCharacterKey()] = done
+                held.done      = done
+
+                store[id] = held
 
                 scanned = scanned + 1
             end
@@ -178,7 +232,7 @@ function Loremaster.ByCategory(includeCompleted)
                 id        = id,
                 name      = record.name,
                 completed = record.completed,
-                done      = record.done or 0,
+                done      = Loremaster.DoneFor(record) or 0,
                 criteria  = record.criteria or 0,
             })
         end
@@ -230,13 +284,15 @@ function Loremaster.Closest(limit)
 
     for id, record in pairs(Records()) do
         if not record.completed and (record.criteria or 0) > 0 then
+            local done = Loremaster.DoneFor(record) or 0
+
             local row = {
                 id       = id,
                 name     = record.name,
                 category = record.category,
-                done     = record.done or 0,
+                done     = done,
                 criteria = record.criteria,
-                fraction = (record.done or 0) / record.criteria,
+                fraction = done / record.criteria,
             }
 
             if row.done > 0 then
@@ -307,18 +363,53 @@ function Loremaster.ForZone(mapID)
         return nil
     end
 
-    local best
+    -- A DETERMINISTIC PICK, NOT WHATEVER `pairs` HANDED BACK FIRST. 0.61.0.
+    --
+    -- The zone name is a SUBSTRING match, so standing in Dalaran matched
+    -- every achievement with "Dalaran" in its name, and the tie-break was
+    -- only "prefer an unfinished one". Among several unfinished matches the
+    -- winner was whichever `pairs` reached first -- which Lua does not
+    -- promise to keep stable, and which in practice changed between sessions.
+    -- The Journey tab showed a different zone achievement for the same zone
+    -- on different logins, with nothing in the game having changed.
+    --
+    -- The ordering, in full:
+    --
+    --   1. Unfinished before finished. A completed zone achievement is not
+    --      what you want while standing in the zone.
+    --   2. The SHORTEST matching name. "Loremaster of Khaz Algar" contains
+    --      no zone name; "Isle of Dorn Explorer" and "Isle of Dorn" both
+    --      match a player on the Isle of Dorn, and the shorter one is the
+    --      one that is ABOUT the zone rather than about the zone plus
+    --      something else.
+    --   3. Lowest id. Arbitrary, but the same arbitrary answer every time,
+    --      which is the whole point.
+    local best, bestRecord
 
     for id, record in pairs(Records()) do
         if record.name and string.find(record.name, zoneName, 1, true) then
-            -- Prefer an unfinished one; a completed zone achievement is not
-            -- the thing you want to be shown while standing in it.
-            if not best or (best.completed and not record.completed) then
+            local better
+
+            if not bestRecord then
+                better = true
+            elseif (bestRecord.completed and true or false)
+                ~= (record.completed and true or false) then
+
+                better = not record.completed
+            elseif #record.name ~= #bestRecord.name then
+                better = #record.name < #bestRecord.name
+            else
+                better = id < best.id
+            end
+
+            if better then
+                bestRecord = record
+
                 best = {
                     id        = id,
                     name      = record.name,
                     completed = record.completed,
-                    done      = record.done or 0,
+                    done      = Loremaster.DoneFor(record) or 0,
                     criteria  = record.criteria or 0,
                 }
             end
@@ -375,8 +466,8 @@ function Loremaster.NextZones(limit)
         if row.fraction >= Loremaster.nearlyDoneFraction then
             value = value + 3
             table.insert(reasons, string.format(
-                "%d%% done" .. CN.DASH .. "finishing is cheaper than starting",
-                math.floor(row.fraction * 100)))
+                "%s done" .. CN.DASH .. "finishing is cheaper than starting",
+                CN.PercentText(row.fraction)))
         elseif row.done > 0 then
             value = value + 1
             table.insert(reasons, string.format("%d of %d done",

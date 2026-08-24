@@ -140,7 +140,21 @@ function Static.QuestEligibility(questID, character)
             end
         end
 
-        return false, label .. " only: " .. table.concat(list, ", ")
+        -- "class only: WARRIOR, PALADIN" IS A DATABASE ROW, NOT A SENTENCE.
+        -- 0.61.0.
+        --
+        -- These are the client's uppercase tokens, and they went straight
+        -- onto the player's screen. The client already holds the localized
+        -- names for exactly these tokens; using them costs one table lookup
+        -- and turns the line into something a player reads rather than
+        -- decodes.
+        local words = {}
+
+        for _, entry in ipairs(list) do
+            table.insert(words, CN.TokenLabel(entry))
+        end
+
+        return false, label .. " only: " .. CN.Series(words)
     end
 
     local okClass, classReason = allowed(record.classes, character.class, "class")

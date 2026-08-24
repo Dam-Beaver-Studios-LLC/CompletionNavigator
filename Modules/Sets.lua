@@ -243,14 +243,38 @@ CN.RegisterCandidateProvider("Sets", function()
     local candidates = {}
 
     for _, set in ipairs(Sets.NearlyComplete()) do
-        if not CN.IsIgnored(CN.objectiveTypes.APPEARANCE, set.setID)
-            and not CN.IsDeferred(CN.objectiveTypes.APPEARANCE, set.setID) then
+        -- TWO ID SPACES, ONE NAMESPACE. FIXED IN 0.61.0.
+        --
+        -- This provider emitted `id = set.setID` under type APPEARANCE, and
+        -- Appearances.lua emits `id = row.categoryID` under the SAME type.
+        -- Both are plain integers from unrelated Blizzard tables, and both
+        -- start low: transmog set 5 and appearance category 5 are different
+        -- things wearing the same (type, id).
+        --
+        -- The aggregate cache dedups on exactly that pair, so whichever
+        -- provider ran second had its row silently DROPPED -- no error, no
+        -- warning, just a set that never appeared in the list no matter how
+        -- close to complete it was. Worse in the other direction: ignoring
+        -- one ignored the other, because `CN.IsIgnored` keys on the same
+        -- pair, so a player hiding an appearance slot could not work out why
+        -- an unrelated set had vanished with it.
+        --
+        -- A prefixed string key is unambiguous forever and costs one
+        -- concatenation per row, at a cooldown of sixty seconds.
+        local key = "set:" .. tostring(set.setID)
+
+        if not CN.IsIgnored(CN.objectiveTypes.APPEARANCE, key)
+            and not CN.IsDeferred(CN.objectiveTypes.APPEARANCE, key) then
 
             table.insert(candidates, CN.NewObjective({
-                id               = set.setID,
+                id               = key,
+
+                -- The raw id, for anything that needs to ask the client
+                -- about the set rather than about this row.
+                setID            = set.setID,
                 type             = CN.objectiveTypes.APPEARANCE,
                 name             = tostring(set.name or ("Set " .. set.setID))
-                    .. ": " .. set.missing .. " piece(s) left",
+                    .. ": " .. CN.Count(set.missing, "piece") .. " left",
 
                 -- A REAL denominator, which this addon is normally short of.
                 completionValue  = 3 + (3 - math.min(3, set.missing)),

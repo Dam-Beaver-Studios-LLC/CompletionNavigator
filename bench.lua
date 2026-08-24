@@ -179,10 +179,31 @@ end)
 
 print("\nCandidates produced: " .. #CN.CollectCandidates(true))
 
-print("\nPer-provider, slowest first:")
+-- THE PER-PROVIDER FIGURES WERE AVERAGED OVER THE WHOLE RUN. 0.61.0.
+--
+-- `CN.providerTimings` accumulates for the life of the session and nothing
+-- reset it, so by the time this block ran every provider had been called by
+-- each of the benchmarks above -- most of them on a warm cache, at a fraction
+-- of a millisecond. Dividing the total by that call count buried the cold
+-- cost this table exists to expose: the Pets provider read 0.56 ms here and
+-- 4.53 ms when measured alone, understating by eight times.
+--
+-- Reset, then ONE cold collection, then read. What the table then holds is
+-- what one provider costs when it actually has to do its work, which is the
+-- only figure worth putting a budget on.
+for name in pairs(CN.providerTimings) do
+    CN.providerTimings[name] = nil
+end
+
+CN.InvalidateCandidates("bench:per-provider")
+CN.CollectCandidates(true)
+
+print("\nPer-provider, slowest first (one cold rebuild, not an average):")
 local rows = {}
 for name, timing in pairs(CN.providerTimings) do
-    table.insert(rows, { name = name, avg = timing.total / timing.calls })
+    if (timing.calls or 0) > 0 then
+        table.insert(rows, { name = name, avg = timing.total / timing.calls })
+    end
 end
 table.sort(rows, function(a, b) return a.avg > b.avg end)
 for _, row in ipairs(rows) do

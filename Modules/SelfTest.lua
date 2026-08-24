@@ -346,6 +346,37 @@ CN.RegisterSelfTest{
                 .. "remembered (sign " .. tostring(state.sign) .. ")"
         end
 
+        -- THERE WAS NO FAIL BRANCH HERE, IN A CHECK WHOSE OWN HEADER SAYS
+        -- "AN UNVERIFIED ASSUMPTION REPORTED AS PASS IS WORSE THAN NO CHECK".
+        -- 0.61.0.
+        --
+        -- `motion.verdict` is set to "confirmed" only by a sample that AGREES
+        -- with the sign in use. A sample that DISAGREES increments `against`
+        -- and leaves the verdict alone, and the sign is not flipped until
+        -- `against` reaches the threshold. So the whole window between the
+        -- first disagreeing sample and the correction has samples > 0 and no
+        -- verdict -- and this function reported that state as
+        -- "confirmed against 1 movement samples".
+        --
+        -- That is the exact state in which the arrow IS pointing backwards
+        -- and the addon has already seen the evidence. Reporting it as a pass
+        -- told a player chasing precisely this bug that there was nothing
+        -- wrong, in the diagnostic written to find it.
+        if state.verdict ~= "confirmed" then
+            if (state.against or 0) > 0 then
+                return FAIL, string.format(
+                    "%d of %d samples say the arrow is backwards and the sign "
+                    .. "has not been flipped yet" .. CN.DASH .. "keep walking "
+                    .. "forward for a few more seconds and run this again",
+                    state.against, state.samples)
+            end
+
+            return SKIP, string.format(
+                "%d samples, none of them conclusive" .. CN.DASH .. "walk "
+                .. "forward while facing east or west, then run this again",
+                state.samples)
+        end
+
         return PASS, string.format(
             "confirmed against %d movement samples (sign %s)",
             state.samples, tostring(state.sign))
@@ -407,6 +438,40 @@ CN.RegisterSelfTest{
             end
         end
 
+        -- IT COUNTED, AND THEN PASSED REGARDLESS. 0.61.0.
+        --
+        -- This is the regression test for the 0.23.0 bug -- quests offered in
+        -- front of the player being structurally invisible because every
+        -- source read the quest log. The whole question is whether ANY pin
+        -- comes back flagged as a quest start. Zero of them is the bug,
+        -- exactly, and this returned PASS for it.
+        --
+        -- Zero starts is not automatically a failure: a map where the player
+        -- has already accepted everything legitimately has none. So the
+        -- distinction is made against the quest log rather than assumed.
+        if starts == 0 then
+            local unaccepted = 0
+
+            for _, poi in ipairs(pois) do
+                if poi.questID and not Blizzard.IsQuestInLog(poi.questID) then
+                    unaccepted = unaccepted + 1
+                end
+            end
+
+            if unaccepted > 0 then
+                return FAIL, string.format(
+                    "%d pins, %d for quests not in your log, and NONE flagged "
+                    .. "as a quest start" .. CN.DASH .. "the 0.23.0 blind spot "
+                    .. "is back",
+                    #pois, unaccepted)
+            end
+
+            return SKIP, string.format(
+                "%d pins, all for quests already in your log" .. CN.DASH
+                .. "nothing here can answer the question",
+                #pois)
+        end
+
         return PASS, string.format("%d pins, %d of them quest starts",
             #pois, starts)
     end,
@@ -466,6 +531,32 @@ CN.RegisterSelfTest{
 
         if sampled == 0 then
             return SKIP, "nothing scanned yet" .. CN.DASH .. "run /cn setup"
+        end
+
+        -- SAME SHAPE AS THE ONE ABOVE, SAME FIX. 0.61.0.
+        --
+        -- This is the regression test for the 0.26.0 bug: a stub that
+        -- returned only three values, hiding the criterion counters. If not
+        -- one of thirty sampled criteria carries a counter, the fifth and
+        -- sixth return values are being dropped again -- which is the bug --
+        -- and this reported "30 criteria read, 0 carry a counter" as a PASS.
+        --
+        -- Thirty criteria with no counter among them does happen on a fresh
+        -- account with only simple achievements scanned, so it is reported as
+        -- inconclusive rather than as a failure unless the sample is large
+        -- enough to mean something.
+        if counted == 0 then
+            if sampled >= 30 then
+                return FAIL, string.format(
+                    "%d criteria read and not one carries a counter" .. CN.DASH
+                    .. "the client's quantity and required fields are being "
+                    .. "dropped",
+                    sampled)
+            end
+
+            return SKIP, string.format(
+                "only %d criteria available, none with a counter" .. CN.DASH
+                .. "too few to tell", sampled)
         end
 
         return PASS, string.format("%d criteria read, %d carry a counter",

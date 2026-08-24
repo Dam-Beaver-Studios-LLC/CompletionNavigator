@@ -206,11 +206,27 @@ jobs:
       # printing a number somebody has to remember is not a check. The
       # ceilings live in bench.lua and carry real headroom, because a budget
       # that fails on runner noise gets deleted within a fortnight.
+      #
+      # AND THE GATE RUNS ON THE VERSION THE GAME RUNS. 0.61.0.
+      #
+      # Every budget in this file was measured and enforced under lua5.4,
+      # which is roughly twice as fast as the 5.1 the WoW client actually
+      # interprets. So a path sitting at 60% of its ceiling here was at 120%
+      # of it in the game, and the gate said "ok". The whole point of a budget
+      # is that it corresponds to a frame the player experiences.
+      #
+      # 5.1 is the gate. 5.4 still runs, reporting only, because the two
+      # numbers side by side are how a real regression is told apart from an
+      # interpreter difference.
       - name: Performance budgets
         timeout-minutes: 6
         run: |
           if [ -f bench.lua ]; then
-            lua5.4 bench.lua . --budget
+            echo "--- lua5.4 (reference, not the gate) ---"
+            lua5.4 bench.lua . --budget || true
+
+            echo "--- lua5.1 (the version the game runs; this is the gate) ---"
+            lua5.1 bench.lua . --budget
           else
             echo "bench.lua is missing; skipping budgets."
           fi
