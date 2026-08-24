@@ -730,7 +730,23 @@ CN.RegisterCandidateProvider("Inventory", function()
 
     return candidates
 end, {
-    events   = { "BAG_UPDATE_DELAYED", "PLAYER_ENTERING_WORLD" },
+    -- THE QUEST EVENTS, because this provider reads the quest log.
+    --
+    -- `Inventory.NearlyDone` walks `GetQuestLogEntries` and emits a row per
+    -- nearly-finished objective -- "Test Quest Alpha: 1 more" -- and the
+    -- declaration named only bag events. `InvalidateCandidates` SKIPS a
+    -- provider that has an events table and was not named, so handing a quest
+    -- in did not touch these rows at all: the quest stayed on the list and in
+    -- the route until a bag update or a loading screen happened along.
+    --
+    -- Reported from play, and the reason the lint below this file exists: a
+    -- provider must declare the events of every system it reads, not of the
+    -- system it is named after.
+    events   = {
+        "BAG_UPDATE_DELAYED", "PLAYER_ENTERING_WORLD",
+        "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_ACCEPTED",
+        "QUEST_LOG_UPDATE",
+    },
     cooldown = 5,
 })
 

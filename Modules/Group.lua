@@ -187,6 +187,16 @@ Group.sharedBonusCap       = 0.45
 local sharedCache = {}
 local unitCache   = nil
 
+-- How long an answer about somebody else's quest log is worth trusting. See
+-- the header inside `SharedWith`.
+Group.sharedCacheSeconds = 30
+
+-- The client's fractional clock where it exists, wall clock otherwise. Split
+-- out so a test can move it.
+function Group.Now()
+    return (GetTime and GetTime()) or (time and time()) or 0
+end
+
 function Group.ForgetShared()
     sharedCache = {}
     unitCache   = nil
@@ -252,10 +262,26 @@ function Group.SharedWith(questID)
         return nil
     end
 
+    -- BOUNDED BY AGE, BECAUSE NO EVENT CAN INVALIDATE THIS.
+    --
+    -- The answer comes from `C_QuestLog.IsUnitOnQuest(unit, questID)` -- a
+    -- question about somebody ELSE'S quest log -- and the client fires no
+    -- event when a party member accepts or hands one in. The invalidation
+    -- below subscribes to `QUEST_ACCEPTED` and `QUEST_TURNED_IN`, which fire
+    -- only for the player, so it never cleared this at all.
+    --
+    -- Four people in your group finish the quest and stay grouped: your list
+    -- kept the shared-work multiplier and `/cn why` kept saying "4 others
+    -- here are on this quest" until somebody left the party.
+    --
+    -- There is no event to wait for, so the honest answer is a short life
+    -- rather than a claim of coverage. Thirty seconds is far cheaper than the
+    -- per-candidate cost this cache exists to avoid and far fresher than
+    -- "until the roster changes".
     local held = sharedCache[questID]
 
-    if held ~= nil then
-        return held
+    if held ~= nil and (Group.Now() - held.at) < Group.sharedCacheSeconds then
+        return held.value
     end
 
     local sharing = 0
@@ -273,7 +299,7 @@ function Group.SharedWith(questID)
         end
     end
 
-    sharedCache[questID] = sharing
+    sharedCache[questID] = { value = sharing, at = Group.Now() }
 
     return sharing
 end
@@ -495,8 +521,12 @@ for _, event in ipairs({
     end)
 end
 
--- AND WHEN SOMEBODY'S QUEST LOG CHANGES, which is the other thing that can
--- change the answer. Held across ranking passes otherwise: the cache exists
+-- AND WHEN YOUR OWN QUEST LOG CHANGES.
+--
+-- Not theirs: the client fires no event for another unit's quest log, which
+-- is why the cache above has a life rather than an invalidation. This still
+-- earns its place -- accepting a quest yourself is the moment you start
+-- asking whether the group is on it. Held across ranking passes otherwise: the cache exists
 -- because a forty-person raid is forty client calls per quest, and clearing
 -- it on the event that triggers the re-rank would mean it never hit.
 for _, event in ipairs({ "QUEST_ACCEPTED", "QUEST_TURNED_IN" }) do

@@ -79,6 +79,9 @@ end
 
 local frame, ticker
 
+-- Sixteen for the button plus two of margin. See where the label is anchored.
+Hud.closeWidth = 18
+
 local function Build()
     if frame or not CreateFrame then
         return frame
@@ -87,7 +90,19 @@ local function Build()
     frame = CreateFrame("Frame", "CompletionNavigatorHud", UIParent)
 
     frame:SetSize(260, 34)
-    frame:SetFrameStrata("BACKGROUND")
+
+    -- MEDIUM, LIKE EVERY OTHER FRAME THIS ADDON PUTS OVER THE WORLD.
+    --
+    -- This was BACKGROUND, the lowest strata above the world itself -- and it
+    -- is the only frame in the addon that was: the arrow and the follow
+    -- frame, which sit over the world in exactly the same way, are both
+    -- MEDIUM. At BACKGROUND anything else on screen takes the mouse first,
+    -- so the line could not be dragged and its two click actions did nothing,
+    -- while its own tooltip promised all three.
+    --
+    -- Reported from play: "the heads up box should be able to be dragged
+    -- around to a different location".
+    frame:SetFrameStrata("MEDIUM")
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
@@ -126,9 +141,18 @@ local function Build()
 
     local inset = CN.SPACE.S
 
+-- The width the close control reserves along the top-right edge. Declared
+-- before the label, which has to keep clear of it.
+
+    -- ROOM FOR THE CLOSE BUTTON.
+    --
+    -- The X is 16 wide at the top-right corner, and alpha 0 does not disable
+    -- mouse input -- so the last stretch of a long objective name sat under a
+    -- button that turns the line off rather than navigating to it. The label
+    -- stops short of it instead.
     frame.label = frame:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
     frame.label:SetPoint("TOPLEFT", inset, -inset)
-    frame.label:SetPoint("TOPRIGHT", -inset, -inset)
+    frame.label:SetPoint("TOPRIGHT", -(inset + Hud.closeWidth), -inset)
     frame.label:SetJustifyH("LEFT")
 
     frame.detail = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
@@ -191,10 +215,99 @@ local function Build()
         CN.NavigateToObjective(objective)
     end)
 
+    -- A WAY OUT, ON THE THING ITSELF.
+    --
+    -- Turning this off meant knowing that `/cn hud` exists, or finding the
+    -- checkbox on the Settings tab of a window you have to open first. A
+    -- frame that appears over the world and cannot be dismissed from itself
+    -- is a frame people uninstall the addon to be rid of.
+    --
+    -- Reported from play: it "should also be able to be closed or turned off
+    -- by clicking an x or other appropriate icon or button in or on the heads
+    -- up box itself".
+    local close = CreateFrame("Button", nil, frame)
+
+    close:SetSize(16, 16)
+    close:SetPoint("TOPRIGHT", -2, -2)
+
+    -- A DRAG STARTED IN THAT CORNER STILL MOVES THE LINE.
+    --
+    -- The button takes the mouse, so without this the top-right eighteen
+    -- pixels were a dead zone for dragging -- and the tooltip promises the
+    -- whole line can be dragged.
+    close:RegisterForDrag("LeftButton")
+
+    close:SetScript("OnDragStart", function()
+        frame:StartMoving()
+    end)
+
+    close:SetScript("OnDragStop", function()
+        local stop = frame:GetScript("OnDragStop")
+
+        if stop then
+            stop(frame)
+        end
+    end)
+
+    close.label = close:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
+    close.label:SetPoint("CENTER")
+    close.label:SetText(CN.Muted("x"))
+
+    CN.Outline(close.label, 11, "MUTED")
+
+    -- Only while the mouse is over the line. A permanent X on a frame whose
+    -- whole job is to be glanced at is one more thing to read.
+    close:SetAlpha(0)
+
+    close:SetScript("OnEnter", function(self)
+        self:SetAlpha(1)
+
+        self.label:SetText(CN.Bad("x"))
+    end)
+
+    close:SetScript("OnLeave", function(self)
+        self.label:SetText(CN.Muted("x"))
+
+        if not frame:IsMouseOver() then
+            self:SetAlpha(0)
+        end
+    end)
+
+    close:SetScript("OnClick", function()
+        -- TURNED OFF, NOT HIDDEN.
+        --
+        -- Hiding it would bring it back on the next refresh, and a control
+        -- that undoes itself is worse than no control. This is the same
+        -- setting the Settings checkbox and `/cn hud` write, so all three
+        -- agree afterwards.
+        Hud.SetEnabled(false)
+
+        CN.Print("Heads-up line off. " .. CN.Aside(CN.Accent("/cn hud")
+            .. " brings it back"))
+    end)
+
+    if CN.UI and CN.UI.AttachTooltip then
+        CN.UI.AttachTooltip(close, "Turn the heads-up line off. /cn hud "
+            .. "brings it back.")
+    end
+
+    frame.close = close
+
+    -- The X appears with the cursor and goes with it.
+    frame:SetScript("OnEnter", function()
+        close:SetAlpha(1)
+    end)
+
+    frame:SetScript("OnLeave", function()
+        if not close:IsMouseOver() then
+            close:SetAlpha(0)
+        end
+    end)
+
     if CN.UI and CN.UI.AttachTooltip then
         CN.UI.AttachTooltip(frame,
             "Click to navigate to this. Right-click to put it off for an "
-            .. "hour. Drag to move this line.")
+            .. "hour. Drag to move this line. The x turns it off.")
     end
 
     frame:SetScale(Hud.Scale())

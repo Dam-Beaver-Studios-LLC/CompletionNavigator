@@ -116,7 +116,36 @@ end
 
 -- The exploration achievement matching the zone the player is standing in,
 -- matched on name because no API maps a UiMapID to its achievement.
+-- THE MAP FIRST, THE NAME ONLY AS A FALLBACK.
+--
+-- This was a substring match over an UNORDERED walk of every exploration
+-- achievement the account has, returning the first hit. Retail has two zones
+-- called Nagrand and two called Shadowmoon Valley, each with its own "Explore
+-- ..." achievement -- both contain the needle, and which one came back was
+-- arbitrary and could differ between sessions.
+--
+-- That was cosmetic while nothing wrote through it. As of this release
+-- `RefreshCurrentZone` DOES write through it, so finishing Draenor's Nagrand
+-- would stamp `completed = true` on Outland's record, which then vanishes
+-- from the list permanently -- only a full `/cn explorescan` rewrites it, and
+-- nothing runs one on its own.
+--
+-- So: the map id, recorded when the record is next refreshed, is the key.
+-- The name match survives as the way a record acquires its map id the first
+-- time, and is now exact rather than a substring.
 function Exploration.ForCurrentZone()
+    local mapID = CN.GetPlayerPosition()
+
+    local store = Store()
+
+    if mapID then
+        for _, record in pairs(store) do
+            if record.mapID == mapID then
+                return record
+            end
+        end
+    end
+
     local zone = GetZoneText and GetZoneText()
 
     if not zone or zone == "" then
@@ -125,8 +154,17 @@ function Exploration.ForCurrentZone()
 
     local needle = string.lower(zone)
 
-    for _, record in pairs(Store()) do
-        if record.name and string.find(string.lower(record.name), needle, 1, true) then
+    -- EXACT, not a substring: "Nagrand" is a substring of "Explore Nagrand"
+    -- and of nothing else useful, but "Explore Shadowmoon Valley" contains
+    -- the needle for both of the zones with that name.
+    for _, record in pairs(store) do
+        if record.name and string.lower(record.name) == needle then
+            -- Learned, so the ambiguity is resolved once rather than every
+            -- time -- and resolved by the map, which cannot be duplicated.
+            if mapID then
+                record.mapID = mapID
+            end
+
             return record
         end
     end
@@ -182,17 +220,66 @@ end, { events = { "CRITERIA_UPDATE", "ZONE_CHANGED_NEW_AREA" } })
 -- EVENTS
 ------------------------------------------------------------
 
-CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
-    -- Discovering a subzone fires criteria updates; the Achievements module
-    -- already throttles those, so only refresh the exploration view.
+-- REFRESH IT WHEN IT CHANGES, NOT ONLY WHEN YOU ARRIVE.
+--
+-- The provider declared `CRITERIA_UPDATE` -- which is exactly the event that
+-- fires when you discover a subzone -- and rebuilt on it, reading the same
+-- persisted record it had read on entering the zone. So "3 subzones left"
+-- was frozen at 3 for as long as the player explored, and only moved when
+-- they left the zone and came back.
+--
+-- Throttled, because a discovery fires several criteria updates in a row and
+-- this is a client call per zone. `CN.Debounce` answers the first
+-- immediately, which is the one the player is watching for.
+Exploration.refreshSeconds = 2
+
+local function RefreshCurrentZone()
     local record = Exploration.ForCurrentZone()
 
-    if record then
-        local done, criteria = Blizzard.GetAchievementProgress(record.achievementID)
-
-        record.done     = done
-        record.criteria = criteria
+    if not record then
+        return false
     end
+
+    local done, criteria = Blizzard.GetAchievementProgress(record.achievementID)
+
+    -- NOT OVER GOOD DATA WITH NOTHING.
+    --
+    -- `GetAchievementProgress` answers `0, 0` when the criteria API is
+    -- unavailable, which is a refusal rather than a measurement -- and this
+    -- writes straight into the persisted store. Overwriting a scanned "9
+    -- criteria, 4 done" with "0 of 0" loses the record and makes the zone
+    -- disappear from the list.
+    if not criteria or criteria <= 0 then
+        return false
+    end
+
+    record.done     = done
+    record.criteria = criteria
+
+    -- AND WRITE `completed`, which nothing did.
+    --
+    -- `Exploration.Closest` filters on `not record.completed` and sorts by
+    -- what is left, ascending -- so a zone finished this session sat at the
+    -- top of that list reading "0 left" for ever, because the only writer of
+    -- the flag was the full scan.
+    -- SET AND CLEARED, both. A patch that adds a subzone to a zone you had
+    -- finished must be able to un-finish it; a flag that only ever goes one
+    -- way is a flag that is wrong for the rest of the account's life.
+    record.completed = (done and done >= criteria) or nil
+
+    return true
+end
+
+Exploration.RefreshCurrentZone = RefreshCurrentZone
+
+CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", RefreshCurrentZone)
+
+CN:RegisterEvent("CRITERIA_UPDATE", function()
+    CN.Debounce("Exploration.criteria", Exploration.refreshSeconds, function()
+        if RefreshCurrentZone() then
+            CN.InvalidateProvider("Exploration")
+        end
+    end)
 end)
 
 ------------------------------------------------------------

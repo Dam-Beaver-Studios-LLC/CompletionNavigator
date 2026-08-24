@@ -790,7 +790,9 @@ function Session.NoteDurationsChanged()
     -- anything already on the list, and `/cn mode fastest`'s second lever
     -- stayed inert. `CN.decoratorGeneration` is the only thing that defeats
     -- that shortcut; Goals and Harvest already use it.
-    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+    -- Both halves. See CN.NoteDecoratorsChanged: bumping the counter alone
+    -- cannot make a provider that is not already stale re-decorate.
+    CN.NoteDecoratorsChanged()
 end
 
 function Session.TypicalSeconds(objectiveType)

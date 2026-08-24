@@ -34,10 +34,29 @@ function Appearances.Scan()
     local categories = Blizzard.GetAppearanceCategories()
 
     for _, category in ipairs(categories) do
+        local held = store[category.categoryID]
+
+        -- A ZERO FROM A CLIENT THAT HAS NOT LOADED THE WARDROBE IS NOT A
+        -- MEASUREMENT.
+        --
+        -- `GetCategoryCollectedCount` falls back to zero when the collection
+        -- is not ready, and this scan now runs at login -- so overwriting a
+        -- scanned "184 of 260" with "0 of 260" would make the addon
+        -- recommend every slot the player has already finished, until
+        -- something transmoggable happened to fire the collection event.
+        --
+        -- Keeping the higher of the two is the honest reading: a count can
+        -- only go up, and a refusal reads as zero.
+        local collected = category.collected or 0
+
+        if held and (held.collected or 0) > collected then
+            collected = held.collected
+        end
+
         store[category.categoryID] = {
             categoryID = category.categoryID,
             name       = category.name,
-            collected  = category.collected,
+            collected  = collected,
             total      = category.total,
             lastSeen   = time(),
         }
@@ -186,6 +205,22 @@ end, { events = { "TRANSMOG_COLLECTION_UPDATED" }, cooldown = 10 })
 Appearances.rescanSeconds = 600
 
 local lastRescan = 0
+
+-- AND ONCE AT LOGIN, which is the one path this store did not have.
+--
+-- Every other setup-scanned store -- currencies, reputations, titles,
+-- professions, quests -- refreshes itself on login. This one relied on
+-- `TRANSMOG_COLLECTION_UPDATED`, which covers appearances collected while
+-- this session is running and nothing collected on another character or in a
+-- session where the addon was not loaded. A player who logs in and loots
+-- nothing transmoggable never fires it, and the counts stay as they were
+-- whenever `/cn setup` last ran -- which is the "silently rotted" state this
+-- file's own header describes.
+CN:OnLogin(function()
+    -- Protected and quiet: this is a journal walk, and a client that refuses
+    -- it must not take the login sequence with it.
+    CN.Guard("Appearances.Scan", Appearances.Scan)
+end)
 
 CN:RegisterEvent("TRANSMOG_COLLECTION_UPDATED", function()
     local now = time()

@@ -796,7 +796,24 @@ function CN.RegisterCandidateDecorator(name, decorator)
 
         CN.candidateDecorators[name] = decorator
 
-        CN.decoratorGeneration = CN.decoratorGeneration + 1
+        -- THROUGH THE FUNCTION THAT DOES BOTH HALVES. Bumping alone leaves a
+        -- clean provider clean, so the late-registered decorator this header
+        -- is about still never reached the rows it was registered for.
+        --
+        -- `CN.NoteDecoratorsChanged` is defined further down this file, so it
+        -- is called through `CN` rather than captured -- decorators register
+        -- at load time, long after this function is defined and long after
+        -- that one is.
+        -- DELIBERATE, because this is a structural change rather than a
+        -- ticker: it happens a handful of times at load, when there is
+        -- nothing built to rebuild, and the header above promises that a
+        -- decorator registering LATE still reaches rows that already exist.
+        -- A cooldown must not be allowed to break that promise.
+        if CN.NoteDecoratorsChanged then
+            CN.NoteDecoratorsChanged(true)
+        else
+            CN.decoratorGeneration = CN.decoratorGeneration + 1
+        end
 
         return true
     end
@@ -877,16 +894,61 @@ end
 -- cooldown exists to stop a chatty *event* from causing work; it must never
 -- delay something the player just did on purpose. Pinning a goal and not
 -- seeing it appear for two seconds reads as the feature being broken.
-function CN.InvalidateCandidates(reason)
+-- SOME EVENTS ARE THE PLAYER DOING SOMETHING, NOT A TICKER.
+--
+-- A cooldown exists to stop a chatty event from causing work. It must never
+-- delay something the player just did, and these are the events that ARE
+-- something the player just did: they fire once, at the moment of the act,
+-- and never in bursts.
+--
+-- This mattered most for `QUEST_TURNED_IN`. Handing in a quest fires it in a
+-- burst with `QUEST_REMOVED` and `QUEST_LOG_UPDATE`, the window redrew on the
+-- first of them -- before the quest provider's two-second cooldown had let it
+-- rebuild -- and the rest of the burst was swallowed by the window's own
+-- throttle. So the quest you had just handed in stayed on the route and in
+-- the list until some unrelated event arrived more than two seconds later.
+-- Reported from play: "the completion of a quest does not appear to remove it
+-- from the journey or queue."
+CN.deliberateEvents = {
+    QUEST_TURNED_IN   = true,
+    QUEST_ACCEPTED    = true,
+    QUEST_REMOVED     = true,
+    NEW_MOUNT_ADDED   = true,
+    NEW_PET_ADDED     = true,
+    NEW_TOY_ADDED     = true,
+    ACHIEVEMENT_EARNED = true,
+    PLAYER_LEVEL_UP   = true,
+}
+
+-- `patient` = mark stale, but do not bypass anybody's cooldown. See the note
+-- in `CN.NoteDecoratorsChanged`, which is the caller that needs it.
+function CN.InvalidateCandidates(reason, patient)
     local hit = 0
 
+    -- No reason at all is a deliberate act by definition -- a command, a
+    -- pinned goal, a scan the player asked for.
+    local deliberate = (not patient)
+        and ((reason == nil) or CN.deliberateEvents[reason] or false)
+
+    -- THE "INVALIDATE EVERYTHING" LIST DID NOTHING.
+    --
+    -- `CN.baseInvalidationEvents` says, in its own comment, that these events
+    -- "must invalidate EVERYTHING regardless of who declared what: the world
+    -- changed under all of them." It was only ever used to make sure those
+    -- events were SUBSCRIBED; the filter below then applied the ordinary
+    -- per-provider test to them like any other. No provider declares
+    -- `PLAYER_LEVEL_UP`, so levelling up invalidated exactly zero of the
+    -- twenty-three -- and a reason that is not an event name at all, which
+    -- four call sites pass as `"mode"`, invalidated zero as well.
+    local universal = CN.IsUniversalInvalidation(reason)
+
     for name, provider in pairs(CN.candidateProviders) do
-        if not reason or not provider.events or provider.events[reason] then
+        if universal or not provider.events or provider.events[reason] then
             local entry = Entry(name)
 
             entry.dirty = true
 
-            if not reason then
+            if deliberate then
                 entry.urgent = true
             end
 
@@ -906,6 +968,70 @@ function CN.InvalidateCandidates(reason)
                 .. " provider" .. (hit == 1 and "" or "s"))
         end
     end
+end
+
+-- BUMPING THE COUNTER IS HALF OF IT.
+--
+-- `CN.decoratorGeneration` is read in exactly one place -- inside the branch
+-- that runs when a provider is ALREADY being rebuilt -- so bumping it cannot
+-- make a clean provider re-decorate. It defeats the identical-list shortcut;
+-- it does not defeat the not-stale-at-all shortcut.
+--
+-- Harvest and Goals both discovered this and both call `InvalidateCandidates`
+-- alongside the bump. Warband, Session and the decorator registry did not, so
+-- three of the five callers were bumping a counter nothing would read. The
+-- registry's own header names "a decorator registering late" as the case it
+-- exists for, and that case did not work.
+--
+-- One function, so the next caller cannot get it half right.
+-- `deliberate` = the player just did this, so no cooldown may delay it.
+--
+-- Pinning a goal is deliberate: 0.57.0 records that "pinning a goal and not
+-- seeing it appear for two seconds reads as the feature being broken". A
+-- reputation tick is not.
+function CN.NoteDecoratorsChanged(deliberate)
+    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+
+    -- MARKED STALE, NOT MARKED URGENT.
+    --
+    -- `InvalidateCandidates()` with no reason means a deliberate act by the
+    -- player, and a deliberate act bypasses every provider's cooldown. That
+    -- is right for pinning a goal and wrong for this: the decorator set
+    -- changing means "re-decorate on the next rebuild", not "rebuild all
+    -- twenty-three now, ignoring what each of them said it costs".
+    --
+    -- The difference is not small. Measured on the retail-scale fixture, the
+    -- urgent form is 12.3 ms -- more than twice a forced cold rebuild, and
+    -- three quarters of a 60fps frame -- because the generation bump also
+    -- defeats the identical-list reuse, so every provider re-decorates every
+    -- candidate. `Warband` calls this from `UPDATE_FACTION`, debounced to
+    -- once every five seconds, which fires continuously while questing. The
+    -- debounce added in 0.59.0 capped how OFTEN; this would have raised what
+    -- each one costs by about eight hundred times.
+    CN.InvalidateCandidates(nil, not deliberate)
+
+    return CN.decoratorGeneration
+end
+
+-- Whether a provider's cached list is waiting to be rebuilt.
+--
+-- Readable because "did that event reach anybody" is a question the suite
+-- has to be able to ask -- `CN.baseInvalidationEvents` claimed to reach every
+-- provider and reached none, for eleven releases, with nothing able to see
+-- it.
+-- Whether a provider has been told to ignore its own cooldown. Readable for
+-- the same reason `IsProviderDirty` is: "did that reach anybody, and did it
+-- cost more than it should have" are both questions the suite has to ask.
+function CN.IsProviderUrgent(name)
+    local held = providerCache[name]
+
+    return held ~= nil and held.urgent == true
+end
+
+function CN.IsProviderDirty(name)
+    local held = providerCache[name]
+
+    return (held == nil) or (held.dirty == true)
 end
 
 function CN.InvalidateProvider(name, urgent)
@@ -944,10 +1070,40 @@ end
 -- empty.
 CN.baseInvalidationEvents = {
     -- Events that must invalidate EVERYTHING regardless of who declared
-    -- what: the world changed under all of them.
+    -- what: the world changed under all of them. `CN.IsUniversalInvalidation`
+    -- is what makes that true -- see the note in `InvalidateCandidates`.
+    --
+    -- ONE ENTRY, NOT TWO. `ZONE_CHANGED_NEW_AREA` was on this list and, once
+    -- the list started meaning something, reached all twenty-three providers
+    -- at 2.5 ms a time -- for an event the client fires on every indoor and
+    -- sub-area transition and repeatedly while flying along a zone border.
+    -- Walking into a cave does not change which pets you own.
+    --
+    -- Every provider that a zone change DOES affect declares it, and as of
+    -- this release the build fails if one reads the player's position
+    -- without declaring it. The check is better than the blanket.
     "PLAYER_LEVEL_UP",
-    "ZONE_CHANGED_NEW_AREA",
 }
+
+-- Built once from the list above rather than searched per call: this runs
+-- inside the loop over every provider, on every dispatched event.
+local universalEvents
+
+function CN.IsUniversalInvalidation(reason)
+    if reason == nil then
+        return true
+    end
+
+    if not universalEvents then
+        universalEvents = {}
+
+        for _, event in ipairs(CN.baseInvalidationEvents) do
+            universalEvents[event] = true
+        end
+    end
+
+    return universalEvents[reason] == true
+end
 
 -- IDEMPOTENT, so a provider registering after login can call it again.
 --

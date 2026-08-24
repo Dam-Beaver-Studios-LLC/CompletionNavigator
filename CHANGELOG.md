@@ -7,6 +7,121 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.60.0]
+
+A player reported that a quest they had handed in stayed on the list. It did,
+and the reason turned out to be a whole class of defect: something that can go
+out of date, with nothing able to tell it. This release is that class, found
+and closed â€” thirteen instances, plus the three things reported from play.
+
+### Fixed â€” reported from play
+
+- **A quest you handed in stayed on the list and on the route.** The provider
+  that reports nearly-finished quest objectives â€” "Kill Ten Rats: 1 more" â€”
+  reads the quest log and declared only bag events, and a provider that is not
+  named by an event is not invalidated at all. So the row survived the turn-in
+  until a bag update or a loading screen happened along. The build now fails
+  if a provider reads a system whose events it does not declare.
+- **The heads-up line could not be dragged.** It was the only frame in the
+  addon at the lowest strata â€” the arrow and the follow frame, which sit over
+  the world in exactly the same way, are both at the ordinary one â€” so
+  anything else on screen took the mouse first and all three of the actions
+  its own tooltip promised did nothing.
+- **The heads-up line has a way out on itself.** An **x** in its corner, shown
+  when the mouse is over the line, that turns it off rather than hiding it â€”
+  hiding would bring it back on the next refresh. `/cn hud` brings it back.
+
+### Fixed â€” the same class, found by audit
+
+- **A goal you finished never left the list**, and follow mode stuck on it. A
+  goal can be a quest, a mount, a pet, a toy, an achievement or a reputation,
+  and the provider declared one event: the zone change. Since follow mode
+  decides a stop is done by asking whether it is still on the list, this stuck
+  the route on something already completed until you crossed a zone boundary.
+- **"Invalidate everything" invalidated nothing.** Two events were on a list
+  whose comment says they "must invalidate EVERYTHING regardless of who
+  declared what". The list was only used to make sure those events were
+  subscribed; the ordinary per-provider filter was then applied to them like
+  any other. No provider declares `PLAYER_LEVEL_UP`, so levelling up reached
+  none of them. Four call sites passing a word that is not an event name
+  reached none of them either.
+- **The window redrew for six events and missed everything else** â€” a second
+  hand-written list, of the kind this project already records as fixed once.
+  In a city, where none of the six fire, looting a toy left "collect this toy"
+  on screen, and **dying did not show the corpse run**, which is the one thing
+  the addon weights above everything else. The list now comes from what the
+  providers themselves declare.
+- **A deferral that ran out never brought the thing back.** Right-click the
+  heads-up line to put a mount off for an hour, and an hour later it stayed
+  gone, while `/cn hidden` reported the deferral as expired â€” the addon
+  contradicting itself about its own state.
+- **A currency retired at the end of a season was recommended for ever.** The
+  store only ever grew, and nothing checked whether the client still lists a
+  currency â€” so "at cap, further earning is wasted" kept appearing, with a
+  fresh urgency bonus every weekly reset, for something that no longer exists.
+- **A crafting order still said it expired in six hours, six hours later.**
+  The one deadline-carrying provider that did not expire on its own.
+- **The subzone count froze the moment you entered a zone.** The provider
+  rebuilt on the event that fires when you discover one, and re-read the same
+  stored figure each time. And a zone finished this session was never recorded
+  as finished, so it sat at the top of "closest to done" reading nothing left.
+- **A character you deleted a month ago went on reordering today's list.**
+  Every recipe, reputation, title and profession that alt covered was ranked
+  down on the character you are actually playing, with the deleted one named
+  as the reason. The addon already has a staleness rule and states it plainly;
+  the suggestions honoured it and the scoring did not.
+- **A party member finishing a quest never stopped counting.** The answer
+  comes from their quest log, the client fires no event about it, and the
+  invalidation was subscribed to your own quest events â€” which never fire for
+  anybody else.
+- **A zone that refused flight before your Pathfinder unlock refused it for
+  ever.** Every route to that zone was costed at ground speed, roughly three
+  and a half times too slow, correctable only by flying back into the zone â€”
+  the one thing the wrong estimate discourages.
+- **A toy kept the travel cost it had in the zone you left**, because it was
+  the only located provider that did not watch for a zone change.
+- **Bumping the decorator counter reached nothing.** Three of its five callers
+  moved a number that is only read while a provider is already being rebuilt â€”
+  including the registry itself, whose own comment says a decorator
+  registering late must reach the rows that already exist.
+- **Appearances were the one scanned collection with no refresh at login**, so
+  anything collected on another character, or in a session where the addon was
+  not loaded, stayed uncounted until something transmoggable happened.
+
+### Changed
+
+- A tooltip no longer silently deletes a hover handler that was already there
+  â€” a trap invisible at the call site and dependent on the order two unrelated
+  lines happen to be written in.
+- Two exploration achievements whose zones share a name â€” retail has two
+  Nagrands and two Shadowmoon Valleys â€” no longer overwrite each other's
+  progress. The record is keyed on the map now, which cannot be duplicated.
+- A client that will not answer no longer overwrites what was scanned: a
+  refusal reads as zero, and zero is not a measurement.
+- The window's redraw and the ranking's rebuild are told apart. A reputation
+  tick marks things stale; it does not force twenty-three providers to drop
+  the cooldowns they declared. Pinning a goal still bypasses all of them,
+  because you are waiting for it.
+
+### Internal
+
+- Two build-time checks added: a provider must declare the events of every
+  system it reads, and no panel field may be cleared in a way a frame can
+  answer over.
+- The offline frame stub gained the ability to express a quest being handed
+  in, a mount being collected, a client that will not say where you are, a
+  frame's strata and movability, and where a region was actually anchored.
+  Six more entries in the running list of defects hidden by a stub more
+  forgiving than the client â€” including the one behind the report that opened
+  this release.
+- Thirty-one mutations added; two hundred and twenty-six now run and all are
+  killed.
+- An adversarial review of this release's own changes found eight more
+  defects in them, two of which were performance regressions this release
+  introduced: one path measured at three quarters of a frame, fired every five
+  seconds while questing. Both are fixed and both have mutations.
+
+
 ## [0.59.0]
 
 The largest accuracy pass since 0.54.0. Six things the addon was getting

@@ -246,18 +246,38 @@ UI.FadeIn = FadeIn
 -- "Rescan zones", "Filter types" and the priority cycler all had to be
 -- guessed at. This is the difference between a window a new player explores
 -- and one they close.
+-- IT COMPOSES, RATHER THAN REPLACING.
+--
+-- A frame that already had an `OnEnter` -- to show a close button, to
+-- highlight, to do anything on hover -- silently lost it the moment somebody
+-- gave it a tooltip, because `SetScript` replaces. That is a trap that is
+-- invisible at the call site and depends on the order two unrelated lines
+-- happen to be written in, which is not a property anybody can hold in their
+-- head. The heads-up line hit it within an hour of the close button being
+-- added.
 local function AttachTooltip(frame, tooltip)
     if not frame or not tooltip or not GameTooltip then
         return
     end
 
-    frame:SetScript("OnEnter", function(hovered)
+    local existingEnter = frame:GetScript("OnEnter")
+    local existingLeave = frame:GetScript("OnLeave")
+
+    frame:SetScript("OnEnter", function(hovered, ...)
+        if existingEnter then
+            existingEnter(hovered, ...)
+        end
+
         GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
         GameTooltip:SetText(tooltip, 1, 1, 1, 1, true)
         GameTooltip:Show()
     end)
 
-    frame:SetScript("OnLeave", function()
+    frame:SetScript("OnLeave", function(hovered, ...)
+        if existingLeave then
+            existingLeave(hovered, ...)
+        end
+
         GameTooltip:Hide()
     end)
 end
@@ -999,23 +1019,37 @@ function UI.Refresh()
 end
 
 -- Called from data events. Cheap when the window is closed.
-local lastRefresh = 0
 
+-- THE LAST EVENT OF A BURST IS THE ONE THAT MATTERS, AND IT WAS THE ONE
+-- BEING DROPPED.
+--
+-- This was a leading-edge throttle with no trailing run: inside two seconds
+-- of the last redraw, an event was discarded outright. Handing in a quest
+-- fires `QUEST_TURNED_IN`, `QUEST_REMOVED` and `QUEST_LOG_UPDATE` within the
+-- same second -- so the window redrew on the first, showing a list the
+-- providers had not rebuilt yet, and swallowed the rest. The quest stayed on
+-- screen until something unrelated happened more than two seconds later.
+--
+-- `CN.Debounce` answers the first event immediately and collapses the rest
+-- into one trailing run, which is the shape this always wanted. It is the
+-- same helper the reputation-tick handlers use, for the same reason.
 function UI.RequestRefresh()
     if not window or not window:IsShown() then
         return
     end
 
-    local now = time()
-
-    if now - lastRefresh < 2 then
-        return
-    end
-
-    lastRefresh = now
-
-    UI.Refresh()
+    CN.Debounce("UI.refresh", UI.refreshSeconds, function()
+        -- Re-checked, because the trailing run happens later and the player
+        -- may have closed the window in between.
+        if window and window:IsShown() then
+            UI.Refresh()
+        end
+    end)
 end
+
+-- Two seconds, matching the busiest provider's own cooldown: the trailing run
+-- has to land AFTER the rebuild it is meant to display.
+UI.refreshSeconds = 2
 
 ------------------------------------------------------------
 -- SHOW / HIDE
@@ -3246,7 +3280,7 @@ UI.RegisterTab{
 
             settings.priorityMode = modes[(currentIndex % #modes) + 1]
 
-            CN.InvalidateCandidates("mode")
+            CN.InvalidateCandidates()
 
             UI.Refresh()
         end, "How the ranking trades travel time against how much a thing is "
@@ -3833,19 +3867,69 @@ CN:OnLogin(function()
     end
 end)
 
--- Keep an open window current without polling.
-for _, event in ipairs({
-    "QUEST_TURNED_IN",
-    "QUEST_ACCEPTED",
-    "QUEST_REMOVED",
-    "UPDATE_FACTION",
-    "ZONE_CHANGED_NEW_AREA",
-    "MAJOR_FACTION_RENOWN_LEVEL_CHANGED",
-}) do
-    CN:RegisterEvent(event, function()
-        UI.RequestRefresh()
-    end)
+-- KEEP AN OPEN WINDOW CURRENT, FROM WHAT THE PROVIDERS ACTUALLY DECLARE.
+--
+-- This was a second hand-written list of six events -- the same "two lists,
+-- one of which nobody checked against the other" that Scoring.lua records as
+-- fixed for the invalidator, left standing here. The providers were being
+-- invalidated correctly and the window simply did not redraw.
+--
+-- Missing from the six: every collection event, achievements, criteria,
+-- currencies, bags, vignettes, lockouts and the vault. In a city, where none
+-- of the six fire, that meant using a mount from your bags left "collect this
+-- mount" on screen; looting a toy did the same; and DYING did not show the
+-- corpse run, which is the one objective the addon weights above everything
+-- else.
+--
+-- Asked of the registry instead, at login, when every provider has
+-- registered. There is no ticker: the refresh is debounced, so a burst costs
+-- one redraw.
+local function SubscribeToRefreshEvents()
+    local wanted = {}
+
+    for _, event in ipairs(CN.baseInvalidationEvents or {}) do
+        wanted[event] = true
+    end
+
+    for _, provider in pairs(CN.candidateProviders or {}) do
+        for event in pairs(provider.events or {}) do
+            wanted[event] = true
+        end
+    end
+
+    -- Two the providers cannot declare, because no provider is about them:
+    -- being dead changes the whole ranking through an adjuster, and the
+    -- reputation renown event is what the Warband tab reads.
+    wanted.PLAYER_DEAD  = true
+    wanted.PLAYER_ALIVE = true
+    wanted.PLAYER_UNGHOST = true
+    wanted.MAJOR_FACTION_RENOWN_LEVEL_CHANGED = true
+
+    local names = {}
+
+    for event in pairs(wanted) do
+        table.insert(names, event)
+    end
+
+    -- Sorted, so the registration order is the same on every login.
+    table.sort(names)
+
+    for _, event in ipairs(names) do
+        CN:RegisterEvent(event, function()
+            UI.RequestRefresh()
+        end)
+    end
+
+    UI.refreshEventCount = #names
+
+    return #names
 end
+
+UI.SubscribeToRefreshEvents = SubscribeToRefreshEvents
+
+CN:OnLogin(function()
+    SubscribeToRefreshEvents()
+end)
 
 ------------------------------------------------------------
 -- COMMANDS

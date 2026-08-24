@@ -548,6 +548,42 @@ CN.migrations = {
         end
     end,
 
+    -- 13 -> 14. Stamp every currency row with a serial older than any sweep.
+    --
+    -- `Currencies` now reports only rows the LAST sweep saw, so a currency
+    -- the client has stopped listing -- a retired season, an expansion
+    -- currency, one migrated to the Warband -- stops being recommended.
+    --
+    -- Rows written before this release carry no serial, and treating those as
+    -- current was the whole feature undone: a row the next scan will not
+    -- rewrite is exactly the row that will never gain one. Serial 0 is older
+    -- than the first sweep's 1, so an existing row is stale until a scan
+    -- confirms it -- and the login scan runs before anything reads this.
+    [13] = function(db)
+        db.characters = db.characters or {}
+
+        local stamped = 0
+
+        for _, character in pairs(db.characters) do
+            if type(character) == "table"
+                and type(character.currencies) == "table" then
+
+                for _, record in pairs(character.currencies) do
+                    if type(record) == "table" and record.serial == nil then
+                        record.serial = 0
+
+                        stamped = stamped + 1
+                    end
+                end
+            end
+        end
+
+        if stamped > 0 then
+            CN.DebugPrint("Marked " .. stamped .. " currency row(s) as "
+                .. "unconfirmed until the next scan.")
+        end
+    end,
+
     -- 7 -> 8. `questStatus` was a per-character fact kept in an account-wide
     -- table, which is two defects at once.
     --

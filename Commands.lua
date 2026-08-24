@@ -633,7 +633,7 @@ CN:RegisterCommand{
             if mode == requested then
                 settings.priorityMode = requested
 
-                CN.InvalidateCandidates("mode")
+                CN.InvalidateCandidates()
 
                 CN.PrintLine("Ranking weight set to |cffffc74f" .. requested .. "|r.")
                 CN.PrintLine("|cff8a8f96Weighting only; your type filters are "

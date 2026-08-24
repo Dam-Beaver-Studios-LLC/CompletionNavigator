@@ -457,12 +457,59 @@ function Filters.PruneExpired()
     return pruned
 end
 
-CN:OnLogin(function()
+-- A DEFERRAL THAT EXPIRES HAS TO WAKE SOMETHING UP.
+--
+-- Setting one invalidates the candidates -- `Objectives.lua` explains why, at
+-- length. Nothing fires when one runs out. Every provider consults
+-- `CN.IsDeferred` at BUILD time, so the deferral is baked into the cached
+-- list; and the providers a deferral is most often used on -- Mounts, Pets,
+-- Toys, Sets, Appearances -- are not volatile and subscribe only to their own
+-- collection events.
+--
+-- So: right-click the heads-up line to put a mount off for an hour, and an
+-- hour later it does not come back. `/cn hidden` reports the deferral as
+-- expired while the objective is still missing from the list, which is the
+-- addon contradicting itself about its own state.
+--
+-- A slow ticker, and only when it actually pruned something. Sixty seconds
+-- is well inside the resolution anybody defers anything at.
+Filters.pruneSeconds = 60
+
+local pruneTicker
+
+function Filters.StartPruneTicker()
+    if pruneTicker or not C_Timer or not C_Timer.NewTicker then
+        return false
+    end
+
+    pruneTicker = C_Timer.NewTicker(Filters.pruneSeconds, function()
+        -- Guarded: a repeating callback that throws is a repeating error box.
+        CN.Guard("Filters.PruneExpired", Filters.SweepExpired)
+    end)
+
+    return true
+end
+
+-- Prunes, and tells the ranking if anything came back. Split out so the
+-- ticker and the tests call the same thing.
+function Filters.SweepExpired()
     local pruned = Filters.PruneExpired()
 
     if pruned > 0 then
-        DebugPrint("Pruned " .. pruned .. " expired deferrals.")
+        DebugPrint("Pruned " .. pruned .. " expired deferral(s).")
+
+        -- Something is actionable again that was not a moment ago, which is
+        -- exactly what a deliberate invalidation means.
+        CN.InvalidateCandidates()
     end
+
+    return pruned
+end
+
+CN:OnLogin(function()
+    Filters.SweepExpired()
+
+    Filters.StartPruneTicker()
 end)
 
 ------------------------------------------------------------
@@ -655,7 +702,7 @@ function Filters.ApplyMode(name)
 
     settings.mode = name
 
-    CN.InvalidateCandidates("mode")
+    CN.InvalidateCandidates()
 
     return true, mode
 end
@@ -698,7 +745,7 @@ function Filters.ClearMode()
     settings.mode         = nil
     settings.modePrevious = nil
 
-    CN.InvalidateCandidates("mode")
+    CN.InvalidateCandidates()
 
     return true
 end

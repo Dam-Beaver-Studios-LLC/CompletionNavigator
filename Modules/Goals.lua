@@ -89,9 +89,13 @@ end
 function Goals.NoteChanged()
     Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
 
-    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
-
-    CN.InvalidateCandidates()
+    -- DELIBERATE: pinning or unpinning is the player acting, and no
+    -- provider's cooldown may delay it -- 0.57.0 records that seeing nothing
+    -- happen for two seconds reads as the feature being broken.
+    --
+    -- `NoteDecoratorsChanged` invalidates as well as bumping, so the second
+    -- call this used to make is now redundant.
+    CN.NoteDecoratorsChanged(true)
 end
 
 function Goals.IsGoal(objectiveType, id)
@@ -452,7 +456,29 @@ CN.RegisterCandidateProvider("Goals", function()
     end
 
     return candidates
-end, { events = { "ZONE_CHANGED_NEW_AREA" }, cooldown = 2 })
+end, {
+    -- THE EVENTS OF EVERY SYSTEM A GOAL CAN BE ABOUT.
+    --
+    -- `Goals.Plan` asks `CN.Explain` whether the goal is done, and a goal can
+    -- be a quest, a mount, a pet, a toy, an achievement or a reputation. This
+    -- declared one event -- the zone change -- so finishing the thing you had
+    -- pinned did not take it off the list: the row carries a completionValue
+    -- of six, so it stayed near the top of `/cn list` and on the route.
+    --
+    -- Worse, `Follow.Remaining` decides a stop is finished by asking whether
+    -- its objectives are still candidates, so follow mode stuck on a goal the
+    -- player had already completed until they crossed a zone boundary.
+    --
+    -- Same shape as the Inventory defect reported from play in 0.59.0, and
+    -- the reason the harness now checks this structurally.
+    events = {
+        "ZONE_CHANGED_NEW_AREA",
+        "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_ACCEPTED",
+        "NEW_MOUNT_ADDED", "NEW_PET_ADDED", "NEW_TOY_ADDED",
+        "ACHIEVEMENT_EARNED", "UPDATE_FACTION",
+    },
+    cooldown = 2,
+})
 
 ------------------------------------------------------------
 -- WEIGHTING

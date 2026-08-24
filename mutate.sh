@@ -1012,14 +1012,12 @@ mutate "Modules/Goals.lua" \
 
 
 mutate "Modules/Harvest.lua" \
-    "    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+    "    Harvest.unlockGeneration = Harvest.unlockGeneration + 1
 
-    if CN.InvalidateCandidates then
-        CN.InvalidateCandidates()
-    end" \
-    "    if false then
-        CN.InvalidateCandidates()
-    end" \
+    CN.NoteDecoratorsChanged()" \
+    "    Harvest.unlockGeneration = Harvest.unlockGeneration + 1
+
+    CN.InvalidateCandidates()" \
     "a harvested unlock never reaches the ranking"
 
 mutate "Modules/Inventory.lua" \
@@ -1039,17 +1037,13 @@ mutate "Modules/Session.lua" \
     "the journey estimate is frozen at the first sighting"
 
 mutate "Modules/Group.lua" \
-    "    local held = sharedCache[questID]
-
-    if held ~= nil then
-        return held
+    "    if held ~= nil and (Group.Now() - held.at) < Group.sharedCacheSeconds then
+        return held.value
     end" \
-    "    local held = nil
-
-    if held ~= nil then
-        return held
+    "    if held ~= nil then
+        return held.value
     end" \
-    "the shared-quest answer is asked of the client once per candidate"
+    "a party member finishing a quest never stops counting toward it"
 
 
 ############################################################
@@ -1103,9 +1097,7 @@ mutate "Scoring.lua" \
     "a contribution another provider has stopped making never goes away"
 
 mutate "Modules/Goals.lua" \
-    "    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
-
-    CN.InvalidateCandidates()
+    "    CN.NoteDecoratorsChanged(true)
 end" \
     "    CN.InvalidateCandidates()
 end" \
@@ -1580,6 +1572,227 @@ mutate "Modules/Navigation.lua" \
     "    if angle ~= angle or angle == math.huge or angle == -math.huge then" \
     "    if angle ~= angle then" \
     "an infinite bearing becomes a NaN on the arrow's ticker"
+
+############################################################
+# 0.60.0 -- everything that could go stale and had no way of being told
+############################################################
+
+mutate "Modules/Inventory.lua" \
+    "        \"BAG_UPDATE_DELAYED\", \"PLAYER_ENTERING_WORLD\",
+        \"QUEST_TURNED_IN\", \"QUEST_REMOVED\", \"QUEST_ACCEPTED\",
+        \"QUEST_LOG_UPDATE\"," \
+    "        \"BAG_UPDATE_DELAYED\", \"PLAYER_ENTERING_WORLD\"," \
+    "a quest you handed in stays on the list and on the route"
+
+# The declaration as it shipped for eleven releases: one event, for a provider
+# whose rows can be about six different systems.
+mutate "Modules/Goals.lua" \
+    "    events = {
+        \"ZONE_CHANGED_NEW_AREA\",
+        \"QUEST_TURNED_IN\", \"QUEST_REMOVED\", \"QUEST_ACCEPTED\",
+        \"NEW_MOUNT_ADDED\", \"NEW_PET_ADDED\", \"NEW_TOY_ADDED\",
+        \"ACHIEVEMENT_EARNED\", \"UPDATE_FACTION\",
+    }," \
+    "    events = { \"ZONE_CHANGED_NEW_AREA\" }," \
+    "a goal you finished never leaves the list, and follow mode sticks on it"
+
+mutate "Modules/Toys.lua" \
+    "    events = { \"NEW_TOY_ADDED\", \"MERCHANT_SHOW\", \"ZONE_CHANGED_NEW_AREA\" }" \
+    "    events = { \"NEW_TOY_ADDED\", \"MERCHANT_SHOW\" }" \
+    "a toy keeps the travel cost it had in the zone you left"
+
+mutate "Scoring.lua" \
+    "    return universalEvents[reason] == true" \
+    "    return false" \
+    "the events that must reach every provider reach none of them"
+
+mutate "Scoring.lua" \
+    "        if universal or not provider.events or provider.events[reason] then" \
+    "        if not reason or not provider.events or provider.events[reason] then" \
+    "levelling up invalidates nothing at all"
+
+mutate "Scoring.lua" \
+    "            CN.NoteDecoratorsChanged(true)" \
+    "            CN.decoratorGeneration = CN.decoratorGeneration + 1" \
+    "a decorator registered late never reaches the rows already built"
+
+mutate "Modules/Filters.lua" \
+    "        -- Something is actionable again that was not a moment ago, which is
+        -- exactly what a deliberate invalidation means.
+        CN.InvalidateCandidates()" \
+    "        local told = nil" \
+    "a deferral that runs out never brings the objective back"
+
+mutate "Modules/Currencies.lua" \
+    "        if record.capped and IsCurrent(record, character) then" \
+    "        if record.capped then" \
+    "a currency retired two seasons ago is still recommended"
+
+mutate "Modules/Currencies.lua" \
+    "    return record.serial == CurrentSerial(character)" \
+    "    return true" \
+    "every currency the store has ever held is reported as current"
+
+mutate "Modules/Group.lua" \
+    "    if held ~= nil and (Group.Now() - held.at) < Group.sharedCacheSeconds then
+        return held.value
+    end" \
+    "    if held ~= nil then
+        return held.value
+    end" \
+    "a party member finishing a quest never stops counting toward it"
+
+mutate "Modules/Warband.lua" \
+    "        if age and age > alts.staleDays then
+            return 0, nil
+        end" \
+    "        if false then
+            return 0, nil
+        end" \
+    "a character deleted a month ago still reorders today's list"
+
+mutate "Modules/Travel.lua" \
+    "        if (time() - (held.at or 0)) > (Travel.flyableDenialDays * 86400) then
+            return nil
+        end" \
+    "        if false then
+            return nil
+        end" \
+    "a zone that refused flight before your unlock refuses it for ever"
+
+mutate "Modules/Travel.lua" \
+    "    FlightMemory()[mapID] = { flyable = false, at = time() }" \
+    "    FlightMemory()[mapID] = false" \
+    "a flight refusal is recorded with no way to tell how old it is"
+
+mutate "Modules/Exploration.lua" \
+    "        if RefreshCurrentZone() then
+            CN.InvalidateProvider(\"Exploration\")
+        end" \
+    "        local refreshed = nil" \
+    "the subzone count is frozen from the moment you enter the zone"
+
+mutate "Modules/Exploration.lua" \
+    "    record.completed = (done and done >= criteria) or nil" \
+    "    record.completed = nil" \
+    "a zone you finished sits at the top of the list reading zero left"
+
+mutate "Modules/Orders.lua" \
+    "    volatile = true,
+    cooldown = 30," \
+    "    cooldown = 30," \
+    "a crafting order still says it expires in six hours, six hours later"
+
+mutate "Modules/Hud.lua" \
+    "    frame:SetFrameStrata(\"MEDIUM\")" \
+    "    frame:SetFrameStrata(\"BACKGROUND\")" \
+    "the heads-up line sits below everything and cannot be clicked"
+
+mutate "Modules/Hud.lua" \
+    "        Hud.SetEnabled(false)
+
+        CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
+    "        frame:Hide()
+
+        CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
+    "the x hides the heads-up line and the next refresh brings it back"
+
+mutate "UI.lua" \
+    "    local existingEnter = frame:GetScript(\"OnEnter\")" \
+    "    local existingEnter = nil" \
+    "attaching a tooltip silently deletes the hover handler already there"
+
+mutate "UI.lua" \
+    "    for _, provider in pairs(CN.candidateProviders or {}) do
+        for event in pairs(provider.events or {}) do
+            wanted[event] = true
+        end
+    end" \
+    "    for _, provider in pairs({}) do
+        for event in pairs(provider.events or {}) do
+            wanted[event] = true
+        end
+    end" \
+    "the window redraws for six events and misses everything else"
+
+# The regressions the 0.60.0 review found in 0.60.0's own changes.
+
+mutate "Scoring.lua" \
+    "    CN.InvalidateCandidates(nil, not deliberate)" \
+    "    CN.InvalidateCandidates()" \
+    "a reputation tick forces every provider to drop its own cooldown"
+
+mutate "Scoring.lua" \
+    "    local deliberate = (not patient)
+        and ((reason == nil) or CN.deliberateEvents[reason] or false)" \
+    "    local deliberate = (reason == nil) or CN.deliberateEvents[reason] or false" \
+    "asking for patience is ignored"
+
+mutate "Scoring.lua" \
+    "CN.baseInvalidationEvents = {" \
+    "CN.baseInvalidationEvents = {
+    \"ZONE_CHANGED_NEW_AREA\"," \
+    "walking into a cave rebuilds every provider in the addon"
+
+mutate "Modules/Travel.lua" \
+    "    if FlightMemory()[mapID] == true then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "a cave revokes a zone's flight permission for a day"
+
+mutate "Modules/Exploration.lua" \
+    "        if record.name and string.lower(record.name) == needle then" \
+    "        if record.name and string.find(string.lower(record.name), needle, 1, true) then" \
+    "two zones with the same name overwrite each other's progress"
+
+mutate "Modules/Exploration.lua" \
+    "            if mapID then
+                record.mapID = mapID
+            end" \
+    "            if false then
+                record.mapID = mapID
+            end" \
+    "which of two zones with one name you get is a coin toss every time"
+
+mutate "Modules/Exploration.lua" \
+    "    if not criteria or criteria <= 0 then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "a client that will not answer overwrites a scanned count with nothing"
+
+mutate "Database.lua" \
+    "                    if type(record) == \"table\" and record.serial == nil then
+                        record.serial = 0" \
+    "                    if false then
+                        record.serial = 0" \
+    "every currency stored before this release is assumed still to exist"
+
+mutate "Modules/Warband.lua" \
+    "            return Freshest(holders), table.concat(holders, \", \"),
+                \"already knows it\"" \
+    "            return holders[1], table.concat(holders, \", \"),
+                \"already knows it\"" \
+    "a deleted alt sorting first hides a character you played yesterday"
+
+mutate "Modules/Hud.lua" \
+    "    frame.label:SetPoint(\"TOPRIGHT\", -(inset + Hud.closeWidth), -inset)" \
+    "    frame.label:SetPoint(\"TOPRIGHT\", -inset, -inset)" \
+    "the close button sits on top of the end of the objective's name"
+
+mutate "Modules/Appearances.lua" \
+    "        if held and (held.collected or 0) > collected then
+            collected = held.collected
+        end" \
+    "        if false then
+            collected = held.collected
+        end" \
+    "a wardrobe that has not loaded erases every scanned count"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

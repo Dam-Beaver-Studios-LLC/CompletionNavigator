@@ -41,6 +41,83 @@ Currencies.CharacterStore = CharacterStore
 -- SCAN
 ------------------------------------------------------------
 
+-- A CURRENCY THE CLIENT HAS STOPPED LISTING IS NOT A CURRENCY YOU CAN SPEND.
+--
+-- `GetCurrencyList` is the currency UI tree, and things leave it: a season
+-- ends, an expansion's currency is retired, one migrates to the Warband. The
+-- store was write-only-grow -- one row per currency ever seen, never removed
+-- -- and `Capped` walked all of it with no freshness check.
+--
+-- So a currency capped last season kept producing "at cap, further earning is
+-- wasted until you spend it", every five seconds because this provider is
+-- volatile, with a fresh weekly urgency bonus every reset, for the life of
+-- the character. The player could not satisfy it and could not make it go
+-- away except with `/cn ignore`.
+--
+-- A serial per sweep is the whole fix: a row the last scan did not see is not
+-- reported on. `lastSeen` was already being written and was read by nothing
+-- anywhere in the tree, which is why this went unnoticed.
+-- PERSISTED, or a reload would leave every row looking stale until the login
+-- scan ran -- a window in which `/cn currencies` would report nothing at all.
+local function Serials()
+    local account = CN.Account()
+
+    account.currencyScans = account.currencyScans or {}
+
+    return account.currencyScans
+end
+
+-- The counter for a NAMED character, not always the logged-in one.
+--
+-- `Capped`, `WeeklyUnfilled` and `Summary` all accept an explicit character,
+-- and comparing an alt's rows against the current character's counter filters
+-- every one of them out -- so an alt would have reported zero capped
+-- currencies and zero unfilled weeklies. No caller passes one today, which is
+-- the only reason this was latent rather than live.
+local function KeyFor(character)
+    if character and character.name and character.realm then
+        return character.name .. "-" .. character.realm
+    end
+
+    return CN.characterKey or "?"
+end
+
+local function CurrentSerial(character)
+    return Serials()[KeyFor(character)] or 0
+end
+
+local function NextSerial()
+    local key = CN.characterKey or "?"
+
+    Serials()[key] = CurrentSerial() + 1
+
+    return Serials()[key]
+end
+
+Currencies.CurrentSerial = CurrentSerial
+
+-- A row is current if the last sweep saw it.
+--
+-- NO EXEMPTION FOR ROWS WRITTEN BEFORE SERIALS EXISTED. The first version of
+-- this treated an unstamped row as current "until the next scan rewrites
+-- them" -- and the premise is wrong in exactly the case the feature is for:
+-- a currency the client no longer lists is precisely the row the next scan
+-- will NOT rewrite. So the fix worked on a fresh install and did nothing at
+-- all for anybody upgrading, which is everybody.
+--
+-- Migration 13 stamps every existing row with serial 0 instead, and the
+-- login scan then stamps the live ones with 1. Nothing is lost: the login
+-- scan runs before anything reads this.
+local function IsCurrent(record, character)
+    if type(record) ~= "table" then
+        return false
+    end
+
+    return record.serial == CurrentSerial(character)
+end
+
+Currencies.IsCurrent = IsCurrent
+
 function Currencies.Scan()
     local names = NameStore()
     local mine  = CharacterStore()
@@ -48,6 +125,8 @@ function Currencies.Scan()
     if not mine then
         return 0, 0, 0
     end
+
+    local serial = NextSerial()
 
     local seen, atCap, weeklyRemaining = 0, 0, 0
 
@@ -76,6 +155,9 @@ function Currencies.Scan()
                 accountWide       = currency.accountWide or nil,
                 weeklyRemaining   = weeklyLeft,
                 lastSeen          = time(),
+
+                -- Which sweep last saw it. See the header above `Scan`.
+                serial            = serial,
             }
 
             seen = seen + 1
@@ -103,7 +185,7 @@ function Currencies.Capped(character)
     local capped = {}
 
     for currencyID, record in pairs(CharacterStore(character) or {}) do
-        if record.capped then
+        if record.capped and IsCurrent(record, character) then
             table.insert(capped, {
                 currencyID = currencyID,
                 name       = NameStore()[currencyID],
@@ -135,7 +217,8 @@ function Currencies.WeeklyUnfilled(character)
     local rows = {}
 
     for currencyID, record in pairs(CharacterStore(character) or {}) do
-        if record.weeklyRemaining and record.weeklyRemaining > 0 then
+        if record.weeklyRemaining and record.weeklyRemaining > 0
+            and IsCurrent(record, character) then
             table.insert(rows, {
                 currencyID = currencyID,
                 name       = NameStore()[currencyID],

@@ -63,6 +63,46 @@ end
 -- Answers for any objective type that has per-character state. Returns
 -- bestKey, detail, scope -- where scope explains why the answer is what it
 -- is, including "account-wide" meaning the question does not apply.
+-- THE FRESHEST HOLDER, NOT THE ALPHABETICALLY FIRST.
+--
+-- `WhoKnows` and `WhoHas` both `table.sort` their holders, which orders them
+-- by realm-name and by nothing else. So a deleted alt called Aaathrowaway
+-- came back ahead of a main called Zeddicus -- and `Suitability`, seeing a
+-- record older than the staleness line, dropped the penalty entirely and
+-- concluded nobody was better suited, when somebody played yesterday already
+-- knew the thing.
+--
+-- Fresh first, then alphabetical among equals so the answer is stable.
+local function Freshest(holders)
+    if type(holders) ~= "table" or #holders == 0 then
+        return nil
+    end
+
+    local alts = CN:GetModule("Alts")
+
+    if not alts or not alts.AgeDays then
+        return holders[1]
+    end
+
+    local best, bestAge
+
+    for _, key in ipairs(holders) do
+        local record = CN.db and CN.db.characters and CN.db.characters[key]
+
+        -- No stamp is not evidence of age. Treated as fresh, which is the
+        -- fail-open direction -- the same one `Suitability` takes.
+        local age = alts.AgeDays(record) or 0
+
+        if not best or age < bestAge then
+            best, bestAge = key, age
+        end
+    end
+
+    return best or holders[1]
+end
+
+Warband.Freshest = Freshest
+
 function Warband.WhoShould(objectiveType, id)
     local types = CN.objectiveTypes
 
@@ -96,7 +136,8 @@ function Warband.WhoShould(objectiveType, id)
         local holders = module.WhoKnows(id)
 
         if #holders > 0 then
-            return holders[1], table.concat(holders, ", "), "already knows it"
+            return Freshest(holders), table.concat(holders, ", "),
+                "already knows it"
         end
 
         return nil, nil, "no character knows this recipe"
@@ -112,7 +153,8 @@ function Warband.WhoShould(objectiveType, id)
         local holders = module.WhoHas(id)
 
         if #holders > 0 then
-            return holders[1], table.concat(holders, ", "), "already earned it"
+            return Freshest(holders), table.concat(holders, ", "),
+                "already earned it"
         end
 
         return nil, nil, "no character has this title"
@@ -161,6 +203,34 @@ function Warband.Suitability(objectiveType, id)
 
     if bestKey == CN.characterKey then
         return 1, "you are the best character for this"
+    end
+
+    -- A MONTH-OLD SNAPSHOT IS NOT A CHARACTER.
+    --
+    -- `Alts.staleDays` is 30 and its own comment says why: "Past this, the
+    -- addon still reports what it knows but stops making suggestions from
+    -- it. A month-old snapshot of a character is a description of a character
+    -- that may not exist in that form any more."
+    --
+    -- The Alts SUGGESTION path honoured that. This one -- which silently
+    -- reorders every list, at a penalty of two points, and prints the other
+    -- character's name as the reason -- did not, and nothing anywhere in the
+    -- addon ever removes a character from the roster. So a deleted or
+    -- transferred alt went on penalising every recipe, reputation, title and
+    -- profession objective it used to cover, for ever.
+    local alts = CN:GetModule("Alts")
+
+    -- `CN.db.characters[key]`, not `CN.Characters()[key]`: that function
+    -- returns an ITERATOR, and Alts.lua reads the table directly for the same
+    -- reason two files over.
+    local record = CN.db and CN.db.characters and CN.db.characters[bestKey]
+
+    if alts and alts.AgeDays and alts.staleDays then
+        local age = alts.AgeDays(record)
+
+        if age and age > alts.staleDays then
+            return 0, nil
+        end
     end
 
     return -2, bestKey .. " is better suited (" .. tostring(detail) .. ")"
@@ -419,7 +489,10 @@ for _, event in ipairs({
 }) do
     CN:RegisterEvent(event, function()
         CN.Debounce("Warband.suitability", Warband.rescanSeconds, function()
-            CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+            -- Both halves: the counter defeats the identical-list reuse,
+            -- and the invalidation is what makes a clean provider rebuild so
+            -- that reuse is reached at all. See CN.NoteDecoratorsChanged.
+            CN.NoteDecoratorsChanged()
         end)
     end)
 end

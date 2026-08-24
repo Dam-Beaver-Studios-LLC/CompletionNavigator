@@ -835,11 +835,7 @@ Harvest.unlockCap = 6
 function Harvest.NoteUnlocksChanged()
     Harvest.unlockGeneration = Harvest.unlockGeneration + 1
 
-    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
-
-    if CN.InvalidateCandidates then
-        CN.InvalidateCandidates()
-    end
+    CN.NoteDecoratorsChanged()
 end
 
 function Harvest.UnlockIndex()

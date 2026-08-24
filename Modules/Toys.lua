@@ -187,7 +187,13 @@ CN.RegisterCandidateProvider("Toys", function()
     CN.providerTruncation["Toys"] = { considered = considered, dropped = dropped }
 
     return candidates
-end, { events = { "NEW_TOY_ADDED", "MERCHANT_SHOW" }, cooldown = 5 })
+end, { -- `ZONE_CHANGED_NEW_AREA` because this provider reads the player's
+    -- position: it scores a vendor in your current zone above one elsewhere
+    -- and stamps a travel cost from where you are standing. Every other
+    -- located provider declares it; this was the only one that did not, so
+    -- flying to another zone left every toy carrying the cost it had in the
+    -- last one until a loading screen happened along.
+    events = { "NEW_TOY_ADDED", "MERCHANT_SHOW", "ZONE_CHANGED_NEW_AREA" }, cooldown = 5 })
 
 ------------------------------------------------------------
 -- ELIGIBILITY

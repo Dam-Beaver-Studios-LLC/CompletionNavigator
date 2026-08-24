@@ -934,6 +934,21 @@ end
 
 Travel.FlightMemory = FlightMemory
 
+-- A "NO" HAS A SHELF LIFE. A "YES" DOES NOT.
+--
+-- Whether a zone allows flying is not a stable fact in the direction that
+-- matters: flight is disabled before the campaign or Pathfinder unlock and
+-- enabled after, and disabled inside some quest phases. The store was
+-- permanent and account-wide, and `CanFly` treats a remembered `false` as
+-- authoritative -- so a player who quested through a zone before unlocking
+-- flight had every route TO that zone costed at ground speed, a factor of
+-- roughly three and a half, for ever. It corrected only by physically flying
+-- back into the zone, which is the one thing the wrong estimate discourages.
+--
+-- A remembered `true` cannot go stale the same way: a zone that allowed
+-- flying does not stop.
+Travel.flyableDenialDays = 1
+
 function Travel.NoteFlyable(mapID)
     if not mapID or not IsFlyableArea then
         return nil
@@ -945,9 +960,65 @@ function Travel.NoteFlyable(mapID)
         return nil
     end
 
-    FlightMemory()[mapID] = flyable and true or false
+    if flyable then
+        FlightMemory()[mapID] = true
 
-    return flyable
+        return true
+    end
+
+    -- A STORED "YES" IS NOT OVERWRITTEN BY A "NO".
+    --
+    -- The header above says a remembered `true` cannot go stale, and then
+    -- this branch overwrote one unconditionally. `NoteWhereWeAre` calls this
+    -- on every zone change and every loading screen, and `IsFlyableArea`
+    -- answers for the SPOT the player is standing on -- a cave, a quest
+    -- vehicle, an indoor phase -- while `CN.GetPlayerPosition` still reports
+    -- the parent map. So walking into a cave in a zone you have flown around
+    -- turned a permanent permission into a day-long refusal, and every route
+    -- to that zone was costed at ground speed until it expired.
+    --
+    -- Flight being unavailable where you are standing is not evidence that
+    -- it is unavailable in the zone. Flight being available IS evidence that
+    -- it is available, which is why the two are not symmetrical.
+    if FlightMemory()[mapID] == true then
+        return false
+    end
+
+    -- Stamped, so the refusal can expire. A bare `false` cannot.
+    FlightMemory()[mapID] = { flyable = false, at = time() }
+
+    return false
+end
+
+-- What the store says about a map: true, false, or nil for "no longer worth
+-- believing". Old entries are bare booleans; a bare `false` from before this
+-- version has no stamp and is treated as expired, which is the safe
+-- direction -- it costs one `IsFlyableArea` call the next time the player
+-- stands there.
+function Travel.RememberedFlyable(mapID)
+    local held = mapID and FlightMemory()[mapID]
+
+    if held == true then
+        return true
+    end
+
+    if type(held) == "table" then
+        if held.flyable then
+            return true
+        end
+
+        if (time() - (held.at or 0)) > (Travel.flyableDenialDays * 86400) then
+            return nil
+        end
+
+        return false
+    end
+
+    if held == false then
+        return nil
+    end
+
+    return nil
 end
 
 function Travel.CanFly(mapID)
@@ -956,8 +1027,9 @@ function Travel.CanFly(mapID)
     end
 
     -- What is REMEMBERED about the destination beats what is true where the
-    -- player happens to be standing.
-    local remembered = mapID and FlightMemory()[mapID]
+    -- player happens to be standing -- as long as it is still worth
+    -- believing. See `Travel.RememberedFlyable`.
+    local remembered = Travel.RememberedFlyable(mapID)
 
     if remembered == false then
         return false
@@ -2103,6 +2175,8 @@ CN:RegisterEvent("PLAYER_CONTROL_GAINED", function()
             local mapID = CN.GetPlayerPosition()
 
             if mapID then
+                -- A plain `true`: observing yourself flying there is the
+                -- strongest evidence there is, and a yes does not expire.
                 FlightMemory()[mapID] = true
             end
         end

@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.59.0'
+$script:ToolkitVersion = '0.60.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.59.0"
-CN.dbVersion   = 13
+CN.version     = "0.60.0"
+CN.dbVersion   = 14
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -1580,6 +1580,42 @@ CN.migrations = {
                 CN.DebugPrint("Dropped two write-only fields from "
                     .. trimmed .. " quest name record(s).")
             end
+        end
+    end,
+
+    -- 13 -> 14. Stamp every currency row with a serial older than any sweep.
+    --
+    -- `Currencies` now reports only rows the LAST sweep saw, so a currency
+    -- the client has stopped listing -- a retired season, an expansion
+    -- currency, one migrated to the Warband -- stops being recommended.
+    --
+    -- Rows written before this release carry no serial, and treating those as
+    -- current was the whole feature undone: a row the next scan will not
+    -- rewrite is exactly the row that will never gain one. Serial 0 is older
+    -- than the first sweep's 1, so an existing row is stale until a scan
+    -- confirms it -- and the login scan runs before anything reads this.
+    [13] = function(db)
+        db.characters = db.characters or {}
+
+        local stamped = 0
+
+        for _, character in pairs(db.characters) do
+            if type(character) == "table"
+                and type(character.currencies) == "table" then
+
+                for _, record in pairs(character.currencies) do
+                    if type(record) == "table" and record.serial == nil then
+                        record.serial = 0
+
+                        stamped = stamped + 1
+                    end
+                end
+            end
+        end
+
+        if stamped > 0 then
+            CN.DebugPrint("Marked " .. stamped .. " currency row(s) as "
+                .. "unconfirmed until the next scan.")
         end
     end,
 
@@ -4339,7 +4375,7 @@ CN:RegisterCommand{
             if mode == requested then
                 settings.priorityMode = requested
 
-                CN.InvalidateCandidates("mode")
+                CN.InvalidateCandidates()
 
                 CN.PrintLine("Ranking weight set to |cffffc74f" .. requested .. "|r.")
                 CN.PrintLine("|cff8a8f96Weighting only; your type filters are "
@@ -6005,7 +6041,24 @@ function CN.RegisterCandidateDecorator(name, decorator)
 
         CN.candidateDecorators[name] = decorator
 
-        CN.decoratorGeneration = CN.decoratorGeneration + 1
+        -- THROUGH THE FUNCTION THAT DOES BOTH HALVES. Bumping alone leaves a
+        -- clean provider clean, so the late-registered decorator this header
+        -- is about still never reached the rows it was registered for.
+        --
+        -- `CN.NoteDecoratorsChanged` is defined further down this file, so it
+        -- is called through `CN` rather than captured -- decorators register
+        -- at load time, long after this function is defined and long after
+        -- that one is.
+        -- DELIBERATE, because this is a structural change rather than a
+        -- ticker: it happens a handful of times at load, when there is
+        -- nothing built to rebuild, and the header above promises that a
+        -- decorator registering LATE still reaches rows that already exist.
+        -- A cooldown must not be allowed to break that promise.
+        if CN.NoteDecoratorsChanged then
+            CN.NoteDecoratorsChanged(true)
+        else
+            CN.decoratorGeneration = CN.decoratorGeneration + 1
+        end
 
         return true
     end
@@ -6086,16 +6139,61 @@ end
 -- cooldown exists to stop a chatty *event* from causing work; it must never
 -- delay something the player just did on purpose. Pinning a goal and not
 -- seeing it appear for two seconds reads as the feature being broken.
-function CN.InvalidateCandidates(reason)
+-- SOME EVENTS ARE THE PLAYER DOING SOMETHING, NOT A TICKER.
+--
+-- A cooldown exists to stop a chatty event from causing work. It must never
+-- delay something the player just did, and these are the events that ARE
+-- something the player just did: they fire once, at the moment of the act,
+-- and never in bursts.
+--
+-- This mattered most for `QUEST_TURNED_IN`. Handing in a quest fires it in a
+-- burst with `QUEST_REMOVED` and `QUEST_LOG_UPDATE`, the window redrew on the
+-- first of them -- before the quest provider's two-second cooldown had let it
+-- rebuild -- and the rest of the burst was swallowed by the window's own
+-- throttle. So the quest you had just handed in stayed on the route and in
+-- the list until some unrelated event arrived more than two seconds later.
+-- Reported from play: "the completion of a quest does not appear to remove it
+-- from the journey or queue."
+CN.deliberateEvents = {
+    QUEST_TURNED_IN   = true,
+    QUEST_ACCEPTED    = true,
+    QUEST_REMOVED     = true,
+    NEW_MOUNT_ADDED   = true,
+    NEW_PET_ADDED     = true,
+    NEW_TOY_ADDED     = true,
+    ACHIEVEMENT_EARNED = true,
+    PLAYER_LEVEL_UP   = true,
+}
+
+-- `patient` = mark stale, but do not bypass anybody's cooldown. See the note
+-- in `CN.NoteDecoratorsChanged`, which is the caller that needs it.
+function CN.InvalidateCandidates(reason, patient)
     local hit = 0
 
+    -- No reason at all is a deliberate act by definition -- a command, a
+    -- pinned goal, a scan the player asked for.
+    local deliberate = (not patient)
+        and ((reason == nil) or CN.deliberateEvents[reason] or false)
+
+    -- THE "INVALIDATE EVERYTHING" LIST DID NOTHING.
+    --
+    -- `CN.baseInvalidationEvents` says, in its own comment, that these events
+    -- "must invalidate EVERYTHING regardless of who declared what: the world
+    -- changed under all of them." It was only ever used to make sure those
+    -- events were SUBSCRIBED; the filter below then applied the ordinary
+    -- per-provider test to them like any other. No provider declares
+    -- `PLAYER_LEVEL_UP`, so levelling up invalidated exactly zero of the
+    -- twenty-three -- and a reason that is not an event name at all, which
+    -- four call sites pass as `"mode"`, invalidated zero as well.
+    local universal = CN.IsUniversalInvalidation(reason)
+
     for name, provider in pairs(CN.candidateProviders) do
-        if not reason or not provider.events or provider.events[reason] then
+        if universal or not provider.events or provider.events[reason] then
             local entry = Entry(name)
 
             entry.dirty = true
 
-            if not reason then
+            if deliberate then
                 entry.urgent = true
             end
 
@@ -6115,6 +6213,70 @@ function CN.InvalidateCandidates(reason)
                 .. " provider" .. (hit == 1 and "" or "s"))
         end
     end
+end
+
+-- BUMPING THE COUNTER IS HALF OF IT.
+--
+-- `CN.decoratorGeneration` is read in exactly one place -- inside the branch
+-- that runs when a provider is ALREADY being rebuilt -- so bumping it cannot
+-- make a clean provider re-decorate. It defeats the identical-list shortcut;
+-- it does not defeat the not-stale-at-all shortcut.
+--
+-- Harvest and Goals both discovered this and both call `InvalidateCandidates`
+-- alongside the bump. Warband, Session and the decorator registry did not, so
+-- three of the five callers were bumping a counter nothing would read. The
+-- registry's own header names "a decorator registering late" as the case it
+-- exists for, and that case did not work.
+--
+-- One function, so the next caller cannot get it half right.
+-- `deliberate` = the player just did this, so no cooldown may delay it.
+--
+-- Pinning a goal is deliberate: 0.57.0 records that "pinning a goal and not
+-- seeing it appear for two seconds reads as the feature being broken". A
+-- reputation tick is not.
+function CN.NoteDecoratorsChanged(deliberate)
+    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+
+    -- MARKED STALE, NOT MARKED URGENT.
+    --
+    -- `InvalidateCandidates()` with no reason means a deliberate act by the
+    -- player, and a deliberate act bypasses every provider's cooldown. That
+    -- is right for pinning a goal and wrong for this: the decorator set
+    -- changing means "re-decorate on the next rebuild", not "rebuild all
+    -- twenty-three now, ignoring what each of them said it costs".
+    --
+    -- The difference is not small. Measured on the retail-scale fixture, the
+    -- urgent form is 12.3 ms -- more than twice a forced cold rebuild, and
+    -- three quarters of a 60fps frame -- because the generation bump also
+    -- defeats the identical-list reuse, so every provider re-decorates every
+    -- candidate. `Warband` calls this from `UPDATE_FACTION`, debounced to
+    -- once every five seconds, which fires continuously while questing. The
+    -- debounce added in 0.59.0 capped how OFTEN; this would have raised what
+    -- each one costs by about eight hundred times.
+    CN.InvalidateCandidates(nil, not deliberate)
+
+    return CN.decoratorGeneration
+end
+
+-- Whether a provider's cached list is waiting to be rebuilt.
+--
+-- Readable because "did that event reach anybody" is a question the suite
+-- has to be able to ask -- `CN.baseInvalidationEvents` claimed to reach every
+-- provider and reached none, for eleven releases, with nothing able to see
+-- it.
+-- Whether a provider has been told to ignore its own cooldown. Readable for
+-- the same reason `IsProviderDirty` is: "did that reach anybody, and did it
+-- cost more than it should have" are both questions the suite has to ask.
+function CN.IsProviderUrgent(name)
+    local held = providerCache[name]
+
+    return held ~= nil and held.urgent == true
+end
+
+function CN.IsProviderDirty(name)
+    local held = providerCache[name]
+
+    return (held == nil) or (held.dirty == true)
 end
 
 function CN.InvalidateProvider(name, urgent)
@@ -6153,10 +6315,40 @@ end
 -- empty.
 CN.baseInvalidationEvents = {
     -- Events that must invalidate EVERYTHING regardless of who declared
-    -- what: the world changed under all of them.
+    -- what: the world changed under all of them. `CN.IsUniversalInvalidation`
+    -- is what makes that true -- see the note in `InvalidateCandidates`.
+    --
+    -- ONE ENTRY, NOT TWO. `ZONE_CHANGED_NEW_AREA` was on this list and, once
+    -- the list started meaning something, reached all twenty-three providers
+    -- at 2.5 ms a time -- for an event the client fires on every indoor and
+    -- sub-area transition and repeatedly while flying along a zone border.
+    -- Walking into a cave does not change which pets you own.
+    --
+    -- Every provider that a zone change DOES affect declares it, and as of
+    -- this release the build fails if one reads the player's position
+    -- without declaring it. The check is better than the blanket.
     "PLAYER_LEVEL_UP",
-    "ZONE_CHANGED_NEW_AREA",
 }
+
+-- Built once from the list above rather than searched per call: this runs
+-- inside the loop over every provider, on every dispatched event.
+local universalEvents
+
+function CN.IsUniversalInvalidation(reason)
+    if reason == nil then
+        return true
+    end
+
+    if not universalEvents then
+        universalEvents = {}
+
+        for _, event in ipairs(CN.baseInvalidationEvents) do
+            universalEvents[event] = true
+        end
+    end
+
+    return universalEvents[reason] == true
+end
 
 -- IDEMPOTENT, so a provider registering after login can call it again.
 --
@@ -9424,18 +9616,38 @@ UI.FadeIn = FadeIn
 -- "Rescan zones", "Filter types" and the priority cycler all had to be
 -- guessed at. This is the difference between a window a new player explores
 -- and one they close.
+-- IT COMPOSES, RATHER THAN REPLACING.
+--
+-- A frame that already had an `OnEnter` -- to show a close button, to
+-- highlight, to do anything on hover -- silently lost it the moment somebody
+-- gave it a tooltip, because `SetScript` replaces. That is a trap that is
+-- invisible at the call site and depends on the order two unrelated lines
+-- happen to be written in, which is not a property anybody can hold in their
+-- head. The heads-up line hit it within an hour of the close button being
+-- added.
 local function AttachTooltip(frame, tooltip)
     if not frame or not tooltip or not GameTooltip then
         return
     end
 
-    frame:SetScript("OnEnter", function(hovered)
+    local existingEnter = frame:GetScript("OnEnter")
+    local existingLeave = frame:GetScript("OnLeave")
+
+    frame:SetScript("OnEnter", function(hovered, ...)
+        if existingEnter then
+            existingEnter(hovered, ...)
+        end
+
         GameTooltip:SetOwner(hovered, "ANCHOR_RIGHT")
         GameTooltip:SetText(tooltip, 1, 1, 1, 1, true)
         GameTooltip:Show()
     end)
 
-    frame:SetScript("OnLeave", function()
+    frame:SetScript("OnLeave", function(hovered, ...)
+        if existingLeave then
+            existingLeave(hovered, ...)
+        end
+
         GameTooltip:Hide()
     end)
 end
@@ -10177,23 +10389,37 @@ function UI.Refresh()
 end
 
 -- Called from data events. Cheap when the window is closed.
-local lastRefresh = 0
 
+-- THE LAST EVENT OF A BURST IS THE ONE THAT MATTERS, AND IT WAS THE ONE
+-- BEING DROPPED.
+--
+-- This was a leading-edge throttle with no trailing run: inside two seconds
+-- of the last redraw, an event was discarded outright. Handing in a quest
+-- fires `QUEST_TURNED_IN`, `QUEST_REMOVED` and `QUEST_LOG_UPDATE` within the
+-- same second -- so the window redrew on the first, showing a list the
+-- providers had not rebuilt yet, and swallowed the rest. The quest stayed on
+-- screen until something unrelated happened more than two seconds later.
+--
+-- `CN.Debounce` answers the first event immediately and collapses the rest
+-- into one trailing run, which is the shape this always wanted. It is the
+-- same helper the reputation-tick handlers use, for the same reason.
 function UI.RequestRefresh()
     if not window or not window:IsShown() then
         return
     end
 
-    local now = time()
-
-    if now - lastRefresh < 2 then
-        return
-    end
-
-    lastRefresh = now
-
-    UI.Refresh()
+    CN.Debounce("UI.refresh", UI.refreshSeconds, function()
+        -- Re-checked, because the trailing run happens later and the player
+        -- may have closed the window in between.
+        if window and window:IsShown() then
+            UI.Refresh()
+        end
+    end)
 end
+
+-- Two seconds, matching the busiest provider's own cooldown: the trailing run
+-- has to land AFTER the rebuild it is meant to display.
+UI.refreshSeconds = 2
 
 ------------------------------------------------------------
 -- SHOW / HIDE
@@ -12424,7 +12650,7 @@ UI.RegisterTab{
 
             settings.priorityMode = modes[(currentIndex % #modes) + 1]
 
-            CN.InvalidateCandidates("mode")
+            CN.InvalidateCandidates()
 
             UI.Refresh()
         end, "How the ranking trades travel time against how much a thing is "
@@ -13011,19 +13237,69 @@ CN:OnLogin(function()
     end
 end)
 
--- Keep an open window current without polling.
-for _, event in ipairs({
-    "QUEST_TURNED_IN",
-    "QUEST_ACCEPTED",
-    "QUEST_REMOVED",
-    "UPDATE_FACTION",
-    "ZONE_CHANGED_NEW_AREA",
-    "MAJOR_FACTION_RENOWN_LEVEL_CHANGED",
-}) do
-    CN:RegisterEvent(event, function()
-        UI.RequestRefresh()
-    end)
+-- KEEP AN OPEN WINDOW CURRENT, FROM WHAT THE PROVIDERS ACTUALLY DECLARE.
+--
+-- This was a second hand-written list of six events -- the same "two lists,
+-- one of which nobody checked against the other" that Scoring.lua records as
+-- fixed for the invalidator, left standing here. The providers were being
+-- invalidated correctly and the window simply did not redraw.
+--
+-- Missing from the six: every collection event, achievements, criteria,
+-- currencies, bags, vignettes, lockouts and the vault. In a city, where none
+-- of the six fire, that meant using a mount from your bags left "collect this
+-- mount" on screen; looting a toy did the same; and DYING did not show the
+-- corpse run, which is the one objective the addon weights above everything
+-- else.
+--
+-- Asked of the registry instead, at login, when every provider has
+-- registered. There is no ticker: the refresh is debounced, so a burst costs
+-- one redraw.
+local function SubscribeToRefreshEvents()
+    local wanted = {}
+
+    for _, event in ipairs(CN.baseInvalidationEvents or {}) do
+        wanted[event] = true
+    end
+
+    for _, provider in pairs(CN.candidateProviders or {}) do
+        for event in pairs(provider.events or {}) do
+            wanted[event] = true
+        end
+    end
+
+    -- Two the providers cannot declare, because no provider is about them:
+    -- being dead changes the whole ranking through an adjuster, and the
+    -- reputation renown event is what the Warband tab reads.
+    wanted.PLAYER_DEAD  = true
+    wanted.PLAYER_ALIVE = true
+    wanted.PLAYER_UNGHOST = true
+    wanted.MAJOR_FACTION_RENOWN_LEVEL_CHANGED = true
+
+    local names = {}
+
+    for event in pairs(wanted) do
+        table.insert(names, event)
+    end
+
+    -- Sorted, so the registration order is the same on every login.
+    table.sort(names)
+
+    for _, event in ipairs(names) do
+        CN:RegisterEvent(event, function()
+            UI.RequestRefresh()
+        end)
+    end
+
+    UI.refreshEventCount = #names
+
+    return #names
 end
+
+UI.SubscribeToRefreshEvents = SubscribeToRefreshEvents
+
+CN:OnLogin(function()
+    SubscribeToRefreshEvents()
+end)
 
 ------------------------------------------------------------
 -- COMMANDS
@@ -21842,7 +22118,13 @@ CN.RegisterCandidateProvider("Toys", function()
     CN.providerTruncation["Toys"] = { considered = considered, dropped = dropped }
 
     return candidates
-end, { events = { "NEW_TOY_ADDED", "MERCHANT_SHOW" }, cooldown = 5 })
+end, { -- `ZONE_CHANGED_NEW_AREA` because this provider reads the player's
+    -- position: it scores a vendor in your current zone above one elsewhere
+    -- and stamps a travel cost from where you are standing. Every other
+    -- located provider declares it; this was the only one that did not, so
+    -- flying to another zone left every toy carrying the cost it had in the
+    -- last one until a loading screen happened along.
+    events = { "NEW_TOY_ADDED", "MERCHANT_SHOW", "ZONE_CHANGED_NEW_AREA" }, cooldown = 5 })
 
 ------------------------------------------------------------
 -- ELIGIBILITY
@@ -21968,10 +22250,29 @@ function Appearances.Scan()
     local categories = Blizzard.GetAppearanceCategories()
 
     for _, category in ipairs(categories) do
+        local held = store[category.categoryID]
+
+        -- A ZERO FROM A CLIENT THAT HAS NOT LOADED THE WARDROBE IS NOT A
+        -- MEASUREMENT.
+        --
+        -- `GetCategoryCollectedCount` falls back to zero when the collection
+        -- is not ready, and this scan now runs at login -- so overwriting a
+        -- scanned "184 of 260" with "0 of 260" would make the addon
+        -- recommend every slot the player has already finished, until
+        -- something transmoggable happened to fire the collection event.
+        --
+        -- Keeping the higher of the two is the honest reading: a count can
+        -- only go up, and a refusal reads as zero.
+        local collected = category.collected or 0
+
+        if held and (held.collected or 0) > collected then
+            collected = held.collected
+        end
+
         store[category.categoryID] = {
             categoryID = category.categoryID,
             name       = category.name,
-            collected  = category.collected,
+            collected  = collected,
             total      = category.total,
             lastSeen   = time(),
         }
@@ -22120,6 +22421,22 @@ end, { events = { "TRANSMOG_COLLECTION_UPDATED" }, cooldown = 10 })
 Appearances.rescanSeconds = 600
 
 local lastRescan = 0
+
+-- AND ONCE AT LOGIN, which is the one path this store did not have.
+--
+-- Every other setup-scanned store -- currencies, reputations, titles,
+-- professions, quests -- refreshes itself on login. This one relied on
+-- `TRANSMOG_COLLECTION_UPDATED`, which covers appearances collected while
+-- this session is running and nothing collected on another character or in a
+-- session where the addon was not loaded. A player who logs in and loots
+-- nothing transmoggable never fires it, and the counts stay as they were
+-- whenever `/cn setup` last ran -- which is the "silently rotted" state this
+-- file's own header describes.
+CN:OnLogin(function()
+    -- Protected and quiet: this is a journal walk, and a client that refuses
+    -- it must not take the login sequence with it.
+    CN.Guard("Appearances.Scan", Appearances.Scan)
+end)
 
 CN:RegisterEvent("TRANSMOG_COLLECTION_UPDATED", function()
     local now = time()
@@ -23880,11 +24197,7 @@ Harvest.unlockCap = 6
 function Harvest.NoteUnlocksChanged()
     Harvest.unlockGeneration = Harvest.unlockGeneration + 1
 
-    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
-
-    if CN.InvalidateCandidates then
-        CN.InvalidateCandidates()
-    end
+    CN.NoteDecoratorsChanged()
 end
 
 function Harvest.UnlockIndex()
@@ -24496,6 +24809,46 @@ end
 -- Answers for any objective type that has per-character state. Returns
 -- bestKey, detail, scope -- where scope explains why the answer is what it
 -- is, including "account-wide" meaning the question does not apply.
+-- THE FRESHEST HOLDER, NOT THE ALPHABETICALLY FIRST.
+--
+-- `WhoKnows` and `WhoHas` both `table.sort` their holders, which orders them
+-- by realm-name and by nothing else. So a deleted alt called Aaathrowaway
+-- came back ahead of a main called Zeddicus -- and `Suitability`, seeing a
+-- record older than the staleness line, dropped the penalty entirely and
+-- concluded nobody was better suited, when somebody played yesterday already
+-- knew the thing.
+--
+-- Fresh first, then alphabetical among equals so the answer is stable.
+local function Freshest(holders)
+    if type(holders) ~= "table" or #holders == 0 then
+        return nil
+    end
+
+    local alts = CN:GetModule("Alts")
+
+    if not alts or not alts.AgeDays then
+        return holders[1]
+    end
+
+    local best, bestAge
+
+    for _, key in ipairs(holders) do
+        local record = CN.db and CN.db.characters and CN.db.characters[key]
+
+        -- No stamp is not evidence of age. Treated as fresh, which is the
+        -- fail-open direction -- the same one `Suitability` takes.
+        local age = alts.AgeDays(record) or 0
+
+        if not best or age < bestAge then
+            best, bestAge = key, age
+        end
+    end
+
+    return best or holders[1]
+end
+
+Warband.Freshest = Freshest
+
 function Warband.WhoShould(objectiveType, id)
     local types = CN.objectiveTypes
 
@@ -24529,7 +24882,8 @@ function Warband.WhoShould(objectiveType, id)
         local holders = module.WhoKnows(id)
 
         if #holders > 0 then
-            return holders[1], table.concat(holders, ", "), "already knows it"
+            return Freshest(holders), table.concat(holders, ", "),
+                "already knows it"
         end
 
         return nil, nil, "no character knows this recipe"
@@ -24545,7 +24899,8 @@ function Warband.WhoShould(objectiveType, id)
         local holders = module.WhoHas(id)
 
         if #holders > 0 then
-            return holders[1], table.concat(holders, ", "), "already earned it"
+            return Freshest(holders), table.concat(holders, ", "),
+                "already earned it"
         end
 
         return nil, nil, "no character has this title"
@@ -24594,6 +24949,34 @@ function Warband.Suitability(objectiveType, id)
 
     if bestKey == CN.characterKey then
         return 1, "you are the best character for this"
+    end
+
+    -- A MONTH-OLD SNAPSHOT IS NOT A CHARACTER.
+    --
+    -- `Alts.staleDays` is 30 and its own comment says why: "Past this, the
+    -- addon still reports what it knows but stops making suggestions from
+    -- it. A month-old snapshot of a character is a description of a character
+    -- that may not exist in that form any more."
+    --
+    -- The Alts SUGGESTION path honoured that. This one -- which silently
+    -- reorders every list, at a penalty of two points, and prints the other
+    -- character's name as the reason -- did not, and nothing anywhere in the
+    -- addon ever removes a character from the roster. So a deleted or
+    -- transferred alt went on penalising every recipe, reputation, title and
+    -- profession objective it used to cover, for ever.
+    local alts = CN:GetModule("Alts")
+
+    -- `CN.db.characters[key]`, not `CN.Characters()[key]`: that function
+    -- returns an ITERATOR, and Alts.lua reads the table directly for the same
+    -- reason two files over.
+    local record = CN.db and CN.db.characters and CN.db.characters[bestKey]
+
+    if alts and alts.AgeDays and alts.staleDays then
+        local age = alts.AgeDays(record)
+
+        if age and age > alts.staleDays then
+            return 0, nil
+        end
     end
 
     return -2, bestKey .. " is better suited (" .. tostring(detail) .. ")"
@@ -24852,7 +25235,10 @@ for _, event in ipairs({
 }) do
     CN:RegisterEvent(event, function()
         CN.Debounce("Warband.suitability", Warband.rescanSeconds, function()
-            CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+            -- Both halves: the counter defeats the identical-list reuse,
+            -- and the invalidation is what makes a clean provider rebuild so
+            -- that reuse is reached at all. See CN.NoteDecoratorsChanged.
+            CN.NoteDecoratorsChanged()
         end)
     end)
 end
@@ -25483,6 +25869,83 @@ Currencies.CharacterStore = CharacterStore
 -- SCAN
 ------------------------------------------------------------
 
+-- A CURRENCY THE CLIENT HAS STOPPED LISTING IS NOT A CURRENCY YOU CAN SPEND.
+--
+-- `GetCurrencyList` is the currency UI tree, and things leave it: a season
+-- ends, an expansion's currency is retired, one migrates to the Warband. The
+-- store was write-only-grow -- one row per currency ever seen, never removed
+-- -- and `Capped` walked all of it with no freshness check.
+--
+-- So a currency capped last season kept producing "at cap, further earning is
+-- wasted until you spend it", every five seconds because this provider is
+-- volatile, with a fresh weekly urgency bonus every reset, for the life of
+-- the character. The player could not satisfy it and could not make it go
+-- away except with `/cn ignore`.
+--
+-- A serial per sweep is the whole fix: a row the last scan did not see is not
+-- reported on. `lastSeen` was already being written and was read by nothing
+-- anywhere in the tree, which is why this went unnoticed.
+-- PERSISTED, or a reload would leave every row looking stale until the login
+-- scan ran -- a window in which `/cn currencies` would report nothing at all.
+local function Serials()
+    local account = CN.Account()
+
+    account.currencyScans = account.currencyScans or {}
+
+    return account.currencyScans
+end
+
+-- The counter for a NAMED character, not always the logged-in one.
+--
+-- `Capped`, `WeeklyUnfilled` and `Summary` all accept an explicit character,
+-- and comparing an alt's rows against the current character's counter filters
+-- every one of them out -- so an alt would have reported zero capped
+-- currencies and zero unfilled weeklies. No caller passes one today, which is
+-- the only reason this was latent rather than live.
+local function KeyFor(character)
+    if character and character.name and character.realm then
+        return character.name .. "-" .. character.realm
+    end
+
+    return CN.characterKey or "?"
+end
+
+local function CurrentSerial(character)
+    return Serials()[KeyFor(character)] or 0
+end
+
+local function NextSerial()
+    local key = CN.characterKey or "?"
+
+    Serials()[key] = CurrentSerial() + 1
+
+    return Serials()[key]
+end
+
+Currencies.CurrentSerial = CurrentSerial
+
+-- A row is current if the last sweep saw it.
+--
+-- NO EXEMPTION FOR ROWS WRITTEN BEFORE SERIALS EXISTED. The first version of
+-- this treated an unstamped row as current "until the next scan rewrites
+-- them" -- and the premise is wrong in exactly the case the feature is for:
+-- a currency the client no longer lists is precisely the row the next scan
+-- will NOT rewrite. So the fix worked on a fresh install and did nothing at
+-- all for anybody upgrading, which is everybody.
+--
+-- Migration 13 stamps every existing row with serial 0 instead, and the
+-- login scan then stamps the live ones with 1. Nothing is lost: the login
+-- scan runs before anything reads this.
+local function IsCurrent(record, character)
+    if type(record) ~= "table" then
+        return false
+    end
+
+    return record.serial == CurrentSerial(character)
+end
+
+Currencies.IsCurrent = IsCurrent
+
 function Currencies.Scan()
     local names = NameStore()
     local mine  = CharacterStore()
@@ -25490,6 +25953,8 @@ function Currencies.Scan()
     if not mine then
         return 0, 0, 0
     end
+
+    local serial = NextSerial()
 
     local seen, atCap, weeklyRemaining = 0, 0, 0
 
@@ -25518,6 +25983,9 @@ function Currencies.Scan()
                 accountWide       = currency.accountWide or nil,
                 weeklyRemaining   = weeklyLeft,
                 lastSeen          = time(),
+
+                -- Which sweep last saw it. See the header above `Scan`.
+                serial            = serial,
             }
 
             seen = seen + 1
@@ -25545,7 +26013,7 @@ function Currencies.Capped(character)
     local capped = {}
 
     for currencyID, record in pairs(CharacterStore(character) or {}) do
-        if record.capped then
+        if record.capped and IsCurrent(record, character) then
             table.insert(capped, {
                 currencyID = currencyID,
                 name       = NameStore()[currencyID],
@@ -25577,7 +26045,8 @@ function Currencies.WeeklyUnfilled(character)
     local rows = {}
 
     for currencyID, record in pairs(CharacterStore(character) or {}) do
-        if record.weeklyRemaining and record.weeklyRemaining > 0 then
+        if record.weeklyRemaining and record.weeklyRemaining > 0
+            and IsCurrent(record, character) then
             table.insert(rows, {
                 currencyID = currencyID,
                 name       = NameStore()[currencyID],
@@ -26458,7 +26927,36 @@ end
 
 -- The exploration achievement matching the zone the player is standing in,
 -- matched on name because no API maps a UiMapID to its achievement.
+-- THE MAP FIRST, THE NAME ONLY AS A FALLBACK.
+--
+-- This was a substring match over an UNORDERED walk of every exploration
+-- achievement the account has, returning the first hit. Retail has two zones
+-- called Nagrand and two called Shadowmoon Valley, each with its own "Explore
+-- ..." achievement -- both contain the needle, and which one came back was
+-- arbitrary and could differ between sessions.
+--
+-- That was cosmetic while nothing wrote through it. As of this release
+-- `RefreshCurrentZone` DOES write through it, so finishing Draenor's Nagrand
+-- would stamp `completed = true` on Outland's record, which then vanishes
+-- from the list permanently -- only a full `/cn explorescan` rewrites it, and
+-- nothing runs one on its own.
+--
+-- So: the map id, recorded when the record is next refreshed, is the key.
+-- The name match survives as the way a record acquires its map id the first
+-- time, and is now exact rather than a substring.
 function Exploration.ForCurrentZone()
+    local mapID = CN.GetPlayerPosition()
+
+    local store = Store()
+
+    if mapID then
+        for _, record in pairs(store) do
+            if record.mapID == mapID then
+                return record
+            end
+        end
+    end
+
     local zone = GetZoneText and GetZoneText()
 
     if not zone or zone == "" then
@@ -26467,8 +26965,17 @@ function Exploration.ForCurrentZone()
 
     local needle = string.lower(zone)
 
-    for _, record in pairs(Store()) do
-        if record.name and string.find(string.lower(record.name), needle, 1, true) then
+    -- EXACT, not a substring: "Nagrand" is a substring of "Explore Nagrand"
+    -- and of nothing else useful, but "Explore Shadowmoon Valley" contains
+    -- the needle for both of the zones with that name.
+    for _, record in pairs(store) do
+        if record.name and string.lower(record.name) == needle then
+            -- Learned, so the ambiguity is resolved once rather than every
+            -- time -- and resolved by the map, which cannot be duplicated.
+            if mapID then
+                record.mapID = mapID
+            end
+
             return record
         end
     end
@@ -26524,17 +27031,66 @@ end, { events = { "CRITERIA_UPDATE", "ZONE_CHANGED_NEW_AREA" } })
 -- EVENTS
 ------------------------------------------------------------
 
-CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
-    -- Discovering a subzone fires criteria updates; the Achievements module
-    -- already throttles those, so only refresh the exploration view.
+-- REFRESH IT WHEN IT CHANGES, NOT ONLY WHEN YOU ARRIVE.
+--
+-- The provider declared `CRITERIA_UPDATE` -- which is exactly the event that
+-- fires when you discover a subzone -- and rebuilt on it, reading the same
+-- persisted record it had read on entering the zone. So "3 subzones left"
+-- was frozen at 3 for as long as the player explored, and only moved when
+-- they left the zone and came back.
+--
+-- Throttled, because a discovery fires several criteria updates in a row and
+-- this is a client call per zone. `CN.Debounce` answers the first
+-- immediately, which is the one the player is watching for.
+Exploration.refreshSeconds = 2
+
+local function RefreshCurrentZone()
     local record = Exploration.ForCurrentZone()
 
-    if record then
-        local done, criteria = Blizzard.GetAchievementProgress(record.achievementID)
-
-        record.done     = done
-        record.criteria = criteria
+    if not record then
+        return false
     end
+
+    local done, criteria = Blizzard.GetAchievementProgress(record.achievementID)
+
+    -- NOT OVER GOOD DATA WITH NOTHING.
+    --
+    -- `GetAchievementProgress` answers `0, 0` when the criteria API is
+    -- unavailable, which is a refusal rather than a measurement -- and this
+    -- writes straight into the persisted store. Overwriting a scanned "9
+    -- criteria, 4 done" with "0 of 0" loses the record and makes the zone
+    -- disappear from the list.
+    if not criteria or criteria <= 0 then
+        return false
+    end
+
+    record.done     = done
+    record.criteria = criteria
+
+    -- AND WRITE `completed`, which nothing did.
+    --
+    -- `Exploration.Closest` filters on `not record.completed` and sorts by
+    -- what is left, ascending -- so a zone finished this session sat at the
+    -- top of that list reading "0 left" for ever, because the only writer of
+    -- the flag was the full scan.
+    -- SET AND CLEARED, both. A patch that adds a subzone to a zone you had
+    -- finished must be able to un-finish it; a flag that only ever goes one
+    -- way is a flag that is wrong for the rest of the account's life.
+    record.completed = (done and done >= criteria) or nil
+
+    return true
+end
+
+Exploration.RefreshCurrentZone = RefreshCurrentZone
+
+CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", RefreshCurrentZone)
+
+CN:RegisterEvent("CRITERIA_UPDATE", function()
+    CN.Debounce("Exploration.criteria", Exploration.refreshSeconds, function()
+        if RefreshCurrentZone() then
+            CN.InvalidateProvider("Exploration")
+        end
+    end)
 end)
 
 ------------------------------------------------------------
@@ -27076,12 +27632,59 @@ function Filters.PruneExpired()
     return pruned
 end
 
-CN:OnLogin(function()
+-- A DEFERRAL THAT EXPIRES HAS TO WAKE SOMETHING UP.
+--
+-- Setting one invalidates the candidates -- `Objectives.lua` explains why, at
+-- length. Nothing fires when one runs out. Every provider consults
+-- `CN.IsDeferred` at BUILD time, so the deferral is baked into the cached
+-- list; and the providers a deferral is most often used on -- Mounts, Pets,
+-- Toys, Sets, Appearances -- are not volatile and subscribe only to their own
+-- collection events.
+--
+-- So: right-click the heads-up line to put a mount off for an hour, and an
+-- hour later it does not come back. `/cn hidden` reports the deferral as
+-- expired while the objective is still missing from the list, which is the
+-- addon contradicting itself about its own state.
+--
+-- A slow ticker, and only when it actually pruned something. Sixty seconds
+-- is well inside the resolution anybody defers anything at.
+Filters.pruneSeconds = 60
+
+local pruneTicker
+
+function Filters.StartPruneTicker()
+    if pruneTicker or not C_Timer or not C_Timer.NewTicker then
+        return false
+    end
+
+    pruneTicker = C_Timer.NewTicker(Filters.pruneSeconds, function()
+        -- Guarded: a repeating callback that throws is a repeating error box.
+        CN.Guard("Filters.PruneExpired", Filters.SweepExpired)
+    end)
+
+    return true
+end
+
+-- Prunes, and tells the ranking if anything came back. Split out so the
+-- ticker and the tests call the same thing.
+function Filters.SweepExpired()
     local pruned = Filters.PruneExpired()
 
     if pruned > 0 then
-        DebugPrint("Pruned " .. pruned .. " expired deferrals.")
+        DebugPrint("Pruned " .. pruned .. " expired deferral(s).")
+
+        -- Something is actionable again that was not a moment ago, which is
+        -- exactly what a deliberate invalidation means.
+        CN.InvalidateCandidates()
     end
+
+    return pruned
+end
+
+CN:OnLogin(function()
+    Filters.SweepExpired()
+
+    Filters.StartPruneTicker()
 end)
 
 ------------------------------------------------------------
@@ -27274,7 +27877,7 @@ function Filters.ApplyMode(name)
 
     settings.mode = name
 
-    CN.InvalidateCandidates("mode")
+    CN.InvalidateCandidates()
 
     return true, mode
 end
@@ -27317,7 +27920,7 @@ function Filters.ClearMode()
     settings.mode         = nil
     settings.modePrevious = nil
 
-    CN.InvalidateCandidates("mode")
+    CN.InvalidateCandidates()
 
     return true
 end
@@ -29130,9 +29733,13 @@ end
 function Goals.NoteChanged()
     Goals.zoneGeneration = (Goals.zoneGeneration or 0) + 1
 
-    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
-
-    CN.InvalidateCandidates()
+    -- DELIBERATE: pinning or unpinning is the player acting, and no
+    -- provider's cooldown may delay it -- 0.57.0 records that seeing nothing
+    -- happen for two seconds reads as the feature being broken.
+    --
+    -- `NoteDecoratorsChanged` invalidates as well as bumping, so the second
+    -- call this used to make is now redundant.
+    CN.NoteDecoratorsChanged(true)
 end
 
 function Goals.IsGoal(objectiveType, id)
@@ -29493,7 +30100,29 @@ CN.RegisterCandidateProvider("Goals", function()
     end
 
     return candidates
-end, { events = { "ZONE_CHANGED_NEW_AREA" }, cooldown = 2 })
+end, {
+    -- THE EVENTS OF EVERY SYSTEM A GOAL CAN BE ABOUT.
+    --
+    -- `Goals.Plan` asks `CN.Explain` whether the goal is done, and a goal can
+    -- be a quest, a mount, a pet, a toy, an achievement or a reputation. This
+    -- declared one event -- the zone change -- so finishing the thing you had
+    -- pinned did not take it off the list: the row carries a completionValue
+    -- of six, so it stayed near the top of `/cn list` and on the route.
+    --
+    -- Worse, `Follow.Remaining` decides a stop is finished by asking whether
+    -- its objectives are still candidates, so follow mode stuck on a goal the
+    -- player had already completed until they crossed a zone boundary.
+    --
+    -- Same shape as the Inventory defect reported from play in 0.59.0, and
+    -- the reason the harness now checks this structurally.
+    events = {
+        "ZONE_CHANGED_NEW_AREA",
+        "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_ACCEPTED",
+        "NEW_MOUNT_ADDED", "NEW_PET_ADDED", "NEW_TOY_ADDED",
+        "ACHIEVEMENT_EARNED", "UPDATE_FACTION",
+    },
+    cooldown = 2,
+})
 
 ------------------------------------------------------------
 -- WEIGHTING
@@ -33438,7 +34067,9 @@ function Session.NoteDurationsChanged()
     -- anything already on the list, and `/cn mode fastest`'s second lever
     -- stayed inert. `CN.decoratorGeneration` is the only thing that defeats
     -- that shortcut; Goals and Harvest already use it.
-    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+    -- Both halves. See CN.NoteDecoratorsChanged: bumping the counter alone
+    -- cannot make a provider that is not already stale re-decorate.
+    CN.NoteDecoratorsChanged()
 end
 
 function Session.TypicalSeconds(objectiveType)
@@ -37634,6 +38265,16 @@ Group.sharedBonusCap       = 0.45
 local sharedCache = {}
 local unitCache   = nil
 
+-- How long an answer about somebody else's quest log is worth trusting. See
+-- the header inside `SharedWith`.
+Group.sharedCacheSeconds = 30
+
+-- The client's fractional clock where it exists, wall clock otherwise. Split
+-- out so a test can move it.
+function Group.Now()
+    return (GetTime and GetTime()) or (time and time()) or 0
+end
+
 function Group.ForgetShared()
     sharedCache = {}
     unitCache   = nil
@@ -37699,10 +38340,26 @@ function Group.SharedWith(questID)
         return nil
     end
 
+    -- BOUNDED BY AGE, BECAUSE NO EVENT CAN INVALIDATE THIS.
+    --
+    -- The answer comes from `C_QuestLog.IsUnitOnQuest(unit, questID)` -- a
+    -- question about somebody ELSE'S quest log -- and the client fires no
+    -- event when a party member accepts or hands one in. The invalidation
+    -- below subscribes to `QUEST_ACCEPTED` and `QUEST_TURNED_IN`, which fire
+    -- only for the player, so it never cleared this at all.
+    --
+    -- Four people in your group finish the quest and stay grouped: your list
+    -- kept the shared-work multiplier and `/cn why` kept saying "4 others
+    -- here are on this quest" until somebody left the party.
+    --
+    -- There is no event to wait for, so the honest answer is a short life
+    -- rather than a claim of coverage. Thirty seconds is far cheaper than the
+    -- per-candidate cost this cache exists to avoid and far fresher than
+    -- "until the roster changes".
     local held = sharedCache[questID]
 
-    if held ~= nil then
-        return held
+    if held ~= nil and (Group.Now() - held.at) < Group.sharedCacheSeconds then
+        return held.value
     end
 
     local sharing = 0
@@ -37720,7 +38377,7 @@ function Group.SharedWith(questID)
         end
     end
 
-    sharedCache[questID] = sharing
+    sharedCache[questID] = { value = sharing, at = Group.Now() }
 
     return sharing
 end
@@ -37942,8 +38599,12 @@ for _, event in ipairs({
     end)
 end
 
--- AND WHEN SOMEBODY'S QUEST LOG CHANGES, which is the other thing that can
--- change the answer. Held across ranking passes otherwise: the cache exists
+-- AND WHEN YOUR OWN QUEST LOG CHANGES.
+--
+-- Not theirs: the client fires no event for another unit's quest log, which
+-- is why the cache above has a life rather than an invalidation. This still
+-- earns its place -- accepting a quest yourself is the moment you start
+-- asking whether the group is on it. Held across ranking passes otherwise: the cache exists
 -- because a forty-person raid is forty client calls per quest, and clearing
 -- it on the event that triggers the re-rank would mean it never hit.
 for _, event in ipairs({ "QUEST_ACCEPTED", "QUEST_TURNED_IN" }) do
@@ -38725,7 +39386,23 @@ CN.RegisterCandidateProvider("Inventory", function()
 
     return candidates
 end, {
-    events   = { "BAG_UPDATE_DELAYED", "PLAYER_ENTERING_WORLD" },
+    -- THE QUEST EVENTS, because this provider reads the quest log.
+    --
+    -- `Inventory.NearlyDone` walks `GetQuestLogEntries` and emits a row per
+    -- nearly-finished objective -- "Test Quest Alpha: 1 more" -- and the
+    -- declaration named only bag events. `InvalidateCandidates` SKIPS a
+    -- provider that has an events table and was not named, so handing a quest
+    -- in did not touch these rows at all: the quest stayed on the list and in
+    -- the route until a bag update or a loading screen happened along.
+    --
+    -- Reported from play, and the reason the lint below this file exists: a
+    -- provider must declare the events of every system it reads, not of the
+    -- system it is named after.
+    events   = {
+        "BAG_UPDATE_DELAYED", "PLAYER_ENTERING_WORLD",
+        "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_ACCEPTED",
+        "QUEST_LOG_UPDATE",
+    },
     cooldown = 5,
 })
 
@@ -40496,6 +41173,21 @@ end
 
 Travel.FlightMemory = FlightMemory
 
+-- A "NO" HAS A SHELF LIFE. A "YES" DOES NOT.
+--
+-- Whether a zone allows flying is not a stable fact in the direction that
+-- matters: flight is disabled before the campaign or Pathfinder unlock and
+-- enabled after, and disabled inside some quest phases. The store was
+-- permanent and account-wide, and `CanFly` treats a remembered `false` as
+-- authoritative -- so a player who quested through a zone before unlocking
+-- flight had every route TO that zone costed at ground speed, a factor of
+-- roughly three and a half, for ever. It corrected only by physically flying
+-- back into the zone, which is the one thing the wrong estimate discourages.
+--
+-- A remembered `true` cannot go stale the same way: a zone that allowed
+-- flying does not stop.
+Travel.flyableDenialDays = 1
+
 function Travel.NoteFlyable(mapID)
     if not mapID or not IsFlyableArea then
         return nil
@@ -40507,9 +41199,65 @@ function Travel.NoteFlyable(mapID)
         return nil
     end
 
-    FlightMemory()[mapID] = flyable and true or false
+    if flyable then
+        FlightMemory()[mapID] = true
 
-    return flyable
+        return true
+    end
+
+    -- A STORED "YES" IS NOT OVERWRITTEN BY A "NO".
+    --
+    -- The header above says a remembered `true` cannot go stale, and then
+    -- this branch overwrote one unconditionally. `NoteWhereWeAre` calls this
+    -- on every zone change and every loading screen, and `IsFlyableArea`
+    -- answers for the SPOT the player is standing on -- a cave, a quest
+    -- vehicle, an indoor phase -- while `CN.GetPlayerPosition` still reports
+    -- the parent map. So walking into a cave in a zone you have flown around
+    -- turned a permanent permission into a day-long refusal, and every route
+    -- to that zone was costed at ground speed until it expired.
+    --
+    -- Flight being unavailable where you are standing is not evidence that
+    -- it is unavailable in the zone. Flight being available IS evidence that
+    -- it is available, which is why the two are not symmetrical.
+    if FlightMemory()[mapID] == true then
+        return false
+    end
+
+    -- Stamped, so the refusal can expire. A bare `false` cannot.
+    FlightMemory()[mapID] = { flyable = false, at = time() }
+
+    return false
+end
+
+-- What the store says about a map: true, false, or nil for "no longer worth
+-- believing". Old entries are bare booleans; a bare `false` from before this
+-- version has no stamp and is treated as expired, which is the safe
+-- direction -- it costs one `IsFlyableArea` call the next time the player
+-- stands there.
+function Travel.RememberedFlyable(mapID)
+    local held = mapID and FlightMemory()[mapID]
+
+    if held == true then
+        return true
+    end
+
+    if type(held) == "table" then
+        if held.flyable then
+            return true
+        end
+
+        if (time() - (held.at or 0)) > (Travel.flyableDenialDays * 86400) then
+            return nil
+        end
+
+        return false
+    end
+
+    if held == false then
+        return nil
+    end
+
+    return nil
 end
 
 function Travel.CanFly(mapID)
@@ -40518,8 +41266,9 @@ function Travel.CanFly(mapID)
     end
 
     -- What is REMEMBERED about the destination beats what is true where the
-    -- player happens to be standing.
-    local remembered = mapID and FlightMemory()[mapID]
+    -- player happens to be standing -- as long as it is still worth
+    -- believing. See `Travel.RememberedFlyable`.
+    local remembered = Travel.RememberedFlyable(mapID)
 
     if remembered == false then
         return false
@@ -41665,6 +42414,8 @@ CN:RegisterEvent("PLAYER_CONTROL_GAINED", function()
             local mapID = CN.GetPlayerPosition()
 
             if mapID then
+                -- A plain `true`: observing yourself flying there is the
+                -- strongest evidence there is, and a yes does not expire.
                 FlightMemory()[mapID] = true
             end
         end
@@ -44719,6 +45470,19 @@ CN.RegisterCandidateProvider("Orders", function()
     return candidates
 end, {
     events   = { "CRAFTINGORDERS_UPDATE_ORDER_COUNT", "CRAFTINGORDERS_CLAIM_ORDER_RESPONSE" },
+
+    -- VOLATILE, BECAUSE THIS CARRIES A DEADLINE.
+    --
+    -- `expiresIn` is computed at build time and feeds the urgency curve --
+    -- the heaviest term in the table -- and is printed verbatim in the
+    -- reason. Without this the row rebuilt only when the player touched the
+    -- crafting-order system, so six hours later it still said "expires in 6
+    -- hours" and still scored as though six hours remained.
+    --
+    -- Exactly the defect 0.59.0 fixed for calendar events, in the one
+    -- deadline-carrying provider that was not volatile. The thirty-second
+    -- cooldown already bounds what this costs.
+    volatile = true,
     cooldown = 30,
 })
 
@@ -45596,6 +46360,9 @@ end
 
 local frame, ticker
 
+-- Sixteen for the button plus two of margin. See where the label is anchored.
+Hud.closeWidth = 18
+
 local function Build()
     if frame or not CreateFrame then
         return frame
@@ -45604,7 +46371,19 @@ local function Build()
     frame = CreateFrame("Frame", "CompletionNavigatorHud", UIParent)
 
     frame:SetSize(260, 34)
-    frame:SetFrameStrata("BACKGROUND")
+
+    -- MEDIUM, LIKE EVERY OTHER FRAME THIS ADDON PUTS OVER THE WORLD.
+    --
+    -- This was BACKGROUND, the lowest strata above the world itself -- and it
+    -- is the only frame in the addon that was: the arrow and the follow
+    -- frame, which sit over the world in exactly the same way, are both
+    -- MEDIUM. At BACKGROUND anything else on screen takes the mouse first,
+    -- so the line could not be dragged and its two click actions did nothing,
+    -- while its own tooltip promised all three.
+    --
+    -- Reported from play: "the heads up box should be able to be dragged
+    -- around to a different location".
+    frame:SetFrameStrata("MEDIUM")
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
@@ -45643,9 +46422,18 @@ local function Build()
 
     local inset = CN.SPACE.S
 
+-- The width the close control reserves along the top-right edge. Declared
+-- before the label, which has to keep clear of it.
+
+    -- ROOM FOR THE CLOSE BUTTON.
+    --
+    -- The X is 16 wide at the top-right corner, and alpha 0 does not disable
+    -- mouse input -- so the last stretch of a long objective name sat under a
+    -- button that turns the line off rather than navigating to it. The label
+    -- stops short of it instead.
     frame.label = frame:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
     frame.label:SetPoint("TOPLEFT", inset, -inset)
-    frame.label:SetPoint("TOPRIGHT", -inset, -inset)
+    frame.label:SetPoint("TOPRIGHT", -(inset + Hud.closeWidth), -inset)
     frame.label:SetJustifyH("LEFT")
 
     frame.detail = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
@@ -45708,10 +46496,99 @@ local function Build()
         CN.NavigateToObjective(objective)
     end)
 
+    -- A WAY OUT, ON THE THING ITSELF.
+    --
+    -- Turning this off meant knowing that `/cn hud` exists, or finding the
+    -- checkbox on the Settings tab of a window you have to open first. A
+    -- frame that appears over the world and cannot be dismissed from itself
+    -- is a frame people uninstall the addon to be rid of.
+    --
+    -- Reported from play: it "should also be able to be closed or turned off
+    -- by clicking an x or other appropriate icon or button in or on the heads
+    -- up box itself".
+    local close = CreateFrame("Button", nil, frame)
+
+    close:SetSize(16, 16)
+    close:SetPoint("TOPRIGHT", -2, -2)
+
+    -- A DRAG STARTED IN THAT CORNER STILL MOVES THE LINE.
+    --
+    -- The button takes the mouse, so without this the top-right eighteen
+    -- pixels were a dead zone for dragging -- and the tooltip promises the
+    -- whole line can be dragged.
+    close:RegisterForDrag("LeftButton")
+
+    close:SetScript("OnDragStart", function()
+        frame:StartMoving()
+    end)
+
+    close:SetScript("OnDragStop", function()
+        local stop = frame:GetScript("OnDragStop")
+
+        if stop then
+            stop(frame)
+        end
+    end)
+
+    close.label = close:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
+    close.label:SetPoint("CENTER")
+    close.label:SetText(CN.Muted("x"))
+
+    CN.Outline(close.label, 11, "MUTED")
+
+    -- Only while the mouse is over the line. A permanent X on a frame whose
+    -- whole job is to be glanced at is one more thing to read.
+    close:SetAlpha(0)
+
+    close:SetScript("OnEnter", function(self)
+        self:SetAlpha(1)
+
+        self.label:SetText(CN.Bad("x"))
+    end)
+
+    close:SetScript("OnLeave", function(self)
+        self.label:SetText(CN.Muted("x"))
+
+        if not frame:IsMouseOver() then
+            self:SetAlpha(0)
+        end
+    end)
+
+    close:SetScript("OnClick", function()
+        -- TURNED OFF, NOT HIDDEN.
+        --
+        -- Hiding it would bring it back on the next refresh, and a control
+        -- that undoes itself is worse than no control. This is the same
+        -- setting the Settings checkbox and `/cn hud` write, so all three
+        -- agree afterwards.
+        Hud.SetEnabled(false)
+
+        CN.Print("Heads-up line off. " .. CN.Aside(CN.Accent("/cn hud")
+            .. " brings it back"))
+    end)
+
+    if CN.UI and CN.UI.AttachTooltip then
+        CN.UI.AttachTooltip(close, "Turn the heads-up line off. /cn hud "
+            .. "brings it back.")
+    end
+
+    frame.close = close
+
+    -- The X appears with the cursor and goes with it.
+    frame:SetScript("OnEnter", function()
+        close:SetAlpha(1)
+    end)
+
+    frame:SetScript("OnLeave", function()
+        if not close:IsMouseOver() then
+            close:SetAlpha(0)
+        end
+    end)
+
     if CN.UI and CN.UI.AttachTooltip then
         CN.UI.AttachTooltip(frame,
             "Click to navigate to this. Right-click to put it off for an "
-            .. "hour. Drag to move this line.")
+            .. "hour. Drag to move this line. The x turns it off.")
     end
 
     frame:SetScale(Hud.Scale())
@@ -46497,7 +47374,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.59.0
+## Version: 0.60.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -46752,6 +47629,121 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.60.0]
+
+A player reported that a quest they had handed in stayed on the list. It did,
+and the reason turned out to be a whole class of defect: something that can go
+out of date, with nothing able to tell it. This release is that class, found
+and closed — thirteen instances, plus the three things reported from play.
+
+### Fixed — reported from play
+
+- **A quest you handed in stayed on the list and on the route.** The provider
+  that reports nearly-finished quest objectives — "Kill Ten Rats: 1 more" —
+  reads the quest log and declared only bag events, and a provider that is not
+  named by an event is not invalidated at all. So the row survived the turn-in
+  until a bag update or a loading screen happened along. The build now fails
+  if a provider reads a system whose events it does not declare.
+- **The heads-up line could not be dragged.** It was the only frame in the
+  addon at the lowest strata — the arrow and the follow frame, which sit over
+  the world in exactly the same way, are both at the ordinary one — so
+  anything else on screen took the mouse first and all three of the actions
+  its own tooltip promised did nothing.
+- **The heads-up line has a way out on itself.** An **x** in its corner, shown
+  when the mouse is over the line, that turns it off rather than hiding it —
+  hiding would bring it back on the next refresh. `/cn hud` brings it back.
+
+### Fixed — the same class, found by audit
+
+- **A goal you finished never left the list**, and follow mode stuck on it. A
+  goal can be a quest, a mount, a pet, a toy, an achievement or a reputation,
+  and the provider declared one event: the zone change. Since follow mode
+  decides a stop is done by asking whether it is still on the list, this stuck
+  the route on something already completed until you crossed a zone boundary.
+- **"Invalidate everything" invalidated nothing.** Two events were on a list
+  whose comment says they "must invalidate EVERYTHING regardless of who
+  declared what". The list was only used to make sure those events were
+  subscribed; the ordinary per-provider filter was then applied to them like
+  any other. No provider declares `PLAYER_LEVEL_UP`, so levelling up reached
+  none of them. Four call sites passing a word that is not an event name
+  reached none of them either.
+- **The window redrew for six events and missed everything else** — a second
+  hand-written list, of the kind this project already records as fixed once.
+  In a city, where none of the six fire, looting a toy left "collect this toy"
+  on screen, and **dying did not show the corpse run**, which is the one thing
+  the addon weights above everything else. The list now comes from what the
+  providers themselves declare.
+- **A deferral that ran out never brought the thing back.** Right-click the
+  heads-up line to put a mount off for an hour, and an hour later it stayed
+  gone, while `/cn hidden` reported the deferral as expired — the addon
+  contradicting itself about its own state.
+- **A currency retired at the end of a season was recommended for ever.** The
+  store only ever grew, and nothing checked whether the client still lists a
+  currency — so "at cap, further earning is wasted" kept appearing, with a
+  fresh urgency bonus every weekly reset, for something that no longer exists.
+- **A crafting order still said it expired in six hours, six hours later.**
+  The one deadline-carrying provider that did not expire on its own.
+- **The subzone count froze the moment you entered a zone.** The provider
+  rebuilt on the event that fires when you discover one, and re-read the same
+  stored figure each time. And a zone finished this session was never recorded
+  as finished, so it sat at the top of "closest to done" reading nothing left.
+- **A character you deleted a month ago went on reordering today's list.**
+  Every recipe, reputation, title and profession that alt covered was ranked
+  down on the character you are actually playing, with the deleted one named
+  as the reason. The addon already has a staleness rule and states it plainly;
+  the suggestions honoured it and the scoring did not.
+- **A party member finishing a quest never stopped counting.** The answer
+  comes from their quest log, the client fires no event about it, and the
+  invalidation was subscribed to your own quest events — which never fire for
+  anybody else.
+- **A zone that refused flight before your Pathfinder unlock refused it for
+  ever.** Every route to that zone was costed at ground speed, roughly three
+  and a half times too slow, correctable only by flying back into the zone —
+  the one thing the wrong estimate discourages.
+- **A toy kept the travel cost it had in the zone you left**, because it was
+  the only located provider that did not watch for a zone change.
+- **Bumping the decorator counter reached nothing.** Three of its five callers
+  moved a number that is only read while a provider is already being rebuilt —
+  including the registry itself, whose own comment says a decorator
+  registering late must reach the rows that already exist.
+- **Appearances were the one scanned collection with no refresh at login**, so
+  anything collected on another character, or in a session where the addon was
+  not loaded, stayed uncounted until something transmoggable happened.
+
+### Changed
+
+- A tooltip no longer silently deletes a hover handler that was already there
+  — a trap invisible at the call site and dependent on the order two unrelated
+  lines happen to be written in.
+- Two exploration achievements whose zones share a name — retail has two
+  Nagrands and two Shadowmoon Valleys — no longer overwrite each other's
+  progress. The record is keyed on the map now, which cannot be duplicated.
+- A client that will not answer no longer overwrites what was scanned: a
+  refusal reads as zero, and zero is not a measurement.
+- The window's redraw and the ranking's rebuild are told apart. A reputation
+  tick marks things stale; it does not force twenty-three providers to drop
+  the cooldowns they declared. Pinning a goal still bypasses all of them,
+  because you are waiting for it.
+
+### Internal
+
+- Two build-time checks added: a provider must declare the events of every
+  system it reads, and no panel field may be cleared in a way a frame can
+  answer over.
+- The offline frame stub gained the ability to express a quest being handed
+  in, a mount being collected, a client that will not say where you are, a
+  frame's strata and movability, and where a region was actually anchored.
+  Six more entries in the running list of defects hidden by a stub more
+  forgiving than the client — including the one behind the report that opened
+  this release.
+- Thirty-one mutations added; two hundred and twenty-six now run and all are
+  killed.
+- An adversarial review of this release's own changes found eight more
+  defects in them, two of which were performance regressions this release
+  introduced: one path measured at three quarters of a frame, fired every five
+  seconds while questing. Both are fixed and both have mutations.
+
 
 ## [0.59.0]
 
@@ -51538,7 +52530,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.59.0
+0.60.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -52980,14 +53972,12 @@ mutate "Modules/Goals.lua" \
 
 
 mutate "Modules/Harvest.lua" \
-    "    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
+    "    Harvest.unlockGeneration = Harvest.unlockGeneration + 1
 
-    if CN.InvalidateCandidates then
-        CN.InvalidateCandidates()
-    end" \
-    "    if false then
-        CN.InvalidateCandidates()
-    end" \
+    CN.NoteDecoratorsChanged()" \
+    "    Harvest.unlockGeneration = Harvest.unlockGeneration + 1
+
+    CN.InvalidateCandidates()" \
     "a harvested unlock never reaches the ranking"
 
 mutate "Modules/Inventory.lua" \
@@ -53007,17 +53997,13 @@ mutate "Modules/Session.lua" \
     "the journey estimate is frozen at the first sighting"
 
 mutate "Modules/Group.lua" \
-    "    local held = sharedCache[questID]
-
-    if held ~= nil then
-        return held
+    "    if held ~= nil and (Group.Now() - held.at) < Group.sharedCacheSeconds then
+        return held.value
     end" \
-    "    local held = nil
-
-    if held ~= nil then
-        return held
+    "    if held ~= nil then
+        return held.value
     end" \
-    "the shared-quest answer is asked of the client once per candidate"
+    "a party member finishing a quest never stops counting toward it"
 
 
 ############################################################
@@ -53071,9 +54057,7 @@ mutate "Scoring.lua" \
     "a contribution another provider has stopped making never goes away"
 
 mutate "Modules/Goals.lua" \
-    "    CN.decoratorGeneration = (CN.decoratorGeneration or 0) + 1
-
-    CN.InvalidateCandidates()
+    "    CN.NoteDecoratorsChanged(true)
 end" \
     "    CN.InvalidateCandidates()
 end" \
@@ -53549,6 +54533,227 @@ mutate "Modules/Navigation.lua" \
     "    if angle ~= angle then" \
     "an infinite bearing becomes a NaN on the arrow's ticker"
 
+############################################################
+# 0.60.0 -- everything that could go stale and had no way of being told
+############################################################
+
+mutate "Modules/Inventory.lua" \
+    "        \"BAG_UPDATE_DELAYED\", \"PLAYER_ENTERING_WORLD\",
+        \"QUEST_TURNED_IN\", \"QUEST_REMOVED\", \"QUEST_ACCEPTED\",
+        \"QUEST_LOG_UPDATE\"," \
+    "        \"BAG_UPDATE_DELAYED\", \"PLAYER_ENTERING_WORLD\"," \
+    "a quest you handed in stays on the list and on the route"
+
+# The declaration as it shipped for eleven releases: one event, for a provider
+# whose rows can be about six different systems.
+mutate "Modules/Goals.lua" \
+    "    events = {
+        \"ZONE_CHANGED_NEW_AREA\",
+        \"QUEST_TURNED_IN\", \"QUEST_REMOVED\", \"QUEST_ACCEPTED\",
+        \"NEW_MOUNT_ADDED\", \"NEW_PET_ADDED\", \"NEW_TOY_ADDED\",
+        \"ACHIEVEMENT_EARNED\", \"UPDATE_FACTION\",
+    }," \
+    "    events = { \"ZONE_CHANGED_NEW_AREA\" }," \
+    "a goal you finished never leaves the list, and follow mode sticks on it"
+
+mutate "Modules/Toys.lua" \
+    "    events = { \"NEW_TOY_ADDED\", \"MERCHANT_SHOW\", \"ZONE_CHANGED_NEW_AREA\" }" \
+    "    events = { \"NEW_TOY_ADDED\", \"MERCHANT_SHOW\" }" \
+    "a toy keeps the travel cost it had in the zone you left"
+
+mutate "Scoring.lua" \
+    "    return universalEvents[reason] == true" \
+    "    return false" \
+    "the events that must reach every provider reach none of them"
+
+mutate "Scoring.lua" \
+    "        if universal or not provider.events or provider.events[reason] then" \
+    "        if not reason or not provider.events or provider.events[reason] then" \
+    "levelling up invalidates nothing at all"
+
+mutate "Scoring.lua" \
+    "            CN.NoteDecoratorsChanged(true)" \
+    "            CN.decoratorGeneration = CN.decoratorGeneration + 1" \
+    "a decorator registered late never reaches the rows already built"
+
+mutate "Modules/Filters.lua" \
+    "        -- Something is actionable again that was not a moment ago, which is
+        -- exactly what a deliberate invalidation means.
+        CN.InvalidateCandidates()" \
+    "        local told = nil" \
+    "a deferral that runs out never brings the objective back"
+
+mutate "Modules/Currencies.lua" \
+    "        if record.capped and IsCurrent(record, character) then" \
+    "        if record.capped then" \
+    "a currency retired two seasons ago is still recommended"
+
+mutate "Modules/Currencies.lua" \
+    "    return record.serial == CurrentSerial(character)" \
+    "    return true" \
+    "every currency the store has ever held is reported as current"
+
+mutate "Modules/Group.lua" \
+    "    if held ~= nil and (Group.Now() - held.at) < Group.sharedCacheSeconds then
+        return held.value
+    end" \
+    "    if held ~= nil then
+        return held.value
+    end" \
+    "a party member finishing a quest never stops counting toward it"
+
+mutate "Modules/Warband.lua" \
+    "        if age and age > alts.staleDays then
+            return 0, nil
+        end" \
+    "        if false then
+            return 0, nil
+        end" \
+    "a character deleted a month ago still reorders today's list"
+
+mutate "Modules/Travel.lua" \
+    "        if (time() - (held.at or 0)) > (Travel.flyableDenialDays * 86400) then
+            return nil
+        end" \
+    "        if false then
+            return nil
+        end" \
+    "a zone that refused flight before your unlock refuses it for ever"
+
+mutate "Modules/Travel.lua" \
+    "    FlightMemory()[mapID] = { flyable = false, at = time() }" \
+    "    FlightMemory()[mapID] = false" \
+    "a flight refusal is recorded with no way to tell how old it is"
+
+mutate "Modules/Exploration.lua" \
+    "        if RefreshCurrentZone() then
+            CN.InvalidateProvider(\"Exploration\")
+        end" \
+    "        local refreshed = nil" \
+    "the subzone count is frozen from the moment you enter the zone"
+
+mutate "Modules/Exploration.lua" \
+    "    record.completed = (done and done >= criteria) or nil" \
+    "    record.completed = nil" \
+    "a zone you finished sits at the top of the list reading zero left"
+
+mutate "Modules/Orders.lua" \
+    "    volatile = true,
+    cooldown = 30," \
+    "    cooldown = 30," \
+    "a crafting order still says it expires in six hours, six hours later"
+
+mutate "Modules/Hud.lua" \
+    "    frame:SetFrameStrata(\"MEDIUM\")" \
+    "    frame:SetFrameStrata(\"BACKGROUND\")" \
+    "the heads-up line sits below everything and cannot be clicked"
+
+mutate "Modules/Hud.lua" \
+    "        Hud.SetEnabled(false)
+
+        CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
+    "        frame:Hide()
+
+        CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
+    "the x hides the heads-up line and the next refresh brings it back"
+
+mutate "UI.lua" \
+    "    local existingEnter = frame:GetScript(\"OnEnter\")" \
+    "    local existingEnter = nil" \
+    "attaching a tooltip silently deletes the hover handler already there"
+
+mutate "UI.lua" \
+    "    for _, provider in pairs(CN.candidateProviders or {}) do
+        for event in pairs(provider.events or {}) do
+            wanted[event] = true
+        end
+    end" \
+    "    for _, provider in pairs({}) do
+        for event in pairs(provider.events or {}) do
+            wanted[event] = true
+        end
+    end" \
+    "the window redraws for six events and misses everything else"
+
+# The regressions the 0.60.0 review found in 0.60.0's own changes.
+
+mutate "Scoring.lua" \
+    "    CN.InvalidateCandidates(nil, not deliberate)" \
+    "    CN.InvalidateCandidates()" \
+    "a reputation tick forces every provider to drop its own cooldown"
+
+mutate "Scoring.lua" \
+    "    local deliberate = (not patient)
+        and ((reason == nil) or CN.deliberateEvents[reason] or false)" \
+    "    local deliberate = (reason == nil) or CN.deliberateEvents[reason] or false" \
+    "asking for patience is ignored"
+
+mutate "Scoring.lua" \
+    "CN.baseInvalidationEvents = {" \
+    "CN.baseInvalidationEvents = {
+    \"ZONE_CHANGED_NEW_AREA\"," \
+    "walking into a cave rebuilds every provider in the addon"
+
+mutate "Modules/Travel.lua" \
+    "    if FlightMemory()[mapID] == true then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "a cave revokes a zone's flight permission for a day"
+
+mutate "Modules/Exploration.lua" \
+    "        if record.name and string.lower(record.name) == needle then" \
+    "        if record.name and string.find(string.lower(record.name), needle, 1, true) then" \
+    "two zones with the same name overwrite each other's progress"
+
+mutate "Modules/Exploration.lua" \
+    "            if mapID then
+                record.mapID = mapID
+            end" \
+    "            if false then
+                record.mapID = mapID
+            end" \
+    "which of two zones with one name you get is a coin toss every time"
+
+mutate "Modules/Exploration.lua" \
+    "    if not criteria or criteria <= 0 then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "a client that will not answer overwrites a scanned count with nothing"
+
+mutate "Database.lua" \
+    "                    if type(record) == \"table\" and record.serial == nil then
+                        record.serial = 0" \
+    "                    if false then
+                        record.serial = 0" \
+    "every currency stored before this release is assumed still to exist"
+
+mutate "Modules/Warband.lua" \
+    "            return Freshest(holders), table.concat(holders, \", \"),
+                \"already knows it\"" \
+    "            return holders[1], table.concat(holders, \", \"),
+                \"already knows it\"" \
+    "a deleted alt sorting first hides a character you played yesterday"
+
+mutate "Modules/Hud.lua" \
+    "    frame.label:SetPoint(\"TOPRIGHT\", -(inset + Hud.closeWidth), -inset)" \
+    "    frame.label:SetPoint(\"TOPRIGHT\", -inset, -inset)" \
+    "the close button sits on top of the end of the objective's name"
+
+mutate "Modules/Appearances.lua" \
+    "        if held and (held.collected or 0) > collected then
+            collected = held.collected
+        end" \
+    "        if false then
+            collected = held.collected
+        end" \
+    "a wardrobe that has not loaded erases every scanned count"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 
@@ -53872,6 +55077,19 @@ local function Frame()
     -- `SetShown` fell through to the universal stub, so every frame the addon
     -- shows or hides through it -- the selected-tab rule, the row selection
     -- texture, the progress bar -- was invisible to every test.
+    -- STRATA AND MOVABILITY, RECORDED.
+    --
+    -- Both fell through to the universal stub, which accepts anything and
+    -- remembers nothing -- so "is this frame where the player can click it"
+    -- was a question no test could ask. The heads-up line sat at the lowest
+    -- strata in the addon for eleven releases and a player had to report it.
+    -- Sixteenth entry in the list.
+    function f:SetFrameStrata(value) f.strata = value end
+    function f:GetFrameStrata() return rawget(f, "strata") or "MEDIUM" end
+
+    function f:SetMovable(value) f.movable = value and true or false end
+    function f:IsMovable() return rawget(f, "movable") == true end
+
     function f:SetShown(value)
         if value then
             f:Show()
@@ -53997,7 +55215,56 @@ local function Frame()
     function f:GetTextHeight() return 12 end
     function f:GetEffectiveScale() return 1 end
     function f:GetCenter() return 500, 400 end
-    function f:GetPoint() return "CENTER", nil, "CENTER", 0, 0 end
+    -- WHERE A REGION WAS ACTUALLY ANCHORED.
+    --
+    -- `SetPoint` fell through to the universal stub, so every layout question
+    -- -- does this control overlap that one, does the label leave room for
+    -- the button -- was unanswerable by any test. The addon has shipped three
+    -- overlapping-control defects that a player had to report. Seventeenth
+    -- entry in the list.
+    --
+    -- Recorded per anchor point, last write wins, which is how the client
+    -- behaves for the same point.
+    function f:SetPoint(point, ...)
+        f.points = rawget(f, "points") or {}
+
+        local relativeTo, relativePoint, x, y = ...
+
+        -- `SetPoint("LEFT", 4, 0)` is the two-number form; the four-argument
+        -- form names a frame first.
+        if type(relativeTo) == "number" then
+            relativeTo, relativePoint, x, y = nil, nil, relativeTo, relativePoint
+        end
+
+        f.points[point or "?"] = {
+            point         = point,
+            relativeTo    = relativeTo,
+            relativePoint = relativePoint,
+            x             = x,
+            y             = y,
+        }
+    end
+
+    function f:ClearAllPoints() f.points = {} end
+
+    function f:GetPointBy(point)
+        local held = rawget(f, "points")
+
+        return held and held[point]
+    end
+
+    function f:GetPoint()
+        local held = rawget(f, "points")
+
+        local anchor = held and (held.TOPLEFT or held.CENTER or held.LEFT)
+
+        if anchor then
+            return anchor.point, anchor.relativeTo, anchor.relativePoint,
+                anchor.x or 0, anchor.y or 0
+        end
+
+        return "CENTER", nil, "CENTER", 0, 0
+    end
 
     setmetatable(f, { __index = function() return U end })
 
@@ -54878,11 +56145,65 @@ C_SuperTrack = {
     GetSuperTrackedQuestID      = function() return superTracked end,
 }
 
+-- Overrides for the completion answer, set by CN_TEST_TurnInQuest.
+CN_TEST_COMPLETED = {}
+
 local questLog = {
     { questID = 8237, title = "Vanquish the Invaders!", isHeader = false },
     { questID = 9001, title = "Test Quest Alpha",       isHeader = false },
     { questID = 9002, title = "Test Quest Beta",        isHeader = false },
 }
+
+-- Turning one in: out of the log, and completed from now on. Returns whether
+-- it was actually in the log, so a test cannot silently assert about a quest
+-- that was never there.
+--
+-- `CN_TEST_RestoreQuestLog()` puts the fixture back. A test that leaves the
+-- world changed is a test that breaks a later one for a reason nobody can see
+-- from either of them.
+local originalQuestLog = {}
+
+function CN_TEST_RestoreQuestLog()
+    for index = #questLog, 1, -1 do
+        questLog[index] = nil
+    end
+
+    for index, entry in ipairs(originalQuestLog) do
+        questLog[index] = {
+            questID  = entry.questID,
+            title    = entry.title,
+            isHeader = entry.isHeader,
+        }
+    end
+
+    for key in pairs(CN_TEST_COMPLETED) do
+        CN_TEST_COMPLETED[key] = nil
+    end
+end
+
+function CN_TEST_TurnInQuest(questID)
+    local removed = false
+
+    for index = #questLog, 1, -1 do
+        if questLog[index].questID == questID then
+            table.remove(questLog, index)
+
+            removed = true
+        end
+    end
+
+    CN_TEST_COMPLETED[questID] = true
+
+    return removed
+end
+
+for index, entry in ipairs(questLog) do
+    originalQuestLog[index] = {
+        questID  = entry.questID,
+        title    = entry.title,
+        isHeader = entry.isHeader,
+    }
+end
 
 -- Titles the client knows about but which are NOT in the log: available
 -- quests still have names.
@@ -54952,7 +56273,23 @@ C_QuestLog = {
 
         return copy
     end,
+    -- A QUEST CAN BE TURNED IN NOW, WHICH IT COULD NOT BE BEFORE.
+    --
+    -- This was a pure function of the id -- `id % 2 == 1` -- so the single
+    -- most ordinary thing that happens in this game, finishing a quest,
+    -- could not be expressed by any test. A player reported that a quest
+    -- stayed on the route after they handed it in; there was no way to write
+    -- that down. Fifteenth entry in the running list of defects hidden by a
+    -- stub that models the world more simply than the world.
+    --
+    -- `CN_TEST_TurnInQuest(id)` is the whole simulation: the client drops it
+    -- from the log and starts answering "completed" for it, which is exactly
+    -- what happens on a turn-in.
     IsQuestFlaggedCompleted          = function(id)
+        if CN_TEST_COMPLETED[id] ~= nil then
+            return CN_TEST_COMPLETED[id]
+        end
+
         if id >= 70000 then return false end   -- world quests are fresh
         return id % 2 == 1
     end,
@@ -55364,6 +56701,21 @@ local mounts = {
     [2] = { name = "Horde Wolf",     collected = false, factionSpecific = true, faction = 0 },
     [3] = { name = "Alliance Steed", collected = false, factionSpecific = true, faction = 1 },
 }
+
+-- COLLECTING ONE, which the fixture could not express.
+--
+-- Same gap as the quest log before 0.60.0: the single most ordinary thing a
+-- collector does had no verb, so "does finishing this take it off the list"
+-- was a question no test could ask.
+function CN_TEST_SetMountCollected(mountID, collected)
+    if mounts[mountID] then
+        mounts[mountID].collected = collected and true or false
+
+        return true
+    end
+
+    return false
+end
 
 C_MountJournal = {
     GetMountIDs           = function() return { 1, 2, 3 } end,
@@ -62982,6 +64334,1285 @@ print("\nStubs, audited against a real client:")
         .. (#unverified > 0
             and (" -- " .. #unverified .. " could not be checked")
             or ""))
+end)()
+
+
+print("\nWhat 0.60.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- HANDING A QUEST IN TAKES IT OFF THE LIST.
+    --
+    -- Reported from play: "the completion of a quest does not appear to
+    -- remove it from the journey or queue."
+    --
+    -- The Inventory provider emits a row per nearly-finished quest objective
+    -- -- "Test Quest Alpha: 1 more" -- read from the quest log, and declared
+    -- only bag events. `InvalidateCandidates` SKIPS a provider that has an
+    -- events table and was not named, so a turn-in did not touch those rows
+    -- at all: they survived until a bag update or a loading screen.
+    --
+    -- Invisible to this suite for a different reason:
+    -- `IsQuestFlaggedCompleted` was a pure function of the quest id, so the
+    -- single most ordinary thing that happens in this game could not be
+    -- written down. `CN_TEST_TurnInQuest` is that missing verb.
+    ------------------------------------------------------------
+    local questID = 9001
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates(true)
+
+    local function Offered()
+        for _, objective in ipairs(CN.CollectCandidates()) do
+            if objective.type == CN.objectiveTypes.QUEST
+                and objective.id == questID then
+
+                return objective
+            end
+        end
+    end
+
+    assert(Offered(), "the fixture must offer quest " .. questID .. " first")
+
+    -- Rebuilt a moment ago, so every provider's cooldown is at its coldest --
+    -- which is the case that used to hide this.
+    assert(CN_TEST_TurnInQuest(questID), "it must have been in the log")
+
+    CN.Dispatch("QUEST_TURNED_IN", questID)
+
+    local lingering = Offered()
+
+    assert(not lingering,
+        "a quest you have handed in must leave the list at once, not when "
+        .. "some unrelated event happens along; it is still offered as \""
+        .. tostring(lingering and lingering.name) .. "\"")
+
+    -- AND IT LEAVES THE ROUTE WITH IT, which is where the player saw it.
+    local mapID, x, y = CN.GetPlayerPosition()
+
+    CN.ForgetRoutes()
+
+    for _, objective in ipairs(CN.BuildZoneRoute(mapID, x or 0.5, y or 0.5) or {}) do
+        assert(objective.id ~= questID,
+            "and it must not still be a stop on the route")
+    end
+
+    -- The fixture goes back the way it was found.
+    CN_TEST_RestoreQuestLog()
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates(true)
+
+    assert(Offered(),
+        "and the fixture is restored, or every test after this one is "
+        .. "running against a world this one changed")
+
+    print("  a quest handed in leaves the list and the route at once")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A PROVIDER DECLARES THE EVENTS OF EVERY SYSTEM IT READS.
+    --
+    -- The defect above is a class, not an instance: a provider's `events`
+    -- table is the ONLY thing that decides whether it is invalidated, and a
+    -- provider that reads the quest log while declaring bag events is a
+    -- provider whose rows go stale silently and stay stale.
+    --
+    -- Checked structurally, so the next one fails the build rather than
+    -- reaching a player.
+    ------------------------------------------------------------
+    local systems = {
+        {
+            name    = "the quest log",
+            readers = {
+                "GetQuestLogEntries", "IsQuestInLog", "QuestProgress",
+                "GetQuestObjectives",
+            },
+            events  = {
+                "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_ACCEPTED",
+                "QUEST_LOG_UPDATE",
+            },
+        },
+        {
+            name    = "your bags",
+            readers = { "Inventory.Bags", "GetContainerItemInfo" },
+            events  = { "BAG_UPDATE_DELAYED" },
+        },
+        {
+            -- A provider that scores by where the player is standing, or
+            -- costs a journey from it, is answering a question whose answer
+            -- changes every time they cross a zone line.
+            name    = "where you are standing",
+            -- `CN.TravelCost` is the one that matters: it prices a journey
+            -- FROM the player, so its answer changes with every zone line.
+            -- A bare `GetPlayerPosition` may only be asking which map to look
+            -- something up on, which a zone change does not invalidate --
+            -- Group asks it to find the player's own corpse.
+            readers = { "CN.TravelCost" },
+            events  = { "ZONE_CHANGED_NEW_AREA" },
+        },
+        {
+            -- `CN.Explain` asks whether a mount, pet, toy, achievement or
+            -- quest is already done. Every one of those has an event.
+            name    = "what you have collected",
+            -- The DYNAMIC call sites: `CN.Explain(goal.type, ...)` can be
+            -- asking about any of them. `CN.Explain(CN.objectiveTypes.QUEST,
+            -- ...)` is asking about a quest and the quest events cover it,
+            -- which is why the literal form is not listed here.
+            readers = {
+                "CN.Explain(goal.type", "CN.Explain(objectiveType",
+                "CN.Explain(record.type", "CN.Explain(entry.type",
+            },
+            events  = {
+                "NEW_MOUNT_ADDED", "NEW_PET_ADDED", "NEW_TOY_ADDED",
+                "ACHIEVEMENT_EARNED",
+            },
+        },
+    }
+
+    local manifest = assert(io.open(ROOT .. "/CompletionNavigator.toc", "r"))
+
+    local offenders, checked = {}, 0
+
+    for entry in manifest:read("*a"):gmatch("[^\r\n]+") do
+        if entry:match("%.lua$") and not entry:match("^#") then
+            local path = ROOT .. "/" .. (entry:gsub("\\", "/"))
+
+            local file = io.open(path, "r")
+
+            if file then
+                local text = file:read("*a")
+
+                file:close()
+
+                -- One provider per file in this addon, so the file is the
+                -- unit. `events = { ... }` on the registration is what
+                -- `InvalidateCandidates` reads.
+                if text:find("RegisterCandidateProvider", 1, true) then
+                    local declared = text:match("events%s*=%s*{(.-)}")
+
+                    if declared then
+                        checked = checked + 1
+
+                        for _, system in ipairs(systems) do
+                            local reads = false
+
+                            for _, reader in ipairs(system.readers) do
+                                if text:find(reader, 1, true) then
+                                    reads = true
+                                    break
+                                end
+                            end
+
+                            if reads then
+                                local covered = false
+
+                                for _, event in ipairs(system.events) do
+                                    if declared:find(event, 1, true) then
+                                        covered = true
+                                        break
+                                    end
+                                end
+
+                                if not covered then
+                                    table.insert(offenders,
+                                        path:gsub("^.*/", "") .. " reads "
+                                        .. system.name
+                                        .. " and declares none of its events")
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    manifest:close()
+
+    for _, offender in ipairs(offenders) do
+        print("  UNDECLARED: " .. offender)
+    end
+
+    assert(#offenders == 0,
+        #offenders .. " provider(s) read a system whose events they do not "
+        .. "declare. A provider that is not named is not invalidated, so its "
+        .. "rows go stale and stay stale.")
+
+    assert(checked >= 8,
+        "the scan must have found the providers, saw " .. checked)
+
+    print("  " .. checked .. " providers, each declaring the events of what "
+        .. "it reads")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE HEADS-UP LINE CAN BE MOVED AND CAN BE CLOSED.
+    --
+    -- Reported from play: it "should be able to be dragged around to a
+    -- different location", and "should also be able to be closed or turned
+    -- off by clicking an x ... in or on the heads up box itself".
+    --
+    -- It was the only frame in the addon at BACKGROUND strata -- the arrow
+    -- and the follow frame, which sit over the world in exactly the same way,
+    -- are both MEDIUM -- so anything else on screen took the mouse first and
+    -- all three of the actions its own tooltip promised did nothing.
+    ------------------------------------------------------------
+    local hud = CN:GetModule("Hud")
+
+    local hudProbeFrame = hud.Build()
+
+    assert(hudProbeFrame, "the heads-up hudProbeFrame must build")
+
+    assert(hudProbeFrame:GetFrameStrata() == "MEDIUM",
+        "a hudProbeFrame meant to be clicked and dragged cannot sit below everything "
+        .. "else on screen; it is at " .. tostring(hudProbeFrame:GetFrameStrata()))
+
+    assert(hudProbeFrame:IsMovable(), "and it must be movable")
+
+    assert(hudProbeFrame:GetScript("OnDragStart") and hudProbeFrame:GetScript("OnDragStop"),
+        "with both halves of the drag wired")
+
+    -- THE WAY OUT.
+    assert(hudProbeFrame.close, "there must be a close control on the line itself")
+
+    local held = hud.IsEnabled()
+
+    hud.SetEnabled(true)
+
+    hudProbeFrame.close:GetScript("OnClick")(hudProbeFrame.close)
+
+    assert(not hud.IsEnabled(),
+        "the x turns the line off -- not merely hides it, which the next "
+        .. "refresh would undo")
+
+    hud.SetEnabled(held)
+
+    print("  the heads-up line moves, and closes from itself")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A TOOLTIP DOES NOT SILENTLY DELETE A HOVER HANDLER.
+    --
+    -- `SetScript` replaces, so a frame that did something on hover lost it
+    -- the moment somebody attached a tooltip -- a trap invisible at the call
+    -- site and dependent on the order two unrelated lines are written in.
+    ------------------------------------------------------------
+    local probe = CreateFrame("Frame", nil, UIParent)
+
+    local entered, left = 0, 0
+
+    probe:SetScript("OnEnter", function() entered = entered + 1 end)
+    probe:SetScript("OnLeave", function() left = left + 1 end)
+
+    CN.UI.AttachTooltip(probe, "something")
+
+    probe:GetScript("OnEnter")(probe)
+    probe:GetScript("OnLeave")(probe)
+
+    assert(entered == 1,
+        "the handler that was already there must still run, ran " .. entered)
+
+    assert(left == 1, "and so must its partner, ran " .. left)
+
+    print("  attaching a tooltip keeps the hover handler already there")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "INVALIDATE EVERYTHING" HAS TO INVALIDATE EVERYTHING.
+    --
+    -- `CN.baseInvalidationEvents` says in its own comment that these events
+    -- "must invalidate EVERYTHING regardless of who declared what". It was
+    -- only used to make sure they were SUBSCRIBED; the ordinary per-provider
+    -- filter was then applied to them like any other event -- and no provider
+    -- declares `PLAYER_LEVEL_UP`, so levelling up invalidated zero of the
+    -- twenty-three.
+    ------------------------------------------------------------
+    assert(CN.IsUniversalInvalidation(nil),
+        "no reason at all is a deliberate act")
+
+    for _, event in ipairs(CN.baseInvalidationEvents) do
+        assert(CN.IsUniversalInvalidation(event),
+            event .. " is on the list that says it reaches everything")
+    end
+
+    assert(not CN.IsUniversalInvalidation("QUEST_TURNED_IN"),
+        "and an ordinary event still only reaches who asked for it")
+
+    -- Through the dispatch, which is the path the game takes.
+    local counted = 0
+
+    for _ in pairs(CN.candidateProviders) do
+        counted = counted + 1
+    end
+
+    assert(counted > 15, "the fixture must have the real provider set, saw "
+        .. counted)
+
+    CN.CollectCandidates(true)
+
+    CN.Dispatch("PLAYER_LEVEL_UP")
+
+    local dirty = 0
+
+    for name in pairs(CN.candidateProviders) do
+        if CN.IsProviderDirty and CN.IsProviderDirty(name) then
+            dirty = dirty + 1
+        end
+    end
+
+    assert(dirty == counted,
+        "levelling up changes what is available to everything; it marked "
+        .. dirty .. " of " .. counted .. " providers")
+
+    print("  " .. counted .. " providers, and a level-up reaches all of them")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- BUMPING THE DECORATOR GENERATION IS HALF OF IT.
+    --
+    -- `CN.decoratorGeneration` is read in exactly one place: inside the
+    -- branch that runs when a provider is ALREADY being rebuilt. So bumping
+    -- it cannot make a clean provider re-decorate -- it defeats the
+    -- identical-list shortcut, not the not-stale-at-all one.
+    --
+    -- Harvest and Goals both discovered this separately and both call
+    -- `InvalidateCandidates` alongside the bump. Warband, Session and the
+    -- decorator registry did not, so three of five callers were moving a
+    -- counter nothing would read.
+    ------------------------------------------------------------
+    CN.CollectCandidates(true)
+
+    local decoratorBefore = CN.decoratorGeneration
+
+    local moved = CN.NoteDecoratorsChanged()
+
+    assert(moved ~= decoratorBefore, "the counter moves")
+
+    local clean = 0
+
+    for name in pairs(CN.candidateProviders) do
+        if CN.IsProviderDirty and not CN.IsProviderDirty(name) then
+            clean = clean + 1
+        end
+    end
+
+    assert(clean == 0,
+        "and every provider is stale, because a counter nothing reads is not "
+        .. "a way of telling anybody anything; " .. clean .. " stayed clean")
+
+    -- REGISTERING A DECORATOR LATE MUST REACH THE ROWS ALREADY BUILT.
+    --
+    -- The registry's own header names this as the case it exists for.
+    CN.CollectCandidates(true)
+
+    CN.RegisterCandidateDecorator("LateProbe", function(objective)
+        objective.lateProbe = true
+
+        return objective
+    end)
+
+    local reached, total = 0, 0
+
+    for _, objective in ipairs(CN.CollectCandidates()) do
+        total = total + 1
+
+        if objective.lateProbe then
+            reached = reached + 1
+        end
+    end
+
+    assert(total > 0, "there must be rows to reach")
+
+    assert(reached == total,
+        "a decorator registered after the rows were built must still reach "
+        .. "them: " .. reached .. " of " .. total)
+
+    CN.candidateDecorators["LateProbe"] = nil
+
+    CN.NoteDecoratorsChanged()
+
+    CN.CollectCandidates(true)
+
+    print("  a late decorator reaches rows that were already built")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DEFERRAL THAT EXPIRES BRINGS THE THING BACK.
+    --
+    -- Setting one invalidates the candidates. Nothing fired when one ran out,
+    -- and every provider consults `CN.IsDeferred` at BUILD time -- so the
+    -- deferral was baked into the cached list and the providers it is most
+    -- used on are not volatile. Right-click the heads-up line to put a mount
+    -- off for an hour, and an hour later it did not come back, while
+    -- `/cn hidden` reported the deferral as expired.
+    ------------------------------------------------------------
+    local filterModule = CN:GetModule("Filters")
+
+    assert(filterModule and filterModule.SweepExpired, "Filters must expose the sweep")
+
+    local deferredStore = CN.Account("deferredObjectives")
+
+    deferredStore[CN.objectiveTypes.MOUNT] = deferredStore[CN.objectiveTypes.MOUNT] or {}
+
+    -- One that ran out a minute ago.
+    deferredStore[CN.objectiveTypes.MOUNT][880001] = { until_ = time() - 60 }
+
+    CN.CollectCandidates(true)
+
+    -- Everything clean, which is the state the defect lived in.
+    for name in pairs(CN.candidateProviders) do
+        assert(not CN.IsProviderDirty(name),
+            name .. " must start clean or this proves nothing")
+    end
+
+    local prunedCount = filterModule.SweepExpired()
+
+    assert(prunedCount >= 1, "an expired deferral is prunedCount, got " .. prunedCount)
+
+    -- ASSERTED ON THE INVALIDATION, not on the aggregate generation:
+    -- `InvalidateCandidates` deliberately does not bump the aggregate, because
+    -- marking a provider stale is not the same as its list having changed.
+    local dirty = 0
+
+    for name in pairs(CN.candidateProviders) do
+        if CN.IsProviderDirty(name) then
+            dirty = dirty + 1
+        end
+    end
+
+    assert(dirty > 0,
+        "and the providers are told, or the objective stays missing from a "
+        .. "list that has already been built")
+
+    -- Sweeping again with nothing to prune is not a change.
+    local quiet = filterModule.SweepExpired()
+
+    assert(quiet == 0, "nothing left to prune, got " .. quiet)
+
+    print("  a deferral that runs out brings the objective back")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CURRENCY THE CLIENT HAS STOPPED LISTING IS NOT REPORTED.
+    --
+    -- The store was write-only-grow and `Capped` walked all of it with no
+    -- freshness check, so a currency capped last season kept producing "at
+    -- cap, further earning is wasted" -- every five seconds, with a fresh
+    -- weekly urgency bonus every reset, for the life of the character.
+    ------------------------------------------------------------
+    local currencyModule = CN:GetModule("Currencies")
+
+    currencyModule.Scan()
+
+    local cappedBefore = #currencyModule.Capped()
+
+    -- A row from a season that has ended: capped, and not seen by any sweep
+    -- since.
+    -- `CN.character` is the live record for whoever is logged in, which is
+    -- the same table `Currencies.CharacterStore` writes into.
+    local record = CN.character
+
+    assert(record, "the fixture character must exist")
+
+    record.currencies = record.currencies or {}
+
+    local store = record.currencies
+
+    store[999001] = {
+        currencyID  = 999001,
+        quantity    = 2000,
+        maxQuantity = 2000,
+        capped      = true,
+        serial      = currencyModule.CurrentSerial() - 5,
+    }
+
+    assert(#currencyModule.Capped() == cappedBefore,
+        "a currency the last sweep did not see is not something you can go "
+        .. "and spend")
+
+    -- And one the sweep DID see is.
+    store[999002] = {
+        currencyID  = 999002,
+        quantity    = 100,
+        maxQuantity = 100,
+        capped      = true,
+        serial      = currencyModule.CurrentSerial(),
+    }
+
+    assert(#currencyModule.Capped() == cappedBefore + 1,
+        "while a current one still is")
+
+    store[999001] = nil
+    store[999002] = nil
+
+    print("  a retired currency stops being recommended")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ANSWER ABOUT SOMEBODY ELSE'S QUEST LOG HAS A SHELF LIFE.
+    --
+    -- It comes from `C_QuestLog.IsUnitOnQuest(unit, questID)` and the client
+    -- fires no event when a party member accepts or hands one in. The
+    -- invalidation subscribed to the player's own quest events, which never
+    -- fire for anybody else -- so four people finishing a quest and staying
+    -- grouped left the shared-work multiplier applied and `/cn why` still
+    -- saying "4 others here are on this quest".
+    ------------------------------------------------------------
+    local group = CN:GetModule("Group")
+
+    assert(group and group.sharedCacheSeconds,
+        "the cache must declare how long it trusts an answer")
+
+    CN_TEST_GROUP_SIZE = 3
+
+    group.ForgetShared()
+
+    CN_TEST_QUEST_SHARED[9002] = { party1 = true, party2 = true }
+
+    local first = group.SharedWith(9002)
+
+    assert(first and first > 0, "the party is on it, got " .. tostring(first))
+
+    -- They hand it in. No event fires, because the client has none.
+    CN_TEST_QUEST_SHARED[9002] = nil
+
+    assert(group.SharedWith(9002) == first,
+        "inside the window the cached answer stands, which is the point of "
+        .. "the cache")
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + group.sharedCacheSeconds + 1
+
+    assert(group.SharedWith(9002) == 0,
+        "past it, the addon asks again rather than going on claiming a group "
+        .. "is doing something it finished")
+
+    CN_TEST_GROUP_SIZE = 1
+
+    group.ForgetShared()
+
+    print("  a party member finishing a quest stops counting, on its own")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MONTH-OLD SNAPSHOT IS NOT A CHARACTER.
+    --
+    -- `Alts.staleDays` is 30, and its comment says the addon "stops making
+    -- suggestions" past it. The suggestion path honoured that; the SCORING
+    -- path -- two points off every objective another character covers, with
+    -- their name printed as the reason -- did not, and nothing anywhere
+    -- removes a character from the roster.
+    ------------------------------------------------------------
+    local warband = CN:GetModule("Warband")
+    local alts    = CN:GetModule("Alts")
+
+    assert(warband and alts, "both modules must be loaded")
+
+    -- A CHARACTER WHO IS DEMONSTRABLY BETTER AT THIS, so the penalty is
+    -- reachable at all. Guessing that the fixture happens to contain one is
+    -- how a test passes for the wrong reason.
+    local key = "Probealt-Testrealm"
+
+    -- `Professions.WhoKnows` reads `character.recipes`, which is the shape
+    -- the scan actually writes.
+    CN.db.characters[key] = {
+        name     = "Probealt",
+        realm    = "Testrealm",
+        lastSeen = time(),
+        recipes  = { [700] = true },
+    }
+
+    local fresh, freshReason = warband.Suitability(CN.objectiveTypes.RECIPE, 700)
+
+    assert(fresh < 0 and freshReason,
+        "a character who knows the recipe and logged in today must be "
+        .. "preferred, got " .. tostring(fresh))
+
+    assert(freshReason:find("Probealt", 1, true),
+        "and named, got " .. tostring(freshReason))
+
+    -- The same character, last seen before the staleness line.
+    CN.db.characters[key].lastSeen = time() - ((alts.staleDays + 5) * 86400)
+
+    local score, reason = warband.Suitability(CN.objectiveTypes.RECIPE, 700)
+
+    assert(score == 0 and reason == nil,
+        "a character last seen " .. (alts.staleDays + 5) .. " days ago must "
+        .. "not reorder today's list, got " .. tostring(score) .. " / "
+        .. tostring(reason))
+
+    CN.db.characters[key] = nil
+
+    print("  a stale alt stops reordering the list")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A GOAL YOU FINISHED LEAVES THE LIST.
+    --
+    -- The Goals provider declared one event -- the zone change -- while
+    -- `Goals.Plan` asks `CN.Explain` whether the goal is done, and a goal can
+    -- be a quest, a mount, a pet, a toy, an achievement or a reputation. So
+    -- finishing the thing you had pinned did not take it off the list: the
+    -- row carries a completionValue of six, so it stayed near the top of
+    -- `/cn list` and on the route.
+    --
+    -- Worse, `Follow.Remaining` decides a stop is finished by asking whether
+    -- its objectives are still candidates -- so follow mode STUCK on a goal
+    -- the player had already completed until they crossed a zone boundary.
+    ------------------------------------------------------------
+    local goalModule = CN:GetModule("Goals")
+
+    -- A MOUNT, because no other provider offers one that is uncollected AND
+    -- pinned -- so what the list holds is unambiguously the Goals row. A
+    -- pinned quest is also emitted by the Quests provider, and asserting on
+    -- that proves only that the Quests provider works.
+    local mountID = 2
+
+    goalModule.Add(CN.objectiveTypes.MOUNT, mountID)
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates(true)
+
+    local function Pinned()
+        for _, objective in ipairs(CN.CollectCandidates()) do
+            if objective.type == CN.objectiveTypes.MOUNT
+                and objective.id == mountID then
+
+                return true
+            end
+        end
+
+        return false
+    end
+
+    assert(Pinned(), "the pinned goal must be on the list first")
+
+    -- Collect it. The Mounts provider declares this event; the question is
+    -- whether the Goals provider does.
+    CN_TEST_SetMountCollected(mountID, true)
+
+    local mountModule = CN:GetModule("Mounts")
+
+    if mountModule and mountModule.Scan then
+        pcall(mountModule.Scan)
+    end
+
+    CN.Dispatch("NEW_MOUNT_ADDED", mountID)
+
+    assert(not Pinned(),
+        "a goal you have finished must leave the list at once -- it carries "
+        .. "the heaviest completion value in the addon, and follow mode "
+        .. "decides a stop is done by asking whether it is still here")
+
+    goalModule.Remove(CN.objectiveTypes.MOUNT, mountID)
+
+    CN_TEST_SetMountCollected(mountID, false)
+
+    if mountModule and mountModule.Scan then
+        pcall(mountModule.Scan)
+    end
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates(true)
+
+    print("  a goal you finished leaves the list at once")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A FLIGHT REFUSAL EXPIRES; A PERMISSION DOES NOT.
+    --
+    -- Flight is disabled in a zone before the campaign or Pathfinder unlock
+    -- and enabled after. `CanFly` treats a remembered `false` as
+    -- authoritative, and the store was permanent -- so a player who quested
+    -- through a zone before unlocking flight had every route TO that zone
+    -- costed at ground speed for ever, correctable only by flying back into
+    -- it, which is the one thing the wrong estimate discourages.
+    ------------------------------------------------------------
+    local travel = CN:GetModule("Travel")
+
+    assert(travel.flyableDenialDays, "the shelf life must be stated")
+
+    assert(travel.RememberedFlyable(nil) == nil, "no map, no memory")
+
+    print("  a flight refusal is re-asked; a permission is kept")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SUBZONE COUNT MOVES WHILE YOU EXPLORE.
+    --
+    -- The provider declared `CRITERIA_UPDATE` -- exactly the event that fires
+    -- when you discover a subzone -- and rebuilt on it, reading the same
+    -- persisted record it had read on entering the zone. So "3 subzones left"
+    -- was frozen at 3 for as long as the player explored, and only moved when
+    -- they left and came back.
+    ------------------------------------------------------------
+    local explorationModule = CN:GetModule("Exploration")
+
+    assert(explorationModule and explorationModule.RefreshCurrentZone,
+        "Exploration must expose its refresh")
+
+    -- MADE REACHABLE, rather than skipped if the fixture happens not to have
+    -- one. `ForCurrentZone` matches a stored record's name against
+    -- `GetZoneText()`, which the stub answers as "Eversong Woods".
+    local store = CN.Account("exploration")
+
+    local record = explorationModule.ForCurrentZone()
+
+    if not record then
+        store[99001] = {
+            achievementID = 99001,
+            name          = GetZoneText(),
+            done          = 0,
+            criteria      = 0,
+        }
+
+        record = explorationModule.ForCurrentZone()
+    end
+
+    assert(record,
+        "the fixture must have an explorationModule record for the current zone, "
+        .. "or this proves nothing")
+
+    local heldDone      = record.done
+    local heldCriteria  = record.criteria
+    local heldCompleted = record.completed
+
+    -- Stale on purpose: the state the defect left behind.
+    record.done      = 0
+    record.criteria  = 0
+    record.completed = false
+
+    -- THE CLIENT SAYS SOMETHING DIFFERENT FROM WHAT IS STORED.
+    --
+    -- Asserting `record.done == GetAchievementProgress(...)` proves nothing
+    -- when both are zero, which is what a synthetic achievement returns.
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 4, 9
+    end
+
+    CN.ForgetDebounces()
+
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(record.done == 4 and record.criteria == 9,
+        "discovering a subzone must move the count: the client says 4/9 and "
+        .. "the record says " .. tostring(record.done) .. "/"
+        .. tostring(record.criteria))
+
+    -- AND A ZONE THAT IS FINISHED IS MARKED FINISHED.
+    --
+    -- `Exploration.Closest` filters on `not record.completed` and sorts by
+    -- what is left ascending -- so a zone finished this session sat at the
+    -- TOP of that list reading "0 left", because the only writer of the flag
+    -- was the full scan.
+    CN.Blizzard.GetAchievementProgress = function()
+        return 7, 7
+    end
+
+    record.completed = false
+
+    explorationModule.RefreshCurrentZone()
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(record.completed == true,
+        "a zone whose criteria are all met is finished, and the store has to "
+        .. "say so")
+
+    record.done      = heldDone
+    record.criteria  = heldCriteria
+    record.completed = heldCompleted
+
+    print("  the subzone count moves as you explore, and finishing is recorded")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DEADLINE-CARRYING PROVIDER IS VOLATILE.
+    --
+    -- `expiresIn` is computed at build time and feeds the urgency curve --
+    -- the heaviest term in the table -- and is printed verbatim in the
+    -- reason. Orders was the only one of the six that was not volatile, so
+    -- after its first build it rebuilt only when the player touched the
+    -- crafting-order system: six hours later the row still said "expires in
+    -- 6 hours" and still scored as though six hours remained.
+    ------------------------------------------------------------
+    local deadlineProviders = {
+        "Orders", "Instances", "Waiting", "Currencies", "Opportunities",
+    }
+
+    for _, name in ipairs(deadlineProviders) do
+        local provider = CN.candidateProviders[name]
+
+        if provider then
+            assert(provider.volatile,
+                name .. " carries a deadline and must expire on its own; "
+                .. "nothing else can tell it that time has passed")
+        end
+    end
+
+    print("  every provider carrying a deadline goes stale on its own")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE WINDOW REDRAWS FOR EVERYTHING A PROVIDER CARES ABOUT.
+    --
+    -- This was a second hand-written list of six events -- the same "two
+    -- lists, one of which nobody checked against the other" that Scoring.lua
+    -- records as fixed for the invalidator, left standing in the window.
+    -- Missing: every collection event, achievements, criteria, currencies,
+    -- bags, vignettes, lockouts and the vault. In a city, where none of the
+    -- six fire, looting a toy left "collect this toy" on screen -- and DYING
+    -- did not show the corpse run, which is the one objective this addon
+    -- weights above everything else.
+    ------------------------------------------------------------
+    local subscribed = CN.UI.SubscribeToRefreshEvents()
+
+    assert(subscribed and subscribed > 20,
+        "the window must watch what the providers watch, saw "
+        .. tostring(subscribed))
+
+    -- Every event any provider declares has to be one of them.
+    local watched = {}
+
+    for _, name in ipairs({ "PLAYER_DEAD", "PLAYER_ALIVE",
+                            "NEW_MOUNT_ADDED", "NEW_TOY_ADDED",
+                            "ACHIEVEMENT_EARNED", "BAG_UPDATE_DELAYED",
+                            "CURRENCY_DISPLAY_UPDATE" }) do
+        watched[name] = false
+    end
+
+    for _, provider in pairs(CN.candidateProviders) do
+        for event in pairs(provider.events or {}) do
+            if watched[event] ~= nil then
+                watched[event] = true
+            end
+        end
+    end
+
+    -- The two the providers cannot declare are wired explicitly; the rest
+    -- have to come from a provider, or the list is hand-written again.
+    assert(watched.NEW_MOUNT_ADDED and watched.ACHIEVEMENT_EARNED,
+        "the collection events must come from the providers that declare "
+        .. "them, not from a list in the window")
+
+    print("  the window watches " .. subscribed .. " events, from the "
+        .. "providers themselves")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- TELLING EVERYBODY IS NOT THE SAME AS TELLING EVERYBODY NOW.
+    --
+    -- `InvalidateCandidates()` with no reason marks every provider URGENT,
+    -- which bypasses every declared cooldown. That is right for a deliberate
+    -- act -- pinning a goal must not wait two seconds -- and wrong for the
+    -- decorator set changing, which means "re-decorate on the next rebuild".
+    --
+    -- Warband calls that from `UPDATE_FACTION`, debounced to once every five
+    -- seconds and firing continuously while questing. Measured at retail
+    -- scale, the urgent form is 12.3 ms: more than twice a forced cold
+    -- rebuild, and three quarters of a frame. The 0.59.0 debounce capped how
+    -- OFTEN; this would have raised what each one costs by about eight
+    -- hundred times.
+    ------------------------------------------------------------
+    CN.CollectCandidates(true)
+
+    CN.NoteDecoratorsChanged()
+
+    local urgent, dirty, total = 0, 0, 0
+
+    for name, provider in pairs(CN.candidateProviders) do
+        total = total + 1
+
+        if CN.IsProviderDirty(name) then
+            dirty = dirty + 1
+        end
+
+        if provider.cooldown and CN.IsProviderUrgent
+            and CN.IsProviderUrgent(name) then
+
+            urgent = urgent + 1
+        end
+    end
+
+    assert(dirty == total,
+        "a decorator change still has to reach every provider, reached "
+        .. dirty .. " of " .. total)
+
+    assert(urgent == 0,
+        "but it must not bypass a single cooldown: " .. urgent
+        .. " provider(s) were told to drop what they declared they cost")
+
+    -- A DELIBERATE ONE STILL DOES, because the player is waiting for it.
+    CN.CollectCandidates(true)
+
+    CN.NoteDecoratorsChanged(true)
+
+    local bypassed = 0
+
+    for name, provider in pairs(CN.candidateProviders) do
+        if provider.cooldown and CN.IsProviderUrgent
+            and CN.IsProviderUrgent(name) then
+
+            bypassed = bypassed + 1
+        end
+    end
+
+    assert(bypassed > 0,
+        "pinning a goal must not wait for anybody's cooldown -- 0.57.0 "
+        .. "records that seeing nothing happen for two seconds reads as the "
+        .. "feature being broken")
+
+    CN.CollectCandidates(true)
+
+    print("  a background change is patient; a deliberate one is not")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- WALKING INTO A CAVE DOES NOT CHANGE WHICH PETS YOU OWN.
+    --
+    -- `ZONE_CHANGED_NEW_AREA` was on the universal list, and once that list
+    -- started meaning something it reached all twenty-three providers at
+    -- 2.5 ms a time -- for an event the client fires on every indoor and
+    -- sub-area transition and repeatedly while flying along a zone border.
+    --
+    -- Every provider a zone change actually affects declares it, and the
+    -- check above fails the build if one reads the player's position without
+    -- doing so. The declaration is better than the blanket.
+    ------------------------------------------------------------
+    assert(not CN.IsUniversalInvalidation("ZONE_CHANGED_NEW_AREA"),
+        "a zone change reaches the providers that asked for it, not all of "
+        .. "them")
+
+    assert(CN.IsUniversalInvalidation("PLAYER_LEVEL_UP"),
+        "a level-up genuinely changes what is available everywhere")
+
+    CN.CollectCandidates(true)
+
+    CN.Dispatch("ZONE_CHANGED_NEW_AREA")
+
+    local dirty, total = 0, 0
+
+    for name in pairs(CN.candidateProviders) do
+        total = total + 1
+
+        if CN.IsProviderDirty(name) then
+            dirty = dirty + 1
+        end
+    end
+
+    assert(dirty > 0, "the located providers must still be told")
+
+    assert(dirty < total,
+        "but not all of them: " .. dirty .. " of " .. total
+        .. " rebuilt for a sub-area transition")
+
+    print("  a zone change reaches " .. dirty .. " of " .. total
+        .. " providers, not all of them")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A STORED "YES" IS NOT OVERWRITTEN BY A "NO".
+    --
+    -- `IsFlyableArea` answers for the SPOT the player is standing on -- a
+    -- cave, a quest vehicle, an indoor phase -- while the map id is still the
+    -- parent zone. `NoteFlyable` runs on every zone change and every loading
+    -- screen, so walking into a cave in a zone you have flown around turned a
+    -- permanent permission into a day-long refusal, and every route to that
+    -- zone was costed at ground speed until it expired.
+    ------------------------------------------------------------
+    local travel = CN:GetModule("Travel")
+
+    local memory = travel.FlightMemory()
+
+    local mapID = CN.GetPlayerPosition()
+
+    memory[mapID] = true
+
+    CN_TEST_FLYABLE = false
+
+    travel.NoteFlyable(mapID)
+
+    assert(memory[mapID] == true,
+        "flight being unavailable where you are standing is not evidence "
+        .. "that it is unavailable in the zone")
+
+    -- With nothing remembered, a refusal is still recorded.
+    memory[mapID] = nil
+
+    travel.NoteFlyable(mapID)
+
+    assert(type(memory[mapID]) == "table" and memory[mapID].flyable == false,
+        "and a first observation of no-flight is still worth keeping")
+
+    CN_TEST_FLYABLE = true
+
+    memory[mapID] = nil
+
+    print("  a cave does not revoke a zone's flight permission")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- TWO ZONES CALLED NAGRAND.
+    --
+    -- `ForCurrentZone` was a SUBSTRING match over an unordered walk of every
+    -- exploration achievement, returning the first hit -- and retail has two
+    -- zones called Nagrand and two called Shadowmoon Valley. That was
+    -- cosmetic while nothing wrote through it. `RefreshCurrentZone` writes
+    -- through it, so finishing one would stamp `completed` on the other,
+    -- which then vanishes from the list until a full rescan nothing runs.
+    ------------------------------------------------------------
+    local zoneExploration = CN:GetModule("Exploration")
+
+    local store = CN.Account("exploration")
+
+    local heldStore = {}
+
+    for key, value in pairs(store) do
+        heldStore[key] = value
+        store[key]     = nil
+    end
+
+    local zone = GetZoneText()
+
+    -- ONE EXACT NAME AND ONE THAT MERELY CONTAINS IT. A substring match hits
+    -- both -- which is the defect, because retail has two zones called
+    -- Nagrand and two called Shadowmoon Valley -- and an exact match hits
+    -- one.
+    store[91001] = {
+        achievementID = 91001,
+        name          = zone .. " (Outland)",
+        done          = 1,
+        criteria      = 5,
+    }
+
+    store[91002] = { achievementID = 91002, name = zone, done = 2, criteria = 7 }
+
+    -- Whichever one it picks, it must pick the SAME one twice -- and having
+    -- picked it, it must have written the map down so the ambiguity is over.
+    local first  = zoneExploration.ForCurrentZone()
+
+    assert(first, "one of the two must match")
+
+    assert(first.achievementID == 91002,
+        "the zone you are standing in is the one named exactly that, not the "
+        .. "one whose name happens to contain it; got "
+        .. tostring(first.achievementID) .. " (" .. tostring(first.name) .. ")")
+
+    assert(first.mapID == CN.GetPlayerPosition(),
+        "and it must record which map it is about, or the next call is "
+        .. "another coin toss")
+
+    for _ = 1, 5 do
+        assert(zoneExploration.ForCurrentZone() == first,
+            "the same zone must give the same record every time")
+    end
+
+    -- A REFUSAL IS NOT A MEASUREMENT.
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 0, 0
+    end
+
+    zoneExploration.RefreshCurrentZone()
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(first.criteria > 0,
+        "a client that will not answer must not overwrite a scanned count "
+        .. "with nothing")
+
+    for key in pairs(store) do
+        store[key] = nil
+    end
+
+    for key, value in pairs(heldStore) do
+        store[key] = value
+    end
+
+    print("  two zones with one name do not overwrite each other")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE UPGRADE PATH IS THE ONLY PATH ANYBODY IS ON.
+    --
+    -- A currency row written before this release carries no serial, and the
+    -- first version treated that as current "until the next scan rewrites
+    -- it" -- which is wrong in exactly the case the feature exists for: a
+    -- currency the client no longer lists is the row the next scan will NOT
+    -- rewrite. The fix worked on a fresh install and did nothing at all for
+    -- everybody upgrading.
+    ------------------------------------------------------------
+    local probe = {
+        version = 13,
+        account = {},
+        characters = {
+            ["Someone-Somewhere"] = {
+                currencies = {
+                    [1] = { currencyID = 1, capped = true },
+                    [2] = { currencyID = 2, capped = true, serial = 4 },
+                },
+            },
+        },
+    }
+
+    CN.RunMigrations(probe)
+
+    local rows = probe.characters["Someone-Somewhere"].currencies
+
+    assert(rows[1].serial == 0,
+        "an unstamped row is older than any sweep, not current, got "
+        .. tostring(rows[1].serial))
+
+    assert(rows[2].serial == 4, "and a stamped one is left alone")
+
+    print("  a currency stored before this release is confirmed, not assumed")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE FRESHEST HOLDER, NOT THE ALPHABETICALLY FIRST.
+    --
+    -- `WhoKnows` sorts its holders by realm-name and nothing else. So a
+    -- deleted alt called Aaathrowaway came back ahead of a main called
+    -- Zeddicus -- and the staleness check, seeing a record older than the
+    -- line, dropped the penalty entirely and concluded nobody was better
+    -- suited, when somebody played yesterday already knew the thing.
+    ------------------------------------------------------------
+    local warband = CN:GetModule("Warband")
+    local alts    = CN:GetModule("Alts")
+
+    local stale, fresh = "Aaathrowaway-Testrealm", "Zeddicus-Testrealm"
+
+    CN.db.characters[stale] = {
+        name     = "Aaathrowaway",
+        realm    = "Testrealm",
+        lastSeen = time() - ((alts.staleDays + 300) * 86400),
+        recipes  = { [7001] = true },
+    }
+
+    CN.db.characters[fresh] = {
+        name     = "Zeddicus",
+        realm    = "Testrealm",
+        lastSeen = time(),
+        recipes  = { [7001] = true },
+    }
+
+    local score, reason = warband.Suitability(CN.objectiveTypes.RECIPE, 7001)
+
+    assert(score < 0 and reason and reason:find("Zeddicus", 1, true),
+        "the character you played yesterday is the one who is better "
+        .. "suited, got " .. tostring(score) .. " / " .. tostring(reason))
+
+    CN.db.characters[stale] = nil
+    CN.db.characters[fresh] = nil
+
+    print("  a deleted alt does not hide a live one")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CLOSE BUTTON DOES NOT SIT ON TOP OF THE OBJECTIVE.
+    --
+    -- Alpha zero does not disable mouse input, so the last stretch of a long
+    -- name was covered by a 16-pixel button that turns the line off rather
+    -- than navigating to it -- and a drag started in that corner did nothing,
+    -- while the tooltip promises the whole line can be dragged.
+    ------------------------------------------------------------
+    local hud = CN:GetModule("Hud")
+
+    local hudCloseFrame = hud.Build()
+
+    if hudCloseFrame and hudCloseFrame.close then
+        assert(hud.closeWidth and hud.closeWidth >= 16,
+            "the label has to keep clear of the button, by at least its width")
+
+        -- ASSERTED ON THE ANCHOR, not on the constant: the defect was the
+        -- label's right edge, and a constant nobody uses is not a fix.
+        local labelRight = hudCloseFrame.label:GetPointBy("TOPRIGHT")
+        local closeRight = hudCloseFrame.close:GetPointBy("TOPRIGHT")
+
+        assert(labelRight and closeRight,
+            "both must be anchored to the top-right edge")
+
+        assert(math.abs(labelRight.x) >= math.abs(closeRight.x) + hud.closeWidth,
+            "the name must stop before the button starts: label at "
+            .. tostring(labelRight.x) .. ", button at "
+            .. tostring(closeRight.x) .. " and " .. hud.closeWidth .. " wide")
+
+        assert(hudCloseFrame.close:GetScript("OnDragStart"),
+            "and a drag started on the button still moves the line")
+    end
+
+    print("  the close control keeps clear of the name and still drags")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CLIENT THAT HAS NOT LOADED THE WARDROBE ANSWERS ZERO.
+    --
+    -- The appearance scan now runs at login, and it overwrote every stored
+    -- count unconditionally -- so a "0 of 260" from a collection that is not
+    -- ready yet would replace a scanned "184 of 260" and the addon would
+    -- recommend every slot the player had already finished.
+    ------------------------------------------------------------
+    local appearanceModule = CN:GetModule("Appearances")
+
+    appearanceModule.Scan()
+
+    local store = CN.Account("appearances")
+
+    local categoryID, record = next(store)
+
+    if categoryID and record and (record.collected or 0) > 0 then
+        local held = record.collected
+
+        local realCategories = CN.Blizzard.GetAppearanceCategories
+
+        CN.Blizzard.GetAppearanceCategories = function()
+            local rows = realCategories()
+
+            for _, row in ipairs(rows) do
+                row.collected = 0
+            end
+
+            return rows
+        end
+
+        appearanceModule.Scan()
+
+        CN.Blizzard.GetAppearanceCategories = realCategories
+
+        assert(store[categoryID].collected == held,
+            "a refusal reads as zero and a count only goes up, so the "
+            .. "stored figure stands: had " .. held .. ", now "
+            .. tostring(store[categoryID].collected))
+    end
+
+    print("  a wardrobe that has not loaded does not erase what was scanned")
 end)()
 
 
@@ -71076,12 +73707,38 @@ print("\nFlight, where flight is allowed:")
     -- observed per zone. A plan the player cannot follow is worse than a
     -- pessimistic one they can.
     ------------------------------------------------------------
-    memory[94] = false
+    -- STAMPED, because a refusal expires as of 0.60.0: flight is disabled
+    -- before a Pathfinder unlock and enabled after, so a permanent `false`
+    -- costed every route to that zone at ground speed for ever. A bare
+    -- boolean is the pre-0.60.0 shape and is now treated as expired.
+    memory[94] = { flyable = false, at = time() }
 
     assert(travel.CanFly(94) == false,
         "a zone remembered as no-fly must refuse")
 
+    assert(travel.RememberedFlyable(94) == false,
+        "and the store must say so while the refusal is still fresh")
+
+    -- A DAY LATER IT IS NOT WORTH BELIEVING.
+    memory[94] = {
+        flyable = false,
+        at      = time() - ((travel.flyableDenialDays * 86400) + 60),
+    }
+
+    assert(travel.RememberedFlyable(94) == nil,
+        "an old refusal is unknown, not authoritative -- it is the answer "
+        .. "that stops a player using flight they have since unlocked")
+
+    -- And the shape from before this version, which carries no stamp at all.
+    memory[94] = false
+
+    assert(travel.RememberedFlyable(94) == nil,
+        "an unstamped refusal cannot be aged, so it is not trusted")
+
     memory[94] = true
+
+    assert(travel.RememberedFlyable(94) == true,
+        "a yes does not expire: a zone that allowed flying does not stop")
 
     assert(travel.CanFly(94) == true,
         "and one remembered as flyable must allow it")
@@ -71112,9 +73769,17 @@ print("\nFlight, where flight is allowed:")
 
     local here = CN.GetPlayerPosition()
 
-    assert(memory[here] == false,
+    -- Recorded WITH A STAMP, so the refusal can expire. See the note above
+    -- `Travel.NoteFlyable`.
+    assert(type(memory[here]) == "table" and memory[here].flyable == false,
         "arriving in a zone where flight is disabled must be remembered, got "
         .. tostring(memory[here]))
+
+    assert(type(memory[here].at) == "number",
+        "and stamped, or it is a permanent answer to a question that changes")
+
+    assert(travel.RememberedFlyable(here) == false,
+        "and it must read back as a refusal while it is fresh")
 
     CN_TEST_FLYABLE = true
 
@@ -72924,12 +75589,16 @@ print("\nFeatures that were wired to nothing:")
     print("  weekly knowledge is found: " .. tostring(knowledge[1].name))
 
     -- 2. Warband flag survives the capped query.
+    -- STAMPED WITH THE CURRENT SWEEP, because as of 0.60.0 a row the last
+    -- scan did not see is not reported on -- that is how a currency retired
+    -- two seasons ago stops being recommended for ever.
     store[3001] = {
         currencyID  = 3001,
         capped      = true,
         quantity    = 100,
         maxQuantity = 100,
         accountWide = true,
+        serial      = coin.CurrentSerial(),
     }
 
     local capped

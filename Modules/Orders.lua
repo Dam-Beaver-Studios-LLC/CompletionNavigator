@@ -152,6 +152,19 @@ CN.RegisterCandidateProvider("Orders", function()
     return candidates
 end, {
     events   = { "CRAFTINGORDERS_UPDATE_ORDER_COUNT", "CRAFTINGORDERS_CLAIM_ORDER_RESPONSE" },
+
+    -- VOLATILE, BECAUSE THIS CARRIES A DEADLINE.
+    --
+    -- `expiresIn` is computed at build time and feeds the urgency curve --
+    -- the heaviest term in the table -- and is printed verbatim in the
+    -- reason. Without this the row rebuilt only when the player touched the
+    -- crafting-order system, so six hours later it still said "expires in 6
+    -- hours" and still scored as though six hours remained.
+    --
+    -- Exactly the defect 0.59.0 fixed for calendar events, in the one
+    -- deadline-carrying provider that was not volatile. The thirty-second
+    -- cooldown already bounds what this costs.
+    volatile = true,
     cooldown = 30,
 })
 
