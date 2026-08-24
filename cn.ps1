@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.61.0'
+$script:ToolkitVersion = '0.61.1'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.61.0"
+CN.version     = "0.61.1"
 CN.dbVersion   = 15
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -49117,7 +49117,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.61.0
+## Version: 0.61.1
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -49372,6 +49372,36 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.61.1]
+
+A build fix. 0.61.0 was verified and never published: its release run stopped
+at the performance-budget step with "command not found".
+
+### Fixed
+
+- **The release could not complete.** 0.61.0 moved the performance budgets
+  onto Lua 5.1 — the interpreter the game actually runs, and about half the
+  speed of the 5.4 they had always been measured on. The step called `lua5.1`
+  without checking it was there. The build machine did not have it, so the
+  step exited 127 and everything after it, including the upload, never ran.
+  The step ten lines above it had always checked; this one was written without
+  looking at it.
+- **The step now checks for Lua 5.1 before using it**, the way the harness
+  step beside it always has. It runs on 5.1 wherever 5.1 exists — including
+  the local release rehearsal, where every budget in this release was measured
+  — and says plainly when it had to fall back rather than failing the build.
+  Installing 5.1 on the build machine was tried and rejected: this project
+  does not take its toolchain from the runner's package manager, because a
+  package lock once hung a release for no reason anybody could act on.
+- **The release rehearsal now catches this whole class before a tag is
+  pushed.** It runs the real workflow's steps locally, and it passed 0.61.0 —
+  because this machine happens to have Lua 5.1 and the build machine does not.
+  A local success is not evidence about the runner. Every tool the workflow
+  invokes must now either be installed by the workflow itself or be checked
+  for, and the rehearsal refuses to proceed otherwise.
+
+No addon behaviour changed. Everything in 0.61.0 below ships unaltered.
 
 ## [0.61.0]
 
@@ -54408,7 +54438,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.61.0
+0.61.1
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -54506,6 +54536,19 @@ jobs:
         run: |
           luarocks install luacheck
           luarocks install luacov || echo "luacov unavailable; coverage will skip"
+
+          # NO LUA 5.1 HERE, DELIBERATELY. 0.61.1.
+          #
+          # The game runs Lua 5.1 and this workspace's toolchain is 5.4, so
+          # installing 5.1 is tempting -- and 0.61.1 tried it with apt before
+          # the toolkit's own lint stopped it. That lint exists because the
+          # runner's unattended upgrades hold the dpkg lock and a release that
+          # waits on it dies on a timeout for no reason anybody can act on.
+          #
+          # So the two steps that want 5.1 -- the harness and the performance
+          # budgets -- both CHECK for it and say plainly when it is missing.
+          # They run on 5.1 wherever it exists, including the local release
+          # rehearsal, and neither can exit 127 for the want of it.
 
           mkdir -p "$HOME/bin"
           ln -sf "$(command -v lua)"  "$HOME/bin/lua5.4"
@@ -54635,14 +54678,31 @@ jobs:
       - name: Performance budgets
         timeout-minutes: 6
         run: |
-          if [ -f bench.lua ]; then
-            echo "--- lua5.4 (reference, not the gate) ---"
-            lua5.4 bench.lua . --budget || true
+          if [ ! -f bench.lua ]; then
+            echo "bench.lua is missing; skipping budgets."
+            exit 0
+          fi
 
+          echo "--- lua5.4 (reference, not the gate) ---"
+          lua5.4 bench.lua . --budget || true
+
+          # GUARDED, LIKE THE 5.1 HARNESS STEP NEXT DOOR. 0.61.1.
+          #
+          # 0.61.0 called `lua5.1` here unguarded. The runner did not have it,
+          # the step exited 127 -- "command not found" -- and the release died
+          # between the harness and packaging. The harness step ten lines above
+          # had ALWAYS guarded this exact binary; this step was written without
+          # looking at it.
+          #
+          # That is the same shape of defect this project keeps finding: two
+          # places that need the same precondition, one of which nobody
+          # checked against the other.
+          if command -v lua5.1 >/dev/null 2>&1; then
             echo "--- lua5.1 (the version the game runs; this is the gate) ---"
             lua5.1 bench.lua . --budget
           else
-            echo "bench.lua is missing; skipping budgets."
+            echo "::warning::lua5.1 is not on this runner, so the budgets were"
+            echo "gated on 5.4 -- which is about twice as fast as the game."
           fi
 
       # Mutation testing: does the suite actually notice when the code is
@@ -82044,6 +82104,92 @@ SKIP_PATTERN='^(Fetch tags|Verify a tag points at HEAD)$'
 status=0
 ran=0
 skipped=0
+
+# ------------------------------------------------------------
+# PREFLIGHT: A COMMAND NOTHING INSTALLS IS AN EXIT 127 WAITING FOR A TAG.
+#
+# 0.61.0 died on the runner with "Process completed with exit code 127" --
+# command not found. The Performance budgets step called `lua5.1` directly,
+# the runner does not have it, and nothing here noticed because THIS MACHINE
+# does. That is precisely the failure mode this whole script exists to
+# prevent: a step that passes locally and cannot pass there.
+#
+# So the steps are read for bare invocations of the interpreters and tools
+# this workflow depends on, and each one must either be installed by the
+# workflow's own "Install Lua tooling" step or be guarded by `command -v`.
+# Whether it happens to exist locally is not evidence about the runner.
+# ------------------------------------------------------------
+# ONLY LINES THAT ACTUALLY INSTALL SOMETHING.
+#
+# The first version of this grepped the whole Install step for the tool's
+# name, and the step's own comment and its "could not be installed" warning
+# both contain it -- so the check passed on prose and the preflight said
+# nothing. Comments and echoes are stripped, and what remains must be an
+# install or a symlink.
+# THE END MARKER MATCHES THE START PATTERN, SO IT IS TESTED FIRST.
+#
+# Steps are delimited `=== <n>\t<label>` ... `=== end`, and `/^=== /` matches
+# BOTH. With the start rule first, every `=== end` reset the body before the
+# end rule could read it, so the body was always empty and the preflight
+# checked nothing while reporting success -- a check that cannot fail, which
+# is worse than no check.
+install_body=$(awk '
+    /^=== end/{ collecting = 0; next }
+    /^=== /{ collecting = ($0 ~ /Install Lua tooling/) ? 1 : 0; next }
+    !collecting { next }
+    /^ *#/ { next }
+    /echo / { next }
+    /(apt-get +install|luarocks +install|ln +-sf|apk +add|brew +install)/ { print }
+' .cisim-steps)
+
+preflight=0
+
+for tool in lua5.1 lua5.2 lua5.3 lua5.4 luac5.1 luac5.4 luacheck luacov busted; do
+    # Every step that invokes the tool as a command.
+    if ! grep -qE "(^|[^-[:alnum:]_./])${tool}[[:space:]]" .cisim-steps 2>/dev/null; then
+        continue
+    fi
+
+    # Installed by the workflow itself?
+    if printf '%s' "$install_body" | grep -q "$tool"; then
+        continue
+    fi
+
+    # Every invocation guarded by a presence check in its own step?
+    # `&&` TRAILS THE LINE. mawk continues a condition after a trailing
+    # operator and refuses one that begins with it, which is how the first
+    # version of this printed six syntax errors and checked nothing.
+    unguarded=$(awk -v tool="$tool" '
+        /^=== end/{
+            uses = (body ~ ("(^|[^-[:alnum:]_./])" tool "[ \t]"))
+            seen = (body ~ ("command -v " tool)) ||
+                   (body ~ ("which " tool)) ||
+                   (body ~ ("hash " tool))
+            # The Install step naming a tool is it INSTALLING the tool, not
+            # depending on one that may be absent.
+            if (uses && !seen && label !~ /Install Lua tooling/) {
+                sub(/^=== [0-9]*\t?/, "", label)
+                print label
+            }
+            next
+        }
+        /^=== /{ label = $0; body = ""; next }
+        { body = body $0 " " }
+    ' .cisim-steps)
+
+    if [ -n "$unguarded" ]; then
+        echo "  PREFLIGHT FAIL  '$tool' is neither installed by the workflow"
+        echo "                  nor guarded, in: $unguarded"
+        echo "                  On a runner without it that step exits 127."
+        preflight=1
+    fi
+done
+
+if [ "$preflight" -ne 0 ]; then
+    echo ""
+    echo "A workflow step would fail on the runner with command-not-found."
+    exit 1
+fi
 
 label=""
 body=""

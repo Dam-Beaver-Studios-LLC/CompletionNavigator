@@ -149,6 +149,92 @@ status=0
 ran=0
 skipped=0
 
+# ------------------------------------------------------------
+# PREFLIGHT: A COMMAND NOTHING INSTALLS IS AN EXIT 127 WAITING FOR A TAG.
+#
+# 0.61.0 died on the runner with "Process completed with exit code 127" --
+# command not found. The Performance budgets step called `lua5.1` directly,
+# the runner does not have it, and nothing here noticed because THIS MACHINE
+# does. That is precisely the failure mode this whole script exists to
+# prevent: a step that passes locally and cannot pass there.
+#
+# So the steps are read for bare invocations of the interpreters and tools
+# this workflow depends on, and each one must either be installed by the
+# workflow's own "Install Lua tooling" step or be guarded by `command -v`.
+# Whether it happens to exist locally is not evidence about the runner.
+# ------------------------------------------------------------
+# ONLY LINES THAT ACTUALLY INSTALL SOMETHING.
+#
+# The first version of this grepped the whole Install step for the tool's
+# name, and the step's own comment and its "could not be installed" warning
+# both contain it -- so the check passed on prose and the preflight said
+# nothing. Comments and echoes are stripped, and what remains must be an
+# install or a symlink.
+# THE END MARKER MATCHES THE START PATTERN, SO IT IS TESTED FIRST.
+#
+# Steps are delimited `=== <n>\t<label>` ... `=== end`, and `/^=== /` matches
+# BOTH. With the start rule first, every `=== end` reset the body before the
+# end rule could read it, so the body was always empty and the preflight
+# checked nothing while reporting success -- a check that cannot fail, which
+# is worse than no check.
+install_body=$(awk '
+    /^=== end/{ collecting = 0; next }
+    /^=== /{ collecting = ($0 ~ /Install Lua tooling/) ? 1 : 0; next }
+    !collecting { next }
+    /^ *#/ { next }
+    /echo / { next }
+    /(apt-get +install|luarocks +install|ln +-sf|apk +add|brew +install)/ { print }
+' .cisim-steps)
+
+preflight=0
+
+for tool in lua5.1 lua5.2 lua5.3 lua5.4 luac5.1 luac5.4 luacheck luacov busted; do
+    # Every step that invokes the tool as a command.
+    if ! grep -qE "(^|[^-[:alnum:]_./])${tool}[[:space:]]" .cisim-steps 2>/dev/null; then
+        continue
+    fi
+
+    # Installed by the workflow itself?
+    if printf '%s' "$install_body" | grep -q "$tool"; then
+        continue
+    fi
+
+    # Every invocation guarded by a presence check in its own step?
+    # `&&` TRAILS THE LINE. mawk continues a condition after a trailing
+    # operator and refuses one that begins with it, which is how the first
+    # version of this printed six syntax errors and checked nothing.
+    unguarded=$(awk -v tool="$tool" '
+        /^=== end/{
+            uses = (body ~ ("(^|[^-[:alnum:]_./])" tool "[ \t]"))
+            seen = (body ~ ("command -v " tool)) ||
+                   (body ~ ("which " tool)) ||
+                   (body ~ ("hash " tool))
+            # The Install step naming a tool is it INSTALLING the tool, not
+            # depending on one that may be absent.
+            if (uses && !seen && label !~ /Install Lua tooling/) {
+                sub(/^=== [0-9]*\t?/, "", label)
+                print label
+            }
+            next
+        }
+        /^=== /{ label = $0; body = ""; next }
+        { body = body $0 " " }
+    ' .cisim-steps)
+
+    if [ -n "$unguarded" ]; then
+        echo "  PREFLIGHT FAIL  '$tool' is neither installed by the workflow"
+        echo "                  nor guarded, in: $unguarded"
+        echo "                  On a runner without it that step exits 127."
+        preflight=1
+    fi
+done
+
+if [ "$preflight" -ne 0 ]; then
+    echo ""
+    echo "A workflow step would fail on the runner with command-not-found."
+    exit 1
+fi
+
 label=""
 body=""
 collecting=0

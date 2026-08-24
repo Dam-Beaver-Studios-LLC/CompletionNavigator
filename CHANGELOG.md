@@ -7,6 +7,36 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.61.1]
+
+A build fix. 0.61.0 was verified and never published: its release run stopped
+at the performance-budget step with "command not found".
+
+### Fixed
+
+- **The release could not complete.** 0.61.0 moved the performance budgets
+  onto Lua 5.1 â€” the interpreter the game actually runs, and about half the
+  speed of the 5.4 they had always been measured on. The step called `lua5.1`
+  without checking it was there. The build machine did not have it, so the
+  step exited 127 and everything after it, including the upload, never ran.
+  The step ten lines above it had always checked; this one was written without
+  looking at it.
+- **The step now checks for Lua 5.1 before using it**, the way the harness
+  step beside it always has. It runs on 5.1 wherever 5.1 exists â€” including
+  the local release rehearsal, where every budget in this release was measured
+  â€” and says plainly when it had to fall back rather than failing the build.
+  Installing 5.1 on the build machine was tried and rejected: this project
+  does not take its toolchain from the runner's package manager, because a
+  package lock once hung a release for no reason anybody could act on.
+- **The release rehearsal now catches this whole class before a tag is
+  pushed.** It runs the real workflow's steps locally, and it passed 0.61.0 â€”
+  because this machine happens to have Lua 5.1 and the build machine does not.
+  A local success is not evidence about the runner. Every tool the workflow
+  invokes must now either be installed by the workflow itself or be checked
+  for, and the rehearsal refuses to proceed otherwise.
+
+No addon behaviour changed. Everything in 0.61.0 below ships unaltered.
+
 ## [0.61.0]
 
 Numbers, and what they cost. Two themes ran through this release: figures that

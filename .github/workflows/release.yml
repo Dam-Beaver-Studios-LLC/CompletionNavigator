@@ -93,6 +93,19 @@ jobs:
           luarocks install luacheck
           luarocks install luacov || echo "luacov unavailable; coverage will skip"
 
+          # NO LUA 5.1 HERE, DELIBERATELY. 0.61.1.
+          #
+          # The game runs Lua 5.1 and this workspace's toolchain is 5.4, so
+          # installing 5.1 is tempting -- and 0.61.1 tried it with apt before
+          # the toolkit's own lint stopped it. That lint exists because the
+          # runner's unattended upgrades hold the dpkg lock and a release that
+          # waits on it dies on a timeout for no reason anybody can act on.
+          #
+          # So the two steps that want 5.1 -- the harness and the performance
+          # budgets -- both CHECK for it and say plainly when it is missing.
+          # They run on 5.1 wherever it exists, including the local release
+          # rehearsal, and neither can exit 127 for the want of it.
+
           mkdir -p "$HOME/bin"
           ln -sf "$(command -v lua)"  "$HOME/bin/lua5.4"
           ln -sf "$(command -v luac)" "$HOME/bin/luac5.4"
@@ -221,14 +234,31 @@ jobs:
       - name: Performance budgets
         timeout-minutes: 6
         run: |
-          if [ -f bench.lua ]; then
-            echo "--- lua5.4 (reference, not the gate) ---"
-            lua5.4 bench.lua . --budget || true
+          if [ ! -f bench.lua ]; then
+            echo "bench.lua is missing; skipping budgets."
+            exit 0
+          fi
 
+          echo "--- lua5.4 (reference, not the gate) ---"
+          lua5.4 bench.lua . --budget || true
+
+          # GUARDED, LIKE THE 5.1 HARNESS STEP NEXT DOOR. 0.61.1.
+          #
+          # 0.61.0 called `lua5.1` here unguarded. The runner did not have it,
+          # the step exited 127 -- "command not found" -- and the release died
+          # between the harness and packaging. The harness step ten lines above
+          # had ALWAYS guarded this exact binary; this step was written without
+          # looking at it.
+          #
+          # That is the same shape of defect this project keeps finding: two
+          # places that need the same precondition, one of which nobody
+          # checked against the other.
+          if command -v lua5.1 >/dev/null 2>&1; then
             echo "--- lua5.1 (the version the game runs; this is the gate) ---"
             lua5.1 bench.lua . --budget
           else
-            echo "bench.lua is missing; skipping budgets."
+            echo "::warning::lua5.1 is not on this runner, so the budgets were"
+            echo "gated on 5.4 -- which is about twice as fast as the game."
           fi
 
       # Mutation testing: does the suite actually notice when the code is
