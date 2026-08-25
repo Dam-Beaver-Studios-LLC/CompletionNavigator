@@ -467,7 +467,11 @@ function InCombatLockdown() return CN_TEST_IN_COMBAT end
 -- inside the same second read as zero elapsed and was thrown away.
 CN_TEST_CLOCK = 1000.0
 function GetTime() return CN_TEST_CLOCK end
-function GetZoneText() return "Eversong Woods" end
+-- OVERRIDABLE, so a test can stand somewhere with a name it chose. The zone
+-- name is matched against achievement names, and the two forms differ.
+CN_TEST_ZONE_NAME = nil
+
+function GetZoneText() return CN_TEST_ZONE_NAME or "Eversong Woods" end
 
 -- WHERE THE HEARTHSTONE IS BOUND.
 --
@@ -1753,6 +1757,30 @@ local petSpecies = {
     { speciesID = 102, name = "Gone Forever",   petType = 3, isWild = false, canBattle = false, owned = false, count = 0, obtainable = false },
 }
 
+-- THE JOURNAL LISTS A SPECIES ONCE PER COPY HELD.
+--
+-- That is why `GetPetCollectedCount` returns `collected, limit`, and it is
+-- what `GetNumPets` counts: DISPLAYED ENTRIES, not species. The stub listed
+-- one row per species, so a scan that counted rows and a summary that counted
+-- species agreed here and disagreed on any real account with a duplicate --
+-- eighteenth time a stub simpler than the client has hidden a defect.
+--
+-- Species 100 is held three times, so the journal shows five entries for
+-- three species.
+function CN_TEST_PetDisplayRows()
+    local rows = {}
+
+    for _, pet in ipairs(petSpecies) do
+        local copies = pet.owned and math.max(1, pet.count or 1) or 1
+
+        for _ = 1, copies do
+            table.insert(rows, pet)
+        end
+    end
+
+    return rows
+end
+
 LE_PET_JOURNAL_FILTER_COLLECTED     = 1
 LE_PET_JOURNAL_FILTER_NOT_COLLECTED = 2
 
@@ -1833,9 +1861,9 @@ C_PetJournal = {
             CN_TEST_PET_FILTERS.uncollected = value
         end
     end,
-    GetNumPets               = function() return #petSpecies, 1 end,
+    GetNumPets               = function() return #CN_TEST_PetDisplayRows(), 1 end,
     GetPetInfoByIndex        = function(i)
-        local p = petSpecies[i]
+        local p = CN_TEST_PetDisplayRows()[i]
         if not p then return nil end
         return "petid" .. i, p.speciesID, p.owned, nil, 25, false, false,
                p.name, 1, p.petType, nil, nil, "desc", p.isWild, p.canBattle,
@@ -2391,6 +2419,38 @@ CN_TEST_CURRENCY_ROWS = {
       maxQuantity = 0, quantityEarnedThisWeek = 1, maxWeeklyQuantity = 3,
       totalEarned = 1 },
 }
+
+-- A CURRENCY WHOSE CAP IS ON WHAT YOU HAVE EARNED, NOT WHAT YOU HOLD.
+--
+-- `useTotalEarnedForMaxQty` is a real client field the addon read and then
+-- neither stored nor consulted, so every currency was tested as
+-- `quantity >= maxQuantity`. No row in this fixture set the flag, so the
+-- defect was unreachable from the suite: a player at the cap who had spent
+-- the balance was told they were not capped.
+function CN_TEST_SetTotalEarnedCurrency(currencyID, maxQuantity, totalEarned,
+    quantity)
+
+    for index = #CN_TEST_CURRENCY_ROWS, 1, -1 do
+        if CN_TEST_CURRENCY_ROWS[index].currencyID == currencyID then
+            table.remove(CN_TEST_CURRENCY_ROWS, index)
+        end
+    end
+
+    if not maxQuantity then
+        return
+    end
+
+    table.insert(CN_TEST_CURRENCY_ROWS, {
+        currencyID              = currencyID,
+        name                    = "Seasonal Proof",
+        quantity                = quantity or 0,
+        maxQuantity             = maxQuantity,
+        quantityEarnedThisWeek  = 0,
+        maxWeeklyQuantity       = 0,
+        totalEarned             = totalEarned or 0,
+        useTotalEarnedForMaxQty = true,
+    })
+end
 
 -- What the client would actually list, given the current header states.
 local function CurrencyVisible()
@@ -9704,6 +9764,283 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
+print("\nWhat 0.62.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ACHIEVEMENT NAME IS NOT A ZONE NAME.
+    --
+    -- 0.59.0 tightened a working substring match into an exact one, and the
+    -- two strings it compares are never equal on any client: the store holds
+    -- "Explore Eversong Woods" and the needle is "Eversong Woods". The whole
+    -- Exploration feature -- the provider, the per-zone block, the learned
+    -- map id -- was dead in every zone, on every client.
+    ------------------------------------------------------------
+    local exploreModule = CN:GetModule("Exploration")
+
+    if CN.CountKeys(CN.Account("exploration")) == 0 then
+        exploreModule.Scan()
+    end
+
+    local record = exploreModule.ForCurrentZone()
+
+    assert(record and record.name == "Explore Eversong Woods",
+        "the zone lookup must find the achievement whose name CONTAINS the "
+        .. "zone name: " .. tostring(record and record.name))
+
+    -- And the tightening it was reaching for still holds: the zone name must
+    -- be a whole trailing run, so "Shadowmoon" must not match
+    -- "Explore Shadowmoon Valley".
+    local store = CN.Account("exploration")
+
+    -- The lookup above learned this map, and a learned map short-circuits the
+    -- name match by design. Cleared so the NAME rule is what is under test.
+    for _, held in pairs(store) do
+        held.mapID = nil
+    end
+
+    store[990101] = { achievementID = 990101,
+        name = "Explore Shadowmoon Valley", done = 0, criteria = 10 }
+
+    CN_TEST_ZONE_NAME = "Shadowmoon"
+
+    assert(exploreModule.ForCurrentZone() ~= store[990101],
+        "a partial word run must not match")
+
+    CN_TEST_ZONE_NAME = "Shadowmoon Valley"
+
+    for _, held in pairs(store) do
+        held.mapID = nil
+    end
+
+    assert(exploreModule.ForCurrentZone() == store[990101],
+        "and the whole zone name must")
+
+    CN_TEST_ZONE_NAME = nil
+    store[990101] = nil
+
+    print("  the exploration lookup finds the zone you are standing in")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MOUNT IS RANKED BY A NUMBER, NOT BY AN ENGLISH SENTENCE.
+    --
+    -- The journal's `sourceText` is localized, so searching it for "vendor",
+    -- "quest" and "drop" ranked every uncollected mount identically on every
+    -- non-English client. The numeric `sourceType` was being stored, unused,
+    -- the whole time.
+    ------------------------------------------------------------
+    local mountModule = CN:GetModule("Mounts")
+
+    -- A vendor mount whose prose is German, and a raid drop with no prose at
+    -- all. Neither can be told apart by the old English match.
+    assert(mountModule.SourceValue({ sourceType = 3, source = "HÃ¤ndler: Irgendwo" }) == 3,
+        "a vendor mount is actionable whatever language the client speaks")
+
+    assert(mountModule.SourceValue({ sourceType = 1, source = "" }) == 2,
+        "and a drop ranks below it with no prose at all")
+
+    assert(mountModule.SourceValue({ sourceType = 2 }) == 3, "quest mounts too")
+
+    -- A row written before 0.62.0 carries prose and no type.
+    assert(mountModule.SourceValue({ source = "Vendor: Somewhere" }) == 3,
+        "and a database from before this release still ranks until it is "
+        .. "rescanned")
+
+    assert(mountModule.SourceValue({}) == 1, "nothing known ranks last, not first")
+
+    -- The prose is no longer written to disk.
+    for id, held in pairs(mountModule.Store()) do
+        assert(held.source == nil,
+            "mount " .. tostring(id) .. " must not persist the localized "
+            .. "source sentence the client hands back for free")
+    end
+
+    print("  a mount is ranked by where it comes from, in any language")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE LIST OF WHAT CHANGES A COLLECTION COUNT.
+    --
+    -- Breakdown kept its own event list and Scoring kept another; the second
+    -- gained the profession and title events and the first did not, in a file
+    -- that reports a Recipes row and a Titles row.
+    ------------------------------------------------------------
+    local breakdown = CN:GetModule("Breakdown")
+
+    breakdown.Report(nil, true)
+
+    local first = breakdown.Report()
+
+    assert(first == breakdown.Report(),
+        "the report is cached while nothing has changed")
+
+    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1
+
+    assert(breakdown.Report() ~= first,
+        "and anything that moves the collection generation releases it")
+
+    print("  learning a recipe changes what the Remaining tab says")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE COUNT PER SPECIES, NOT PER JOURNAL ROW.
+    --
+    -- `GetNumPets` returns displayed entries and an owned species appears
+    -- once per copy held, so `/cn petscan` and `/cn pets` reported different
+    -- totals for the same journal.
+    ------------------------------------------------------------
+    local pets = CN:GetModule("Pets")
+
+    local seen, owned = pets.Scan()
+
+    local counts = pets.Summary()
+
+    assert(seen == counts.known,
+        "the scan and the summary must agree on how many pets exist: "
+        .. tostring(seen) .. " vs " .. tostring(counts.known))
+
+    assert(owned == counts.collected,
+        "and on how many are collected: " .. tostring(owned) .. " vs "
+        .. tostring(counts.collected))
+
+    print("  two commands agree about the same pet journal")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN EMPTY COMPLETED LIST EARLY IN A LOGIN IS "NOT YET".
+    --
+    -- The client returns an empty TABLE, not nil, before quest data has
+    -- loaded. The baseline was snapshotted as zero, and when the real list
+    -- arrived every quest the character had ever finished counted as done
+    -- this session.
+    ------------------------------------------------------------
+    local real = C_QuestLog.GetAllCompletedQuestIDs
+
+    C_QuestLog.GetAllCompletedQuestIDs = function() return {} end
+
+    assert(CN.Blizzard.GetAllCompletedQuestIDs() == nil,
+        "an empty list is not an answer")
+
+    C_QuestLog.GetAllCompletedQuestIDs = real
+
+    print("  a login that has not loaded your quests yet says so")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CAP APPLIES TO WHAT THE CLIENT SAYS IT APPLIES TO.
+    ------------------------------------------------------------
+    local currencyStore = CN:GetModule("Currencies")
+
+    CN_TEST_SetTotalEarnedCurrency(3001, 2500, 2500, 100)
+
+    currencyStore.Scan()
+
+    local row = currencyStore.CharacterStore()[3001]
+
+    assert(row and row.capped,
+        "a currency capped on lifetime earnings is capped even with the "
+        .. "balance spent")
+
+    CN_TEST_SetTotalEarnedCurrency(3001, nil)
+
+    print("  a currency capped on what you earned says so after you spend it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE NEARLY-DONE RULE.
+    ------------------------------------------------------------
+    local achievements = CN:GetModule("Achievements")
+
+    local held = achievements.nearlyDoneThreshold
+
+    achievements.nearlyDoneThreshold = 1
+
+    local counts = achievements.Summary()
+
+    local shortlist = achievements.Shortlist()
+
+    achievements.nearlyDoneThreshold = held
+
+    CN.ClearShortlist("Achievements")
+
+    assert(counts.nearlyDone == #shortlist,
+        "what the summary calls nearly done must be what the provider works "
+        .. "from: " .. counts.nearlyDone .. " vs " .. #shortlist)
+
+    print("  the nearly-done rule is written once")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CRITERIA SWEEP COVERS WHAT CAN CHANGE THE ANSWER.
+    --
+    -- It walked every tracked achievement and called a function that makes
+    -- one client call PER CRITERION -- several thousand calls every five
+    -- seconds while questing.
+    ------------------------------------------------------------
+    local achievements = CN:GetModule("Achievements")
+
+    local store = achievements.Store()
+
+    -- A row nowhere near the boundary. Nothing anybody sees changes when it
+    -- moves, so it must not be polled.
+    store[990201] = { achievementID = 990201, categoryID = 92,
+        done = 3, criteria = 40 }
+
+    local asked = {}
+
+    local real = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function(id)
+        asked[id] = true
+
+        return real(id)
+    end
+
+    -- The sweep throttles itself to once every five seconds, which is right
+    -- in play and makes it unreachable from a test that runs in one.
+    local heldThrottle = achievements.criteriaSweepSeconds
+
+    achievements.criteriaSweepSeconds = 0
+
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    achievements.criteriaSweepSeconds = heldThrottle
+
+    CN.Blizzard.GetAchievementProgress = real
+
+    assert(next(asked) ~= nil,
+        "the sweep must actually have run, or this proves nothing")
+
+    assert(not asked[990201],
+        "a row far from the boundary must not be polled every five seconds")
+
+    store[990201] = nil
+
+    print("  the criteria sweep polls the dozen rows that can move the list")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CHARACTER KEY HAS ONE FORMAT.
+    ------------------------------------------------------------
+    assert(CN.CharacterKeyFor("Realm", "Name") == "Realm-Name",
+        "realm first, name second")
+
+    assert(CN.GetCharacterKey() == CN.CharacterKeyFor(GetRealmName(),
+        UnitName("player")), "and the live key is built the same way")
+
+    print("  every character key is built by the one function that knows the "
+        .. "format")
+end)()
+
 print("\nWhat 0.61.0 changed, asserted through the paths the game takes:")
 
 ;(function()
@@ -11373,22 +11710,27 @@ end)()
     -- `GetZoneText()`, which the stub answers as "Eversong Woods".
     local store = CN.Account("exploration")
 
-    local record = explorationModule.ForCurrentZone()
-
-    if not record then
-        store[99001] = {
-            achievementID = 99001,
-            name          = GetZoneText(),
-            done          = 0,
-            criteria      = 0,
-        }
-
-        record = explorationModule.ForCurrentZone()
+    -- NO FABRICATED ROW. 0.62.0.
+    --
+    -- This used to build a store row named after `GetZoneText()` whenever the
+    -- lookup failed -- which is a stub being more forgiving than the client,
+    -- the defect class this project has now found eighteen times. The lookup
+    -- failed on EVERY client, because it compared an achievement name
+    -- ("Explore Eversong Woods") against a zone name ("Eversong Woods"), and
+    -- this rescue meant the suite never noticed.
+    --
+    -- The fixture carries the name the client actually returns. If the lookup
+    -- cannot find it, that is the bug, and it fails here.
+    if CN.CountKeys(store) == 0 then
+        explorationModule.Scan()
     end
 
+    local record = explorationModule.ForCurrentZone()
+
     assert(record,
-        "the fixture must have an explorationModule record for the current zone, "
-        .. "or this proves nothing")
+        "the zone lookup must find the exploration achievement for the zone "
+        .. "the player is standing in, by the name the client actually "
+        .. "returns for it")
 
     local heldDone      = record.done
     local heldCriteria  = record.criteria

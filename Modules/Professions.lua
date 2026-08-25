@@ -544,6 +544,12 @@ Professions.teachingPrefixes = {
     "design: ", "technique: ", "manuscript: ", "method: ", "glyph: ",
 }
 
+-- The separators every locale puts between the teaching word and the recipe
+-- name. The WORD is translated; the punctuation is not, and French puts a
+-- space before its colon. Two lookups at worst, and only on an item whose
+-- name did not match a recipe outright.
+Professions.teachingSeparators = { ": ", " : ", "\239\188\154" }
+
 -- The recipe an item teaches, or nil. O(1) rather than O(every recipe).
 function Professions.RecipeForItem(itemID, itemName)
     local names = RecipeNames()
@@ -573,6 +579,31 @@ function Professions.RecipeForItem(itemID, itemName)
     for _, prefix in ipairs(Professions.teachingPrefixes) do
         if string.sub(needle, 1, #prefix) == prefix then
             local taught = index[string.sub(needle, #prefix + 1)]
+
+            if taught then
+                return taught, true
+            end
+        end
+    end
+
+    -- AND THE PREFIX LIST IS ENGLISH, WHICH THE ITEM NAME IS NOT. 0.62.0.
+    --
+    -- "Recipe: Flask of Testing" is "Rezept: FlÃ¤schchen ..." on a German
+    -- client, so every teaching item fell through and the tooltip join --
+    -- "you already know this", "Zeddicus knows it" -- was silently dead for
+    -- roughly half the player base. Third defect of this shape found in this
+    -- addon; the rule is the same each time.
+    --
+    -- The separator is not localized even where the word is: every locale the
+    -- game ships writes these as "<word><separator> <recipe name>". So the
+    -- prefix is found STRUCTURALLY -- take what follows the first separator
+    -- and ask whether it names a recipe -- and the English list above stays
+    -- only as the fast path that avoids this work on an English client.
+    for _, separator in ipairs(Professions.teachingSeparators) do
+        local at = string.find(needle, separator, 1, true)
+
+        if at then
+            local taught = index[CN.Trim(string.sub(needle, at + #separator))]
 
             if taught then
                 return taught, true

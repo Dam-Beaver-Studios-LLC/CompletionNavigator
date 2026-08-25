@@ -74,9 +74,20 @@ end
 -- every one of them out -- so an alt would have reported zero capped
 -- currencies and zero unfilled weeklies. No caller passes one today, which is
 -- the only reason this was latent rather than live.
+-- REALM FIRST, LIKE EVERY OTHER CHARACTER KEY IN THE ADDON. 0.62.0.
+--
+-- `CN.GetCharacterKey` is `realm .. "-" .. name`, and this built
+-- `name .. "-" .. realm` -- so the key matched nothing, `CurrentSerial` came
+-- back 0, and the paragraph above describes precisely the symptom that
+-- produces. The comment was written about the bug being fixed; the code kept
+-- it. Latent only because nothing passes a character yet, which is the reason
+-- to correct it now rather than when the first caller trips over it.
+--
+-- Built through the one function that owns the format, so the two cannot
+-- drift again.
 local function KeyFor(character)
     if character and character.name and character.realm then
-        return character.name .. "-" .. character.realm
+        return CN.CharacterKeyFor(character.realm, character.name)
     end
 
     return CN.characterKey or "?"
@@ -134,8 +145,24 @@ function Currencies.Scan()
         if currency.currencyID then
             names[currency.currencyID] = currency.name
 
+            -- THE CAP APPLIES TO WHAT THE CLIENT SAYS IT APPLIES TO. 0.62.0.
+            --
+            -- `useTotalEarnedForMaxQty` is read from the client in
+            -- BlizzardWorld.lua and was then neither stored nor consulted, so
+            -- every currency was tested as `quantity >= maxQuantity`. For the
+            -- currencies whose cap is on LIFETIME or SEASONAL earnings, a
+            -- player who has hit the cap and then spent the balance was told
+            -- they were not capped -- so `/cn currencies` and the currency
+            -- provider stayed silent about earning that is now being thrown
+            -- away, which is the one thing this row exists to warn about.
+            -- The reason string read "at cap: 1200 / 2500", which is its own
+            -- contradiction.
+            local against = currency.useTotalEarnedForMaxQty
+                and (currency.totalEarned or 0)
+                or currency.quantity
+
             local capped = currency.maxQuantity > 0
-                and currency.quantity >= currency.maxQuantity
+                and against >= currency.maxQuantity
 
             local weeklyLeft = 0
 
@@ -152,6 +179,12 @@ function Currencies.Scan()
                 earnedThisWeek    = currency.earnedThisWeek,
                 maxWeeklyQuantity = currency.maxWeeklyQuantity,
                 capped            = capped,
+
+                -- Which quantity the cap is measured against, so every
+                -- reader agrees with the flag above rather than recomputing
+                -- it from the wrong field.
+                cappedAgainst     = against,
+                usesTotalEarned   = currency.useTotalEarnedForMaxQty or nil,
                 accountWide       = currency.accountWide or nil,
                 weeklyRemaining   = weeklyLeft,
                 lastSeen          = time(),

@@ -143,7 +143,19 @@ function Achievements.Scan()
                             criteria      = criteria,
                         }
 
-                        if criteria > 0 and done >= criteria - 2 then
+                        -- THROUGH THE ONE RULE. 0.62.0.
+                        --
+                        -- This and `Summary` each hardcoded
+                        -- `done >= criteria - 2`, neither guarded
+                        -- `remaining > 0`, and `IsNearlyDone` -- the rule the
+                        -- provider actually uses -- reads a published
+                        -- threshold field. Three copies, one of them
+                        -- authoritative: changing the threshold silently
+                        -- desynchronised what `/cn achievescan` and
+                        -- `/cn achievements` report from the shortlist the
+                        -- addon works off, and both counted finished
+                        -- achievements as nearly finished.
+                        if IsNearlyDone(store[achievement.achievementID]) then
                             nearlyDone = nearlyDone + 1
                         end
                     end
@@ -182,7 +194,8 @@ function Achievements.Summary()
     for _, record in pairs(Store()) do
         counts.inProgress = counts.inProgress + 1
 
-        if record.criteria > 0 and record.done >= record.criteria - 2 then
+        -- The same one rule. See the note in `Scan`.
+        if IsNearlyDone(record) then
             counts.nearlyDone = counts.nearlyDone + 1
         end
     end
@@ -409,19 +422,59 @@ end)
 -- rather than rescanning thousands of achievements, and throttle even that.
 local lastCriteriaSweep = 0
 
+-- Published rather than a literal, so the throttle is a knob the suite can
+-- turn. A guard nothing can reach is a guard nothing tests.
+Achievements.criteriaSweepSeconds = 5
+
 CN:RegisterEvent("CRITERIA_UPDATE", function()
     local now = time()
 
-    if now - lastCriteriaSweep < 5 then
+    if now - lastCriteriaSweep < Achievements.criteriaSweepSeconds then
         return
     end
 
     lastCriteriaSweep = now
 
+    -- THE SHORTLIST, NOT THE WHOLE STORE. 0.62.0.
+    --
+    -- This walked every incomplete tracked achievement and called
+    -- `GetAchievementProgress` on each -- and that function makes one client
+    -- call PER CRITERION. At retail scale it is several hundred rows of five
+    -- to forty criteria: a few thousand client calls, every five seconds, for
+    -- as long as CRITERIA_UPDATE keeps firing, which is continuously while
+    -- questing or raiding. Measured on the game's own Lua 5.1: 21.4 ms per
+    -- sweep, more than a frame, twelve times a minute.
+    --
+    -- Only rows near the boundary can change what the addon SHOWS: the
+    -- provider reads the shortlist, and a row at 3 of 40 moving to 4 of 40
+    -- changes nothing anybody sees until it is within the threshold. So the
+    -- sweep covers the shortlist plus anything the player has pinned as a
+    -- goal, which is a dozen rows rather than several hundred.
+    --
+    -- The rest are picked up by the next full scan, exactly as before -- this
+    -- store has always been a snapshot refreshed on demand.
     local store = Store()
 
+    local watched = {}
+
+    for _, entry in ipairs(Achievements.Shortlist()) do
+        watched[entry.id] = true
+    end
+
+    local goals = CN:GetModule("Goals")
+
+    if goals and goals.List then
+        for _, goal in ipairs(goals.List() or {}) do
+            if goal and goal.type == CN.objectiveTypes.ACHIEVEMENT and goal.id then
+                watched[goal.id] = true
+            end
+        end
+    end
+
     for achievementID, record in pairs(store) do
-        if record.criteria and record.criteria > 0 then
+        if watched[achievementID]
+            and record.criteria and record.criteria > 0 then
+
             local done = Blizzard.GetAchievementProgress(achievementID)
 
             if done ~= record.done then

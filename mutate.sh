@@ -1170,7 +1170,7 @@ mutate "Modules/Session.lua" \
     "a learned duration is memoised past the sample that changed it"
 
 mutate "Modules/Breakdown.lua" \
-    "        if reportCache and reportGeneration == Breakdown.generation then
+    "        if reportCache and reportGeneration == CacheKey() then
             return reportCache
         end" \
     "        if reportCache then
@@ -1757,9 +1757,13 @@ mutate "Modules/Travel.lua" \
     end" \
     "a cave revokes a zone's flight permission for a day"
 
+# RETARGETED IN 0.62.0. The exact-match line this pointed at could never
+# match anything -- an achievement name is not a zone name -- and was replaced
+# by a trailing whole-word-run rule. The property being protected is the same:
+# "Shadowmoon" must not match "Explore Shadowmoon Valley".
 mutate "Modules/Exploration.lua" \
-    "        if record.name and string.lower(record.name) == needle then" \
-    "        if record.name and string.find(string.lower(record.name), needle, 1, true) then" \
+    "        return string.sub(candidate, -(#needle + 1)) == (\" \" .. needle)" \
+    "        return string.find(candidate, needle, 1, true) ~= nil" \
     "two zones with the same name overwrite each other's progress"
 
 mutate "Modules/Exploration.lua" \
@@ -2025,6 +2029,53 @@ mutate "Modules/Breakdown.lua" \
         Breakdown.ForgetQuestCounts()
     end" \
     "pressing Refresh does not recount the quests"
+
+# ------------------------------------------------------------
+# 0.62.0
+# ------------------------------------------------------------
+
+mutate "Modules/Exploration.lua" \
+    "        return string.sub(candidate, -(#needle + 1)) == (\" \" .. needle)" \
+    "        return false" \
+    "the exploration lookup finds nothing in any zone"
+
+mutate "Modules/Mounts.lua" \
+    "    local kind = record and Mounts.sourceTypes[record.sourceType]" \
+    "    local kind = nil" \
+    "a mount is ranked by an English sentence"
+
+mutate "Modules/Breakdown.lua" \
+    "    return Breakdown.generation .. \":\" .. tostring(CN.collectionGeneration or 0)" \
+    "    return Breakdown.generation" \
+    "learning a recipe leaves the Remaining tab stale"
+
+mutate "Modules/Pets.lua" \
+    "                if not counted[pet.speciesID] then" \
+    "                if true then" \
+    "the pet scan counts a species once per copy held"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    if ok and type(ids) == \"table\" and #ids > 0 then" \
+    "    if ok and type(ids) == \"table\" then" \
+    "an empty completed list becomes a session baseline of zero"
+
+mutate "Modules/Currencies.lua" \
+    "            local against = currency.useTotalEarnedForMaxQty
+                and (currency.totalEarned or 0)
+                or currency.quantity" \
+    "            local against = currency.quantity" \
+    "a currency capped on earnings is measured against the balance"
+
+mutate "Modules/Achievements.lua" \
+    "        if watched[achievementID]
+            and record.criteria and record.criteria > 0 then" \
+    "        if record.criteria and record.criteria > 0 then" \
+    "the criteria sweep polls every tracked achievement every five seconds"
+
+mutate "Character.lua" \
+    "    return tostring(realm or \"UnknownRealm\") .. \"-\" .. tostring(name or \"Unknown\")" \
+    "    return tostring(name or \"Unknown\") .. \"-\" .. tostring(realm or \"UnknownRealm\")" \
+    "a character key is built name-first"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

@@ -7,6 +7,72 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.62.0]
+
+An audit release. Fifteen defects, several of which had been quietly wrong for
+many versions â€” including two whole features that could never once have worked,
+and three places where the addon decided something by reading an English word.
+
+### Fixed â€” features that were silently dead
+
+- **Exploration never found the zone you were standing in.** The lookup
+  compared an achievement name â€” "Explore Eversong Woods" â€” against a zone
+  name, "Eversong Woods", and those are never equal. So the exploration
+  recommendations, the per-zone block in `/cn exploration`, and the learned map
+  id that resolves the two Shadowmoon Valleys were all dead on every client
+  since 0.59.0. The test suite could not see it because the fixture invented a
+  matching row whenever the lookup failed.
+- **Recipe items were recognised only in English.** "Recipe: Flask of Alchemy"
+  is "Rezept: â€¦" on a German client, so the tooltip line that says whether you
+  or one of your characters already knows a recipe never appeared for anyone
+  not playing in English. The prefix is now found by structure rather than by
+  the English word.
+- **Mounts were ranked by an English sentence.** A vendor mount two zones away
+  ranked the same as a one-percent raid drop on every non-English client. The
+  game supplies a number for this, and the addon had been storing it, unused,
+  the whole time.
+
+### Fixed â€” numbers that were wrong
+
+- **`/cn petscan` and `/cn pets` disagreed about the same journal.** The game
+  lists a pet you own once per copy you hold, so every duplicate was counted as
+  another species.
+- **"This session" could report your entire questing career.** The client
+  returns an empty list â€” not nothing â€” before it has finished loading your
+  quests, and that empty list was taken as a real baseline of zero.
+- **A currency capped on what you have *earned* said you were not capped once
+  you spent the balance** â€” so the row that exists to warn you about wasted
+  earning stayed silent about exactly that.
+- **"Within two criteria of finishing" was counted three different ways**, one
+  of which included achievements that were already finished.
+- **The Remaining tab went stale after learning recipes or earning a title**,
+  and after a scan. Two lists of "what changes a collection count" had drifted
+  apart; there is one list now.
+- **`/cn warband` printed `DEATHKNIGHT`** rather than the class name in your
+  language.
+
+### Faster
+
+- **21 ms off every five seconds while questing.** Every criteria update swept
+  every tracked achievement, and the client is asked once *per criterion* â€”
+  several thousand calls, for rows whose movement changes nothing you can see.
+  It now polls the handful near the boundary plus anything you have pinned.
+
+### Smaller on disk, and fresher
+
+- **Mount source text is no longer stored** â€” around nine hundred rows of
+  localized prose the client returns instantly. A stale zone name on every rare
+  went with it.
+- **Mounts, pets and toys now refresh at login.** They relied entirely on
+  "collected!" events, so anything collected in a session where the addon was
+  not loaded was recommended to you until you rescanned by hand.
+
+### Internal
+
+- **Character keys are built by one function.** A second copy had the realm and
+  name the wrong way round, which would have made every currency row on an alt
+  read as another character's.
+
 ## [0.61.1]
 
 A build fix. 0.61.0 was verified and never published: its release run stopped

@@ -154,11 +154,49 @@ function Exploration.ForCurrentZone()
 
     local needle = string.lower(zone)
 
-    -- EXACT, not a substring: "Nagrand" is a substring of "Explore Nagrand"
-    -- and of nothing else useful, but "Explore Shadowmoon Valley" contains
-    -- the needle for both of the zones with that name.
+    -- THE EXACT MATCH COULD NEVER MATCH. FIXED IN 0.62.0.
+    --
+    -- `record.name` is an achievement name -- "Explore Eversong Woods" -- and
+    -- the needle is a ZONE name, "Eversong Woods". 0.59.0 tightened a working
+    -- substring match into an exact one to resolve the two Shadowmoon
+    -- Valleys, and in doing so made it compare two strings that are never
+    -- equal on any client. Its own comment says the two forms differ.
+    --
+    -- Everything downstream died silently: `ForCurrentZone` returned nil in
+    -- every zone, so the Exploration provider emitted nothing ever, `/cn
+    -- exploration` never printed its "This zone" block, and `record.mapID` --
+    -- the learned fast path that resolves the ambiguity permanently -- is
+    -- only written inside the branch that never ran, so it could never be
+    -- learned either.
+    --
+    -- The harness did not catch it because its fixture fabricates a store row
+    -- named after `GetZoneText()` when the lookup fails, which is a stub being
+    -- more forgiving than the client. That row is gone and the fixture now
+    -- carries the achievement name the client actually returns.
+    --
+    -- What replaces it keeps the tightening that was wanted. The zone name
+    -- must appear as a WHOLE WORD RUN inside the achievement name, anchored
+    -- at the end -- "Explore Nagrand" matches "Nagrand", and "Explore
+    -- Shadowmoon Valley" matches "Shadowmoon Valley" and not "Shadowmoon".
+    -- The genuine duplicate-name case is then resolved by `mapID`, learned on
+    -- the first successful lookup, exactly as intended.
+    local function Names(candidate)
+        if not candidate then
+            return false
+        end
+
+        candidate = string.lower(candidate)
+
+        if candidate == needle then
+            return true
+        end
+
+        -- Ends with the zone name, preceded by a space.
+        return string.sub(candidate, -(#needle + 1)) == (" " .. needle)
+    end
+
     for _, record in pairs(store) do
-        if record.name and string.lower(record.name) == needle then
+        if Names(record.name) then
             -- Learned, so the ambiguity is resolved once rather than every
             -- time -- and resolved by the map, which cannot be duplicated.
             if mapID then

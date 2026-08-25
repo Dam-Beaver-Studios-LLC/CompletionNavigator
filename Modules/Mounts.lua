@@ -47,7 +47,19 @@ function Mounts.Scan()
                 name              = mount.name,
                 spellID           = mount.spellID,
                 sourceType        = mount.sourceType,
-                source            = mount.source,
+
+                -- `source` IS NOT STORED ANY MORE. 0.62.0.
+                --
+                -- It is the journal's multi-line LOCALIZED source prose, for
+                -- around nine hundred rows -- by far the largest thing this
+                -- addon still wrote to disk that the client hands back
+                -- instantly from `GetMountInfoExtraByID`. Migrations 4, 5 and
+                -- 14 stripped item names, achievement names and points, pet
+                -- names and harvest zones on exactly this rule.
+                --
+                -- Nothing needs it stored now that ranking reads the numeric
+                -- `sourceType`: the two places that DISPLAY it read it live,
+                -- through `Mounts.SourceText` below.
                 isFactionSpecific = mount.isFactionSpecific,
                 faction           = mount.faction,
                 collected         = mount.isCollected,
@@ -81,6 +93,88 @@ end
 -- action, it is a list -- and /cn breakdown and the Collections tab already
 -- read the store directly for that. What makes a mount actionable is the
 -- journal's source text: "Vendor: X", "Quest: Y", "Drop: Z".
+-- WHERE A MOUNT COMES FROM, AS A NUMBER. 0.62.0.
+--
+-- `C_MountJournal.GetMountInfoByID` returns a numeric `sourceType` alongside
+-- the localized source sentence, and the addon has been storing it, unused,
+-- since it started reading mounts. These are the client's own values; an enum
+-- is the same number in every language, which the sentence is not.
+--
+-- Unknown values rank as "we do not know", not as "worthless" -- a source the
+-- client adds in a future patch must not be silently buried.
+Mounts.sourceTypes = {
+    [0]  = "UNKNOWN",
+    [1]  = "DROP",
+    [2]  = "QUEST",
+    [3]  = "VENDOR",
+    [4]  = "PROFESSION",
+    [5]  = "PET_STORE",
+    [6]  = "ACHIEVEMENT",
+    [7]  = "WORLD_EVENT",
+    [8]  = "PROMOTION",
+    [9]  = "TCG",
+    [10] = "BLACK_MARKET",
+    [11] = "TRADING_POST",
+    [12] = "DISCOVERY",
+}
+
+-- Something you can walk up to and buy or complete beats something with a
+-- drop chance, which beats everything else.
+Mounts.sourceValues = {
+    VENDOR      = 3,
+    QUEST       = 3,
+    ACHIEVEMENT = 3,
+    PROFESSION  = 3,
+    WORLD_EVENT = 3,
+    DROP        = 2,
+    DISCOVERY   = 2,
+}
+
+function Mounts.SourceValue(record)
+    local kind = record and Mounts.sourceTypes[record.sourceType]
+
+    if kind then
+        return Mounts.sourceValues[kind] or 1
+    end
+
+    -- A ROW WRITTEN BEFORE THE TYPE WAS READ, and nothing else.
+    --
+    -- Databases from before 0.62.0 carry the sentence and no type, and the
+    -- next scan replaces them. Until it does, the old English match is better
+    -- than nothing FOR THOSE ROWS -- but it is not a fallback the addon
+    -- relies on, and on a non-English client it simply returns 1, which is
+    -- what it did for every row before this release.
+    local source = record and record.source
+
+    if type(source) == "string" and source ~= "" then
+        source = string.lower(source)
+
+        if source:find("vendor", 1, true) or source:find("quest", 1, true) then
+            return 3
+        end
+
+        if source:find("drop", 1, true) then
+            return 2
+        end
+    end
+
+    return 1
+end
+
+-- The journal's source sentence, live. See the note in `Scan`.
+--
+-- Falls back to whatever an older database still carries, so a player who has
+-- not rescanned since upgrading loses nothing in the meantime.
+function Mounts.SourceText(mountID, record)
+    local live = CN.Blizzard.GetMountByID and CN.Blizzard.GetMountByID(mountID)
+
+    if live and live.source and live.source ~= "" then
+        return live.source
+    end
+
+    return record and record.source
+end
+
 CN.RegisterCandidateProvider("Mounts", function()
     local playerFaction = UnitFactionGroup and UnitFactionGroup("player") or nil
 
@@ -101,7 +195,15 @@ CN.RegisterCandidateProvider("Mounts", function()
                 end
             end
 
-            if not record.source or record.source == "" then
+            -- SOMETHING KNOWN ABOUT WHERE IT COMES FROM, IN ANY FORM.
+            --
+            -- This required the localized `source` sentence to be non-empty,
+            -- which is the same locale trap as the ranking below: a client
+            -- that returns a source TYPE and an empty prose line -- which
+            -- happens -- had every one of its mounts dropped from the list.
+            if (record.sourceType == nil or record.sourceType == 0)
+                and not Mounts.SourceText(mountID, record) then
+
                 return nil
             end
 
@@ -110,19 +212,20 @@ CN.RegisterCandidateProvider("Mounts", function()
                 return nil
             end
 
-            -- Something you can walk up to and buy or complete beats something
-            -- with a drop chance, which beats everything else.
-            local source = string.lower(record.source)
-
-            if source:find("vendor", 1, true) or source:find("quest", 1, true) then
-                return 3
-            end
-
-            if source:find("drop", 1, true) then
-                return 2
-            end
-
-            return 1
+            -- THE NUMBER, NOT THE SENTENCE. FIXED IN 0.62.0.
+            --
+            -- This ranked mounts by searching the journal's `sourceText` for
+            -- the English words "vendor", "quest" and "drop". That string is
+            -- LOCALIZED -- "HÃ¤ndler:", "QuÃªte :", "BotÃ­n:" -- so on every
+            -- non-English client every uncollected mount fell through to 1,
+            -- and a vendor mount two zones away ranked identically to a
+            -- one-per-cent raid drop. `/cn next` stopped preferring the
+            -- actionable one for roughly half the player base.
+            --
+            -- The client hands over a numeric `sourceType` from the same call
+            -- and the addon has been STORING it, unused, since it started
+            -- reading mounts. An enum is the same number in every locale.
+            return Mounts.SourceValue(record)
         end,
         function(mountID, record, value)
             return CN.NewObjective({
@@ -131,7 +234,8 @@ CN.RegisterCandidateProvider("Mounts", function()
                 name            = record.name,
                 accountWide     = true,
                 completionValue = value,
-                reasons         = { record.source },
+                reasons         = { Mounts.SourceText(mountID, record)
+                    or "the journal does not say where this comes from" },
             })
         end)
 
@@ -313,8 +417,10 @@ CN:RegisterCommand{
         Print(record.name .. " |cff8a8f96(" .. mountID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected))
 
-        if record.source and record.source ~= "" then
-            Print("Source: " .. record.source:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""))
+        local sourceText = Mounts.SourceText(mountID, record)
+
+        if sourceText and sourceText ~= "" then
+            Print("Source: " .. sourceText:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""))
         end
 
         if record.isFactionSpecific then
@@ -323,3 +429,21 @@ CN:RegisterCommand{
         end
     end,
 }
+
+-- AND ONCE AT LOGIN. 0.62.0.
+--
+-- This store relied entirely on `NEW_MOUNT_ADDED`, which covers
+-- collections made while this session is running and nothing collected in a
+-- session where the addon was not loaded. The store is persisted account-wide,
+-- so a player who turns addons off for a raid night, collects three, and turns
+-- them back on is recommended things they already own until they happen to run
+-- the scan by hand.
+--
+-- `Appearances.lua` made exactly this argument in 0.58.0 and the same argument
+-- applies verbatim here; three stores were left behind.
+--
+-- Guarded and quiet: this is a journal walk, and a client that refuses it must
+-- not take the login sequence with it.
+CN:OnLogin(function()
+    CN.Guard("Mounts.Scan", Mounts.Scan)
+end)

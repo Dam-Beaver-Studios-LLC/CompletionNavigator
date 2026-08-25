@@ -2202,7 +2202,7 @@ UI.RegisterTab{
                 text = row.key
                     .. (row.isCurrent and CN.Brand("  (you)") or "")
                     .. CN.Aside(tostring(row.level) .. " "
-                        .. tostring(row.class or "?")
+                        .. CN.TokenLabel(row.class or "?")
                         .. (row.faction and (" " .. row.faction) or "")),
 
                 -- THE WORDS THIS TAB USES TWICE ALREADY.

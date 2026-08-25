@@ -169,7 +169,7 @@ And where there is a real percentage, it is honest at both ends. **999 of 1,000 
 
 ## It works in your language
 
-The addon stores what the game gives it as **ids**, and reads names back from the client in whatever language you play in. Nothing it decides is decided by matching an English word, so features do not quietly disappear on a non-English client â€” weekly profession knowledge, class and race restrictions, and every count on the Scans tab read the same way in every locale the game ships.
+The addon stores what the game gives it as **ids**, and reads names back from the client in whatever language you play in. Nothing it decides is decided by matching an English word, so features do not quietly disappear on a non-English client â€” weekly profession knowledge, which mounts are worth going for, whether an item in your bags teaches a recipe, class and race restrictions, and every count on the Scans tab read the same way in every locale the game ships.
 
 ## Where every number comes from
 

@@ -54,6 +54,9 @@ function Pets.Scan()
 
     local seen, owned, missing = 0, 0, 0
 
+    -- Which species this scan has already counted. See the note below.
+    local counted = {}
+
     Blizzard.WithAllPetsShown(function()
         local total = select(1, Blizzard.GetNumPets())
 
@@ -74,12 +77,30 @@ function Pets.Scan()
                     limit      = limit or 3,
                 }
 
-                seen = seen + 1
+                -- ONE COUNT PER SPECIES, NOT PER JOURNAL ROW. 0.62.0.
+                --
+                -- `GetNumPets` returns DISPLAYED ENTRIES, and an owned
+                -- species appears once per copy held -- which is exactly why
+                -- `GetPetCollectedCount` returns `collected, limit`. These
+                -- counters incremented per entry while `store` is keyed per
+                -- species, so a player holding duplicates got two commands
+                -- that disagreed about the same journal:
+                --
+                --   /cn petscan -> "Scanned 2,146 pets. Collected: 1,104"
+                --   /cn pets    -> "known to the journal: 1,842. Collected: 802"
+                --
+                -- Counted off the store, which is the thing the rest of the
+                -- addon reads.
+                if not counted[pet.speciesID] then
+                    counted[pet.speciesID] = true
 
-                if (collected or 0) > 0 then
-                    owned = owned + 1
-                elseif pet.obtainable then
-                    missing = missing + 1
+                    seen = seen + 1
+
+                    if (collected or 0) > 0 then
+                        owned = owned + 1
+                    elseif pet.obtainable then
+                        missing = missing + 1
+                    end
                 end
             end
         end
@@ -333,3 +354,21 @@ CN:RegisterCommand{
         end
     end,
 }
+
+-- AND ONCE AT LOGIN. 0.62.0.
+--
+-- This store relied entirely on `NEW_PET_ADDED`, which covers
+-- collections made while this session is running and nothing collected in a
+-- session where the addon was not loaded. The store is persisted account-wide,
+-- so a player who turns addons off for a raid night, collects three, and turns
+-- them back on is recommended things they already own until they happen to run
+-- the scan by hand.
+--
+-- `Appearances.lua` made exactly this argument in 0.58.0 and the same argument
+-- applies verbatim here; three stores were left behind.
+--
+-- Guarded and quiet: this is a journal walk, and a client that refuses it must
+-- not take the login sequence with it.
+CN:OnLogin(function()
+    CN.Guard("Pets.Scan", Pets.Scan)
+end)

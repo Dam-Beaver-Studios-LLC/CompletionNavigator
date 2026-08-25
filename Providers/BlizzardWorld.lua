@@ -976,7 +976,23 @@ function Blizzard.GetAllCompletedQuestIDs()
 
     local ok, ids = pcall(C_QuestLog.GetAllCompletedQuestIDs)
 
-    if ok and type(ids) == "table" then
+    -- AN EMPTY LIST EARLY IN A LOGIN IS "NOT YET", NOT "NONE". 0.62.0.
+    --
+    -- The client returns an EMPTY TABLE, not nil, before it has finished
+    -- loading quest data. This accepted any table, so `Progress.BeginSession`
+    -- snapshotted a lifetime baseline of zero at `PLAYER_LOGIN`, and when the
+    -- real list arrived every quest the character had ever completed counted
+    -- as done "this session": `/cn progress` printed "This session: 34,812"
+    -- and a per-hour rate derived from it.
+    --
+    -- The nil path was handled and the empty-table path was not, which is the
+    -- same shape as the map that was always square: the case the fixture
+    -- could not express.
+    --
+    -- Zero completed quests is a real state for a brand-new character, so it
+    -- is not an error -- it is UNKNOWN until the client says something. The
+    -- caller re-asks; nothing here has to guess.
+    if ok and type(ids) == "table" and #ids > 0 then
         return ids
     end
 

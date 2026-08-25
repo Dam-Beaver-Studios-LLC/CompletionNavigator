@@ -117,7 +117,12 @@ function Rares.Record(vignette)
             record.mapID = vignette.mapID
             record.x     = math.floor(vignette.x * 10000 + 0.5) / 10000
             record.y     = math.floor(vignette.y * 10000 + 0.5) / 10000
-            record.zone  = Blizzard.GetMapName(vignette.mapID)
+            -- `zone` IS NOT STORED. 0.62.0.
+            --
+            -- It was written on every sighting and read by nothing: the map
+            -- id is already on the row and the client derives the name from
+            -- it instantly. Migration 7 deleted this exact field from
+            -- `questHarvest` with that exact note, and this copy survived.
         end
     end
 

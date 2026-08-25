@@ -838,6 +838,51 @@ CN.migrations = {
                 .. "appearance set(s) onto their own key.")
         end
     end,
+
+    -- 15 -> 16. TWO MORE FIELDS THE CLIENT HANDS BACK FOR FREE.
+    --
+    -- `mounts[id].source` is the journal's multi-line LOCALIZED source prose,
+    -- around nine hundred rows of it -- the largest thing still written to
+    -- disk that `GetMountInfoExtraByID` returns instantly. It was also the
+    -- thing mount ranking used to branch on, which is why it was kept; 0.62.0
+    -- ranks on the numeric `sourceType` instead, and the two places that
+    -- DISPLAY the sentence read it live.
+    --
+    -- `rares[id].zone` was written on every sighting and read by nothing. The
+    -- map id is already on the row. Migration 7 deleted the identical field
+    -- from `questHarvest` and this copy survived it.
+    --
+    -- Same standing rule both times: persist only what the client cannot
+    -- re-supply.
+    [15] = function(db)
+        db.account = db.account or {}
+
+        local prose = 0
+
+        for _, record in pairs(db.account.mounts or {}) do
+            if type(record) == "table" and record.source ~= nil then
+                record.source = nil
+
+                prose = prose + 1
+            end
+        end
+
+        local zones = 0
+
+        for _, record in pairs(db.account.rares or {}) do
+            if type(record) == "table" and record.zone ~= nil then
+                record.zone = nil
+
+                zones = zones + 1
+            end
+        end
+
+        if prose > 0 or zones > 0 then
+            CN.DebugPrint("Dropped source prose from " .. prose
+                .. " mount row(s) and a derived zone name from " .. zones
+                .. " rare row(s).")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

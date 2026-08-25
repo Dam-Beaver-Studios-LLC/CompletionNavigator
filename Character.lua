@@ -14,11 +14,18 @@ local DebugPrint = CN.DebugPrint
 -- IDENTITY
 ------------------------------------------------------------
 
-function CN.GetCharacterKey()
-    local name  = UnitName("player") or "Unknown"
-    local realm = GetRealmName() or "UnknownRealm"
+-- ONE PLACE THAT KNOWS THE FORMAT. 0.62.0.
+--
+-- The key was assembled by hand in more than one file, and the second copy
+-- had realm and name the wrong way round -- a key that matches nothing, in a
+-- function whose own comment described the symptom as already fixed. The
+-- format is a rule, and a rule written down twice is a rule that drifts.
+function CN.CharacterKeyFor(realm, name)
+    return tostring(realm or "UnknownRealm") .. "-" .. tostring(name or "Unknown")
+end
 
-    return realm .. "-" .. name
+function CN.GetCharacterKey()
+    return CN.CharacterKeyFor(GetRealmName(), UnitName("player"))
 end
 
 ------------------------------------------------------------

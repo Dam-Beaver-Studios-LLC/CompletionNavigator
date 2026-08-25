@@ -340,7 +340,7 @@ CN:RegisterCommand{
 
             CN.PrintLine(marker .. row.key
                 .. " |cff8a8f96" .. tostring(row.level) .. " "
-                .. tostring(row.class or "?")
+                .. CN.TokenLabel(row.class or "?")
                 .. (row.faction and (" " .. row.faction) or "") .. "|r")
 
             CN.PrintLine("      professions " .. row.professions

@@ -280,3 +280,21 @@ CN:RegisterCommand{
         Print("Collected: " .. CN.YesNo(record.collected))
     end,
 }
+
+-- AND ONCE AT LOGIN. 0.62.0.
+--
+-- This store relied entirely on `NEW_TOY_ADDED`, which covers
+-- collections made while this session is running and nothing collected in a
+-- session where the addon was not loaded. The store is persisted account-wide,
+-- so a player who turns addons off for a raid night, collects three, and turns
+-- them back on is recommended things they already own until they happen to run
+-- the scan by hand.
+--
+-- `Appearances.lua` made exactly this argument in 0.58.0 and the same argument
+-- applies verbatim here; three stores were left behind.
+--
+-- Guarded and quiet: this is a journal walk, and a client that refuses it must
+-- not take the login sequence with it.
+CN:OnLogin(function()
+    CN.Guard("Toys.Scan", Toys.Scan)
+end)

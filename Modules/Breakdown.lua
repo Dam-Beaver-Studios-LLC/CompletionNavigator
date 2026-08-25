@@ -85,6 +85,26 @@ function Breakdown.NoteChanged()
     Breakdown.generation = Breakdown.generation + 1
 end
 
+-- TWO LISTS OF "WHAT CHANGES A COLLECTION COUNT", AND THEY DRIFTED. 0.62.0.
+--
+-- This file kept its own event list and `Scoring.lua` kept another for
+-- `CN.collectionGeneration`. The second one gained the profession, title and
+-- level events in 0.61.0 and this one did not -- and this file reports a
+-- Recipes row and a Titles row. So a player learned forty recipes in their
+-- Alchemy window, the Collections tab moved, and `/cn breakdown` and the
+-- Remaining tab went on serving the old figure until some unrelated pet or
+-- quest event happened along. `CN.MarkScanned` bumped one counter and not the
+-- other, so `/cn profscan` followed by `/cn breakdown` reported the pre-scan
+-- count.
+--
+-- There is now ONE list, in Scoring.lua, and this cache reads it. A rule
+-- written down twice is a rule that drifts; this project has now found that
+-- shape in the invalidator, the window's refresh events, the collection
+-- generation and here.
+local function CacheKey()
+    return Breakdown.generation .. ":" .. tostring(CN.collectionGeneration or 0)
+end
+
 -- `force` IS NOT A LUXURY.
 --
 -- The cache is keyed on a generation bumped by nine collection events, and
@@ -111,7 +131,7 @@ function Breakdown.Report(categoryName, force)
     end
 
     if not categoryName and not force then
-        if reportCache and reportGeneration == Breakdown.generation then
+        if reportCache and reportGeneration == CacheKey() then
             return reportCache
         end
     end
@@ -146,7 +166,7 @@ function Breakdown.Report(categoryName, force)
 
     if not categoryName then
         reportCache      = rows
-        reportGeneration = Breakdown.generation
+        reportGeneration = CacheKey()
     end
 
     return rows
