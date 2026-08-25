@@ -2452,6 +2452,38 @@ function CN_TEST_SetTotalEarnedCurrency(currencyID, maxQuantity, totalEarned,
     })
 end
 
+-- A CURRENCY YOU CAN MOVE BETWEEN CHARACTERS FOR A FEE.
+--
+-- `isAccountTransferable` and `isAccountWide` are different facts and the
+-- addon read the first as the second. No row in this fixture set the
+-- transferable flag without the account-wide one, so the two could not be
+-- told apart from here.
+function CN_TEST_SetTransferableCurrency(currencyID, transferable)
+    for index = #CN_TEST_CURRENCY_ROWS, 1, -1 do
+        if CN_TEST_CURRENCY_ROWS[index].currencyID == currencyID then
+            table.remove(CN_TEST_CURRENCY_ROWS, index)
+        end
+    end
+
+    if not transferable then
+        return
+    end
+
+    table.insert(CN_TEST_CURRENCY_ROWS, {
+        currencyID             = currencyID,
+        name                   = "Movable Proof",
+        quantity               = 40,
+        maxQuantity            = 0,
+        quantityEarnedThisWeek = 0,
+        maxWeeklyQuantity      = 0,
+        totalEarned            = 40,
+
+        -- Movable, not shared.
+        isAccountWide          = false,
+        isAccountTransferable  = true,
+    })
+end
+
 -- What the client would actually list, given the current header states.
 local function CurrencyVisible()
     local visible = {}
@@ -9761,6 +9793,387 @@ print("\nStubs, audited against a real client:")
         .. (#unverified > 0
             and (" -- " .. #unverified .. " could not be checked")
             or ""))
+end)()
+
+
+print("\nWhat 0.63.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CAP ROW PRINTS THE NUMBERS THE CAP WAS MEASURED AGAINST.
+    --
+    -- 0.62.0 fixed the detection and left the display, so the row was
+    -- correctly flagged and then printed its own contradiction:
+    -- "At cap - spend these: Foo 100 / 2500".
+    ------------------------------------------------------------
+    local currencyModule = CN:GetModule("Currencies")
+
+    CN_TEST_SetTotalEarnedCurrency(3002, 2500, 2500, 100)
+
+    currencyModule.Scan()
+
+    local found
+
+    for _, row in ipairs(currencyModule.Capped()) do
+        if row.currencyID == 3002 then
+            found = row
+        end
+    end
+
+    assert(found, "the capped currency must be reported")
+
+    assert(found.quantity == 2500,
+        "the row shows what the cap was measured against, not the balance: "
+        .. tostring(found.quantity))
+
+    assert(found.held == 100,
+        "and carries the balance separately: " .. tostring(found.held))
+
+    assert(found.usesTotalEarned,
+        "and says which kind of cap it is, so the two numbers are explicable")
+
+    CN_TEST_SetTotalEarnedCurrency(3002, nil)
+    currencyModule.Scan()
+
+    print("  a capped currency prints the numbers its cap was measured against")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- TRANSFERABLE IS NOT SHARED.
+    --
+    -- `isAccountTransferable` means the balance can be MOVED between
+    -- characters for a fee. It was read as "every character sees this
+    -- balance", so a currency belonging to one character was ranked, and
+    -- labelled, as the Warband's.
+    ------------------------------------------------------------
+    CN_TEST_SetTransferableCurrency(3003, true)
+
+    local rows = CN.Blizzard.GetCurrencyList()
+
+    local found
+
+    for _, row in ipairs(rows) do
+        if row.currencyID == 3003 then
+            found = row
+        end
+    end
+
+    assert(found, "the currency must be listed")
+
+    assert(found.accountWide == false,
+        "a transferable currency is not account-wide")
+
+    assert(found.transferable == true,
+        "and the fact that it CAN be moved is still carried, because that is "
+        .. "worth saying")
+
+    CN_TEST_SetTransferableCurrency(3003, nil)
+
+    print("  a currency you can move is not a currency everybody has")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A GUESS MUST NOT OUTRANK THE QUEST LOG.
+    --
+    -- 0.61.0 collapsed every non-manual quest name to a bare string and read
+    -- a bare string back as source "blizzard" -- rank 1, the top. So a title
+    -- captured from a map pin outranked the authoritative quest-log title
+    -- that arrived later, and could never be corrected.
+    ------------------------------------------------------------
+    local quests = CN:GetModule("Quests")
+
+    local store = CN.Account("questMetadata")
+
+    store[970501] = nil
+
+    quests.SetMetadata(970501, "Pin Guess", "available")
+
+    assert(quests.GetMetadata(970501).source == "available",
+        "provenance survives storage: "
+        .. tostring(quests.GetMetadata(970501).source))
+
+    quests.SetMetadata(970501, "The Real Title", "questlog")
+
+    assert(quests.GetMetadata(970501).name == "The Real Title",
+        "and the quest log corrects a map-pin guess: "
+        .. tostring(quests.GetMetadata(970501).name))
+
+    -- The storage saving still holds for the common case.
+    assert(type(store[970501]) == "string",
+        "a title from the client is still stored as a bare string")
+
+    store[970501] = nil
+
+    print("  a map-pin guess is corrected by the quest log")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE DEADLINE, ONE CURVE.
+    --
+    -- A world quest set `limitedTimeBonus` from a four-step cliff AND
+    -- `expiresIn` for the continuous curve, so one deadline was charged twice
+    -- through two curves tuned separately -- and `/cn urgency`, which the
+    -- addon offers as its explanation of the ordering, plots only one of
+    -- them.
+    ------------------------------------------------------------
+    local opportunities = CN:GetModule("Opportunities")
+
+    local timed = CN.candidateProviders["Opportunities"].fn() or {}
+
+    local checked = 0
+
+    for _, objective in ipairs(timed) do
+        if objective.expiresIn then
+            assert((objective.limitedTimeBonus or 0) == 0,
+                "an objective with a deadline must charge it through the "
+                .. "curve the addon plots, and not also through a second "
+                .. "one: " .. tostring(objective.name))
+
+            checked = checked + 1
+        end
+    end
+
+    assert(checked > 0,
+        "the fixture must produce at least one objective with a deadline")
+
+    -- The window curve stays, for the one caller that has no `expiresIn`.
+    assert(opportunities.Urgency(60) > opportunities.Urgency(86400),
+        "and a window closing sooner is still more urgent")
+
+    print("  one deadline is charged once, through the curve /cn urgency plots")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A NAME THE CLIENT HANDS BACK IS NOT ON DISK.
+    ------------------------------------------------------------
+    local mountModule = CN:GetModule("Mounts")
+    local toyModule   = CN:GetModule("Toys")
+
+    mountModule.Scan()
+    toyModule.Scan()
+
+    for id, record in pairs(mountModule.Store()) do
+        assert(record.name == nil,
+            "mount " .. tostring(id) .. " must not persist its name")
+    end
+
+    for id, record in pairs(CN.Account("toys")) do
+        assert(record.name == nil,
+            "toy " .. tostring(id) .. " must not persist its name")
+    end
+
+    -- And the readers still answer, live.
+    local anyMount = next(mountModule.Store())
+
+    assert(anyMount, "the fixture must have a mount")
+
+    local name = mountModule.NameOf(anyMount, mountModule.Store()[anyMount])
+
+    assert(type(name) == "string" and name ~= ""
+        and not name:find("^Mount %d"),
+        "and the journal still names it: " .. tostring(name))
+
+    print("  mount and toy names are read from the client, not from disk")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DISCOVERY IS ONE CLIENT CALL, NOT THIRTY THOUSAND.
+    --
+    -- The snapshot was keyed on the SIZE of the discovered set, and quests
+    -- are discovered dozens at a time on entering new content -- so the walk
+    -- this cache exists to remove came back once per turn-in for as long as
+    -- the player was somewhere new.
+    ------------------------------------------------------------
+    local breakdown = CN:GetModule("Breakdown")
+    local quests    = CN:GetModule("Quests")
+
+    breakdown.ForgetQuestCounts()
+
+    local discovered = CN.Account("discoveredQuests")
+
+    for id = 971001, 971100 do
+        discovered[id] = true
+    end
+
+    local real  = quests.IsCompletedByCharacter
+    local asked = 0
+
+    quests.IsCompletedByCharacter = function(questID)
+        asked = asked + 1
+
+        return real(questID)
+    end
+
+    local first = breakdown.CompletedQuestCount()
+
+    assert(asked >= 100, "the first count walks the set")
+
+    asked = 0
+
+    -- Walking into new content: dozens of new ids.
+    for id = 972001, 972040 do
+        quests.RecordDiscovered(id, "available")
+    end
+
+    assert(asked <= 40,
+        "a discovery costs one call about one id, not a walk: " .. asked)
+
+    asked = 0
+
+    assert(breakdown.CompletedQuestCount() == first,
+        "and the count is still served from the snapshot")
+
+    assert(asked == 0,
+        "without rewalking anything: " .. asked)
+
+    quests.IsCompletedByCharacter = real
+
+    for id = 971001, 971100 do discovered[id] = nil end
+    for id = 972001, 972040 do discovered[id] = nil end
+
+    breakdown.ForgetQuestCounts()
+
+    print("  walking into new content does not rewalk your quest history")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN INFERRED PREREQUISITE CAN BE CORRECTED.
+    --
+    -- `not record.observedRequires` made the stored copy write-once, so an
+    -- ordering later shown to be wrong kept the wrong answer for the life of
+    -- the account -- and that is the copy the toolkit ships.
+    ------------------------------------------------------------
+    assert(CN.SameIDList({ 1, 2 }, { 1, 2 }), "same list")
+    assert(not CN.SameIDList({ 1, 2 }, { 2, 1 }), "order matters")
+    assert(not CN.SameIDList({ 1 }, { 1, 2 }), "length matters")
+    assert(not CN.SameIDList(nil, { 1 }), "absent is not equal")
+
+    local prerequisites = CN:GetModule("Harvest")
+
+    local store = CN.Account("questHarvest")
+
+    store[973001] = { observedRequires = { 11, 22 } }
+
+    prerequisites.WriteObservedPrerequisites(973001, { 11, 22, 33 })
+
+    assert(#store[973001].observedRequires == 3,
+        "a widened observation rewrites the stored copy: "
+        .. #store[973001].observedRequires)
+
+    store[973001] = nil
+
+    print("  an inferred ordering can be corrected by later play")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LOGIN THAT ANSWERS LATE STILL GETS A BASELINE.
+    --
+    -- The client returns nothing about completed quests until it has finished
+    -- loading them, and `BeginSession` runs inside exactly that window. The
+    -- nil was CACHED as settled, so the baseline stayed nil for the whole
+    -- session and the branch that reports quests completed by any means --
+    -- including ones the addon saw no event for -- never ran once.
+    ------------------------------------------------------------
+    local progress = CN:GetModule("Progress")
+
+    local real = C_QuestLog.GetAllCompletedQuestIDs
+
+    -- Log in early: the client has nothing yet.
+    C_QuestLog.GetAllCompletedQuestIDs = function() return {} end
+
+    progress.InvalidateLifetime()
+    progress.BeginSession()
+
+    assert(progress.LifetimeCompleted() == nil,
+        "the client has not answered yet")
+
+    -- It answers a moment later.
+    C_QuestLog.GetAllCompletedQuestIDs = real
+
+    local summary = progress.Summary()
+
+    assert(summary.lifetime and summary.lifetime > 0,
+        "the client now answers: " .. tostring(summary.lifetime))
+
+    assert(progress.SessionBaseline() == summary.lifetime,
+        "and the baseline is taken from the first real answer rather than "
+        .. "left nil for the session: "
+        .. tostring(progress.SessionBaseline()))
+
+    -- Taken once: a baseline that moved would make "this session" shrink.
+    progress.NoteBaseline()
+
+    assert(progress.SessionBaseline() == summary.lifetime,
+        "and it is not retaken afterwards")
+
+    print("  a session that began before your quests loaded still has a "
+        .. "baseline")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY PLACE THAT PRINTS A CLASS PRINTS THE CLASS NAME.
+    --
+    -- 0.62.0 fixed two of the three call sites. `/cn alts` and `/cn warband`
+    -- list the same roster in the same session and disagreed.
+    ------------------------------------------------------------
+    -- A SECOND CHARACTER, OR THE ROSTER PRINTS NO CLASS AT ALL.
+    --
+    -- `/cn alts` says "only this character has been seen" on a one-character
+    -- fixture, so an assertion about what it prints would have passed while
+    -- printing nothing. That is the shape of a test that cannot fail.
+    CN.db.characters["Realm-Zed"] = CN.db.characters["Realm-Zed"] or {
+        name    = "Zed",
+        realm   = "Realm",
+        class   = "DEATHKNIGHT",
+        race    = "NightElf",
+        level   = 80,
+        faction = "Alliance",
+        lastSeen = time(),
+    }
+
+    local printed = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(printed, tostring(message))
+
+        return realAdd(chatFrame, message)
+    end
+
+    SlashCmdList.COMPLETIONNAVIGATOR("alts")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local sawRoster = false
+
+    for _, line in ipairs(printed) do
+        if line:find("Zed", 1, true) then
+            sawRoster = true
+        end
+    end
+
+    assert(sawRoster,
+        "the roster must actually have printed the second character")
+
+    for _, line in ipairs(printed) do
+        assert(not line:find("DEATHKNIGHT", 1, true)
+            and not line:find("DEMONHUNTER", 1, true)
+            and not line:find("WARRIOR", 1, true),
+            "a raw class token reached the player: " .. line)
+    end
+
+    CN.db.characters["Realm-Zed"] = nil
+
+    print("  every command that names a class names it the way the game does")
 end)()
 
 

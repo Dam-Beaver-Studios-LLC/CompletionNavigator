@@ -12,6 +12,17 @@ local Print      = CN.Print
 local DebugPrint = CN.DebugPrint
 local Blizzard   = CN.Blizzard
 
+-- A toy's name, from the client, falling back to an older database's copy.
+function Toys.NameOf(itemID, record)
+    local live = CN.Blizzard.GetToyName and CN.Blizzard.GetToyName(itemID)
+
+    if live then
+        return live
+    end
+
+    return (record and record.name) or ("Toy " .. tostring(itemID))
+end
+
 local function Store()
     return CN.Account("toys")
 end
@@ -40,7 +51,11 @@ function Toys.Scan()
             if toy and toy.itemID then
                 store[toy.itemID] = {
                     itemID    = toy.itemID,
-                    name      = toy.name,
+
+                    -- `name` IS NOT STORED. 0.63.0. Same rule and the same
+                    -- reason as mounts next door: the toy box answers
+                    -- instantly, in the player's own language, and a stored
+                    -- copy freezes at whatever locale last scanned.
                     collected = toy.collected,
                 }
 
@@ -95,8 +110,10 @@ function Toys.Resolve(text)
     local matches = {}
 
     for id, record in pairs(Store()) do
-        if record.name and string.find(string.lower(record.name), needle, 1, true) then
-            table.insert(matches, { id = id, name = record.name })
+        local heldName = Toys.NameOf(id, record)
+
+        if heldName and string.find(string.lower(heldName), needle, 1, true) then
+            table.insert(matches, { id = id, name = heldName })
         end
     end
 
@@ -165,7 +182,7 @@ CN.RegisterCandidateProvider("Toys", function()
             return CN.NewObjective({
                 id              = itemID,
                 type            = CN.objectiveTypes.TOY,
-                name            = record.name,
+                name            = Toys.NameOf(itemID, record),
                 mapID           = seller.mapID,
                 x               = seller.x,
                 y               = seller.y,
@@ -208,7 +225,7 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.TOY, function(itemID)
     end
 
     if record.collected then
-        return states.COMPLETED, "Already collected", record.name
+        return states.COMPLETED, "Already collected", Toys.NameOf(itemID, record)
     end
 
     return states.AVAILABLE, nil, nil
@@ -276,7 +293,8 @@ CN:RegisterCommand{
 
         local record = Store()[itemID]
 
-        Print(record.name .. " |cff8a8f96(" .. itemID .. ")|r")
+        Print(Toys.NameOf(itemID, record)
+            .. " |cff8a8f96(" .. itemID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected))
     end,
 }

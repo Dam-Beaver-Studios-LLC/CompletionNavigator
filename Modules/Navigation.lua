@@ -525,7 +525,17 @@ function Navigation.PlayerPositionOnMap(mapID)
         return nil
     end
 
-    return { x = x, y = y }
+    -- TWO VALUES, NOT A TABLE. 0.63.0.
+    --
+    -- `Compute` calls this on every 10 Hz tick whenever the player's best map
+    -- differs from the target's -- which is the ORDINARY case in a city, an
+    -- inn, a cave or any micro-dungeon overlay, so much of the time the arrow
+    -- is up. 0.61.0 removed the per-tick state table two functions below this
+    -- one and left the allocation on the same code path.
+    --
+    -- Returned as a pair. The two callers both immediately read `.x` and
+    -- `.y`, so nothing wanted the table for its own sake.
+    return x, y
 end
 
 -- ONE STATE TABLE, REUSED. 0.61.0.
@@ -592,12 +602,13 @@ function Navigation.Compute()
     local onTargetMap = false
 
     if mapID ~= target.mapID then
-        local translated = Navigation.PlayerPositionOnMap(target.mapID)
+        local translatedX, translatedY =
+            Navigation.PlayerPositionOnMap(target.mapID)
 
-        if translated then
+        if translatedX then
             mapID   = target.mapID
-            playerX = translated.x
-            playerY = translated.y
+            playerX = translatedX
+            playerY = translatedY
 
             onTargetMap = true
         else

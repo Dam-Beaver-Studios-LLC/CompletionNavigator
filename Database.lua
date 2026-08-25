@@ -883,6 +883,51 @@ CN.migrations = {
                 .. " rare row(s).")
         end
     end,
+
+    -- 16 -> 17. THE LAST OF THE NAMES THE CLIENT HANDS BACK FOR FREE.
+    --
+    -- Around nine hundred mount names, a thousand toy names, and a zone name
+    -- on every captured vendor. All three are LOCALIZED, all three are
+    -- answered instantly by the client, and all three froze at whatever
+    -- language last scanned -- so a player who switched client language could
+    -- not find their own mounts by name and read old-locale zone names in
+    -- every vendor tooltip.
+    --
+    -- This is the fifth application of one rule: persist only what the client
+    -- cannot re-supply. Migrations 4, 5, 14 and 15 were the others.
+    [16] = function(db)
+        db.account = db.account or {}
+
+        local names, zones = 0, 0
+
+        for _, store in ipairs({ db.account.mounts, db.account.toys }) do
+            for _, record in pairs(store or {}) do
+                if type(record) == "table" and record.name ~= nil then
+                    record.name = nil
+
+                    names = names + 1
+                end
+            end
+        end
+
+        for _, record in pairs(db.account.vendors or {}) do
+            -- Only where the map id can derive it again. A row with a zone
+            -- and no map id has nothing to fall back on, and losing it would
+            -- be losing information rather than losing a duplicate.
+            if type(record) == "table" and record.zone ~= nil
+                and record.mapID then
+
+                record.zone = nil
+
+                zones = zones + 1
+            end
+        end
+
+        if names > 0 or zones > 0 then
+            CN.DebugPrint("Dropped " .. names .. " collectible name(s) and "
+                .. zones .. " vendor zone name(s) the client re-supplies.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

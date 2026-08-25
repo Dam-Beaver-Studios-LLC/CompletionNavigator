@@ -634,8 +634,22 @@ end
                 -- Warband currencies. The client flags them and the addon
                 -- ignored the flag until 0.43.0, so one capped on your main
                 -- was recommended again on every alt.
-                accountWide = (info.isAccountWide
-                    or info.isAccountTransferable) and true or false,
+                -- TRANSFERABLE IS NOT SHARED. 0.63.0.
+                --
+                -- `isAccountTransferable` means the balance can be MOVED
+                -- between characters, for a fee, one deliberate action at a
+                -- time. `isAccountWide` means every character sees the same
+                -- balance. Treating the first as the second told the ranking
+                -- that a currency belonging to exactly one character was
+                -- everybody's -- so `Warband.Decorate` short-circuited to
+                -- "account-wide" and dropped the character verdict, and the
+                -- row printed "(Warband)".
+                --
+                -- Both are carried, because the second one is worth SAYING --
+                -- "you can move this to the character who needs it" is useful
+                -- and is not the same sentence.
+                accountWide     = info.isAccountWide and true or false,
+                transferable    = info.isAccountTransferable and true or false,
             })
         end
     end

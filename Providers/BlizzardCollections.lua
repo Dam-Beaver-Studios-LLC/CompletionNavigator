@@ -219,6 +219,23 @@ function Blizzard.GetMountIDs()
     return {}
 end
 
+-- A toy's name, live. `C_ToyBox.GetToyInfo` returns itemID, name, icon,
+-- isFavorite, hasFanfare, quality -- and answers instantly, which is why the
+-- addon has no business keeping a copy of it on disk.
+function Blizzard.GetToyName(itemID)
+    if not C_ToyBox or not C_ToyBox.GetToyInfo or not itemID then
+        return nil
+    end
+
+    local ok, _, name = pcall(C_ToyBox.GetToyInfo, itemID)
+
+    if ok and type(name) == "string" and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
 function Blizzard.GetMountByID(mountID)
     if not C_MountJournal or not C_MountJournal.GetMountInfoByID then
         return nil

@@ -245,15 +245,19 @@ CN.RegisterSelfTest{
 
         local nav = CN:GetModule("Navigation")
 
-        local translated = nav and nav.PlayerPositionOnMap(parentID)
+        local translatedX, translatedY
 
-        if not translated then
+        if nav then
+            translatedX, translatedY = nav.PlayerPositionOnMap(parentID)
+        end
+
+        if not translatedX then
             return SKIP, "the parent map cannot place you, which is normal "
                 .. "for a continent"
         end
 
         return PASS, string.format("also %.1f, %.1f on map %d",
-            translated.x * 100, translated.y * 100, parentID)
+            translatedX * 100, translatedY * 100, parentID)
     end,
 }
 

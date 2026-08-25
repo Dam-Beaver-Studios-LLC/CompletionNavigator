@@ -118,11 +118,12 @@ end
 function Breakdown.Report(categoryName, force)
     -- AND A FORCED RECOUNT RECOUNTS THE QUESTS TOO. 0.61.0.
     --
-    -- The quest figure is maintained incrementally against a snapshot, and
-    -- the snapshot is only rebuilt when the discovered set GROWS. That is
-    -- correct for ordinary play and wrong for the one case this parameter
-    -- exists for: the player pressed Refresh, or ran a scan, and is asking to
-    -- be told the truth rather than the remembered answer.
+    -- The quest figure is maintained incrementally against a snapshot taken
+    -- once, and both edges are credited as they happen -- a discovery and a
+    -- turn-in. That is correct for ordinary play and is exactly what this
+    -- parameter exists to override: the player pressed Refresh, or ran a
+    -- scan, and is asking to be told the truth rather than the remembered
+    -- answer.
     --
     -- Same rule as the paragraph above, applied to the one figure in this
     -- file that does not live in `reportCache`.
@@ -448,14 +449,29 @@ function Breakdown.CompletedQuestCount()
     local key = CN.characterKey or CN.GetCharacterKey()
 
     local discovered = CN.Account("discoveredQuests")
-    local size       = CN.CountKeys(discovered)
 
     local held = questCounts[key]
 
-    -- The discovered set only ever grows, so its size is a sufficient key:
-    -- a set that has not grown cannot have gained a completable quest, and a
-    -- turn-in is credited below rather than by rewalking.
-    if held and held.size == size then
+    -- THE SET GROWING IS NOT A REASON TO RECOUNT ALL OF IT. 0.63.0.
+    --
+    -- The key was the SIZE of the discovered set, and `RecordDiscovered`
+    -- fires from map sweeps, gossip and the quest log -- dozens of new ids on
+    -- walking into fresh content. So with the Remaining tab open the sequence
+    -- "enter a new zone, hand in a quest" put the whole 30,000-entry walk
+    -- back, once per turn-in, for as long as the player was somewhere new.
+    -- That is the 13.7 ms this cache was written to remove, returning exactly
+    -- where questing puts a player most often.
+    --
+    -- A newly discovered quest is almost never already completed -- it was
+    -- just offered -- and where it is, `NoteDiscovered` below asks the client
+    -- about that ONE id, which is a single call rather than thirty thousand.
+    -- So the snapshot is now keyed on nothing but its own existence, and both
+    -- edges of the count are maintained incrementally: discoveries in, and
+    -- turn-ins in.
+    --
+    -- `Breakdown.ForgetQuestCounts` remains the way to demand a real recount,
+    -- and the Remaining tab's Refresh button passes `force` to reach it.
+    if held then
         return held.completed
     end
 
@@ -475,12 +491,46 @@ function Breakdown.CompletedQuestCount()
     end
 
     questCounts[key] = {
-        size      = size,
         completed = completed,
         counted   = counted,
     }
 
     return completed
+end
+
+-- Called when a quest is discovered. One client call, not thirty thousand.
+--
+-- A quest the addon has just seen offered is almost never already completed,
+-- but "almost never" is not never -- a repeatable, or a quest first seen on a
+-- character who did it years ago. Asking about the one id keeps the snapshot
+-- exact without the walk.
+function Breakdown.NoteQuestDiscovered(questID)
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    local held = questCounts[key]
+
+    if not held or not questID then
+        return
+    end
+
+    held.counted = held.counted or {}
+
+    if held.counted[questID] then
+        return
+    end
+
+    local quests = CN:GetModule("Quests")
+
+    if not quests or not quests.IsCompletedByCharacter then
+        return
+    end
+
+    if not quests.IsCompletedByCharacter(questID) then
+        return
+    end
+
+    held.counted[questID] = true
+    held.completed        = held.completed + 1
 end
 
 -- Called from the turn-in hook. Cheap, exact, and it does not touch the

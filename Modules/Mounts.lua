@@ -44,7 +44,18 @@ function Mounts.Scan()
 
             store[mountID] = {
                 mountID           = mountID,
-                name              = mount.name,
+
+                -- `name` IS NOT STORED. 0.63.0.
+                --
+                -- Around nine hundred localized names the journal returns
+                -- instantly, in the language the player is reading. Stored,
+                -- they froze: a player who changed client language could not
+                -- find their own mounts with `/cn mount <name>` and the row
+                -- printed the old locale's name. 0.62.0 dropped `source` from
+                -- these same rows on the same rule and left the name.
+                --
+                -- `Mounts.NameOf` below is the one reader, matching
+                -- `Pets.NameOf` and `Achievements.NameOf`.
                 spellID           = mount.spellID,
                 sourceType        = mount.sourceType,
 
@@ -161,6 +172,19 @@ function Mounts.SourceValue(record)
     return 1
 end
 
+-- A mount's name, from the client, falling back to whatever an older
+-- database still carries so nothing goes blank between upgrading and the next
+-- scan. See the note in `Scan`.
+function Mounts.NameOf(mountID, record)
+    local live = CN.Blizzard.GetMountByID and CN.Blizzard.GetMountByID(mountID)
+
+    if live and live.name and live.name ~= "" then
+        return live.name
+    end
+
+    return (record and record.name) or ("Mount " .. tostring(mountID))
+end
+
 -- The journal's source sentence, live. See the note in `Scan`.
 --
 -- Falls back to whatever an older database still carries, so a player who has
@@ -231,7 +255,7 @@ CN.RegisterCandidateProvider("Mounts", function()
             return CN.NewObjective({
                 id              = mountID,
                 type            = CN.objectiveTypes.MOUNT,
-                name            = record.name,
+                name            = Mounts.NameOf(mountID, record),
                 accountWide     = true,
                 completionValue = value,
                 reasons         = { Mounts.SourceText(mountID, record)
@@ -274,7 +298,7 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.MOUNT, function(mountID)
     end
 
     if record.collected then
-        return states.COMPLETED, "Already collected", record.name
+        return states.COMPLETED, "Already collected", Mounts.NameOf(mountID, record)
     end
 
     if not Mounts.IsUsableByCharacter(record) then
@@ -334,8 +358,10 @@ function Mounts.Resolve(text)
     local matches = {}
 
     for id, record in pairs(Store()) do
-        if record.name and string.find(string.lower(record.name), needle, 1, true) then
-            table.insert(matches, { id = id, name = record.name })
+        local heldName = Mounts.NameOf(id, record)
+
+        if heldName and string.find(string.lower(heldName), needle, 1, true) then
+            table.insert(matches, { id = id, name = heldName })
         end
     end
 
@@ -414,7 +440,8 @@ CN:RegisterCommand{
 
         local record = Store()[mountID]
 
-        Print(record.name .. " |cff8a8f96(" .. mountID .. ")|r")
+        Print(Mounts.NameOf(mountID, record)
+            .. " |cff8a8f96(" .. mountID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected))
 
         local sourceText = Mounts.SourceText(mountID, record)

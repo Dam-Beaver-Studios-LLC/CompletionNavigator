@@ -378,8 +378,8 @@ end
 function Harvest.PublishConfident()
     local published, recorded = 0, 0
 
-    local store = Store()
-
+    -- The store is reached through `WriteObservedPrerequisites` below, which
+    -- owns the rule about when a stored inference may be rewritten.
     for questID, prerequisites in pairs(Harvest.AllConfident()) do
         CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
             observedRequires = prerequisites,
@@ -402,14 +402,20 @@ function Harvest.PublishConfident()
         -- started saying "X is required" -- inference masquerading as
         -- authority, through a door I had just built for it. The existing
         -- test for that distinction caught it.
-        local record = store[questID]
-
-        if record and not record.observedRequires and #prerequisites > 0 then
-            record.observedRequires = prerequisites
-
-            -- The unlock index is an inversion of exactly this field.
-            Harvest.NoteUnlocksChanged()
-
+        -- WRITE-ONCE MEANT NEVER-CORRECTED. 0.63.0.
+        --
+        -- `not record.observedRequires` made the stored copy permanent: later
+        -- play that widened or contradicted the observed set updated the
+        -- in-memory graph and could never rewrite the row -- and the row is
+        -- what the toolkit folds into the shipped data file. A chain observed
+        -- twice early and disproved later kept the wrong answer for the life
+        -- of the account.
+        --
+        -- The guard it should have been is "only when the answer changed",
+        -- which keeps the write cheap without freezing it. `AllConfident`
+        -- already applies the confidence threshold, so what arrives here is
+        -- an observation the addon is prepared to stand behind.
+        if Harvest.WriteObservedPrerequisites(questID, prerequisites) then
             recorded = recorded + 1
         end
     end
@@ -832,6 +838,31 @@ Harvest.unlockCap = 6
 -- `entry.decorated == CN.decoratorGeneration`, so bumping it makes every
 -- provider re-decorate on its next rebuild, and invalidating the candidates
 -- makes that rebuild happen.
+-- The stored copy of an observed ordering. Returns whether it changed.
+--
+-- Published because the rule it enforces -- rewrite only when the answer
+-- actually moved, rather than never -- is the whole of the 0.63.0 fix, and a
+-- rule only reachable through a full observation sweep is a rule nothing
+-- tests directly.
+function Harvest.WriteObservedPrerequisites(questID, prerequisites)
+    local record = CN.Account("questHarvest")[questID]
+
+    if not record or type(prerequisites) ~= "table" or #prerequisites == 0 then
+        return false
+    end
+
+    if CN.SameIDList(record.observedRequires, prerequisites) then
+        return false
+    end
+
+    record.observedRequires = prerequisites
+
+    -- The unlock index is an inversion of exactly this field.
+    Harvest.NoteUnlocksChanged()
+
+    return true
+end
+
 function Harvest.NoteUnlocksChanged()
     Harvest.unlockGeneration = Harvest.unlockGeneration + 1
 

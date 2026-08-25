@@ -285,7 +285,7 @@ CN:RegisterCommand{
                 row.isCurrent and "|cff73b873" or "|cfff2f4f6",
                 tostring(row.name),
                 tostring(row.level or "?"),
-                tostring(row.class or ""),
+                CN.TokenLabel(row.class or ""),
                 Alts.DescribeAge(character)))
         end
 

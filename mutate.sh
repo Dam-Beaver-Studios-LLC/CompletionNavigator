@@ -1868,17 +1868,12 @@ mutate "Modules/Sets.lua" \
     "        local key = set.setID" \
     "a transmog set is filed under an appearance category's id"
 
+# RETARGETED IN 0.63.0. The English match is gone rather than demoted, so the
+# property to protect is the locale-free one that replaced it: knowledge first
+# by id, then by how much of the week's cap is still unclaimed.
 mutate "Modules/Waiting.lua" \
-    "            local knowledge = Waiting.knowledgeCurrencies[currencyID] == true
-
-            if not knowledge and name then
-                knowledge = name:find(Waiting.knowledgePattern) and true or false
-            end" \
-    "            local knowledge = false
-
-            if name then
-                knowledge = name:find(Waiting.knowledgePattern) and true or false
-            end" \
+    "            local knowledge = Waiting.knowledgeCurrencies[currencyID] == true" \
+    "            local knowledge = false" \
     "knowledge is identified only by an English word"
 
 # NOT MUTATED: the `open` preference in `LockoutFor`.
@@ -1955,8 +1950,11 @@ mutate "Routing.lua" \
     "        CN.ForgetBatching()" \
     "the routes for the zone behind you are held for the session"
 
+# SUPERSEDED IN 0.63.0 by "discovering a quest rewalks your whole quest
+# history" below: the snapshot is no longer keyed on the set's size, because
+# the size changes dozens of times on walking into new content.
 mutate "Modules/Breakdown.lua" \
-    "    if held and held.size == size then
+    "    if held then
         return held.completed
     end" \
     "    if false then
@@ -1977,21 +1975,35 @@ mutate "Database.lua" \
     "the Scans tab says not scanned after you scan"
 
 mutate "Modules/Breakdown.lua" \
-    "    if not quests.IsCompletedByCharacter(questID) then
-        return
-    end" \
-    "    if false then
-        return
-    end" \
+    "    -- The client is the authority on whether this actually completed. A
+    -- repeatable quest answers false here and is correctly not credited.
+    if not quests.IsCompletedByCharacter(questID) then" \
+    "    if false then" \
     "a repeatable turn-in counts as a completed quest"
 
 mutate "Modules/Breakdown.lua" \
-    "    if held.counted[questID] then
+    "    held.counted = held.counted or {}
+
+    if held.counted[questID] then
         return
-    end" \
-    "    if false then
+    end
+
+    local quests = CN:GetModule(\"Quests\")
+
+    if not quests or not quests.IsCompletedByCharacter then
         return
-    end" \
+    end
+
+    -- The client is the authority" \
+    "    held.counted = held.counted or {}
+
+    local quests = CN:GetModule(\"Quests\")
+
+    if not quests or not quests.IsCompletedByCharacter then
+        return
+    end
+
+    -- The client is the authority" \
     "handing the same quest in twice counts it twice"
 
 mutate "Modules/Progress.lua" \
@@ -2076,6 +2088,72 @@ mutate "Character.lua" \
     "    return tostring(realm or \"UnknownRealm\") .. \"-\" .. tostring(name or \"Unknown\")" \
     "    return tostring(name or \"Unknown\") .. \"-\" .. tostring(realm or \"UnknownRealm\")" \
     "a character key is built name-first"
+
+# ------------------------------------------------------------
+# 0.63.0
+# ------------------------------------------------------------
+
+mutate "Modules/Currencies.lua" \
+    "                quantity   = record.cappedAgainst or record.quantity," \
+    "                quantity   = record.quantity," \
+    "a capped currency prints the balance it was not measured against"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "                accountWide     = info.isAccountWide and true or false," \
+    "                accountWide     = (info.isAccountWide
+                    or info.isAccountTransferable) and true or false," \
+    "a currency you can move is treated as one everybody has"
+
+mutate "Modules/Quests.lua" \
+    "    if source == \"blizzard\" or source == \"questlog\" then" \
+    "    if source ~= \"manual\" then" \
+    "a map-pin guess outranks the quest log and cannot be corrected"
+
+mutate "Modules/Opportunities.lua" \
+    "            travelCost       = travel,
+            expiresIn        = worldQuest.secondsLeft," \
+    "            limitedTimeBonus = Opportunities.Urgency(worldQuest.secondsLeft),
+            travelCost       = travel,
+            expiresIn        = worldQuest.secondsLeft," \
+    "one deadline is charged twice through two curves"
+
+mutate "Modules/Breakdown.lua" \
+    "    if held then
+        return held.completed
+    end" \
+    "    if held and held.size == CN.CountKeys(discovered) then
+        return held.completed
+    end" \
+    "discovering a quest rewalks your whole quest history"
+
+mutate "Modules/Harvest.lua" \
+    "    if CN.SameIDList(record.observedRequires, prerequisites) then
+        return false
+    end" \
+    "    if record.observedRequires then
+        return false
+    end" \
+    "an inferred ordering can never be corrected"
+
+mutate "Modules/Progress.lua" \
+    "    if not ids then
+        lifetimeCache.valid = false
+        lifetimeCache.value = nil
+
+        return nil
+    end" \
+    "    if not ids then
+        lifetimeCache.valid = true
+        lifetimeCache.value = nil
+
+        return nil
+    end" \
+    "a login that answers late never gets a session baseline"
+
+mutate "Modules/Alts.lua" \
+    "CN.TokenLabel(row.class or \"\")" \
+    "tostring(row.class or \"\")" \
+    "/cn alts prints a raw class token"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

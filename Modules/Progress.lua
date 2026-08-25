@@ -106,10 +106,28 @@ function Progress.LifetimeCompleted()
 
     local ids = Blizzard.GetAllCompletedQuestIDs()
 
-    -- A nil answer is cached too. The client refusing to say is a stable
-    -- fact for the moment, and re-asking on every refresh in the hope of a
-    -- different answer is the same waste with extra steps.
-    lifetimeCache.value = ids and #ids or nil
+    -- A NIL ANSWER IS NOT A SETTLED ONE. 0.63.0.
+    --
+    -- This cached nil as valid, on the argument that a client refusing to
+    -- answer is a stable fact. It is not: the ONE moment the client refuses
+    -- is early in a login, before quest data has loaded -- and that is
+    -- precisely when `BeginSession` takes its baseline. So the baseline was
+    -- nil for the whole session, and the branch that reports quests completed
+    -- by any means -- including ones the addon saw no event for -- never ran
+    -- once.
+    --
+    -- 0.62.0 taught this to tell "not yet" from "none", and then cached the
+    -- "not yet". Nil is left uncached so the next ask gets the real answer,
+    -- at a cost of one client call per refresh for the few seconds a login
+    -- lasts.
+    if not ids then
+        lifetimeCache.valid = false
+        lifetimeCache.value = nil
+
+        return nil
+    end
+
+    lifetimeCache.value = #ids
     lifetimeCache.valid = true
     lifetimeCache.at    = time()
 
@@ -317,8 +335,49 @@ function Progress.BeginSession()
         Progress.RollDay(store)
     end
 
+    -- TAKEN ONCE THE CLIENT CAN ANSWER, NOT ONCE. 0.63.0.
+    --
+    -- `BeginSession` runs at `PLAYER_LOGIN`, which is inside the window where
+    -- the client has not finished loading quest data and correctly answers
+    -- "not yet". So the baseline was nil, and stayed nil for the session --
+    -- and the branch in `Summary` that reports quests completed by ANY means,
+    -- including ones the addon saw no event for, could never run.
+    --
+    -- Asked here, and asked again by `Progress.NoteBaseline` below when the
+    -- client first has an answer. Set once, then left alone: a baseline that
+    -- moved would make "this session" shrink.
     sessionStart.completed = Progress.LifetimeCompleted()
     sessionStart.at        = time()
+end
+
+-- What the session started from, for anything that needs to reason about the
+-- baseline rather than the delta.
+function Progress.SessionBaseline()
+    return sessionStart.completed
+end
+
+-- The first real answer becomes the baseline, if login was too early for one.
+--
+-- Cheap: it returns immediately once a baseline exists, which is after the
+-- first successful ask.
+function Progress.NoteBaseline()
+    if sessionStart.completed then
+        return
+    end
+
+    local lifetime = Progress.LifetimeCompleted()
+
+    if not lifetime then
+        return
+    end
+
+    sessionStart.completed = lifetime
+
+    -- The session began when the player logged in, not when the client
+    -- finally answered; `at` was set correctly by `BeginSession` and is left
+    -- alone, so the rate is measured over the real session.
+    DebugPrint("Session baseline taken late: " .. lifetime
+        .. " lifetime completions.")
 end
 
 ------------------------------------------------------------
@@ -328,6 +387,10 @@ end
 -- Everything worth showing, in one table. Fields are nil rather than zero
 -- when the client has not answered, so callers can tell the difference.
 function Progress.Summary()
+    -- The one place every reader passes through, so the late baseline needs
+    -- no event of its own.
+    Progress.NoteBaseline()
+
     local store = Store() or {}
 
     local summary = {
@@ -336,13 +399,19 @@ function Progress.Summary()
         session  = store.session or 0,
         best     = store.best or 0,
         previous = store.previousDay,
+
+        -- What the session started from. Published because "this session"
+        -- being a client delta rather than the addon's own tally is a real
+        -- distinction, and `/cn navdiag` and the Journey tab both need to be
+        -- able to say which one they are showing.
+        baseline = Progress.SessionBaseline(),
     }
 
     -- Prefer the client's own delta for the session where we have it: it
     -- counts quests completed by any means, including ones the addon did not
     -- see an event for.
-    if sessionStart.completed and summary.lifetime then
-        local delta = summary.lifetime - sessionStart.completed
+    if summary.baseline and summary.lifetime then
+        local delta = summary.lifetime - summary.baseline
 
         if delta >= 0 then
             summary.session = math.max(summary.session, delta)

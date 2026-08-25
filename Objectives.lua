@@ -334,14 +334,46 @@ end
 
 -- Lower number means higher authority. Manual overrides must never
 -- silently replace a more authoritative source.
+-- Lower wins. Two sources were being written and were absent from this
+-- table, which made them rank 99 -- worse than everything, including each
+-- other, so whichever arrived first could never be corrected. 0.63.0.
 CN.sourceRank = {
-    ["blizzard"] = 1,
-    ["questlog"] = 2,
-    ["observed"] = 3,
-    ["static"]   = 4,
-    ["external"] = 5,
-    ["manual"]   = 6,
+    ["blizzard"]  = 1,
+    ["questlog"]  = 2,
+
+    -- Read from a gossip window: the NPC is offering it, so the title is the
+    -- client's, but it is not the quest log's.
+    ["offered"]   = 3,
+
+    -- Read from a map pin. The same title by a longer road, and the one most
+    -- likely to be superseded.
+    ["available"] = 4,
+
+    ["observed"]  = 5,
+    ["static"]    = 6,
+    ["external"]  = 7,
+    ["manual"]    = 8,
 }
+
+-- Two id lists, same members, same order. Used where a stored inference is
+-- rewritten only when it actually changed.
+function CN.SameIDList(a, b)
+    if a == b then
+        return true
+    end
+
+    if type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then
+        return false
+    end
+
+    for index = 1, #a do
+        if a[index] ~= b[index] then
+            return false
+        end
+    end
+
+    return true
+end
 
 function CN.IsBetterSource(newSource, existingSource)
     if not existingSource then

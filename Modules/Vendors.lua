@@ -66,7 +66,18 @@ function Vendors.CaptureOpenMerchant()
         record.mapID = mapID
         record.x     = math.floor(x * 10000 + 0.5) / 10000
         record.y     = math.floor(y * 10000 + 0.5) / 10000
-        record.zone  = Blizzard.GetMapName(mapID)
+
+        -- `zone` IS NOT STORED. 0.63.0.
+        --
+        -- The map id is right there and the client derives the name from it
+        -- instantly, in the language the player is reading. Stored, it froze:
+        -- a player who changed client language, or a zone Blizzard renamed,
+        -- kept the old name in every tooltip until they happened to reopen
+        -- that merchant.
+        --
+        -- Third copy of the rule migration 7 applied to `questHarvest` and
+        -- 0.62.0 applied to rares. Derived at the one place that builds
+        -- seller rows, below.
     end
 
     -- WHAT NOT TO WRITE TO DISK.
@@ -218,7 +229,10 @@ function Vendors.WhoSells(itemID)
             table.insert(sellers, {
                 npcID = npcID,
                 name  = record.name,
-                zone  = record.zone,
+                -- Derived from the map id, live. See the note in the
+                -- capture above.
+                zone  = record.mapID and Blizzard.GetMapName(record.mapID)
+                    or record.zone,
                 mapID = record.mapID,
                 x     = record.x,
                 y     = record.y,

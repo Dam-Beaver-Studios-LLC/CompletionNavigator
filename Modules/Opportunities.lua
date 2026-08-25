@@ -28,6 +28,27 @@ local DAY  = 86400
 -- Converts "seconds remaining" into the bonus the scorer multiplies by 3.0.
 -- Deliberately steep: something with an hour left should dominate, something
 -- with three days left should barely register.
+-- ONE DEADLINE, ONE CURVE. 0.63.0.
+--
+-- A world quest set BOTH `limitedTimeBonus = Opportunities.Urgency(left)` --
+-- this four-step cliff, weighted 3.0 -- and `expiresIn = left`, which the
+-- scorer feeds to the continuous `CN.UrgencyBonus`, weighted separately. The
+-- same number was charged twice through two curves tuned independently, and
+-- the step at the one-hour boundary was a jump of 3.0 in the total that
+-- nothing explained.
+--
+-- Worse for the player: `/cn urgency` announces "how much a deadline is worth,
+-- at every distance from it" and plots only `CN.UrgencyBonus`. So the chart
+-- the addon offers as its own explanation omitted the larger of the two
+-- contributions, and the ordering it described was not the ordering it used.
+--
+-- `expiresIn` is the field every other deadline in the addon uses and the one
+-- the chart plots, so it is the one that stays. This function is now only for
+-- callers that have no `expiresIn` to give -- world EVENTS, below, which are
+-- ranked as a whole rather than per objective.
+--
+-- Kept rather than deleted because that caller is real; renamed in spirit by
+-- this comment: it is "how urgent is a window", not "the bonus to add".
 function Opportunities.Urgency(secondsLeft)
     if not secondsLeft or secondsLeft <= 0 then
         return 0
@@ -262,8 +283,6 @@ CN.RegisterCandidateProvider("Opportunities", function()
     for _, worldQuest in ipairs(Opportunities.GetWorldQuests(playerMap)) do
         local reasons = {}
 
-        local urgency = Opportunities.Urgency(worldQuest.secondsLeft)
-
         if worldQuest.secondsLeft then
             table.insert(reasons, "world quest, "
                 .. Opportunities.FormatTimeLeft(worldQuest.secondsLeft))
@@ -294,7 +313,9 @@ CN.RegisterCandidateProvider("Opportunities", function()
             y                = worldQuest.y,
             state            = CN.objectiveStates.AVAILABLE,
             completionValue  = 1,
-            limitedTimeBonus = urgency,
+            -- NOT `limitedTimeBonus`. See the note on `Opportunities.Urgency`:
+            -- setting both charged one deadline through two curves, and only
+            -- one of them appears in `/cn urgency`.
             travelCost       = travel,
             expiresIn        = worldQuest.secondsLeft,
             reasons          = reasons,
@@ -336,8 +357,19 @@ CN.RegisterCandidateProvider("Opportunities", function()
                 type             = CN.objectiveTypes.CURRENCY,
                 name             = event.title,
                 completionValue  = 2,
-                limitedTimeBonus = event.endsIn
-                    and Opportunities.Urgency(event.endsIn) or 1,
+
+                -- THE SAME DOUBLE CHARGE AS THE WORLD QUEST ABOVE. 0.63.0.
+                --
+                -- This set both terms too, so a Timewalking week was scored
+                -- through two independently tuned curves. `expiresIn` is the
+                -- one `/cn urgency` plots and the one every other deadline in
+                -- the addon uses.
+                --
+                -- The flat 1 for an event with no known end is kept: an event
+                -- the client will not date is still a limited-time thing, and
+                -- that is what this term means when there is no deadline to
+                -- charge.
+                limitedTimeBonus = event.endsIn and 0 or 1,
                 travelCost       = CN.placelessCost,
                 expiresIn        = event.endsIn,
                 reasons          = reasons,

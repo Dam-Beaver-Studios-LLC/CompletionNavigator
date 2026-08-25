@@ -2796,10 +2796,23 @@ UI.RegisterTab{
             -- button whose tooltip says "counts what is left again" could
             -- not, and a row telling you to run `/cn harvest` went on showing
             -- the old number after you ran it.
+            -- AND `force`, WHICH NOTHING EVER PASSED. 0.63.0.
+            --
+            -- `NoteChanged` busts the report cache; it does not touch the
+            -- incrementally-maintained quest count, which is exactly the row
+            -- most likely to be stale -- quests completed in a session where
+            -- the addon was not loaded, or credited to the Warband. The
+            -- `force` parameter was added in 0.61.0 for this button and then
+            -- given no caller, so every other row moved when the player
+            -- pressed Refresh and the Quests row did not.
+            --
+            -- A grep for `Report(` returned two call sites and neither passed
+            -- it. That is what a half-finished fix looks like.
             local breakdown = CN:GetModule("Breakdown")
 
             if breakdown then
                 breakdown.NoteChanged()
+                breakdown.Report(nil, true)
             end
 
             UI.Refresh()

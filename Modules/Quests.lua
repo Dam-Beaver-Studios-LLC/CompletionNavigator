@@ -57,6 +57,27 @@ CN.IsQuestCompletedOnAccount   = Quests.IsCompletedOnAccount
 --
 -- Both readers below accept either shape, and migration 15 collapses the
 -- existing ones on first login.
+-- A BARE STRING IS THE CLIENT'S NAME, AND ONLY THE CLIENT'S. 0.63.0.
+--
+-- 0.61.0 collapsed the row to a bare string for everything except a name the
+-- player typed, and taught this to report a bare string as source
+-- "blizzard". That threw away provenance for two other sources -- a title
+-- read from a gossip window ("offered") and one read from a map pin
+-- ("available") -- and did something worse than lose a label: because
+-- "blizzard" is rank 1, the TOP of `CN.sourceRank`, a guess captured from a
+-- map pin outranked the authoritative quest-log title that arrived later, and
+-- `IsBetterSource` refused to correct it. `/cn cache 12345` then reported the
+-- guess as having come from the client.
+--
+-- The saving was never in dropping the source; it was in dropping the
+-- WRAPPER for the overwhelmingly common case. So the common case keeps the
+-- bare string and every other source keeps its table -- a handful of rows
+-- against thirty thousand, which is the same arithmetic that justified the
+-- change in the first place.
+--
+-- "offered" and "available" are ranked now, too. They were absent from the
+-- ladder entirely, which made them rank 99: worse than anything, including
+-- each other.
 local function NameFrom(record)
     if type(record) == "string" then
         return record, "blizzard"
@@ -93,10 +114,15 @@ function Quests.SetMetadata(questID, name, source)
     -- `questID` duplicated the key this is filed under and `lastSeen` had no
     -- reader. The same fields migration 5 stripped from achievements, pets
     -- and toys.
-    if source == "manual" then
-        metadata[questID] = { name = name, source = source }
-    else
+    -- The bare string means "the client's own title for this quest", which
+    -- is the overwhelmingly common case and the one worth optimising -- and
+    -- the two sources that mean it are the top two ranks, so collapsing them
+    -- together loses no decision. Every other source keeps its label, which
+    -- is the part 0.61.0 threw away.
+    if source == "blizzard" or source == "questlog" then
         metadata[questID] = name
+    else
+        metadata[questID] = { name = name, source = source }
     end
 
     return true
@@ -171,6 +197,15 @@ function Quests.RecordDiscovered(questID, source)
     -- full on every logout, for information nothing has ever asked for. See
     -- migration 12.
     discovered[questID] = true
+
+    -- The Remaining tab's quest figure counts completed quests among the
+    -- DISCOVERED set, so a new discovery is one of the two edges it has to be
+    -- told about. One client call about one id; see the note there.
+    local breakdown = CN:GetModule("Breakdown")
+
+    if breakdown and breakdown.NoteQuestDiscovered then
+        breakdown.NoteQuestDiscovered(questID)
+    end
 
     if not existing then
         DebugPrint("Discovered quest " .. questID .. " (" .. tostring(source or "manual") .. ").")

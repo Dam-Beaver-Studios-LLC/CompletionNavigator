@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.62.0"
-CN.dbVersion   = 16
+CN.version     = "0.63.0"
+CN.dbVersion   = 17
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -80,6 +80,21 @@ function CN.DebugPrint(message)
     if CN.db and CN.db.settings and CN.db.settings.debug then
         DEFAULT_CHAT_FRAME:AddMessage(DEBUG_PREFIX .. tostring(message))
     end
+end
+
+-- IS ANYBODY LISTENING? 0.63.0.
+--
+-- `DebugPrint` checks the setting AFTER the caller has already built the
+-- string, because Lua evaluates arguments at the call site. The hot one is
+-- `CN.InvalidateCandidates`, which runs once per subscribed event -- and the
+-- subscribed set includes `QUEST_LOG_UPDATE`, `CRITERIA_UPDATE` and
+-- `UPDATE_FACTION`, all firehoses while questing. Four concatenations and
+-- three intermediate strings, tens of times a second, for output nobody can
+-- see.
+--
+-- Callers on a hot path ask first and build second.
+function CN.Debugging()
+    return (CN.db and CN.db.settings and CN.db.settings.debug) and true or false
 end
 
 local Print      = CN.Print

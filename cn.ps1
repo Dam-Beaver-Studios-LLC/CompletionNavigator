@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.62.0'
+$script:ToolkitVersion = '0.63.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.62.0"
-CN.dbVersion   = 16
+CN.version     = "0.63.0"
+CN.dbVersion   = 17
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -183,6 +183,21 @@ function CN.DebugPrint(message)
     if CN.db and CN.db.settings and CN.db.settings.debug then
         DEFAULT_CHAT_FRAME:AddMessage(DEBUG_PREFIX .. tostring(message))
     end
+end
+
+-- IS ANYBODY LISTENING? 0.63.0.
+--
+-- `DebugPrint` checks the setting AFTER the caller has already built the
+-- string, because Lua evaluates arguments at the call site. The hot one is
+-- `CN.InvalidateCandidates`, which runs once per subscribed event -- and the
+-- subscribed set includes `QUEST_LOG_UPDATE`, `CRITERIA_UPDATE` and
+-- `UPDATE_FACTION`, all firehoses while questing. Four concatenations and
+-- three intermediate strings, tens of times a second, for output nobody can
+-- see.
+--
+-- Callers on a hot path ask first and build second.
+function CN.Debugging()
+    return (CN.db and CN.db.settings and CN.db.settings.debug) and true or false
 end
 
 local Print      = CN.Print
@@ -2286,6 +2301,51 @@ CN.migrations = {
                 .. " rare row(s).")
         end
     end,
+
+    -- 16 -> 17. THE LAST OF THE NAMES THE CLIENT HANDS BACK FOR FREE.
+    --
+    -- Around nine hundred mount names, a thousand toy names, and a zone name
+    -- on every captured vendor. All three are LOCALIZED, all three are
+    -- answered instantly by the client, and all three froze at whatever
+    -- language last scanned -- so a player who switched client language could
+    -- not find their own mounts by name and read old-locale zone names in
+    -- every vendor tooltip.
+    --
+    -- This is the fifth application of one rule: persist only what the client
+    -- cannot re-supply. Migrations 4, 5, 14 and 15 were the others.
+    [16] = function(db)
+        db.account = db.account or {}
+
+        local names, zones = 0, 0
+
+        for _, store in ipairs({ db.account.mounts, db.account.toys }) do
+            for _, record in pairs(store or {}) do
+                if type(record) == "table" and record.name ~= nil then
+                    record.name = nil
+
+                    names = names + 1
+                end
+            end
+        end
+
+        for _, record in pairs(db.account.vendors or {}) do
+            -- Only where the map id can derive it again. A row with a zone
+            -- and no map id has nothing to fall back on, and losing it would
+            -- be losing information rather than losing a duplicate.
+            if type(record) == "table" and record.zone ~= nil
+                and record.mapID then
+
+                record.zone = nil
+
+                zones = zones + 1
+            end
+        end
+
+        if names > 0 or zones > 0 then
+            CN.DebugPrint("Dropped " .. names .. " collectible name(s) and "
+                .. zones .. " vendor zone name(s) the client re-supplies.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A
@@ -3251,14 +3311,46 @@ end
 
 -- Lower number means higher authority. Manual overrides must never
 -- silently replace a more authoritative source.
+-- Lower wins. Two sources were being written and were absent from this
+-- table, which made them rank 99 -- worse than everything, including each
+-- other, so whichever arrived first could never be corrected. 0.63.0.
 CN.sourceRank = {
-    ["blizzard"] = 1,
-    ["questlog"] = 2,
-    ["observed"] = 3,
-    ["static"]   = 4,
-    ["external"] = 5,
-    ["manual"]   = 6,
+    ["blizzard"]  = 1,
+    ["questlog"]  = 2,
+
+    -- Read from a gossip window: the NPC is offering it, so the title is the
+    -- client's, but it is not the quest log's.
+    ["offered"]   = 3,
+
+    -- Read from a map pin. The same title by a longer road, and the one most
+    -- likely to be superseded.
+    ["available"] = 4,
+
+    ["observed"]  = 5,
+    ["static"]    = 6,
+    ["external"]  = 7,
+    ["manual"]    = 8,
 }
+
+-- Two id lists, same members, same order. Used where a stored inference is
+-- rewritten only when it actually changed.
+function CN.SameIDList(a, b)
+    if a == b then
+        return true
+    end
+
+    if type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then
+        return false
+    end
+
+    for index = 1, #a do
+        if a[index] ~= b[index] then
+            return false
+        end
+    end
+
+    return true
+end
 
 function CN.IsBetterSource(newSource, existingSource)
     if not existingSource then
@@ -6849,7 +6941,8 @@ function CN.InvalidateCandidates(reason, patient)
         -- RefreshProviders knows whether anything was actually rebuilt, and
         -- discarding the aggregate here would bust the ranked cache on every
         -- QUEST_LOG_UPDATE for nothing.
-        if reason then
+        -- Asked before built. See `CN.Debugging`.
+        if reason and CN.Debugging() then
             CN.DebugPrint("Candidate cache: " .. reason .. " invalidated " .. hit
                 .. " provider" .. (hit == 1 and "" or "s"))
         end
@@ -12854,10 +12947,23 @@ UI.RegisterTab{
             -- button whose tooltip says "counts what is left again" could
             -- not, and a row telling you to run `/cn harvest` went on showing
             -- the old number after you ran it.
+            -- AND `force`, WHICH NOTHING EVER PASSED. 0.63.0.
+            --
+            -- `NoteChanged` busts the report cache; it does not touch the
+            -- incrementally-maintained quest count, which is exactly the row
+            -- most likely to be stale -- quests completed in a session where
+            -- the addon was not loaded, or credited to the Warband. The
+            -- `force` parameter was added in 0.61.0 for this button and then
+            -- given no caller, so every other row moved when the player
+            -- pressed Refresh and the Quests row did not.
+            --
+            -- A grep for `Report(` returned two call sites and neither passed
+            -- it. That is what a half-finished fix looks like.
             local breakdown = CN:GetModule("Breakdown")
 
             if breakdown then
                 breakdown.NoteChanged()
+                breakdown.Report(nil, true)
             end
 
             UI.Refresh()
@@ -16031,6 +16137,23 @@ function Blizzard.GetMountIDs()
     return {}
 end
 
+-- A toy's name, live. `C_ToyBox.GetToyInfo` returns itemID, name, icon,
+-- isFavorite, hasFanfare, quality -- and answers instantly, which is why the
+-- addon has no business keeping a copy of it on disk.
+function Blizzard.GetToyName(itemID)
+    if not C_ToyBox or not C_ToyBox.GetToyInfo or not itemID then
+        return nil
+    end
+
+    local ok, _, name = pcall(C_ToyBox.GetToyInfo, itemID)
+
+    if ok and type(name) == "string" and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
 function Blizzard.GetMountByID(mountID)
     if not C_MountJournal or not C_MountJournal.GetMountInfoByID then
         return nil
@@ -17035,8 +17158,22 @@ end
                 -- Warband currencies. The client flags them and the addon
                 -- ignored the flag until 0.43.0, so one capped on your main
                 -- was recommended again on every alt.
-                accountWide = (info.isAccountWide
-                    or info.isAccountTransferable) and true or false,
+                -- TRANSFERABLE IS NOT SHARED. 0.63.0.
+                --
+                -- `isAccountTransferable` means the balance can be MOVED
+                -- between characters, for a fee, one deliberate action at a
+                -- time. `isAccountWide` means every character sees the same
+                -- balance. Treating the first as the second told the ranking
+                -- that a currency belonging to exactly one character was
+                -- everybody's -- so `Warband.Decorate` short-circuited to
+                -- "account-wide" and dropped the character verdict, and the
+                -- row printed "(Warband)".
+                --
+                -- Both are carried, because the second one is worth SAYING --
+                -- "you can move this to the character who needs it" is useful
+                -- and is not the same sentence.
+                accountWide     = info.isAccountWide and true or false,
+                transferable    = info.isAccountTransferable and true or false,
             })
         end
     end
@@ -19163,6 +19300,27 @@ CN.IsQuestCompletedOnAccount   = Quests.IsCompletedOnAccount
 --
 -- Both readers below accept either shape, and migration 15 collapses the
 -- existing ones on first login.
+-- A BARE STRING IS THE CLIENT'S NAME, AND ONLY THE CLIENT'S. 0.63.0.
+--
+-- 0.61.0 collapsed the row to a bare string for everything except a name the
+-- player typed, and taught this to report a bare string as source
+-- "blizzard". That threw away provenance for two other sources -- a title
+-- read from a gossip window ("offered") and one read from a map pin
+-- ("available") -- and did something worse than lose a label: because
+-- "blizzard" is rank 1, the TOP of `CN.sourceRank`, a guess captured from a
+-- map pin outranked the authoritative quest-log title that arrived later, and
+-- `IsBetterSource` refused to correct it. `/cn cache 12345` then reported the
+-- guess as having come from the client.
+--
+-- The saving was never in dropping the source; it was in dropping the
+-- WRAPPER for the overwhelmingly common case. So the common case keeps the
+-- bare string and every other source keeps its table -- a handful of rows
+-- against thirty thousand, which is the same arithmetic that justified the
+-- change in the first place.
+--
+-- "offered" and "available" are ranked now, too. They were absent from the
+-- ladder entirely, which made them rank 99: worse than anything, including
+-- each other.
 local function NameFrom(record)
     if type(record) == "string" then
         return record, "blizzard"
@@ -19199,10 +19357,15 @@ function Quests.SetMetadata(questID, name, source)
     -- `questID` duplicated the key this is filed under and `lastSeen` had no
     -- reader. The same fields migration 5 stripped from achievements, pets
     -- and toys.
-    if source == "manual" then
-        metadata[questID] = { name = name, source = source }
-    else
+    -- The bare string means "the client's own title for this quest", which
+    -- is the overwhelmingly common case and the one worth optimising -- and
+    -- the two sources that mean it are the top two ranks, so collapsing them
+    -- together loses no decision. Every other source keeps its label, which
+    -- is the part 0.61.0 threw away.
+    if source == "blizzard" or source == "questlog" then
         metadata[questID] = name
+    else
+        metadata[questID] = { name = name, source = source }
     end
 
     return true
@@ -19277,6 +19440,15 @@ function Quests.RecordDiscovered(questID, source)
     -- full on every logout, for information nothing has ever asked for. See
     -- migration 12.
     discovered[questID] = true
+
+    -- The Remaining tab's quest figure counts completed quests among the
+    -- DISCOVERED set, so a new discovery is one of the two edges it has to be
+    -- told about. One client call about one id; see the note there.
+    local breakdown = CN:GetModule("Breakdown")
+
+    if breakdown and breakdown.NoteQuestDiscovered then
+        breakdown.NoteQuestDiscovered(questID)
+    end
 
     if not existing then
         DebugPrint("Discovered quest " .. questID .. " (" .. tostring(source or "manual") .. ").")
@@ -22739,7 +22911,18 @@ function Mounts.Scan()
 
             store[mountID] = {
                 mountID           = mountID,
-                name              = mount.name,
+
+                -- `name` IS NOT STORED. 0.63.0.
+                --
+                -- Around nine hundred localized names the journal returns
+                -- instantly, in the language the player is reading. Stored,
+                -- they froze: a player who changed client language could not
+                -- find their own mounts with `/cn mount <name>` and the row
+                -- printed the old locale's name. 0.62.0 dropped `source` from
+                -- these same rows on the same rule and left the name.
+                --
+                -- `Mounts.NameOf` below is the one reader, matching
+                -- `Pets.NameOf` and `Achievements.NameOf`.
                 spellID           = mount.spellID,
                 sourceType        = mount.sourceType,
 
@@ -22856,6 +23039,19 @@ function Mounts.SourceValue(record)
     return 1
 end
 
+-- A mount's name, from the client, falling back to whatever an older
+-- database still carries so nothing goes blank between upgrading and the next
+-- scan. See the note in `Scan`.
+function Mounts.NameOf(mountID, record)
+    local live = CN.Blizzard.GetMountByID and CN.Blizzard.GetMountByID(mountID)
+
+    if live and live.name and live.name ~= "" then
+        return live.name
+    end
+
+    return (record and record.name) or ("Mount " .. tostring(mountID))
+end
+
 -- The journal's source sentence, live. See the note in `Scan`.
 --
 -- Falls back to whatever an older database still carries, so a player who has
@@ -22926,7 +23122,7 @@ CN.RegisterCandidateProvider("Mounts", function()
             return CN.NewObjective({
                 id              = mountID,
                 type            = CN.objectiveTypes.MOUNT,
-                name            = record.name,
+                name            = Mounts.NameOf(mountID, record),
                 accountWide     = true,
                 completionValue = value,
                 reasons         = { Mounts.SourceText(mountID, record)
@@ -22969,7 +23165,7 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.MOUNT, function(mountID)
     end
 
     if record.collected then
-        return states.COMPLETED, "Already collected", record.name
+        return states.COMPLETED, "Already collected", Mounts.NameOf(mountID, record)
     end
 
     if not Mounts.IsUsableByCharacter(record) then
@@ -23029,8 +23225,10 @@ function Mounts.Resolve(text)
     local matches = {}
 
     for id, record in pairs(Store()) do
-        if record.name and string.find(string.lower(record.name), needle, 1, true) then
-            table.insert(matches, { id = id, name = record.name })
+        local heldName = Mounts.NameOf(id, record)
+
+        if heldName and string.find(string.lower(heldName), needle, 1, true) then
+            table.insert(matches, { id = id, name = heldName })
         end
     end
 
@@ -23109,7 +23307,8 @@ CN:RegisterCommand{
 
         local record = Store()[mountID]
 
-        Print(record.name .. " |cff8a8f96(" .. mountID .. ")|r")
+        Print(Mounts.NameOf(mountID, record)
+            .. " |cff8a8f96(" .. mountID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected))
 
         local sourceText = Mounts.SourceText(mountID, record)
@@ -23159,6 +23358,17 @@ local Print      = CN.Print
 local DebugPrint = CN.DebugPrint
 local Blizzard   = CN.Blizzard
 
+-- A toy's name, from the client, falling back to an older database's copy.
+function Toys.NameOf(itemID, record)
+    local live = CN.Blizzard.GetToyName and CN.Blizzard.GetToyName(itemID)
+
+    if live then
+        return live
+    end
+
+    return (record and record.name) or ("Toy " .. tostring(itemID))
+end
+
 local function Store()
     return CN.Account("toys")
 end
@@ -23187,7 +23397,11 @@ function Toys.Scan()
             if toy and toy.itemID then
                 store[toy.itemID] = {
                     itemID    = toy.itemID,
-                    name      = toy.name,
+
+                    -- `name` IS NOT STORED. 0.63.0. Same rule and the same
+                    -- reason as mounts next door: the toy box answers
+                    -- instantly, in the player's own language, and a stored
+                    -- copy freezes at whatever locale last scanned.
                     collected = toy.collected,
                 }
 
@@ -23242,8 +23456,10 @@ function Toys.Resolve(text)
     local matches = {}
 
     for id, record in pairs(Store()) do
-        if record.name and string.find(string.lower(record.name), needle, 1, true) then
-            table.insert(matches, { id = id, name = record.name })
+        local heldName = Toys.NameOf(id, record)
+
+        if heldName and string.find(string.lower(heldName), needle, 1, true) then
+            table.insert(matches, { id = id, name = heldName })
         end
     end
 
@@ -23312,7 +23528,7 @@ CN.RegisterCandidateProvider("Toys", function()
             return CN.NewObjective({
                 id              = itemID,
                 type            = CN.objectiveTypes.TOY,
-                name            = record.name,
+                name            = Toys.NameOf(itemID, record),
                 mapID           = seller.mapID,
                 x               = seller.x,
                 y               = seller.y,
@@ -23355,7 +23571,7 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.TOY, function(itemID)
     end
 
     if record.collected then
-        return states.COMPLETED, "Already collected", record.name
+        return states.COMPLETED, "Already collected", Toys.NameOf(itemID, record)
     end
 
     return states.AVAILABLE, nil, nil
@@ -23423,7 +23639,8 @@ CN:RegisterCommand{
 
         local record = Store()[itemID]
 
-        Print(record.name .. " |cff8a8f96(" .. itemID .. ")|r")
+        Print(Toys.NameOf(itemID, record)
+            .. " |cff8a8f96(" .. itemID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected))
     end,
 }
@@ -25006,8 +25223,8 @@ end
 function Harvest.PublishConfident()
     local published, recorded = 0, 0
 
-    local store = Store()
-
+    -- The store is reached through `WriteObservedPrerequisites` below, which
+    -- owns the rule about when a stored inference may be rewritten.
     for questID, prerequisites in pairs(Harvest.AllConfident()) do
         CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
             observedRequires = prerequisites,
@@ -25030,14 +25247,20 @@ function Harvest.PublishConfident()
         -- started saying "X is required" -- inference masquerading as
         -- authority, through a door I had just built for it. The existing
         -- test for that distinction caught it.
-        local record = store[questID]
-
-        if record and not record.observedRequires and #prerequisites > 0 then
-            record.observedRequires = prerequisites
-
-            -- The unlock index is an inversion of exactly this field.
-            Harvest.NoteUnlocksChanged()
-
+        -- WRITE-ONCE MEANT NEVER-CORRECTED. 0.63.0.
+        --
+        -- `not record.observedRequires` made the stored copy permanent: later
+        -- play that widened or contradicted the observed set updated the
+        -- in-memory graph and could never rewrite the row -- and the row is
+        -- what the toolkit folds into the shipped data file. A chain observed
+        -- twice early and disproved later kept the wrong answer for the life
+        -- of the account.
+        --
+        -- The guard it should have been is "only when the answer changed",
+        -- which keeps the write cheap without freezing it. `AllConfident`
+        -- already applies the confidence threshold, so what arrives here is
+        -- an observation the addon is prepared to stand behind.
+        if Harvest.WriteObservedPrerequisites(questID, prerequisites) then
             recorded = recorded + 1
         end
     end
@@ -25460,6 +25683,31 @@ Harvest.unlockCap = 6
 -- `entry.decorated == CN.decoratorGeneration`, so bumping it makes every
 -- provider re-decorate on its next rebuild, and invalidating the candidates
 -- makes that rebuild happen.
+-- The stored copy of an observed ordering. Returns whether it changed.
+--
+-- Published because the rule it enforces -- rewrite only when the answer
+-- actually moved, rather than never -- is the whole of the 0.63.0 fix, and a
+-- rule only reachable through a full observation sweep is a rule nothing
+-- tests directly.
+function Harvest.WriteObservedPrerequisites(questID, prerequisites)
+    local record = CN.Account("questHarvest")[questID]
+
+    if not record or type(prerequisites) ~= "table" or #prerequisites == 0 then
+        return false
+    end
+
+    if CN.SameIDList(record.observedRequires, prerequisites) then
+        return false
+    end
+
+    record.observedRequires = prerequisites
+
+    -- The unlock index is an inversion of exactly this field.
+    Harvest.NoteUnlocksChanged()
+
+    return true
+end
+
 function Harvest.NoteUnlocksChanged()
     Harvest.unlockGeneration = Harvest.unlockGeneration + 1
 
@@ -25599,6 +25847,27 @@ local DAY  = 86400
 -- Converts "seconds remaining" into the bonus the scorer multiplies by 3.0.
 -- Deliberately steep: something with an hour left should dominate, something
 -- with three days left should barely register.
+-- ONE DEADLINE, ONE CURVE. 0.63.0.
+--
+-- A world quest set BOTH `limitedTimeBonus = Opportunities.Urgency(left)` --
+-- this four-step cliff, weighted 3.0 -- and `expiresIn = left`, which the
+-- scorer feeds to the continuous `CN.UrgencyBonus`, weighted separately. The
+-- same number was charged twice through two curves tuned independently, and
+-- the step at the one-hour boundary was a jump of 3.0 in the total that
+-- nothing explained.
+--
+-- Worse for the player: `/cn urgency` announces "how much a deadline is worth,
+-- at every distance from it" and plots only `CN.UrgencyBonus`. So the chart
+-- the addon offers as its own explanation omitted the larger of the two
+-- contributions, and the ordering it described was not the ordering it used.
+--
+-- `expiresIn` is the field every other deadline in the addon uses and the one
+-- the chart plots, so it is the one that stays. This function is now only for
+-- callers that have no `expiresIn` to give -- world EVENTS, below, which are
+-- ranked as a whole rather than per objective.
+--
+-- Kept rather than deleted because that caller is real; renamed in spirit by
+-- this comment: it is "how urgent is a window", not "the bonus to add".
 function Opportunities.Urgency(secondsLeft)
     if not secondsLeft or secondsLeft <= 0 then
         return 0
@@ -25833,8 +26102,6 @@ CN.RegisterCandidateProvider("Opportunities", function()
     for _, worldQuest in ipairs(Opportunities.GetWorldQuests(playerMap)) do
         local reasons = {}
 
-        local urgency = Opportunities.Urgency(worldQuest.secondsLeft)
-
         if worldQuest.secondsLeft then
             table.insert(reasons, "world quest, "
                 .. Opportunities.FormatTimeLeft(worldQuest.secondsLeft))
@@ -25865,7 +26132,9 @@ CN.RegisterCandidateProvider("Opportunities", function()
             y                = worldQuest.y,
             state            = CN.objectiveStates.AVAILABLE,
             completionValue  = 1,
-            limitedTimeBonus = urgency,
+            -- NOT `limitedTimeBonus`. See the note on `Opportunities.Urgency`:
+            -- setting both charged one deadline through two curves, and only
+            -- one of them appears in `/cn urgency`.
             travelCost       = travel,
             expiresIn        = worldQuest.secondsLeft,
             reasons          = reasons,
@@ -25907,8 +26176,19 @@ CN.RegisterCandidateProvider("Opportunities", function()
                 type             = CN.objectiveTypes.CURRENCY,
                 name             = event.title,
                 completionValue  = 2,
-                limitedTimeBonus = event.endsIn
-                    and Opportunities.Urgency(event.endsIn) or 1,
+
+                -- THE SAME DOUBLE CHARGE AS THE WORLD QUEST ABOVE. 0.63.0.
+                --
+                -- This set both terms too, so a Timewalking week was scored
+                -- through two independently tuned curves. `expiresIn` is the
+                -- one `/cn urgency` plots and the one every other deadline in
+                -- the addon uses.
+                --
+                -- The flat 1 for an event with no known end is kept: an event
+                -- the client will not date is still a limited-time thing, and
+                -- that is what this term means when there is no deadline to
+                -- charge.
+                limitedTimeBonus = event.endsIn and 0 or 1,
                 travelCost       = CN.placelessCost,
                 expiresIn        = event.endsIn,
                 reasons          = reasons,
@@ -27321,8 +27601,28 @@ function Currencies.Capped(character)
             table.insert(capped, {
                 currencyID = currencyID,
                 name       = NameStore()[currencyID],
-                quantity   = record.quantity,
+                -- THE NUMBERS THE CAP WAS MEASURED AGAINST. 0.63.0.
+                --
+                -- 0.62.0 fixed the DETECTION -- a currency whose cap applies
+                -- to lifetime earnings is tested against `totalEarned` -- and
+                -- then this function went on exporting `quantity` and
+                -- `maxQuantity` for display. So the fix produced a row that
+                -- was correctly flagged and then printed its own
+                -- contradiction: "At cap - spend these: Foo 100 / 2500".
+                --
+                -- `cappedAgainst` was stored by that release and read by
+                -- nothing, which is what a half-finished fix looks like in a
+                -- grep. It is the display value now, and `held` carries the
+                -- balance separately for anything that wants to say how much
+                -- there is to spend.
+                quantity   = record.cappedAgainst or record.quantity,
                 maximum    = record.maxQuantity,
+                held       = record.quantity,
+                earned     = record.totalEarned,
+
+                -- So a reader can say WHY the two differ rather than leaving
+                -- the player to work it out.
+                usesTotalEarned = record.usesTotalEarned or nil,
 
                 -- CARRIED THROUGH, WHICH IT WAS NOT.
                 --
@@ -27446,7 +27746,8 @@ CN.RegisterCandidateProvider("Currencies", function()
 
                 reasons          = {
                     "at cap: " .. tostring(currency.quantity)
-                        .. " / " .. tostring(currency.maximum),
+                        .. " / " .. tostring(currency.maximum)
+                        .. (currency.usesTotalEarned and " earned" or ""),
                     "further earning is wasted until you spend it",
                 },
             }))
@@ -27505,7 +27806,15 @@ CN:RegisterCommand{
             for _, currency in ipairs(capped) do
                 CN.PrintLine("  " .. tostring(currency.name)
                     .. " |cff8a8f96" .. currency.quantity
-                    .. " / " .. currency.maximum .. "|r")
+                    .. " / " .. currency.maximum
+                    -- A cap on lifetime earning and a balance are different
+                    -- numbers, and a player who has spent theirs will
+                    -- otherwise read this as a bug.
+                    .. (currency.usesTotalEarned
+                        and (" earned, " .. tostring(currency.held)
+                            .. " held")
+                        or "")
+                    .. "|r")
             end
         end
 
@@ -27665,11 +27974,12 @@ end
 function Breakdown.Report(categoryName, force)
     -- AND A FORCED RECOUNT RECOUNTS THE QUESTS TOO. 0.61.0.
     --
-    -- The quest figure is maintained incrementally against a snapshot, and
-    -- the snapshot is only rebuilt when the discovered set GROWS. That is
-    -- correct for ordinary play and wrong for the one case this parameter
-    -- exists for: the player pressed Refresh, or ran a scan, and is asking to
-    -- be told the truth rather than the remembered answer.
+    -- The quest figure is maintained incrementally against a snapshot taken
+    -- once, and both edges are credited as they happen -- a discovery and a
+    -- turn-in. That is correct for ordinary play and is exactly what this
+    -- parameter exists to override: the player pressed Refresh, or ran a
+    -- scan, and is asking to be told the truth rather than the remembered
+    -- answer.
     --
     -- Same rule as the paragraph above, applied to the one figure in this
     -- file that does not live in `reportCache`.
@@ -27995,14 +28305,29 @@ function Breakdown.CompletedQuestCount()
     local key = CN.characterKey or CN.GetCharacterKey()
 
     local discovered = CN.Account("discoveredQuests")
-    local size       = CN.CountKeys(discovered)
 
     local held = questCounts[key]
 
-    -- The discovered set only ever grows, so its size is a sufficient key:
-    -- a set that has not grown cannot have gained a completable quest, and a
-    -- turn-in is credited below rather than by rewalking.
-    if held and held.size == size then
+    -- THE SET GROWING IS NOT A REASON TO RECOUNT ALL OF IT. 0.63.0.
+    --
+    -- The key was the SIZE of the discovered set, and `RecordDiscovered`
+    -- fires from map sweeps, gossip and the quest log -- dozens of new ids on
+    -- walking into fresh content. So with the Remaining tab open the sequence
+    -- "enter a new zone, hand in a quest" put the whole 30,000-entry walk
+    -- back, once per turn-in, for as long as the player was somewhere new.
+    -- That is the 13.7 ms this cache was written to remove, returning exactly
+    -- where questing puts a player most often.
+    --
+    -- A newly discovered quest is almost never already completed -- it was
+    -- just offered -- and where it is, `NoteDiscovered` below asks the client
+    -- about that ONE id, which is a single call rather than thirty thousand.
+    -- So the snapshot is now keyed on nothing but its own existence, and both
+    -- edges of the count are maintained incrementally: discoveries in, and
+    -- turn-ins in.
+    --
+    -- `Breakdown.ForgetQuestCounts` remains the way to demand a real recount,
+    -- and the Remaining tab's Refresh button passes `force` to reach it.
+    if held then
         return held.completed
     end
 
@@ -28022,12 +28347,46 @@ function Breakdown.CompletedQuestCount()
     end
 
     questCounts[key] = {
-        size      = size,
         completed = completed,
         counted   = counted,
     }
 
     return completed
+end
+
+-- Called when a quest is discovered. One client call, not thirty thousand.
+--
+-- A quest the addon has just seen offered is almost never already completed,
+-- but "almost never" is not never -- a repeatable, or a quest first seen on a
+-- character who did it years ago. Asking about the one id keeps the snapshot
+-- exact without the walk.
+function Breakdown.NoteQuestDiscovered(questID)
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    local held = questCounts[key]
+
+    if not held or not questID then
+        return
+    end
+
+    held.counted = held.counted or {}
+
+    if held.counted[questID] then
+        return
+    end
+
+    local quests = CN:GetModule("Quests")
+
+    if not quests or not quests.IsCompletedByCharacter then
+        return
+    end
+
+    if not quests.IsCompletedByCharacter(questID) then
+        return
+    end
+
+    held.counted[questID] = true
+    held.completed        = held.completed + 1
 end
 
 -- Called from the turn-in hook. Cheap, exact, and it does not touch the
@@ -29721,7 +30080,18 @@ function Vendors.CaptureOpenMerchant()
         record.mapID = mapID
         record.x     = math.floor(x * 10000 + 0.5) / 10000
         record.y     = math.floor(y * 10000 + 0.5) / 10000
-        record.zone  = Blizzard.GetMapName(mapID)
+
+        -- `zone` IS NOT STORED. 0.63.0.
+        --
+        -- The map id is right there and the client derives the name from it
+        -- instantly, in the language the player is reading. Stored, it froze:
+        -- a player who changed client language, or a zone Blizzard renamed,
+        -- kept the old name in every tooltip until they happened to reopen
+        -- that merchant.
+        --
+        -- Third copy of the rule migration 7 applied to `questHarvest` and
+        -- 0.62.0 applied to rares. Derived at the one place that builds
+        -- seller rows, below.
     end
 
     -- WHAT NOT TO WRITE TO DISK.
@@ -29873,7 +30243,10 @@ function Vendors.WhoSells(itemID)
             table.insert(sellers, {
                 npcID = npcID,
                 name  = record.name,
-                zone  = record.zone,
+                -- Derived from the map id, live. See the note in the
+                -- capture above.
+                zone  = record.mapID and Blizzard.GetMapName(record.mapID)
+                    or record.zone,
                 mapID = record.mapID,
                 x     = record.x,
                 y     = record.y,
@@ -33171,10 +33544,28 @@ function Progress.LifetimeCompleted()
 
     local ids = Blizzard.GetAllCompletedQuestIDs()
 
-    -- A nil answer is cached too. The client refusing to say is a stable
-    -- fact for the moment, and re-asking on every refresh in the hope of a
-    -- different answer is the same waste with extra steps.
-    lifetimeCache.value = ids and #ids or nil
+    -- A NIL ANSWER IS NOT A SETTLED ONE. 0.63.0.
+    --
+    -- This cached nil as valid, on the argument that a client refusing to
+    -- answer is a stable fact. It is not: the ONE moment the client refuses
+    -- is early in a login, before quest data has loaded -- and that is
+    -- precisely when `BeginSession` takes its baseline. So the baseline was
+    -- nil for the whole session, and the branch that reports quests completed
+    -- by any means -- including ones the addon saw no event for -- never ran
+    -- once.
+    --
+    -- 0.62.0 taught this to tell "not yet" from "none", and then cached the
+    -- "not yet". Nil is left uncached so the next ask gets the real answer,
+    -- at a cost of one client call per refresh for the few seconds a login
+    -- lasts.
+    if not ids then
+        lifetimeCache.valid = false
+        lifetimeCache.value = nil
+
+        return nil
+    end
+
+    lifetimeCache.value = #ids
     lifetimeCache.valid = true
     lifetimeCache.at    = time()
 
@@ -33382,8 +33773,49 @@ function Progress.BeginSession()
         Progress.RollDay(store)
     end
 
+    -- TAKEN ONCE THE CLIENT CAN ANSWER, NOT ONCE. 0.63.0.
+    --
+    -- `BeginSession` runs at `PLAYER_LOGIN`, which is inside the window where
+    -- the client has not finished loading quest data and correctly answers
+    -- "not yet". So the baseline was nil, and stayed nil for the session --
+    -- and the branch in `Summary` that reports quests completed by ANY means,
+    -- including ones the addon saw no event for, could never run.
+    --
+    -- Asked here, and asked again by `Progress.NoteBaseline` below when the
+    -- client first has an answer. Set once, then left alone: a baseline that
+    -- moved would make "this session" shrink.
     sessionStart.completed = Progress.LifetimeCompleted()
     sessionStart.at        = time()
+end
+
+-- What the session started from, for anything that needs to reason about the
+-- baseline rather than the delta.
+function Progress.SessionBaseline()
+    return sessionStart.completed
+end
+
+-- The first real answer becomes the baseline, if login was too early for one.
+--
+-- Cheap: it returns immediately once a baseline exists, which is after the
+-- first successful ask.
+function Progress.NoteBaseline()
+    if sessionStart.completed then
+        return
+    end
+
+    local lifetime = Progress.LifetimeCompleted()
+
+    if not lifetime then
+        return
+    end
+
+    sessionStart.completed = lifetime
+
+    -- The session began when the player logged in, not when the client
+    -- finally answered; `at` was set correctly by `BeginSession` and is left
+    -- alone, so the rate is measured over the real session.
+    DebugPrint("Session baseline taken late: " .. lifetime
+        .. " lifetime completions.")
 end
 
 ------------------------------------------------------------
@@ -33393,6 +33825,10 @@ end
 -- Everything worth showing, in one table. Fields are nil rather than zero
 -- when the client has not answered, so callers can tell the difference.
 function Progress.Summary()
+    -- The one place every reader passes through, so the late baseline needs
+    -- no event of its own.
+    Progress.NoteBaseline()
+
     local store = Store() or {}
 
     local summary = {
@@ -33401,13 +33837,19 @@ function Progress.Summary()
         session  = store.session or 0,
         best     = store.best or 0,
         previous = store.previousDay,
+
+        -- What the session started from. Published because "this session"
+        -- being a client delta rather than the addon's own tally is a real
+        -- distinction, and `/cn navdiag` and the Journey tab both need to be
+        -- able to say which one they are showing.
+        baseline = Progress.SessionBaseline(),
     }
 
     -- Prefer the client's own delta for the session where we have it: it
     -- counts quests completed by any means, including ones the addon did not
     -- see an event for.
-    if sessionStart.completed and summary.lifetime then
-        local delta = summary.lifetime - sessionStart.completed
+    if summary.baseline and summary.lifetime then
+        local delta = summary.lifetime - summary.baseline
 
         if delta >= 0 then
             summary.session = math.max(summary.session, delta)
@@ -36772,7 +37214,7 @@ CN:RegisterCommand{
                 row.isCurrent and "|cff73b873" or "|cfff2f4f6",
                 tostring(row.name),
                 tostring(row.level or "?"),
-                tostring(row.class or ""),
+                CN.TokenLabel(row.class or ""),
                 Alts.DescribeAge(character)))
         end
 
@@ -37675,7 +38117,17 @@ function Navigation.PlayerPositionOnMap(mapID)
         return nil
     end
 
-    return { x = x, y = y }
+    -- TWO VALUES, NOT A TABLE. 0.63.0.
+    --
+    -- `Compute` calls this on every 10 Hz tick whenever the player's best map
+    -- differs from the target's -- which is the ORDINARY case in a city, an
+    -- inn, a cave or any micro-dungeon overlay, so much of the time the arrow
+    -- is up. 0.61.0 removed the per-tick state table two functions below this
+    -- one and left the allocation on the same code path.
+    --
+    -- Returned as a pair. The two callers both immediately read `.x` and
+    -- `.y`, so nothing wanted the table for its own sake.
+    return x, y
 end
 
 -- ONE STATE TABLE, REUSED. 0.61.0.
@@ -37742,12 +38194,13 @@ function Navigation.Compute()
     local onTargetMap = false
 
     if mapID ~= target.mapID then
-        local translated = Navigation.PlayerPositionOnMap(target.mapID)
+        local translatedX, translatedY =
+            Navigation.PlayerPositionOnMap(target.mapID)
 
-        if translated then
+        if translatedX then
             mapID   = target.mapID
-            playerX = translated.x
-            playerY = translated.y
+            playerX = translatedX
+            playerY = translatedY
 
             onTargetMap = true
         else
@@ -41588,10 +42041,12 @@ end
 -- cap on a currency is the game saying "this is gone on Tuesday", which is
 -- precisely the question `/cn clock` asks.
 --
--- The pattern survives, demoted to what it can actually do -- flag a row as
--- profession knowledge on a client where the word happens to match, so the
--- ordering can put it first. It decides nothing.
-Waiting.knowledgePattern = "[Kk]nowledge"
+-- AND THE DEMOTED PATTERN IS GONE TOO. 0.63.0.
+--
+-- 0.61.0 kept it as an ordering hint, which is the same bug with a smaller
+-- blast radius: an English player saw knowledge sorted first and a German
+-- player did not. A hint that works in one language is not a hint. See the
+-- note at the ordering below for what replaced it.
 
 -- Locale-free reinforcement: the profession knowledge currencies the addon
 -- knows by id. An id is the same in every locale. This is a HINT for
@@ -41632,11 +42087,23 @@ function Waiting.Knowledge()
 
             -- No name is not a reason to drop a capped currency: the row is
             -- still true, and the id can carry it.
+            -- THE HINT IS STILL A GATE, JUST A SMALLER ONE. 0.63.0.
+            --
+            -- 0.61.0 demoted the English word from deciding WHETHER a row
+            -- appears to deciding where it SORTS -- which is better and still
+            -- wrong for the same reason. A German player whose knowledge
+            -- currency is not in the hard-coded id list (any new expansion's
+            -- will not be) sees "Wissen" sorted among the ordinary weeklies
+            -- while an English player sees it first.
+            --
+            -- The id list is locale-free and stays. The English match is gone
+            -- rather than demoted again: a hint that works in one language is
+            -- not a hint, it is a bug with a smaller blast radius. What
+            -- replaces it for currencies the list does not know is the fact
+            -- the client vouches for -- a weekly cap that is nearly full is
+            -- more urgent than one barely touched -- which is true in every
+            -- language and is what a player is actually deciding on.
             local knowledge = Waiting.knowledgeCurrencies[currencyID] == true
-
-            if not knowledge and name then
-                knowledge = name:find(Waiting.knowledgePattern) and true or false
-            end
 
             table.insert(rows, {
                 currencyID = currencyID,
@@ -41653,6 +42120,15 @@ function Waiting.Knowledge()
     table.sort(rows, function(a, b)
         if a.knowledge ~= b.knowledge then
             return a.knowledge
+        end
+
+        -- Then by how much of the week's cap is still unclaimed, which is a
+        -- fact in every locale. See the note above.
+        local left  = (a.cap or 0) > 0 and (a.remaining / a.cap) or 0
+        local right = (b.cap or 0) > 0 and (b.remaining / b.cap) or 0
+
+        if left ~= right then
+            return left > right
         end
 
         return a.currencyID < b.currencyID
@@ -46942,15 +47418,19 @@ CN.RegisterSelfTest{
 
         local nav = CN:GetModule("Navigation")
 
-        local translated = nav and nav.PlayerPositionOnMap(parentID)
+        local translatedX, translatedY
 
-        if not translated then
+        if nav then
+            translatedX, translatedY = nav.PlayerPositionOnMap(parentID)
+        end
+
+        if not translatedX then
             return SKIP, "the parent map cannot place you, which is normal "
                 .. "for a continent"
         end
 
         return PASS, string.format("also %.1f, %.1f on map %d",
-            translated.x * 100, translated.y * 100, parentID)
+            translatedX * 100, translatedY * 100, parentID)
     end,
 }
 
@@ -49546,7 +50026,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.62.0
+## Version: 0.63.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -49801,6 +50281,69 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.63.0]
+
+Fourteen defects. Half of them were places an earlier release fixed one caller
+and left the others — so this one ends with a rule about that, and a backlog
+rewritten to match what is actually still open.
+
+### Fixed — numbers and text the player reads
+
+- **A capped currency printed the two numbers its cap was *not* measured
+  against.** 0.62.0 taught the addon that some caps apply to what you have
+  earned rather than what you hold, and then went on displaying the balance:
+  "At cap — spend these: 100 / 2500". The row now shows what the cap was
+  measured against, says so, and carries the balance beside it.
+- **A currency you can *move* between characters was treated as one every
+  character shares.** So a balance belonging to exactly one character was
+  labelled "(Warband)" and the advice about which character should spend it
+  disappeared.
+- **`/cn alts` printed `DEATHKNIGHT`** while `/cn warband`, listing the same
+  characters in the same session, printed "Death Knight".
+- **A quest name guessed from a map pin outranked the real one.** Every name
+  read back as though the client had vouched for it, so the authoritative
+  quest-log title that arrived later was rejected as no better, and `/cn cache`
+  reported a guess as fact.
+- **Weekly knowledge was still ordered by an English word.** 0.61.0 demoted
+  that from deciding whether a row appears to deciding where it sorts, which is
+  the same bug with a smaller blast radius. It is ordered by how much of the
+  week's cap is unclaimed now — true in every language.
+- **The Refresh button on the Remaining tab still could not recount your
+  quests.** The parameter that makes it recount was added a release ago and
+  given no caller.
+- **"This session" was never the client's own count.** The figure meant to
+  include quests completed by any means — including ones the addon saw no event
+  for — could not be computed, because the baseline is taken at login and the
+  client cannot answer that early. It is taken from the first real answer now.
+- **An ordering the addon inferred from watching you play could never be
+  corrected.** Written once and frozen, even after later play contradicted it —
+  and that is the copy the curated data file is built from.
+- **Vendor zone names, and mount and toy names, were frozen at whatever
+  language last scanned.** Around 1,900 rows of localized text off disk; a
+  player who switches client language can now find their own mounts by name
+  again.
+
+### Faster
+
+- **Walking into new content no longer rewalks your quest history.** Quests are
+  discovered dozens at a time on entering a new zone, and each batch put the
+  30,000-entry walk back on the next turn-in. Both edges of that count are
+  maintained one quest at a time now.
+- **The arrow stopped allocating a table ten times a second** whenever your
+  best map differs from your target's — a city, an inn, a cave, most of the
+  time it is on screen.
+- **Debug text is no longer built when debug is off.** It was assembled on
+  every cache invalidation, which happens tens of times a second while questing,
+  and then discarded unread.
+
+### Changed
+
+- **A deadline is charged once.** World quests and world events set two
+  different urgency terms from the same expiry, scored through two curves tuned
+  separately — and `/cn urgency`, which the addon offers as its explanation of
+  the ordering, plots only one of them. Now there is one curve, and it is the
+  one the chart shows.
 
 ## [0.62.0]
 
@@ -54933,7 +55476,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.62.0
+0.63.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -57277,17 +57820,12 @@ mutate "Modules/Sets.lua" \
     "        local key = set.setID" \
     "a transmog set is filed under an appearance category's id"
 
+# RETARGETED IN 0.63.0. The English match is gone rather than demoted, so the
+# property to protect is the locale-free one that replaced it: knowledge first
+# by id, then by how much of the week's cap is still unclaimed.
 mutate "Modules/Waiting.lua" \
-    "            local knowledge = Waiting.knowledgeCurrencies[currencyID] == true
-
-            if not knowledge and name then
-                knowledge = name:find(Waiting.knowledgePattern) and true or false
-            end" \
-    "            local knowledge = false
-
-            if name then
-                knowledge = name:find(Waiting.knowledgePattern) and true or false
-            end" \
+    "            local knowledge = Waiting.knowledgeCurrencies[currencyID] == true" \
+    "            local knowledge = false" \
     "knowledge is identified only by an English word"
 
 # NOT MUTATED: the `open` preference in `LockoutFor`.
@@ -57364,8 +57902,11 @@ mutate "Routing.lua" \
     "        CN.ForgetBatching()" \
     "the routes for the zone behind you are held for the session"
 
+# SUPERSEDED IN 0.63.0 by "discovering a quest rewalks your whole quest
+# history" below: the snapshot is no longer keyed on the set's size, because
+# the size changes dozens of times on walking into new content.
 mutate "Modules/Breakdown.lua" \
-    "    if held and held.size == size then
+    "    if held then
         return held.completed
     end" \
     "    if false then
@@ -57386,21 +57927,35 @@ mutate "Database.lua" \
     "the Scans tab says not scanned after you scan"
 
 mutate "Modules/Breakdown.lua" \
-    "    if not quests.IsCompletedByCharacter(questID) then
-        return
-    end" \
-    "    if false then
-        return
-    end" \
+    "    -- The client is the authority on whether this actually completed. A
+    -- repeatable quest answers false here and is correctly not credited.
+    if not quests.IsCompletedByCharacter(questID) then" \
+    "    if false then" \
     "a repeatable turn-in counts as a completed quest"
 
 mutate "Modules/Breakdown.lua" \
-    "    if held.counted[questID] then
+    "    held.counted = held.counted or {}
+
+    if held.counted[questID] then
         return
-    end" \
-    "    if false then
+    end
+
+    local quests = CN:GetModule(\"Quests\")
+
+    if not quests or not quests.IsCompletedByCharacter then
         return
-    end" \
+    end
+
+    -- The client is the authority" \
+    "    held.counted = held.counted or {}
+
+    local quests = CN:GetModule(\"Quests\")
+
+    if not quests or not quests.IsCompletedByCharacter then
+        return
+    end
+
+    -- The client is the authority" \
     "handing the same quest in twice counts it twice"
 
 mutate "Modules/Progress.lua" \
@@ -57485,6 +58040,72 @@ mutate "Character.lua" \
     "    return tostring(realm or \"UnknownRealm\") .. \"-\" .. tostring(name or \"Unknown\")" \
     "    return tostring(name or \"Unknown\") .. \"-\" .. tostring(realm or \"UnknownRealm\")" \
     "a character key is built name-first"
+
+# ------------------------------------------------------------
+# 0.63.0
+# ------------------------------------------------------------
+
+mutate "Modules/Currencies.lua" \
+    "                quantity   = record.cappedAgainst or record.quantity," \
+    "                quantity   = record.quantity," \
+    "a capped currency prints the balance it was not measured against"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "                accountWide     = info.isAccountWide and true or false," \
+    "                accountWide     = (info.isAccountWide
+                    or info.isAccountTransferable) and true or false," \
+    "a currency you can move is treated as one everybody has"
+
+mutate "Modules/Quests.lua" \
+    "    if source == \"blizzard\" or source == \"questlog\" then" \
+    "    if source ~= \"manual\" then" \
+    "a map-pin guess outranks the quest log and cannot be corrected"
+
+mutate "Modules/Opportunities.lua" \
+    "            travelCost       = travel,
+            expiresIn        = worldQuest.secondsLeft," \
+    "            limitedTimeBonus = Opportunities.Urgency(worldQuest.secondsLeft),
+            travelCost       = travel,
+            expiresIn        = worldQuest.secondsLeft," \
+    "one deadline is charged twice through two curves"
+
+mutate "Modules/Breakdown.lua" \
+    "    if held then
+        return held.completed
+    end" \
+    "    if held and held.size == CN.CountKeys(discovered) then
+        return held.completed
+    end" \
+    "discovering a quest rewalks your whole quest history"
+
+mutate "Modules/Harvest.lua" \
+    "    if CN.SameIDList(record.observedRequires, prerequisites) then
+        return false
+    end" \
+    "    if record.observedRequires then
+        return false
+    end" \
+    "an inferred ordering can never be corrected"
+
+mutate "Modules/Progress.lua" \
+    "    if not ids then
+        lifetimeCache.valid = false
+        lifetimeCache.value = nil
+
+        return nil
+    end" \
+    "    if not ids then
+        lifetimeCache.valid = true
+        lifetimeCache.value = nil
+
+        return nil
+    end" \
+    "a login that answers late never gets a session baseline"
+
+mutate "Modules/Alts.lua" \
+    "CN.TokenLabel(row.class or \"\")" \
+    "tostring(row.class or \"\")" \
+    "/cn alts prints a raw class token"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -60164,6 +60785,38 @@ function CN_TEST_SetTotalEarnedCurrency(currencyID, maxQuantity, totalEarned,
         maxWeeklyQuantity       = 0,
         totalEarned             = totalEarned or 0,
         useTotalEarnedForMaxQty = true,
+    })
+end
+
+-- A CURRENCY YOU CAN MOVE BETWEEN CHARACTERS FOR A FEE.
+--
+-- `isAccountTransferable` and `isAccountWide` are different facts and the
+-- addon read the first as the second. No row in this fixture set the
+-- transferable flag without the account-wide one, so the two could not be
+-- told apart from here.
+function CN_TEST_SetTransferableCurrency(currencyID, transferable)
+    for index = #CN_TEST_CURRENCY_ROWS, 1, -1 do
+        if CN_TEST_CURRENCY_ROWS[index].currencyID == currencyID then
+            table.remove(CN_TEST_CURRENCY_ROWS, index)
+        end
+    end
+
+    if not transferable then
+        return
+    end
+
+    table.insert(CN_TEST_CURRENCY_ROWS, {
+        currencyID             = currencyID,
+        name                   = "Movable Proof",
+        quantity               = 40,
+        maxQuantity            = 0,
+        quantityEarnedThisWeek = 0,
+        maxWeeklyQuantity      = 0,
+        totalEarned            = 40,
+
+        -- Movable, not shared.
+        isAccountWide          = false,
+        isAccountTransferable  = true,
     })
 end
 
@@ -67476,6 +68129,387 @@ print("\nStubs, audited against a real client:")
         .. (#unverified > 0
             and (" -- " .. #unverified .. " could not be checked")
             or ""))
+end)()
+
+
+print("\nWhat 0.63.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CAP ROW PRINTS THE NUMBERS THE CAP WAS MEASURED AGAINST.
+    --
+    -- 0.62.0 fixed the detection and left the display, so the row was
+    -- correctly flagged and then printed its own contradiction:
+    -- "At cap - spend these: Foo 100 / 2500".
+    ------------------------------------------------------------
+    local currencyModule = CN:GetModule("Currencies")
+
+    CN_TEST_SetTotalEarnedCurrency(3002, 2500, 2500, 100)
+
+    currencyModule.Scan()
+
+    local found
+
+    for _, row in ipairs(currencyModule.Capped()) do
+        if row.currencyID == 3002 then
+            found = row
+        end
+    end
+
+    assert(found, "the capped currency must be reported")
+
+    assert(found.quantity == 2500,
+        "the row shows what the cap was measured against, not the balance: "
+        .. tostring(found.quantity))
+
+    assert(found.held == 100,
+        "and carries the balance separately: " .. tostring(found.held))
+
+    assert(found.usesTotalEarned,
+        "and says which kind of cap it is, so the two numbers are explicable")
+
+    CN_TEST_SetTotalEarnedCurrency(3002, nil)
+    currencyModule.Scan()
+
+    print("  a capped currency prints the numbers its cap was measured against")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- TRANSFERABLE IS NOT SHARED.
+    --
+    -- `isAccountTransferable` means the balance can be MOVED between
+    -- characters for a fee. It was read as "every character sees this
+    -- balance", so a currency belonging to one character was ranked, and
+    -- labelled, as the Warband's.
+    ------------------------------------------------------------
+    CN_TEST_SetTransferableCurrency(3003, true)
+
+    local rows = CN.Blizzard.GetCurrencyList()
+
+    local found
+
+    for _, row in ipairs(rows) do
+        if row.currencyID == 3003 then
+            found = row
+        end
+    end
+
+    assert(found, "the currency must be listed")
+
+    assert(found.accountWide == false,
+        "a transferable currency is not account-wide")
+
+    assert(found.transferable == true,
+        "and the fact that it CAN be moved is still carried, because that is "
+        .. "worth saying")
+
+    CN_TEST_SetTransferableCurrency(3003, nil)
+
+    print("  a currency you can move is not a currency everybody has")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A GUESS MUST NOT OUTRANK THE QUEST LOG.
+    --
+    -- 0.61.0 collapsed every non-manual quest name to a bare string and read
+    -- a bare string back as source "blizzard" -- rank 1, the top. So a title
+    -- captured from a map pin outranked the authoritative quest-log title
+    -- that arrived later, and could never be corrected.
+    ------------------------------------------------------------
+    local quests = CN:GetModule("Quests")
+
+    local store = CN.Account("questMetadata")
+
+    store[970501] = nil
+
+    quests.SetMetadata(970501, "Pin Guess", "available")
+
+    assert(quests.GetMetadata(970501).source == "available",
+        "provenance survives storage: "
+        .. tostring(quests.GetMetadata(970501).source))
+
+    quests.SetMetadata(970501, "The Real Title", "questlog")
+
+    assert(quests.GetMetadata(970501).name == "The Real Title",
+        "and the quest log corrects a map-pin guess: "
+        .. tostring(quests.GetMetadata(970501).name))
+
+    -- The storage saving still holds for the common case.
+    assert(type(store[970501]) == "string",
+        "a title from the client is still stored as a bare string")
+
+    store[970501] = nil
+
+    print("  a map-pin guess is corrected by the quest log")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE DEADLINE, ONE CURVE.
+    --
+    -- A world quest set `limitedTimeBonus` from a four-step cliff AND
+    -- `expiresIn` for the continuous curve, so one deadline was charged twice
+    -- through two curves tuned separately -- and `/cn urgency`, which the
+    -- addon offers as its explanation of the ordering, plots only one of
+    -- them.
+    ------------------------------------------------------------
+    local opportunities = CN:GetModule("Opportunities")
+
+    local timed = CN.candidateProviders["Opportunities"].fn() or {}
+
+    local checked = 0
+
+    for _, objective in ipairs(timed) do
+        if objective.expiresIn then
+            assert((objective.limitedTimeBonus or 0) == 0,
+                "an objective with a deadline must charge it through the "
+                .. "curve the addon plots, and not also through a second "
+                .. "one: " .. tostring(objective.name))
+
+            checked = checked + 1
+        end
+    end
+
+    assert(checked > 0,
+        "the fixture must produce at least one objective with a deadline")
+
+    -- The window curve stays, for the one caller that has no `expiresIn`.
+    assert(opportunities.Urgency(60) > opportunities.Urgency(86400),
+        "and a window closing sooner is still more urgent")
+
+    print("  one deadline is charged once, through the curve /cn urgency plots")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A NAME THE CLIENT HANDS BACK IS NOT ON DISK.
+    ------------------------------------------------------------
+    local mountModule = CN:GetModule("Mounts")
+    local toyModule   = CN:GetModule("Toys")
+
+    mountModule.Scan()
+    toyModule.Scan()
+
+    for id, record in pairs(mountModule.Store()) do
+        assert(record.name == nil,
+            "mount " .. tostring(id) .. " must not persist its name")
+    end
+
+    for id, record in pairs(CN.Account("toys")) do
+        assert(record.name == nil,
+            "toy " .. tostring(id) .. " must not persist its name")
+    end
+
+    -- And the readers still answer, live.
+    local anyMount = next(mountModule.Store())
+
+    assert(anyMount, "the fixture must have a mount")
+
+    local name = mountModule.NameOf(anyMount, mountModule.Store()[anyMount])
+
+    assert(type(name) == "string" and name ~= ""
+        and not name:find("^Mount %d"),
+        "and the journal still names it: " .. tostring(name))
+
+    print("  mount and toy names are read from the client, not from disk")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DISCOVERY IS ONE CLIENT CALL, NOT THIRTY THOUSAND.
+    --
+    -- The snapshot was keyed on the SIZE of the discovered set, and quests
+    -- are discovered dozens at a time on entering new content -- so the walk
+    -- this cache exists to remove came back once per turn-in for as long as
+    -- the player was somewhere new.
+    ------------------------------------------------------------
+    local breakdown = CN:GetModule("Breakdown")
+    local quests    = CN:GetModule("Quests")
+
+    breakdown.ForgetQuestCounts()
+
+    local discovered = CN.Account("discoveredQuests")
+
+    for id = 971001, 971100 do
+        discovered[id] = true
+    end
+
+    local real  = quests.IsCompletedByCharacter
+    local asked = 0
+
+    quests.IsCompletedByCharacter = function(questID)
+        asked = asked + 1
+
+        return real(questID)
+    end
+
+    local first = breakdown.CompletedQuestCount()
+
+    assert(asked >= 100, "the first count walks the set")
+
+    asked = 0
+
+    -- Walking into new content: dozens of new ids.
+    for id = 972001, 972040 do
+        quests.RecordDiscovered(id, "available")
+    end
+
+    assert(asked <= 40,
+        "a discovery costs one call about one id, not a walk: " .. asked)
+
+    asked = 0
+
+    assert(breakdown.CompletedQuestCount() == first,
+        "and the count is still served from the snapshot")
+
+    assert(asked == 0,
+        "without rewalking anything: " .. asked)
+
+    quests.IsCompletedByCharacter = real
+
+    for id = 971001, 971100 do discovered[id] = nil end
+    for id = 972001, 972040 do discovered[id] = nil end
+
+    breakdown.ForgetQuestCounts()
+
+    print("  walking into new content does not rewalk your quest history")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN INFERRED PREREQUISITE CAN BE CORRECTED.
+    --
+    -- `not record.observedRequires` made the stored copy write-once, so an
+    -- ordering later shown to be wrong kept the wrong answer for the life of
+    -- the account -- and that is the copy the toolkit ships.
+    ------------------------------------------------------------
+    assert(CN.SameIDList({ 1, 2 }, { 1, 2 }), "same list")
+    assert(not CN.SameIDList({ 1, 2 }, { 2, 1 }), "order matters")
+    assert(not CN.SameIDList({ 1 }, { 1, 2 }), "length matters")
+    assert(not CN.SameIDList(nil, { 1 }), "absent is not equal")
+
+    local prerequisites = CN:GetModule("Harvest")
+
+    local store = CN.Account("questHarvest")
+
+    store[973001] = { observedRequires = { 11, 22 } }
+
+    prerequisites.WriteObservedPrerequisites(973001, { 11, 22, 33 })
+
+    assert(#store[973001].observedRequires == 3,
+        "a widened observation rewrites the stored copy: "
+        .. #store[973001].observedRequires)
+
+    store[973001] = nil
+
+    print("  an inferred ordering can be corrected by later play")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LOGIN THAT ANSWERS LATE STILL GETS A BASELINE.
+    --
+    -- The client returns nothing about completed quests until it has finished
+    -- loading them, and `BeginSession` runs inside exactly that window. The
+    -- nil was CACHED as settled, so the baseline stayed nil for the whole
+    -- session and the branch that reports quests completed by any means --
+    -- including ones the addon saw no event for -- never ran once.
+    ------------------------------------------------------------
+    local progress = CN:GetModule("Progress")
+
+    local real = C_QuestLog.GetAllCompletedQuestIDs
+
+    -- Log in early: the client has nothing yet.
+    C_QuestLog.GetAllCompletedQuestIDs = function() return {} end
+
+    progress.InvalidateLifetime()
+    progress.BeginSession()
+
+    assert(progress.LifetimeCompleted() == nil,
+        "the client has not answered yet")
+
+    -- It answers a moment later.
+    C_QuestLog.GetAllCompletedQuestIDs = real
+
+    local summary = progress.Summary()
+
+    assert(summary.lifetime and summary.lifetime > 0,
+        "the client now answers: " .. tostring(summary.lifetime))
+
+    assert(progress.SessionBaseline() == summary.lifetime,
+        "and the baseline is taken from the first real answer rather than "
+        .. "left nil for the session: "
+        .. tostring(progress.SessionBaseline()))
+
+    -- Taken once: a baseline that moved would make "this session" shrink.
+    progress.NoteBaseline()
+
+    assert(progress.SessionBaseline() == summary.lifetime,
+        "and it is not retaken afterwards")
+
+    print("  a session that began before your quests loaded still has a "
+        .. "baseline")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY PLACE THAT PRINTS A CLASS PRINTS THE CLASS NAME.
+    --
+    -- 0.62.0 fixed two of the three call sites. `/cn alts` and `/cn warband`
+    -- list the same roster in the same session and disagreed.
+    ------------------------------------------------------------
+    -- A SECOND CHARACTER, OR THE ROSTER PRINTS NO CLASS AT ALL.
+    --
+    -- `/cn alts` says "only this character has been seen" on a one-character
+    -- fixture, so an assertion about what it prints would have passed while
+    -- printing nothing. That is the shape of a test that cannot fail.
+    CN.db.characters["Realm-Zed"] = CN.db.characters["Realm-Zed"] or {
+        name    = "Zed",
+        realm   = "Realm",
+        class   = "DEATHKNIGHT",
+        race    = "NightElf",
+        level   = 80,
+        faction = "Alliance",
+        lastSeen = time(),
+    }
+
+    local printed = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(printed, tostring(message))
+
+        return realAdd(chatFrame, message)
+    end
+
+    SlashCmdList.COMPLETIONNAVIGATOR("alts")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local sawRoster = false
+
+    for _, line in ipairs(printed) do
+        if line:find("Zed", 1, true) then
+            sawRoster = true
+        end
+    end
+
+    assert(sawRoster,
+        "the roster must actually have printed the second character")
+
+    for _, line in ipairs(printed) do
+        assert(not line:find("DEATHKNIGHT", 1, true)
+            and not line:find("DEMONHUNTER", 1, true)
+            and not line:find("WARRIOR", 1, true),
+            "a raw class token reached the player: " .. line)
+    end
+
+    CN.db.characters["Realm-Zed"] = nil
+
+    print("  every command that names a class names it the way the game does")
 end)()
 
 

@@ -7,6 +7,69 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.63.0]
+
+Fourteen defects. Half of them were places an earlier release fixed one caller
+and left the others â€” so this one ends with a rule about that, and a backlog
+rewritten to match what is actually still open.
+
+### Fixed â€” numbers and text the player reads
+
+- **A capped currency printed the two numbers its cap was *not* measured
+  against.** 0.62.0 taught the addon that some caps apply to what you have
+  earned rather than what you hold, and then went on displaying the balance:
+  "At cap â€” spend these: 100 / 2500". The row now shows what the cap was
+  measured against, says so, and carries the balance beside it.
+- **A currency you can *move* between characters was treated as one every
+  character shares.** So a balance belonging to exactly one character was
+  labelled "(Warband)" and the advice about which character should spend it
+  disappeared.
+- **`/cn alts` printed `DEATHKNIGHT`** while `/cn warband`, listing the same
+  characters in the same session, printed "Death Knight".
+- **A quest name guessed from a map pin outranked the real one.** Every name
+  read back as though the client had vouched for it, so the authoritative
+  quest-log title that arrived later was rejected as no better, and `/cn cache`
+  reported a guess as fact.
+- **Weekly knowledge was still ordered by an English word.** 0.61.0 demoted
+  that from deciding whether a row appears to deciding where it sorts, which is
+  the same bug with a smaller blast radius. It is ordered by how much of the
+  week's cap is unclaimed now â€” true in every language.
+- **The Refresh button on the Remaining tab still could not recount your
+  quests.** The parameter that makes it recount was added a release ago and
+  given no caller.
+- **"This session" was never the client's own count.** The figure meant to
+  include quests completed by any means â€” including ones the addon saw no event
+  for â€” could not be computed, because the baseline is taken at login and the
+  client cannot answer that early. It is taken from the first real answer now.
+- **An ordering the addon inferred from watching you play could never be
+  corrected.** Written once and frozen, even after later play contradicted it â€”
+  and that is the copy the curated data file is built from.
+- **Vendor zone names, and mount and toy names, were frozen at whatever
+  language last scanned.** Around 1,900 rows of localized text off disk; a
+  player who switches client language can now find their own mounts by name
+  again.
+
+### Faster
+
+- **Walking into new content no longer rewalks your quest history.** Quests are
+  discovered dozens at a time on entering a new zone, and each batch put the
+  30,000-entry walk back on the next turn-in. Both edges of that count are
+  maintained one quest at a time now.
+- **The arrow stopped allocating a table ten times a second** whenever your
+  best map differs from your target's â€” a city, an inn, a cave, most of the
+  time it is on screen.
+- **Debug text is no longer built when debug is off.** It was assembled on
+  every cache invalidation, which happens tens of times a second while questing,
+  and then discarded unread.
+
+### Changed
+
+- **A deadline is charged once.** World quests and world events set two
+  different urgency terms from the same expiry, scored through two curves tuned
+  separately â€” and `/cn urgency`, which the addon offers as its explanation of
+  the ordering, plots only one of them. Now there is one curve, and it is the
+  one the chart shows.
+
 ## [0.62.0]
 
 An audit release. Fifteen defects, several of which had been quietly wrong for

@@ -167,10 +167,12 @@ end
 -- cap on a currency is the game saying "this is gone on Tuesday", which is
 -- precisely the question `/cn clock` asks.
 --
--- The pattern survives, demoted to what it can actually do -- flag a row as
--- profession knowledge on a client where the word happens to match, so the
--- ordering can put it first. It decides nothing.
-Waiting.knowledgePattern = "[Kk]nowledge"
+-- AND THE DEMOTED PATTERN IS GONE TOO. 0.63.0.
+--
+-- 0.61.0 kept it as an ordering hint, which is the same bug with a smaller
+-- blast radius: an English player saw knowledge sorted first and a German
+-- player did not. A hint that works in one language is not a hint. See the
+-- note at the ordering below for what replaced it.
 
 -- Locale-free reinforcement: the profession knowledge currencies the addon
 -- knows by id. An id is the same in every locale. This is a HINT for
@@ -211,11 +213,23 @@ function Waiting.Knowledge()
 
             -- No name is not a reason to drop a capped currency: the row is
             -- still true, and the id can carry it.
+            -- THE HINT IS STILL A GATE, JUST A SMALLER ONE. 0.63.0.
+            --
+            -- 0.61.0 demoted the English word from deciding WHETHER a row
+            -- appears to deciding where it SORTS -- which is better and still
+            -- wrong for the same reason. A German player whose knowledge
+            -- currency is not in the hard-coded id list (any new expansion's
+            -- will not be) sees "Wissen" sorted among the ordinary weeklies
+            -- while an English player sees it first.
+            --
+            -- The id list is locale-free and stays. The English match is gone
+            -- rather than demoted again: a hint that works in one language is
+            -- not a hint, it is a bug with a smaller blast radius. What
+            -- replaces it for currencies the list does not know is the fact
+            -- the client vouches for -- a weekly cap that is nearly full is
+            -- more urgent than one barely touched -- which is true in every
+            -- language and is what a player is actually deciding on.
             local knowledge = Waiting.knowledgeCurrencies[currencyID] == true
-
-            if not knowledge and name then
-                knowledge = name:find(Waiting.knowledgePattern) and true or false
-            end
 
             table.insert(rows, {
                 currencyID = currencyID,
@@ -232,6 +246,15 @@ function Waiting.Knowledge()
     table.sort(rows, function(a, b)
         if a.knowledge ~= b.knowledge then
             return a.knowledge
+        end
+
+        -- Then by how much of the week's cap is still unclaimed, which is a
+        -- fact in every locale. See the note above.
+        local left  = (a.cap or 0) > 0 and (a.remaining / a.cap) or 0
+        local right = (b.cap or 0) > 0 and (b.remaining / b.cap) or 0
+
+        if left ~= right then
+            return left > right
         end
 
         return a.currencyID < b.currencyID

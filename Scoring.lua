@@ -1000,7 +1000,8 @@ function CN.InvalidateCandidates(reason, patient)
         -- RefreshProviders knows whether anything was actually rebuilt, and
         -- discarding the aggregate here would bust the ranked cache on every
         -- QUEST_LOG_UPDATE for nothing.
-        if reason then
+        -- Asked before built. See `CN.Debugging`.
+        if reason and CN.Debugging() then
             CN.DebugPrint("Candidate cache: " .. reason .. " invalidated " .. hit
                 .. " provider" .. (hit == 1 and "" or "s"))
         end

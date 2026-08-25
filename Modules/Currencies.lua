@@ -222,8 +222,28 @@ function Currencies.Capped(character)
             table.insert(capped, {
                 currencyID = currencyID,
                 name       = NameStore()[currencyID],
-                quantity   = record.quantity,
+                -- THE NUMBERS THE CAP WAS MEASURED AGAINST. 0.63.0.
+                --
+                -- 0.62.0 fixed the DETECTION -- a currency whose cap applies
+                -- to lifetime earnings is tested against `totalEarned` -- and
+                -- then this function went on exporting `quantity` and
+                -- `maxQuantity` for display. So the fix produced a row that
+                -- was correctly flagged and then printed its own
+                -- contradiction: "At cap - spend these: Foo 100 / 2500".
+                --
+                -- `cappedAgainst` was stored by that release and read by
+                -- nothing, which is what a half-finished fix looks like in a
+                -- grep. It is the display value now, and `held` carries the
+                -- balance separately for anything that wants to say how much
+                -- there is to spend.
+                quantity   = record.cappedAgainst or record.quantity,
                 maximum    = record.maxQuantity,
+                held       = record.quantity,
+                earned     = record.totalEarned,
+
+                -- So a reader can say WHY the two differ rather than leaving
+                -- the player to work it out.
+                usesTotalEarned = record.usesTotalEarned or nil,
 
                 -- CARRIED THROUGH, WHICH IT WAS NOT.
                 --
@@ -347,7 +367,8 @@ CN.RegisterCandidateProvider("Currencies", function()
 
                 reasons          = {
                     "at cap: " .. tostring(currency.quantity)
-                        .. " / " .. tostring(currency.maximum),
+                        .. " / " .. tostring(currency.maximum)
+                        .. (currency.usesTotalEarned and " earned" or ""),
                     "further earning is wasted until you spend it",
                 },
             }))
@@ -406,7 +427,15 @@ CN:RegisterCommand{
             for _, currency in ipairs(capped) do
                 CN.PrintLine("  " .. tostring(currency.name)
                     .. " |cff8a8f96" .. currency.quantity
-                    .. " / " .. currency.maximum .. "|r")
+                    .. " / " .. currency.maximum
+                    -- A cap on lifetime earning and a balance are different
+                    -- numbers, and a player who has spent theirs will
+                    -- otherwise read this as a bug.
+                    .. (currency.usesTotalEarned
+                        and (" earned, " .. tostring(currency.held)
+                            .. " held")
+                        or "")
+                    .. "|r")
             end
         end
 
