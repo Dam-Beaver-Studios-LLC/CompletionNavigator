@@ -114,6 +114,37 @@ end
 
 Loremaster.Records = Records
 
+-- The achievement's name, and its category's, from the client. See the note
+-- in `Scan`. The stored fallbacks keep an older database readable until its
+-- first rescan.
+function Loremaster.NameOf(achievementID, record)
+    local live = Blizzard.GetAchievementName
+        and Blizzard.GetAchievementName(achievementID)
+
+    if live and live ~= "" then
+        return live
+    end
+
+    return (record and record.name)
+        or ("Achievement " .. tostring(achievementID))
+end
+
+function Loremaster.CategoryOf(record)
+    if type(record) ~= "table" then
+        return "Other"
+    end
+
+    if record.categoryID and Blizzard.GetCategoryName then
+        local live = Blizzard.GetCategoryName(record.categoryID)
+
+        if live and live ~= "" then
+            return live
+        end
+    end
+
+    return record.category or "Other"
+end
+
 -- THE STORE HAD NO CHARACTER DIMENSION, AND SAID IT DID. FIXED IN 0.61.0.
 --
 -- `Loremaster.Scan`'s own comment says the store exists "so the Warband view
@@ -183,8 +214,20 @@ function Loremaster.Scan()
 
                 local held = store[id] or {}
 
-                held.name      = achievement.name
-                held.category  = category.name
+                -- NEITHER NAME IS STORED. 0.64.0.
+                --
+                -- Both are LOCALIZED strings the client answers instantly,
+                -- and both were being branched on: `ByCategory` groups on the
+                -- stored category and `ForZone` substring-matches the stored
+                -- achievement name against a LIVE zone name. So a player who
+                -- switched client language read English achievement names
+                -- under English headings, and `ForZone` matched nothing at
+                -- all -- the "This zone" block and the already-here bonus in
+                -- `/cn zones` simply disappeared until a rescan.
+                --
+                -- Sixth store to lose a name it did not need to keep;
+                -- migrations 4, 5, 14, 15 and 16 were the others.
+                held.categoryID = category.categoryID
                 held.completed = achievement.completed and true or false
                 held.criteria  = criteria
 
@@ -221,7 +264,7 @@ function Loremaster.ByCategory(includeCompleted)
 
     for id, record in pairs(Records()) do
         if includeCompleted or not record.completed then
-            local key = record.category or "Other"
+            local key = Loremaster.CategoryOf(record)
 
             if not groups[key] then
                 groups[key] = {}
@@ -230,7 +273,7 @@ function Loremaster.ByCategory(includeCompleted)
 
             table.insert(groups[key], {
                 id        = id,
-                name      = record.name,
+                name      = Loremaster.NameOf(id, record),
                 completed = record.completed,
                 done      = Loremaster.DoneFor(record) or 0,
                 criteria  = record.criteria or 0,
@@ -288,8 +331,8 @@ function Loremaster.Closest(limit)
 
             local row = {
                 id       = id,
-                name     = record.name,
-                category = record.category,
+                name     = Loremaster.NameOf(id, record),
+                category = Loremaster.CategoryOf(record),
                 done     = done,
                 criteria = record.criteria,
                 fraction = done / record.criteria,
@@ -384,10 +427,12 @@ function Loremaster.ForZone(mapID)
     --      something else.
     --   3. Lowest id. Arbitrary, but the same arbitrary answer every time,
     --      which is the whole point.
-    local best, bestRecord
+    local best, bestRecord, bestName
 
     for id, record in pairs(Records()) do
-        if record.name and string.find(record.name, zoneName, 1, true) then
+        local heldName = Loremaster.NameOf(id, record)
+
+        if heldName and string.find(heldName, zoneName, 1, true) then
             local better
 
             if not bestRecord then
@@ -396,18 +441,19 @@ function Loremaster.ForZone(mapID)
                 ~= (record.completed and true or false) then
 
                 better = not record.completed
-            elseif #record.name ~= #bestRecord.name then
-                better = #record.name < #bestRecord.name
+            elseif #heldName ~= #bestName then
+                better = #heldName < #bestName
             else
                 better = id < best.id
             end
 
             if better then
                 bestRecord = record
+                bestName   = heldName
 
                 best = {
                     id        = id,
-                    name      = record.name,
+                    name      = heldName,
                     completed = record.completed,
                     done      = Loremaster.DoneFor(record) or 0,
                     criteria  = record.criteria or 0,

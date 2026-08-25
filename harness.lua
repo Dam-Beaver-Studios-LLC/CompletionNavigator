@@ -1781,6 +1781,17 @@ function CN_TEST_PetDisplayRows()
     return rows
 end
 
+-- ALLIANCE AND HORDE, IN THE CLIENT'S OWN LANGUAGE.
+--
+-- `UnitFactionGroup` returns an English token and the roster printed it raw
+-- beside a class that had been run through the client's localized names. The
+-- client has always kept both names in these globals; the stub did not have
+-- them, so the two could not be told apart from here. Deliberately NOT
+-- English, like the class names above.
+FACTION_ALLIANCE           = "Allianz"
+FACTION_HORDE              = "Horde"
+FACTION_STANDING_LABEL4    = "Neutral"
+
 LE_PET_JOURNAL_FILTER_COLLECTED     = 1
 LE_PET_JOURNAL_FILTER_NOT_COLLECTED = 2
 
@@ -2060,6 +2071,23 @@ end
 -- for every one of them. Every meta achievement in the game is past that cap
 -- and none was representable here.
 local wideAchievementID = 990000
+
+-- AN ACHIEVEMENT THE CLIENT KNOWS BY NAME.
+--
+-- Since 0.64.0 the addon reads achievement names live rather than from its own
+-- store, so a test that invents a store row without telling the client about
+-- it is testing a row the addon can no longer name.
+function CN_TEST_MakeAchievement(achievementID, name, criteria, done)
+    achievementData[achievementID] = {
+        name      = name,
+        points    = 10,
+        completed = false,
+        criteria  = criteria or 0,
+        done      = done or 0,
+    }
+
+    return achievementID
+end
 
 function CN_TEST_MakeWideAchievement(criteria, done)
     wideAchievementID = wideAchievementID + 1
@@ -2572,19 +2600,39 @@ C_CurrencyInfo = {
 -- the currency's LOCALIZED name, and every currency in this fixture is named
 -- in English -- so the gate looked correct here and returned zero rows on
 -- every non-English client in the world.
+-- LISTED AS WELL AS LOOKED UP. 0.64.0.
+--
+-- This wrote only the by-id table, which is what `GetCurrencyInfo` answers
+-- from -- so `Currencies.Scan`, which walks the currency LIST, never saw the
+-- row and never gave it a sweep serial. A test that then wrote the row into
+-- the store by hand was modelling a state the client cannot produce, and it
+-- passed only because the staleness rule was missing from the reader.
 function CN_TEST_SetCurrencyRow(id, name, maxWeekly)
+    for index = #CN_TEST_CURRENCY_ROWS, 1, -1 do
+        if CN_TEST_CURRENCY_ROWS[index].currencyID == id then
+            table.remove(CN_TEST_CURRENCY_ROWS, index)
+        end
+    end
+
     if not name then
         currencyByID[id] = nil
 
         return
     end
 
-    currencyByID[id] = {
-        currencyID        = id,
-        name              = name,
-        quantity          = 0,
-        maxWeeklyQuantity = maxWeekly or 0,
+    local row = {
+        currencyID             = id,
+        name                   = name,
+        quantity               = 250,
+        maxQuantity            = 0,
+        quantityEarnedThisWeek = 0,
+        maxWeeklyQuantity      = maxWeekly or 0,
+        totalEarned            = 250,
     }
+
+    currencyByID[id] = row
+
+    table.insert(CN_TEST_CURRENCY_ROWS, row)
 end
 
 ------------------------------------------------------------
@@ -9796,6 +9844,250 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
+print("\nWhat 0.64.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- HOW MUCH OF A ZONE YOU HAVE EXPLORED IS YOURS.
+    --
+    -- Written into an account store keyed by achievement id alone -- the same
+    -- defect fixed for Loremaster in 0.61.0, in the sibling store the fix
+    -- never reached. Worse here: the refresh is wired to
+    -- ZONE_CHANGED_NEW_AREA, so an alt flying through overwrote the main's
+    -- progress on the way past, with no scan involved.
+    ------------------------------------------------------------
+    local exploreModule = CN:GetModule("Exploration")
+
+    exploreModule.Scan()
+
+    local store = CN.Account("exploration")
+
+    local anyID = next(store)
+
+    assert(anyID, "the fixture must have an exploration row")
+
+    local record = store[anyID]
+
+    assert(record.progress, "the row carries a per-character map")
+
+    assert(exploreModule.DoneFor(record, "Realm-Someone-Else") == nil,
+        "a character that has never explored this zone is UNKNOWN, not this "
+        .. "character's number wearing somebody else's name")
+
+    -- And the name is not on disk.
+    assert(record.name == nil,
+        "the achievement name is read from the client, not stored")
+
+    assert(exploreModule.NameOf(anyID, record):find("Explore", 1, true),
+        "and the client still names it: "
+        .. tostring(exploreModule.NameOf(anyID, record)))
+
+    print("  exploration progress belongs to the character that walked it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A FIREHOSE MUST NOT MOVE A CACHE KEY.
+    --
+    -- `UPDATE_FACTION` fires many times a second while any reputation moves,
+    -- and it was bumping the generation the Collections tab's eight store
+    -- walks, the Warband roster and the whole Breakdown report are memoized
+    -- against -- so all of them rebuilt on every window refresh for as long
+    -- as the player was questing. Two other files already carried the note
+    -- that this event must be debounced first.
+    ------------------------------------------------------------
+    CN.ForgetDebounces()
+
+    local startedAt = CN.collectionGeneration or 0
+
+    for _ = 1, 20 do
+        CN.Dispatch("UPDATE_FACTION")
+    end
+
+    -- Not zero: the debounce has a leading edge, so the first tick of a burst
+    -- is served at once and the rest are folded into it. What must not happen
+    -- is one bump per tick, which is what every cache keyed on this counter
+    -- was paying for.
+    local moved = (CN.collectionGeneration or 0) - startedAt
+
+    assert(moved <= 2,
+        "a burst of twenty reputation ticks must not move the counter twenty "
+        .. "times: " .. tostring(moved))
+
+    -- A collection that genuinely happened is still immediate.
+    local held = CN.collectionGeneration or 0
+
+    CN.Dispatch("NEW_PET_ADDED")
+
+    assert((CN.collectionGeneration or 0) > held,
+        "and collecting something still moves it at once")
+
+    print("  a burst of reputation ticks does not rebuild every store twice a "
+        .. "second")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CURRENCY SWEEP DOES NOT DISTURB A WINDOW THE PLAYER IS READING.
+    --
+    -- It expands and re-collapses the player's currency headers to see rows
+    -- the client hides. It puts them back -- but a player with that frame
+    -- open watched their collapsed groups pop open and shut every ten
+    -- seconds, which is the addon acting rather than prompting.
+    ------------------------------------------------------------
+    local currencyModule = CN:GetModule("Currencies")
+
+    assert(currencyModule.rescanSeconds >= 60,
+        "the sweep is a minute apart, not ten seconds: "
+        .. tostring(currencyModule.rescanSeconds))
+
+    assert(currencyModule.IsFrameOpen() == false,
+        "nothing is open in the fixture")
+
+    -- And the sweep actually defers while it IS open.
+    local realFrame = _G.TokenFrame
+
+    _G.TokenFrame = { IsShown = function() return true end }
+
+    assert(currencyModule.IsFrameOpen() == true,
+        "an open currency frame is seen")
+
+    local scans = 0
+
+    local realScan = currencyModule.Scan
+
+    currencyModule.Scan = function(...)
+        scans = scans + 1
+
+        return realScan(...)
+    end
+
+    CN_TEST_CURRENCY_LAST_SCAN = nil
+
+    currencyModule.ForgetLastScan()
+
+    CN.Dispatch("CURRENCY_DISPLAY_UPDATE")
+
+    assert(scans == 0,
+        "the sweep must not disturb a frame the player is reading")
+
+    _G.TokenFrame = realFrame
+
+    currencyModule.ForgetLastScan()
+
+    CN.Dispatch("CURRENCY_DISPLAY_UPDATE")
+
+    assert(scans == 1,
+        "and it runs as soon as they close it: " .. scans)
+
+    currencyModule.Scan = realScan
+
+    print("  the currency sweep leaves the player's own window alone")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE STALENESS RULE, APPLIED WHEREVER CURRENCIES ARE REPORTED.
+    --
+    -- `Currencies.IsCurrent` exists so a row the client has stopped listing
+    -- is not reported as live. Two readers applied it and `/cn clock`
+    -- re-implemented the filter without it, so a retired currency showed in
+    -- one command and not the other on the same login.
+    ------------------------------------------------------------
+    local currencyModule = CN:GetModule("Currencies")
+    local waiting        = CN:GetModule("Waiting")
+
+    CN_TEST_SetCurrencyRow(2916, "Wissen Zwei", 400)
+
+    currencyModule.Scan()
+
+    local function KnowledgeHas(id)
+        for _, row in ipairs(waiting.Knowledge()) do
+            if row.currencyID == id then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    assert(KnowledgeHas(2916), "a live weekly currency is reported")
+
+    -- The client stops listing it -- a patch retired it. The row stays in the
+    -- store until something prunes it, carrying its old serial.
+    CN_TEST_SetCurrencyRow(2916, nil)
+
+    currencyModule.Scan()
+
+    assert(not KnowledgeHas(2916),
+        "and a row the client no longer lists is not reported as still "
+        .. "earnable")
+
+    print("  /cn clock and /cn currencies agree about which rows are live")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE BLOCK REASON IS A TOKEN, NOT PARSED BACK OUT OF ENGLISH PROSE.
+    ------------------------------------------------------------
+    CN.Static.RegisterQuests({
+        [978001] = { name = "Druids Only",     classes = { "DRUID" } },
+        [978002] = { name = "Level Gate",      minLevel = 70 },
+        [978003] = { name = "Horde Business",  faction = "Horde" },
+        [978004] = { name = "Orcs Only",       races   = { "Orc" } },
+    })
+
+    local mage = {
+        class   = "MAGE",
+        race    = "Human",
+        faction = "Alliance",
+        level   = 10,
+    }
+
+    local expected = {
+        [978001] = "CLASS",
+        [978002] = "LEVEL",
+        [978003] = "FACTION",
+        [978004] = "RACE",
+    }
+
+    for questID, want in pairs(expected) do
+        local eligible, sentence, gate =
+            CN.Static.QuestEligibility(questID, mage)
+
+        assert(eligible == false,
+            "quest " .. questID .. " must be gated for this character")
+
+        assert(gate == want,
+            "the reason comes back as a stable token: " .. tostring(gate)
+            .. ", wanted " .. want)
+
+        assert(type(sentence) == "string" and sentence ~= "",
+            "and the sentence is still built for the player")
+    end
+
+    print("  why a quest is blocked is a token, not a sentence to parse")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE PLURALIZER.
+    --
+    -- `CN.Pluralize` had one caller while twenty-two places hand-rolled the
+    -- same expression and one module kept a third private copy. Nothing was
+    -- wrong; it is the one-fix-one-call-site shape pre-loaded.
+    ------------------------------------------------------------
+    assert(CN.Pluralize(1, "") == "", "one is singular")
+    assert(CN.Pluralize(2, "") == "s", "two are plural")
+
+    local source = CN_TEST_ReadAddonFile("UI.lua")
+
+    assert(source and not source:find('== 1 and "" or "s"', 1, true),
+        "no file may hand-roll the pluralizer")
+
+    print("  the pluralizer is written once")
+end)()
+
 print("\nWhat 0.63.0 changed, asserted through the paths the game takes:")
 
 ;(function()
@@ -10151,6 +10443,11 @@ end)()
 
     SlashCmdList.COMPLETIONNAVIGATOR("alts")
 
+    -- Both commands list the same roster, and the faction is printed by this
+    -- one. 0.62.0 fixed the class in two of three places; the faction beside
+    -- it was raw in both.
+    SlashCmdList.COMPLETIONNAVIGATOR("warband")
+
     DEFAULT_CHAT_FRAME.AddMessage = realAdd
 
     local sawRoster = false
@@ -10163,6 +10460,22 @@ end)()
 
     assert(sawRoster,
         "the roster must actually have printed the second character")
+
+    -- The faction is a token too, and was printed raw beside a class that had
+    -- been localized. 0.64.0.
+    local sawFaction = false
+
+    for _, line in ipairs(printed) do
+        if line:find(FACTION_ALLIANCE, 1, true) then
+            sawFaction = true
+        end
+
+        assert(not line:find("Alliance", 1, true)
+            or FACTION_ALLIANCE == "Alliance",
+            "a raw faction token reached the player: " .. line)
+    end
+
+    assert(sawFaction, "the roster names the faction the way the game does")
 
     for _, line in ipairs(printed) do
         assert(not line:find("DEATHKNIGHT", 1, true)
@@ -10197,9 +10510,13 @@ print("\nWhat 0.62.0 changed, asserted through the paths the game takes:")
 
     local record = exploreModule.ForCurrentZone()
 
-    assert(record and record.name == "Explore Eversong Woods",
+    -- The NAME comes from the client now (0.64.0), not from the row: a stored
+    -- name freezes at whatever language last scanned, which is how this
+    -- feature disappeared for anyone who switched client language.
+    assert(record and exploreModule.NameOf(record.achievementID, record)
+        == "Explore Eversong Woods",
         "the zone lookup must find the achievement whose name CONTAINS the "
-        .. "zone name: " .. tostring(record and record.name))
+        .. "zone name: " .. tostring(record and record.achievementID))
 
     -- And the tightening it was reaching for still holds: the zone name must
     -- be a whole trailing run, so "Shadowmoon" must not match
@@ -10212,8 +10529,10 @@ print("\nWhat 0.62.0 changed, asserted through the paths the game takes:")
         held.mapID = nil
     end
 
-    store[990101] = { achievementID = 990101,
-        name = "Explore Shadowmoon Valley", done = 0, criteria = 10 }
+    -- Registered with the client stub, because the name is read live now.
+    CN_TEST_MakeAchievement(990101, "Explore Shadowmoon Valley", 10, 0)
+
+    store[990101] = { achievementID = 990101, criteria = 10 }
 
     CN_TEST_ZONE_NAME = "Shadowmoon"
 
@@ -10643,11 +10962,14 @@ end)()
 
     local currencyModule = CN:GetModule("Currencies")
 
-    currencyModule.CharacterStore()[2915] = {
-        quantity          = 250,
-        maxWeeklyQuantity = 500,
-        weeklyRemaining   = 250,
-    }
+    -- WRITTEN BY THE REAL SCAN, not by hand. 0.64.0.
+    --
+    -- A hand-written row carries no sweep serial, and `Currencies.IsCurrent`
+    -- -- which `/cn clock` now applies, like the rest of the currency module
+    -- -- correctly rejects a row the client has not confirmed. A fixture that
+    -- writes straight into the store is testing a state the client cannot
+    -- produce.
+    currencyModule.Scan()
 
     local rows = waiting.Knowledge()
 
@@ -10665,8 +10987,8 @@ end)()
     assert(found.knowledge,
         "and the id says it is knowledge even when the name does not")
 
-    currencyModule.CharacterStore()[2915] = nil
     CN_TEST_SetCurrencyRow(2915, nil)
+    currencyModule.Scan()
 
     print("  weekly knowledge is found on a client that does not speak English")
 end)()
@@ -10750,12 +11072,16 @@ end)()
     -- pass while the shortest-name rule was gone -- which is exactly what a
     -- mutation of that rule proved, the first time this fixture was written
     -- with the ids the other way round.
-    store[900001] = { name = "Loremaster of Isle of Dorn and Beyond",
-        category = "Zones", completed = false, criteria = 90, done = 0 }
-    store[900002] = { name = "Isle of Dorn Explorer", category = "Zones",
-        completed = false, criteria = 40, done = 1 }
-    store[900003] = { name = "Isle of Dorn", category = "Zones",
-        completed = false, criteria = 10, done = 3 }
+    -- REGISTERED WITH THE CLIENT, because the name is read live (0.64.0). A
+    -- row the client cannot name is a row the addon can no longer match, and
+    -- a fixture that writes one is testing a state that cannot occur.
+    CN_TEST_MakeAchievement(900001, "Loremaster of Isle of Dorn and Beyond", 90, 0)
+    CN_TEST_MakeAchievement(900002, "Isle of Dorn Explorer", 40, 1)
+    CN_TEST_MakeAchievement(900003, "Isle of Dorn", 10, 3)
+
+    store[900001] = { completed = false, criteria = 90, done = 0 }
+    store[900002] = { completed = false, criteria = 40, done = 1 }
+    store[900003] = { completed = false, criteria = 10, done = 3 }
 
     CN_TEST_SetMapName(2248, "Isle of Dorn")
 
@@ -10782,6 +11108,10 @@ end)()
         .. "in the zone: " .. tostring(unfinished.name))
 
     store[900001], store[900002], store[900003] = nil, nil, nil
+
+    -- NOTE: since 0.64.0 the fixture rows above carry NO stored name at all
+    -- -- the client is asked -- so everything asserted here is already
+    -- proving the live path.
 
     print("  a zone picks the same achievement on every login")
 end)()

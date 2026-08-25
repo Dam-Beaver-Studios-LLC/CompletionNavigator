@@ -1280,7 +1280,7 @@ UI.RegisterTab{
 
             panel.title:SetText("Show which types?")
             panel.type:SetText(hidden == 0 and "showing everything"
-                or (hidden .. " type" .. (hidden == 1 and "" or "s") .. " hidden"))
+                or (hidden .. " type" .. CN.Pluralize(hidden, "") .. " hidden"))
             panel.why:SetText("Hidden types still appear in Remaining and "
                 .. "Collections.\nThis only filters recommendations.")
 
@@ -1851,7 +1851,7 @@ function UI.Sources()
                     end
                 end
 
-                return lines .. " line" .. (lines == 1 and "" or "s")
+                return CN.Count(lines, "line")
                     .. ", " .. seen .. " with recipes read"
             end,
         },
@@ -2177,7 +2177,7 @@ UI.RegisterTab{
 
         panel.header:SetText(string.format(
             "%d character%s  |cff8a8f96combined: %d professions, %d recipes, %d titles|r",
-            #rows, #rows == 1 and "" or "s",
+            #rows, CN.Pluralize(#rows, ""),
             coverage.professions, coverage.recipes, coverage.titles))
 
         local entries = {}
@@ -2203,7 +2203,8 @@ UI.RegisterTab{
                     .. (row.isCurrent and CN.Brand("  (you)") or "")
                     .. CN.Aside(tostring(row.level) .. " "
                         .. CN.TokenLabel(row.class or "?")
-                        .. (row.faction and (" " .. row.faction) or "")),
+                        .. (row.faction
+                            and (" " .. CN.FactionLabel(row.faction)) or "")),
 
                 -- THE WORDS THIS TAB USES TWICE ALREADY.
                 --
@@ -2284,7 +2285,7 @@ UI.RegisterTab{
         local summary = vault.Summary()
 
         panel.header:SetText(summary.unlocked .. " reward"
-            .. (summary.unlocked == 1 and "" or "s") .. " unlocked"
+            .. CN.Pluralize(summary.unlocked, "") .. " unlocked"
             .. (summary.resetsIn and ("  |cff8a8f96resets in "
                 .. vault.FormatReset(summary.resetsIn) .. "|r") or ""))
 
@@ -2420,7 +2421,7 @@ UI.RegisterTab{
 
         local list = goals.List()
 
-        panel.header:SetText(#list .. " goal" .. (#list == 1 and "" or "s")
+        panel.header:SetText(#list .. " goal" .. CN.Pluralize(#list, "")
             .. " |cff8a8f96of " .. goals.limit .. "|r")
 
         if #list == 0 then

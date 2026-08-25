@@ -223,7 +223,7 @@ local function VendorLines(lines, itemID)
     for index, seller in ipairs(sellers) do
         if index > 3 then
             Add(lines, "and " .. (#sellers - 3) .. " more recorded seller"
-                .. ((#sellers - 3) == 1 and "" or "s"), GREY)
+                .. CN.Pluralize((#sellers - 3), ""), GREY)
             break
         end
 

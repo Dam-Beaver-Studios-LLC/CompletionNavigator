@@ -332,7 +332,7 @@ CN:RegisterCommand{
         local summary = Vault.Summary()
 
         Print("Great Vault: " .. summary.unlocked .. " reward"
-            .. (summary.unlocked == 1 and "" or "s") .. " unlocked"
+            .. CN.Pluralize(summary.unlocked, "") .. " unlocked"
             .. (summary.resetsIn
                 and (" |cff8a8f96resets in " .. FormatReset(summary.resetsIn) .. "|r")
                 or ""))

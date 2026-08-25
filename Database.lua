@@ -928,6 +928,72 @@ CN.migrations = {
                 .. zones .. " vendor zone name(s) the client re-supplies.")
         end
     end,
+
+    -- 17 -> 18. THE EXPLORATION STORE GETS A CHARACTER DIMENSION, AND TWO
+    -- MORE STORES LOSE NAMES THE CLIENT ANSWERS FOR FREE.
+    --
+    -- 1. `exploration[id].done` and `.completed` are how much of a zone THIS
+    --    character has explored, and they were written into an account store
+    --    keyed by the achievement id alone -- the same defect migration 14
+    --    fixed for `loremaster`, in the identically-shaped sibling store the
+    --    fix never reached. It is worse here: the refresh is wired to
+    --    `ZONE_CHANGED_NEW_AREA`, so an alt flying through a zone overwrote
+    --    the main's progress on the way past, with no scan involved.
+    --
+    --    The flat fields stay and are the current character's; the map is
+    --    what the Warband view reads. As with migration 14, this cannot know
+    --    WHICH character wrote the existing number, so it does not guess.
+    --
+    -- 2. `exploration[id].name` and `loremaster[id].name` / `.category` are
+    --    localized strings the client returns instantly -- and both were
+    --    being BRANCHED on: the zone lookups substring-match a stored name
+    --    against a live one, so a player who changed client language lost
+    --    both features entirely until a rescan.
+    --
+    -- 3. `achievementTotals` is a per-category snapshot of numbers one client
+    --    call answers, written on every scan and read by nothing at all.
+    [17] = function(db)
+        db.account = db.account or {}
+
+        local split, names = 0, 0
+
+        for _, record in pairs(db.account.exploration or {}) do
+            if type(record) == "table" then
+                if record.progress == nil then
+                    record.progress = {}
+
+                    split = split + 1
+                end
+
+                if record.name ~= nil then
+                    record.name = nil
+
+                    names = names + 1
+                end
+            end
+        end
+
+        for _, record in pairs(db.account.loremaster or {}) do
+            if type(record) == "table"
+                and (record.name ~= nil or record.category ~= nil) then
+
+                record.name     = nil
+                record.category = nil
+
+                names = names + 1
+            end
+        end
+
+        local totals = CN.CountKeys(db.account.achievementTotals)
+
+        db.account.achievementTotals = nil
+
+        if split > 0 or names > 0 or totals > 0 then
+            CN.DebugPrint("Gave " .. split .. " exploration row(s) a character "
+                .. "dimension, dropped " .. names .. " stored name(s), and "
+                .. "removed " .. totals .. " write-only achievement total(s).")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

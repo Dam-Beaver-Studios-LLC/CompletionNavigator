@@ -238,16 +238,22 @@ function Filters.DescribeObjective(objectiveType, id)
     -- addon had not seen yet produced "Faction 2600" -- which is the addon
     -- telling the player it does not know what they just asked for. The
     -- client knows. Ask it.
+    -- THE CLIENT FIRST, THE STORE SECOND. 0.64.0.
+    --
+    -- This asked the STORE first and the client only when the store was
+    -- empty, which is backwards and is the opposite of what the pet, mount
+    -- and achievement branches below do. A stored name is frozen at whatever
+    -- language last scanned, so `/cn hidden` listed old-locale faction names
+    -- beside correctly re-localized pet names in the same list.
     if objectiveType == types.REPUTATION and numericID then
-        local cached = CN.Account("factionNames")[numericID]
-
-        if cached then
-            return cached
-        end
-
         local data = CN.Blizzard.GetFactionByID(numericID)
 
-        return (data and data.name) or ("Faction " .. numericID)
+        if data and data.name then
+            return data.name
+        end
+
+        return CN.Account("factionNames")[numericID]
+            or ("Faction " .. numericID)
     end
 
     if objectiveType == types.PET and numericID then
@@ -339,7 +345,18 @@ function Filters.DescribeObjective(objectiveType, id)
             or ("Achievement " .. numericID)
     end
 
+    -- AND THESE TWO HAD NO LIVE PATH AT ALL. 0.64.0.
+    --
+    -- Migration 16's header says it removed "the last of the names the client
+    -- hands back for free", and these were still being read from disk with no
+    -- fallback to the client that answers instantly.
     if objectiveType == types.CURRENCY and numericID then
+        local info = CN.Blizzard.GetCurrency and CN.Blizzard.GetCurrency(numericID)
+
+        if info and info.name then
+            return info.name
+        end
+
         return CN.Account("currencyNames")[numericID] or ("Currency " .. numericID)
     end
 
@@ -348,6 +365,12 @@ function Filters.DescribeObjective(objectiveType, id)
     end
 
     if objectiveType == types.TITLE and numericID then
+        local live = CN.Blizzard.GetTitleName and CN.Blizzard.GetTitleName(numericID)
+
+        if live and live ~= "" then
+            return live
+        end
+
         return CN.Account("titleNames")[numericID] or ("Title " .. numericID)
     end
 
@@ -646,7 +669,7 @@ CN:RegisterCommand{
             local count = Filters.RestoreAll()
 
             Print("Restored " .. count .. " hidden objective"
-                .. (count == 1 and "" or "s") .. ".")
+                .. CN.Pluralize(count, "") .. ".")
             return
         end
 

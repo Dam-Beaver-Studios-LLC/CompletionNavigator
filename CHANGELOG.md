@@ -7,6 +7,66 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.64.0]
+
+Twelve defects, found by looking for one specific thing: places where an
+earlier fix landed at one call site and its siblings were missed. That search
+was added to the process last release, and it found most of this one.
+
+### Fixed â€” your progress, and whose it is
+
+- **Zone exploration progress was shared between your characters.** How much
+  of a zone you have explored was stored against the zone rather than against
+  you, and the refresh runs when you *enter* a zone â€” so an alt flying through
+  overwrote your main's progress in passing, with no scan involved. This is the
+  same defect fixed for Loremaster three releases ago, in the neighbouring
+  store the fix never reached.
+- **The whole Exploration feature disappeared if you changed client
+  language** â€” and so did the Loremaster zone lookup. Both matched an
+  achievement name stored in the old language against a zone name in the new
+  one. 0.62.0 fixed one half of that comparison and left the other frozen.
+- **`/cn hidden` mixed languages in one list.** Faction, title and currency
+  names came off disk while pet and mount names beside them came from the
+  client.
+- **The heads-up line said "nothing actionable" in English** while the data
+  broker feed an inch away said it in yours. Same sentence, one of the two
+  hardcoded.
+- **Alliance and Horde were printed untranslated** on the Warband roster,
+  beside a class name that had been translated correctly.
+- **`/cn clock` reported currencies the game has retired**, which `/cn
+  currencies` had already correctly dropped, on the same login. One staleness
+  rule; two of the three readers applied it.
+- **`/cn breakdown` subtracted one population from another** â€” it counted
+  every currency row it had ever seen and then subtracted only the live ones.
+
+### Faster
+
+- **Seven milliseconds every two seconds, while questing.** Reputation ticks
+  and quest turn-ins were moving the counter that the Collections tab, the
+  Warband roster and the whole Remaining report use to decide whether anything
+  has changed. Since a reputation tick fires many times a second, every one of
+  those caches rebuilt on every window refresh â€” the caches were doing nothing
+  in exactly the situation they were written for.
+- **The currency sweep no longer runs every ten seconds** â€” nor while your own
+  currency window is open. It briefly expands and re-collapses your currency
+  headers to see rows the game hides, and a player with that window open
+  watched their groups pop open and shut all evening. It waits until you close
+  it.
+- **A per-category snapshot of achievement totals stopped being written to
+  disk.** It was rewritten at every logout, re-parsed at every login, and read
+  by nothing at all.
+
+### Internal
+
+- **Why a quest is blocked is a token now, not a sentence.** The reason was
+  recovered by pattern-matching English display text that had already been
+  half-translated â€” one more translation away from telling you the wrong alt
+  could do a quest.
+- **One pluralizer.** The shared one had a single caller while twenty-two
+  places wrote the same expression by hand and one module kept a third private
+  copy. Nothing was wrong yet; it is the one-fix-one-call-site shape waiting to
+  happen.
+
 ## [0.63.0]
 
 Fourteen defects. Half of them were places an earlier release fixed one caller

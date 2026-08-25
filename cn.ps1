@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.63.0'
+$script:ToolkitVersion = '0.64.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.63.0"
-CN.dbVersion   = 17
+CN.version     = "0.64.0"
+CN.dbVersion   = 18
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -815,6 +815,10 @@ end
 
 -- The word alone, where the caller has already written the number (a
 -- coloured count, usually).
+-- `CN.Pluralize(3, "")` is "s" and `CN.Pluralize(1, "")` is "" -- which is
+-- what twenty-two call sites were writing by hand as
+-- `(n == 1 and "" or "s")`, each of them a place the next grammar change
+-- would have had to find. 0.64.0.
 function CN.Pluralize(number, singular, plural)
     if (tonumber(number) or 0) == 1 then
         return singular
@@ -875,6 +879,32 @@ end
 -- For the harness, and for anything that changes locale mid-session.
 function CN.ForgetRaceNames()
     raceNames = nil
+end
+
+-- Alliance and Horde, in the player's language.
+--
+-- `UnitFactionGroup` returns an English token like every other one, and it
+-- was printed raw beside a class run through `CN.TokenLabel` -- one localized
+-- word and one untranslated token in the same seven characters. The client
+-- keeps both names in globals it has always had. 0.64.0.
+CN.factionGlobals = {
+    Alliance = "FACTION_ALLIANCE",
+    Horde    = "FACTION_HORDE",
+    Neutral  = "FACTION_STANDING_LABEL4",
+}
+
+function CN.FactionLabel(token)
+    if type(token) ~= "string" or token == "" then
+        return ""
+    end
+
+    local global = CN.factionGlobals[token]
+
+    if global and _G[global] and _G[global] ~= "" then
+        return _G[global]
+    end
+
+    return token
 end
 
 function CN.TokenLabel(token)
@@ -2344,6 +2374,72 @@ CN.migrations = {
         if names > 0 or zones > 0 then
             CN.DebugPrint("Dropped " .. names .. " collectible name(s) and "
                 .. zones .. " vendor zone name(s) the client re-supplies.")
+        end
+    end,
+
+    -- 17 -> 18. THE EXPLORATION STORE GETS A CHARACTER DIMENSION, AND TWO
+    -- MORE STORES LOSE NAMES THE CLIENT ANSWERS FOR FREE.
+    --
+    -- 1. `exploration[id].done` and `.completed` are how much of a zone THIS
+    --    character has explored, and they were written into an account store
+    --    keyed by the achievement id alone -- the same defect migration 14
+    --    fixed for `loremaster`, in the identically-shaped sibling store the
+    --    fix never reached. It is worse here: the refresh is wired to
+    --    `ZONE_CHANGED_NEW_AREA`, so an alt flying through a zone overwrote
+    --    the main's progress on the way past, with no scan involved.
+    --
+    --    The flat fields stay and are the current character's; the map is
+    --    what the Warband view reads. As with migration 14, this cannot know
+    --    WHICH character wrote the existing number, so it does not guess.
+    --
+    -- 2. `exploration[id].name` and `loremaster[id].name` / `.category` are
+    --    localized strings the client returns instantly -- and both were
+    --    being BRANCHED on: the zone lookups substring-match a stored name
+    --    against a live one, so a player who changed client language lost
+    --    both features entirely until a rescan.
+    --
+    -- 3. `achievementTotals` is a per-category snapshot of numbers one client
+    --    call answers, written on every scan and read by nothing at all.
+    [17] = function(db)
+        db.account = db.account or {}
+
+        local split, names = 0, 0
+
+        for _, record in pairs(db.account.exploration or {}) do
+            if type(record) == "table" then
+                if record.progress == nil then
+                    record.progress = {}
+
+                    split = split + 1
+                end
+
+                if record.name ~= nil then
+                    record.name = nil
+
+                    names = names + 1
+                end
+            end
+        end
+
+        for _, record in pairs(db.account.loremaster or {}) do
+            if type(record) == "table"
+                and (record.name ~= nil or record.category ~= nil) then
+
+                record.name     = nil
+                record.category = nil
+
+                names = names + 1
+            end
+        end
+
+        local totals = CN.CountKeys(db.account.achievementTotals)
+
+        db.account.achievementTotals = nil
+
+        if split > 0 or names > 0 or totals > 0 then
+            CN.DebugPrint("Gave " .. split .. " exploration row(s) a character "
+                .. "dimension, dropped " .. names .. " stored name(s), and "
+                .. "removed " .. totals .. " write-only achievement total(s).")
         end
     end,
 }
@@ -4778,7 +4874,7 @@ local function ShowStatus()
         if #missing > 0 then
             table.insert(lines, CN.Accent("/cn setup")
                 .. CN.Muted(" " .. CN.DASH .. " " .. #missing .. " thing"
-                    .. (#missing == 1 and "" or "s")
+                    .. CN.Pluralize(#missing, "")
                     .. " here has never been read"))
         end
     end
@@ -6175,6 +6271,16 @@ CN.rankingGeneration = CN.rankingGeneration or 0
 -- Declared here rather than in Core so that all the generation counters this
 -- addon runs on are in one file, which is the only reason anybody ever finds
 -- the one they need.
+-- How long a burst of reputation ticks or quest turn-ins is allowed to hold
+-- the collection counter still. Published so the suite can turn it off.
+CN.collectionBurstSeconds = 5
+
+-- The one writer, so a caller cannot bump the counter without going past the
+-- debounce decision above.
+function CN.NoteCollectionChanged()
+    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1
+end
+
 for _, event in ipairs({
     "NEW_PET_ADDED", "NEW_MOUNT_ADDED", "NEW_TOY_ADDED",
     "ACHIEVEMENT_EARNED", "TRANSMOG_COLLECTION_UPDATED",
@@ -6197,8 +6303,40 @@ for _, event in ipairs({
     -- The Warband roster shows a level per character.
     "PLAYER_LEVEL_UP",
 }) do
+    -- TWO OF THESE ARE FIREHOSES, AND THIS COUNTER IS A CACHE KEY. 0.64.0.
+    --
+    -- `UPDATE_FACTION` fires many times a second while any reputation is
+    -- moving, and `QUEST_TURNED_IN` comes in runs. Both were bumping the
+    -- generation that the Collections tab's eight store walks, the Warband
+    -- tab's roster and coverage, and the whole Breakdown report are memoized
+    -- against -- so every one of those caches rebuilt on every two-second
+    -- window refresh for as long as the player was questing. About seven
+    -- milliseconds of redundant walking every two seconds, in exactly the
+    -- situation the caches were written for.
+    --
+    -- Worse, it made Breakdown's own five-second burst debounce inert: that
+    -- module debounces its OWN counter and then concatenates this one into
+    -- the same cache key.
+    --
+    -- Two files already carry the note that `UPDATE_FACTION` must be
+    -- debounced before it moves a generation, and the decorator counter was
+    -- fixed on exactly that argument. This counter, in the same file as the
+    -- note, was not. One-fix-one-call-site again.
+    --
+    -- A collection count that is at most five seconds stale is not a problem.
+    -- A tab that rebuilds every store in the addon twice a second is.
+    local bursty = (event == "UPDATE_FACTION")
+        or (event == "QUEST_TURNED_IN")
+        or (event == "TRADE_SKILL_LIST_UPDATE")
+
     CN:RegisterEvent(event, function()
-        CN.collectionGeneration = (CN.collectionGeneration or 0) + 1
+        if bursty then
+            CN.Debounce("collectionGeneration." .. event,
+                CN.collectionBurstSeconds, CN.NoteCollectionChanged)
+            return
+        end
+
+        CN.NoteCollectionChanged()
     end)
 end
 
@@ -6944,7 +7082,7 @@ function CN.InvalidateCandidates(reason, patient)
         -- Asked before built. See `CN.Debugging`.
         if reason and CN.Debugging() then
             CN.DebugPrint("Candidate cache: " .. reason .. " invalidated " .. hit
-                .. " provider" .. (hit == 1 and "" or "s"))
+                .. " provider" .. CN.Pluralize(hit, ""))
         end
     end
 end
@@ -11431,7 +11569,7 @@ UI.RegisterTab{
 
             panel.title:SetText("Show which types?")
             panel.type:SetText(hidden == 0 and "showing everything"
-                or (hidden .. " type" .. (hidden == 1 and "" or "s") .. " hidden"))
+                or (hidden .. " type" .. CN.Pluralize(hidden, "") .. " hidden"))
             panel.why:SetText("Hidden types still appear in Remaining and "
                 .. "Collections.\nThis only filters recommendations.")
 
@@ -12002,7 +12140,7 @@ function UI.Sources()
                     end
                 end
 
-                return lines .. " line" .. (lines == 1 and "" or "s")
+                return CN.Count(lines, "line")
                     .. ", " .. seen .. " with recipes read"
             end,
         },
@@ -12328,7 +12466,7 @@ UI.RegisterTab{
 
         panel.header:SetText(string.format(
             "%d character%s  |cff8a8f96combined: %d professions, %d recipes, %d titles|r",
-            #rows, #rows == 1 and "" or "s",
+            #rows, CN.Pluralize(#rows, ""),
             coverage.professions, coverage.recipes, coverage.titles))
 
         local entries = {}
@@ -12354,7 +12492,8 @@ UI.RegisterTab{
                     .. (row.isCurrent and CN.Brand("  (you)") or "")
                     .. CN.Aside(tostring(row.level) .. " "
                         .. CN.TokenLabel(row.class or "?")
-                        .. (row.faction and (" " .. row.faction) or "")),
+                        .. (row.faction
+                            and (" " .. CN.FactionLabel(row.faction)) or "")),
 
                 -- THE WORDS THIS TAB USES TWICE ALREADY.
                 --
@@ -12435,7 +12574,7 @@ UI.RegisterTab{
         local summary = vault.Summary()
 
         panel.header:SetText(summary.unlocked .. " reward"
-            .. (summary.unlocked == 1 and "" or "s") .. " unlocked"
+            .. CN.Pluralize(summary.unlocked, "") .. " unlocked"
             .. (summary.resetsIn and ("  |cff8a8f96resets in "
                 .. vault.FormatReset(summary.resetsIn) .. "|r") or ""))
 
@@ -12571,7 +12710,7 @@ UI.RegisterTab{
 
         local list = goals.List()
 
-        panel.header:SetText(#list .. " goal" .. (#list == 1 and "" or "s")
+        panel.header:SetText(#list .. " goal" .. CN.Pluralize(#list, "")
             .. " |cff8a8f96of " .. goals.limit .. "|r")
 
         if #list == 0 then
@@ -16453,6 +16592,39 @@ end
 -- Needed because a player can pin an achievement the addon has never scanned,
 -- and answering them with "Achievement 12345" is the addon admitting it did
 -- not look.
+-- An achievement CATEGORY's name, from the client. `GetCategoryInfo` returns
+-- name, parentID, flags. Added in 0.64.0 because Loremaster was persisting the
+-- localized category string and grouping on it.
+function Blizzard.GetCategoryName(categoryID)
+    if not GetCategoryInfo or not categoryID then
+        return nil
+    end
+
+    local ok, name = pcall(GetCategoryInfo, categoryID)
+
+    if ok and type(name) == "string" and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
+-- A title's name by id. The hidden-objectives list read this from disk with
+-- no live path at all.
+function Blizzard.GetTitleName(titleID)
+    if not GetTitleName or not titleID then
+        return nil
+    end
+
+    local ok, name = pcall(GetTitleName, titleID)
+
+    if ok and type(name) == "string" and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
 function Blizzard.GetAchievementName(achievementID)
     if not GetAchievementInfo or not achievementID then
         return nil
@@ -18259,16 +18431,32 @@ function Static.QuestEligibility(questID, character)
 
     character = character or CN.character or {}
 
+    -- THE REASON AS A TOKEN, AS WELL AS AS A SENTENCE. 0.64.0.
+    --
+    -- The caller in Quests.lua recovered WHY a quest was blocked by
+    -- pattern-matching this English prose -- `find("^race")`,
+    -- `find("Alliance")`. Since 0.61.0 the class and race lists in that
+    -- sentence are run through the client's LOCALIZED names, so the string is
+    -- already half-translated and the parser survives only because the label
+    -- prefixes happen to still be English.
+    --
+    -- The reason is known here, exactly, at the moment the sentence is built.
+    -- Throwing it away and reconstructing it from the display text is the
+    -- "branch on a localized string" rule broken by a longer road: the first
+    -- translation of "race only" would silently reclassify every race-gated
+    -- quest as class-gated, and `/cn alts` would name the wrong alt.
+    --
+    -- Third return: a stable token. The sentence is unchanged.
     if record.faction and character.faction
         and record.faction ~= character.faction then
 
-        return false, record.faction .. " only"
+        return false, CN.TokenLabel(record.faction) .. " only", "FACTION"
     end
 
     if record.minLevel and character.level
         and character.level < record.minLevel then
 
-        return false, "level " .. record.minLevel .. " required"
+        return false, "level " .. record.minLevel .. " required", "LEVEL"
     end
 
     local function allowed(list, value, label)
@@ -18302,16 +18490,16 @@ function Static.QuestEligibility(questID, character)
     local okClass, classReason = allowed(record.classes, character.class, "class")
 
     if not okClass then
-        return false, classReason
+        return false, classReason, "CLASS"
     end
 
     local okRace, raceReason = allowed(record.races, character.race, "race")
 
     if not okRace then
-        return false, raceReason
+        return false, raceReason, "RACE"
     end
 
-    return true, nil
+    return true, nil, nil
 end
 
 -- Where a quest is HANDED IN, which is not where it is picked up and is not
@@ -20110,7 +20298,7 @@ function Quests.AnnounceArrival(mapID)
     local zone = Blizzard.GetMapName(mapID) or "This zone"
 
     CN.PrintBlock(zone .. ": " .. CN.Brand(#available)
-        .. " quest" .. (#available == 1 and "" or "s")
+        .. " quest" .. CN.Pluralize(#available, "")
         .. " here you have not picked up",
         {
             CN.Accent("/cn zone")
@@ -20319,20 +20507,26 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
     -- which works while you are standing there and answers nothing when you
     -- ask "could any of my characters do this?" -- which is precisely what
     -- /cn alts is for.
-    local eligible, gateReason = CN.Static.QuestEligibility(questID)
+    -- THE TOKEN, NOT THE SENTENCE. 0.64.0.
+    --
+    -- This recovered the block reason by pattern-matching the English display
+    -- prose the eligibility check builds -- and since 0.61.0 that prose is
+    -- partly localized, so the parser was one translation away from telling
+    -- `/cn alts` that a race-gated quest was class-gated. The reason is
+    -- returned as a stable token now; see the note there.
+    local eligible, gateReason, gate = CN.Static.QuestEligibility(questID)
 
     if not eligible then
-        local reason = CN.blockReasons.WRONG_CLASS
+        local byGate = {
+            CLASS   = CN.blockReasons.WRONG_CLASS,
+            RACE    = CN.blockReasons.WRONG_RACE,
+            LEVEL   = CN.blockReasons.LEVEL_TOO_LOW,
+            FACTION = CN.blockReasons.WRONG_FACTION,
+        }
 
-        if gateReason:find("^race") then
-            reason = CN.blockReasons.WRONG_RACE
-        elseif gateReason:find("^level") then
-            reason = CN.blockReasons.LEVEL_TOO_LOW
-        elseif gateReason:find("Alliance") or gateReason:find("Horde") then
-            reason = CN.blockReasons.WRONG_FACTION
-        end
-
-        return states.INELIGIBLE, reason, gateReason
+        return states.INELIGIBLE,
+            byGate[gate] or CN.blockReasons.WRONG_CLASS,
+            gateReason
     end
 
     -- Prerequisites nobody curated, inferred from repeated observation
@@ -20914,10 +21108,10 @@ CN:RegisterCommand{
         local near, zone = Quests.SplitAvailableByDistance(available, mapID)
 
         if #near > 0 then
-            Print(#near .. " quest" .. (#near == 1 and "" or "s")
+            Print(#near .. " quest" .. CN.Pluralize(#near, "")
                 .. " available right here:")
         else
-            Print(#available .. " quest" .. (#available == 1 and "" or "s")
+            Print(#available .. " quest" .. CN.Pluralize(#available, "")
                 .. " available in this zone, none within "
                 .. CN.nearbyYards .. "yd:")
         end
@@ -20946,7 +21140,7 @@ CN:RegisterCommand{
 
         if #tasks > 0 then
             Print("|cff8a8f96Also " .. #tasks .. " world quest"
-                .. (#tasks == 1 and "" or "s")
+                .. CN.Pluralize(#tasks, "")
                 .. " or bonus objective in this zone" .. CN.DASH .. "no giver to talk "
                 .. "to.|r")
         end
@@ -21940,10 +22134,6 @@ local function Store()
     return CN.Account("achievements")
 end
 
-local function Totals()
-    return CN.Account("achievementTotals")
-end
-
 Achievements.Store  = Store
 Achievements.NameOf = NameOf
 
@@ -21998,8 +22188,7 @@ function Achievements.Scan()
         return 0, 0, 0
     end
 
-    local store  = Store()
-    local totals = Totals()
+    local store = Store()
 
     Wipe(store)
 
@@ -22008,12 +22197,17 @@ function Achievements.Scan()
     local scanned, completed, nearlyDone = 0, 0, 0
 
     for _, categoryID in ipairs(Blizzard.GetAchievementCategories()) do
-        local total, categoryCompleted = Blizzard.GetCategoryCounts(categoryID)
+        local total = Blizzard.GetCategoryCounts(categoryID)
 
-        totals[categoryID] = {
-            total     = total,
-            completed = categoryCompleted,
-        }
+        -- `achievementTotals` IS NOT WRITTEN ANY MORE. 0.64.0.
+        --
+        -- A per-category snapshot of numbers `GetAchievementTotals` answers
+        -- in one call, persisted, re-parsed at every login, rewritten at
+        -- every logout -- and read by nothing at all. `Achievements.Summary`
+        -- takes its totals live; the only other reference in the tree is the
+        -- field-stripper in a migration.
+        --
+        -- The same class migrations 4, 5, 14, 15 and 16 exist to remove.
 
         for index = 1, total do
             local achievement = Blizzard.GetAchievementInCategory(categoryID, index)
@@ -26625,7 +26819,7 @@ CN:RegisterCommand{
         end
 
         Print("Warband (" .. #rows .. " character"
-            .. (#rows == 1 and "" or "s") .. "):")
+            .. CN.Pluralize(#rows, "") .. "):")
 
         for _, row in ipairs(rows) do
             local marker = row.isCurrent and "|cff73b873>|r " or "  "
@@ -26633,7 +26827,8 @@ CN:RegisterCommand{
             CN.PrintLine(marker .. row.key
                 .. " |cff8a8f96" .. tostring(row.level) .. " "
                 .. CN.TokenLabel(row.class or "?")
-                .. (row.faction and (" " .. row.faction) or "") .. "|r")
+                .. (row.faction
+                    and (" " .. CN.FactionLabel(row.faction)) or "") .. "|r")
 
             CN.PrintLine("      professions " .. row.professions
                 .. ", recipes " .. row.recipes
@@ -26651,7 +26846,7 @@ CN:RegisterCommand{
         -- account. With three of ten alts seen the figure was printed as
         -- plain fact and only the `#rows == 1` case was hedged.
         Print("Combined coverage across the " .. #rows .. " character"
-            .. (#rows == 1 and "" or "s") .. " this addon has seen: "
+            .. CN.Pluralize(#rows, "") .. " this addon has seen: "
             .. coverage.professions .. " professions, "
             .. coverage.recipes .. " recipes, " .. coverage.titles .. " titles.")
 
@@ -27667,13 +27862,31 @@ function Currencies.WeeklyUnfilled(character)
 end
 
 function Currencies.Summary(character)
-    local store = CharacterStore(character) or {}
-
     return {
-        known           = CN.CountKeys(store),
+        -- COUNTED OVER THE SAME POPULATION AS THE OTHER TWO. 0.64.0.
+        --
+        -- `known` counted every row in the store while `capped` and
+        -- `weeklyUnfilled` counted only rows the client still lists -- so
+        -- `/cn breakdown` printed `known - capped`, a subtraction across two
+        -- different populations, and could report more capped currencies than
+        -- known ones.
+        known           = Currencies.CurrentCount(character),
         capped          = #Currencies.Capped(character),
         weeklyUnfilled  = #Currencies.WeeklyUnfilled(character),
     }
+end
+
+-- How many rows the client still lists. See the note in `Summary`.
+function Currencies.CurrentCount(character)
+    local count = 0
+
+    for _, record in pairs(CharacterStore(character) or {}) do
+        if IsCurrent(record, character) then
+            count = count + 1
+        end
+    end
+
+    return count
 end
 
 function Currencies.Resolve(text)
@@ -27763,10 +27976,50 @@ end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true })
 
 local lastScan = 0
 
+-- SIXTY SECONDS, NOT TEN, AND NOT WHILE THE PLAYER IS LOOKING. 0.64.0.
+--
+-- `CURRENCY_DISPLAY_UPDATE` fires on every coin picked up, so a ten-second
+-- guard meant this ran continuously through an evening -- and it is not a
+-- cheap read. Each sweep makes three passes over the whole currency list,
+-- recovers an id per row by building and matching a hyperlink, rewrites about
+-- a hundred and fifty tables into SavedVariables, and bumps the collection
+-- generation.
+--
+-- It also EXPANDS AND RE-COLLAPSES the player's currency headers to see rows
+-- the client hides, which is the one place in this addon that changes
+-- something the player can see. It puts them back -- but a player with the
+-- Currency tab open watched their collapsed groups pop open and shut every
+-- ten seconds, which is the addon acting rather than prompting.
+--
+-- So: a minute rather than ten seconds, and never while the frame whose state
+-- it disturbs is on screen. A currency total that is at most a minute stale
+-- costs nothing; the sweep costs a visible flicker.
+Currencies.rescanSeconds = 60
+
+local function CurrencyFrameOpen()
+    local frame = _G.TokenFrame or _G.CharacterFrame
+
+    return frame and frame.IsShown and frame:IsShown() and true or false
+end
+
+Currencies.IsFrameOpen = CurrencyFrameOpen
+
+-- So the suite can reach the deferral, which is otherwise behind a minute's
+-- wait. A guard nothing can exercise is a guard nothing tests.
+function Currencies.ForgetLastScan()
+    lastScan = 0
+end
+
 CN:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function()
     local now = time()
 
-    if now - lastScan < 10 then
+    if now - lastScan < Currencies.rescanSeconds then
+        return
+    end
+
+    -- Deferred rather than skipped: `lastScan` is not advanced, so the sweep
+    -- happens as soon as the player closes the window.
+    if CurrencyFrameOpen() then
         return
     end
 
@@ -27843,6 +28096,15 @@ CN:RegisterCommand{
     order   = 78,
     help    = "Rescan currencies for this character.",
     handler = function()
+        -- A SCAN THE PLAYER ASKED FOR RE-ARMS THE TIMER. 0.64.0.
+        --
+        -- The automatic sweep is a minute apart and defers while the player's
+        -- own currency window is open. Without this, a manual scan left the
+        -- old timestamp in place, so the next automatic sweep could fire
+        -- seconds after the player had just scanned by hand -- doing the
+        -- expensive three-pass read twice for one answer.
+        Currencies.ForgetLastScan()
+
         local seen, atCap, weekly = Currencies.Scan()
 
         Print("Scanned " .. seen .. " currencies.")
@@ -27884,9 +28146,14 @@ local function Are(count)
     return count == 1 and "is" or "are"
 end
 
-local function Plural(count, singular, plural)
-    return count == 1 and singular or (plural or (singular .. "s"))
-end
+-- THROUGH THE SHARED ONE. 0.64.0.
+--
+-- This file kept a private copy of the pluralizer while `CN.Pluralize` had
+-- exactly one caller and twenty-two other places hand-rolled the same
+-- expression. Nothing was wrong -- it is the one-fix-one-call-site shape
+-- pre-loaded, and the next grammar change would have landed in one of
+-- twenty-three places.
+local Plural = CN.Pluralize
 
 ------------------------------------------------------------
 -- REGISTRY
@@ -28673,6 +28940,83 @@ end
 
 Exploration.Store = Store
 
+-- A NAME, LIVE. 0.64.0.
+--
+-- The stored name is an achievement name in whatever language last scanned,
+-- and `ForCurrentZone` matches it against `GetZoneText()`, which is live. So a
+-- player who changed client language had the whole Exploration feature
+-- disappear until they happened to rescan -- which is verbatim the failure
+-- 0.62.0 describes as fixed. That release corrected the COMPARISON and left
+-- the stored side frozen: one half of the defect.
+--
+-- Same resolver shape as `Achievements.NameOf`, `Pets.NameOf`, `Mounts.NameOf`
+-- and `Toys.NameOf`. Fifth store to get one.
+function Exploration.NameOf(achievementID, record)
+    local live = Blizzard.GetAchievementName
+        and Blizzard.GetAchievementName(achievementID)
+
+    if live and live ~= "" then
+        return live
+    end
+
+    return (record and record.name)
+        or ("Achievement " .. tostring(achievementID))
+end
+
+-- PROGRESS THROUGH A ZONE IS ONE CHARACTER'S. 0.64.0.
+--
+-- `done` and `completed` were written into an ACCOUNT store keyed by the
+-- achievement id alone -- exactly the defect fixed in `Loremaster` in 0.61.0,
+-- in the identically-shaped sibling store the fix never reached. It is worse
+-- here, because `RefreshCurrentZone` is wired to `ZONE_CHANGED_NEW_AREA`, so
+-- it does not even take a scan: an alt flying through a zone overwrites the
+-- main's progress on the way past.
+--
+-- The split follows what the game scopes. The achievement's NAME and its
+-- criteria COUNT are properties of the achievement. How much of it you have
+-- explored is yours.
+function Exploration.DoneFor(record, characterKey)
+    if type(record) ~= "table" then
+        return 0
+    end
+
+    characterKey = characterKey or CN.characterKey or CN.GetCharacterKey()
+
+    if record.progress and record.progress[characterKey] then
+        return record.progress[characterKey].done or 0,
+            record.progress[characterKey].completed and true or false
+    end
+
+    -- Only the CURRENT character may fall back to the flat field, which holds
+    -- whoever wrote last -- naming another character as its owner would be
+    -- telling the same lie somewhere new.
+    if characterKey == (CN.characterKey or CN.GetCharacterKey()) then
+        return record.done or 0, record.completed and true or false
+    end
+
+    return nil, nil
+end
+
+-- The one writer, so the two places that record progress cannot drift.
+function Exploration.NoteProgress(record, done, completed)
+    if type(record) ~= "table" then
+        return
+    end
+
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    record.progress      = record.progress or {}
+    record.progress[key] = {
+        done      = done,
+        completed = completed and true or false,
+    }
+
+    -- Kept flat as well, so every existing reader works unchanged and a
+    -- database written by an older version still reads correctly.
+    record.done      = done
+    record.completed = completed and true or false
+end
+
 ------------------------------------------------------------
 -- SCAN
 ------------------------------------------------------------
@@ -28683,14 +29027,18 @@ function Exploration.Scan()
     local seen, complete = 0, 0
 
     for _, achievement in ipairs(Blizzard.GetExplorationAchievements()) do
-        store[achievement.achievementID] = {
-            achievementID = achievement.achievementID,
-            name          = achievement.name,
-            completed     = achievement.completed,
-            done          = achievement.done,
-            criteria      = achievement.criteria,
-            lastSeen      = time(),
-        }
+        local held = store[achievement.achievementID] or {}
+
+        held.achievementID = achievement.achievementID
+        held.criteria      = achievement.criteria
+        held.lastSeen      = time()
+
+        -- `name` IS NOT STORED. See `Exploration.NameOf`.
+        held.name = nil
+
+        Exploration.NoteProgress(held, achievement.done, achievement.completed)
+
+        store[achievement.achievementID] = held
 
         seen = seen + 1
 
@@ -28717,11 +29065,13 @@ function Exploration.Summary()
     }
 
     for _, record in pairs(Store()) do
+        local done, completed = Exploration.DoneFor(record)
+
         counts.zones    = counts.zones + 1
         counts.criteria = counts.criteria + (record.criteria or 0)
-        counts.done     = counts.done + (record.done or 0)
+        counts.done     = counts.done + (done or 0)
 
-        if record.completed then
+        if completed then
             counts.complete = counts.complete + 1
         end
     end
@@ -28733,14 +29083,18 @@ end
 function Exploration.Closest(limit)
     local rows = {}
 
-    for _, record in pairs(Store()) do
-        if not record.completed and (record.criteria or 0) > 0 then
+    for achievementID, record in pairs(Store()) do
+        local done, completed = Exploration.DoneFor(record)
+
+        done = done or 0
+
+        if not completed and (record.criteria or 0) > 0 then
             table.insert(rows, {
                 achievementID = record.achievementID,
-                name          = record.name,
-                done          = record.done,
+                name          = Exploration.NameOf(achievementID, record),
+                done          = done,
                 criteria      = record.criteria,
-                remaining     = record.criteria - record.done,
+                remaining     = record.criteria - done,
             })
         end
     end
@@ -28843,8 +29197,8 @@ function Exploration.ForCurrentZone()
         return string.sub(candidate, -(#needle + 1)) == (" " .. needle)
     end
 
-    for _, record in pairs(store) do
-        if Names(record.name) then
+    for achievementID, record in pairs(store) do
+        if Names(Exploration.NameOf(achievementID, record)) then
             -- Learned, so the ambiguity is resolved once rather than every
             -- time -- and resolved by the map, which cannot be duplicated.
             if mapID then
@@ -28869,15 +29223,17 @@ CN.RegisterCandidateProvider("Exploration", function()
 
     local record = Exploration.ForCurrentZone()
 
-    if record and not record.completed and (record.criteria or 0) > 0 then
-        local remaining = record.criteria - record.done
+    local done, completed = Exploration.DoneFor(record)
+
+    if record and not completed and (record.criteria or 0) > 0 then
+        local remaining = record.criteria - (done or 0)
 
         if remaining > 0
             and not CN.IsIgnored(CN.objectiveTypes.EXPLORATION, record.achievementID)
             and not CN.IsDeferred(CN.objectiveTypes.EXPLORATION, record.achievementID) then
 
             local reasons = {
-                remaining .. " subzone" .. (remaining == 1 and "" or "s")
+                CN.Count(remaining, "subzone")
                     .. " left in this zone",
             }
 
@@ -28939,7 +29295,6 @@ local function RefreshCurrentZone()
         return false
     end
 
-    record.done     = done
     record.criteria = criteria
 
     -- AND WRITE `completed`, which nothing did.
@@ -28951,7 +29306,12 @@ local function RefreshCurrentZone()
     -- SET AND CLEARED, both. A patch that adds a subzone to a zone you had
     -- finished must be able to un-finish it; a flag that only ever goes one
     -- way is a flag that is wrong for the rest of the account's life.
-    record.completed = (done and done >= criteria) or nil
+    --
+    -- THROUGH THE ONE WRITER, so this and the scan cannot record progress
+    -- differently -- and so both file it under the character it belongs to.
+    -- This function is wired to `ZONE_CHANGED_NEW_AREA`, so before 0.64.0 an
+    -- alt flying through a zone overwrote the main's progress in passing.
+    Exploration.NoteProgress(record, done, done and done >= criteria)
 
     return true
 end
@@ -29288,16 +29648,22 @@ function Filters.DescribeObjective(objectiveType, id)
     -- addon had not seen yet produced "Faction 2600" -- which is the addon
     -- telling the player it does not know what they just asked for. The
     -- client knows. Ask it.
+    -- THE CLIENT FIRST, THE STORE SECOND. 0.64.0.
+    --
+    -- This asked the STORE first and the client only when the store was
+    -- empty, which is backwards and is the opposite of what the pet, mount
+    -- and achievement branches below do. A stored name is frozen at whatever
+    -- language last scanned, so `/cn hidden` listed old-locale faction names
+    -- beside correctly re-localized pet names in the same list.
     if objectiveType == types.REPUTATION and numericID then
-        local cached = CN.Account("factionNames")[numericID]
-
-        if cached then
-            return cached
-        end
-
         local data = CN.Blizzard.GetFactionByID(numericID)
 
-        return (data and data.name) or ("Faction " .. numericID)
+        if data and data.name then
+            return data.name
+        end
+
+        return CN.Account("factionNames")[numericID]
+            or ("Faction " .. numericID)
     end
 
     if objectiveType == types.PET and numericID then
@@ -29389,7 +29755,18 @@ function Filters.DescribeObjective(objectiveType, id)
             or ("Achievement " .. numericID)
     end
 
+    -- AND THESE TWO HAD NO LIVE PATH AT ALL. 0.64.0.
+    --
+    -- Migration 16's header says it removed "the last of the names the client
+    -- hands back for free", and these were still being read from disk with no
+    -- fallback to the client that answers instantly.
     if objectiveType == types.CURRENCY and numericID then
+        local info = CN.Blizzard.GetCurrency and CN.Blizzard.GetCurrency(numericID)
+
+        if info and info.name then
+            return info.name
+        end
+
         return CN.Account("currencyNames")[numericID] or ("Currency " .. numericID)
     end
 
@@ -29398,6 +29775,12 @@ function Filters.DescribeObjective(objectiveType, id)
     end
 
     if objectiveType == types.TITLE and numericID then
+        local live = CN.Blizzard.GetTitleName and CN.Blizzard.GetTitleName(numericID)
+
+        if live and live ~= "" then
+            return live
+        end
+
         return CN.Account("titleNames")[numericID] or ("Title " .. numericID)
     end
 
@@ -29696,7 +30079,7 @@ CN:RegisterCommand{
             local count = Filters.RestoreAll()
 
             Print("Restored " .. count .. " hidden objective"
-                .. (count == 1 and "" or "s") .. ".")
+                .. CN.Pluralize(count, "") .. ".")
             return
         end
 
@@ -30775,7 +31158,7 @@ local function VendorLines(lines, itemID)
     for index, seller in ipairs(sellers) do
         if index > 3 then
             Add(lines, "and " .. (#sellers - 3) .. " more recorded seller"
-                .. ((#sellers - 3) == 1 and "" or "s"), GREY)
+                .. CN.Pluralize((#sellers - 3), ""), GREY)
             break
         end
 
@@ -31500,7 +31883,7 @@ function Setup.RemindIfNeeded()
     end
 
     CN.PrintBlock(
-        #missing .. " thing" .. (#missing == 1 and "" or "s")
+        CN.Count(#missing, "thing")
             .. " here " .. (#missing == 1 and "has" or "have")
             .. " never been read: "
             .. CN.Muted(string.lower(table.concat(named, ", "))),
@@ -31968,7 +32351,7 @@ function Goals.Plan(goal)
             plan.zone = record.zone
 
             step("Seen " .. (record.sightings or 1) .. " time"
-                .. ((record.sightings or 1) == 1 and "" or "s") .. " here.")
+                .. CN.Pluralize((record.sightings or 1), "") .. " here.")
         end
     end
 
@@ -32417,7 +32800,7 @@ CN:RegisterCommand{
         if string.lower(args) == "all" then
             local count = Goals.Clear()
 
-            Print("Cleared " .. count .. " goal" .. (count == 1 and "" or "s") .. ".")
+            Print("Cleared " .. CN.Count(count, "goal") .. ".")
             return
         end
 
@@ -34077,6 +34460,37 @@ end
 
 Loremaster.Records = Records
 
+-- The achievement's name, and its category's, from the client. See the note
+-- in `Scan`. The stored fallbacks keep an older database readable until its
+-- first rescan.
+function Loremaster.NameOf(achievementID, record)
+    local live = Blizzard.GetAchievementName
+        and Blizzard.GetAchievementName(achievementID)
+
+    if live and live ~= "" then
+        return live
+    end
+
+    return (record and record.name)
+        or ("Achievement " .. tostring(achievementID))
+end
+
+function Loremaster.CategoryOf(record)
+    if type(record) ~= "table" then
+        return "Other"
+    end
+
+    if record.categoryID and Blizzard.GetCategoryName then
+        local live = Blizzard.GetCategoryName(record.categoryID)
+
+        if live and live ~= "" then
+            return live
+        end
+    end
+
+    return record.category or "Other"
+end
+
 -- THE STORE HAD NO CHARACTER DIMENSION, AND SAID IT DID. FIXED IN 0.61.0.
 --
 -- `Loremaster.Scan`'s own comment says the store exists "so the Warband view
@@ -34146,8 +34560,20 @@ function Loremaster.Scan()
 
                 local held = store[id] or {}
 
-                held.name      = achievement.name
-                held.category  = category.name
+                -- NEITHER NAME IS STORED. 0.64.0.
+                --
+                -- Both are LOCALIZED strings the client answers instantly,
+                -- and both were being branched on: `ByCategory` groups on the
+                -- stored category and `ForZone` substring-matches the stored
+                -- achievement name against a LIVE zone name. So a player who
+                -- switched client language read English achievement names
+                -- under English headings, and `ForZone` matched nothing at
+                -- all -- the "This zone" block and the already-here bonus in
+                -- `/cn zones` simply disappeared until a rescan.
+                --
+                -- Sixth store to lose a name it did not need to keep;
+                -- migrations 4, 5, 14, 15 and 16 were the others.
+                held.categoryID = category.categoryID
                 held.completed = achievement.completed and true or false
                 held.criteria  = criteria
 
@@ -34184,7 +34610,7 @@ function Loremaster.ByCategory(includeCompleted)
 
     for id, record in pairs(Records()) do
         if includeCompleted or not record.completed then
-            local key = record.category or "Other"
+            local key = Loremaster.CategoryOf(record)
 
             if not groups[key] then
                 groups[key] = {}
@@ -34193,7 +34619,7 @@ function Loremaster.ByCategory(includeCompleted)
 
             table.insert(groups[key], {
                 id        = id,
-                name      = record.name,
+                name      = Loremaster.NameOf(id, record),
                 completed = record.completed,
                 done      = Loremaster.DoneFor(record) or 0,
                 criteria  = record.criteria or 0,
@@ -34251,8 +34677,8 @@ function Loremaster.Closest(limit)
 
             local row = {
                 id       = id,
-                name     = record.name,
-                category = record.category,
+                name     = Loremaster.NameOf(id, record),
+                category = Loremaster.CategoryOf(record),
                 done     = done,
                 criteria = record.criteria,
                 fraction = done / record.criteria,
@@ -34347,10 +34773,12 @@ function Loremaster.ForZone(mapID)
     --      something else.
     --   3. Lowest id. Arbitrary, but the same arbitrary answer every time,
     --      which is the whole point.
-    local best, bestRecord
+    local best, bestRecord, bestName
 
     for id, record in pairs(Records()) do
-        if record.name and string.find(record.name, zoneName, 1, true) then
+        local heldName = Loremaster.NameOf(id, record)
+
+        if heldName and string.find(heldName, zoneName, 1, true) then
             local better
 
             if not bestRecord then
@@ -34359,18 +34787,19 @@ function Loremaster.ForZone(mapID)
                 ~= (record.completed and true or false) then
 
                 better = not record.completed
-            elseif #record.name ~= #bestRecord.name then
-                better = #record.name < #bestRecord.name
+            elseif #heldName ~= #bestName then
+                better = #heldName < #bestName
             else
                 better = id < best.id
             end
 
             if better then
                 bestRecord = record
+                bestName   = heldName
 
                 best = {
                     id        = id,
-                    name      = record.name,
+                    name      = heldName,
                     completed = record.completed,
                     done      = Loremaster.DoneFor(record) or 0,
                     criteria  = record.criteria or 0,
@@ -36818,7 +37247,7 @@ CN:RegisterCommand{
         -- figure regardless. One convention, both lines.
         Print(string.format("%d stop%s, about %s of the %dm you have:",
             #plan.stops,
-            #plan.stops == 1 and "" or "s",
+            CN.Pluralize(#plan.stops, ""),
             CN.WithConfidence(Session.FormatDuration(plan.seconds),
                 CN.ConfidenceFor(plan.confident)),
             plan.minutes))
@@ -37561,7 +37990,7 @@ CN:RegisterCommand{
         local summary = Vault.Summary()
 
         Print("Great Vault: " .. summary.unlocked .. " reward"
-            .. (summary.unlocked == 1 and "" or "s") .. " unlocked"
+            .. CN.Pluralize(summary.unlocked, "") .. " unlocked"
             .. (summary.resetsIn
                 and (" |cff8a8f96resets in " .. FormatReset(summary.resetsIn) .. "|r")
                 or ""))
@@ -42079,7 +42508,18 @@ function Waiting.Knowledge()
     end
 
     for currencyID, record in pairs(currencies.CharacterStore() or {}) do
-        if record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0
+        -- THE SAME STALENESS RULE THE CURRENCY MODULE APPLIES. 0.64.0.
+        --
+        -- `Currencies.IsCurrent` exists so a row the client has stopped
+        -- listing -- a currency retired at a patch, or any row still carrying
+        -- migration 13's "unconfirmed" serial -- is not reported as though it
+        -- were live. `Capped` and `WeeklyUnfilled` both apply it; this
+        -- re-implemented the filter without it.
+        --
+        -- So `/cn clock` said "still 1,500 to earn this week" about a
+        -- currency `/cn currencies` had correctly dropped, on the same login.
+        if currencies.IsCurrent(record)
+            and record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0
             and (record.weeklyRemaining or 0) > 0 then
 
             local info = Blizzard.GetCurrency(currencyID)
@@ -48208,7 +48648,7 @@ CN:RegisterCommand{
         if #mine == 0 then
             Print("No orders outstanding.")
         else
-            Print(#mine .. " order" .. (#mine == 1 and "" or "s") .. ":")
+            Print(#mine .. " order" .. CN.Pluralize(#mine, "") .. ":")
 
             local session = CN:GetModule("Session")
 
@@ -49264,7 +49704,15 @@ function Hud.Refresh()
     if not objective then
         frame.objective = nil
 
-        frame.label:SetText("|cff8a8f96nothing actionable|r")
+        -- THROUGH THE LOCALE TABLE, LIKE THE OTHER CALL SITE. 0.64.0.
+        --
+        -- `Modules/Broker.lua` prints `CN.L["nothing actionable"]` for the
+        -- same state. The key is canonical and translated in all ten shipped
+        -- locale files, and the build lint only requires that a key be used
+        -- ONCE -- so a second, hardcoded copy of the same sentence passed
+        -- every check. A German player read "nichts zu tun" in the broker
+        -- feed and "nothing actionable" an inch away on the heads-up line.
+        frame.label:SetText(CN.Muted(CN.L["nothing actionable"]))
         frame.detail:SetText("")
 
         return true
@@ -50026,7 +50474,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.63.0
+## Version: 0.64.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -50281,6 +50729,66 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.64.0]
+
+Twelve defects, found by looking for one specific thing: places where an
+earlier fix landed at one call site and its siblings were missed. That search
+was added to the process last release, and it found most of this one.
+
+### Fixed — your progress, and whose it is
+
+- **Zone exploration progress was shared between your characters.** How much
+  of a zone you have explored was stored against the zone rather than against
+  you, and the refresh runs when you *enter* a zone — so an alt flying through
+  overwrote your main's progress in passing, with no scan involved. This is the
+  same defect fixed for Loremaster three releases ago, in the neighbouring
+  store the fix never reached.
+- **The whole Exploration feature disappeared if you changed client
+  language** — and so did the Loremaster zone lookup. Both matched an
+  achievement name stored in the old language against a zone name in the new
+  one. 0.62.0 fixed one half of that comparison and left the other frozen.
+- **`/cn hidden` mixed languages in one list.** Faction, title and currency
+  names came off disk while pet and mount names beside them came from the
+  client.
+- **The heads-up line said "nothing actionable" in English** while the data
+  broker feed an inch away said it in yours. Same sentence, one of the two
+  hardcoded.
+- **Alliance and Horde were printed untranslated** on the Warband roster,
+  beside a class name that had been translated correctly.
+- **`/cn clock` reported currencies the game has retired**, which `/cn
+  currencies` had already correctly dropped, on the same login. One staleness
+  rule; two of the three readers applied it.
+- **`/cn breakdown` subtracted one population from another** — it counted
+  every currency row it had ever seen and then subtracted only the live ones.
+
+### Faster
+
+- **Seven milliseconds every two seconds, while questing.** Reputation ticks
+  and quest turn-ins were moving the counter that the Collections tab, the
+  Warband roster and the whole Remaining report use to decide whether anything
+  has changed. Since a reputation tick fires many times a second, every one of
+  those caches rebuilt on every window refresh — the caches were doing nothing
+  in exactly the situation they were written for.
+- **The currency sweep no longer runs every ten seconds** — nor while your own
+  currency window is open. It briefly expands and re-collapses your currency
+  headers to see rows the game hides, and a player with that window open
+  watched their groups pop open and shut all evening. It waits until you close
+  it.
+- **A per-category snapshot of achievement totals stopped being written to
+  disk.** It was rewritten at every logout, re-parsed at every login, and read
+  by nothing at all.
+
+### Internal
+
+- **Why a quest is blocked is a token now, not a sentence.** The reason was
+  recovered by pattern-matching English display text that had already been
+  half-translated — one more translation away from telling you the wrong alt
+  could do a quest.
+- **One pluralizer.** The shared one had a single caller while twenty-two
+  places wrote the same expression by hand and one module kept a third private
+  copy. Nothing was wrong yet; it is the one-fix-one-call-site shape waiting to
+  happen.
 
 ## [0.63.0]
 
@@ -55476,7 +55984,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.63.0
+0.64.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -57639,8 +58147,8 @@ mutate "Modules/Exploration.lua" \
     "the subzone count is frozen from the moment you enter the zone"
 
 mutate "Modules/Exploration.lua" \
-    "    record.completed = (done and done >= criteria) or nil" \
-    "    record.completed = nil" \
+    "    Exploration.NoteProgress(record, done, done and done >= criteria)" \
+    "    Exploration.NoteProgress(record, done, nil)" \
     "a zone you finished sits at the top of the list reading zero left"
 
 mutate "Modules/Orders.lua" \
@@ -57871,8 +58379,8 @@ mutate "Modules/Loremaster.lua" \
     "another character is shown whichever character scanned last"
 
 mutate "Modules/Loremaster.lua" \
-    "            elseif #record.name ~= #bestRecord.name then
-                better = #record.name < #bestRecord.name" \
+    "            elseif #heldName ~= #bestName then
+                better = #heldName < #bestName" \
     "            elseif false then
                 better = #record.name < #bestRecord.name" \
     "a zone picks a different achievement on every login"
@@ -58106,6 +58614,65 @@ mutate "Modules/Alts.lua" \
     "CN.TokenLabel(row.class or \"\")" \
     "tostring(row.class or \"\")" \
     "/cn alts prints a raw class token"
+
+# ------------------------------------------------------------
+# 0.64.0
+# ------------------------------------------------------------
+
+mutate "Modules/Exploration.lua" \
+    "    if characterKey == (CN.characterKey or CN.GetCharacterKey()) then
+        return record.done or 0, record.completed and true or false
+    end
+
+    return nil, nil" \
+    "    return record.done or 0, record.completed and true or false" \
+    "an alt is shown whichever character explored last"
+
+mutate "Modules/Exploration.lua" \
+    "        if Names(Exploration.NameOf(achievementID, record)) then" \
+    "        if Names(record.name) then" \
+    "the zone lookup reads a name frozen at the last scan's language"
+
+mutate "Scoring.lua" \
+    "        if bursty then
+            CN.Debounce(\"collectionGeneration.\" .. event,
+                CN.collectionBurstSeconds, CN.NoteCollectionChanged)
+            return
+        end" \
+    "        if false then
+            return
+        end" \
+    "a reputation tick rebuilds every store in the addon"
+
+mutate "Modules/Currencies.lua" \
+    "    if CurrencyFrameOpen() then
+        return
+    end" \
+    "    if false then
+        return
+    end" \
+    "the currency sweep reopens the player's collapsed headers"
+
+mutate "Modules/Waiting.lua" \
+    "        if currencies.IsCurrent(record)
+            and record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0" \
+    "        if record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0" \
+    "/cn clock reports a currency the client has retired"
+
+mutate "Providers/StaticData.lua" \
+    "        return false, classReason, \"CLASS\"" \
+    "        return false, classReason" \
+    "the block reason has to be parsed back out of English prose"
+
+mutate "Modules/Loremaster.lua" \
+    "        local heldName = Loremaster.NameOf(id, record)" \
+    "        local heldName = record.name" \
+    "the zone achievement is matched against a stored name"
+
+mutate "Core.lua" \
+    "    local global = CN.factionGlobals[token]" \
+    "    local global = nil" \
+    "the roster prints an untranslated faction token"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -60117,6 +60684,17 @@ function CN_TEST_PetDisplayRows()
     return rows
 end
 
+-- ALLIANCE AND HORDE, IN THE CLIENT'S OWN LANGUAGE.
+--
+-- `UnitFactionGroup` returns an English token and the roster printed it raw
+-- beside a class that had been run through the client's localized names. The
+-- client has always kept both names in these globals; the stub did not have
+-- them, so the two could not be told apart from here. Deliberately NOT
+-- English, like the class names above.
+FACTION_ALLIANCE           = "Allianz"
+FACTION_HORDE              = "Horde"
+FACTION_STANDING_LABEL4    = "Neutral"
+
 LE_PET_JOURNAL_FILTER_COLLECTED     = 1
 LE_PET_JOURNAL_FILTER_NOT_COLLECTED = 2
 
@@ -60396,6 +60974,23 @@ end
 -- for every one of them. Every meta achievement in the game is past that cap
 -- and none was representable here.
 local wideAchievementID = 990000
+
+-- AN ACHIEVEMENT THE CLIENT KNOWS BY NAME.
+--
+-- Since 0.64.0 the addon reads achievement names live rather than from its own
+-- store, so a test that invents a store row without telling the client about
+-- it is testing a row the addon can no longer name.
+function CN_TEST_MakeAchievement(achievementID, name, criteria, done)
+    achievementData[achievementID] = {
+        name      = name,
+        points    = 10,
+        completed = false,
+        criteria  = criteria or 0,
+        done      = done or 0,
+    }
+
+    return achievementID
+end
 
 function CN_TEST_MakeWideAchievement(criteria, done)
     wideAchievementID = wideAchievementID + 1
@@ -60908,19 +61503,39 @@ C_CurrencyInfo = {
 -- the currency's LOCALIZED name, and every currency in this fixture is named
 -- in English -- so the gate looked correct here and returned zero rows on
 -- every non-English client in the world.
+-- LISTED AS WELL AS LOOKED UP. 0.64.0.
+--
+-- This wrote only the by-id table, which is what `GetCurrencyInfo` answers
+-- from -- so `Currencies.Scan`, which walks the currency LIST, never saw the
+-- row and never gave it a sweep serial. A test that then wrote the row into
+-- the store by hand was modelling a state the client cannot produce, and it
+-- passed only because the staleness rule was missing from the reader.
 function CN_TEST_SetCurrencyRow(id, name, maxWeekly)
+    for index = #CN_TEST_CURRENCY_ROWS, 1, -1 do
+        if CN_TEST_CURRENCY_ROWS[index].currencyID == id then
+            table.remove(CN_TEST_CURRENCY_ROWS, index)
+        end
+    end
+
     if not name then
         currencyByID[id] = nil
 
         return
     end
 
-    currencyByID[id] = {
-        currencyID        = id,
-        name              = name,
-        quantity          = 0,
-        maxWeeklyQuantity = maxWeekly or 0,
+    local row = {
+        currencyID             = id,
+        name                   = name,
+        quantity               = 250,
+        maxQuantity            = 0,
+        quantityEarnedThisWeek = 0,
+        maxWeeklyQuantity      = maxWeekly or 0,
+        totalEarned            = 250,
     }
+
+    currencyByID[id] = row
+
+    table.insert(CN_TEST_CURRENCY_ROWS, row)
 end
 
 ------------------------------------------------------------
@@ -68132,6 +68747,250 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
+print("\nWhat 0.64.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- HOW MUCH OF A ZONE YOU HAVE EXPLORED IS YOURS.
+    --
+    -- Written into an account store keyed by achievement id alone -- the same
+    -- defect fixed for Loremaster in 0.61.0, in the sibling store the fix
+    -- never reached. Worse here: the refresh is wired to
+    -- ZONE_CHANGED_NEW_AREA, so an alt flying through overwrote the main's
+    -- progress on the way past, with no scan involved.
+    ------------------------------------------------------------
+    local exploreModule = CN:GetModule("Exploration")
+
+    exploreModule.Scan()
+
+    local store = CN.Account("exploration")
+
+    local anyID = next(store)
+
+    assert(anyID, "the fixture must have an exploration row")
+
+    local record = store[anyID]
+
+    assert(record.progress, "the row carries a per-character map")
+
+    assert(exploreModule.DoneFor(record, "Realm-Someone-Else") == nil,
+        "a character that has never explored this zone is UNKNOWN, not this "
+        .. "character's number wearing somebody else's name")
+
+    -- And the name is not on disk.
+    assert(record.name == nil,
+        "the achievement name is read from the client, not stored")
+
+    assert(exploreModule.NameOf(anyID, record):find("Explore", 1, true),
+        "and the client still names it: "
+        .. tostring(exploreModule.NameOf(anyID, record)))
+
+    print("  exploration progress belongs to the character that walked it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A FIREHOSE MUST NOT MOVE A CACHE KEY.
+    --
+    -- `UPDATE_FACTION` fires many times a second while any reputation moves,
+    -- and it was bumping the generation the Collections tab's eight store
+    -- walks, the Warband roster and the whole Breakdown report are memoized
+    -- against -- so all of them rebuilt on every window refresh for as long
+    -- as the player was questing. Two other files already carried the note
+    -- that this event must be debounced first.
+    ------------------------------------------------------------
+    CN.ForgetDebounces()
+
+    local startedAt = CN.collectionGeneration or 0
+
+    for _ = 1, 20 do
+        CN.Dispatch("UPDATE_FACTION")
+    end
+
+    -- Not zero: the debounce has a leading edge, so the first tick of a burst
+    -- is served at once and the rest are folded into it. What must not happen
+    -- is one bump per tick, which is what every cache keyed on this counter
+    -- was paying for.
+    local moved = (CN.collectionGeneration or 0) - startedAt
+
+    assert(moved <= 2,
+        "a burst of twenty reputation ticks must not move the counter twenty "
+        .. "times: " .. tostring(moved))
+
+    -- A collection that genuinely happened is still immediate.
+    local held = CN.collectionGeneration or 0
+
+    CN.Dispatch("NEW_PET_ADDED")
+
+    assert((CN.collectionGeneration or 0) > held,
+        "and collecting something still moves it at once")
+
+    print("  a burst of reputation ticks does not rebuild every store twice a "
+        .. "second")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CURRENCY SWEEP DOES NOT DISTURB A WINDOW THE PLAYER IS READING.
+    --
+    -- It expands and re-collapses the player's currency headers to see rows
+    -- the client hides. It puts them back -- but a player with that frame
+    -- open watched their collapsed groups pop open and shut every ten
+    -- seconds, which is the addon acting rather than prompting.
+    ------------------------------------------------------------
+    local currencyModule = CN:GetModule("Currencies")
+
+    assert(currencyModule.rescanSeconds >= 60,
+        "the sweep is a minute apart, not ten seconds: "
+        .. tostring(currencyModule.rescanSeconds))
+
+    assert(currencyModule.IsFrameOpen() == false,
+        "nothing is open in the fixture")
+
+    -- And the sweep actually defers while it IS open.
+    local realFrame = _G.TokenFrame
+
+    _G.TokenFrame = { IsShown = function() return true end }
+
+    assert(currencyModule.IsFrameOpen() == true,
+        "an open currency frame is seen")
+
+    local scans = 0
+
+    local realScan = currencyModule.Scan
+
+    currencyModule.Scan = function(...)
+        scans = scans + 1
+
+        return realScan(...)
+    end
+
+    CN_TEST_CURRENCY_LAST_SCAN = nil
+
+    currencyModule.ForgetLastScan()
+
+    CN.Dispatch("CURRENCY_DISPLAY_UPDATE")
+
+    assert(scans == 0,
+        "the sweep must not disturb a frame the player is reading")
+
+    _G.TokenFrame = realFrame
+
+    currencyModule.ForgetLastScan()
+
+    CN.Dispatch("CURRENCY_DISPLAY_UPDATE")
+
+    assert(scans == 1,
+        "and it runs as soon as they close it: " .. scans)
+
+    currencyModule.Scan = realScan
+
+    print("  the currency sweep leaves the player's own window alone")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE STALENESS RULE, APPLIED WHEREVER CURRENCIES ARE REPORTED.
+    --
+    -- `Currencies.IsCurrent` exists so a row the client has stopped listing
+    -- is not reported as live. Two readers applied it and `/cn clock`
+    -- re-implemented the filter without it, so a retired currency showed in
+    -- one command and not the other on the same login.
+    ------------------------------------------------------------
+    local currencyModule = CN:GetModule("Currencies")
+    local waiting        = CN:GetModule("Waiting")
+
+    CN_TEST_SetCurrencyRow(2916, "Wissen Zwei", 400)
+
+    currencyModule.Scan()
+
+    local function KnowledgeHas(id)
+        for _, row in ipairs(waiting.Knowledge()) do
+            if row.currencyID == id then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    assert(KnowledgeHas(2916), "a live weekly currency is reported")
+
+    -- The client stops listing it -- a patch retired it. The row stays in the
+    -- store until something prunes it, carrying its old serial.
+    CN_TEST_SetCurrencyRow(2916, nil)
+
+    currencyModule.Scan()
+
+    assert(not KnowledgeHas(2916),
+        "and a row the client no longer lists is not reported as still "
+        .. "earnable")
+
+    print("  /cn clock and /cn currencies agree about which rows are live")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE BLOCK REASON IS A TOKEN, NOT PARSED BACK OUT OF ENGLISH PROSE.
+    ------------------------------------------------------------
+    CN.Static.RegisterQuests({
+        [978001] = { name = "Druids Only",     classes = { "DRUID" } },
+        [978002] = { name = "Level Gate",      minLevel = 70 },
+        [978003] = { name = "Horde Business",  faction = "Horde" },
+        [978004] = { name = "Orcs Only",       races   = { "Orc" } },
+    })
+
+    local mage = {
+        class   = "MAGE",
+        race    = "Human",
+        faction = "Alliance",
+        level   = 10,
+    }
+
+    local expected = {
+        [978001] = "CLASS",
+        [978002] = "LEVEL",
+        [978003] = "FACTION",
+        [978004] = "RACE",
+    }
+
+    for questID, want in pairs(expected) do
+        local eligible, sentence, gate =
+            CN.Static.QuestEligibility(questID, mage)
+
+        assert(eligible == false,
+            "quest " .. questID .. " must be gated for this character")
+
+        assert(gate == want,
+            "the reason comes back as a stable token: " .. tostring(gate)
+            .. ", wanted " .. want)
+
+        assert(type(sentence) == "string" and sentence ~= "",
+            "and the sentence is still built for the player")
+    end
+
+    print("  why a quest is blocked is a token, not a sentence to parse")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE PLURALIZER.
+    --
+    -- `CN.Pluralize` had one caller while twenty-two places hand-rolled the
+    -- same expression and one module kept a third private copy. Nothing was
+    -- wrong; it is the one-fix-one-call-site shape pre-loaded.
+    ------------------------------------------------------------
+    assert(CN.Pluralize(1, "") == "", "one is singular")
+    assert(CN.Pluralize(2, "") == "s", "two are plural")
+
+    local source = CN_TEST_ReadAddonFile("UI.lua")
+
+    assert(source and not source:find('== 1 and "" or "s"', 1, true),
+        "no file may hand-roll the pluralizer")
+
+    print("  the pluralizer is written once")
+end)()
+
 print("\nWhat 0.63.0 changed, asserted through the paths the game takes:")
 
 ;(function()
@@ -68487,6 +69346,11 @@ end)()
 
     SlashCmdList.COMPLETIONNAVIGATOR("alts")
 
+    -- Both commands list the same roster, and the faction is printed by this
+    -- one. 0.62.0 fixed the class in two of three places; the faction beside
+    -- it was raw in both.
+    SlashCmdList.COMPLETIONNAVIGATOR("warband")
+
     DEFAULT_CHAT_FRAME.AddMessage = realAdd
 
     local sawRoster = false
@@ -68499,6 +69363,22 @@ end)()
 
     assert(sawRoster,
         "the roster must actually have printed the second character")
+
+    -- The faction is a token too, and was printed raw beside a class that had
+    -- been localized. 0.64.0.
+    local sawFaction = false
+
+    for _, line in ipairs(printed) do
+        if line:find(FACTION_ALLIANCE, 1, true) then
+            sawFaction = true
+        end
+
+        assert(not line:find("Alliance", 1, true)
+            or FACTION_ALLIANCE == "Alliance",
+            "a raw faction token reached the player: " .. line)
+    end
+
+    assert(sawFaction, "the roster names the faction the way the game does")
 
     for _, line in ipairs(printed) do
         assert(not line:find("DEATHKNIGHT", 1, true)
@@ -68533,9 +69413,13 @@ print("\nWhat 0.62.0 changed, asserted through the paths the game takes:")
 
     local record = exploreModule.ForCurrentZone()
 
-    assert(record and record.name == "Explore Eversong Woods",
+    -- The NAME comes from the client now (0.64.0), not from the row: a stored
+    -- name freezes at whatever language last scanned, which is how this
+    -- feature disappeared for anyone who switched client language.
+    assert(record and exploreModule.NameOf(record.achievementID, record)
+        == "Explore Eversong Woods",
         "the zone lookup must find the achievement whose name CONTAINS the "
-        .. "zone name: " .. tostring(record and record.name))
+        .. "zone name: " .. tostring(record and record.achievementID))
 
     -- And the tightening it was reaching for still holds: the zone name must
     -- be a whole trailing run, so "Shadowmoon" must not match
@@ -68548,8 +69432,10 @@ print("\nWhat 0.62.0 changed, asserted through the paths the game takes:")
         held.mapID = nil
     end
 
-    store[990101] = { achievementID = 990101,
-        name = "Explore Shadowmoon Valley", done = 0, criteria = 10 }
+    -- Registered with the client stub, because the name is read live now.
+    CN_TEST_MakeAchievement(990101, "Explore Shadowmoon Valley", 10, 0)
+
+    store[990101] = { achievementID = 990101, criteria = 10 }
 
     CN_TEST_ZONE_NAME = "Shadowmoon"
 
@@ -68979,11 +69865,14 @@ end)()
 
     local currencyModule = CN:GetModule("Currencies")
 
-    currencyModule.CharacterStore()[2915] = {
-        quantity          = 250,
-        maxWeeklyQuantity = 500,
-        weeklyRemaining   = 250,
-    }
+    -- WRITTEN BY THE REAL SCAN, not by hand. 0.64.0.
+    --
+    -- A hand-written row carries no sweep serial, and `Currencies.IsCurrent`
+    -- -- which `/cn clock` now applies, like the rest of the currency module
+    -- -- correctly rejects a row the client has not confirmed. A fixture that
+    -- writes straight into the store is testing a state the client cannot
+    -- produce.
+    currencyModule.Scan()
 
     local rows = waiting.Knowledge()
 
@@ -69001,8 +69890,8 @@ end)()
     assert(found.knowledge,
         "and the id says it is knowledge even when the name does not")
 
-    currencyModule.CharacterStore()[2915] = nil
     CN_TEST_SetCurrencyRow(2915, nil)
+    currencyModule.Scan()
 
     print("  weekly knowledge is found on a client that does not speak English")
 end)()
@@ -69086,12 +69975,16 @@ end)()
     -- pass while the shortest-name rule was gone -- which is exactly what a
     -- mutation of that rule proved, the first time this fixture was written
     -- with the ids the other way round.
-    store[900001] = { name = "Loremaster of Isle of Dorn and Beyond",
-        category = "Zones", completed = false, criteria = 90, done = 0 }
-    store[900002] = { name = "Isle of Dorn Explorer", category = "Zones",
-        completed = false, criteria = 40, done = 1 }
-    store[900003] = { name = "Isle of Dorn", category = "Zones",
-        completed = false, criteria = 10, done = 3 }
+    -- REGISTERED WITH THE CLIENT, because the name is read live (0.64.0). A
+    -- row the client cannot name is a row the addon can no longer match, and
+    -- a fixture that writes one is testing a state that cannot occur.
+    CN_TEST_MakeAchievement(900001, "Loremaster of Isle of Dorn and Beyond", 90, 0)
+    CN_TEST_MakeAchievement(900002, "Isle of Dorn Explorer", 40, 1)
+    CN_TEST_MakeAchievement(900003, "Isle of Dorn", 10, 3)
+
+    store[900001] = { completed = false, criteria = 90, done = 0 }
+    store[900002] = { completed = false, criteria = 40, done = 1 }
+    store[900003] = { completed = false, criteria = 10, done = 3 }
 
     CN_TEST_SetMapName(2248, "Isle of Dorn")
 
@@ -69118,6 +70011,10 @@ end)()
         .. "in the zone: " .. tostring(unfinished.name))
 
     store[900001], store[900002], store[900003] = nil, nil, nil
+
+    -- NOTE: since 0.64.0 the fixture rows above carry NO stored name at all
+    -- -- the client is asked -- so everything asserted here is already
+    -- proving the live path.
 
     print("  a zone picks the same achievement on every login")
 end)()

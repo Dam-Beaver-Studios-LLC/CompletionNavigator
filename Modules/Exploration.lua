@@ -25,6 +25,83 @@ end
 
 Exploration.Store = Store
 
+-- A NAME, LIVE. 0.64.0.
+--
+-- The stored name is an achievement name in whatever language last scanned,
+-- and `ForCurrentZone` matches it against `GetZoneText()`, which is live. So a
+-- player who changed client language had the whole Exploration feature
+-- disappear until they happened to rescan -- which is verbatim the failure
+-- 0.62.0 describes as fixed. That release corrected the COMPARISON and left
+-- the stored side frozen: one half of the defect.
+--
+-- Same resolver shape as `Achievements.NameOf`, `Pets.NameOf`, `Mounts.NameOf`
+-- and `Toys.NameOf`. Fifth store to get one.
+function Exploration.NameOf(achievementID, record)
+    local live = Blizzard.GetAchievementName
+        and Blizzard.GetAchievementName(achievementID)
+
+    if live and live ~= "" then
+        return live
+    end
+
+    return (record and record.name)
+        or ("Achievement " .. tostring(achievementID))
+end
+
+-- PROGRESS THROUGH A ZONE IS ONE CHARACTER'S. 0.64.0.
+--
+-- `done` and `completed` were written into an ACCOUNT store keyed by the
+-- achievement id alone -- exactly the defect fixed in `Loremaster` in 0.61.0,
+-- in the identically-shaped sibling store the fix never reached. It is worse
+-- here, because `RefreshCurrentZone` is wired to `ZONE_CHANGED_NEW_AREA`, so
+-- it does not even take a scan: an alt flying through a zone overwrites the
+-- main's progress on the way past.
+--
+-- The split follows what the game scopes. The achievement's NAME and its
+-- criteria COUNT are properties of the achievement. How much of it you have
+-- explored is yours.
+function Exploration.DoneFor(record, characterKey)
+    if type(record) ~= "table" then
+        return 0
+    end
+
+    characterKey = characterKey or CN.characterKey or CN.GetCharacterKey()
+
+    if record.progress and record.progress[characterKey] then
+        return record.progress[characterKey].done or 0,
+            record.progress[characterKey].completed and true or false
+    end
+
+    -- Only the CURRENT character may fall back to the flat field, which holds
+    -- whoever wrote last -- naming another character as its owner would be
+    -- telling the same lie somewhere new.
+    if characterKey == (CN.characterKey or CN.GetCharacterKey()) then
+        return record.done or 0, record.completed and true or false
+    end
+
+    return nil, nil
+end
+
+-- The one writer, so the two places that record progress cannot drift.
+function Exploration.NoteProgress(record, done, completed)
+    if type(record) ~= "table" then
+        return
+    end
+
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    record.progress      = record.progress or {}
+    record.progress[key] = {
+        done      = done,
+        completed = completed and true or false,
+    }
+
+    -- Kept flat as well, so every existing reader works unchanged and a
+    -- database written by an older version still reads correctly.
+    record.done      = done
+    record.completed = completed and true or false
+end
+
 ------------------------------------------------------------
 -- SCAN
 ------------------------------------------------------------
@@ -35,14 +112,18 @@ function Exploration.Scan()
     local seen, complete = 0, 0
 
     for _, achievement in ipairs(Blizzard.GetExplorationAchievements()) do
-        store[achievement.achievementID] = {
-            achievementID = achievement.achievementID,
-            name          = achievement.name,
-            completed     = achievement.completed,
-            done          = achievement.done,
-            criteria      = achievement.criteria,
-            lastSeen      = time(),
-        }
+        local held = store[achievement.achievementID] or {}
+
+        held.achievementID = achievement.achievementID
+        held.criteria      = achievement.criteria
+        held.lastSeen      = time()
+
+        -- `name` IS NOT STORED. See `Exploration.NameOf`.
+        held.name = nil
+
+        Exploration.NoteProgress(held, achievement.done, achievement.completed)
+
+        store[achievement.achievementID] = held
 
         seen = seen + 1
 
@@ -69,11 +150,13 @@ function Exploration.Summary()
     }
 
     for _, record in pairs(Store()) do
+        local done, completed = Exploration.DoneFor(record)
+
         counts.zones    = counts.zones + 1
         counts.criteria = counts.criteria + (record.criteria or 0)
-        counts.done     = counts.done + (record.done or 0)
+        counts.done     = counts.done + (done or 0)
 
-        if record.completed then
+        if completed then
             counts.complete = counts.complete + 1
         end
     end
@@ -85,14 +168,18 @@ end
 function Exploration.Closest(limit)
     local rows = {}
 
-    for _, record in pairs(Store()) do
-        if not record.completed and (record.criteria or 0) > 0 then
+    for achievementID, record in pairs(Store()) do
+        local done, completed = Exploration.DoneFor(record)
+
+        done = done or 0
+
+        if not completed and (record.criteria or 0) > 0 then
             table.insert(rows, {
                 achievementID = record.achievementID,
-                name          = record.name,
-                done          = record.done,
+                name          = Exploration.NameOf(achievementID, record),
+                done          = done,
                 criteria      = record.criteria,
-                remaining     = record.criteria - record.done,
+                remaining     = record.criteria - done,
             })
         end
     end
@@ -195,8 +282,8 @@ function Exploration.ForCurrentZone()
         return string.sub(candidate, -(#needle + 1)) == (" " .. needle)
     end
 
-    for _, record in pairs(store) do
-        if Names(record.name) then
+    for achievementID, record in pairs(store) do
+        if Names(Exploration.NameOf(achievementID, record)) then
             -- Learned, so the ambiguity is resolved once rather than every
             -- time -- and resolved by the map, which cannot be duplicated.
             if mapID then
@@ -221,15 +308,17 @@ CN.RegisterCandidateProvider("Exploration", function()
 
     local record = Exploration.ForCurrentZone()
 
-    if record and not record.completed and (record.criteria or 0) > 0 then
-        local remaining = record.criteria - record.done
+    local done, completed = Exploration.DoneFor(record)
+
+    if record and not completed and (record.criteria or 0) > 0 then
+        local remaining = record.criteria - (done or 0)
 
         if remaining > 0
             and not CN.IsIgnored(CN.objectiveTypes.EXPLORATION, record.achievementID)
             and not CN.IsDeferred(CN.objectiveTypes.EXPLORATION, record.achievementID) then
 
             local reasons = {
-                remaining .. " subzone" .. (remaining == 1 and "" or "s")
+                CN.Count(remaining, "subzone")
                     .. " left in this zone",
             }
 
@@ -291,7 +380,6 @@ local function RefreshCurrentZone()
         return false
     end
 
-    record.done     = done
     record.criteria = criteria
 
     -- AND WRITE `completed`, which nothing did.
@@ -303,7 +391,12 @@ local function RefreshCurrentZone()
     -- SET AND CLEARED, both. A patch that adds a subzone to a zone you had
     -- finished must be able to un-finish it; a flag that only ever goes one
     -- way is a flag that is wrong for the rest of the account's life.
-    record.completed = (done and done >= criteria) or nil
+    --
+    -- THROUGH THE ONE WRITER, so this and the scan cannot record progress
+    -- differently -- and so both file it under the character it belongs to.
+    -- This function is wired to `ZONE_CHANGED_NEW_AREA`, so before 0.64.0 an
+    -- alt flying through a zone overwrote the main's progress in passing.
+    Exploration.NoteProgress(record, done, done and done >= criteria)
 
     return true
 end

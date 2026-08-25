@@ -867,7 +867,7 @@ function Quests.AnnounceArrival(mapID)
     local zone = Blizzard.GetMapName(mapID) or "This zone"
 
     CN.PrintBlock(zone .. ": " .. CN.Brand(#available)
-        .. " quest" .. (#available == 1 and "" or "s")
+        .. " quest" .. CN.Pluralize(#available, "")
         .. " here you have not picked up",
         {
             CN.Accent("/cn zone")
@@ -1076,20 +1076,26 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
     -- which works while you are standing there and answers nothing when you
     -- ask "could any of my characters do this?" -- which is precisely what
     -- /cn alts is for.
-    local eligible, gateReason = CN.Static.QuestEligibility(questID)
+    -- THE TOKEN, NOT THE SENTENCE. 0.64.0.
+    --
+    -- This recovered the block reason by pattern-matching the English display
+    -- prose the eligibility check builds -- and since 0.61.0 that prose is
+    -- partly localized, so the parser was one translation away from telling
+    -- `/cn alts` that a race-gated quest was class-gated. The reason is
+    -- returned as a stable token now; see the note there.
+    local eligible, gateReason, gate = CN.Static.QuestEligibility(questID)
 
     if not eligible then
-        local reason = CN.blockReasons.WRONG_CLASS
+        local byGate = {
+            CLASS   = CN.blockReasons.WRONG_CLASS,
+            RACE    = CN.blockReasons.WRONG_RACE,
+            LEVEL   = CN.blockReasons.LEVEL_TOO_LOW,
+            FACTION = CN.blockReasons.WRONG_FACTION,
+        }
 
-        if gateReason:find("^race") then
-            reason = CN.blockReasons.WRONG_RACE
-        elseif gateReason:find("^level") then
-            reason = CN.blockReasons.LEVEL_TOO_LOW
-        elseif gateReason:find("Alliance") or gateReason:find("Horde") then
-            reason = CN.blockReasons.WRONG_FACTION
-        end
-
-        return states.INELIGIBLE, reason, gateReason
+        return states.INELIGIBLE,
+            byGate[gate] or CN.blockReasons.WRONG_CLASS,
+            gateReason
     end
 
     -- Prerequisites nobody curated, inferred from repeated observation
@@ -1671,10 +1677,10 @@ CN:RegisterCommand{
         local near, zone = Quests.SplitAvailableByDistance(available, mapID)
 
         if #near > 0 then
-            Print(#near .. " quest" .. (#near == 1 and "" or "s")
+            Print(#near .. " quest" .. CN.Pluralize(#near, "")
                 .. " available right here:")
         else
-            Print(#available .. " quest" .. (#available == 1 and "" or "s")
+            Print(#available .. " quest" .. CN.Pluralize(#available, "")
                 .. " available in this zone, none within "
                 .. CN.nearbyYards .. "yd:")
         end
@@ -1703,7 +1709,7 @@ CN:RegisterCommand{
 
         if #tasks > 0 then
             Print("|cff8a8f96Also " .. #tasks .. " world quest"
-                .. (#tasks == 1 and "" or "s")
+                .. CN.Pluralize(#tasks, "")
                 .. " or bonus objective in this zone" .. CN.DASH .. "no giver to talk "
                 .. "to.|r")
         end

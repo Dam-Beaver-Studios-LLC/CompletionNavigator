@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.63.0"
-CN.dbVersion   = 17
+CN.version     = "0.64.0"
+CN.dbVersion   = 18
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -712,6 +712,10 @@ end
 
 -- The word alone, where the caller has already written the number (a
 -- coloured count, usually).
+-- `CN.Pluralize(3, "")` is "s" and `CN.Pluralize(1, "")` is "" -- which is
+-- what twenty-two call sites were writing by hand as
+-- `(n == 1 and "" or "s")`, each of them a place the next grammar change
+-- would have had to find. 0.64.0.
 function CN.Pluralize(number, singular, plural)
     if (tonumber(number) or 0) == 1 then
         return singular
@@ -772,6 +776,32 @@ end
 -- For the harness, and for anything that changes locale mid-session.
 function CN.ForgetRaceNames()
     raceNames = nil
+end
+
+-- Alliance and Horde, in the player's language.
+--
+-- `UnitFactionGroup` returns an English token like every other one, and it
+-- was printed raw beside a class run through `CN.TokenLabel` -- one localized
+-- word and one untranslated token in the same seven characters. The client
+-- keeps both names in globals it has always had. 0.64.0.
+CN.factionGlobals = {
+    Alliance = "FACTION_ALLIANCE",
+    Horde    = "FACTION_HORDE",
+    Neutral  = "FACTION_STANDING_LABEL4",
+}
+
+function CN.FactionLabel(token)
+    if type(token) ~= "string" or token == "" then
+        return ""
+    end
+
+    local global = CN.factionGlobals[token]
+
+    if global and _G[global] and _G[global] ~= "" then
+        return _G[global]
+    end
+
+    return token
 end
 
 function CN.TokenLabel(token)

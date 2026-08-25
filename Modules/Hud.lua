@@ -331,7 +331,15 @@ function Hud.Refresh()
     if not objective then
         frame.objective = nil
 
-        frame.label:SetText("|cff8a8f96nothing actionable|r")
+        -- THROUGH THE LOCALE TABLE, LIKE THE OTHER CALL SITE. 0.64.0.
+        --
+        -- `Modules/Broker.lua` prints `CN.L["nothing actionable"]` for the
+        -- same state. The key is canonical and translated in all ten shipped
+        -- locale files, and the build lint only requires that a key be used
+        -- ONCE -- so a second, hardcoded copy of the same sentence passed
+        -- every check. A German player read "nichts zu tun" in the broker
+        -- feed and "nothing actionable" an inch away on the heads-up line.
+        frame.label:SetText(CN.Muted(CN.L["nothing actionable"]))
         frame.detail:SetText("")
 
         return true

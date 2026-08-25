@@ -1687,8 +1687,8 @@ mutate "Modules/Exploration.lua" \
     "the subzone count is frozen from the moment you enter the zone"
 
 mutate "Modules/Exploration.lua" \
-    "    record.completed = (done and done >= criteria) or nil" \
-    "    record.completed = nil" \
+    "    Exploration.NoteProgress(record, done, done and done >= criteria)" \
+    "    Exploration.NoteProgress(record, done, nil)" \
     "a zone you finished sits at the top of the list reading zero left"
 
 mutate "Modules/Orders.lua" \
@@ -1919,8 +1919,8 @@ mutate "Modules/Loremaster.lua" \
     "another character is shown whichever character scanned last"
 
 mutate "Modules/Loremaster.lua" \
-    "            elseif #record.name ~= #bestRecord.name then
-                better = #record.name < #bestRecord.name" \
+    "            elseif #heldName ~= #bestName then
+                better = #heldName < #bestName" \
     "            elseif false then
                 better = #record.name < #bestRecord.name" \
     "a zone picks a different achievement on every login"
@@ -2154,6 +2154,65 @@ mutate "Modules/Alts.lua" \
     "CN.TokenLabel(row.class or \"\")" \
     "tostring(row.class or \"\")" \
     "/cn alts prints a raw class token"
+
+# ------------------------------------------------------------
+# 0.64.0
+# ------------------------------------------------------------
+
+mutate "Modules/Exploration.lua" \
+    "    if characterKey == (CN.characterKey or CN.GetCharacterKey()) then
+        return record.done or 0, record.completed and true or false
+    end
+
+    return nil, nil" \
+    "    return record.done or 0, record.completed and true or false" \
+    "an alt is shown whichever character explored last"
+
+mutate "Modules/Exploration.lua" \
+    "        if Names(Exploration.NameOf(achievementID, record)) then" \
+    "        if Names(record.name) then" \
+    "the zone lookup reads a name frozen at the last scan's language"
+
+mutate "Scoring.lua" \
+    "        if bursty then
+            CN.Debounce(\"collectionGeneration.\" .. event,
+                CN.collectionBurstSeconds, CN.NoteCollectionChanged)
+            return
+        end" \
+    "        if false then
+            return
+        end" \
+    "a reputation tick rebuilds every store in the addon"
+
+mutate "Modules/Currencies.lua" \
+    "    if CurrencyFrameOpen() then
+        return
+    end" \
+    "    if false then
+        return
+    end" \
+    "the currency sweep reopens the player's collapsed headers"
+
+mutate "Modules/Waiting.lua" \
+    "        if currencies.IsCurrent(record)
+            and record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0" \
+    "        if record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0" \
+    "/cn clock reports a currency the client has retired"
+
+mutate "Providers/StaticData.lua" \
+    "        return false, classReason, \"CLASS\"" \
+    "        return false, classReason" \
+    "the block reason has to be parsed back out of English prose"
+
+mutate "Modules/Loremaster.lua" \
+    "        local heldName = Loremaster.NameOf(id, record)" \
+    "        local heldName = record.name" \
+    "the zone achievement is matched against a stored name"
+
+mutate "Core.lua" \
+    "    local global = CN.factionGlobals[token]" \
+    "    local global = nil" \
+    "the roster prints an untranslated faction token"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

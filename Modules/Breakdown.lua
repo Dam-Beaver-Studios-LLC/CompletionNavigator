@@ -28,9 +28,14 @@ local function Are(count)
     return count == 1 and "is" or "are"
 end
 
-local function Plural(count, singular, plural)
-    return count == 1 and singular or (plural or (singular .. "s"))
-end
+-- THROUGH THE SHARED ONE. 0.64.0.
+--
+-- This file kept a private copy of the pluralizer while `CN.Pluralize` had
+-- exactly one caller and twenty-two other places hand-rolled the same
+-- expression. Nothing was wrong -- it is the one-fix-one-call-site shape
+-- pre-loaded, and the next grammar change would have landed in one of
+-- twenty-three places.
+local Plural = CN.Pluralize
 
 ------------------------------------------------------------
 -- REGISTRY

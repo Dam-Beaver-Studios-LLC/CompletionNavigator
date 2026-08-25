@@ -535,6 +535,39 @@ end
 -- Needed because a player can pin an achievement the addon has never scanned,
 -- and answering them with "Achievement 12345" is the addon admitting it did
 -- not look.
+-- An achievement CATEGORY's name, from the client. `GetCategoryInfo` returns
+-- name, parentID, flags. Added in 0.64.0 because Loremaster was persisting the
+-- localized category string and grouping on it.
+function Blizzard.GetCategoryName(categoryID)
+    if not GetCategoryInfo or not categoryID then
+        return nil
+    end
+
+    local ok, name = pcall(GetCategoryInfo, categoryID)
+
+    if ok and type(name) == "string" and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
+-- A title's name by id. The hidden-objectives list read this from disk with
+-- no live path at all.
+function Blizzard.GetTitleName(titleID)
+    if not GetTitleName or not titleID then
+        return nil
+    end
+
+    local ok, name = pcall(GetTitleName, titleID)
+
+    if ok and type(name) == "string" and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
 function Blizzard.GetAchievementName(achievementID)
     if not GetAchievementInfo or not achievementID then
         return nil

@@ -46,10 +46,6 @@ local function Store()
     return CN.Account("achievements")
 end
 
-local function Totals()
-    return CN.Account("achievementTotals")
-end
-
 Achievements.Store  = Store
 Achievements.NameOf = NameOf
 
@@ -104,8 +100,7 @@ function Achievements.Scan()
         return 0, 0, 0
     end
 
-    local store  = Store()
-    local totals = Totals()
+    local store = Store()
 
     Wipe(store)
 
@@ -114,12 +109,17 @@ function Achievements.Scan()
     local scanned, completed, nearlyDone = 0, 0, 0
 
     for _, categoryID in ipairs(Blizzard.GetAchievementCategories()) do
-        local total, categoryCompleted = Blizzard.GetCategoryCounts(categoryID)
+        local total = Blizzard.GetCategoryCounts(categoryID)
 
-        totals[categoryID] = {
-            total     = total,
-            completed = categoryCompleted,
-        }
+        -- `achievementTotals` IS NOT WRITTEN ANY MORE. 0.64.0.
+        --
+        -- A per-category snapshot of numbers `GetAchievementTotals` answers
+        -- in one call, persisted, re-parsed at every login, rewritten at
+        -- every logout -- and read by nothing at all. `Achievements.Summary`
+        -- takes its totals live; the only other reference in the tree is the
+        -- field-stripper in a migration.
+        --
+        -- The same class migrations 4, 5, 14, 15 and 16 exist to remove.
 
         for index = 1, total do
             local achievement = Blizzard.GetAchievementInCategory(categoryID, index)

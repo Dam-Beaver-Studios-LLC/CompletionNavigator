@@ -117,16 +117,32 @@ function Static.QuestEligibility(questID, character)
 
     character = character or CN.character or {}
 
+    -- THE REASON AS A TOKEN, AS WELL AS AS A SENTENCE. 0.64.0.
+    --
+    -- The caller in Quests.lua recovered WHY a quest was blocked by
+    -- pattern-matching this English prose -- `find("^race")`,
+    -- `find("Alliance")`. Since 0.61.0 the class and race lists in that
+    -- sentence are run through the client's LOCALIZED names, so the string is
+    -- already half-translated and the parser survives only because the label
+    -- prefixes happen to still be English.
+    --
+    -- The reason is known here, exactly, at the moment the sentence is built.
+    -- Throwing it away and reconstructing it from the display text is the
+    -- "branch on a localized string" rule broken by a longer road: the first
+    -- translation of "race only" would silently reclassify every race-gated
+    -- quest as class-gated, and `/cn alts` would name the wrong alt.
+    --
+    -- Third return: a stable token. The sentence is unchanged.
     if record.faction and character.faction
         and record.faction ~= character.faction then
 
-        return false, record.faction .. " only"
+        return false, CN.TokenLabel(record.faction) .. " only", "FACTION"
     end
 
     if record.minLevel and character.level
         and character.level < record.minLevel then
 
-        return false, "level " .. record.minLevel .. " required"
+        return false, "level " .. record.minLevel .. " required", "LEVEL"
     end
 
     local function allowed(list, value, label)
@@ -160,16 +176,16 @@ function Static.QuestEligibility(questID, character)
     local okClass, classReason = allowed(record.classes, character.class, "class")
 
     if not okClass then
-        return false, classReason
+        return false, classReason, "CLASS"
     end
 
     local okRace, raceReason = allowed(record.races, character.race, "race")
 
     if not okRace then
-        return false, raceReason
+        return false, raceReason, "RACE"
     end
 
-    return true, nil
+    return true, nil, nil
 end
 
 -- Where a quest is HANDED IN, which is not where it is picked up and is not

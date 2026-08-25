@@ -234,6 +234,16 @@ CN.rankingGeneration = CN.rankingGeneration or 0
 -- Declared here rather than in Core so that all the generation counters this
 -- addon runs on are in one file, which is the only reason anybody ever finds
 -- the one they need.
+-- How long a burst of reputation ticks or quest turn-ins is allowed to hold
+-- the collection counter still. Published so the suite can turn it off.
+CN.collectionBurstSeconds = 5
+
+-- The one writer, so a caller cannot bump the counter without going past the
+-- debounce decision above.
+function CN.NoteCollectionChanged()
+    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1
+end
+
 for _, event in ipairs({
     "NEW_PET_ADDED", "NEW_MOUNT_ADDED", "NEW_TOY_ADDED",
     "ACHIEVEMENT_EARNED", "TRANSMOG_COLLECTION_UPDATED",
@@ -256,8 +266,40 @@ for _, event in ipairs({
     -- The Warband roster shows a level per character.
     "PLAYER_LEVEL_UP",
 }) do
+    -- TWO OF THESE ARE FIREHOSES, AND THIS COUNTER IS A CACHE KEY. 0.64.0.
+    --
+    -- `UPDATE_FACTION` fires many times a second while any reputation is
+    -- moving, and `QUEST_TURNED_IN` comes in runs. Both were bumping the
+    -- generation that the Collections tab's eight store walks, the Warband
+    -- tab's roster and coverage, and the whole Breakdown report are memoized
+    -- against -- so every one of those caches rebuilt on every two-second
+    -- window refresh for as long as the player was questing. About seven
+    -- milliseconds of redundant walking every two seconds, in exactly the
+    -- situation the caches were written for.
+    --
+    -- Worse, it made Breakdown's own five-second burst debounce inert: that
+    -- module debounces its OWN counter and then concatenates this one into
+    -- the same cache key.
+    --
+    -- Two files already carry the note that `UPDATE_FACTION` must be
+    -- debounced before it moves a generation, and the decorator counter was
+    -- fixed on exactly that argument. This counter, in the same file as the
+    -- note, was not. One-fix-one-call-site again.
+    --
+    -- A collection count that is at most five seconds stale is not a problem.
+    -- A tab that rebuilds every store in the addon twice a second is.
+    local bursty = (event == "UPDATE_FACTION")
+        or (event == "QUEST_TURNED_IN")
+        or (event == "TRADE_SKILL_LIST_UPDATE")
+
     CN:RegisterEvent(event, function()
-        CN.collectionGeneration = (CN.collectionGeneration or 0) + 1
+        if bursty then
+            CN.Debounce("collectionGeneration." .. event,
+                CN.collectionBurstSeconds, CN.NoteCollectionChanged)
+            return
+        end
+
+        CN.NoteCollectionChanged()
     end)
 end
 
@@ -1003,7 +1045,7 @@ function CN.InvalidateCandidates(reason, patient)
         -- Asked before built. See `CN.Debugging`.
         if reason and CN.Debugging() then
             CN.DebugPrint("Candidate cache: " .. reason .. " invalidated " .. hit
-                .. " provider" .. (hit == 1 and "" or "s"))
+                .. " provider" .. CN.Pluralize(hit, ""))
         end
     end
 end

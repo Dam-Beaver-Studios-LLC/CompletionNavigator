@@ -333,7 +333,7 @@ CN:RegisterCommand{
         end
 
         Print("Warband (" .. #rows .. " character"
-            .. (#rows == 1 and "" or "s") .. "):")
+            .. CN.Pluralize(#rows, "") .. "):")
 
         for _, row in ipairs(rows) do
             local marker = row.isCurrent and "|cff73b873>|r " or "  "
@@ -341,7 +341,8 @@ CN:RegisterCommand{
             CN.PrintLine(marker .. row.key
                 .. " |cff8a8f96" .. tostring(row.level) .. " "
                 .. CN.TokenLabel(row.class or "?")
-                .. (row.faction and (" " .. row.faction) or "") .. "|r")
+                .. (row.faction
+                    and (" " .. CN.FactionLabel(row.faction)) or "") .. "|r")
 
             CN.PrintLine("      professions " .. row.professions
                 .. ", recipes " .. row.recipes
@@ -359,7 +360,7 @@ CN:RegisterCommand{
         -- account. With three of ten alts seen the figure was printed as
         -- plain fact and only the `#rows == 1` case was hedged.
         Print("Combined coverage across the " .. #rows .. " character"
-            .. (#rows == 1 and "" or "s") .. " this addon has seen: "
+            .. CN.Pluralize(#rows, "") .. " this addon has seen: "
             .. coverage.professions .. " professions, "
             .. coverage.recipes .. " recipes, " .. coverage.titles .. " titles.")
 

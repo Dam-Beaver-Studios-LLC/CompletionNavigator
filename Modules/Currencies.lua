@@ -288,13 +288,31 @@ function Currencies.WeeklyUnfilled(character)
 end
 
 function Currencies.Summary(character)
-    local store = CharacterStore(character) or {}
-
     return {
-        known           = CN.CountKeys(store),
+        -- COUNTED OVER THE SAME POPULATION AS THE OTHER TWO. 0.64.0.
+        --
+        -- `known` counted every row in the store while `capped` and
+        -- `weeklyUnfilled` counted only rows the client still lists -- so
+        -- `/cn breakdown` printed `known - capped`, a subtraction across two
+        -- different populations, and could report more capped currencies than
+        -- known ones.
+        known           = Currencies.CurrentCount(character),
         capped          = #Currencies.Capped(character),
         weeklyUnfilled  = #Currencies.WeeklyUnfilled(character),
     }
+end
+
+-- How many rows the client still lists. See the note in `Summary`.
+function Currencies.CurrentCount(character)
+    local count = 0
+
+    for _, record in pairs(CharacterStore(character) or {}) do
+        if IsCurrent(record, character) then
+            count = count + 1
+        end
+    end
+
+    return count
 end
 
 function Currencies.Resolve(text)
@@ -384,10 +402,50 @@ end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true })
 
 local lastScan = 0
 
+-- SIXTY SECONDS, NOT TEN, AND NOT WHILE THE PLAYER IS LOOKING. 0.64.0.
+--
+-- `CURRENCY_DISPLAY_UPDATE` fires on every coin picked up, so a ten-second
+-- guard meant this ran continuously through an evening -- and it is not a
+-- cheap read. Each sweep makes three passes over the whole currency list,
+-- recovers an id per row by building and matching a hyperlink, rewrites about
+-- a hundred and fifty tables into SavedVariables, and bumps the collection
+-- generation.
+--
+-- It also EXPANDS AND RE-COLLAPSES the player's currency headers to see rows
+-- the client hides, which is the one place in this addon that changes
+-- something the player can see. It puts them back -- but a player with the
+-- Currency tab open watched their collapsed groups pop open and shut every
+-- ten seconds, which is the addon acting rather than prompting.
+--
+-- So: a minute rather than ten seconds, and never while the frame whose state
+-- it disturbs is on screen. A currency total that is at most a minute stale
+-- costs nothing; the sweep costs a visible flicker.
+Currencies.rescanSeconds = 60
+
+local function CurrencyFrameOpen()
+    local frame = _G.TokenFrame or _G.CharacterFrame
+
+    return frame and frame.IsShown and frame:IsShown() and true or false
+end
+
+Currencies.IsFrameOpen = CurrencyFrameOpen
+
+-- So the suite can reach the deferral, which is otherwise behind a minute's
+-- wait. A guard nothing can exercise is a guard nothing tests.
+function Currencies.ForgetLastScan()
+    lastScan = 0
+end
+
 CN:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function()
     local now = time()
 
-    if now - lastScan < 10 then
+    if now - lastScan < Currencies.rescanSeconds then
+        return
+    end
+
+    -- Deferred rather than skipped: `lastScan` is not advanced, so the sweep
+    -- happens as soon as the player closes the window.
+    if CurrencyFrameOpen() then
         return
     end
 
@@ -464,6 +522,15 @@ CN:RegisterCommand{
     order   = 78,
     help    = "Rescan currencies for this character.",
     handler = function()
+        -- A SCAN THE PLAYER ASKED FOR RE-ARMS THE TIMER. 0.64.0.
+        --
+        -- The automatic sweep is a minute apart and defers while the player's
+        -- own currency window is open. Without this, a manual scan left the
+        -- old timestamp in place, so the next automatic sweep could fire
+        -- seconds after the player had just scanned by hand -- doing the
+        -- expensive three-pass read twice for one answer.
+        Currencies.ForgetLastScan()
+
         local seen, atCap, weekly = Currencies.Scan()
 
         Print("Scanned " .. seen .. " currencies.")

@@ -241,7 +241,7 @@ CN:RegisterCommand{
         if #mine == 0 then
             Print("No orders outstanding.")
         else
-            Print(#mine .. " order" .. (#mine == 1 and "" or "s") .. ":")
+            Print(#mine .. " order" .. CN.Pluralize(#mine, "") .. ":")
 
             local session = CN:GetModule("Session")
 

@@ -340,7 +340,7 @@ local function ShowStatus()
         if #missing > 0 then
             table.insert(lines, CN.Accent("/cn setup")
                 .. CN.Muted(" " .. CN.DASH .. " " .. #missing .. " thing"
-                    .. (#missing == 1 and "" or "s")
+                    .. CN.Pluralize(#missing, "")
                     .. " here has never been read"))
         end
     end

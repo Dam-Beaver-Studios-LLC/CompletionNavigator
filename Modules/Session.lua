@@ -1263,7 +1263,7 @@ CN:RegisterCommand{
         -- figure regardless. One convention, both lines.
         Print(string.format("%d stop%s, about %s of the %dm you have:",
             #plan.stops,
-            #plan.stops == 1 and "" or "s",
+            CN.Pluralize(#plan.stops, ""),
             CN.WithConfidence(Session.FormatDuration(plan.seconds),
                 CN.ConfidenceFor(plan.confident)),
             plan.minutes))

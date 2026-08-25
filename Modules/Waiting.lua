@@ -205,7 +205,18 @@ function Waiting.Knowledge()
     end
 
     for currencyID, record in pairs(currencies.CharacterStore() or {}) do
-        if record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0
+        -- THE SAME STALENESS RULE THE CURRENCY MODULE APPLIES. 0.64.0.
+        --
+        -- `Currencies.IsCurrent` exists so a row the client has stopped
+        -- listing -- a currency retired at a patch, or any row still carrying
+        -- migration 13's "unconfirmed" serial -- is not reported as though it
+        -- were live. `Capped` and `WeeklyUnfilled` both apply it; this
+        -- re-implemented the filter without it.
+        --
+        -- So `/cn clock` said "still 1,500 to earn this week" about a
+        -- currency `/cn currencies` had correctly dropped, on the same login.
+        if currencies.IsCurrent(record)
+            and record.maxWeeklyQuantity and record.maxWeeklyQuantity > 0
             and (record.weeklyRemaining or 0) > 0 then
 
             local info = Blizzard.GetCurrency(currencyID)

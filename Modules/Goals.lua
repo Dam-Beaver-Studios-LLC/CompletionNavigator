@@ -344,7 +344,7 @@ function Goals.Plan(goal)
             plan.zone = record.zone
 
             step("Seen " .. (record.sightings or 1) .. " time"
-                .. ((record.sightings or 1) == 1 and "" or "s") .. " here.")
+                .. CN.Pluralize((record.sightings or 1), "") .. " here.")
         end
     end
 
@@ -793,7 +793,7 @@ CN:RegisterCommand{
         if string.lower(args) == "all" then
             local count = Goals.Clear()
 
-            Print("Cleared " .. count .. " goal" .. (count == 1 and "" or "s") .. ".")
+            Print("Cleared " .. CN.Count(count, "goal") .. ".")
             return
         end
 
