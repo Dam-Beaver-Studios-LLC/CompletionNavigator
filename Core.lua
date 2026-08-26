@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.66.0"
-CN.dbVersion   = 20
+CN.version     = "0.67.0"
+CN.dbVersion   = 21
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -924,6 +924,25 @@ end
 -- means "do not cache this", which is how a caller opts out without a branch.
 local memos = {}
 
+-- WHAT COMES BACK IS THE CACHE, NOT A COPY OF IT. 0.67.0.
+--
+-- 0.66.0 split the Scans tab into a memoized half and a live half, and then
+-- appended the live rows onto the table this returns -- which is the cached
+-- table. Standing still, the generation does not move, so the same table came
+-- back every two seconds and grew by five rows each time: half a minute in,
+-- the tab listed "Quests in your log" fifteen times.
+--
+-- The cache cannot stop a caller mutating what it is handed, but it can NOTICE
+-- and refuse to serve the damage: an array whose length has changed since it
+-- was stored is not the value that was built. Rebuilt, and reported through
+-- `/cn errors`, so the next one of these is a bug report rather than a
+-- mystery.
+--
+-- Length only. Deep-comparing a memoized table on every hit would cost more
+-- than the walk the memo exists to avoid, and every mutation of this shape --
+-- there has been exactly one -- has been an append.
+CN.memoMutations = 0
+
 function CN.Memo(key, generation, build)
     if generation == nil then
         return build()
@@ -932,12 +951,28 @@ function CN.Memo(key, generation, build)
     local held = memos[key]
 
     if held and held.generation == generation then
-        return held.value
+        if held.count == nil or held.count == #held.value then
+            return held.value
+        end
+
+        CN.memoMutations = CN.memoMutations + 1
+
+        local errors = CN.modules and CN:GetModule("Errors")
+
+        if errors and errors.Record then
+            errors.Record("a memoized value was modified by its reader",
+                tostring(key) .. ": built with " .. tostring(held.count)
+                .. " entries, found " .. tostring(#held.value))
+        end
     end
 
     local value = build()
 
-    memos[key] = { generation = generation, value = value }
+    memos[key] = {
+        generation = generation,
+        value      = value,
+        count      = type(value) == "table" and #value or nil,
+    }
 
     return value
 end

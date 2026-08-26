@@ -619,7 +619,7 @@ local function ShowExport(text, count)
 
         exportFrame.edit = edit
 
-        local hint = exportFrame:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
+        local hint = CN.Label(exportFrame, "ARTWORK", "LABEL")
         hint:SetPoint("BOTTOMLEFT", 14, 14)
         hint:SetText("Ctrl+A then Ctrl+C, and paste into Data\\Quests.lua")
 

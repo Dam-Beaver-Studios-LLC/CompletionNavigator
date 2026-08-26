@@ -98,7 +98,7 @@ CN.helpGroups = {
 
     { title = "When something is wrong",
       names = { "selftest", "errors", "dbsize", "cache", "perf", "capture",
-                "contribute", "harvest", "export", "debug", "status",
+                "contribute", "provenance", "harvest", "export", "debug", "status",
                 "lookup", "setquest", "rep", "title", "toy", "pet", "mount",
                 "rare", "recipe", "events" } },
 }

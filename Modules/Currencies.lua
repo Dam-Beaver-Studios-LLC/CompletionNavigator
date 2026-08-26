@@ -457,10 +457,27 @@ end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true })
 -- costs nothing; the sweep costs a visible flicker.
 Currencies.rescanSeconds = 60
 
+-- `IsVisible`, NOT `IsShown`, AND ONLY THE CURRENCY PANEL. 0.67.0.
+--
+-- `IsShown` reports a region's own flag, not whether the player can see it:
+-- a child of a hidden parent still answers true. `TokenFrame` is a panel
+-- INSIDE `CharacterFrame`, so pressing C, clicking Currency and pressing Esc
+-- left its flag set forever -- and from that moment this returned true on
+-- every path, `SweepIfDue` refused on every path, and the store froze at
+-- login for the rest of the session. A currency capped that evening was
+-- never reported, which is the one thing this module exists to warn about.
+--
+-- The `or _G.CharacterFrame` fallback made it worse rather than safer: with
+-- `Blizzard_TokenUI` not yet loaded it answered about the character sheet,
+-- which is a different window that this sweep does not disturb.
 local function CurrencyFrameOpen()
-    local frame = _G.TokenFrame or _G.CharacterFrame
+    local frame = _G.TokenFrame
 
-    return frame and frame.IsShown and frame:IsShown() and true or false
+    if not frame or not frame.IsVisible then
+        return false
+    end
+
+    return frame:IsVisible() and true or false
 end
 
 Currencies.IsFrameOpen = CurrencyFrameOpen
@@ -517,6 +534,15 @@ end)
 -- No client event announces that frame closing, so the frame itself is asked.
 -- Hooked once, at login, guarded, and silent if the frame does not exist --
 -- the same shape every other optional client surface in this addon gets.
+-- HOOKED WHEN THE FRAME EXISTS, WHICH IS NOT AT LOGIN. 0.67.0.
+--
+-- `Blizzard_TokenUI` is loaded on demand, so at `PLAYER_LOGIN` there is no
+-- `TokenFrame` -- and the first version of this fell back to
+-- `CharacterFrame`, hooked THAT, and set the "done" flag, so the frame it was
+-- written for never got a hook at all and closing the character sheet swept
+-- currencies instead.
+--
+-- Retried on `ADDON_LOADED`, which is how the client announces exactly this.
 local hookedCurrencyFrame = false
 
 function Currencies.HookFrame()
@@ -524,7 +550,7 @@ function Currencies.HookFrame()
         return true
     end
 
-    local frame = _G.TokenFrame or _G.CharacterFrame
+    local frame = _G.TokenFrame
 
     if not frame or not frame.HookScript then
         return false
@@ -538,6 +564,10 @@ function Currencies.HookFrame()
 
     return hookedCurrencyFrame
 end
+
+CN:RegisterEvent("ADDON_LOADED", function()
+    Currencies.HookFrame()
+end)
 
 CN:OnLogin(function()
     Currencies.HookFrame()

@@ -404,16 +404,37 @@ function Filters.DescribeObjective(objectiveType, id)
     -- client-language change it showed the previous locale's name beside pet
     -- and mount names that had correctly re-localized.
     --
-    -- `Blizzard.GetItemName` answers for exactly these ids; `Vendors.FindItem`
-    -- resolves recipe names with it already.
+    -- BUT THE STORE FIRST, BECAUSE RECIPE IS THREE ID SPACES. 0.67.0.
+    --
+    -- 0.66.0 put the client's item lookup ahead of the store on the grounds
+    -- that every other branch asks the client first. Every other branch has
+    -- ONE id space. This type carries three: a merchant itemID from Vendors,
+    -- a trade-skill recipe id from Professions -- which is what
+    -- `recipeNames` is keyed by -- and a crafting orderID from Orders.
+    --
+    -- `GetItemName` on a trade-skill recipe id returns nil, or, where the
+    -- number happens to collide with a real item, the name of a wholly
+    -- unrelated one -- and being asked first, it BEAT the correct stored
+    -- name. So a hidden Alchemy recipe that read back correctly in 0.65.0
+    -- read back as some other item entirely, and `/cn unhide <name>` could
+    -- not match what the list had printed.
+    --
+    -- The store is keyed by the one id space that has a name recorded for it;
+    -- the client is asked for everything else.
     if objectiveType == types.RECIPE and numericID then
+        local stored = CN.Account("recipeNames")[numericID]
+
+        if stored and stored ~= "" then
+            return stored
+        end
+
         local live = CN.Blizzard.GetItemName and CN.Blizzard.GetItemName(numericID)
 
         if live and live ~= "" then
             return live
         end
 
-        return CN.Account("recipeNames")[numericID] or ("Recipe " .. numericID)
+        return "Recipe " .. numericID
     end
 
     if objectiveType == types.TITLE and numericID then
@@ -426,7 +447,15 @@ function Filters.DescribeObjective(objectiveType, id)
         return "Title " .. numericID
     end
 
-    return tostring(objectiveType) .. " " .. tostring(id)
+    -- THE BADGE, NOT THE ENUM, FOR EVERYTHING THAT REACHES HERE. 0.67.0.
+    --
+    -- Every branch above produces a title-cased placeholder, and this last
+    -- line -- which catches every id that is not a number, such as the
+    -- crafting-order row whose id is the string "claim" -- produced
+    -- "RECIPE claim". The addon's own internals offered to the player as the
+    -- name of the thing they hid, which is the defect two branches above were
+    -- rewritten to fix.
+    return CN.TypeBadge(objectiveType) .. " " .. tostring(id)
 end
 
 -- The stores are nested by type since 0.54.0 -- see CN.IsIgnored for why --

@@ -323,6 +323,8 @@ A scale for everything it draws, and a colourblind mode that changes the arrow's
 
 **And you can search the whole window at once.** `/cn find <text>` looks on every tab and says which one the match is on, so finding something does not require knowing which tab it lives on first. The filter box does the same thing quietly: type on the wrong tab and it tells you which other tabs match, instead of saying nothing matched while the answer sits one tab over.
 
+**Hovering a row says why it matters, not what it is.** A world quest says when it disappears whether you do it or not, and roughly how far away it is by the route this addon would take. A rare says whether this character has already cleared it since the last reset. A type filter says how much of the list it is currently holding â€” which is the only thing that makes switching it off a decision rather than a guess.
+
 ```
 /cn scale 1.25
 /cn colourblind
@@ -353,6 +355,8 @@ Failures inside the addon are caught so they cannot break your session â€” 
 Prints one line of quest IDs and orderings â€” no character name, no realm, no timestamps, nothing that identifies you. You can read the whole thing before deciding to send it, which is the point of a format you can read.
 
 Nothing is uploaded. The addon *cannot* upload; addons have no network access at all. Pasting it into an issue is the entire transport, and chains that arrive that way are recorded as observations, never as fact.
+
+**And you can ask which of its claims have never been checked.** `/cn provenance` lists every prerequisite the addon believes on evidence rather than on somebody having read it â€” learned from your own play, contributed by another player, or imported by hand â€” with how many characters or contributions stand behind each. `/cn why` has always named the source of an answer; this is the opposite question, and it is where checking one starts.
 
 ## Ask it whether it is working
 
@@ -397,6 +401,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn situation` | What the addon thinks you are in the middle of |
 | `/cn unpicked` | Quests you have seen and never picked up, by zone |
 | `/cn find <text>` | Find something without knowing which tab it is on |
+| `/cn provenance` | Which chain claims have never been checked by a person |
 | `/cn textsize <100-150>` | Larger text, without resizing the window |
 | `/cn orders` | Crafting orders you placed, and anything ready to collect |
 | `/cn hud` | A small always-on line showing the next thing |

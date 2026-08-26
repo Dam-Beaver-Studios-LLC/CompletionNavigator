@@ -475,9 +475,23 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
         if watched[achievementID]
             and record.criteria and record.criteria > 0 then
 
-            local done = Blizzard.GetAchievementProgress(achievementID)
+            -- BOTH RETURNS, BECAUSE A REFUSAL LOOKS LIKE ZERO. 0.67.0.
+            --
+            -- `GetAchievementProgress` answers `0, 0` when the criteria API
+            -- is unavailable -- early in a loading screen, or before the
+            -- achievement UI has loaded -- and this discarded the second
+            -- return, so a refusal was written into the store as real
+            -- progress. One `CRITERIA_UPDATE` at the wrong moment rewrote
+            -- every watched row to zero, `IsNearlyDone` went false, and an
+            -- achievement at 38 of 40 dropped out of `/cn next` until a full
+            -- `/cn achievescan`, which nothing runs on its own.
+            --
+            -- `Exploration.RefreshCurrentZone` guards this exact case, under
+            -- the header "NOT OVER GOOD DATA WITH NOTHING". The guard was
+            -- never carried to the sibling.
+            local done, criteria = Blizzard.GetAchievementProgress(achievementID)
 
-            if done ~= record.done then
+            if criteria and criteria > 0 and done ~= record.done then
                 local wasNear = IsNearlyDone(record)
 
                 record.done     = done

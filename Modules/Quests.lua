@@ -364,6 +364,21 @@ local function Remembered()
     return CN.Account("questPins")
 end
 
+-- A COUNTER, NOT A COUNT. 0.67.0.
+--
+-- The off-map shortlist keyed its revision on `CN.CountKeys(Remembered())`,
+-- which is a walk of up to six hundred rows -- the exact walk 0.65.0 took OFF
+-- this path -- performed on every call, from a provider on the
+-- `QUEST_LOG_UPDATE` firehose. Worse, walking into new content adds ids
+-- continuously, so the count moved constantly and the shortlist rebuilt every
+-- two seconds: a full store walk plus one travel estimate per remembered map,
+-- and a travel estimate is four client conversions and a scan of the flight
+-- network.
+--
+-- One integer, bumped by the only two things that change what is in the
+-- store.
+Quests.pinRevision = 0
+
 Quests.Remembered = Remembered
 
 function Quests.RememberOffer(poi)
@@ -376,6 +391,10 @@ function Quests.RememberOffer(poi)
     -- Only what the client cannot re-derive instantly: no names, no
     -- timestamps beyond the one that makes pruning possible.
     local isNew = store[poi.questID] == nil
+
+    if isNew then
+        Quests.pinRevision = Quests.pinRevision + 1
+    end
 
     store[poi.questID] = {
         mapID = poi.mapID,
@@ -430,11 +449,43 @@ Quests.offMapCap   = 20
 function Quests.NearbyRememberedMaps(playerMap)
     local byMap = {}
 
+    -- THE NEIGHBOURHOOD, NOT THE EXACT MAP. 0.67.0.
+    --
+    -- Pins are recorded against every RELATED map -- `AvailableOnMap` walks
+    -- `RelatedMapIDs`, which adds the parent zone and all its children -- and
+    -- `GetBestMapForUnit` answers with the city's own map when the player is
+    -- standing in one. So a quest giver twenty yards away in Dornogal, whose
+    -- pin was filed against Isle of Dorn, came back through the OFF-map
+    -- branch: priced as a journey, penalised a point, and captioned
+    -- "available to pick up in Isle of Dorn" while the player stood in it.
+    local here = {}
+
+    if playerMap then
+        here[playerMap] = true
+
+        for _, related in ipairs(Blizzard.RelatedMapIDs(playerMap) or {}) do
+            here[related] = true
+        end
+    end
+
+    local function Skip(mapID)
+        return here[mapID] == true
+    end
+
     for questID, record in pairs(Remembered()) do
         local mapID = record.mapID
 
-        if mapID and mapID ~= playerMap
-            and not Quests.IsCompletedOnAccount(questID)
+        -- BY CHARACTER, NOT BY ACCOUNT. 0.67.0.
+        --
+        -- `PruneRemembered` uses the account check deliberately -- WHERE a
+        -- quest is does not depend on who is asking -- and this borrowed it,
+        -- which is the opposite question. So a player whose main had cleared
+        -- a continent rolled an alt and was offered nothing at all from it:
+        -- `/cn unpicked` correctly listed twenty-two quests in a zone and
+        -- `/cn next` never mentioned one of them. The in-zone sibling,
+        -- `AvailableOnMap`, has always used the character check.
+        if mapID and not Skip(mapID)
+            and not Quests.IsCompletedByCharacter(questID)
             and not Blizzard.IsQuestInLog(questID) then
 
             byMap[mapID] = byMap[mapID] or {}
@@ -489,8 +540,20 @@ function Quests.OffMapOffers()
         return {}
     end
 
-    local revision = tostring(playerMap) .. ":"
-        .. tostring(CN.CountKeys(Remembered()))
+    -- AND WHERE THE PLAYER IS, COARSELY. 0.67.0.
+    --
+    -- The revision carried the map and not the position, so the "three
+    -- cheapest zones" ordering was taken once on entering a zone and never
+    -- re-costed: fly to the far side of it, or learn a flight point, and the
+    -- addon went on pricing the journey from where you landed. A tenth of a
+    -- map is coarse enough that walking does not thrash it and fine enough
+    -- that crossing a zone re-asks.
+    local _, playerX, playerY = CN.GetPlayerPosition()
+
+    local revision = tostring(playerMap)
+        .. ":" .. tostring(Quests.pinRevision)
+        .. ":" .. tostring(math.floor((playerX or 0) * 10))
+        .. ":" .. tostring(math.floor((playerY or 0) * 10))
 
     local list = CN.Shortlist("quests:offmap", revision, function()
         local offers = {}
@@ -555,6 +618,10 @@ function Quests.PruneRemembered()
             store[ids[index]] = nil
             dropped = dropped + 1
         end
+    end
+
+    if dropped > 0 then
+        Quests.pinRevision = Quests.pinRevision + 1
     end
 
     return dropped
@@ -1564,7 +1631,7 @@ CN.RegisterCandidateProvider("Quests", function()
         -- a quest they are already carrying. Twenty checks; the shortlist
         -- exists to keep the six-hundred-row walk off this path, not these.
         if not seen[pin.questID]
-            and not Quests.IsCompletedOnAccount(pin.questID)
+            and not Quests.IsCompletedByCharacter(pin.questID)
             and not Blizzard.IsQuestInLog(pin.questID) then
             local name = Quests.GetName(pin.questID)
                 or Blizzard.GetQuestTitle(pin.questID, true)

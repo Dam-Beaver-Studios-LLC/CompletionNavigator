@@ -358,11 +358,11 @@ local function BuildArrow()
         arrow.texture:SetTexture("Interface\\Minimap\\MinimapArrow")
     end
 
-    arrow.label = arrow:CreateFontString(nil, "OVERLAY", CN.FONT.CAPTION)
+    arrow.label = CN.Label(arrow, "OVERLAY", "CAPTION")
     arrow.label:SetPoint("TOP", arrow, "BOTTOM", 0, -2)
     arrow.label:SetJustifyH("CENTER")
 
-    arrow.distance = arrow:CreateFontString(nil, "OVERLAY", CN.FONT.LEAD)
+    arrow.distance = CN.Label(arrow, "OVERLAY", "LEAD")
     arrow.distance:SetPoint("TOP", arrow.label, "BOTTOM", 0, -2)
     arrow.distance:SetJustifyH("CENTER")
 

@@ -311,8 +311,19 @@ end
 -- not held alive by this list.
 local textStrings = setmetatable({}, { __mode = "k" })
 
+-- APPLIED IN BOTH DIRECTIONS. 0.67.0.
+--
+-- At scale 1 `CN.FontObject` returns the template NAME, and this only acted
+-- on a table -- so raising the size worked and lowering it did nothing at
+-- all. Every label kept whatever enlarged font it was last given, while the
+-- button and the command both reported 100%. The Settings button cycles
+-- 1.5 back round to 1.0, which is the normal way a player met this.
 local function ApplyRole(fontString, role)
     local object = CN.FontObject(role)
+
+    if type(object) == "string" then
+        object = _G and _G[object]
+    end
 
     if type(object) == "table" and fontString.SetFontObject then
         pcall(fontString.SetFontObject, fontString, object)
@@ -341,11 +352,44 @@ function CN.Label(parent, layer, role)
     return fontString
 end
 
+-- TEXT DRAWN OVER THE WORLD IS SIZED, NOT FONT-OBJECTED. 0.67.0.
+--
+-- `CN.Outline` sets an explicit face, size and OUTLINE flag, because a font
+-- object cannot carry an outline -- so the arrow's distance readout, the
+-- heads-up line, the follow frame and the map pin numbers would ignore a font
+-- object even once they were registered. They are remembered separately, with
+-- the size they were asked for, and re-outlined at the new scale.
+local outlined = setmetatable({}, { __mode = "k" })
+
+-- A FONT STRING THE CLIENT MADE, NOT THIS ADDON. 0.67.0.
+--
+-- A templated button or checkbox arrives with its own label already built, so
+-- `CN.Label` never sees it -- and in the game every button label, checkbox
+-- label and tab caption in the window stayed at 100% while the rows around
+-- them grew. Adopting one is the same registration, from the other end.
+function CN.AdoptLabel(fontString, role)
+    if not fontString or not fontString.SetFontObject then
+        return nil
+    end
+
+    textStrings[fontString] = role or "BODY"
+
+    ApplyRole(fontString, role or "BODY")
+
+    return fontString
+end
+
 function CN.RefreshTextScale()
     local touched = 0
 
     for fontString, role in pairs(textStrings) do
         ApplyRole(fontString, role)
+
+        touched = touched + 1
+    end
+
+    for fontString, spec in pairs(outlined) do
+        CN.Outline(fontString, spec.size, spec.role)
 
         touched = touched + 1
     end
@@ -403,8 +447,14 @@ function CN.Outline(fontString, size, role)
         return false
     end
 
-    local applied = pcall(fontString.SetFont, fontString, face, size or 12,
-        "OUTLINE")
+    -- REMEMBERED AT THE SIZE IT WAS ASKED FOR, and scaled on the way out, so
+    -- the text-size setting reaches the four widgets it was written for.
+    local asked = size or 12
+
+    outlined[fontString] = { size = asked, role = role }
+
+    local applied = pcall(fontString.SetFont, fontString, face,
+        math.floor(asked * CN.TextScale() + 0.5), "OUTLINE")
 
     if not applied then
         return false

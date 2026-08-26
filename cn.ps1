@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.66.0'
+$script:ToolkitVersion = '0.67.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.66.0"
-CN.dbVersion   = 20
+CN.version     = "0.67.0"
+CN.dbVersion   = 21
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -1027,6 +1027,25 @@ end
 -- means "do not cache this", which is how a caller opts out without a branch.
 local memos = {}
 
+-- WHAT COMES BACK IS THE CACHE, NOT A COPY OF IT. 0.67.0.
+--
+-- 0.66.0 split the Scans tab into a memoized half and a live half, and then
+-- appended the live rows onto the table this returns -- which is the cached
+-- table. Standing still, the generation does not move, so the same table came
+-- back every two seconds and grew by five rows each time: half a minute in,
+-- the tab listed "Quests in your log" fifteen times.
+--
+-- The cache cannot stop a caller mutating what it is handed, but it can NOTICE
+-- and refuse to serve the damage: an array whose length has changed since it
+-- was stored is not the value that was built. Rebuilt, and reported through
+-- `/cn errors`, so the next one of these is a bug report rather than a
+-- mystery.
+--
+-- Length only. Deep-comparing a memoized table on every hit would cost more
+-- than the walk the memo exists to avoid, and every mutation of this shape --
+-- there has been exactly one -- has been an append.
+CN.memoMutations = 0
+
 function CN.Memo(key, generation, build)
     if generation == nil then
         return build()
@@ -1035,12 +1054,28 @@ function CN.Memo(key, generation, build)
     local held = memos[key]
 
     if held and held.generation == generation then
-        return held.value
+        if held.count == nil or held.count == #held.value then
+            return held.value
+        end
+
+        CN.memoMutations = CN.memoMutations + 1
+
+        local errors = CN.modules and CN:GetModule("Errors")
+
+        if errors and errors.Record then
+            errors.Record("a memoized value was modified by its reader",
+                tostring(key) .. ": built with " .. tostring(held.count)
+                .. " entries, found " .. tostring(#held.value))
+        end
     end
 
     local value = build()
 
-    memos[key] = { generation = generation, value = value }
+    memos[key] = {
+        generation = generation,
+        value      = value,
+        count      = type(value) == "table" and #value or nil,
+    }
 
     return value
 end
@@ -1381,8 +1416,19 @@ end
 -- not held alive by this list.
 local textStrings = setmetatable({}, { __mode = "k" })
 
+-- APPLIED IN BOTH DIRECTIONS. 0.67.0.
+--
+-- At scale 1 `CN.FontObject` returns the template NAME, and this only acted
+-- on a table -- so raising the size worked and lowering it did nothing at
+-- all. Every label kept whatever enlarged font it was last given, while the
+-- button and the command both reported 100%. The Settings button cycles
+-- 1.5 back round to 1.0, which is the normal way a player met this.
 local function ApplyRole(fontString, role)
     local object = CN.FontObject(role)
+
+    if type(object) == "string" then
+        object = _G and _G[object]
+    end
 
     if type(object) == "table" and fontString.SetFontObject then
         pcall(fontString.SetFontObject, fontString, object)
@@ -1411,11 +1457,44 @@ function CN.Label(parent, layer, role)
     return fontString
 end
 
+-- TEXT DRAWN OVER THE WORLD IS SIZED, NOT FONT-OBJECTED. 0.67.0.
+--
+-- `CN.Outline` sets an explicit face, size and OUTLINE flag, because a font
+-- object cannot carry an outline -- so the arrow's distance readout, the
+-- heads-up line, the follow frame and the map pin numbers would ignore a font
+-- object even once they were registered. They are remembered separately, with
+-- the size they were asked for, and re-outlined at the new scale.
+local outlined = setmetatable({}, { __mode = "k" })
+
+-- A FONT STRING THE CLIENT MADE, NOT THIS ADDON. 0.67.0.
+--
+-- A templated button or checkbox arrives with its own label already built, so
+-- `CN.Label` never sees it -- and in the game every button label, checkbox
+-- label and tab caption in the window stayed at 100% while the rows around
+-- them grew. Adopting one is the same registration, from the other end.
+function CN.AdoptLabel(fontString, role)
+    if not fontString or not fontString.SetFontObject then
+        return nil
+    end
+
+    textStrings[fontString] = role or "BODY"
+
+    ApplyRole(fontString, role or "BODY")
+
+    return fontString
+end
+
 function CN.RefreshTextScale()
     local touched = 0
 
     for fontString, role in pairs(textStrings) do
         ApplyRole(fontString, role)
+
+        touched = touched + 1
+    end
+
+    for fontString, spec in pairs(outlined) do
+        CN.Outline(fontString, spec.size, spec.role)
 
         touched = touched + 1
     end
@@ -1473,8 +1552,14 @@ function CN.Outline(fontString, size, role)
         return false
     end
 
-    local applied = pcall(fontString.SetFont, fontString, face, size or 12,
-        "OUTLINE")
+    -- REMEMBERED AT THE SIZE IT WAS ASKED FOR, and scaled on the way out, so
+    -- the text-size setting reaches the four widgets it was written for.
+    local asked = size or 12
+
+    outlined[fontString] = { size = asked, role = role }
+
+    local applied = pcall(fontString.SetFont, fontString, face,
+        math.floor(asked * CN.TextScale() + 0.5), "OUTLINE")
 
     if not applied then
         return false
@@ -2725,6 +2810,47 @@ CN.migrations = {
         if dropped > 0 then
             CN.DebugPrint("Dropped " .. dropped .. " inflated rare sighting "
                 .. "count(s); they are counted per encounter now.")
+        end
+    end,
+    -- 20 -> 21. THE FLAT FIELDS THE 0.66.0 CHANGE LEFT BEHIND.
+    --
+    -- 0.66.0 stopped WRITING `record.done` / `record.completed` on exploration
+    -- and Loremaster rows, because any character rewrote them merely by flying
+    -- through a zone and `DoneFor` fell back to them -- so an alt was handed
+    -- the main's progress as its own. The read-side fallback was kept, on the
+    -- stated grounds that databases written before the per-character split
+    -- still need it and that the field would "decay out of the store as
+    -- characters rescan".
+    --
+    -- It does not decay. Nothing rewrites it any more, so an upgraded account
+    -- carries the last value the main wrote, for ever -- and Loremaster in
+    -- particular scans only when its store is empty and is not in the setup
+    -- run, so a fresh alt reads "Loremaster of Khaz Algar 90 / 120" with three
+    -- done and never stops.
+    --
+    -- Deleted, once, here. That is what makes the fallback mean what its
+    -- comment says: a pre-split database, and nothing else.
+    [20] = function(db)
+        db.account = db.account or {}
+
+        local cleared = 0
+
+        for _, store in ipairs({ db.account.exploration, db.account.loremaster }) do
+            for _, record in pairs(store or {}) do
+                if type(record) == "table"
+                    and (record.done ~= nil or record.completed ~= nil) then
+
+                    record.done      = nil
+                    record.completed = nil
+
+                    cleared = cleared + 1
+                end
+            end
+        end
+
+        if cleared > 0 then
+            CN.DebugPrint("Cleared " .. cleared .. " shared progress figure(s)"
+                .. " that belonged to whichever character wrote last.")
         end
     end,
 }
@@ -4917,7 +5043,7 @@ CN.helpGroups = {
 
     { title = "When something is wrong",
       names = { "selftest", "errors", "dbsize", "cache", "perf", "capture",
-                "contribute", "harvest", "export", "debug", "status",
+                "contribute", "provenance", "harvest", "export", "debug", "status",
                 "lookup", "setquest", "rep", "title", "toy", "pet", "mount",
                 "rare", "recipe", "events" } },
 }
@@ -10666,6 +10792,19 @@ local window, minimapButton
 -- handler behaves when a slash command reaches it.
 --
 -- Never both: the same sentence in two places reads as two things happening.
+-- The line under the filter box. Separate from `UI.Answer` on purpose: a
+-- search hint and the result of a button press are two different sentences
+-- and neither may silently replace the other.
+function UI.ShowElsewhere(text)
+    if window and window.elsewhere then
+        window.elsewhere:SetText(text and CN.Muted(text) or "")
+
+        return true
+    end
+
+    return false
+end
+
 function UI.Answer(text)
     text = tostring(text)
 
@@ -10913,6 +11052,10 @@ local function AddButton(parent, text, width, onClick, tooltip)
         local highlight = button:CreateTexture(nil, "HIGHLIGHT")
         highlight:SetAllPoints()
         highlight:SetColorTexture(1, 1, 1, 0.12)
+    elseif button.GetFontString then
+        -- The templated path arrives with its own label, so `CN.Label` never
+        -- saw it and the text-size setting did not reach it. 0.67.0.
+        CN.AdoptLabel(button:GetFontString(), "CAPTION")
     end
 
     button:SetText(text)
@@ -10932,6 +11075,8 @@ local function AddCheckbox(parent, text, getter, setter, tooltip)
 
     if check.Text then
         check.Text:SetText(text)
+
+        CN.AdoptLabel(check.Text, "BODY")
     else
         local label = CN.Label(check, "ARTWORK", "BODY")
         label:SetPoint("LEFT", check, "RIGHT", 2, 0)
@@ -11108,13 +11253,14 @@ local function BuildWindow()
     search:SetScript("OnTextChanged", function(self)
         UI.SetFilter(self:GetText())
 
-        -- AND SAY WHERE ELSE IT IS. 0.66.0.
+        -- AND SAY WHERE ELSE IT IS -- IN ITS OWN LINE. 0.67.0.
         --
-        -- The filter box searched the tab you were standing on, so typing a
-        -- name on the wrong tab produced "Nothing matched" -- true, and
-        -- useless, because the addon had the answer and was declining to say
-        -- which tab it was on.
-        UI.Answer(UI.SearchElsewhere(self:GetText()) or "")
+        -- 0.66.0 wrote this into `UI.Answer`, which is the line where the
+        -- result of clicking a button goes, and passed `or ""` when nothing
+        -- matched elsewhere -- so typing a single character after pressing
+        -- "Scan everything" wiped "Read 6 collections." off the screen with
+        -- nothing, and there was no way to get it back.
+        UI.ShowElsewhere(UI.SearchElsewhere(self:GetText()))
     end)
 
     -- KEEP THE FILTER ACROSS TABS, OR CLEAR IT?
@@ -11155,6 +11301,13 @@ local function BuildWindow()
         self:SetText("")
         self:ClearFocus()
     end)
+
+    -- The cross-tab hint's own line, so it cannot overwrite an answer.
+    window.elsewhere = CN.Label(window, "OVERLAY", "LABEL")
+    window.elsewhere:SetPoint("TOPRIGHT", search, "BOTTOMRIGHT", 0, -2)
+    window.elsewhere:SetJustifyH("RIGHT")
+    window.elsewhere:SetTextColor(CN.Rgb("ACCENT"))
+    window.elsewhere:SetText("")
 
     window.search      = search
     window.searchLabel = searchLabel
@@ -11449,6 +11602,10 @@ function UI.SelectTab(index)
         window.answer:SetText("")
     end
 
+    -- And so does the cross-tab hint: it names OTHER tabs, and which tabs
+    -- those are depends on which one you are standing on.
+    UI.ShowElsewhere(nil)
+
     if window.footer then
         local deeper = UI.tabFooters[tab.name]
 
@@ -11494,24 +11651,7 @@ function UI.SelectTab(index)
         end
     end
 
-    if not tab.panel then
-        tab.panel = CreateFrame("Frame", nil, window.body)
-        tab.panel:SetAllPoints()
-
-        if tab.build then
-            local ok, err = pcall(tab.build, tab.panel)
-
-            if not ok then
-                Print("Error building the " .. tab.name .. " tab: " .. tostring(err))
-
-                local errors = CN:GetModule("Errors")
-
-                if errors then
-                    errors.Record("building the " .. tab.name .. " tab", err)
-                end
-            end
-        end
-    end
+    UI.BuildPanel(tab)
 
     tab.panel:Show()
 
@@ -11676,17 +11816,61 @@ function UI.SearchAll(text)
     return results
 end
 
--- REFRESHED, BECAUSE AN UNBUILT TAB HOLDS NOTHING.
+-- ONE PLACE THAT TURNS A TAB INTO A PANEL. 0.67.0.
 --
--- The window builds every tab's frame up front but only REFRESHES the
--- selected one, so ten of the eleven lists are empty until the player visits
--- them -- and a search of them would answer "nothing found" for things the
--- addon has on disk. This is the only caller that needs all eleven at once,
--- and it is user-initiated.
+-- This was written out inline in `SelectTab`, which is why the cross-tab
+-- search could not do it: a panel is created the first time a tab is
+-- SELECTED, so ten of the eleven tabs have no panel at all until the player
+-- clicks them, and anything that wants to read all eleven had to either
+-- duplicate this block or skip them.
+function UI.BuildPanel(tab)
+    if not tab or tab.panel or not window or not window.body then
+        return tab and tab.panel or nil
+    end
+
+    tab.panel = CreateFrame("Frame", nil, window.body)
+    tab.panel:SetAllPoints()
+    tab.panel:Hide()
+
+    if tab.build then
+        local ok, err = pcall(tab.build, tab.panel)
+
+        if not ok then
+            Print("Error building the " .. tab.name .. " tab: " .. tostring(err))
+
+            local errors = CN:GetModule("Errors")
+
+            if errors then
+                errors.Record("building the " .. tab.name .. " tab", err)
+            end
+        end
+    end
+
+    return tab.panel
+end
+
+-- BUILT AS WELL AS REFRESHED. 0.67.0.
+--
+-- The comment here used to say "the window builds every tab's frame up
+-- front". It does not -- a panel is created the first time its tab is
+-- selected -- so this skipped every tab the player had not clicked this
+-- session, and `/cn find` and the "Also on:" line under the filter box were
+-- blind to exactly the tabs a player is least likely to have visited.
+--
+-- This is the only caller that needs all eleven at once, and it is
+-- user-initiated.
 function UI.RefreshAllTabs()
+    -- THE WINDOW FIRST. A function that promises every tab has to make sure
+    -- there is something for a tab to be a panel of: `BuildPanel` cannot
+    -- build anything before the window body exists, and on a fresh login it
+    -- does not. 0.67.0.
+    UI.BuildWindow()
+
     local refreshed = 0
 
     for _, tab in ipairs(UI.tabs) do
+        UI.BuildPanel(tab)
+
         if tab.refresh and tab.panel then
             if pcall(tab.refresh, tab.panel) then
                 refreshed = refreshed + 1
@@ -12015,9 +12199,38 @@ UI.RegisterTab{
                         .. filters.TypeLabel(objectiveType)
                         .. (enabled and "" or "|r"),
 
-                    tooltip = filters.TypeLabel(objectiveType)
-                        .. (enabled and "\nShown in recommendations."
-                            or "\nHidden from recommendations."),
+                    -- WITH THE CONSEQUENCE ATTACHED. 0.67.0.
+                    --
+                    -- "Shown in recommendations" restates the checkbox the
+                    -- player is looking at. What they cannot see is how much
+                    -- of the list this switch is holding -- which is the only
+                    -- thing that makes the decision to flip it a decision.
+                    tooltip = function()
+                        local lines = { filters.TypeLabel(objectiveType) }
+
+                        local holding = 0
+
+                        for _, objective in ipairs(CN.Recommend(60) or {}) do
+                            if objective.type == objectiveType then
+                                holding = holding + 1
+                            end
+                        end
+
+                        if enabled then
+                            table.insert(lines, "Shown. "
+                                .. CN.Count(holding, "row")
+                                .. " in the list right now; hiding it drops "
+                                .. "them from the route as well, so you are "
+                                .. "not walked past something you said you "
+                                .. "did not want.")
+                        else
+                            table.insert(lines, "Hidden from recommendations "
+                                .. "and from the route. Collection totals "
+                                .. "still count it.")
+                        end
+
+                        return table.concat(lines, "\n")
+                    end,
 
                     onClick = function()
                         filters.ToggleType(objectiveType)
@@ -12368,8 +12581,22 @@ UI.RegisterTab{
         -- The cost the memo was written for is entirely in the stored half:
         -- ten `Summary()` calls, each walking its module's whole store. The
         -- live half is three client calls.
-        local sources = CN.Memo("ui:sources:stored", CN.collectionGeneration,
+        -- A NEW ARRAY EVERY REFRESH. THE MEMO HANDS BACK THE CACHE ITSELF.
+        --
+        -- 0.66.0 split this in two and then appended the live rows onto the
+        -- table `CN.Memo` returned -- which is the cached table, not a copy of
+        -- it. Standing still, the generation does not move, so the same table
+        -- came back every two seconds and grew by five rows each time: after
+        -- half a minute the tab listed "Quests in your log" fifteen times, and
+        -- `/cn find`, which refreshes every tab, added another copy per use.
+        local held = CN.Memo("ui:sources:stored", CN.collectionGeneration,
             function() return UI.Sources("stored") end)
+
+        local sources = {}
+
+        for _, row in ipairs(held) do
+            table.insert(sources, row)
+        end
 
         for _, row in ipairs(UI.Sources("live")) do
             table.insert(sources, row)
@@ -12767,7 +12994,42 @@ UI.RegisterTab{
 
                     sortSeconds = worldQuest.secondsLeft or math.huge,
 
-                    tooltip = "Click to set a waypoint.",
+                    -- WHY IT MATTERS, NOT ONLY WHAT CLICKING DOES. 0.67.0.
+                    --
+                    -- Backlog item 21. Every tooltip in this window said what
+                    -- the row was or what the click would do -- both of which
+                    -- the player can see -- and none of them said why the row
+                    -- is worth reading. The addon knows: it has the clock, the
+                    -- journey and the reward.
+                    tooltip = function()
+                        local lines = { tostring(worldQuest.name) }
+
+                        table.insert(lines, "Gone in "
+                            .. tostring(opportunities.FormatTimeLeft(
+                                worldQuest.secondsLeft))
+                            .. " whether you do it or not.")
+
+                        if worldQuest.tagName and worldQuest.tagName ~= "" then
+                            table.insert(lines, tostring(worldQuest.tagName)
+                                .. (worldQuest.isElite and " (elite)" or "")
+                                .. ".")
+                        elseif worldQuest.isElite then
+                            table.insert(lines, "Elite.")
+                        end
+
+                        local cost = CN.TravelCost(worldQuest.mapID,
+                            worldQuest.x, worldQuest.y)
+
+                        if cost then
+                            table.insert(lines, "About "
+                                .. CN.Count(math.floor(cost + 0.5), "minute")
+                                .. " away by the route this addon would take.")
+                        end
+
+                        table.insert(lines, "Click to set a waypoint.")
+
+                        return table.concat(lines, "\n")
+                    end,
 
                     onClick = function()
                         CN.NavigateToObjective({
@@ -12798,7 +13060,40 @@ UI.RegisterTab{
                     -- Up right now, so it sorts above anything on a clock.
                     sortSeconds = 0,
 
-                    tooltip = "Up right now. Click to set a waypoint.",
+                    tooltip = function()
+                        local lines = { tostring(vignette.name) }
+
+                        table.insert(lines, "Up right now. Vignettes only "
+                            .. "appear for things in range, so this is a "
+                            .. "chance rather than a plan.")
+
+                        local record = CN.Account("rares")[vignette.vignetteID]
+
+                        if record and (record.sightings or 0) > 1 then
+                            table.insert(lines, "You have met it "
+                                .. CN.Count(record.sightings, "time") .. ".")
+                        elseif record then
+                            table.insert(lines, "First time you have met it.")
+                        end
+
+                        if rares.IsClearedByCharacter(vignette.vignetteID) then
+                            table.insert(lines, "This character has already "
+                                .. "cleared it since the last weekly reset.")
+                        end
+
+                        local cost = CN.TravelCost(vignette.mapID,
+                            vignette.x, vignette.y)
+
+                        if cost then
+                            table.insert(lines, "About "
+                                .. CN.Count(math.floor(cost + 0.5), "minute")
+                                .. " away.")
+                        end
+
+                        table.insert(lines, "Click to set a waypoint.")
+
+                        return table.concat(lines, "\n")
+                    end,
 
                     onClick = function()
                         CN.NavigateToObjective({
@@ -14835,7 +15130,10 @@ CN:RegisterCommand{
         -- A player typing this has usually not opened the window, and a tab
         -- that has never been refreshed holds no entries -- so the search
         -- would have answered "nothing" for things the addon plainly knows.
-        UI.Frame()
+        -- `RefreshAllTabs` builds the window itself. This used to call
+        -- `UI.Frame()`, which is a pure accessor -- `return window` -- so on
+        -- a fresh login it built nothing and the command answered "nothing
+        -- matches" for things the addon plainly had. 0.67.0.
         UI.RefreshAllTabs()
 
         local hits = UI.SearchAll(args)
@@ -20336,6 +20634,21 @@ local function Remembered()
     return CN.Account("questPins")
 end
 
+-- A COUNTER, NOT A COUNT. 0.67.0.
+--
+-- The off-map shortlist keyed its revision on `CN.CountKeys(Remembered())`,
+-- which is a walk of up to six hundred rows -- the exact walk 0.65.0 took OFF
+-- this path -- performed on every call, from a provider on the
+-- `QUEST_LOG_UPDATE` firehose. Worse, walking into new content adds ids
+-- continuously, so the count moved constantly and the shortlist rebuilt every
+-- two seconds: a full store walk plus one travel estimate per remembered map,
+-- and a travel estimate is four client conversions and a scan of the flight
+-- network.
+--
+-- One integer, bumped by the only two things that change what is in the
+-- store.
+Quests.pinRevision = 0
+
 Quests.Remembered = Remembered
 
 function Quests.RememberOffer(poi)
@@ -20348,6 +20661,10 @@ function Quests.RememberOffer(poi)
     -- Only what the client cannot re-derive instantly: no names, no
     -- timestamps beyond the one that makes pruning possible.
     local isNew = store[poi.questID] == nil
+
+    if isNew then
+        Quests.pinRevision = Quests.pinRevision + 1
+    end
 
     store[poi.questID] = {
         mapID = poi.mapID,
@@ -20402,11 +20719,43 @@ Quests.offMapCap   = 20
 function Quests.NearbyRememberedMaps(playerMap)
     local byMap = {}
 
+    -- THE NEIGHBOURHOOD, NOT THE EXACT MAP. 0.67.0.
+    --
+    -- Pins are recorded against every RELATED map -- `AvailableOnMap` walks
+    -- `RelatedMapIDs`, which adds the parent zone and all its children -- and
+    -- `GetBestMapForUnit` answers with the city's own map when the player is
+    -- standing in one. So a quest giver twenty yards away in Dornogal, whose
+    -- pin was filed against Isle of Dorn, came back through the OFF-map
+    -- branch: priced as a journey, penalised a point, and captioned
+    -- "available to pick up in Isle of Dorn" while the player stood in it.
+    local here = {}
+
+    if playerMap then
+        here[playerMap] = true
+
+        for _, related in ipairs(Blizzard.RelatedMapIDs(playerMap) or {}) do
+            here[related] = true
+        end
+    end
+
+    local function Skip(mapID)
+        return here[mapID] == true
+    end
+
     for questID, record in pairs(Remembered()) do
         local mapID = record.mapID
 
-        if mapID and mapID ~= playerMap
-            and not Quests.IsCompletedOnAccount(questID)
+        -- BY CHARACTER, NOT BY ACCOUNT. 0.67.0.
+        --
+        -- `PruneRemembered` uses the account check deliberately -- WHERE a
+        -- quest is does not depend on who is asking -- and this borrowed it,
+        -- which is the opposite question. So a player whose main had cleared
+        -- a continent rolled an alt and was offered nothing at all from it:
+        -- `/cn unpicked` correctly listed twenty-two quests in a zone and
+        -- `/cn next` never mentioned one of them. The in-zone sibling,
+        -- `AvailableOnMap`, has always used the character check.
+        if mapID and not Skip(mapID)
+            and not Quests.IsCompletedByCharacter(questID)
             and not Blizzard.IsQuestInLog(questID) then
 
             byMap[mapID] = byMap[mapID] or {}
@@ -20461,8 +20810,20 @@ function Quests.OffMapOffers()
         return {}
     end
 
-    local revision = tostring(playerMap) .. ":"
-        .. tostring(CN.CountKeys(Remembered()))
+    -- AND WHERE THE PLAYER IS, COARSELY. 0.67.0.
+    --
+    -- The revision carried the map and not the position, so the "three
+    -- cheapest zones" ordering was taken once on entering a zone and never
+    -- re-costed: fly to the far side of it, or learn a flight point, and the
+    -- addon went on pricing the journey from where you landed. A tenth of a
+    -- map is coarse enough that walking does not thrash it and fine enough
+    -- that crossing a zone re-asks.
+    local _, playerX, playerY = CN.GetPlayerPosition()
+
+    local revision = tostring(playerMap)
+        .. ":" .. tostring(Quests.pinRevision)
+        .. ":" .. tostring(math.floor((playerX or 0) * 10))
+        .. ":" .. tostring(math.floor((playerY or 0) * 10))
 
     local list = CN.Shortlist("quests:offmap", revision, function()
         local offers = {}
@@ -20527,6 +20888,10 @@ function Quests.PruneRemembered()
             store[ids[index]] = nil
             dropped = dropped + 1
         end
+    end
+
+    if dropped > 0 then
+        Quests.pinRevision = Quests.pinRevision + 1
     end
 
     return dropped
@@ -21536,7 +21901,7 @@ CN.RegisterCandidateProvider("Quests", function()
         -- a quest they are already carrying. Twenty checks; the shortlist
         -- exists to keep the six-hundred-row walk off this path, not these.
         if not seen[pin.questID]
-            and not Quests.IsCompletedOnAccount(pin.questID)
+            and not Quests.IsCompletedByCharacter(pin.questID)
             and not Blizzard.IsQuestInLog(pin.questID) then
             local name = Quests.GetName(pin.questID)
                 or Blizzard.GetQuestTitle(pin.questID, true)
@@ -23319,9 +23684,23 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
         if watched[achievementID]
             and record.criteria and record.criteria > 0 then
 
-            local done = Blizzard.GetAchievementProgress(achievementID)
+            -- BOTH RETURNS, BECAUSE A REFUSAL LOOKS LIKE ZERO. 0.67.0.
+            --
+            -- `GetAchievementProgress` answers `0, 0` when the criteria API
+            -- is unavailable -- early in a loading screen, or before the
+            -- achievement UI has loaded -- and this discarded the second
+            -- return, so a refusal was written into the store as real
+            -- progress. One `CRITERIA_UPDATE` at the wrong moment rewrote
+            -- every watched row to zero, `IsNearlyDone` went false, and an
+            -- achievement at 38 of 40 dropped out of `/cn next` until a full
+            -- `/cn achievescan`, which nothing runs on its own.
+            --
+            -- `Exploration.RefreshCurrentZone` guards this exact case, under
+            -- the header "NOT OVER GOOD DATA WITH NOTHING". The guard was
+            -- never carried to the sibling.
+            local done, criteria = Blizzard.GetAchievementProgress(achievementID)
 
-            if done ~= record.done then
+            if criteria and criteria > 0 and done ~= record.done then
                 local wasNear = IsNearlyDone(record)
 
                 record.done     = done
@@ -26473,7 +26852,7 @@ local function ShowExport(text, count)
 
         exportFrame.edit = edit
 
-        local hint = exportFrame:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
+        local hint = CN.Label(exportFrame, "ARTWORK", "LABEL")
         hint:SetPoint("BOTTOMLEFT", 14, 14)
         hint:SetText("Ctrl+A then Ctrl+C, and paste into Data\\Quests.lua")
 
@@ -28099,11 +28478,19 @@ function Rares.IsClearedByCharacter(vignetteID)
         return false
     end
 
-    -- MIGRATED IN PLACE. Entries written before 0.53.0 hold the time the
-    -- vignette vanished rather than the time the memory expires, and most of
-    -- them are the false positives described above. Treating a bare timestamp
-    -- as "expires one week after it was written" retires them without a
-    -- migration step and without discarding a genuine recent kill.
+    -- LEGACY ENTRIES ARE RETIRED, NOT CONVERTED. The comment here used to
+    -- claim they were treated as "expires one week after it was written",
+    -- and the code has always treated the number as the expiry itself --
+    -- so an entry written before 0.53.0, which holds the time the vignette
+    -- VANISHED and is therefore always in the past, is dropped on first read.
+    --
+    -- That is the right outcome and the comment was the thing that was
+    -- wrong. Most of those entries are the false positives described above,
+    -- the rule they were written under is gone, and a rare offered once more
+    -- than it needed to be is a smaller error than one silently never offered
+    -- again. Corrected rather than implemented, in 0.67.0: converting them
+    -- would mean adding a week to genuine expiries that have already passed,
+    -- which resurrects exactly the stale clears this expiry exists to end.
     local expires = type(entry) == "number" and entry or 0
 
     if expires < time() then
@@ -28933,10 +29320,27 @@ end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true })
 -- costs nothing; the sweep costs a visible flicker.
 Currencies.rescanSeconds = 60
 
+-- `IsVisible`, NOT `IsShown`, AND ONLY THE CURRENCY PANEL. 0.67.0.
+--
+-- `IsShown` reports a region's own flag, not whether the player can see it:
+-- a child of a hidden parent still answers true. `TokenFrame` is a panel
+-- INSIDE `CharacterFrame`, so pressing C, clicking Currency and pressing Esc
+-- left its flag set forever -- and from that moment this returned true on
+-- every path, `SweepIfDue` refused on every path, and the store froze at
+-- login for the rest of the session. A currency capped that evening was
+-- never reported, which is the one thing this module exists to warn about.
+--
+-- The `or _G.CharacterFrame` fallback made it worse rather than safer: with
+-- `Blizzard_TokenUI` not yet loaded it answered about the character sheet,
+-- which is a different window that this sweep does not disturb.
 local function CurrencyFrameOpen()
-    local frame = _G.TokenFrame or _G.CharacterFrame
+    local frame = _G.TokenFrame
 
-    return frame and frame.IsShown and frame:IsShown() and true or false
+    if not frame or not frame.IsVisible then
+        return false
+    end
+
+    return frame:IsVisible() and true or false
 end
 
 Currencies.IsFrameOpen = CurrencyFrameOpen
@@ -28993,6 +29397,15 @@ end)
 -- No client event announces that frame closing, so the frame itself is asked.
 -- Hooked once, at login, guarded, and silent if the frame does not exist --
 -- the same shape every other optional client surface in this addon gets.
+-- HOOKED WHEN THE FRAME EXISTS, WHICH IS NOT AT LOGIN. 0.67.0.
+--
+-- `Blizzard_TokenUI` is loaded on demand, so at `PLAYER_LOGIN` there is no
+-- `TokenFrame` -- and the first version of this fell back to
+-- `CharacterFrame`, hooked THAT, and set the "done" flag, so the frame it was
+-- written for never got a hook at all and closing the character sheet swept
+-- currencies instead.
+--
+-- Retried on `ADDON_LOADED`, which is how the client announces exactly this.
 local hookedCurrencyFrame = false
 
 function Currencies.HookFrame()
@@ -29000,7 +29413,7 @@ function Currencies.HookFrame()
         return true
     end
 
-    local frame = _G.TokenFrame or _G.CharacterFrame
+    local frame = _G.TokenFrame
 
     if not frame or not frame.HookScript then
         return false
@@ -29014,6 +29427,10 @@ function Currencies.HookFrame()
 
     return hookedCurrencyFrame
 end
+
+CN:RegisterEvent("ADDON_LOADED", function()
+    Currencies.HookFrame()
+end)
 
 CN:OnLogin(function()
     Currencies.HookFrame()
@@ -30841,16 +31258,37 @@ function Filters.DescribeObjective(objectiveType, id)
     -- client-language change it showed the previous locale's name beside pet
     -- and mount names that had correctly re-localized.
     --
-    -- `Blizzard.GetItemName` answers for exactly these ids; `Vendors.FindItem`
-    -- resolves recipe names with it already.
+    -- BUT THE STORE FIRST, BECAUSE RECIPE IS THREE ID SPACES. 0.67.0.
+    --
+    -- 0.66.0 put the client's item lookup ahead of the store on the grounds
+    -- that every other branch asks the client first. Every other branch has
+    -- ONE id space. This type carries three: a merchant itemID from Vendors,
+    -- a trade-skill recipe id from Professions -- which is what
+    -- `recipeNames` is keyed by -- and a crafting orderID from Orders.
+    --
+    -- `GetItemName` on a trade-skill recipe id returns nil, or, where the
+    -- number happens to collide with a real item, the name of a wholly
+    -- unrelated one -- and being asked first, it BEAT the correct stored
+    -- name. So a hidden Alchemy recipe that read back correctly in 0.65.0
+    -- read back as some other item entirely, and `/cn unhide <name>` could
+    -- not match what the list had printed.
+    --
+    -- The store is keyed by the one id space that has a name recorded for it;
+    -- the client is asked for everything else.
     if objectiveType == types.RECIPE and numericID then
+        local stored = CN.Account("recipeNames")[numericID]
+
+        if stored and stored ~= "" then
+            return stored
+        end
+
         local live = CN.Blizzard.GetItemName and CN.Blizzard.GetItemName(numericID)
 
         if live and live ~= "" then
             return live
         end
 
-        return CN.Account("recipeNames")[numericID] or ("Recipe " .. numericID)
+        return "Recipe " .. numericID
     end
 
     if objectiveType == types.TITLE and numericID then
@@ -30863,7 +31301,15 @@ function Filters.DescribeObjective(objectiveType, id)
         return "Title " .. numericID
     end
 
-    return tostring(objectiveType) .. " " .. tostring(id)
+    -- THE BADGE, NOT THE ENUM, FOR EVERYTHING THAT REACHES HERE. 0.67.0.
+    --
+    -- Every branch above produces a title-cased placeholder, and this last
+    -- line -- which catches every id that is not a number, such as the
+    -- crafting-order row whose id is the string "claim" -- produced
+    -- "RECIPE claim". The addon's own internals offered to the player as the
+    -- name of the thing they hid, which is the defect two branches above were
+    -- rewritten to fix.
+    return CN.TypeBadge(objectiveType) .. " " .. tostring(id)
 end
 
 -- The stores are nested by type since 0.54.0 -- see CN.IsIgnored for why --
@@ -32638,6 +33084,16 @@ Setup.steps = {
     { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan",     unit = "titles" },
     { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines" },
     { key = "exploration", label = "Exploration", module = "Exploration", fn = "Scan",     unit = "zones" },
+    -- LOREMASTER WAS MISSING FROM THIS LIST. 0.67.0.
+    --
+    -- Its store is per-character for `progress` and account-wide for
+    -- everything else, and it scans on login only when the store is EMPTY --
+    -- which after the first character it never is. So a new character had no
+    -- `progress` row of its own for any zone and read whatever the last
+    -- character to scan had recorded. Eleven collections were offered on the
+    -- setup screen and the twelfth, which is the one with a per-character
+    -- dimension, was not.
+    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements" },
     { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
     { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements" },
     { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },
@@ -36824,11 +37280,11 @@ local function BuildFrame()
 
     local inset = CN.SPACE.M
 
-    frame.header = frame:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
+    frame.header = CN.Label(frame, "OVERLAY", "HEAD")
     frame.header:SetPoint("TOPLEFT", inset, -CN.SPACE.S)
     frame.header:SetJustifyH("LEFT")
 
-    frame.body = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
+    frame.body = CN.Label(frame, "OVERLAY", "SMALL")
     frame.body:SetPoint("TOPLEFT", frame.header, "BOTTOMLEFT", 0, -CN.SPACE.S)
     frame.body:SetJustifyH("LEFT")
     frame.body:SetJustifyV("TOP")
@@ -39516,11 +39972,11 @@ local function BuildArrow()
         arrow.texture:SetTexture("Interface\\Minimap\\MinimapArrow")
     end
 
-    arrow.label = arrow:CreateFontString(nil, "OVERLAY", CN.FONT.CAPTION)
+    arrow.label = CN.Label(arrow, "OVERLAY", "CAPTION")
     arrow.label:SetPoint("TOP", arrow, "BOTTOM", 0, -2)
     arrow.label:SetJustifyH("CENTER")
 
-    arrow.distance = arrow:CreateFontString(nil, "OVERLAY", CN.FONT.LEAD)
+    arrow.distance = CN.Label(arrow, "OVERLAY", "LEAD")
     arrow.distance:SetPoint("TOP", arrow.label, "BOTTOM", 0, -2)
     arrow.distance:SetJustifyH("CENTER")
 
@@ -41374,7 +41830,7 @@ local function AcquirePin(index, canvas)
         frame.texture:SetTexture("Interface\\Minimap\\MinimapArrow")
     end
 
-    frame.label = frame:CreateFontString(nil, "OVERLAY", CN.FONT.CAPTION)
+    frame.label = CN.Label(frame, "OVERLAY", "CAPTION")
     frame.label:SetPoint("CENTER")
 
     -- Over map art, which is the same problem as over the world: a stop
@@ -50039,6 +50495,143 @@ end)
 -- COMMAND
 ------------------------------------------------------------
 
+-- WHERE A CLAIM CAME FROM, ROW BY ROW. 0.67.0.
+--
+-- Backlog item 13. The addon draws prerequisite chains from four sources, in
+-- a deliberate order of authority -- curated data, this character's own
+-- harvest, rows other players contributed, rows imported by hand -- and
+-- `/cn why` says which one a particular answer came from. What nothing could
+-- do was ask the opposite question: *which* of the things I am being told
+-- have never been checked by anybody?
+--
+-- That matters because the two weakest sources grow on their own. A harvest
+-- row is promoted the moment three characters agree, and a contributed row
+-- arrives believed. Neither has ever been read by a person, and without a
+-- list of them nobody can start.
+function Contribute.Provenance()
+    local rows = {}
+
+    local harvestModule = CN:GetModule("Harvest")
+
+    local threshold = (harvestModule and harvestModule.confidenceThreshold) or 3
+
+    local harvest = CN.Account("questHarvest")
+
+    for questID, record in pairs(harvest or {}) do
+        local observed = record.observedRequires
+
+        if type(observed) == "table" and #observed > 0 then
+            table.insert(rows, {
+                questID = questID,
+                origin  = "harvested",
+                count   = #observed,
+                detail  = "seen on " .. tostring(threshold)
+                    .. "+ of your own characters",
+            })
+        end
+    end
+
+    for questID, record in pairs((CN.Static and CN.Static.community) or {}) do
+        if type(record) == "table" and type(record.requires) == "table" then
+            table.insert(rows, {
+                questID = questID,
+                origin  = "community",
+                count   = #record.requires,
+                detail  = record.sources
+                    and (CN.Count(record.sources, "independent contribution"))
+                    or "shipped without a source count",
+            })
+        end
+    end
+
+    for questID, requires in pairs(CN.Account("contributed") or {}) do
+        if type(requires) == "table" and #requires > 0 then
+            table.insert(rows, {
+                questID = questID,
+                origin  = "imported",
+                count   = #requires,
+                detail  = "imported on this account by hand",
+            })
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        if a.origin ~= b.origin then
+            return a.origin < b.origin
+        end
+
+        return a.questID < b.questID
+    end)
+
+    return rows
+end
+
+CN:RegisterCommand{
+    name    = "provenance",
+    args    = "[origin]",
+    order   = 37.5,
+    help    = "Which chain claims have never been checked by a person.",
+    handler = function(args)
+        local wanted = string.lower(CN.Trim(args or ""))
+
+        local rows = Contribute.Provenance()
+
+        local curated = 0
+
+        for _ in pairs((CN.Static and CN.Static.quests) or {}) do
+            curated = curated + 1
+        end
+
+        Print("Curated rows, each one checked by hand: " .. curated)
+
+        Print("Rows believed on evidence rather than on a reading: "
+            .. #rows .. " |cff8a8f96("
+            .. ((CN.Static and CN.Static.CommunityCount
+                and CN.Static.CommunityCount()) or 0)
+            .. " of them shipped with the addon)|r")
+
+        if #rows == 0 then
+            Print("|cff8a8f96Nothing unchecked. Play with |cffffc74f/cn "
+                .. "harvestnow|r on and this fills from your own play.|r")
+            return
+        end
+
+        local shown = 0
+
+        for _, row in ipairs(rows) do
+            if wanted == "" or wanted == row.origin then
+                shown = shown + 1
+
+                if shown <= 20 then
+                    local quests = CN:GetModule("Quests")
+
+                    local name = quests and quests.GetName(row.questID)
+
+                    CN.PrintLine("  " .. row.origin .. " |cffffc74f"
+                        .. tostring(name or ("Quest " .. row.questID))
+                        .. "|r |cff8a8f96(" .. row.questID .. ") "
+                        .. CN.Count(row.count, "prerequisite") .. CN.DASH
+                        .. row.detail .. "|r")
+                end
+            end
+        end
+
+        if shown > 20 then
+            Print("|cff8a8f96... and " .. (shown - 20) .. " more. "
+                .. "|cffffc74f/cn provenance harvested|r, |cffffc74f"
+                .. "community|r or |cffffc74fimported|r narrows it.|r")
+        elseif shown == 0 then
+            Print("|cff8a8f96Nothing with that origin. Try harvested, "
+                .. "community or imported.|r")
+        end
+
+        Print("|cff8a8f96None of these is presented to you as fact"
+            .. CN.DASH .. "|cffffc74f/cn why|r names the source on every "
+            .. "answer that uses one. This list is where checking them "
+            .. "starts.|r")
+    end,
+}
+
 CN:RegisterCommand{
     name    = "contribute",
     args    = "[import <text>, or forget]",
@@ -50259,11 +50852,11 @@ function Welcome.Build()
         })
     end
 
-    local title = frame:CreateFontString(nil, "OVERLAY", CN.FONT.TITLE)
+    local title = CN.Label(frame, "OVERLAY", "TITLE")
     title:SetPoint("TOP", 0, -18)
     title:SetText("Completion Navigator")
 
-    local body = frame:CreateFontString(nil, "OVERLAY", CN.FONT.BODY)
+    local body = CN.Label(frame, "OVERLAY", "BODY")
     body:SetPoint("TOPLEFT", 24, -48)
     body:SetPoint("TOPRIGHT", -24, -48)
     body:SetJustifyH("LEFT")
@@ -50323,7 +50916,7 @@ function Welcome.Build()
     frame.scan = scan
 
     -- Where the scan reports, so the button does not have to become a label.
-    frame.scanNote = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
+    frame.scanNote = CN.Label(frame, "OVERLAY", "SMALL")
     frame.scanNote:SetPoint("TOPLEFT", scan, "BOTTOMLEFT", 0, -2)
     frame.scanNote:SetPoint("RIGHT", scan, "RIGHT")
     frame.scanNote:SetJustifyH("LEFT")
@@ -50409,7 +51002,7 @@ function Welcome.Build()
         previous = button
     end
 
-    local note = frame:CreateFontString(nil, "OVERLAY", CN.FONT.LABEL)
+    local note = CN.Label(frame, "OVERLAY", "LABEL")
     note:SetPoint("BOTTOMLEFT", 24, 46)
     note:SetPoint("BOTTOMRIGHT", -24, 46)
     note:SetJustifyH("LEFT")
@@ -50660,12 +51253,12 @@ local function Build()
     -- mouse input -- so the last stretch of a long objective name sat under a
     -- button that turns the line off rather than navigating to it. The label
     -- stops short of it instead.
-    frame.label = frame:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
+    frame.label = CN.Label(frame, "OVERLAY", "HEAD")
     frame.label:SetPoint("TOPLEFT", inset, -inset)
     frame.label:SetPoint("TOPRIGHT", -(inset + Hud.closeWidth), -inset)
     frame.label:SetJustifyH("LEFT")
 
-    frame.detail = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
+    frame.detail = CN.Label(frame, "OVERLAY", "SMALL")
     frame.detail:SetPoint("TOPLEFT", frame.label, "BOTTOMLEFT", 0, -CN.SPACE.XS)
     frame.detail:SetPoint("TOPRIGHT", frame.label, "BOTTOMRIGHT", 0, -CN.SPACE.XS)
     frame.detail:SetJustifyH("LEFT")
@@ -50759,7 +51352,7 @@ local function Build()
         end
     end)
 
-    close.label = close:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
+    close.label = CN.Label(close, "OVERLAY", "SMALL")
     close.label:SetPoint("CENTER")
     close.label:SetText(CN.Muted("x"))
 
@@ -51053,7 +51646,7 @@ function Hud.RegisterOptionsPanel()
 
     panel.name = "Completion Navigator"
 
-    local title = panel:CreateFontString(nil, "ARTWORK", CN.FONT.TITLE)
+    local title = CN.Label(panel, "ARTWORK", "TITLE")
     title:SetPoint("TOPLEFT", 16, -16)
     title:SetText("Completion Navigator")
 
@@ -51068,7 +51661,7 @@ function Hud.RegisterOptionsPanel()
     --
     -- Three sentences and two buttons. The settings themselves live one click
     -- away, in the window, where there is room to group them.
-    local body = panel:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
+    local body = CN.Label(panel, "ARTWORK", "BODY")
     body:SetPoint("TOPLEFT", 16, -48)
     body:SetPoint("TOPRIGHT", -16, -48)
     body:SetJustifyH("LEFT")
@@ -51103,7 +51696,7 @@ function Hud.RegisterOptionsPanel()
         end
     end)
 
-    local version = panel:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
+    local version = CN.Label(panel, "ARTWORK", "LABEL")
     version:SetPoint("TOPLEFT", scan, "BOTTOMLEFT", 0, -12)
     version:SetText("v" .. tostring(CN.version)
         .. "  " .. CN.DOT .. "  Dam Beaver Studios, LLC")
@@ -51655,7 +52248,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.66.0
+## Version: 0.67.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -51910,6 +52503,98 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.67.0]
+
+Thirteen defects and four improvements. Eight of the thirteen were in what
+0.66.0 itself added — including one that made a tab grow by five rows every
+two seconds, and one that switched off the currency sweep for the session the
+first time you opened your Currency tab.
+
+### Fixed — 0.66.0's own additions
+
+- **The Scans tab duplicated itself every two seconds.** The live rows were
+  being appended onto the cached table rather than onto a copy of it, so
+  standing with the window open, "Quests in your log" appeared fifteen times
+  after half a minute and several hundred times after a few. The cache now
+  notices when something has modified what it handed out, rebuilds, and
+  reports it to `/cn errors`.
+- **`/cn find` answered "nothing matches" if you had not opened the window.**
+  It asked for the window rather than building one. It also only searched tabs
+  you had clicked at least once — panels are created on first visit — so the
+  search was blind to exactly the tabs you were least likely to have seen.
+- **Text size could be raised and never lowered.** `/cn textsize 100` reported
+  success and changed nothing; every label kept whatever larger font it was
+  last given until you reloaded. The Settings button cycles back round to
+  100%, which is the normal way to meet this.
+- **Text size did not reach the arrow, the heads-up line, the follow frame or
+  the map pin numbers** — the four widgets the setting exists for — nor any
+  button or checkbox label in the window.
+- **Opening your Currency tab once switched off the currency sweep for the
+  rest of the session.** The check asked whether that panel's own flag was
+  set, and a panel inside a closed window still answers yes. So `/cn
+  currencies` served a store frozen at login, and a currency you capped that
+  evening was never reported. The hook meant to catch you closing the window
+  had also attached itself to your character sheet, because the currency panel
+  does not exist yet when the addon loads.
+- **An alt was offered no quests at all from the zones next door** if their
+  main had cleared them: the new off-map list was filtered by what the
+  *account* had finished rather than what *this character* had. And a quest
+  giver twenty yards away could be offered as a journey to another zone,
+  because standing in a city means the client names the city, not the zone
+  around it.
+- **Walking through new content re-costed every remembered zone every two
+  seconds** — the cache key was a count of a six-hundred-row store, and that
+  count moves continuously while you discover quests. It is a counter now, and
+  it includes roughly where you are standing, so the cheapest-zones ordering
+  is re-taken as you cross a zone instead of being fixed where you landed.
+- **A hidden recipe showed the name of an unrelated item.** Recipes arrive
+  from three different sources with three different kinds of id, and the
+  client's item lookup was being asked first for all of them.
+
+### Fixed — older
+
+- **A new character read the main's Loremaster progress as its own** — "90 /
+  120" with three done — permanently, because nothing rewrote the shared
+  figure any more. The stale figures are cleared on upgrade, and Loremaster
+  has been added to first-time setup, which it was missing from.
+- **An achievement at 38 of 40 could vanish from the list.** When the game
+  declines to answer about criteria — during a loading screen, or before the
+  achievement UI has loaded — it answers zero, and that was written into the
+  store as real progress. The neighbouring module has guarded this for
+  several releases.
+- **Typing in the filter box wiped whatever a button had just told you.** The
+  cross-tab hint has its own line now.
+- **`/cn hidden` could show `RECIPE claim`** — the addon's internals offered
+  as the name of the thing you hid.
+
+### New
+
+- **`/cn provenance`** lists every prerequisite the addon believes on evidence
+  rather than on somebody having read it — harvested from your own play,
+  contributed by other players, or imported by hand — with how many characters
+  or contributions stand behind each. `/cn why` has always said which source
+  an answer came from; this is the opposite question, and it is where checking
+  them starts.
+- **Tooltips say why a row matters**, not only what it is. A world quest says
+  when it disappears whether you do it or not, and roughly how far away it is.
+  A rare says whether this character has already cleared it and how many times
+  you have met it. A type filter says how much of the current list it is
+  holding, which is the only thing that makes switching it off a decision.
+
+### Internal
+
+- **Every tooltip on every tab is now built during the test run** and must
+  produce text with no `nil` in it. Tooltips are built on hover, so nothing in
+  the suite had ever run one — and the first draft of the work above read a
+  field the world-quest row does not carry.
+- **A recording that does not cover a stub rule is a failure, not a note**,
+  under `CN_REQUIRE_FULL_FIXTURES`. It is deliberately a separate switch: the
+  recording in the repository is old enough to cover none of the three
+  strongest rules, so arming it needs one fresh `/cn capture` first.
+- **The test harness can measure what size a piece of text is drawn at.** It
+  could not, which is why the four widgets drawn over the world were the only
+  text in the addon no test could see.
 
 ## [0.66.0]
 
@@ -57150,6 +57835,8 @@ A scale for everything it draws, and a colourblind mode that changes the arrow's
 
 **And you can search the whole window at once.** `/cn find <text>` looks on every tab and says which one the match is on, so finding something does not require knowing which tab it lives on first. The filter box does the same thing quietly: type on the wrong tab and it tells you which other tabs match, instead of saying nothing matched while the answer sits one tab over.
 
+**Hovering a row says why it matters, not what it is.** A world quest says when it disappears whether you do it or not, and roughly how far away it is by the route this addon would take. A rare says whether this character has already cleared it since the last reset. A type filter says how much of the list it is currently holding — which is the only thing that makes switching it off a decision rather than a guess.
+
 ```
 /cn scale 1.25
 /cn colourblind
@@ -57180,6 +57867,8 @@ Failures inside the addon are caught so they cannot break your session — which
 Prints one line of quest IDs and orderings — no character name, no realm, no timestamps, nothing that identifies you. You can read the whole thing before deciding to send it, which is the point of a format you can read.
 
 Nothing is uploaded. The addon *cannot* upload; addons have no network access at all. Pasting it into an issue is the entire transport, and chains that arrive that way are recorded as observations, never as fact.
+
+**And you can ask which of its claims have never been checked.** `/cn provenance` lists every prerequisite the addon believes on evidence rather than on somebody having read it — learned from your own play, contributed by another player, or imported by hand — with how many characters or contributions stand behind each. `/cn why` has always named the source of an answer; this is the opposite question, and it is where checking one starts.
 
 ## Ask it whether it is working
 
@@ -57224,6 +57913,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn situation` | What the addon thinks you are in the middle of |
 | `/cn unpicked` | Quests you have seen and never picked up, by zone |
 | `/cn find <text>` | Find something without knowing which tab it is on |
+| `/cn provenance` | Which chain claims have never been checked by a person |
 | `/cn textsize <100-150>` | Larger text, without resizing the window |
 | `/cn orders` | Crafting orders you placed, and anything ready to collect |
 | `/cn hud` | A small always-on line showing the next thing |
@@ -57321,7 +58011,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.66.0
+0.67.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -60075,9 +60765,9 @@ mutate "Modules/Currencies.lua" \
     "a manual scan arms a second sweep a second later"
 
 mutate "UI.lua" \
-    "        local sources = CN.Memo(\"ui:sources:stored\", CN.collectionGeneration,
+    "        local held = CN.Memo(\"ui:sources:stored\", CN.collectionGeneration,
             function() return UI.Sources(\"stored\") end)" \
-    "        local sources = UI.Sources(\"stored\")" \
+    "        local held = UI.Sources(\"stored\")" \
     "the Sources tab rewalks ten stores every two seconds"
 
 mutate "UI.lua" \
@@ -60177,6 +60867,116 @@ mutate "Modules/Exploration.lua" \
     record.completed     = completed and true or false
     record.progress[key] = {" \
     "an alt is handed the last character's zone progress"
+
+############################################################
+# 0.67.0
+############################################################
+
+mutate "UI.lua" \
+    "        local sources = {}
+
+        for _, row in ipairs(held) do
+            table.insert(sources, row)
+        end" \
+    "        local sources = held" \
+    "the Scans tab grows by five rows every two seconds"
+
+mutate "Core.lua" \
+    "        if held.count == nil or held.count == #held.value then
+            return held.value
+        end" \
+    "        return held.value" \
+    "a memoized value mutated by its reader is served anyway"
+
+# NOT MUTATED: `UI.RefreshAllTabs` builds the window before refreshing, and by
+# the time any test reaches it the window already exists -- every earlier block
+# opens it. The property only differs on a FRESH login, which a single-process
+# suite has exactly one of, and it is spent before this code is reachable.
+# Asserted as a source rule in the 0.67.0 block instead.
+
+mutate "UI.lua" \
+    "    for _, tab in ipairs(UI.tabs) do
+        UI.BuildPanel(tab)
+
+        if tab.refresh and tab.panel then" \
+    "    for _, tab in ipairs(UI.tabs) do
+        if tab.refresh and tab.panel then" \
+    "the search is blind to every tab the player has not clicked"
+
+mutate "Design.lua" \
+    "    if type(object) == \"string\" then
+        object = _G and _G[object]
+    end" \
+    "    if false then
+        object = nil
+    end" \
+    "text size can be raised but never lowered"
+
+mutate "Design.lua" \
+    "    local applied = pcall(fontString.SetFont, fontString, face,
+        math.floor(asked * CN.TextScale() + 0.5), \"OUTLINE\")" \
+    "    local applied = pcall(fontString.SetFont, fontString, face, asked,
+        \"OUTLINE\")" \
+    "text drawn over the world ignores the text-size setting"
+
+mutate "Modules/Currencies.lua" \
+    "    return frame:IsVisible() and true or false" \
+    "    return frame:IsShown() and true or false" \
+    "opening the currency tab once disables the sweep for the session"
+
+mutate "Modules/Currencies.lua" \
+    "    local frame = _G.TokenFrame
+
+    if not frame or not frame.HookScript then" \
+    "    local frame = _G.TokenFrame or _G.CharacterFrame
+
+    if not frame or not frame.HookScript then" \
+    "the currency hook lands on whatever frame exists at login"
+
+mutate "Modules/Quests.lua" \
+    "        if mapID and not Skip(mapID)
+            and not Quests.IsCompletedByCharacter(questID)" \
+    "        if mapID and not Skip(mapID)
+            and not Quests.IsCompletedOnAccount(questID)" \
+    "an alt is offered nothing its main has already finished"
+
+mutate "Modules/Quests.lua" \
+    "        if mapID and not Skip(mapID)" \
+    "        if mapID and mapID ~= playerMap" \
+    "a quest in the zone you are standing in is priced as a journey"
+
+mutate "Modules/Quests.lua" \
+    "        .. \":\" .. tostring(Quests.pinRevision)" \
+    "        .. \":\" .. tostring(CN.CountKeys(Remembered()))" \
+    "the off-map cache key walks the whole remembered store"
+
+mutate "Modules/Achievements.lua" \
+    "            if criteria and criteria > 0 and done ~= record.done then" \
+    "            if done ~= record.done then" \
+    "a refusal from the criteria API is written in as progress"
+
+mutate "Modules/Filters.lua" \
+    "        local stored = CN.Account(\"recipeNames\")[numericID]
+
+        if stored and stored ~= \"\" then
+            return stored
+        end" \
+    "        local stored = nil
+
+        if stored then
+            return stored
+        end" \
+    "a recipe id is looked up as though it were an item id"
+
+mutate "Modules/Filters.lua" \
+    "    return CN.TypeBadge(objectiveType) .. \" \" .. tostring(id)" \
+    "    return tostring(objectiveType) .. \" \" .. tostring(id)" \
+    "an id that is not a number is described with the internal enum"
+
+mutate "Modules/Setup.lua" \
+    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\" }," \
+    "" \
+    "a new character never scans the one store with a per-character split"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -60569,6 +61369,35 @@ local function Frame()
 
         function fs:SetFontObject(object) fs.fontObject = object end
         function fs:GetFontObject() return rawget(fs, "fontObject") end
+
+        -- AND THE EXPLICIT FACE/SIZE/FLAGS PATH, which is what `CN.Outline`
+        -- uses -- a font object cannot carry an outline. It fell through to
+        -- the universal stub, so the four widgets drawn over the world were
+        -- the only text in the addon no test could measure. 0.67.0.
+        function fs:SetFont(file, points, flags)
+            fs.fontFile, fs.fontSize, fs.fontFlags = file, points, flags
+        end
+
+        function fs:GetFont()
+            local object = rawget(fs, "fontObject")
+
+            if rawget(fs, "fontSize") then
+                return rawget(fs, "fontFile"), rawget(fs, "fontSize"),
+                    rawget(fs, "fontFlags")
+            end
+
+            if object and object.GetFont then
+                return object:GetFont()
+            end
+
+            local fontTemplate = rawget(fs, "template")
+
+            if fontTemplate and _G[fontTemplate] and _G[fontTemplate].GetFont then
+                return _G[fontTemplate]:GetFont()
+            end
+
+            return nil
+        end
 
         -- Record what was actually displayed. The universal stub swallowed
         -- SetText, so no test could ever assert what the arrow said.
@@ -64222,7 +65051,10 @@ print("\nSetup:")
 local setup = CN:GetModule("Setup")
 
 assert(setup, "the Setup module must load")
-assert(#setup.steps == 11, "every scannable subsystem must have a setup step, got "
+-- TWELVE SINCE 0.67.0: Loremaster was missing, and it is the one collection
+-- with a per-character dimension -- so a new character had no row of its own
+-- and read whatever the last character to scan had recorded.
+assert(#setup.steps == 12, "every scannable subsystem must have a setup step, got "
     .. #setup.steps)
 
 -- Every step must name a module and function that actually exist. This is the
@@ -70440,8 +71272,40 @@ print("\nStubs, audited against a real client:")
     assert(#complaints == 0,
         #complaints .. " stub(s) are simpler than the client they stand in for")
 
+    -- AND A RECORDING THAT DOES NOT COVER A RULE IS A GAP, NOT A PASS. 0.67.0.
+    --
+    -- Backlog item 25. Once a recording is present these were printed and
+    -- nothing more, so a capture that had quietly stopped covering a field --
+    -- because the player was somewhere the client answers nothing, or because
+    -- `/cn capture` grew a rule it does not record -- read as a green run
+    -- with a note. On a machine that has a client, that is exactly the state
+    -- the gate exists to catch: the fix is to widen the capture, and it can
+    -- only be asked for if the build asks.
+    --
+    -- Advisory where no client can exist, for the same reason the missing
+    -- recording is: CI has no game and never will.
+    -- A SECOND VARIABLE, NOT THE ONE THAT ALREADY EXISTS.
+    --
+    -- `CN_REQUIRE_FIXTURES` is already set on a machine with a game client,
+    -- and the recording currently in the repository is from 0.46.0 and
+    -- carries none of these three -- so folding this into that variable would
+    -- break the release pipeline of everyone who has one, for a capture they
+    -- have not been asked for yet. Armed separately, and the line below says
+    -- exactly how.
+    if #unverified > 0 and os.getenv("CN_REQUIRE_FULL_FIXTURES") then
+        error(#unverified .. " stub rule(s) are not covered by the recording: "
+            .. table.concat(unverified, ", ")
+            .. " -- re-run /cn capture in game somewhere these answer, then "
+            .. "cn.ps1 fixtures")
+    end
+
     for _, field in ipairs(unverified) do
         print("    UNVERIFIED: the recording carries no " .. field)
+    end
+
+    if #unverified > 0 then
+        print("    |these are gaps, not passes| set CN_REQUIRE_FULL_FIXTURES=1 "
+            .. "to make them block once a fresh /cn capture covers them")
     end
 
     print("  " .. audited .. " of " .. (audited + #unverified)
@@ -70452,7 +71316,466 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
-print("\nWhat 0.66.0 changed, asserted through the paths the game takes:")
+print("\nWhat 0.67.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A MEMOIZED TABLE IS THE CACHE, NOT A COPY OF IT. 0.67.0.
+    --
+    -- 0.66.0 appended the Scans tab's live rows onto the table `CN.Memo`
+    -- returned. Standing still, the generation does not move, so the same
+    -- table came back every two seconds and grew by five rows each time --
+    -- half a minute in, the tab listed "Quests in your log" fifteen times,
+    -- and `/cn find`, which refreshes every tab, added a copy per use.
+    ------------------------------------------------------------
+    CN.UI.Show()
+
+    local scansTab
+
+    for _, tab in ipairs(CN.UI.tabs) do
+        if tab.name == "Scans" then
+            scansTab = tab
+        end
+    end
+
+    assert(scansTab and scansTab.panel and scansTab.refresh,
+        "the Scans tab is built")
+
+    local list = CN.UI.listPanels[scansTab.panel]
+
+    assert(list and list.Entries, "and it owns a list")
+
+    scansTab.refresh(scansTab.panel)
+
+    local first = #list:Entries()
+
+    assert(first > 0, "which has rows in it")
+
+    -- Refreshed four more times with nothing changed. The generation does not
+    -- move, so every one of these is a cache hit -- which is exactly the case
+    -- that grew.
+    for _ = 1, 4 do
+        scansTab.refresh(scansTab.panel)
+    end
+
+    assert(#list:Entries() == first,
+        "a tab refreshed five times with nothing changed shows the same rows, "
+        .. "not five copies of them: " .. first .. " then "
+        .. #list:Entries())
+
+    -- AND THE CACHE NOTICES IF SOMETHING DOES MUTATE IT, rather than serving
+    -- the damage. Asserted by doing the damage.
+    local heldMutations = CN.memoMutations
+
+    local held = CN.Memo("cn:test:memo", 1, function()
+        return { "a", "b" }
+    end)
+
+    table.insert(held, "c")
+
+    local again = CN.Memo("cn:test:memo", 1, function()
+        return { "a", "b" }
+    end)
+
+    assert(#again == 2,
+        "a mutated cache entry is rebuilt rather than served: " .. #again)
+
+    assert(CN.memoMutations == heldMutations + 1,
+        "and the mutation is counted, so the next one is a bug report rather "
+        .. "than a mystery")
+
+    CN.ForgetMemos("cn:test:memo")
+
+    print("  a memoized list does not grow every time it is read")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY TOOLTIP IN THE WINDOW IS BUILT, AND NONE OF THEM SAYS "nil".
+    -- 0.67.0.
+    --
+    -- Tooltips are the one part of this window that nothing ever ran: they
+    -- are built on hover, so a refresh does not touch them and a test that
+    -- refreshes every tab proves nothing about them. 0.67.0 added depth to
+    -- three of them and the first draft read a field the world-quest row does
+    -- not carry -- silently producing a shorter tooltip than intended, which
+    -- is the same "wrote a reader for something nobody writes" shape this
+    -- project keeps finding a release later.
+    --
+    -- Hovering is the only path, so the test hovers: every row of every tab,
+    -- and every button and checkbox that carries one.
+    ------------------------------------------------------------
+    CN.UI.Show()
+    CN.UI.RefreshAllTabs()
+
+    local tipsBuilt, empty = 0, {}
+
+    local function Check(where, value)
+        if value == nil then
+            return
+        end
+
+        if type(value) == "function" then
+            local ok, produced = pcall(value)
+
+            assert(ok, where .. " threw while building its tooltip: "
+                .. tostring(produced))
+
+            value = produced
+        end
+
+        if value == nil then
+            return
+        end
+
+        -- `AttachTooltip` accepts a list of lines as well as one string;
+        -- both reach `GameTooltip`, so both are checked.
+
+        assert(type(value) == "string",
+            where .. " produced a tooltip that is not text: " .. type(value))
+
+        tipsBuilt = tipsBuilt + 1
+
+        assert(not value:find("nil", 1, true),
+            where .. " has a nil in its tooltip: " .. value)
+
+        if CN.Trim(value) == "" then
+            table.insert(empty, where)
+        end
+    end
+
+    for _, tab in ipairs(CN.UI.tabs) do
+        local list = tab.panel and CN.UI.listPanels
+            and CN.UI.listPanels[tab.panel]
+
+        if list and list.Entries then
+            for index, entry in ipairs(list:Entries()) do
+                Check(tab.name .. " row " .. index, entry.tooltip)
+            end
+        end
+
+        -- NOT the buttons and checkboxes: the frame stub answers any field
+        -- with a stub, so sweeping a panel's fields for `cnTooltip` reads
+        -- noise rather than tooltips. The rows are where the composed ones
+        -- live, and they are reached the way the game reaches them.
+    end
+
+    assert(tipsBuilt > 20,
+        "the fixture reaches a real number of tooltips, or this proves "
+        .. "nothing: " .. tipsBuilt)
+
+    assert(#empty == 0,
+        CN.Count(#empty, "tooltip") .. " tipsBuilt to nothing: "
+        .. table.concat(empty, ", "))
+
+    print("  " .. tipsBuilt .. " tooltips build, none of them saying nil")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- `/cn find` BUILDS THE WINDOW IT SEARCHES. 0.67.0.
+    --
+    -- It called `UI.Frame()`, which is a pure accessor -- so on a fresh
+    -- login it tipsBuilt nothing, every panel was nil, and the command answered
+    -- "nothing matches" for things the addon plainly had. And even with the
+    -- window open, panels are created the first time a tab is SELECTED, so
+    -- the search was blind to every tab the player had not clicked.
+    ------------------------------------------------------------
+    CN.UI.Hide()
+
+    -- The state a player who has never opened the window is in.
+    for _, tab in ipairs(CN.UI.tabs) do
+        tab.panel = nil
+    end
+
+    CN.UI.listPanels = {}
+
+    local printed = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(printed, tostring(message))
+
+        return realAdd(chatFrame, message)
+    end
+
+    SlashCmdList.COMPLETIONNAVIGATOR("find e")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local answered = false
+
+    for _, line in ipairs(printed) do
+        if line:find("Matches for", 1, true) then
+            answered = true
+        end
+    end
+
+    assert(answered,
+        "a player who has never opened the window still gets an answer: "
+        .. table.concat(printed, " / "))
+
+    -- AND EVERY TAB HAS A PANEL AFTERWARDS, not only the one that was
+    -- selected -- which is what makes the search see all of them.
+    local without = {}
+
+    for _, tab in ipairs(CN.UI.tabs) do
+        if not tab.panel then
+            table.insert(without, tab.name)
+        end
+    end
+
+    assert(#without == 0,
+        "every tab is built before it is searched; these were not: "
+        .. table.concat(without, ", "))
+
+    -- AND SAID IN THE SOURCE, because the difference only shows on a fresh
+    -- login and this suite has spent its one. `UI.Frame` is a pure accessor:
+    -- reaching for it here is the defect, and it is invisible to any test
+    -- that has already opened the window.
+    do
+        local source = CN_TEST_ReadAddonFile("UI.lua")
+
+        assert(source, "UI.lua must be readable")
+
+        local body = source:match("function UI%.RefreshAllTabs%(%)(.-)\nend")
+
+        assert(body, "UI.RefreshAllTabs must be findable in the source")
+
+        assert(body:find("UI.BuildWindow()", 1, true),
+            "UI.RefreshAllTabs builds the window before refreshing tabs of "
+            .. "it -- on a fresh login there is nothing to be a tab of")
+    end
+
+    print("  /cn find builds the window it searches")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE THREE REMAINING 0.67.0 PROPERTIES.
+    ------------------------------------------------------------
+    -- An off-map quest is filtered by THIS character's completion. Filtering
+    -- on the account's meant a player whose main had cleared a continent got
+    -- nothing at all from it on an alt.
+    local quests = CN:GetModule("Quests")
+
+    local playerMap = CN.GetPlayerPosition()
+
+    local far = playerMap + 500
+
+    local remembered = quests.Remembered()
+
+    remembered[979001] = { mapID = far, x = 0.4, y = 0.4 }
+
+    local realAccount = quests.IsCompletedOnAccount
+    local realMine    = quests.IsCompletedByCharacter
+
+    quests.IsCompletedOnAccount = function(questID)
+        if questID == 979001 then
+            return true
+        end
+
+        return realAccount(questID)
+    end
+
+    quests.IsCompletedByCharacter = function(questID)
+        if questID == 979001 then
+            return false
+        end
+
+        return realMine(questID)
+    end
+
+    quests.pinRevision = quests.pinRevision + 1
+
+    local offeredToMe = false
+
+    for _, pin in ipairs(quests.OffMapOffers()) do
+        if pin.questID == 979001 then
+            offeredToMe = true
+        end
+    end
+
+    quests.IsCompletedOnAccount   = realAccount
+    quests.IsCompletedByCharacter = realMine
+
+    assert(offeredToMe,
+        "a quest another character finished is still offered to THIS one, "
+        .. "which is the whole reason an alt has a quest log of its own")
+
+    -- THE NEIGHBOURHOOD IS "HERE", NOT JUST THE EXACT MAP.
+    --
+    -- Pins are recorded against every RELATED map, and standing in a city
+    -- answers with the city's own id -- so a quest giver twenty yards away,
+    -- filed against the surrounding zone, came back through the OFF-map
+    -- branch: priced as a journey, penalised a point, and captioned
+    -- "available to pick up in Isle of Dorn" while the player stood in it.
+    --
+    -- A NEIGHBOUR, not the map itself: testing with `playerMap` would pass
+    -- against the broken version too.
+    local neighbour = playerMap + 1
+
+    local realRelated = CN.Blizzard.RelatedMapIDs
+
+    CN.Blizzard.RelatedMapIDs = function(mapID)
+        if mapID == playerMap then
+            return { playerMap, neighbour }
+        end
+
+        return realRelated(mapID)
+    end
+
+    remembered[979002] = { mapID = neighbour, x = 0.5, y = 0.5 }
+
+    quests.pinRevision = quests.pinRevision + 1
+
+    local offeredNeighbour = false
+
+    for _, pin in ipairs(quests.OffMapOffers()) do
+        if pin.questID == 979002 then
+            offeredNeighbour = true
+        end
+    end
+
+    CN.Blizzard.RelatedMapIDs = realRelated
+
+    assert(not offeredNeighbour,
+        "a pin in the zone the player is standing in is not an off-map "
+        .. "offer, however the client names that zone")
+
+    remembered[979001] = nil
+    remembered[979002] = nil
+
+    quests.pinRevision = quests.pinRevision + 1
+
+    -- The shortlist's revision does not walk the store any more.
+    local walks = 0
+
+    local realCount = CN.CountKeys
+
+    CN.CountKeys = function(...)
+        walks = walks + 1
+
+        return realCount(...)
+    end
+
+    quests.OffMapOffers()
+    quests.OffMapOffers()
+
+    CN.CountKeys = realCount
+
+    assert(walks == 0,
+        "asking for the off-map offers does not walk the six-hundred-row "
+        .. "store to build a cache key: " .. walks)
+
+    -- A refusal from the criteria API is not written in as progress.
+    local achievements = CN:GetModule("Achievements")
+
+    achievements.Scan()
+
+    local watchedID, watchedRecord
+
+    for id, record in pairs(achievements.Store()) do
+        if record.criteria and record.criteria > 0 and not record.completed then
+            watchedID, watchedRecord = id, record
+            break
+        end
+    end
+
+    -- PINNED AS A GOAL, so it is certainly in the watched set: the sweep
+    -- covers the shortlist plus anything the player has pinned, and a fixture
+    -- that happened not to shortlist this row would pass against the broken
+    -- version without ever running the guard.
+    if watchedID then
+        local goalModule = CN:GetModule("Goals")
+
+        goalModule.Add(CN.objectiveTypes.ACHIEVEMENT, watchedID)
+
+        watchedRecord.done = 5
+
+        CN_TEST_TIME_OFFSET = CN_TEST_TIME_OFFSET
+            + achievements.criteriaSweepSeconds + 1
+
+        local realProgress = CN.Blizzard.GetAchievementProgress
+
+        CN.Blizzard.GetAchievementProgress = function()
+            return 0, 0
+        end
+
+        CN.ForgetDebounces()
+        CN.Dispatch("CRITERIA_UPDATE")
+
+        CN.Blizzard.GetAchievementProgress = realProgress
+
+        assert(watchedRecord.done == 5,
+            "a client that answers nothing does not overwrite real progress "
+            .. "with zero: " .. tostring(watchedRecord.done))
+
+        -- AND A CLIENT THAT DOES ANSWER STILL MOVES IT, or this passes for
+        -- the wrong reason.
+        CN.Blizzard.GetAchievementProgress = function()
+            return 7, watchedRecord.criteria or 10
+        end
+
+        -- PAST THE SWEEP THROTTLE. The handler runs at most every few
+        -- seconds, so a second dispatch in the same second does nothing at
+        -- all -- and a test that did not move the clock would prove the guard
+        -- held by proving the handler never ran.
+        CN_TEST_TIME_OFFSET = CN_TEST_TIME_OFFSET
+            + achievements.criteriaSweepSeconds + 1
+
+        CN.ForgetDebounces()
+        CN.Dispatch("CRITERIA_UPDATE")
+
+        CN.Blizzard.GetAchievementProgress = realProgress
+
+        assert(watchedRecord.done == 7,
+            "real progress is still recorded: " .. tostring(watchedRecord.done))
+
+        goalModule.Remove(CN.objectiveTypes.ACHIEVEMENT, watchedID)
+
+        -- THE CLOCK IS LEFT WHERE IT IS, DELIBERATELY.
+        --
+        -- Winding it back leaves every throttle in the addon holding a
+        -- timestamp from the future, so the next test that relies on one
+        -- finds it permanently unexpired -- which is how a later assertion
+        -- about the criteria sweep stopped proving anything. Time only ever
+        -- moves forward here, as it does in the game.
+    end
+
+    -- A recipe's name comes from the store that is keyed by its id space.
+    local filterModule = CN:GetModule("Filters")
+
+    CN.Account("recipeNames")[194424] = "Flask of Alchemical Chaos"
+
+    local realItemName = CN.Blizzard.GetItemName
+
+    CN.Blizzard.GetItemName = function()
+        return "Some Unrelated Item"
+    end
+
+    local described = filterModule.DescribeObjective(
+        CN.objectiveTypes.RECIPE, 194424)
+
+    CN.Blizzard.GetItemName = realItemName
+
+    assert(described == "Flask of Alchemical Chaos",
+        "a trade-skill recipe id is not an item id, and the store that knows "
+        .. "its name is asked first: " .. tostring(described))
+
+    CN.Account("recipeNames")[194424] = nil
+
+    -- And an id that is not a number at all is described with its badge.
+    local claim = filterModule.DescribeObjective(CN.objectiveTypes.RECIPE, "claim")
+
+    assert(not claim:find("RECIPE", 1, true),
+        "the addon's own enum is never offered as the name of anything: "
+        .. tostring(claim))
+
+    print("  the remaining 0.67.0 properties hold")
+end)()
+
 
 ;(function()
     ------------------------------------------------------------
@@ -70613,9 +71936,15 @@ end)()
         "and it starts from the client's own template for the role")
 
     assert(CN.TextScale() == 1, "text is at its normal size to begin with")
-    assert(sample:GetFontObject() == nil,
-        "and at normal size nothing is derived at all -- the client's own "
-        .. "font object is left in place")
+
+    -- AT NORMAL SIZE THE CLIENT'S OWN TEMPLATE IS APPLIED, not nothing.
+    -- 0.66.0 applied only derived font objects, so the size could be raised
+    -- and never lowered: every label kept whatever enlarged font it was last
+    -- given while the button and the command both reported 100%.
+    local normal = sample:GetFontObject()
+
+    assert(normal == _G[CN.FONT.BODY],
+        "at normal size a label wears the client's own template")
 
     local madeBefore = CN_TEST_FONTS_CREATED
 
@@ -70661,9 +71990,47 @@ end)()
         "the derived fonts are kept, not rebuilt on every refresh: "
         .. (CN_TEST_FONTS_CREATED - madeAfter) .. " more")
 
+    assert(CN.SetTextScale(1.0), "and it can be set back")
+
+    assert(CN.TextScale() == 1, "the setting goes back")
+
+    -- AND SO DOES THE TEXT. This is the half that was missing.
+    assert(sample:GetFontObject() == normal,
+        "text that was enlarged returns to its normal size, rather than "
+        .. "keeping the larger font while the button reports 100%")
+
+    local _, backTo = sample:GetFontObject():GetFont()
+
+    assert(backTo == base,
+        "measurably so: " .. tostring(backTo) .. " vs " .. tostring(base))
+
+    -- AND TEXT DRAWN OVER THE WORLD. 0.67.0.
+    --
+    -- The arrow's distance, the heads-up line, the follow frame and the map
+    -- pin numbers are outlined -- `CN.Outline` sets an explicit face, size and
+    -- OUTLINE flag, because a font object cannot carry an outline -- so they
+    -- would ignore a font object even once they were registered. They are the
+    -- widgets the whole setting was written for.
+    local worldText = CN.Label(UIParent, "OVERLAY", "LEAD")
+
+    assert(CN.Outline(worldText, 20, "TEXT"), "world text can be outlined")
+
+    local _, atNormal = worldText:GetFont()
+
+    assert(CN.SetTextScale(1.5), "the size can be raised")
+
+    local _, atLarge = worldText:GetFont()
+
+    assert(atLarge > atNormal,
+        "text drawn over the world grows with the setting too: "
+        .. tostring(atLarge) .. " vs " .. tostring(atNormal))
+
     CN.SetTextScale(1.0)
 
-    assert(CN.TextScale() == 1, "and it goes back")
+    local _, backOutside = worldText:GetFont()
+
+    assert(backOutside == atNormal,
+        "and comes back: " .. tostring(backOutside))
 
     print("  text size reaches text the window has already drawn")
 end)()
@@ -71568,7 +72935,23 @@ end)()
     -- And the sweep actually defers while it IS open.
     local realFrame = _G.TokenFrame
 
-    _G.TokenFrame = { IsShown = function() return true end }
+    -- `IsVisible`, NOT `IsShown`. 0.67.0: `IsShown` reports a region's own
+    -- flag, and `TokenFrame` is a panel inside `CharacterFrame` -- so once the
+    -- player had opened the Currency tab even once, its flag stayed set for
+    -- the session, this answered "open" forever, and the sweep never ran
+    -- again. A currency capped that evening was never reported.
+    _G.TokenFrame = {
+        IsShown   = function() return true end,
+        IsVisible = function() return false end,
+    }
+
+    assert(currencyModule.IsFrameOpen() == false,
+        "a panel whose own flag is set inside a hidden parent is NOT open")
+
+    _G.TokenFrame = {
+        IsShown   = function() return true end,
+        IsVisible = function() return true end,
+    }
 
     assert(currencyModule.IsFrameOpen() == true,
         "an open currency frame is seen")
@@ -71604,8 +72987,40 @@ end)()
     -- only thing that reached it was the next `CURRENCY_DISPLAY_UPDATE`.
     local hidden
 
+    -- AND THE HOOK GOES ON THE CURRENCY PANEL, NOT ON WHATEVER EXISTS AT
+    -- LOGIN. `Blizzard_TokenUI` loads on demand, so at `PLAYER_LOGIN` there is
+    -- no `TokenFrame` at all -- and the first version fell back to
+    -- `CharacterFrame`, hooked that, and marked itself done.
+    _G.TokenFrame = nil
+
+    -- A CHARACTER SHEET IS PRESENT AND HOOKABLE, which is the whole point:
+    -- the first version fell back to it, hooked it, and marked itself done,
+    -- so the currency panel never got the hook and closing the character
+    -- sheet swept currencies instead.
+    local characterHooked = false
+
+    local realCharacterFrame = _G.CharacterFrame
+
+    _G.CharacterFrame = {
+        IsShown    = function() return false end,
+        IsVisible  = function() return false end,
+        HookScript = function()
+            characterHooked = true
+        end,
+    }
+
+    assert(currencyModule.HookFrame() == false,
+        "with no currency panel loaded, nothing is hooked")
+
+    assert(not characterHooked,
+        "and nothing else is hooked in its place -- the character sheet is "
+        .. "a different window and closing it is not a currency event")
+
+    _G.CharacterFrame = realCharacterFrame
+
     _G.TokenFrame = {
         IsShown    = function() return true end,
+        IsVisible  = function() return true end,
         HookScript = function(_, script, onScript)
             if script == "OnHide" then
                 hidden = onScript
@@ -72381,20 +73796,24 @@ end)()
         return real(id)
     end
 
-    -- The sweep throttles itself to once every five seconds, which is right
-    -- in play and makes it unreachable from a test that runs in one.
-    local heldThrottle = achievements.criteriaSweepSeconds
-
-    achievements.criteriaSweepSeconds = 0
+    -- THE CLOCK IS MOVED FORWARD, NOT THE THROTTLE SET TO ZERO. 0.67.0.
+    --
+    -- Zeroing the interval only works if the last sweep is in the PAST, and
+    -- an earlier block that advances `CN_TEST_TIME_OFFSET` and then winds it
+    -- back leaves the stamp in the future -- at which point
+    -- `now - lastCriteriaSweep < 0` is true and the sweep returns before it
+    -- does anything. This assertion then held for a reason that had nothing
+    -- to do with what it claims to check, and the mutation for it survived.
+    CN_TEST_TIME_OFFSET = CN_TEST_TIME_OFFSET
+        + (achievements.criteriaSweepSeconds * 10) + 60
 
     CN.Dispatch("CRITERIA_UPDATE")
-
-    achievements.criteriaSweepSeconds = heldThrottle
 
     CN.Blizzard.GetAchievementProgress = real
 
     assert(next(asked) ~= nil,
         "the sweep must actually have run, or this proves nothing")
+
 
     assert(not asked[990201],
         "a row far from the boundary must not be polled every five seconds")

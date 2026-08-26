@@ -453,7 +453,7 @@ local function AcquirePin(index, canvas)
         frame.texture:SetTexture("Interface\\Minimap\\MinimapArrow")
     end
 
-    frame.label = frame:CreateFontString(nil, "OVERLAY", CN.FONT.CAPTION)
+    frame.label = CN.Label(frame, "OVERLAY", "CAPTION")
     frame.label:SetPoint("CENTER")
 
     -- Over map art, which is the same problem as over the world: a stop

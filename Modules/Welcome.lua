@@ -159,11 +159,11 @@ function Welcome.Build()
         })
     end
 
-    local title = frame:CreateFontString(nil, "OVERLAY", CN.FONT.TITLE)
+    local title = CN.Label(frame, "OVERLAY", "TITLE")
     title:SetPoint("TOP", 0, -18)
     title:SetText("Completion Navigator")
 
-    local body = frame:CreateFontString(nil, "OVERLAY", CN.FONT.BODY)
+    local body = CN.Label(frame, "OVERLAY", "BODY")
     body:SetPoint("TOPLEFT", 24, -48)
     body:SetPoint("TOPRIGHT", -24, -48)
     body:SetJustifyH("LEFT")
@@ -223,7 +223,7 @@ function Welcome.Build()
     frame.scan = scan
 
     -- Where the scan reports, so the button does not have to become a label.
-    frame.scanNote = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
+    frame.scanNote = CN.Label(frame, "OVERLAY", "SMALL")
     frame.scanNote:SetPoint("TOPLEFT", scan, "BOTTOMLEFT", 0, -2)
     frame.scanNote:SetPoint("RIGHT", scan, "RIGHT")
     frame.scanNote:SetJustifyH("LEFT")
@@ -309,7 +309,7 @@ function Welcome.Build()
         previous = button
     end
 
-    local note = frame:CreateFontString(nil, "OVERLAY", CN.FONT.LABEL)
+    local note = CN.Label(frame, "OVERLAY", "LABEL")
     note:SetPoint("BOTTOMLEFT", 24, 46)
     note:SetPoint("BOTTOMRIGHT", -24, 46)
     note:SetJustifyH("LEFT")

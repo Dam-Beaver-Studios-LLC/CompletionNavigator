@@ -39,6 +39,16 @@ Setup.steps = {
     { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan",     unit = "titles" },
     { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines" },
     { key = "exploration", label = "Exploration", module = "Exploration", fn = "Scan",     unit = "zones" },
+    -- LOREMASTER WAS MISSING FROM THIS LIST. 0.67.0.
+    --
+    -- Its store is per-character for `progress` and account-wide for
+    -- everything else, and it scans on login only when the store is EMPTY --
+    -- which after the first character it never is. So a new character had no
+    -- `progress` row of its own for any zone and read whatever the last
+    -- character to scan had recorded. Eleven collections were offered on the
+    -- setup screen and the twelfth, which is the one with a per-character
+    -- dimension, was not.
+    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements" },
     { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
     { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements" },
     { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },

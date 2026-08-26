@@ -2278,9 +2278,9 @@ mutate "Modules/Currencies.lua" \
     "a manual scan arms a second sweep a second later"
 
 mutate "UI.lua" \
-    "        local sources = CN.Memo(\"ui:sources:stored\", CN.collectionGeneration,
+    "        local held = CN.Memo(\"ui:sources:stored\", CN.collectionGeneration,
             function() return UI.Sources(\"stored\") end)" \
-    "        local sources = UI.Sources(\"stored\")" \
+    "        local held = UI.Sources(\"stored\")" \
     "the Sources tab rewalks ten stores every two seconds"
 
 mutate "UI.lua" \
@@ -2380,6 +2380,116 @@ mutate "Modules/Exploration.lua" \
     record.completed     = completed and true or false
     record.progress[key] = {" \
     "an alt is handed the last character's zone progress"
+
+############################################################
+# 0.67.0
+############################################################
+
+mutate "UI.lua" \
+    "        local sources = {}
+
+        for _, row in ipairs(held) do
+            table.insert(sources, row)
+        end" \
+    "        local sources = held" \
+    "the Scans tab grows by five rows every two seconds"
+
+mutate "Core.lua" \
+    "        if held.count == nil or held.count == #held.value then
+            return held.value
+        end" \
+    "        return held.value" \
+    "a memoized value mutated by its reader is served anyway"
+
+# NOT MUTATED: `UI.RefreshAllTabs` builds the window before refreshing, and by
+# the time any test reaches it the window already exists -- every earlier block
+# opens it. The property only differs on a FRESH login, which a single-process
+# suite has exactly one of, and it is spent before this code is reachable.
+# Asserted as a source rule in the 0.67.0 block instead.
+
+mutate "UI.lua" \
+    "    for _, tab in ipairs(UI.tabs) do
+        UI.BuildPanel(tab)
+
+        if tab.refresh and tab.panel then" \
+    "    for _, tab in ipairs(UI.tabs) do
+        if tab.refresh and tab.panel then" \
+    "the search is blind to every tab the player has not clicked"
+
+mutate "Design.lua" \
+    "    if type(object) == \"string\" then
+        object = _G and _G[object]
+    end" \
+    "    if false then
+        object = nil
+    end" \
+    "text size can be raised but never lowered"
+
+mutate "Design.lua" \
+    "    local applied = pcall(fontString.SetFont, fontString, face,
+        math.floor(asked * CN.TextScale() + 0.5), \"OUTLINE\")" \
+    "    local applied = pcall(fontString.SetFont, fontString, face, asked,
+        \"OUTLINE\")" \
+    "text drawn over the world ignores the text-size setting"
+
+mutate "Modules/Currencies.lua" \
+    "    return frame:IsVisible() and true or false" \
+    "    return frame:IsShown() and true or false" \
+    "opening the currency tab once disables the sweep for the session"
+
+mutate "Modules/Currencies.lua" \
+    "    local frame = _G.TokenFrame
+
+    if not frame or not frame.HookScript then" \
+    "    local frame = _G.TokenFrame or _G.CharacterFrame
+
+    if not frame or not frame.HookScript then" \
+    "the currency hook lands on whatever frame exists at login"
+
+mutate "Modules/Quests.lua" \
+    "        if mapID and not Skip(mapID)
+            and not Quests.IsCompletedByCharacter(questID)" \
+    "        if mapID and not Skip(mapID)
+            and not Quests.IsCompletedOnAccount(questID)" \
+    "an alt is offered nothing its main has already finished"
+
+mutate "Modules/Quests.lua" \
+    "        if mapID and not Skip(mapID)" \
+    "        if mapID and mapID ~= playerMap" \
+    "a quest in the zone you are standing in is priced as a journey"
+
+mutate "Modules/Quests.lua" \
+    "        .. \":\" .. tostring(Quests.pinRevision)" \
+    "        .. \":\" .. tostring(CN.CountKeys(Remembered()))" \
+    "the off-map cache key walks the whole remembered store"
+
+mutate "Modules/Achievements.lua" \
+    "            if criteria and criteria > 0 and done ~= record.done then" \
+    "            if done ~= record.done then" \
+    "a refusal from the criteria API is written in as progress"
+
+mutate "Modules/Filters.lua" \
+    "        local stored = CN.Account(\"recipeNames\")[numericID]
+
+        if stored and stored ~= \"\" then
+            return stored
+        end" \
+    "        local stored = nil
+
+        if stored then
+            return stored
+        end" \
+    "a recipe id is looked up as though it were an item id"
+
+mutate "Modules/Filters.lua" \
+    "    return CN.TypeBadge(objectiveType) .. \" \" .. tostring(id)" \
+    "    return tostring(objectiveType) .. \" \" .. tostring(id)" \
+    "an id that is not a number is described with the internal enum"
+
+mutate "Modules/Setup.lua" \
+    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\" }," \
+    "" \
+    "a new character never scans the one store with a per-character split"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

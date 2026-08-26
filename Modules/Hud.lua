@@ -150,12 +150,12 @@ local function Build()
     -- mouse input -- so the last stretch of a long objective name sat under a
     -- button that turns the line off rather than navigating to it. The label
     -- stops short of it instead.
-    frame.label = frame:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
+    frame.label = CN.Label(frame, "OVERLAY", "HEAD")
     frame.label:SetPoint("TOPLEFT", inset, -inset)
     frame.label:SetPoint("TOPRIGHT", -(inset + Hud.closeWidth), -inset)
     frame.label:SetJustifyH("LEFT")
 
-    frame.detail = frame:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
+    frame.detail = CN.Label(frame, "OVERLAY", "SMALL")
     frame.detail:SetPoint("TOPLEFT", frame.label, "BOTTOMLEFT", 0, -CN.SPACE.XS)
     frame.detail:SetPoint("TOPRIGHT", frame.label, "BOTTOMRIGHT", 0, -CN.SPACE.XS)
     frame.detail:SetJustifyH("LEFT")
@@ -249,7 +249,7 @@ local function Build()
         end
     end)
 
-    close.label = close:CreateFontString(nil, "OVERLAY", CN.FONT.SMALL)
+    close.label = CN.Label(close, "OVERLAY", "SMALL")
     close.label:SetPoint("CENTER")
     close.label:SetText(CN.Muted("x"))
 
@@ -543,7 +543,7 @@ function Hud.RegisterOptionsPanel()
 
     panel.name = "Completion Navigator"
 
-    local title = panel:CreateFontString(nil, "ARTWORK", CN.FONT.TITLE)
+    local title = CN.Label(panel, "ARTWORK", "TITLE")
     title:SetPoint("TOPLEFT", 16, -16)
     title:SetText("Completion Navigator")
 
@@ -558,7 +558,7 @@ function Hud.RegisterOptionsPanel()
     --
     -- Three sentences and two buttons. The settings themselves live one click
     -- away, in the window, where there is room to group them.
-    local body = panel:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
+    local body = CN.Label(panel, "ARTWORK", "BODY")
     body:SetPoint("TOPLEFT", 16, -48)
     body:SetPoint("TOPRIGHT", -16, -48)
     body:SetJustifyH("LEFT")
@@ -593,7 +593,7 @@ function Hud.RegisterOptionsPanel()
         end
     end)
 
-    local version = panel:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
+    local version = CN.Label(panel, "ARTWORK", "LABEL")
     version:SetPoint("TOPLEFT", scan, "BOTTOMLEFT", 0, -12)
     version:SetText("v" .. tostring(CN.version)
         .. "  " .. CN.DOT .. "  Dam Beaver Studios, LLC")

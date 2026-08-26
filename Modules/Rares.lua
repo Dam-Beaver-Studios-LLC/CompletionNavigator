@@ -255,11 +255,19 @@ function Rares.IsClearedByCharacter(vignetteID)
         return false
     end
 
-    -- MIGRATED IN PLACE. Entries written before 0.53.0 hold the time the
-    -- vignette vanished rather than the time the memory expires, and most of
-    -- them are the false positives described above. Treating a bare timestamp
-    -- as "expires one week after it was written" retires them without a
-    -- migration step and without discarding a genuine recent kill.
+    -- LEGACY ENTRIES ARE RETIRED, NOT CONVERTED. The comment here used to
+    -- claim they were treated as "expires one week after it was written",
+    -- and the code has always treated the number as the expiry itself --
+    -- so an entry written before 0.53.0, which holds the time the vignette
+    -- VANISHED and is therefore always in the past, is dropped on first read.
+    --
+    -- That is the right outcome and the comment was the thing that was
+    -- wrong. Most of those entries are the false positives described above,
+    -- the rule they were written under is gone, and a rare offered once more
+    -- than it needed to be is a smaller error than one silently never offered
+    -- again. Corrected rather than implemented, in 0.67.0: converting them
+    -- would mean adding a week to genuine expiries that have already passed,
+    -- which resurrects exactly the stale clears this expiry exists to end.
     local expires = type(entry) == "number" and entry or 0
 
     if expires < time() then

@@ -77,6 +77,19 @@ local window, minimapButton
 -- handler behaves when a slash command reaches it.
 --
 -- Never both: the same sentence in two places reads as two things happening.
+-- The line under the filter box. Separate from `UI.Answer` on purpose: a
+-- search hint and the result of a button press are two different sentences
+-- and neither may silently replace the other.
+function UI.ShowElsewhere(text)
+    if window and window.elsewhere then
+        window.elsewhere:SetText(text and CN.Muted(text) or "")
+
+        return true
+    end
+
+    return false
+end
+
 function UI.Answer(text)
     text = tostring(text)
 
@@ -324,6 +337,10 @@ local function AddButton(parent, text, width, onClick, tooltip)
         local highlight = button:CreateTexture(nil, "HIGHLIGHT")
         highlight:SetAllPoints()
         highlight:SetColorTexture(1, 1, 1, 0.12)
+    elseif button.GetFontString then
+        -- The templated path arrives with its own label, so `CN.Label` never
+        -- saw it and the text-size setting did not reach it. 0.67.0.
+        CN.AdoptLabel(button:GetFontString(), "CAPTION")
     end
 
     button:SetText(text)
@@ -343,6 +360,8 @@ local function AddCheckbox(parent, text, getter, setter, tooltip)
 
     if check.Text then
         check.Text:SetText(text)
+
+        CN.AdoptLabel(check.Text, "BODY")
     else
         local label = CN.Label(check, "ARTWORK", "BODY")
         label:SetPoint("LEFT", check, "RIGHT", 2, 0)
@@ -519,13 +538,14 @@ local function BuildWindow()
     search:SetScript("OnTextChanged", function(self)
         UI.SetFilter(self:GetText())
 
-        -- AND SAY WHERE ELSE IT IS. 0.66.0.
+        -- AND SAY WHERE ELSE IT IS -- IN ITS OWN LINE. 0.67.0.
         --
-        -- The filter box searched the tab you were standing on, so typing a
-        -- name on the wrong tab produced "Nothing matched" -- true, and
-        -- useless, because the addon had the answer and was declining to say
-        -- which tab it was on.
-        UI.Answer(UI.SearchElsewhere(self:GetText()) or "")
+        -- 0.66.0 wrote this into `UI.Answer`, which is the line where the
+        -- result of clicking a button goes, and passed `or ""` when nothing
+        -- matched elsewhere -- so typing a single character after pressing
+        -- "Scan everything" wiped "Read 6 collections." off the screen with
+        -- nothing, and there was no way to get it back.
+        UI.ShowElsewhere(UI.SearchElsewhere(self:GetText()))
     end)
 
     -- KEEP THE FILTER ACROSS TABS, OR CLEAR IT?
@@ -566,6 +586,13 @@ local function BuildWindow()
         self:SetText("")
         self:ClearFocus()
     end)
+
+    -- The cross-tab hint's own line, so it cannot overwrite an answer.
+    window.elsewhere = CN.Label(window, "OVERLAY", "LABEL")
+    window.elsewhere:SetPoint("TOPRIGHT", search, "BOTTOMRIGHT", 0, -2)
+    window.elsewhere:SetJustifyH("RIGHT")
+    window.elsewhere:SetTextColor(CN.Rgb("ACCENT"))
+    window.elsewhere:SetText("")
 
     window.search      = search
     window.searchLabel = searchLabel
@@ -860,6 +887,10 @@ function UI.SelectTab(index)
         window.answer:SetText("")
     end
 
+    -- And so does the cross-tab hint: it names OTHER tabs, and which tabs
+    -- those are depends on which one you are standing on.
+    UI.ShowElsewhere(nil)
+
     if window.footer then
         local deeper = UI.tabFooters[tab.name]
 
@@ -905,24 +936,7 @@ function UI.SelectTab(index)
         end
     end
 
-    if not tab.panel then
-        tab.panel = CreateFrame("Frame", nil, window.body)
-        tab.panel:SetAllPoints()
-
-        if tab.build then
-            local ok, err = pcall(tab.build, tab.panel)
-
-            if not ok then
-                Print("Error building the " .. tab.name .. " tab: " .. tostring(err))
-
-                local errors = CN:GetModule("Errors")
-
-                if errors then
-                    errors.Record("building the " .. tab.name .. " tab", err)
-                end
-            end
-        end
-    end
+    UI.BuildPanel(tab)
 
     tab.panel:Show()
 
@@ -1087,17 +1101,61 @@ function UI.SearchAll(text)
     return results
 end
 
--- REFRESHED, BECAUSE AN UNBUILT TAB HOLDS NOTHING.
+-- ONE PLACE THAT TURNS A TAB INTO A PANEL. 0.67.0.
 --
--- The window builds every tab's frame up front but only REFRESHES the
--- selected one, so ten of the eleven lists are empty until the player visits
--- them -- and a search of them would answer "nothing found" for things the
--- addon has on disk. This is the only caller that needs all eleven at once,
--- and it is user-initiated.
+-- This was written out inline in `SelectTab`, which is why the cross-tab
+-- search could not do it: a panel is created the first time a tab is
+-- SELECTED, so ten of the eleven tabs have no panel at all until the player
+-- clicks them, and anything that wants to read all eleven had to either
+-- duplicate this block or skip them.
+function UI.BuildPanel(tab)
+    if not tab or tab.panel or not window or not window.body then
+        return tab and tab.panel or nil
+    end
+
+    tab.panel = CreateFrame("Frame", nil, window.body)
+    tab.panel:SetAllPoints()
+    tab.panel:Hide()
+
+    if tab.build then
+        local ok, err = pcall(tab.build, tab.panel)
+
+        if not ok then
+            Print("Error building the " .. tab.name .. " tab: " .. tostring(err))
+
+            local errors = CN:GetModule("Errors")
+
+            if errors then
+                errors.Record("building the " .. tab.name .. " tab", err)
+            end
+        end
+    end
+
+    return tab.panel
+end
+
+-- BUILT AS WELL AS REFRESHED. 0.67.0.
+--
+-- The comment here used to say "the window builds every tab's frame up
+-- front". It does not -- a panel is created the first time its tab is
+-- selected -- so this skipped every tab the player had not clicked this
+-- session, and `/cn find` and the "Also on:" line under the filter box were
+-- blind to exactly the tabs a player is least likely to have visited.
+--
+-- This is the only caller that needs all eleven at once, and it is
+-- user-initiated.
 function UI.RefreshAllTabs()
+    -- THE WINDOW FIRST. A function that promises every tab has to make sure
+    -- there is something for a tab to be a panel of: `BuildPanel` cannot
+    -- build anything before the window body exists, and on a fresh login it
+    -- does not. 0.67.0.
+    UI.BuildWindow()
+
     local refreshed = 0
 
     for _, tab in ipairs(UI.tabs) do
+        UI.BuildPanel(tab)
+
         if tab.refresh and tab.panel then
             if pcall(tab.refresh, tab.panel) then
                 refreshed = refreshed + 1
@@ -1426,9 +1484,38 @@ UI.RegisterTab{
                         .. filters.TypeLabel(objectiveType)
                         .. (enabled and "" or "|r"),
 
-                    tooltip = filters.TypeLabel(objectiveType)
-                        .. (enabled and "\nShown in recommendations."
-                            or "\nHidden from recommendations."),
+                    -- WITH THE CONSEQUENCE ATTACHED. 0.67.0.
+                    --
+                    -- "Shown in recommendations" restates the checkbox the
+                    -- player is looking at. What they cannot see is how much
+                    -- of the list this switch is holding -- which is the only
+                    -- thing that makes the decision to flip it a decision.
+                    tooltip = function()
+                        local lines = { filters.TypeLabel(objectiveType) }
+
+                        local holding = 0
+
+                        for _, objective in ipairs(CN.Recommend(60) or {}) do
+                            if objective.type == objectiveType then
+                                holding = holding + 1
+                            end
+                        end
+
+                        if enabled then
+                            table.insert(lines, "Shown. "
+                                .. CN.Count(holding, "row")
+                                .. " in the list right now; hiding it drops "
+                                .. "them from the route as well, so you are "
+                                .. "not walked past something you said you "
+                                .. "did not want.")
+                        else
+                            table.insert(lines, "Hidden from recommendations "
+                                .. "and from the route. Collection totals "
+                                .. "still count it.")
+                        end
+
+                        return table.concat(lines, "\n")
+                    end,
 
                     onClick = function()
                         filters.ToggleType(objectiveType)
@@ -1779,8 +1866,22 @@ UI.RegisterTab{
         -- The cost the memo was written for is entirely in the stored half:
         -- ten `Summary()` calls, each walking its module's whole store. The
         -- live half is three client calls.
-        local sources = CN.Memo("ui:sources:stored", CN.collectionGeneration,
+        -- A NEW ARRAY EVERY REFRESH. THE MEMO HANDS BACK THE CACHE ITSELF.
+        --
+        -- 0.66.0 split this in two and then appended the live rows onto the
+        -- table `CN.Memo` returned -- which is the cached table, not a copy of
+        -- it. Standing still, the generation does not move, so the same table
+        -- came back every two seconds and grew by five rows each time: after
+        -- half a minute the tab listed "Quests in your log" fifteen times, and
+        -- `/cn find`, which refreshes every tab, added another copy per use.
+        local held = CN.Memo("ui:sources:stored", CN.collectionGeneration,
             function() return UI.Sources("stored") end)
+
+        local sources = {}
+
+        for _, row in ipairs(held) do
+            table.insert(sources, row)
+        end
 
         for _, row in ipairs(UI.Sources("live")) do
             table.insert(sources, row)
@@ -2178,7 +2279,42 @@ UI.RegisterTab{
 
                     sortSeconds = worldQuest.secondsLeft or math.huge,
 
-                    tooltip = "Click to set a waypoint.",
+                    -- WHY IT MATTERS, NOT ONLY WHAT CLICKING DOES. 0.67.0.
+                    --
+                    -- Backlog item 21. Every tooltip in this window said what
+                    -- the row was or what the click would do -- both of which
+                    -- the player can see -- and none of them said why the row
+                    -- is worth reading. The addon knows: it has the clock, the
+                    -- journey and the reward.
+                    tooltip = function()
+                        local lines = { tostring(worldQuest.name) }
+
+                        table.insert(lines, "Gone in "
+                            .. tostring(opportunities.FormatTimeLeft(
+                                worldQuest.secondsLeft))
+                            .. " whether you do it or not.")
+
+                        if worldQuest.tagName and worldQuest.tagName ~= "" then
+                            table.insert(lines, tostring(worldQuest.tagName)
+                                .. (worldQuest.isElite and " (elite)" or "")
+                                .. ".")
+                        elseif worldQuest.isElite then
+                            table.insert(lines, "Elite.")
+                        end
+
+                        local cost = CN.TravelCost(worldQuest.mapID,
+                            worldQuest.x, worldQuest.y)
+
+                        if cost then
+                            table.insert(lines, "About "
+                                .. CN.Count(math.floor(cost + 0.5), "minute")
+                                .. " away by the route this addon would take.")
+                        end
+
+                        table.insert(lines, "Click to set a waypoint.")
+
+                        return table.concat(lines, "\n")
+                    end,
 
                     onClick = function()
                         CN.NavigateToObjective({
@@ -2209,7 +2345,40 @@ UI.RegisterTab{
                     -- Up right now, so it sorts above anything on a clock.
                     sortSeconds = 0,
 
-                    tooltip = "Up right now. Click to set a waypoint.",
+                    tooltip = function()
+                        local lines = { tostring(vignette.name) }
+
+                        table.insert(lines, "Up right now. Vignettes only "
+                            .. "appear for things in range, so this is a "
+                            .. "chance rather than a plan.")
+
+                        local record = CN.Account("rares")[vignette.vignetteID]
+
+                        if record and (record.sightings or 0) > 1 then
+                            table.insert(lines, "You have met it "
+                                .. CN.Count(record.sightings, "time") .. ".")
+                        elseif record then
+                            table.insert(lines, "First time you have met it.")
+                        end
+
+                        if rares.IsClearedByCharacter(vignette.vignetteID) then
+                            table.insert(lines, "This character has already "
+                                .. "cleared it since the last weekly reset.")
+                        end
+
+                        local cost = CN.TravelCost(vignette.mapID,
+                            vignette.x, vignette.y)
+
+                        if cost then
+                            table.insert(lines, "About "
+                                .. CN.Count(math.floor(cost + 0.5), "minute")
+                                .. " away.")
+                        end
+
+                        table.insert(lines, "Click to set a waypoint.")
+
+                        return table.concat(lines, "\n")
+                    end,
 
                     onClick = function()
                         CN.NavigateToObjective({
@@ -4246,7 +4415,10 @@ CN:RegisterCommand{
         -- A player typing this has usually not opened the window, and a tab
         -- that has never been refreshed holds no entries -- so the search
         -- would have answered "nothing" for things the addon plainly knows.
-        UI.Frame()
+        -- `RefreshAllTabs` builds the window itself. This used to call
+        -- `UI.Frame()`, which is a pure accessor -- `return window` -- so on
+        -- a fresh login it built nothing and the command answered "nothing
+        -- matches" for things the addon plainly had. 0.67.0.
         UI.RefreshAllTabs()
 
         local hits = UI.SearchAll(args)

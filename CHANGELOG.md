@@ -7,6 +7,98 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.67.0]
+
+Thirteen defects and four improvements. Eight of the thirteen were in what
+0.66.0 itself added â€” including one that made a tab grow by five rows every
+two seconds, and one that switched off the currency sweep for the session the
+first time you opened your Currency tab.
+
+### Fixed â€” 0.66.0's own additions
+
+- **The Scans tab duplicated itself every two seconds.** The live rows were
+  being appended onto the cached table rather than onto a copy of it, so
+  standing with the window open, "Quests in your log" appeared fifteen times
+  after half a minute and several hundred times after a few. The cache now
+  notices when something has modified what it handed out, rebuilds, and
+  reports it to `/cn errors`.
+- **`/cn find` answered "nothing matches" if you had not opened the window.**
+  It asked for the window rather than building one. It also only searched tabs
+  you had clicked at least once â€” panels are created on first visit â€” so the
+  search was blind to exactly the tabs you were least likely to have seen.
+- **Text size could be raised and never lowered.** `/cn textsize 100` reported
+  success and changed nothing; every label kept whatever larger font it was
+  last given until you reloaded. The Settings button cycles back round to
+  100%, which is the normal way to meet this.
+- **Text size did not reach the arrow, the heads-up line, the follow frame or
+  the map pin numbers** â€” the four widgets the setting exists for â€” nor any
+  button or checkbox label in the window.
+- **Opening your Currency tab once switched off the currency sweep for the
+  rest of the session.** The check asked whether that panel's own flag was
+  set, and a panel inside a closed window still answers yes. So `/cn
+  currencies` served a store frozen at login, and a currency you capped that
+  evening was never reported. The hook meant to catch you closing the window
+  had also attached itself to your character sheet, because the currency panel
+  does not exist yet when the addon loads.
+- **An alt was offered no quests at all from the zones next door** if their
+  main had cleared them: the new off-map list was filtered by what the
+  *account* had finished rather than what *this character* had. And a quest
+  giver twenty yards away could be offered as a journey to another zone,
+  because standing in a city means the client names the city, not the zone
+  around it.
+- **Walking through new content re-costed every remembered zone every two
+  seconds** â€” the cache key was a count of a six-hundred-row store, and that
+  count moves continuously while you discover quests. It is a counter now, and
+  it includes roughly where you are standing, so the cheapest-zones ordering
+  is re-taken as you cross a zone instead of being fixed where you landed.
+- **A hidden recipe showed the name of an unrelated item.** Recipes arrive
+  from three different sources with three different kinds of id, and the
+  client's item lookup was being asked first for all of them.
+
+### Fixed â€” older
+
+- **A new character read the main's Loremaster progress as its own** â€” "90 /
+  120" with three done â€” permanently, because nothing rewrote the shared
+  figure any more. The stale figures are cleared on upgrade, and Loremaster
+  has been added to first-time setup, which it was missing from.
+- **An achievement at 38 of 40 could vanish from the list.** When the game
+  declines to answer about criteria â€” during a loading screen, or before the
+  achievement UI has loaded â€” it answers zero, and that was written into the
+  store as real progress. The neighbouring module has guarded this for
+  several releases.
+- **Typing in the filter box wiped whatever a button had just told you.** The
+  cross-tab hint has its own line now.
+- **`/cn hidden` could show `RECIPE claim`** â€” the addon's internals offered
+  as the name of the thing you hid.
+
+### New
+
+- **`/cn provenance`** lists every prerequisite the addon believes on evidence
+  rather than on somebody having read it â€” harvested from your own play,
+  contributed by other players, or imported by hand â€” with how many characters
+  or contributions stand behind each. `/cn why` has always said which source
+  an answer came from; this is the opposite question, and it is where checking
+  them starts.
+- **Tooltips say why a row matters**, not only what it is. A world quest says
+  when it disappears whether you do it or not, and roughly how far away it is.
+  A rare says whether this character has already cleared it and how many times
+  you have met it. A type filter says how much of the current list it is
+  holding, which is the only thing that makes switching it off a decision.
+
+### Internal
+
+- **Every tooltip on every tab is now built during the test run** and must
+  produce text with no `nil` in it. Tooltips are built on hover, so nothing in
+  the suite had ever run one â€” and the first draft of the work above read a
+  field the world-quest row does not carry.
+- **A recording that does not cover a stub rule is a failure, not a note**,
+  under `CN_REQUIRE_FULL_FIXTURES`. It is deliberately a separate switch: the
+  recording in the repository is old enough to cover none of the three
+  strongest rules, so arming it needs one fresh `/cn capture` first.
+- **The test harness can measure what size a piece of text is drawn at.** It
+  could not, which is why the four widgets drawn over the world were the only
+  text in the addon no test could see.
+
 ## [0.66.0]
 
 Nineteen defects and four features. The worst of the defects had made the

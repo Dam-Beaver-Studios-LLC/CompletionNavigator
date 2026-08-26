@@ -218,6 +218,143 @@ end)
 -- COMMAND
 ------------------------------------------------------------
 
+-- WHERE A CLAIM CAME FROM, ROW BY ROW. 0.67.0.
+--
+-- Backlog item 13. The addon draws prerequisite chains from four sources, in
+-- a deliberate order of authority -- curated data, this character's own
+-- harvest, rows other players contributed, rows imported by hand -- and
+-- `/cn why` says which one a particular answer came from. What nothing could
+-- do was ask the opposite question: *which* of the things I am being told
+-- have never been checked by anybody?
+--
+-- That matters because the two weakest sources grow on their own. A harvest
+-- row is promoted the moment three characters agree, and a contributed row
+-- arrives believed. Neither has ever been read by a person, and without a
+-- list of them nobody can start.
+function Contribute.Provenance()
+    local rows = {}
+
+    local harvestModule = CN:GetModule("Harvest")
+
+    local threshold = (harvestModule and harvestModule.confidenceThreshold) or 3
+
+    local harvest = CN.Account("questHarvest")
+
+    for questID, record in pairs(harvest or {}) do
+        local observed = record.observedRequires
+
+        if type(observed) == "table" and #observed > 0 then
+            table.insert(rows, {
+                questID = questID,
+                origin  = "harvested",
+                count   = #observed,
+                detail  = "seen on " .. tostring(threshold)
+                    .. "+ of your own characters",
+            })
+        end
+    end
+
+    for questID, record in pairs((CN.Static and CN.Static.community) or {}) do
+        if type(record) == "table" and type(record.requires) == "table" then
+            table.insert(rows, {
+                questID = questID,
+                origin  = "community",
+                count   = #record.requires,
+                detail  = record.sources
+                    and (CN.Count(record.sources, "independent contribution"))
+                    or "shipped without a source count",
+            })
+        end
+    end
+
+    for questID, requires in pairs(CN.Account("contributed") or {}) do
+        if type(requires) == "table" and #requires > 0 then
+            table.insert(rows, {
+                questID = questID,
+                origin  = "imported",
+                count   = #requires,
+                detail  = "imported on this account by hand",
+            })
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        if a.origin ~= b.origin then
+            return a.origin < b.origin
+        end
+
+        return a.questID < b.questID
+    end)
+
+    return rows
+end
+
+CN:RegisterCommand{
+    name    = "provenance",
+    args    = "[origin]",
+    order   = 37.5,
+    help    = "Which chain claims have never been checked by a person.",
+    handler = function(args)
+        local wanted = string.lower(CN.Trim(args or ""))
+
+        local rows = Contribute.Provenance()
+
+        local curated = 0
+
+        for _ in pairs((CN.Static and CN.Static.quests) or {}) do
+            curated = curated + 1
+        end
+
+        Print("Curated rows, each one checked by hand: " .. curated)
+
+        Print("Rows believed on evidence rather than on a reading: "
+            .. #rows .. " |cff8a8f96("
+            .. ((CN.Static and CN.Static.CommunityCount
+                and CN.Static.CommunityCount()) or 0)
+            .. " of them shipped with the addon)|r")
+
+        if #rows == 0 then
+            Print("|cff8a8f96Nothing unchecked. Play with |cffffc74f/cn "
+                .. "harvestnow|r on and this fills from your own play.|r")
+            return
+        end
+
+        local shown = 0
+
+        for _, row in ipairs(rows) do
+            if wanted == "" or wanted == row.origin then
+                shown = shown + 1
+
+                if shown <= 20 then
+                    local quests = CN:GetModule("Quests")
+
+                    local name = quests and quests.GetName(row.questID)
+
+                    CN.PrintLine("  " .. row.origin .. " |cffffc74f"
+                        .. tostring(name or ("Quest " .. row.questID))
+                        .. "|r |cff8a8f96(" .. row.questID .. ") "
+                        .. CN.Count(row.count, "prerequisite") .. CN.DASH
+                        .. row.detail .. "|r")
+                end
+            end
+        end
+
+        if shown > 20 then
+            Print("|cff8a8f96... and " .. (shown - 20) .. " more. "
+                .. "|cffffc74f/cn provenance harvested|r, |cffffc74f"
+                .. "community|r or |cffffc74fimported|r narrows it.|r")
+        elseif shown == 0 then
+            Print("|cff8a8f96Nothing with that origin. Try harvested, "
+                .. "community or imported.|r")
+        end
+
+        Print("|cff8a8f96None of these is presented to you as fact"
+            .. CN.DASH .. "|cffffc74f/cn why|r names the source on every "
+            .. "answer that uses one. This list is where checking them "
+            .. "starts.|r")
+    end,
+}
+
 CN:RegisterCommand{
     name    = "contribute",
     args    = "[import <text>, or forget]",

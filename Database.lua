@@ -1089,6 +1089,47 @@ CN.migrations = {
                 .. "count(s); they are counted per encounter now.")
         end
     end,
+    -- 20 -> 21. THE FLAT FIELDS THE 0.66.0 CHANGE LEFT BEHIND.
+    --
+    -- 0.66.0 stopped WRITING `record.done` / `record.completed` on exploration
+    -- and Loremaster rows, because any character rewrote them merely by flying
+    -- through a zone and `DoneFor` fell back to them -- so an alt was handed
+    -- the main's progress as its own. The read-side fallback was kept, on the
+    -- stated grounds that databases written before the per-character split
+    -- still need it and that the field would "decay out of the store as
+    -- characters rescan".
+    --
+    -- It does not decay. Nothing rewrites it any more, so an upgraded account
+    -- carries the last value the main wrote, for ever -- and Loremaster in
+    -- particular scans only when its store is empty and is not in the setup
+    -- run, so a fresh alt reads "Loremaster of Khaz Algar 90 / 120" with three
+    -- done and never stops.
+    --
+    -- Deleted, once, here. That is what makes the fallback mean what its
+    -- comment says: a pre-split database, and nothing else.
+    [20] = function(db)
+        db.account = db.account or {}
+
+        local cleared = 0
+
+        for _, store in ipairs({ db.account.exploration, db.account.loremaster }) do
+            for _, record in pairs(store or {}) do
+                if type(record) == "table"
+                    and (record.done ~= nil or record.completed ~= nil) then
+
+                    record.done      = nil
+                    record.completed = nil
+
+                    cleared = cleared + 1
+                end
+            end
+        end
+
+        if cleared > 0 then
+            CN.DebugPrint("Cleared " .. cleared .. " shared progress figure(s)"
+                .. " that belonged to whichever character wrote last.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A
