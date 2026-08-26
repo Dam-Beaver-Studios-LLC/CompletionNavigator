@@ -82,6 +82,8 @@ lines = text.split('\n')
 
 steps = []
 name = None
+limit = None
+soft = False
 i = 0
 
 while i < len(lines):
@@ -91,6 +93,30 @@ while i < len(lines):
 
     if match:
         name = match.group(1)
+        limit = None
+        soft = False
+        i += 1
+        continue
+
+    # THE RUNNER'S OWN LIMITS, CARRIED THROUGH. 0.67.1.
+    #
+    # This script existed to stop a step passing here and failing there, and
+    # it read only the commands -- so the two constraints the runner enforces
+    # around them were invisible to it. A step with `timeout-minutes: 8` that
+    # takes nine here was reported as passing, and a step marked
+    # `continue-on-error` was treated as fatal, which is the opposite of what
+    # the runner does with it.
+    cap = re.match(r'^\s*timeout-minutes:\s*(\d+)\s*$', line)
+
+    if cap:
+        limit = int(cap.group(1))
+        i += 1
+        continue
+
+    soften = re.match(r'^\s*continue-on-error:\s*(true|false)\s*$', line)
+
+    if soften:
+        soft = soften.group(1) == 'true'
         i += 1
         continue
 
@@ -120,19 +146,21 @@ while i < len(lines):
         trim = min((len(b) - len(b.lstrip()) for b in body if b.strip()),
                    default=0)
 
-        steps.append((name, '\n'.join(b[trim:] for b in body)))
+        steps.append((name, '\n'.join(b[trim:] for b in body), limit, soft))
         continue
 
     inline = re.match(r'^\s*run:\s*(\S.*?)\s*$', line)
 
     if inline:
-        steps.append((name, inline.group(1)))
+        steps.append((name, inline.group(1), limit, soft))
 
     i += 1
 
 with open('.cisim-steps', 'w', encoding='utf-8') as fh:
-    for index, (label, body) in enumerate(steps):
-        fh.write('=== %d\t%s\n' % (index, label or '(unnamed)'))
+    for index, (label, body, limit, soft) in enumerate(steps):
+        fh.write('=== %d\t%s\t%s\t%s\n' % (index, label or '(unnamed)',
+                                              limit if limit else '0',
+                                              '1' if soft else '0'))
         fh.write(body)
         fh.write('\n=== end\n')
 
@@ -250,19 +278,78 @@ while IFS= read -r line; do
             else
                 printf '  ....  %s\r' "$label"
 
-                if bash -c "$body" > step.log 2>&1; then
-                    printf '  ok    %s\n' "$label"
-                    ran=$((ran + 1))
+                # THE RUNNER'S OWN CLOCK. 0.67.1.
+                #
+                # `timeout-minutes` is the constraint this script was blindest
+                # to: a step that takes nine minutes here and is capped at
+                # eight there passed locally and was killed on the runner,
+                # which is exactly the "passes here, fails there" shape the
+                # whole script exists to prevent. Enforced with a margin of
+                # ZERO -- this machine is FASTER than a two-core runner, so a
+                # step that only just fits here does not fit there.
+                started=$(date +%s)
+
+                if [ "${limit:-0}" != "0" ] && command -v timeout >/dev/null 2>&1; then
+                    timeout "${limit}m" bash -c "$body" > step.log 2>&1
+                    code=$?
                 else
-                    printf '  FAIL  %s\n' "$label"
+                    bash -c "$body" > step.log 2>&1
+                    code=$?
+                fi
+
+                elapsed=$(( $(date +%s) - started ))
+
+                if [ "$code" -eq 0 ]; then
+                    # A STEP THAT ONLY JUST FITS IS A STEP THAT WILL NOT.
+                    #
+                    # The runner has two cores and this machine has more, so
+                    # anything past two thirds of its budget here is over
+                    # budget there. Said out loud rather than left to be
+                    # discovered by a failed release.
+                    if [ "${limit:-0}" != "0" ] \
+                        && [ "$elapsed" -gt $(( limit * 40 )) ]; then
+
+                        printf '  ok    %s  <-- %ss of a %sm budget; the runner is slower\n' \
+                            "$label" "$elapsed" "$limit"
+                    else
+                        printf '  ok    %s\n' "$label"
+                    fi
+
+                    ran=$((ran + 1))
+                elif [ "$code" -eq 124 ]; then
+                    printf '  TIMEOUT  %s  (killed at %s minutes, as the runner would)\n' \
+                        "$label" "$limit"
                     echo ''
-                    # OK lines are the ones that did NOT fail, and a
-                    # 25-line tail of a 200-file lint run shows nothing but
-                    # those -- which is how a failing step got reported with
-                    # no failure visible in it. 0.61.0.
-                    grep -vE 'OK$' step.log | sed 's/^/        /' | tail -40
-                    status=1
-                    break
+                    tail -20 step.log | sed 's/^/        /'
+
+                    if [ "${soft:-0}" = "1" ]; then
+                        echo '        this step is continue-on-error, so the runner would'
+                        echo '        not fail the job -- it would simply stop running.'
+                        ran=$((ran + 1))
+                    else
+                        status=1
+                        break
+                    fi
+                else
+                    if [ "${soft:-0}" = "1" ]; then
+                        # THE RUNNER DOES NOT FAIL ON THESE, SO NEITHER DOES
+                        # THIS -- but silence is how a step stops being
+                        # checked, so it is named.
+                        printf '  warn  %s  (failed; continue-on-error, as on the runner)\n' \
+                            "$label"
+                        grep -vE 'OK$' step.log | sed 's/^/        /' | tail -12
+                        ran=$((ran + 1))
+                    else
+                        printf '  FAIL  %s\n' "$label"
+                        echo ''
+                        # OK lines are the ones that did NOT fail, and a
+                        # 25-line tail of a 200-file lint run shows nothing but
+                        # those -- which is how a failing step got reported with
+                        # no failure visible in it. 0.61.0.
+                        grep -vE 'OK$' step.log | sed 's/^/        /' | tail -40
+                        status=1
+                        break
+                    fi
                 fi
             fi
 
@@ -271,6 +358,8 @@ while IFS= read -r line; do
             ;;
         "=== "*)
             label=$(printf '%s' "$line" | cut -f2)
+            limit=$(printf '%s' "$line" | cut -f3)
+            soft=$(printf '%s' "$line" | cut -f4)
             collecting=1
             body=""
             ;;

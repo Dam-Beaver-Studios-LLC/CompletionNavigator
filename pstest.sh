@@ -642,11 +642,43 @@ if not job_timeout:
 
 minutes = int(job_timeout.group(1))
 
-if minutes > 60:
-    print("FAIL: job timeout of %d minutes is too generous to notice a hang" % minutes)
+# THE PER-STEP CAPS ARE THE HANG DETECTOR; THE JOB CAP IS THE BACKSTOP.
+#
+# The ceiling here used to be 60, on the reasoning that a generous job cap
+# cannot notice a hang. That reasoning belongs to the STEP caps -- every step
+# in this workflow carries one, and each is sized to the work it does. The job
+# cap only has to be larger than all of them together, or it becomes the real
+# limit and kills whichever step happens to be running. 0.67.1.
+if minutes > 120:
+    print("FAIL: job timeout of %d minutes is too generous to be a backstop" % minutes)
     sys.exit(1)
 
-print("    job bounded at %d minutes" % minutes)
+# AND THE JOB CAP MUST EXCEED THE STEPS IT CONTAINS. 0.67.1.
+#
+# 0.67.0 shipped with a job capped at 20 minutes containing step caps that add
+# to 57. When the job cap is the smaller number the per-step ones are
+# decoration: whichever step happens to be running when the job clock runs out
+# is killed, no step is marked failed, and the run reports a failure with
+# nothing to point at -- which is exactly what `cn.ps1 ci` could not explain.
+#
+# Only the steps AFTER the job's own line are summed; the job's cap is the
+# first `timeout-minutes` in the file.
+after = text[job_timeout.end():]
+
+step_caps = [int(m) for m in re.findall(r"^\s*timeout-minutes:\s*(\d+)", after, re.M)]
+
+total = sum(step_caps)
+
+if step_caps and minutes <= total:
+    print("FAIL: the job is capped at %d minutes and the steps inside it are"
+          % minutes)
+    print("  capped at %d in total (%s)." % (total, ", ".join(str(c) for c in step_caps)))
+    print("  The job cap is then the real limit, and it kills whichever step")
+    print("  happens to be running -- marking nothing as failed.")
+    sys.exit(1)
+
+print("    job bounded at %d minutes, over %d minutes of step caps"
+      % (minutes, total))
 TIMEOUT
 
 echo "  CI: the toolchain does not come from the runner's package manager"

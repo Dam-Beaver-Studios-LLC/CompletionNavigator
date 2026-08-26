@@ -17,7 +17,18 @@ jobs:
     # A release that has hung for hours looks identical to one still working,
     # which is exactly how a stuck run went unnoticed: it sat "in progress"
     # indefinitely while nobody could tell it was dead.
-    timeout-minutes: 20
+    # A BACKSTOP, NOT THE LIMIT. 0.67.1.
+    #
+    # This was 20 while the steps inside it carried caps adding to 53, which
+    # inverts what the two are for. Each step's cap is sized to the work that
+    # step does and is what notices a hang; the job cap exists only to stop a
+    # runner being held for six hours if something escapes all of them. A
+    # backstop smaller than what it backs is not a backstop -- it is the real
+    # limit, and it kills whichever step happens to be running when it
+    # expires, marking nothing as failed.
+    #
+    # Above the sum of every step cap, and the release rehearsal checks that.
+    timeout-minutes: 75
 
     steps:
       - name: Check out
@@ -269,9 +280,21 @@ jobs:
       # surviving mutation means the SUITE is weak, not that the code is
       # broken. Blocking a release on it would be blocking users from a fix
       # because a test could be better.
+      # FIFTEEN, NOT EIGHT. 0.67.1.
+      #
+      # The suite is 314 mutations and each one runs the whole harness. On the
+      # author's machine that is 341 seconds -- 71% of an eight-minute budget
+      # -- and a GitHub runner has two cores and is slower, so this step was
+      # being killed there and the mutation testing simply stopped happening.
+      # It is continue-on-error, so nothing failed and nothing said so: the
+      # release went green with its strongest suite silently not run.
+      #
+      # `cisim.sh` now enforces `timeout-minutes` locally and warns when a
+      # step passes using more than two thirds of its budget, which is how
+      # this was found.
       - name: Mutation testing
         continue-on-error: true
-        timeout-minutes: 8
+        timeout-minutes: 15
         run: |
           if [ -f mutate.sh ]; then
             bash mutate.sh .

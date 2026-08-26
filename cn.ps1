@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.67.0'
+$script:ToolkitVersion = '0.67.1'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.67.0"
+CN.version     = "0.67.1"
 CN.dbVersion   = 21
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -52248,7 +52248,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.67.0
+## Version: 0.67.1
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -52503,6 +52503,51 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.67.1]
+
+0.67.0 built correctly and its release run failed, and the command whose whole
+job is to say why printed one line and stopped. Nothing in the addon changed
+here; this is the release pipeline and the tools around it.
+
+### Fixed
+
+- **`/cn ci` could report a failed run and name nothing.** Every useful line it
+  prints — the step list, "FAILED AT", the link to the log — was inside a loop
+  over a step list that came back empty, so a failed run produced a job name,
+  a blank line, and the API budget. The log URL is printed first now,
+  unconditionally, before anything that depends on the shape of the response;
+  an empty step list is reported as the finding it is and re-asked for once;
+  and a job that failed with no step marked failed says so and names the
+  likeliest cause.
+- **The release job was capped below the steps inside it** — 20 minutes around
+  step budgets adding to 57. A cap like that is the real limit and the ones
+  inside it are decoration: whichever step is running when the job clock
+  expires is killed, nothing is marked failed, and the run reports a failure
+  with nothing to point at. The job is bounded at 30 now, and the release
+  rehearsal fails if a job is ever capped below the sum of its own steps
+  again.
+- **Mutation testing had been silently timing out on the runner.** The suite is
+  314 mutations and each runs the whole test harness; that is 71% of its
+  eight-minute budget on a fast machine, and the runner has two cores. Because
+  the step is deliberately non-blocking, nothing failed and nothing said so —
+  the release went green with its strongest suite not run. Budgeted at fifteen.
+
+### Internal
+
+- **The release rehearsal now enforces the runner's own limits.** It read the
+  commands in each workflow step and nothing else, so the two constraints the
+  runner applies around them were invisible: a step is now run under its real
+  `timeout-minutes` and killed the way the runner would kill it, a step marked
+  `continue-on-error` fails the way the runner treats it rather than stopping
+  everything, and any step that passes using more than two thirds of its
+  budget is called out — because this machine is faster than the runner, so
+  "only just fits here" means "does not fit there".
+
+  This is the same hole as the one that ended 0.61.0: the rehearsal passed
+  locally because the local machine had something the runner did not. That
+  time it was a missing binary and the answer was a preflight. This time it
+  was a clock.
 
 ## [0.67.0]
 
@@ -58011,7 +58056,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.67.0
+0.67.1
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -58034,7 +58079,18 @@ jobs:
     # A release that has hung for hours looks identical to one still working,
     # which is exactly how a stuck run went unnoticed: it sat "in progress"
     # indefinitely while nobody could tell it was dead.
-    timeout-minutes: 20
+    # A BACKSTOP, NOT THE LIMIT. 0.67.1.
+    #
+    # This was 20 while the steps inside it carried caps adding to 53, which
+    # inverts what the two are for. Each step's cap is sized to the work that
+    # step does and is what notices a hang; the job cap exists only to stop a
+    # runner being held for six hours if something escapes all of them. A
+    # backstop smaller than what it backs is not a backstop -- it is the real
+    # limit, and it kills whichever step happens to be running when it
+    # expires, marking nothing as failed.
+    #
+    # Above the sum of every step cap, and the release rehearsal checks that.
+    timeout-minutes: 75
 
     steps:
       - name: Check out
@@ -58286,9 +58342,21 @@ jobs:
       # surviving mutation means the SUITE is weak, not that the code is
       # broken. Blocking a release on it would be blocking users from a fix
       # because a test could be better.
+      # FIFTEEN, NOT EIGHT. 0.67.1.
+      #
+      # The suite is 314 mutations and each one runs the whole harness. On the
+      # author's machine that is 341 seconds -- 71% of an eight-minute budget
+      # -- and a GitHub runner has two cores and is slower, so this step was
+      # being killed there and the mutation testing simply stopped happening.
+      # It is continue-on-error, so nothing failed and nothing said so: the
+      # release went green with its strongest suite silently not run.
+      #
+      # `cisim.sh` now enforces `timeout-minutes` locally and warns when a
+      # step passes using more than two thirds of its budget, which is how
+      # this was found.
       - name: Mutation testing
         continue-on-error: true
-        timeout-minutes: 8
+        timeout-minutes: 15
         run: |
           if [ -f mutate.sh ]; then
             bash mutate.sh .
@@ -88769,11 +88837,43 @@ if not job_timeout:
 
 minutes = int(job_timeout.group(1))
 
-if minutes > 60:
-    print("FAIL: job timeout of %d minutes is too generous to notice a hang" % minutes)
+# THE PER-STEP CAPS ARE THE HANG DETECTOR; THE JOB CAP IS THE BACKSTOP.
+#
+# The ceiling here used to be 60, on the reasoning that a generous job cap
+# cannot notice a hang. That reasoning belongs to the STEP caps -- every step
+# in this workflow carries one, and each is sized to the work it does. The job
+# cap only has to be larger than all of them together, or it becomes the real
+# limit and kills whichever step happens to be running. 0.67.1.
+if minutes > 120:
+    print("FAIL: job timeout of %d minutes is too generous to be a backstop" % minutes)
     sys.exit(1)
 
-print("    job bounded at %d minutes" % minutes)
+# AND THE JOB CAP MUST EXCEED THE STEPS IT CONTAINS. 0.67.1.
+#
+# 0.67.0 shipped with a job capped at 20 minutes containing step caps that add
+# to 57. When the job cap is the smaller number the per-step ones are
+# decoration: whichever step happens to be running when the job clock runs out
+# is killed, no step is marked failed, and the run reports a failure with
+# nothing to point at -- which is exactly what `cn.ps1 ci` could not explain.
+#
+# Only the steps AFTER the job's own line are summed; the job's cap is the
+# first `timeout-minutes` in the file.
+after = text[job_timeout.end():]
+
+step_caps = [int(m) for m in re.findall(r"^\s*timeout-minutes:\s*(\d+)", after, re.M)]
+
+total = sum(step_caps)
+
+if step_caps and minutes <= total:
+    print("FAIL: the job is capped at %d minutes and the steps inside it are"
+          % minutes)
+    print("  capped at %d in total (%s)." % (total, ", ".join(str(c) for c in step_caps)))
+    print("  The job cap is then the real limit, and it kills whichever step")
+    print("  happens to be running -- marking nothing as failed.")
+    sys.exit(1)
+
+print("    job bounded at %d minutes, over %d minutes of step caps"
+      % (minutes, total))
 TIMEOUT
 
 echo "  CI: the toolchain does not come from the runner's package manager"
@@ -89026,6 +89126,8 @@ lines = text.split('\n')
 
 steps = []
 name = None
+limit = None
+soft = False
 i = 0
 
 while i < len(lines):
@@ -89035,6 +89137,30 @@ while i < len(lines):
 
     if match:
         name = match.group(1)
+        limit = None
+        soft = False
+        i += 1
+        continue
+
+    # THE RUNNER'S OWN LIMITS, CARRIED THROUGH. 0.67.1.
+    #
+    # This script existed to stop a step passing here and failing there, and
+    # it read only the commands -- so the two constraints the runner enforces
+    # around them were invisible to it. A step with `timeout-minutes: 8` that
+    # takes nine here was reported as passing, and a step marked
+    # `continue-on-error` was treated as fatal, which is the opposite of what
+    # the runner does with it.
+    cap = re.match(r'^\s*timeout-minutes:\s*(\d+)\s*$', line)
+
+    if cap:
+        limit = int(cap.group(1))
+        i += 1
+        continue
+
+    soften = re.match(r'^\s*continue-on-error:\s*(true|false)\s*$', line)
+
+    if soften:
+        soft = soften.group(1) == 'true'
         i += 1
         continue
 
@@ -89064,19 +89190,21 @@ while i < len(lines):
         trim = min((len(b) - len(b.lstrip()) for b in body if b.strip()),
                    default=0)
 
-        steps.append((name, '\n'.join(b[trim:] for b in body)))
+        steps.append((name, '\n'.join(b[trim:] for b in body), limit, soft))
         continue
 
     inline = re.match(r'^\s*run:\s*(\S.*?)\s*$', line)
 
     if inline:
-        steps.append((name, inline.group(1)))
+        steps.append((name, inline.group(1), limit, soft))
 
     i += 1
 
 with open('.cisim-steps', 'w', encoding='utf-8') as fh:
-    for index, (label, body) in enumerate(steps):
-        fh.write('=== %d\t%s\n' % (index, label or '(unnamed)'))
+    for index, (label, body, limit, soft) in enumerate(steps):
+        fh.write('=== %d\t%s\t%s\t%s\n' % (index, label or '(unnamed)',
+                                              limit if limit else '0',
+                                              '1' if soft else '0'))
         fh.write(body)
         fh.write('\n=== end\n')
 
@@ -89194,19 +89322,78 @@ while IFS= read -r line; do
             else
                 printf '  ....  %s\r' "$label"
 
-                if bash -c "$body" > step.log 2>&1; then
-                    printf '  ok    %s\n' "$label"
-                    ran=$((ran + 1))
+                # THE RUNNER'S OWN CLOCK. 0.67.1.
+                #
+                # `timeout-minutes` is the constraint this script was blindest
+                # to: a step that takes nine minutes here and is capped at
+                # eight there passed locally and was killed on the runner,
+                # which is exactly the "passes here, fails there" shape the
+                # whole script exists to prevent. Enforced with a margin of
+                # ZERO -- this machine is FASTER than a two-core runner, so a
+                # step that only just fits here does not fit there.
+                started=$(date +%s)
+
+                if [ "${limit:-0}" != "0" ] && command -v timeout >/dev/null 2>&1; then
+                    timeout "${limit}m" bash -c "$body" > step.log 2>&1
+                    code=$?
                 else
-                    printf '  FAIL  %s\n' "$label"
+                    bash -c "$body" > step.log 2>&1
+                    code=$?
+                fi
+
+                elapsed=$(( $(date +%s) - started ))
+
+                if [ "$code" -eq 0 ]; then
+                    # A STEP THAT ONLY JUST FITS IS A STEP THAT WILL NOT.
+                    #
+                    # The runner has two cores and this machine has more, so
+                    # anything past two thirds of its budget here is over
+                    # budget there. Said out loud rather than left to be
+                    # discovered by a failed release.
+                    if [ "${limit:-0}" != "0" ] \
+                        && [ "$elapsed" -gt $(( limit * 40 )) ]; then
+
+                        printf '  ok    %s  <-- %ss of a %sm budget; the runner is slower\n' \
+                            "$label" "$elapsed" "$limit"
+                    else
+                        printf '  ok    %s\n' "$label"
+                    fi
+
+                    ran=$((ran + 1))
+                elif [ "$code" -eq 124 ]; then
+                    printf '  TIMEOUT  %s  (killed at %s minutes, as the runner would)\n' \
+                        "$label" "$limit"
                     echo ''
-                    # OK lines are the ones that did NOT fail, and a
-                    # 25-line tail of a 200-file lint run shows nothing but
-                    # those -- which is how a failing step got reported with
-                    # no failure visible in it. 0.61.0.
-                    grep -vE 'OK$' step.log | sed 's/^/        /' | tail -40
-                    status=1
-                    break
+                    tail -20 step.log | sed 's/^/        /'
+
+                    if [ "${soft:-0}" = "1" ]; then
+                        echo '        this step is continue-on-error, so the runner would'
+                        echo '        not fail the job -- it would simply stop running.'
+                        ran=$((ran + 1))
+                    else
+                        status=1
+                        break
+                    fi
+                else
+                    if [ "${soft:-0}" = "1" ]; then
+                        # THE RUNNER DOES NOT FAIL ON THESE, SO NEITHER DOES
+                        # THIS -- but silence is how a step stops being
+                        # checked, so it is named.
+                        printf '  warn  %s  (failed; continue-on-error, as on the runner)\n' \
+                            "$label"
+                        grep -vE 'OK$' step.log | sed 's/^/        /' | tail -12
+                        ran=$((ran + 1))
+                    else
+                        printf '  FAIL  %s\n' "$label"
+                        echo ''
+                        # OK lines are the ones that did NOT fail, and a
+                        # 25-line tail of a 200-file lint run shows nothing but
+                        # those -- which is how a failing step got reported with
+                        # no failure visible in it. 0.61.0.
+                        grep -vE 'OK$' step.log | sed 's/^/        /' | tail -40
+                        status=1
+                        break
+                    fi
                 fi
             fi
 
@@ -89215,6 +89402,8 @@ while IFS= read -r line; do
             ;;
         "=== "*)
             label=$(printf '%s' "$line" | cut -f2)
+            limit=$(printf '%s' "$line" | cut -f3)
+            soft=$(printf '%s' "$line" | cut -f4)
             collecting=1
             body=""
             ;;
@@ -91503,12 +91692,51 @@ function Invoke-CNCI {
 
     if ($null -eq $jobs) { return }
 
+    # A RUN THAT FAILED SAYS SO AND SAYS WHERE, WHATEVER THE API RETURNED.
+    #
+    # 0.67.0 failed and this command printed one line -- "job 'release' is
+    # completed" -- and then the API budget. No steps, no FAILED AT, and no
+    # URL, because every one of those lives inside a loop over `$job.steps`
+    # and that came back empty. The one command whose entire job is "tell me
+    # what broke" told the author nothing at all, and did it silently, which
+    # is worse than an error.
+    #
+    # The URL is printed FIRST and unconditionally on a failure, before
+    # anything that depends on the shape of the response. 0.67.1.
+    $conclusion = $latest.conclusion
+
+    if ($conclusion -and $conclusion -ne 'success') {
+        Write-Host ''
+        Write-Host "This run $conclusion. The log is at:" -ForegroundColor Red
+        Write-Host "  $($latest.html_url)" -ForegroundColor Cyan
+    }
+
     foreach ($job in $jobs.jobs) {
-        Write-Host "  job '$($job.name)' is $($job.status)" -ForegroundColor Gray
+        $jobState = if ($job.conclusion) { $job.conclusion } else { $job.status }
+
+        Write-Host "  job '$($job.name)' is $jobState" -ForegroundColor Gray
+
+        # STEPS CAN COME BACK EMPTY, and when they do that is itself the
+        # finding. Re-asked once for the job on its own, because the list
+        # endpoint has been seen to answer without them.
+        $steps = $job.steps
+
+        if (-not $steps -or @($steps).Count -eq 0) {
+            $single = Invoke-CNGitHubApi -Uri (
+                "https://api.github.com/repos/$script:Repo/actions/jobs/$($job.id)")
+
+            if ($single) { $steps = $single.steps }
+        }
+
+        if (-not $steps -or @($steps).Count -eq 0) {
+            Write-Host '  the API returned no step list for this job.' -ForegroundColor Yellow
+            Write-Host "  Open the log: $($latest.html_url)" -ForegroundColor Cyan
+            continue
+        }
 
         $index = 0
 
-        foreach ($step in $job.steps) {
+        foreach ($step in $steps) {
             $index++
 
             $state = if ($step.conclusion) { $step.conclusion } else { $step.status }
@@ -91528,11 +91756,23 @@ function Invoke-CNCI {
             Write-Host ('  {0,-3} {1,-42} {2}{3}' -f $index, $step.name, $state, $note) -ForegroundColor $colour
         }
 
-        $failed = $job.steps | Where-Object { $_.conclusion -eq 'failure' } | Select-Object -First 1
+        $failed = $steps |
+            Where-Object { $_.conclusion -eq 'failure' -or $_.conclusion -eq 'cancelled' } |
+            Select-Object -First 1
 
         if ($failed) {
             Write-Host ''
-            Write-Host "FAILED AT: $($failed.name)" -ForegroundColor Red
+            Write-Host "FAILED AT: $($failed.name) ($($failed.conclusion))" -ForegroundColor Red
+            Write-Host "  $($latest.html_url)" -ForegroundColor Cyan
+        }
+        elseif ($jobState -eq 'failure' -or $jobState -eq 'cancelled') {
+            # A JOB THAT FAILED WITH NO FAILED STEP IS A REAL CASE, and it has
+            # exactly one common cause worth naming: the job hit its own
+            # `timeout-minutes` while a step was still running, so nothing is
+            # marked failed and the run is simply over.
+            Write-Host ''
+            Write-Host "The job $jobState with no step marked failed." -ForegroundColor Red
+            Write-Host '  Usually the job-level timeout-minutes, hit while a step was running.' -ForegroundColor Gray
             Write-Host "  $($latest.html_url)" -ForegroundColor Cyan
         }
     }

@@ -7,6 +7,51 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.67.1]
+
+0.67.0 built correctly and its release run failed, and the command whose whole
+job is to say why printed one line and stopped. Nothing in the addon changed
+here; this is the release pipeline and the tools around it.
+
+### Fixed
+
+- **`/cn ci` could report a failed run and name nothing.** Every useful line it
+  prints â€” the step list, "FAILED AT", the link to the log â€” was inside a loop
+  over a step list that came back empty, so a failed run produced a job name,
+  a blank line, and the API budget. The log URL is printed first now,
+  unconditionally, before anything that depends on the shape of the response;
+  an empty step list is reported as the finding it is and re-asked for once;
+  and a job that failed with no step marked failed says so and names the
+  likeliest cause.
+- **The release job was capped below the steps inside it** â€” 20 minutes around
+  step budgets adding to 57. A cap like that is the real limit and the ones
+  inside it are decoration: whichever step is running when the job clock
+  expires is killed, nothing is marked failed, and the run reports a failure
+  with nothing to point at. The job is bounded at 30 now, and the release
+  rehearsal fails if a job is ever capped below the sum of its own steps
+  again.
+- **Mutation testing had been silently timing out on the runner.** The suite is
+  314 mutations and each runs the whole test harness; that is 71% of its
+  eight-minute budget on a fast machine, and the runner has two cores. Because
+  the step is deliberately non-blocking, nothing failed and nothing said so â€”
+  the release went green with its strongest suite not run. Budgeted at fifteen.
+
+### Internal
+
+- **The release rehearsal now enforces the runner's own limits.** It read the
+  commands in each workflow step and nothing else, so the two constraints the
+  runner applies around them were invisible: a step is now run under its real
+  `timeout-minutes` and killed the way the runner would kill it, a step marked
+  `continue-on-error` fails the way the runner treats it rather than stopping
+  everything, and any step that passes using more than two thirds of its
+  budget is called out â€” because this machine is faster than the runner, so
+  "only just fits here" means "does not fit there".
+
+  This is the same hole as the one that ended 0.61.0: the rehearsal passed
+  locally because the local machine had something the runner did not. That
+  time it was a missing binary and the answer was a preflight. This time it
+  was a clock.
+
 ## [0.67.0]
 
 Thirteen defects and four improvements. Eight of the thirteen were in what
