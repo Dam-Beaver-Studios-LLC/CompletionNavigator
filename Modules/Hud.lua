@@ -682,6 +682,50 @@ CN:RegisterCommand{
 }
 
 CN:RegisterCommand{
+    name    = "textsize",
+    aliases = { "text" },
+    args    = "<100 to 150>",
+    order   = 40.5,
+    help    = "Size of the text in the window, without resizing it.",
+    handler = function(args)
+        local typed = CN.Trim(args or "")
+
+        if typed == "" then
+            Print(string.format("Text size: %d%%",
+                math.floor(CN.TextScale() * 100 + 0.5)))
+            Print("|cff8a8f96Usage: /cn textsize 130. `/cn scale` resizes the "
+                .. "whole window instead.|r")
+            return
+        end
+
+        local asked = tonumber(typed)
+
+        if not asked then
+            Print("Usage: /cn textsize 130")
+            return
+        end
+
+        -- A PERCENTAGE OR A MULTIPLIER, WHICHEVER THEY TYPED. Both readings
+        -- are obvious and only one of them can be meant: nobody wants their
+        -- text at 130 times its size, and nobody wants it at 1.3 percent.
+        if asked > 3 then
+            asked = asked / 100
+        end
+
+        if not CN.SetTextScale(asked) then
+            Print("Text size must be between 100% and 200%.")
+            return
+        end
+
+        Print(string.format("Text size: %d%%",
+            math.floor(CN.TextScale() * 100 + 0.5)))
+
+        Print("|cff8a8f96Applied to text already on screen. `/cn scale` "
+            .. "resizes the whole window instead.|r")
+    end,
+}
+
+CN:RegisterCommand{
     name    = "colourblind",
     aliases = { "colorblind" },
     args    = "[on or off]",

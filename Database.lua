@@ -1055,6 +1055,40 @@ CN.migrations = {
                 .. " English renown standing(s) the client re-supplies.")
         end
     end,
+
+    -- 19 -> 20. A COUNT OF EVENT DISPATCHES, PRESENTED AS A COUNT OF
+    -- ENCOUNTERS.
+    --
+    -- `rares[id].sightings` was incremented once per vignette per dispatch of
+    -- `VIGNETTE_MINIMAP_UPDATED`, which fires several times a second while
+    -- anything is moving in range. So the number `/cn goal` printed as "Seen
+    -- 1,847 times here" was a measure of how long the player had stood near a
+    -- rare, in tenths of a second, and it grew while they read it.
+    --
+    -- 0.66.0 counts an encounter instead: a sighting after a gap. The stored
+    -- values cannot be converted into that -- there is no ratio, because it
+    -- depends entirely on how long the player lingered each time -- so they
+    -- are dropped rather than scaled. The count rebuilds from the next
+    -- sighting, and a number that is missing is better than one that is
+    -- confidently wrong.
+    [19] = function(db)
+        db.account = db.account or {}
+
+        local dropped = 0
+
+        for _, record in pairs(db.account.rares or {}) do
+            if type(record) == "table" and record.sightings ~= nil then
+                record.sightings = nil
+
+                dropped = dropped + 1
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped .. " inflated rare sighting "
+                .. "count(s); they are counted per encounter now.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

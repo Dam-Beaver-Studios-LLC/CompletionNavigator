@@ -300,9 +300,23 @@ function Filters.DescribeObjective(objectiveType, id)
         return "Toy " .. numericID
     end
 
+    -- THE BADGE, NOT THE ENUM. 0.66.0.
+    --
+    -- Every other branch in this function produces a title-cased placeholder
+    -- -- "Quest 123", "Toy 123", "Faction 123". This one concatenated the raw
+    -- uppercase token, so `/cn hidden` listed `RARE 5487` as the name of the
+    -- thing the player had hidden: the addon's own internals, which is the
+    -- exact defect the APPEARANCE branch below was written to fix.
+    --
+    -- It broke a second thing at a distance. `Goals.List` decides whether the
+    -- describer has learned a real name by comparing against the placeholder
+    -- it expects -- "Rare 5487" -- and `"RARE 5487"` never equalled it, so a
+    -- pinned rare's placeholder was written over the stored name.
     if (objectiveType == types.RARE or objectiveType == types.TREASURE) and numericID then
         local record = CN.Account("rares")[numericID]
-        return record and record.name or (objectiveType .. " " .. numericID)
+
+        return record and record.name
+            or (CN.TypeBadge(objectiveType) .. " " .. numericID)
     end
 
     -- APPEARANCE COVERS TWO ID SPACES, AND SAYS WHICH. 0.61.0.
@@ -380,7 +394,25 @@ function Filters.DescribeObjective(objectiveType, id)
         return "Currency " .. numericID
     end
 
+    -- AND THE THIRD OF THE THREE. 0.66.0.
+    --
+    -- The note above says "these two had no live path at all" and then gave
+    -- CURRENCY and TITLE one. RECIPE is the third member of that group and
+    -- was left asking disk first with no client fallback -- the only branch
+    -- in this function that does. A hidden vendor recipe read back as
+    -- "Recipe 194424" until a profession window had been opened, and after a
+    -- client-language change it showed the previous locale's name beside pet
+    -- and mount names that had correctly re-localized.
+    --
+    -- `Blizzard.GetItemName` answers for exactly these ids; `Vendors.FindItem`
+    -- resolves recipe names with it already.
     if objectiveType == types.RECIPE and numericID then
+        local live = CN.Blizzard.GetItemName and CN.Blizzard.GetItemName(numericID)
+
+        if live and live ~= "" then
+            return live
+        end
+
         return CN.Account("recipeNames")[numericID] or ("Recipe " .. numericID)
     end
 

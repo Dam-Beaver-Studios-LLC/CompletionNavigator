@@ -292,6 +292,35 @@ end
 -- WARBAND
 ------------------------------------------------------------
 
+-- A RECORD'S STANDING, DERIVED, NOT READ. 0.66.0.
+--
+-- Migration 18 dropped `standing` from every Renown record, because it had
+-- been persisted as hardcoded English. That was right, and the WRITER was
+-- given `CN.RenownLabel` in the same release -- but four readers went on
+-- printing the field through `tostring`, which renders a missing value as the
+-- four-letter word. Only the logged-in character's rows are rewritten at
+-- login, so every ALT's major-faction row printed `Best character:
+-- Ravencrest-Zeddicus (nil)` in `/cn rep`, `/cn who rep` and `/cn alts` until
+-- that alt was played.
+--
+-- Tenth application of one rule: derive what the client can name, in the
+-- language of whoever is READING it, from the number that was worth keeping.
+function Reputations.StandingText(record)
+    if type(record) ~= "table" then
+        return nil
+    end
+
+    if record.kind == "RENOWN" then
+        return CN.RenownLabel(record.renownLevel or record.renown or 0)
+    end
+
+    if record.standing and record.standing ~= "" then
+        return record.standing
+    end
+
+    return Blizzard.GetStandingLabel(record.reaction)
+end
+
 -- Returns the best-standing character for a character-specific faction, so
 -- the recommendation engine can say "switch to this alt instead".
 function Reputations.BestCharacterFor(factionID)
@@ -409,7 +438,8 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.REPUTATION, function(factionID)
             if (bestRecord.reaction or 0) > mine then
                 return states.REQUIRES_OTHER_CHARACTER,
                        CN.blockReasons.BETTER_CHARACTER,
-                       bestKey .. " is " .. tostring(bestRecord.standing)
+                       bestKey .. " is "
+                           .. tostring(Reputations.StandingText(bestRecord))
             end
         end
     end
@@ -679,7 +709,7 @@ CN:RegisterCommand{
         end
 
         Print(record.name .. " |cff8a8f96(" .. factionID .. ")|r")
-        Print("Standing: " .. tostring(record.standing)
+        Print("Standing: " .. tostring(Reputations.StandingText(record))
             .. " - " .. tostring(record.current) .. "/" .. tostring(record.maximum))
         Print("Scope: " .. (record.accountWide
             and "|cff73b873account-wide (Warband)|r"
@@ -707,7 +737,8 @@ CN:RegisterCommand{
 
             if bestKey and bestKey ~= CN.characterKey and bestRecord then
                 Print("Best character: " .. bestKey
-                    .. " (" .. tostring(bestRecord.standing) .. ")")
+                    .. " (" .. tostring(Reputations.StandingText(bestRecord))
+                    .. ")")
             end
         end
 

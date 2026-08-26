@@ -317,7 +317,7 @@ local function AddButton(parent, text, width, onClick, tooltip)
         -- A plain Button has no artwork and no font string of its own.
         PaintPanel(button, 0.16, 0.16, 0.19, 1)
 
-        local label = button:CreateFontString(nil, "ARTWORK", CN.FONT.CAPTION)
+        local label = CN.Label(button, "ARTWORK", "CAPTION")
         label:SetPoint("CENTER")
         button:SetFontString(label)
 
@@ -344,7 +344,7 @@ local function AddCheckbox(parent, text, getter, setter, tooltip)
     if check.Text then
         check.Text:SetText(text)
     else
-        local label = check:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
+        local label = CN.Label(check, "ARTWORK", "BODY")
         label:SetPoint("LEFT", check, "RIGHT", 2, 0)
         label:SetText(text)
         check.Text = label
@@ -466,7 +466,7 @@ local function BuildWindow()
         titleBackground:SetAllPoints()
         titleBackground:SetColorTexture(0.13, 0.13, 0.16, 1)
 
-        local title = titleBar:CreateFontString(nil, "OVERLAY", CN.FONT.HEAD)
+        local title = CN.Label(titleBar, "OVERLAY", "HEAD")
         title:SetPoint("LEFT", 10, 0)
         -- The fallback title, which must say the same thing as the
         -- templated one above -- these were two separate literals and could
@@ -478,7 +478,7 @@ local function BuildWindow()
         close:SetSize(22, 22)
         close:SetPoint("TOPRIGHT", -3, -2)
 
-        local closeLabel = close:CreateFontString(nil, "OVERLAY", CN.FONT.TITLE)
+        local closeLabel = CN.Label(close, "OVERLAY", "TITLE")
         closeLabel:SetPoint("CENTER")
         closeLabel:SetText("x")
         close:SetFontString(closeLabel)
@@ -512,12 +512,20 @@ local function BuildWindow()
     search:SetAutoFocus(false)
     search:SetMaxLetters(40)
 
-    local searchLabel = window:CreateFontString(nil, "OVERLAY", CN.FONT.LABEL)
+    local searchLabel = CN.Label(window, "OVERLAY", "LABEL")
     searchLabel:SetPoint("RIGHT", search, "LEFT", -6, 0)
     searchLabel:SetText("filter")
 
     search:SetScript("OnTextChanged", function(self)
         UI.SetFilter(self:GetText())
+
+        -- AND SAY WHERE ELSE IT IS. 0.66.0.
+        --
+        -- The filter box searched the tab you were standing on, so typing a
+        -- name on the wrong tab produced "Nothing matched" -- true, and
+        -- useless, because the addon had the answer and was declining to say
+        -- which tab it was on.
+        UI.Answer(UI.SearchElsewhere(self:GetText()) or "")
     end)
 
     -- KEEP THE FILTER ACROSS TABS, OR CLEAR IT?
@@ -575,7 +583,7 @@ local function BuildWindow()
     -- Each tab names the two or three commands that go deeper from THAT tab,
     -- at the moment they are relevant, which surfaces about twenty-five
     -- buried commands for the cost of one fontstring.
-    window.footer = window:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+    window.footer = CN.Label(window, "ARTWORK", "SMALL")
     window.footer:SetTextColor(CN.Rgb("MUTED"))
     window.footer:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
     window.footer:SetPoint("BOTTOMRIGHT", -CN.SPACE.M, CN.SPACE.M)
@@ -593,7 +601,7 @@ local function BuildWindow()
     -- One line under the tabs, in the window, where the click happened. Chat
     -- still gets it when the window is not open, because the same handlers
     -- run from slash commands.
-    window.answer = window:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+    window.answer = CN.Label(window, "ARTWORK", "SMALL")
     window.answer:SetPoint("BOTTOMLEFT", window.footer, "TOPLEFT", 0, 4)
     window.answer:SetPoint("BOTTOMRIGHT", window.footer, "TOPRIGHT", 0, 4)
     window.answer:SetJustifyH("LEFT")
@@ -1008,6 +1016,121 @@ function UI.RestoreFilter()
     return true
 end
 
+------------------------------------------------------------
+-- FINDING SOMETHING WITHOUT KNOWING WHICH TAB IT IS ON
+------------------------------------------------------------
+
+-- ELEVEN TABS, AND THE FILTER BOX ONLY EVER SEARCHED ONE. 0.66.0.
+--
+-- The window knows about quests, mounts, toys, appearances, currencies,
+-- titles, factions, rares, vendors, instances and characters -- and to find
+-- any of them the player had to already know which tab it lived on. Typing a
+-- name on the wrong tab produced "Nothing matched", which is true and
+-- useless: the addon had the answer and was declining to say where.
+--
+-- Every tab that owns a list is asked, from the entries it was last given
+-- rather than from what survived its own filter.
+function UI.SearchAll(text)
+    local results = {}
+
+    if type(text) ~= "string" then
+        return results
+    end
+
+    text = CN.Trim(text)
+
+    if text == "" then
+        return results
+    end
+
+    local needle = string.lower(text)
+
+    for index, tab in ipairs(UI.tabs) do
+        local list = tab.panel and UI.listPanels and UI.listPanels[tab.panel]
+
+        if list and list.Entries then
+            local count, first = 0, nil
+
+            for _, entry in ipairs(list:Entries()) do
+                -- Plain find, for the reason the list's own filter gives:
+                -- somebody typing "mount (2)" is typing a name, not a
+                -- pattern, and a stray bracket must not throw.
+                local haystack = string.lower(tostring(entry.text or "")
+                    .. " " .. tostring(entry.value or ""))
+
+                if haystack:find(needle, 1, true) then
+                    count = count + 1
+
+                    first = first or CN.Strip(tostring(entry.text or ""))
+                end
+            end
+
+            if count > 0 then
+                table.insert(results, {
+                    tab   = tab.name,
+                    index = index,
+                    count = count,
+                    first = first,
+                })
+            end
+        end
+    end
+
+    table.sort(results, function(a, b)
+        if a.count ~= b.count then
+            return a.count > b.count
+        end
+
+        return a.index < b.index
+    end)
+
+    return results
+end
+
+-- REFRESHED, BECAUSE AN UNBUILT TAB HOLDS NOTHING.
+--
+-- The window builds every tab's frame up front but only REFRESHES the
+-- selected one, so ten of the eleven lists are empty until the player visits
+-- them -- and a search of them would answer "nothing found" for things the
+-- addon has on disk. This is the only caller that needs all eleven at once,
+-- and it is user-initiated.
+function UI.RefreshAllTabs()
+    local refreshed = 0
+
+    for _, tab in ipairs(UI.tabs) do
+        if tab.refresh and tab.panel then
+            if pcall(tab.refresh, tab.panel) then
+                refreshed = refreshed + 1
+            end
+        end
+    end
+
+    return refreshed
+end
+
+-- The one sentence version, for the line under the filter box.
+function UI.SearchElsewhere(text)
+    local current = UI.selectedTabName
+
+    local parts = {}
+
+    for _, hit in ipairs(UI.SearchAll(text)) do
+        if hit.tab ~= current then
+            table.insert(parts, hit.tab .. " (" .. hit.count .. ")")
+        end
+
+        if #parts >= 4 then
+            break
+        end
+    end
+
+    if #parts == 0 then
+        return nil
+    end
+
+    return "Also on: " .. table.concat(parts, ", ")
+end
+
 function UI.SetFilter(text)
     local tab = UI.tabs[UI.selectedTab or 1]
 
@@ -1162,15 +1285,15 @@ UI.RegisterTab{
     order = 10,
 
     build = function(panel)
-        panel.title = panel:CreateFontString(nil, "ARTWORK", CN.FONT.TITLE)
+        panel.title = CN.Label(panel, "ARTWORK", "TITLE")
         panel.title:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
         panel.title:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.title:SetJustifyH("LEFT")
 
-        panel.type = panel:CreateFontString(nil, "ARTWORK", CN.FONT.LABEL)
+        panel.type = CN.Label(panel, "ARTWORK", "LABEL")
         panel.type:SetPoint("TOPLEFT", panel.title, "BOTTOMLEFT", 0, -2)
 
-        panel.why = panel:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
+        panel.why = CN.Label(panel, "ARTWORK", "BODY")
         panel.why:SetPoint("TOPLEFT", panel.type, "BOTTOMLEFT", 0, -12)
         panel.why:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.why:SetJustifyH("LEFT")
@@ -1426,7 +1549,7 @@ UI.RegisterTab{
     order = 20,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header = CN.Label(panel, "ARTWORK", "HEAD")
         panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
@@ -1589,7 +1712,7 @@ UI.RegisterTab{
     order = 30,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header = CN.Label(panel, "ARTWORK", "HEAD")
         panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
@@ -1622,7 +1745,7 @@ UI.RegisterTab{
 
         panel.stale:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
 
-        panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.note = CN.Label(panel, "ARTWORK", "SMALL")
         panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M + 26)
         panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.note:SetJustifyH("LEFT")
@@ -1641,8 +1764,27 @@ UI.RegisterTab{
         -- continuously while questing because `QUEST_LOG_UPDATE` drives it.
         --
         -- Every number in it is already guarded by the same generation.
-        local sources = CN.Memo("ui:sources", CN.collectionGeneration,
-            UI.Sources)
+        -- ONLY THE STORED HALF IS MEMOIZED. 0.66.0.
+        --
+        -- 0.65.0 wrapped the whole tab in one memo keyed on
+        -- `CN.collectionGeneration`, which is bumped by scans and by the
+        -- eleven client events that change a COLLECTION. The four rows in the
+        -- live section are not collection counts: "Quests in your log",
+        -- "Quest givers on this map" -- whose own detail line reads "Changes
+        -- as you move" -- and "Quests completed today". Nothing bumps that
+        -- generation on `ZONE_CHANGED_NEW_AREA`, `QUEST_ACCEPTED` or
+        -- `QUEST_REMOVED`, so those rows froze at whatever they said when the
+        -- window was opened and stayed there for the session.
+        --
+        -- The cost the memo was written for is entirely in the stored half:
+        -- ten `Summary()` calls, each walking its module's whole store. The
+        -- live half is three client calls.
+        local sources = CN.Memo("ui:sources:stored", CN.collectionGeneration,
+            function() return UI.Sources("stored") end)
+
+        for _, row in ipairs(UI.Sources("live")) do
+            table.insert(sources, row)
+        end
 
         local stale = 0
 
@@ -1730,7 +1872,9 @@ UI.RegisterTab{
 --
 -- Two callers -- the tab above and the "refresh what is stale" button -- and
 -- the tests, which is the third and the reason this is not a local.
-function UI.Sources()
+-- `which` is "stored", "live", or nil for both. See the note at the caller:
+-- the two halves have different lifetimes, so they are cached differently.
+function UI.Sources(which)
     local sources = {}
 
     local steps = {}
@@ -1742,6 +1886,10 @@ function UI.Sources()
     end
 
     local function Stored(label, moduleName, command, value, detail)
+        if which == "live" then
+            return
+        end
+
         table.insert(sources, {
             kind    = "stored",
             label   = label,
@@ -1753,6 +1901,10 @@ function UI.Sources()
     end
 
     local function Live(label, value, detail)
+        if which == "stored" then
+            return
+        end
+
         table.insert(sources, {
             kind   = "live",
             label  = label,
@@ -1941,7 +2093,7 @@ UI.RegisterTab{
     order = 15,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header = CN.Label(panel, "ARTWORK", "HEAD")
         panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
@@ -2143,7 +2295,7 @@ UI.RegisterTab{
     order = 22,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header = CN.Label(panel, "ARTWORK", "HEAD")
         panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
@@ -2154,7 +2306,7 @@ UI.RegisterTab{
         panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
-        panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.note = CN.Label(panel, "ARTWORK", "SMALL")
         panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
         panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.note:SetJustifyH("LEFT")
@@ -2256,7 +2408,7 @@ UI.RegisterTab{
     order = 14,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header = CN.Label(panel, "ARTWORK", "HEAD")
         panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
@@ -2267,7 +2419,7 @@ UI.RegisterTab{
         panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
         panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
 
-        panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.note = CN.Label(panel, "ARTWORK", "SMALL")
         panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M)
         panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.note:SetJustifyH("LEFT")
@@ -2365,7 +2517,7 @@ UI.RegisterTab{
         -- the rest of the function treats as a goal.
         panel.selected = false
 
-        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header = CN.Label(panel, "ARTWORK", "HEAD")
         panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
@@ -2415,7 +2567,7 @@ UI.RegisterTab{
         -- what a goal does and how to pin one -- and Design.lua reserves the
         -- disabled font for labels because it sits at roughly 2.8:1 contrast
         -- on this background.
-        panel.note = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.note = CN.Label(panel, "ARTWORK", "SMALL")
         panel.note:SetPoint("BOTTOMLEFT", CN.SPACE.M, CN.SPACE.M + 26)
         panel.note:SetPoint("RIGHT", -CN.SPACE.M, 0)
         panel.note:SetJustifyH("LEFT")
@@ -2617,12 +2769,12 @@ UI.RegisterTab{
     build = function(panel)
         -- `CN.FONT.HEAD`, like the other seven. This one was a size larger
         -- than every other tab's header for no reason anybody recorded.
-        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header = CN.Label(panel, "ARTWORK", "HEAD")
         panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
 
-        panel.sub = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.sub = CN.Label(panel, "ARTWORK", "SMALL")
         panel.sub:SetPoint("TOPLEFT", panel.header, "BOTTOMLEFT", 0, -4)
         panel.sub:SetJustifyH("LEFT")
 
@@ -2790,7 +2942,7 @@ UI.RegisterTab{
     order = 27,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header = CN.Label(panel, "ARTWORK", "HEAD")
         panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
@@ -2953,7 +3105,7 @@ UI.RegisterTab{
     order = 25,
 
     build = function(panel)
-        panel.header = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+        panel.header = CN.Label(panel, "ARTWORK", "HEAD")
         panel.header:SetPoint("TOPLEFT", CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetPoint("TOPRIGHT", -CN.SPACE.M, -CN.SPACE.S)
         panel.header:SetJustifyH("LEFT")
@@ -3266,7 +3418,7 @@ UI.RegisterTab{
         local COLUMN = 268
 
         local function Heading(text, anchor, column)
-            local head = panel:CreateFontString(nil, "ARTWORK", CN.FONT.HEAD)
+            local head = CN.Label(panel, "ARTWORK", "HEAD")
 
             head:SetTextColor(CN.Rgb("ACCENT"))
             head:SetText(text)
@@ -3353,7 +3505,7 @@ UI.RegisterTab{
         -- window would read as a settings page.
         Under(panel.focusClear, panel.focusButton, CN.SPACE.XS)
 
-        panel.focusNote = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.focusNote = CN.Label(panel, "ARTWORK", "SMALL")
         panel.focusNote:SetTextColor(CN.Rgb("MUTED"))
         panel.focusNote:SetWidth(COLUMN - CN.SPACE.M)
         panel.focusNote:SetJustifyH("LEFT")
@@ -3585,6 +3737,33 @@ UI.RegisterTab{
 
         Under(panel.colourblind, panel.scale, CN.SPACE.XS)
 
+        -- A SECOND AXIS, BECAUSE THEY ARE DIFFERENT QUESTIONS. 0.66.0.
+        --
+        -- "Size" scales the whole frame: the window grows with the text. That
+        -- is the answer to "this addon is too small on my monitor". It is not
+        -- the answer to "I cannot read this", where the player wants the same
+        -- window and larger letters -- and until now there was no way to ask.
+        panel.textSize = AddButton(panel, "Text 100%", 120, function()
+            local steps   = CN.textScales
+            local current = CN.TextScale()
+
+            local index = 1
+
+            for position, value in ipairs(steps) do
+                if math.abs(value - current) < 0.001 then
+                    index = position
+                    break
+                end
+            end
+
+            CN.SetTextScale(steps[(index % #steps) + 1])
+
+            UI.Refresh()
+        end, "How large the text in this window is, without changing the size "
+            .. "of the window. Click to cycle.")
+
+        Under(panel.textSize, panel.colourblind, CN.SPACE.XS)
+
         panel.keepFilter = AddCheckbox(panel, "Keep the filter box across tabs",
             function() return CN.Settings().keepFilter and true or false end,
             function(value)
@@ -3597,7 +3776,7 @@ UI.RegisterTab{
             "Off is safer: a filter that persists invisibly is how a list "
             .. "looks empty when it is not.")
 
-        Under(panel.keepFilter, panel.colourblind, CN.SPACE.XS)
+        Under(panel.keepFilter, panel.textSize, CN.SPACE.XS)
 
         ------------------------------------------------------------
         -- THE REST
@@ -3636,7 +3815,7 @@ UI.RegisterTab{
 
         panel.debug:SetPoint("BOTTOMLEFT", COLUMN, CN.SPACE.M)
 
-        panel.about = panel:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        panel.about = CN.Label(panel, "ARTWORK", "SMALL")
         panel.about:SetTextColor(CN.Rgb("MUTED"))
         panel.about:SetPoint("BOTTOMRIGHT", -CN.SPACE.M, CN.SPACE.M)
         panel.about:SetJustifyH("RIGHT")
@@ -3685,6 +3864,9 @@ UI.RegisterTab{
         -- literal "Size 1.0" changed its own label on the first refresh.
         panel.scale:SetText(string.format("Size %.2f",
             (hud and hud.Scale and hud.Scale()) or 1))
+
+        panel.textSize:SetText(string.format("Text %d%%",
+            math.floor(CN.TextScale() * 100 + 0.5)))
 
         for _, control in ipairs({ panel.learn, panel.minimap, panel.arrow,
                                    panel.pins, panel.tooltips, panel.hud,
@@ -4042,6 +4224,50 @@ CN:RegisterCommand{
     help    = "Open the main window.",
     handler = function()
         UI.Toggle()
+    end,
+}
+
+CN:RegisterCommand{
+    name    = "find",
+    args    = "<text>",
+    order   = 6,
+    help    = "Find something without knowing which tab it is on.",
+    handler = function(args)
+        args = CN.Trim(args or "")
+
+        if args == "" then
+            Print("Usage: /cn find <text>")
+            Print("|cff8a8f96Searches every tab of the window at once.|r")
+            return
+        end
+
+        -- THE TABS HAVE TO HAVE BEEN BUILT TO HAVE ANYTHING IN THEM.
+        --
+        -- A player typing this has usually not opened the window, and a tab
+        -- that has never been refreshed holds no entries -- so the search
+        -- would have answered "nothing" for things the addon plainly knows.
+        UI.Frame()
+        UI.RefreshAllTabs()
+
+        local hits = UI.SearchAll(args)
+
+        if #hits == 0 then
+            Print("Nothing in the window matches: " .. args)
+            Print("|cff8a8f96Collections and goals are searched from what has "
+                .. "been scanned; /cn scan fills them.|r")
+            return
+        end
+
+        Print("Matches for |cffffc74f" .. args .. "|r:")
+
+        for _, hit in ipairs(hits) do
+            CN.PrintLine("  " .. hit.tab .. " |cff8a8f96("
+                .. CN.Count(hit.count, "match", "matches") .. ")|r"
+                .. (hit.first and (" " .. CN.DASH .. " " .. hit.first) or ""))
+        end
+
+        Print("|cff8a8f96/cn ui to open the window; the filter box now says "
+            .. "which other tabs match too.|r")
     end,
 }
 

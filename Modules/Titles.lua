@@ -146,10 +146,25 @@ function Titles.NameOf(titleID)
     return "Title " .. tostring(titleID)
 end
 
+-- OVER THE CLIENT'S WHOLE LIST, NOT OVER WHAT THIS CHARACTER HOLDS. 0.66.0.
+--
+-- 0.65.0 moved this off the `titleNames` store, which held every title the
+-- scan had seen, and onto the character store -- which `Scan` writes only for
+-- titles this character KNOWS. Both resolution paths then returned an id only
+-- when the logged-in character already had the title, so `/cn title
+-- Loremaster` on an alt answered "No known title matches" for a title the
+-- main holds. The command's own help is "Show which characters have a title",
+-- which is a question about the OTHER characters.
+--
+-- It also made one branch of the command unreachable: `WhoHas` always
+-- includes the current character, so "Not earned by any known character"
+-- could never print.
+--
+-- `Blizzard.GetTitles()` is the full list and is free.
 function Titles.Resolve(text)
     local titleID = CN.ToID(text)
 
-    if titleID and CharacterStore() and CharacterStore()[titleID] ~= nil then
+    if titleID then
         return titleID
     end
 
@@ -160,12 +175,11 @@ function Titles.Resolve(text)
     local needle  = string.lower(text)
     local matches = {}
 
-    -- OVER WHAT THIS CHARACTER HAS, NAMED LIVE. See the note in `Scan`.
-    for id in pairs(CharacterStore() or {}) do
-        local name = Titles.NameOf(id)
+    for _, title in ipairs(Blizzard.GetTitles()) do
+        local name = title.name or Titles.NameOf(title.titleID)
 
         if name and string.find(string.lower(name), needle, 1, true) then
-            table.insert(matches, { id = id, name = name })
+            table.insert(matches, { id = title.titleID, name = name })
         end
     end
 

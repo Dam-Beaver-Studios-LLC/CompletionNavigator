@@ -143,6 +143,7 @@ CN.apiSurface = {
     "C_WeeklyRewards.GetActivities",
     "C_WeeklyRewards.HasAvailableRewards",
     "BankFrame",
+    "CreateFont",
     "CreateFrame",
     "CreateVector2D",
     "EJ_ClearSearch",

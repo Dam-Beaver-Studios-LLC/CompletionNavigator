@@ -378,14 +378,22 @@ function Goals.Plan(goal)
     end
 
     if goal.type == types.REPUTATION then
-        local record = CN.Account("reputations")[goal.id]
-
-        if record then
-            if record.accountWide then
-                step("Account-wide: any character's progress counts.")
-            else
-                step("Character-specific: progress does not carry across your Warband.")
-            end
+        -- FROM THE CLIENT, NOT FROM THE STORE THE ANSWER SORTS INTO. 0.66.0.
+        --
+        -- `Reputations.Scan` files a faction into exactly one store: an
+        -- account-wide record goes in the account store and is DELETED from
+        -- the character store, and the reverse. So `CN.Account("reputations")
+        -- [id]` was non-nil only for account-wide factions -- `accountWide`
+        -- was always true there and the `else` branch could never run. The
+        -- sentence about progress not carrying across a Warband never once
+        -- appeared for the factions it is the entire point of.
+        --
+        -- `Chase.lua` asks the client the same question correctly, one file
+        -- over. Two copies of one rule; this is the copy that drifted.
+        if Blizzard.IsAccountWideReputation(goal.id) then
+            step("Account-wide: any character's progress counts.")
+        else
+            step("Character-specific: progress does not carry across your Warband.")
         end
     end
 

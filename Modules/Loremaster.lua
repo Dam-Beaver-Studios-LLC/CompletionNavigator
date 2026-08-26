@@ -231,12 +231,16 @@ function Loremaster.Scan()
                 held.completed = achievement.completed and true or false
                 held.criteria  = criteria
 
-                -- The current character's figure, in both places: the map
-                -- for the Warband view, and the flat field so every existing
-                -- reader keeps working without a lookup.
+                -- THE FLAT FIELD IS NO LONGER WRITTEN. 0.66.0. See the same
+                -- change in `Exploration.NoteProgress`.
+                --
+                -- It was kept so pre-migration databases still read, and
+                -- `DoneFor` still reads it for that reason -- but writing it
+                -- here meant the fallback returned whoever scanned last
+                -- rather than something old, so an alt with no entry of its
+                -- own was handed the main's criteria count as its own.
                 held.progress  = held.progress or {}
                 held.progress[CN.characterKey or CN.GetCharacterKey()] = done
-                held.done      = done
 
                 store[id] = held
 

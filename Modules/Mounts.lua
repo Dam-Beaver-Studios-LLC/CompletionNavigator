@@ -273,6 +273,14 @@ end, { events = { "NEW_MOUNT_ADDED" } })
 ------------------------------------------------------------
 
 -- faction is 0 for Horde and 1 for Alliance in the mount journal.
+--
+-- THIS TABLE IS A TOKEN MAP AND IS USED AS ONE. It is compared against
+-- `character.faction`, which is stored in the same English tokens, and that
+-- comparison is correct. What is NOT correct is printing the token: 0.64.0
+-- gave the Warband roster `CN.FactionLabel`, backed by the client's own
+-- `FACTION_ALLIANCE` / `FACTION_HORDE` globals, and this file -- the other
+-- place a faction reaches the player -- was not converted. A German player
+-- read "Faction: Alliance" beside "Sammelbar: nein". 0.66.0.
 local FACTION_NAMES = { [0] = "Horde", [1] = "Alliance" }
 
 function Mounts.IsUsableByCharacter(record, character)
@@ -302,9 +310,11 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.MOUNT, function(mountID)
     end
 
     if not Mounts.IsUsableByCharacter(record) then
+        local token = FACTION_NAMES[record.faction]
+
         return states.REQUIRES_OTHER_CHARACTER,
                CN.blockReasons.WRONG_FACTION,
-               FACTION_NAMES[record.faction] or "the other faction"
+               token and CN.FactionLabel(token) or "the other faction"
     end
 
     return states.AVAILABLE, nil, nil
@@ -447,11 +457,13 @@ CN:RegisterCommand{
         local sourceText = Mounts.SourceText(mountID, record)
 
         if sourceText and sourceText ~= "" then
-            Print("Source: " .. sourceText:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""))
+            Print("Source: " .. CN.Strip(sourceText))
         end
 
         if record.isFactionSpecific then
-            Print("Faction: " .. (FACTION_NAMES[record.faction] or "unknown")
+            local token = FACTION_NAMES[record.faction]
+
+            Print("Faction: " .. (token and CN.FactionLabel(token) or "unknown")
                 .. (Mounts.IsUsableByCharacter(record) and "" or " |cffe2564c(not this character)|r"))
         end
     end,

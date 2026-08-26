@@ -102,14 +102,14 @@ local function CreateList(parent)
         -- dashboard.
         --
         -- Two anchored fontstrings do what padding cannot.
-        row.value = row:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        row.value = CN.Label(row, "ARTWORK", "SMALL")
         row.value:SetPoint("RIGHT", -6, 0)
         row.value:SetJustifyH("RIGHT")
 
         -- THE CLICKABLE MARKER, in its own gutter to the right of the value
         -- column so it never collides with either. See the header where it is
         -- shown, in the fill loop below.
-        row.chevron = row:CreateFontString(nil, "ARTWORK", CN.FONT.SMALL)
+        row.chevron = CN.Label(row, "ARTWORK", "SMALL")
         row.chevron:SetPoint("RIGHT", 0, 0)
         row.chevron:SetWidth(8)
         row.chevron:SetJustifyH("RIGHT")
@@ -119,7 +119,7 @@ local function CreateList(parent)
         row.value:ClearAllPoints()
         row.value:SetPoint("RIGHT", row.chevron, "LEFT", -2, 0)
 
-        row.label = row:CreateFontString(nil, "ARTWORK", CN.FONT.BODY)
+        row.label = CN.Label(row, "ARTWORK", "BODY")
         row.label:SetPoint("LEFT", 4, 0)
         row.label:SetPoint("RIGHT", row.value, "LEFT", -8, 0)
         row.label:SetJustifyH("LEFT")
@@ -341,8 +341,7 @@ local function CreateList(parent)
         end
     end
 
-    list.sortCaption = sortButton:CreateFontString(nil, "ARTWORK",
-        CN.FONT.SMALL)
+    list.sortCaption = CN.Label(sortButton, "ARTWORK", "SMALL")
     list.sortCaption:SetPoint("RIGHT")
     list.sortCaption:SetJustifyH("RIGHT")
     list.sortCaption:SetText(CN.Muted("sort: as ranked"))
@@ -427,11 +426,7 @@ local function CreateList(parent)
     -- Strips colour openers, the `|r` that closes them, inline textures, and
     -- then any leading punctuation and digits the row uses as a marker.
     local function SortKey(text)
-        text = tostring(text or "")
-
-        text = text:gsub("|c%x%x%x%x%x%x%x%x", "")
-        text = text:gsub("|r", "")
-        text = text:gsub("|T.-|t", "")
+        text = CN.Strip(text)
 
         -- Leading markers: "  ", "x ", "> ", "! ", "12. ".
         text = text:gsub("^[%s%p%d]+", "")
@@ -571,6 +566,14 @@ local function CreateList(parent)
         end
 
         return kept
+    end
+
+    -- What this list was last given, BEFORE the filter and the sort. The
+    -- window's cross-tab search reads it: a search that can only see what
+    -- survived the current filter is a search of the answer rather than of
+    -- the question.
+    function list:Entries()
+        return lastEntries or {}
     end
 
     -- entries = { { text = , onClick = , tooltip = }, ... }

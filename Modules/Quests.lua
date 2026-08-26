@@ -399,6 +399,122 @@ function Quests.RememberOffer(poi)
     return true
 end
 
+------------------------------------------------------------
+-- QUESTS BEYOND THE MAP YOU ARE STANDING ON
+------------------------------------------------------------
+
+-- THE STORE WAS ALREADY BEING FILLED. NOTHING OFFERED FROM IT. 0.66.0.
+--
+-- `questPins` has recorded where every quest-start pin the player has ever
+-- ridden past lives, and pruned itself, since it was added -- and it was read
+-- only to answer "where is this quest" for a quest something ELSE had already
+-- proposed. So the addon's answer to "what next?" was, for available quests,
+-- bounded by the borders of the zone the player happened to be standing in:
+-- it could see a quest twenty yards away and not one in the next zone, and it
+-- would recommend a rare across the continent instead.
+--
+-- This is the largest coverage gap in the backlog and the data for it was
+-- already on disk.
+--
+-- BOUNDED BY ZONE, NOT BY QUEST. Travel cost is a property of where a zone
+-- is, and the pins in one zone share it -- so the cost is asked once per
+-- MAP, of which a player has a few dozen, rather than once per pin, of which
+-- they have up to six hundred. The nearest few zones contribute; the rest do
+-- not, because a list that offers everything is not a recommendation.
+Quests.offMapZones = 3
+Quests.offMapCap   = 20
+
+-- Which remembered maps are worth reaching, cheapest first. One representative
+-- point per map is enough to price it: zones are not large compared to the
+-- distance between them.
+function Quests.NearbyRememberedMaps(playerMap)
+    local byMap = {}
+
+    for questID, record in pairs(Remembered()) do
+        local mapID = record.mapID
+
+        if mapID and mapID ~= playerMap
+            and not Quests.IsCompletedOnAccount(questID)
+            and not Blizzard.IsQuestInLog(questID) then
+
+            byMap[mapID] = byMap[mapID] or {}
+
+            table.insert(byMap[mapID], {
+                questID = questID,
+                mapID   = mapID,
+                x       = record.x,
+                y       = record.y,
+            })
+        end
+    end
+
+    local maps = {}
+
+    for mapID, pins in pairs(byMap) do
+        table.sort(pins, function(a, b) return a.questID < b.questID end)
+
+        local sample = pins[1]
+
+        local cost = CN.TravelCost(mapID, sample.x, sample.y)
+
+        table.insert(maps, {
+            mapID = mapID,
+            cost  = cost or CN.unknownLocationCost,
+            pins  = pins,
+        })
+    end
+
+    -- ORDERED, AND ORDERED TOTALLY. Ties are broken on the map id so two
+    -- clients with the same data produce the same list -- the same reason
+    -- the candidate providers are ordered by registration.
+    table.sort(maps, function(a, b)
+        if a.cost ~= b.cost then
+            return a.cost < b.cost
+        end
+
+        return a.mapID < b.mapID
+    end)
+
+    return maps
+end
+
+-- The offers themselves, capped. Shortlisted because the walk above is over
+-- the whole remembered store and the provider it feeds runs every two
+-- seconds; the revision changes when the store or the player's map does,
+-- which is exactly when the answer can differ.
+function Quests.OffMapOffers()
+    local playerMap = CN.GetPlayerPosition()
+
+    if not playerMap then
+        return {}
+    end
+
+    local revision = tostring(playerMap) .. ":"
+        .. tostring(CN.CountKeys(Remembered()))
+
+    local list = CN.Shortlist("quests:offmap", revision, function()
+        local offers = {}
+
+        for index, map in ipairs(Quests.NearbyRememberedMaps(playerMap)) do
+            if index > Quests.offMapZones then
+                break
+            end
+
+            for _, pin in ipairs(map.pins) do
+                if #offers >= Quests.offMapCap then
+                    break
+                end
+
+                table.insert(offers, pin)
+            end
+        end
+
+        return offers
+    end)
+
+    return list
+end
+
 -- Drops anything no longer worth remembering: completed, in the log, or --
 -- if still over the cap after that -- the lowest quest IDs, which are the
 -- oldest content and the least likely to be what the player is working on.
@@ -1301,7 +1417,22 @@ CN.RegisterCandidateProvider("Quests", function()
             -- everything that quest leads to.
             value = value + 2
 
-            table.insert(reasons, "available to pick up in this zone")
+            if availablePOI.offMap then
+                -- Named, not "in this zone", because it is not. The zone is
+                -- what makes it worth saying: "somewhere else" is not an
+                -- instruction and the route needs a destination.
+                local zone = CN.Blizzard.GetMapName(availablePOI.mapID)
+
+                table.insert(reasons, "available to pick up in "
+                    .. (zone or ("map " .. tostring(availablePOI.mapID))))
+
+                -- One point, not three: going to get a quest in the next zone
+                -- is still worth doing, and still not as good as one you can
+                -- see from here.
+                value = value - 1
+            else
+                table.insert(reasons, "available to pick up in this zone")
+            end
 
             if availablePOI.isDaily then
                 table.insert(reasons, "daily")
@@ -1418,6 +1549,35 @@ CN.RegisterCandidateProvider("Quests", function()
             or ("Quest " .. poi.questID)
 
         add(poi.questID, name, false, poi)
+    end
+
+    -- AND THE ZONES NEXT DOOR. 0.66.0. See `Quests.OffMapOffers`.
+    --
+    -- Weighted BELOW a quest available in this zone -- it is a real journey
+    -- and the travel cost already says so -- but above nothing, which is what
+    -- it was worth before.
+    for _, pin in ipairs(Quests.OffMapOffers()) do
+        -- FILTERED AGAIN HERE, AND ON PURPOSE. The shortlist's revision moves
+        -- when the store grows or the player changes map, and neither of
+        -- those happens when a quest is accepted or turned in -- so without
+        -- this the addon would go on recommending the player go and pick up
+        -- a quest they are already carrying. Twenty checks; the shortlist
+        -- exists to keep the six-hundred-row walk off this path, not these.
+        if not seen[pin.questID]
+            and not Quests.IsCompletedOnAccount(pin.questID)
+            and not Blizzard.IsQuestInLog(pin.questID) then
+            local name = Quests.GetName(pin.questID)
+                or Blizzard.GetQuestTitle(pin.questID, true)
+                or ("Quest " .. pin.questID)
+
+            add(pin.questID, name, false, {
+                questID  = pin.questID,
+                mapID    = pin.mapID,
+                x        = pin.x,
+                y        = pin.y,
+                offMap   = true,
+            })
+        end
     end
 
     -- Curated quests that are not in the log and not yet completed.

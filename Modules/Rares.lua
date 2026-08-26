@@ -91,6 +91,10 @@ end
 -- RECORDING
 ------------------------------------------------------------
 
+-- HOW LONG A GAP MAKES THE NEXT SIGHTING A NEW ONE. See `Rares.Record`.
+-- Longer than any fight, shorter than any respawn.
+Rares.sightingGap = 10 * 60
+
 function Rares.Record(vignette)
     if not vignette or not vignette.vignetteID then
         return false
@@ -107,8 +111,26 @@ function Rares.Record(vignette)
 
     record.name      = vignette.name or record.name
     record.kind      = vignette.kind or record.kind
+
+    -- A SIGHTING IS AN ENCOUNTER, NOT AN EVENT DISPATCH. 0.66.0.
+    --
+    -- This counter was incremented once per vignette per dispatch, and
+    -- `VIGNETTE_MINIMAP_UPDATED` fires several times a second while anything
+    -- is moving in range -- this file's own provider comment says so, which
+    -- is why the PROVIDER has a five-second cooldown and this handler had
+    -- none. Its one reader is the goal plan, so `/cn goal` told a player who
+    -- had met a rare twice that they had seen it 1,847 times, and the number
+    -- climbed while they stood there.
+    --
+    -- An encounter is a sighting after a gap. Ten minutes is longer than any
+    -- fight and shorter than any respawn.
+    local previous = record.lastSeen or 0
+
+    if time() - previous >= Rares.sightingGap then
+        record.sightings = (record.sightings or 0) + 1
+    end
+
     record.lastSeen  = time()
-    record.sightings = (record.sightings or 0) + 1
 
     -- Keep the first coordinates seen; rares roam, and the spawn point is
     -- more useful than wherever it happened to be standing.
@@ -280,8 +302,6 @@ function Rares.Summary()
         cleared   = 0,
     }
 
-    local kills = CharacterKills() or {}
-
     for vignetteID, record in pairs(Store()) do
         counts.known = counts.known + 1
 
@@ -295,7 +315,15 @@ function Rares.Summary()
             counts.located = counts.located + 1
         end
 
-        if kills[vignetteID] then
+        -- THROUGH THE RULE, NOT THE RAW TABLE. 0.66.0.
+        --
+        -- A cleared entry is a timestamp, and `IsClearedByCharacter` is the
+        -- one place that knows an expired one no longer counts -- it prunes
+        -- as it reads. Testing the table for truthiness counted entries that
+        -- had already expired, so after a weekly reset `/cn raredb` reported
+        -- 40 rares cleared while `/cn rares` was correctly offering all 40
+        -- again. The addon contradicting itself about its own state.
+        if Rares.IsClearedByCharacter(vignetteID) then
             counts.cleared = counts.cleared + 1
         end
     end
@@ -416,12 +444,24 @@ end, { events = { "VIGNETTE_MINIMAP_UPDATED", "VIGNETTES_UPDATED", "ZONE_CHANGED
 -- EVENTS
 ------------------------------------------------------------
 
-local function OnVignetteUpdate()
+-- ONE SWEEP, ONCE A SECOND. 0.66.0.
+--
+-- This ran on `VIGNETTE_MINIMAP_UPDATED` AND `VIGNETTES_UPDATED` with no
+-- debounce at all -- several times a second while anything moves in range --
+-- and each run did TWO full `GetVignettes` sweeps of the same map, a distance
+-- calculation per row, two position reads, and a SavedVariables write per
+-- rare. Flying across a zone with eight vignettes up, that is roughly 34
+-- pcall'd client calls and 16 table allocations several times a second.
+--
+-- The second sweep was reading exactly what the first had already read.
+local function VignetteWork()
     local mapID = select(1, CN.GetPlayerPosition())
+
+    local active = Rares.GetActive(mapID)
 
     local currentGuids = {}
 
-    for _, vignette in ipairs(Rares.GetActive(mapID)) do
+    for _, vignette in ipairs(active) do
         currentGuids[vignette.guid] = true
 
         Rares.Record(vignette)
@@ -438,7 +478,7 @@ local function OnVignetteUpdate()
 
     local travel = CN:GetModule("Travel")
 
-    for _, vignette in ipairs(Blizzard.GetVignettes(mapID)) do
+    for _, vignette in ipairs(active) do
         local yards
 
         if travel and travel.YardsBetween and playerMap and playerX
@@ -457,6 +497,14 @@ local function OnVignetteUpdate()
     end
 
     lastSeenGuids = nextSeen
+end
+
+-- Exposed unthrottled so the offline harness and `/cn selftest` can drive it
+-- directly; the game only ever reaches it through the debounce below.
+Rares.VignetteWork = VignetteWork
+
+local function OnVignetteUpdate()
+    CN.Debounce("Rares.vignettes", 1, VignetteWork)
 end
 
 CN:RegisterEvent("VIGNETTE_MINIMAP_UPDATED", OnVignetteUpdate)

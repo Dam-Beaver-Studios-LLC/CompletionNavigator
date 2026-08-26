@@ -96,10 +96,19 @@ function Exploration.NoteProgress(record, done, completed)
         completed = completed and true or false,
     }
 
-    -- Kept flat as well, so every existing reader works unchanged and a
-    -- database written by an older version still reads correctly.
-    record.done      = done
-    record.completed = completed and true or false
+    -- THE FLAT FIELD IS NO LONGER WRITTEN. 0.66.0.
+    --
+    -- It was kept as a fallback for databases written before migration 17
+    -- introduced the per-character dimension, and `DoneFor` still READS it
+    -- for exactly that reason. But it was also still being written -- by
+    -- whoever was logged in, on every `ZONE_CHANGED_NEW_AREA` -- so the
+    -- fallback did not return old data, it returned a fresh lie: a brand-new
+    -- alt who had never set foot in Eversong Woods was told "Explore Eversong
+    -- Woods (9/12)" because the main had flown through it that morning. The
+    -- per-character split was bypassed on the exact read path it exists for.
+    --
+    -- Reading it stays; writing it stops. Old databases still work, and the
+    -- field decays out of the store as characters rescan.
 end
 
 ------------------------------------------------------------

@@ -1291,9 +1291,11 @@ mutate "Modules/Travel.lua" \
     "    costCacheCount  = costCacheCount + 1" \
     "a travel cost is derived again on every single read"
 
-mutate "UI/List.lua" \
-    "        text = text:gsub(\"|c%x%x%x%x%x%x%x%x\", \"\")" \
-    "        text = text" \
+# RE-ANCHORED IN 0.66.0: the three gsubs here became `CN.Strip`, which is now
+# the one definition of "what this says without its colours".
+mutate "Core.lua" \
+    "    text = text:gsub(\"|c%x%x%x%x%x%x%x%x\", \"\")" \
+    "    text = text" \
     "the list sorts on the colour in front of a name instead of the name"
 
 mutate "UI/List.lua" \
@@ -2184,14 +2186,23 @@ mutate "Scoring.lua" \
         end" \
     "a reputation tick rebuilds every store in the addon"
 
+# RE-ANCHORED IN 0.66.0: the throttle, the deferral and the scan moved into
+# `SweepIfDue`, so the frame check lives there now.
 mutate "Modules/Currencies.lua" \
     "    if CurrencyFrameOpen() then
-        return
+        return false
     end" \
     "    if false then
-        return
+        return false
     end" \
     "the currency sweep reopens the player's collapsed headers"
+
+mutate "Modules/Currencies.lua" \
+    "    local ok = pcall(frame.HookScript, frame, \"OnHide\", function()
+        pcall(Currencies.SweepIfDue)
+    end)" \
+    "    local ok = true" \
+    "closing the currency window never collects the sweep it deferred"
 
 mutate "Modules/Waiting.lua" \
     "        if currencies.IsCurrent(record)
@@ -2252,10 +2263,12 @@ mutate "Modules/Reputations.lua" \
 # fail does not belong here; the property is asserted as a source rule in the
 # 0.65.0 block instead.
 
+# RE-ANCHORED IN 0.66.0: `Resolve` searches the client's whole list rather than
+# what this character holds, so the language property is asserted on the name
+# the client hands back rather than on which table is walked.
 mutate "Modules/Titles.lua" \
-    "    for id in pairs(CharacterStore() or {}) do
-        local name = Titles.NameOf(id)" \
-    "    for id, name in pairs(CN.Account(\"titleNames\")) do" \
+    "        local name = title.name or Titles.NameOf(title.titleID)" \
+    "        local name = CN.Account(\"titleNames\")[title.titleID]" \
     "a title cannot be found by name after a language change"
 
 mutate "Modules/Currencies.lua" \
@@ -2265,15 +2278,108 @@ mutate "Modules/Currencies.lua" \
     "a manual scan arms a second sweep a second later"
 
 mutate "UI.lua" \
-    "        local sources = CN.Memo(\"ui:sources\", CN.collectionGeneration,
-            UI.Sources)" \
-    "        local sources = UI.Sources()" \
+    "        local sources = CN.Memo(\"ui:sources:stored\", CN.collectionGeneration,
+            function() return UI.Sources(\"stored\") end)" \
+    "        local sources = UI.Sources(\"stored\")" \
     "the Sources tab rewalks ten stores every two seconds"
+
+mutate "UI.lua" \
+    "        for _, row in ipairs(UI.Sources(\"live\")) do" \
+    "        for _, row in ipairs({}) do" \
+    "the live rows on the Scans tab are never rebuilt"
 
 mutate "Modules/Quests.lua" \
     "    if isNew and CN.CountKeys(store) > Quests.rememberedCap then" \
     "    if CN.CountKeys(store) > Quests.rememberedCap then" \
     "every quest pin walks the whole remembered store"
+
+############################################################
+# 0.66.0
+############################################################
+
+mutate "Modules/Harvest.lua" \
+    "            table.insert(lines, \"        -- \" .. zone)" \
+    "            table.insert(lines, \"       \" .. CN.DASH .. \"\" .. zone)" \
+    "the export writes a display glyph where a Lua comment belongs"
+
+mutate "Modules/Rares.lua" \
+    "    if time() - previous >= Rares.sightingGap then
+        record.sightings = (record.sightings or 0) + 1
+    end" \
+    "    record.sightings = (record.sightings or 0) + 1" \
+    "a sighting counts event dispatches instead of encounters"
+
+mutate "Modules/Rares.lua" \
+    "    CN.Debounce(\"Rares.vignettes\", 1, VignetteWork)" \
+    "    VignetteWork()" \
+    "the vignette handler runs several times a second"
+
+mutate "Modules/Rares.lua" \
+    "        if Rares.IsClearedByCharacter(vignetteID) then" \
+    "        if kills[vignetteID] then" \
+    "an expired clear is still counted as cleared"
+
+mutate "Modules/Reputations.lua" \
+    "    if record.kind == \"RENOWN\" then
+        return CN.RenownLabel(record.renownLevel or record.renown or 0)
+    end" \
+    "    if false then
+        return nil
+    end" \
+    "a renown standing is read off the field a migration deletes"
+
+mutate "Modules/Goals.lua" \
+    "        if Blizzard.IsAccountWideReputation(goal.id) then" \
+    "        if CN.Account(\"reputations\")[goal.id] then" \
+    "a goal decides scope from the store the answer sorts into"
+
+mutate "Modules/Titles.lua" \
+    "    for _, title in ipairs(Blizzard.GetTitles()) do
+        local name = title.name or Titles.NameOf(title.titleID)" \
+    "    for title in pairs(CharacterStore() or {}) do
+        local name = Titles.NameOf(title)" \
+    "a title is findable only if this character already has it"
+
+mutate "Modules/Filters.lua" \
+    "        return record and record.name
+            or (CN.TypeBadge(objectiveType) .. \" \" .. numericID)" \
+    "        return record and record.name or (objectiveType .. \" \" .. numericID)" \
+    "a hidden rare is described with the internal enum"
+
+mutate "Modules/Quests.lua" \
+    "    for _, pin in ipairs(Quests.OffMapOffers()) do" \
+    "    for _, pin in ipairs({}) do" \
+    "quests in the next zone are never offered"
+
+mutate "Modules/Quests.lua" \
+    "            and not Blizzard.IsQuestInLog(pin.questID) then" \
+    "            then" \
+    "a quest already in the log is offered as one to go and get"
+
+mutate "Design.lua" \
+    "    object:SetFont(file, math.floor(size * scale + 0.5), flags)" \
+    "    object:SetFont(file, size, flags)" \
+    "the text-size setting derives a font at the same size"
+
+mutate "Design.lua" \
+    "    for fontString, role in pairs(textStrings) do
+        ApplyRole(fontString, role)
+
+        touched = touched + 1
+    end" \
+    "    for _ in pairs(textStrings) do
+        touched = touched + 1
+    end" \
+    "text already on screen keeps its old size"
+
+mutate "Modules/Exploration.lua" \
+    "    record.progress      = record.progress or {}
+    record.progress[key] = {" \
+    "    record.progress      = record.progress or {}
+    record.done          = done
+    record.completed     = completed and true or false
+    record.progress[key] = {" \
+    "an alt is handed the last character's zone progress"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

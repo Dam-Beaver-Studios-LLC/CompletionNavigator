@@ -144,7 +144,9 @@ function Warband.WhoShould(objectiveType, id)
         end
 
         if bestKey then
-            return bestKey, tostring(bestRecord and bestRecord.standing), "highest standing"
+            return bestKey,
+                   tostring(module.StandingText(bestRecord)),
+                   "highest standing"
         end
 
         return nil, nil, "no character has this faction recorded"

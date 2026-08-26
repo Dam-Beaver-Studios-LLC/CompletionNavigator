@@ -107,6 +107,8 @@ The exclamation marks in front of you are often the cheapest next action availab
 
 It searches the surrounding zone as well as the map under your feet, since a city is a different map from the zone containing it, and it remembers what an NPC offered you when you spoke to them. `/cn available` lists them; `/cn whyzero` explains the count when it looks wrong.
 
+**And the zones next door, from what you have already ridden past.** Every quest start it has ever seen is remembered by zone, so the answer is not bounded by the border you happen to be standing inside: the nearest few zones contribute their unpicked quests too, priced by how far the zone is rather than pin by pin, and the reason names the zone so the row is an instruction rather than a hint.
+
 ## Navigation without another addon
 
 A native on-screen arrow, in the addon's own colours, that tells you whether you are walking toward your target or away from it â€” it turns and recolours the moment you pass the destination, keeps working when you step into a building or a cave, and when it hands itself to the next stop it tells you which destination it is now pointing at rather than quietly changing what it means.
@@ -317,6 +319,10 @@ The game only lists quest pins for the map you are looking at, so "what is waiti
 
 A scale for everything it draws, and a colourblind mode that changes the arrow's **palette** as well as labelling it in words. The arrow's whole language is colour, and gold against red is the worst pair there is for the commonest form of colour blindness â€” so the alternate palette separates by lightness as well as by hue, and the build checks that separation rather than trusting somebody's eye.
 
+**Text size is a separate control from window size.** `/cn scale` grows the frame and everything in it; `/cn textsize` grows only the letters and leaves the window where it is. It uses whatever font your client already uses, at a larger size, and it applies to text the window has already drawn rather than only to what it builds next.
+
+**And you can search the whole window at once.** `/cn find <text>` looks on every tab and says which one the match is on, so finding something does not require knowing which tab it lives on first. The filter box does the same thing quietly: type on the wrong tab and it tells you which other tabs match, instead of saying nothing matched while the answer sits one tab over.
+
 ```
 /cn scale 1.25
 /cn colourblind
@@ -390,6 +396,8 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn handynotes` | What HandyNotes plugins are drawing on this map, shown rather than scored |
 | `/cn situation` | What the addon thinks you are in the middle of |
 | `/cn unpicked` | Quests you have seen and never picked up, by zone |
+| `/cn find <text>` | Find something without knowing which tab it is on |
+| `/cn textsize <100-150>` | Larger text, without resizing the window |
 | `/cn orders` | Crafting orders you placed, and anything ready to collect |
 | `/cn hud` | A small always-on line showing the next thing |
 | `/cn errors` | Anything that went wrong inside the addon this session |

@@ -27,7 +27,7 @@ read_globals = {
     "C_TransmogCollection", "C_VignetteInfo", "C_WeeklyRewards",
 
     -- Flat client API.
-    "CreateFrame", "GetAchievementCriteriaInfo", "GetAchievementInfo",
+    "CreateFrame", "CreateFont", "GetAchievementCriteriaInfo", "GetAchievementInfo",
     "IsMounted", "UnitOnTaxi",
     "GetAchievementNumCriteria", "GetCategoryList", "GetCategoryNumAchievements",
     "GetCursorPosition", "GetItemInfo", "GetMerchantItemInfo",

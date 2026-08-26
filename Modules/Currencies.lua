@@ -465,42 +465,82 @@ end
 
 Currencies.IsFrameOpen = CurrencyFrameOpen
 
--- So the suite can reach the deferral, which is otherwise behind a minute's
--- wait, and so a caller that genuinely wants the next update to sweep can say
--- so. A guard nothing can exercise is a guard nothing tests.
+-- THE ONE PLACE THAT DECIDES WHETHER A SWEEP RUNS NOW. 0.66.0.
 --
--- NOT called before a manual scan: `Scan` stamps the timestamp itself, and
--- resetting it first was the 0.64.0 bug that guaranteed a double sweep.
-function Currencies.ForgetLastScan()
-    lastScan = 0
-end
-
--- A NEW SESSION SWEEPS PROMPTLY.
---
--- The login scan stamps the throttle like every other path, which is right --
--- but a player who reloads mid-session should not then wait a minute for the
--- first update. Clearing on entering the world costs one sweep and keeps the
--- first currency reading of a session current.
-CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
-    Currencies.ForgetLastScan()
-end)
-
-CN:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function()
-    local now = time()
-
-    if now - lastScan < Currencies.rescanSeconds then
-        return
+-- The throttle, the open-frame deferral and the scan were spread across an
+-- event handler, so the only way to reach the deferral was to dispatch a
+-- currency event -- which is why the promise below ("as soon as the player
+-- closes the window") was made by a comment and kept by nothing.
+function Currencies.SweepIfDue()
+    if time() - lastScan < Currencies.rescanSeconds then
+        return false
     end
 
     -- Deferred rather than skipped: `lastScan` is not advanced, so the sweep
-    -- happens as soon as the player closes the window.
+    -- happens at the next opportunity instead of a minute after this one.
     if CurrencyFrameOpen() then
-        return
+        return false
     end
 
-    lastScan = now
-
     Currencies.Scan()
+
+    return true
+end
+
+-- THE LOGIN SCAN ALREADY IS THE PROMPT SWEEP. 0.66.0.
+--
+-- There was a `PLAYER_ENTERING_WORLD` handler here that cleared the throttle,
+-- justified as "a player who reloads mid-session should not then wait a
+-- minute". It could never serve that case: `PLAYER_LOGIN` runs the login
+-- hooks -- including this module's `Scan()` -- and it fires BEFORE
+-- `PLAYER_ENTERING_WORLD`, on a reload as on a fresh login. So the order was
+-- always: sweep, stamp the throttle, throw the stamp away. The next coin
+-- picked up in the first minute ran the whole three-pass sweep again, which
+-- is the same double sweep 0.65.0 fixed on the manual path, arriving by the
+-- other door.
+--
+-- What DOES need collecting is the deferral: see the frame hook below.
+
+CN:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function()
+    Currencies.SweepIfDue()
+end)
+
+-- AND THE DEFERRAL IS ACTUALLY COLLECTED. 0.66.0.
+--
+-- The deferral above says the sweep "happens as soon as the player closes the
+-- window". Nothing made that true: the only thing that reached it was the
+-- next `CURRENCY_DISPLAY_UPDATE`, which arrives when the player next gains a
+-- currency -- so a player who opened the Currency tab, read it, closed it and
+-- went to a raid carried a store that could be an hour stale, and `/cn
+-- currencies` answered from it.
+--
+-- No client event announces that frame closing, so the frame itself is asked.
+-- Hooked once, at login, guarded, and silent if the frame does not exist --
+-- the same shape every other optional client surface in this addon gets.
+local hookedCurrencyFrame = false
+
+function Currencies.HookFrame()
+    if hookedCurrencyFrame then
+        return true
+    end
+
+    local frame = _G.TokenFrame or _G.CharacterFrame
+
+    if not frame or not frame.HookScript then
+        return false
+    end
+
+    local ok = pcall(frame.HookScript, frame, "OnHide", function()
+        pcall(Currencies.SweepIfDue)
+    end)
+
+    hookedCurrencyFrame = ok and true or false
+
+    return hookedCurrencyFrame
+end
+
+CN:OnLogin(function()
+    Currencies.HookFrame()
 end)
 
 CN:OnLogin(function()

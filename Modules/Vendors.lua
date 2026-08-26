@@ -266,15 +266,24 @@ end
 
 -- Finds an item by name across every recorded vendor. This is what makes
 -- "who sells Flask of Testing" work without knowing an item ID.
+--
+-- RETURNS THE NAME AS WELL, because both callers print a headline. 0.66.0.
+-- This function already resolved the name -- it holds it in `bestName` to
+-- pick the shortest match -- and then threw it away, so `/cn sells Traveler's
+-- Tundra Mount` answered "Item 44554 is sold by:": the addon reciting the
+-- number it had just looked up from the words the player typed.
 function Vendors.FindItem(text)
     if not text or text == "" then
-        return nil, {}
+        return nil, {}, nil
     end
 
     local itemID = CN.ToID(text)
 
     if itemID then
-        return itemID, Vendors.WhoSells(itemID)
+        local named = Blizzard.GetItemName(itemID)
+
+        return itemID, Vendors.WhoSells(itemID),
+               (named ~= "" and named) or nil
     end
 
     local needle  = string.lower(text)
@@ -302,10 +311,10 @@ function Vendors.FindItem(text)
     end
 
     if not bestID then
-        return nil, {}
+        return nil, {}, nil
     end
 
-    return bestID, Vendors.WhoSells(bestID)
+    return bestID, Vendors.WhoSells(bestID), bestName
 end
 
 function Vendors.Summary()
@@ -494,7 +503,7 @@ CN:RegisterCommand{
             return
         end
 
-        local itemID, sellers = Vendors.FindItem(args)
+        local itemID, sellers, itemName = Vendors.FindItem(args)
 
         if not itemID or #sellers == 0 then
             Print("Nothing recorded matches: " .. args)
@@ -502,7 +511,8 @@ CN:RegisterCommand{
             return
         end
 
-        Print("Item " .. itemID .. " is sold by:")
+        Print(tostring(itemName or ("Item " .. itemID))
+            .. " |cff8a8f96(" .. itemID .. ")|r is sold by:")
 
         for index, seller in ipairs(sellers) do
             CN.PrintLine("  " .. index .. ". " .. tostring(seller.name)
@@ -526,7 +536,7 @@ CN:RegisterCommand{
             return
         end
 
-        local itemID, sellers = Vendors.FindItem(args)
+        local itemID, sellers, itemName = Vendors.FindItem(args)
 
         if not itemID or #sellers == 0 then
             Print("Nothing recorded matches: " .. args)
@@ -538,7 +548,8 @@ CN:RegisterCommand{
                 CN.NavigateToObjective({
                     id    = seller.npcID,
                     type  = CN.objectiveTypes.VENDOR,
-                    name  = seller.name,
+                    name  = seller.name
+                        .. (itemName and (" (" .. itemName .. ")") or ""),
                     mapID = seller.mapID,
                     x     = seller.x,
                     y     = seller.y,

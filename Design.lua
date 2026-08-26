@@ -219,6 +219,161 @@ CN.FONT = {
 }
 
 ------------------------------------------------------------
+-- TEXT SIZE
+------------------------------------------------------------
+
+-- THE WINDOW WAS FIXED-SIZE TEXT. 0.66.0.
+--
+-- `/cn scale` and the "Size" button scale the whole FRAME: the window, the
+-- arrow and the heads-up line all grow together, which is the right control
+-- for "this addon is too small on my monitor" and the wrong one for "I cannot
+-- read this". A player who wants larger text and the same window had no way
+-- to ask, and the only accessibility work that had landed -- the colourblind
+-- arrow -- does nothing for them.
+--
+-- Text size is a separate axis. It derives a font object per role at the
+-- requested size from the client's own template, so the addon keeps whatever
+-- font the player's client uses rather than naming one.
+CN.textScales = { 1.0, 1.15, 1.3, 1.5 }
+
+function CN.TextScale()
+    local settings = CN.Settings and CN.Settings()
+
+    local scale = settings and tonumber(settings.textScale)
+
+    if not scale or scale < 1 or scale > 2 then
+        return 1
+    end
+
+    return scale
+end
+
+-- Derived once per role per size and kept, because a font object is a client
+-- resource and rebuilding one per font string per refresh is not free.
+local derivedFonts = {}
+
+function CN.FontObject(role)
+    local template = CN.FONT[role] or CN.FONT.BODY
+
+    local scale = CN.TextScale()
+
+    if scale <= 1.001 or not CreateFont then
+        return template
+    end
+
+    local key = tostring(role) .. "@" .. tostring(scale)
+
+    if derivedFonts[key] then
+        return derivedFonts[key]
+    end
+
+    local base = _G and _G[template]
+
+    if not base or not base.GetFont then
+        return template
+    end
+
+    local file, size, flags = base:GetFont()
+
+    if not file or not size then
+        return template
+    end
+
+    local made, object = pcall(CreateFont,
+        "CompletionNavigatorFont" .. tostring(role) .. tostring(scale * 100))
+
+    if not made or not object or not object.SetFont then
+        return template
+    end
+
+    object:SetFont(file, math.floor(size * scale + 0.5), flags)
+
+    -- Colour and justification come from the template, or the derived font
+    -- would silently reset every label in the window to white and centred.
+    if object.SetTextColor and base.GetTextColor then
+        pcall(function() object:SetTextColor(base:GetTextColor()) end)
+    end
+
+    if object.SetJustifyH and base.GetJustifyH then
+        pcall(function() object:SetJustifyH(base:GetJustifyH()) end)
+    end
+
+    derivedFonts[key] = object
+
+    return object
+end
+
+-- EVERY FONT STRING THE ADDON MAKES, REMEMBERED WITH ITS ROLE.
+--
+-- Changing the size has to reach text that already exists: the window builds
+-- its tabs once and keeps them, so rebuilding is not on the table and
+-- re-applying is. Weak keys, so a font string the client has finished with is
+-- not held alive by this list.
+local textStrings = setmetatable({}, { __mode = "k" })
+
+local function ApplyRole(fontString, role)
+    local object = CN.FontObject(role)
+
+    if type(object) == "table" and fontString.SetFontObject then
+        pcall(fontString.SetFontObject, fontString, object)
+    end
+end
+
+-- The one way this addon makes a piece of text. Every `CreateFontString` in
+-- the window went through `CN.FONT.ROLE` directly, which is a template NAME --
+-- correct, and unreachable afterwards.
+function CN.Label(parent, layer, role)
+    if not parent or not parent.CreateFontString then
+        return nil
+    end
+
+    local fontString = parent:CreateFontString(nil, layer or "ARTWORK",
+        CN.FONT[role] or CN.FONT.BODY)
+
+    if not fontString then
+        return nil
+    end
+
+    textStrings[fontString] = role
+
+    ApplyRole(fontString, role)
+
+    return fontString
+end
+
+function CN.RefreshTextScale()
+    local touched = 0
+
+    for fontString, role in pairs(textStrings) do
+        ApplyRole(fontString, role)
+
+        touched = touched + 1
+    end
+
+    return touched
+end
+
+function CN.SetTextScale(scale)
+    scale = tonumber(scale)
+
+    if not scale or scale < 1 or scale > 2 then
+        return false
+    end
+
+    local settings = CN.Settings and CN.Settings()
+
+    if not settings then
+        return false
+    end
+
+    settings.textScale = (scale > 1.001) and scale or nil
+
+    CN.RefreshTextScale()
+
+    return true
+end
+
+------------------------------------------------------------
 -- TEXT THAT IS DRAWN OVER THE WORLD
 ------------------------------------------------------------
 

@@ -92,7 +92,7 @@ CN.helpGroups = {
                 "raredb", "rareforget", "handynotes", "harvestnow" } },
 
     { title = "Setting it up",
-      names = { "ui", "uistatus", "scale", "colourblind", "hud", "cues",
+      names = { "ui", "find", "uistatus", "scale", "textsize", "colourblind", "hud", "cues",
                 "keepfilter", "minimap", "tooltips", "broker", "alerts",
                 "locale", "welcome" } },
 

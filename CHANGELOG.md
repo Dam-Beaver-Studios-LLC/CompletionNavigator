@@ -7,6 +7,89 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.66.0]
+
+Nineteen defects and four features. The worst of the defects had made the
+contribution workflow produce a file that would not load; the largest of the
+features had been sitting on disk, collected and pruned, with nothing reading
+it.
+
+### Fixed â€” things that were plainly broken
+
+- **`/cn export` produced Lua that did not parse.** A sweep that replaced a
+  punctuation idiom across the addon reached inside three quoted strings that
+  were deliberately writing a Lua comment into generated output, so every
+  located quest carried a corrupt line. Anyone who pasted an export into their
+  data file had an addon that would not load. The test now *loads* the export
+  rather than looking at it.
+- **`/cn title <name>` raised an error** for any title the current character
+  did not already hold â€” which is the question the command exists to answer.
+  Titles are resolved against the game's whole list now.
+- **Every alt's Renown standing read `(nil)`** in `/cn rep`, `/cn who rep` and
+  `/cn alts`. The stored English standing was correctly dropped last release
+  and four places went on printing the field it had been dropped from.
+- **`/cn goal` reported a rare you had met twice as "Seen 1,847 times here"**,
+  and the number grew while you read it. It was counting event dispatches. A
+  sighting is an encounter now, and the old inflated counts are discarded on
+  upgrade rather than scaled, because there is no ratio to scale them by.
+- **A character-specific faction's goal never said it was
+  character-specific.** The check read a store that by construction holds only
+  account-wide factions, so the sentence about progress not carrying across
+  your Warband could not appear for the factions it is entirely about.
+- **`/cn raredb` counted rares as cleared after they had expired** â€” while
+  `/cn rares` was correctly offering the same ones again.
+- **`/cn sells <name>` answered with the item's number**, having just looked
+  that number up from the name you typed.
+- **A new alt was shown the main's exploration and Loremaster progress as its
+  own.** The per-character split added two releases ago was bypassed by a flat
+  field that any character rewrote merely by flying through a zone.
+- **The Scans tab froze** â€” "Quest givers on this map", whose own description
+  reads "changes as you move", kept showing the count from wherever the window
+  was opened, for the rest of the session.
+- **The mount journal printed Alliance and Horde untranslated**, beside text
+  that was correctly in your language.
+- **Hidden rares were listed as `RARE 5487`** â€” the addon's own internals
+  offered as the name of the thing you hid â€” and hidden recipes showed a
+  number, or the previous language's name after a client language change.
+- **The first currency you picked up after logging in ran the full sweep a
+  second time**, seconds after the login sweep, because entering the world
+  threw away the timestamp the login scan had just written.
+
+### New
+
+- **Quests in the zones next door.** The addon has been recording where every
+  quest-start pin you ride past lives, and pruning that list, for many
+  releases â€” and nothing ever offered you one. So it could see a quest twenty
+  yards away and not one over the border, and would send you across the
+  continent for a rare instead. The nearest three zones now contribute, priced
+  by where the zone is rather than by each pin, and the reason names the zone.
+- **Text size, separately from window size.** `/cn scale` grows the whole
+  frame; `/cn textsize` and its Settings button grow only the letters. It uses
+  your own client's font at a larger size, and it applies to text the window
+  has already drawn rather than only to whatever it builds next.
+- **`/cn find` searches every tab at once** and tells you which one the match
+  is on. The filter box now also reports matches on the tabs you are not
+  looking at, instead of saying "Nothing matched" while the answer sits one
+  tab over.
+- **The rare-vignette handler runs once a second instead of several times a
+  second**, and reads the map once per run instead of twice. It was the
+  addon's busiest event handler and it was writing to your saved variables
+  every time.
+
+### Internal
+
+- **One way to strip colour codes from text.** It was written by hand in two
+  files that had already drifted â€” one stripped inline textures and the other
+  did not â€” so the sort key and the mount source line disagreed about what a
+  string says.
+- **The currency sweep it defers is now actually collected.** The code said it
+  would happen "as soon as the player closes the window"; nothing made that
+  true, and it waited for the next coin you picked up.
+- **The test harness records what font a piece of text is drawn in.** It
+  swallowed that, so the window's typography was invisible to every test â€”
+  the seventeenth entry in this project's list of defects that a test stub
+  simpler than the game made impossible to see.
+
 ## [0.65.0]
 
 Nineteen defects. Fifteen of them were the *reading* half of a change made in

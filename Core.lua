@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.65.0"
-CN.dbVersion   = 19
+CN.version     = "0.66.0"
+CN.dbVersion   = 20
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -821,6 +821,22 @@ function CN.FactionLabel(token)
     end
 
     return token
+end
+
+-- WHAT THE PLAYER WOULD READ IF THE COLOURS WERE NOT THERE. 0.66.0.
+--
+-- Colour openers, their `|r` closers and inline textures, removed. The idiom
+-- was written out by hand in two files, one of which also stripped textures
+-- and one of which did not -- so the sort key and the mount source line
+-- disagreed about what a string says. A rule written twice drifts.
+function CN.Strip(text)
+    text = tostring(text or "")
+
+    text = text:gsub("|c%x%x%x%x%x%x%x%x", "")
+    text = text:gsub("|r", "")
+    text = text:gsub("|T.-|t", "")
+
+    return text
 end
 
 function CN.TokenLabel(token)

@@ -476,6 +476,16 @@ end
 
 -- Emits harvested rows in the exact shape Data\Quests.lua expects, so the
 -- output can be pasted straight in and committed.
+-- `CN.DASH` IS A CHAT GLYPH AND MUST NEVER REACH GENERATED SOURCE. 0.66.0.
+--
+-- A sweep that replaced the em-dash-as-`--` idiom across the addon reached
+-- inside the three quoted strings here, which were deliberately emitting a
+-- Lua COMMENT MARKER into the file this function generates. The result was an
+-- export that could not be pasted into `Data/Quests.lua` at all: every
+-- located row carried a line reading `" .. CN.DASH .. "Eversong Woods`, the
+-- file failed to parse, and the addon did not load. The whole contribution
+-- workflow this function exists for was broken. Asserted now by LOADING the
+-- export rather than by looking at it.
 function Harvest.BuildExport(onlyLocated)
     local rows = {}
 
@@ -500,7 +510,7 @@ function Harvest.BuildExport(onlyLocated)
         local zone = Harvest.Zone(record)
 
         if zone then
-            table.insert(lines, '       " .. CN.DASH .. "' .. zone)
+            table.insert(lines, "        -- " .. zone)
         end
 
         if record.mapID then
@@ -538,7 +548,7 @@ function Harvest.BuildExport(onlyLocated)
         local confident = Harvest.ConfidentPrerequisites(record.questID)
 
         if #confident > 0 then
-            table.insert(lines, "       " .. CN.DASH .. "observed on "
+            table.insert(lines, "        -- observed on "
                 .. Harvest.confidenceThreshold .. "+ characters")
             table.insert(lines, "        observedRequires = { "
                 .. table.concat(confident, ", ") .. " },")
@@ -557,7 +567,7 @@ function Harvest.BuildExport(onlyLocated)
         table.sort(unconfirmed)
 
         if #unconfirmed > 0 then
-            table.insert(lines, "       " .. CN.DASH .. "unconfirmed, character count in "
+            table.insert(lines, "        -- unconfirmed, character count in "
                 .. "brackets: " .. table.concat(unconfirmed, ", "))
         end
 
