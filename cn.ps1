@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.67.1'
+$script:ToolkitVersion = '0.67.2'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.67.1"
+CN.version     = "0.67.2"
 CN.dbVersion   = 21
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -52248,7 +52248,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.67.1
+## Version: 0.67.2
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -52503,6 +52503,28 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.67.2]
+
+Still nothing in the addon. Two releases in a row were diagnosed as build
+failures when the second one had not been built at all — `ci -Watch` was
+reporting an older run, in failure red, with nothing saying it was not the
+release just asked for.
+
+### Fixed
+
+- **`ci -Watch` now says when the run it is watching is not your version.**
+  `release X` followed by `ci -Watch` reads as one flow and is not: the watch
+  reports the newest run on GitHub, whatever that happens to be. When that
+  does not match the version in the working tree it says so, in as many words,
+  before anything else.
+- **It prints the log URL when a run fails**, rather than directing you to a
+  second command — which 0.67.0 proved could come back with nothing.
+- **`release` checks that GitHub actually started a run.** A push can succeed
+  and nothing happen: Actions disabled, the workflow missing from the default
+  branch, a trigger that no longer matches. The command reported a healthy
+  push either way, and the failure then looked like a broken build instead of
+  a build that never began.
 
 ## [0.67.1]
 
@@ -58056,7 +58078,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.67.1
+0.67.2
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -91611,6 +91633,28 @@ function Invoke-CNCIWatch {
     Write-Host ''
     Write-Host "Watching $script:Repo. Ctrl+C to stop." -ForegroundColor Cyan
 
+    # WHICH VERSION THIS WORKING TREE IS. 0.67.2.
+    #
+    # `release X` then `ci -Watch` reads as one flow, and it is not: the watch
+    # reports the newest run on GitHub, whatever that is. So a release that
+    # never pushed a tag left the watch reporting the PREVIOUS version's run,
+    # in the previous version's failure colour, with nothing anywhere saying
+    # it was not the release just asked for. Twice, that looked exactly like
+    # the new release failing.
+    $expected = $null
+
+    $tocPath = Join-Path $PWD 'CompletionNavigator.toc'
+
+    if (Test-Path $tocPath) {
+        $tocText = Get-Content $tocPath -Raw
+
+        if ($tocText -match '(?m)^##\s*Version:\s*(.+)$') {
+            $expected = $Matches[1].Trim()
+        }
+    }
+
+    $warned = $false
+
     $interval = if (Get-CNGitHubToken) { 15 } else { 40 }
 
     while ($true) {
@@ -91636,6 +91680,19 @@ function Invoke-CNCIWatch {
         Write-Host ("  [{0}] {1,-22} {2,-12} {3}" -f `
             $stamp, $latest.display_title, $state, (Format-CNAge $latest.created_at)) -ForegroundColor $colour
 
+        # THE RUN ON GITHUB IS NOT NECESSARILY THE RELEASE YOU JUST MADE.
+        if ($expected -and -not $warned `
+            -and ($latest.display_title -notmatch [regex]::Escape($expected))) {
+
+            $warned = $true
+
+            Write-Host ''
+            Write-Host "  This is NOT a run of $expected, which is what this tree holds." -ForegroundColor Yellow
+            Write-Host '  Nothing was pushed for it: check that .\cn.ps1 release succeeded' -ForegroundColor Yellow
+            Write-Host '  and that the tag reached GitHub. What follows is an older run.' -ForegroundColor Yellow
+            Write-Host ''
+        }
+
         if ($latest.status -eq 'completed') {
             Write-Host ''
 
@@ -91644,7 +91701,13 @@ function Invoke-CNCIWatch {
             }
             else {
                 Write-Host "Finished as: $($latest.conclusion)" -ForegroundColor Red
-                Write-Host '  Run .\cn.ps1 ci for the failing step.' -ForegroundColor Cyan
+
+                # THE LINK, HERE, NOW. Telling somebody to run a second
+                # command to find out what broke is one round trip too many,
+                # and 0.67.0 proved the second command could come back with
+                # nothing.
+                Write-Host "  $($latest.html_url)" -ForegroundColor Cyan
+                Write-Host '  .\cn.ps1 ci names the failing step.' -ForegroundColor Gray
             }
 
             return
@@ -93118,6 +93181,42 @@ function Invoke-CNRelease {
         #
         # A release command may only report what it did. Everything after the
         # push belongs to a machine this command cannot see.
+        # AND A PUSH THAT STARTS NO RUN IS A FAILED RELEASE. 0.67.2.
+        #
+        # The push can succeed and nothing happen: Actions disabled on the
+        # repository, the workflow removed from the default branch, a tag
+        # filter that no longer matches. The command then reported a healthy
+        # push, `ci -Watch` reported the PREVIOUS version's run because that
+        # is the newest one there is, and the release looked like a build
+        # failure rather than like a build that never started.
+        #
+        # Asked once, after a pause. Not a poll: this is a yes/no about
+        # whether the push was seen at all.
+        Start-Sleep -Seconds 12
+
+        $started = Invoke-CNGitHubApi `
+            -Uri "https://api.github.com/repos/$script:Repo/actions/runs?per_page=5" `
+            -CacheSeconds 0
+
+        $mine = $null
+
+        if ($started) {
+            $mine = $started.workflow_runs |
+                Where-Object { $_.display_title -match [regex]::Escape($new) } |
+                Select-Object -First 1
+        }
+
+        if ($started -and -not $mine) {
+            Write-Host ''
+            Write-Host "WARNING  v$new was pushed and GitHub has started no run for it." -ForegroundColor Yellow
+            Write-Host '  It may still appear a moment from now. If it does not, check:' -ForegroundColor DarkGray
+            Write-Host '    1. Actions is enabled for this repository.' -ForegroundColor DarkGray
+            Write-Host '    2. .github/workflows/release.yml is on the default branch.' -ForegroundColor DarkGray
+            Write-Host '    3. Its trigger still matches this tag shape.' -ForegroundColor DarkGray
+            Write-Host ''
+            Write-Host '  Until a run exists, .\cn.ps1 ci -Watch is watching an OLDER release.' -ForegroundColor Yellow
+        }
+
         Write-Host ''
         Write-Host "Pushed v$new. Nothing is published yet." -ForegroundColor Green
         Write-Host '  The build has to pass before CurseForge sees anything, and it' -ForegroundColor DarkGray

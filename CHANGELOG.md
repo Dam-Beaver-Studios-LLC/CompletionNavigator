@@ -7,6 +7,28 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.67.2]
+
+Still nothing in the addon. Two releases in a row were diagnosed as build
+failures when the second one had not been built at all â€” `ci -Watch` was
+reporting an older run, in failure red, with nothing saying it was not the
+release just asked for.
+
+### Fixed
+
+- **`ci -Watch` now says when the run it is watching is not your version.**
+  `release X` followed by `ci -Watch` reads as one flow and is not: the watch
+  reports the newest run on GitHub, whatever that happens to be. When that
+  does not match the version in the working tree it says so, in as many words,
+  before anything else.
+- **It prints the log URL when a run fails**, rather than directing you to a
+  second command â€” which 0.67.0 proved could come back with nothing.
+- **`release` checks that GitHub actually started a run.** A push can succeed
+  and nothing happen: Actions disabled, the workflow missing from the default
+  branch, a trigger that no longer matches. The command reported a healthy
+  push either way, and the failure then looked like a broken build instead of
+  a build that never began.
+
 ## [0.67.1]
 
 0.67.0 built correctly and its release run failed, and the command whose whole
