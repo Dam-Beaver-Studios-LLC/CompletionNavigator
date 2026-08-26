@@ -429,7 +429,7 @@ CN.RegisterCandidateProvider("Instances", function()
                 lockout.defeated .. " of " .. lockout.encounters
                     .. " already defeated" .. CN.DASH .. "those kills expire at the reset",
                 lockout.remaining .. " "
-                    .. (lockout.remaining == 1 and "boss" or "bosses") .. " left",
+                    .. CN.Pluralize(lockout.remaining, "boss", "bosses") .. " left",
             }
 
             if lockout.resetsIn then
@@ -486,7 +486,7 @@ CN:RegisterCommand{
         end
 
         Print("Saved to " .. #lockouts
-            .. (#lockouts == 1 and " instance:" or " instances:"))
+            .. CN.Pluralize(#lockouts, " instance:", " instances:"))
 
         for _, lockout in ipairs(lockouts) do
             CN.PrintLine("  " .. Instances.Describe(lockout))
@@ -506,10 +506,10 @@ CN:RegisterCommand{
 
         if summary.unfinished > 0 then
             Print(summary.bosses .. " "
-                .. (summary.bosses == 1 and "boss" or "bosses")
+                .. CN.Pluralize(summary.bosses, "boss", "bosses")
                 .. " still available across "
                 .. summary.unfinished
-                .. (summary.unfinished == 1 and " lockout." or " lockouts."))
+                .. CN.Pluralize(summary.unfinished, " lockout.", " lockouts."))
         else
             Print("|cff8a8f96Everything you are saved to is cleared.|r")
         end
@@ -552,7 +552,7 @@ CN:RegisterCommand{
         end
 
         Print("\"" .. args .. "\" " .. CN.DASH .. " " .. #results
-            .. (#results == 1 and " encounter:" or " encounters:"))
+            .. CN.Pluralize(#results, " encounter:", " encounters:"))
 
         for _, result in ipairs(results) do
             local line = "  " .. tostring(result.encounter or "?")

@@ -1613,7 +1613,7 @@ UI.RegisterTab{
                 UI.Answer("Nothing is stale. Every source has been read today.")
             else
                 UI.Answer("Read " .. refreshed .. " stale "
-                    .. (refreshed == 1 and "source" or "sources") .. ".")
+                    .. CN.Pluralize(refreshed, "source", "sources") .. ".")
             end
 
             UI.Refresh()
@@ -1631,7 +1631,18 @@ UI.RegisterTab{
     refresh = function(panel)
         local entries = {}
 
-        local sources = UI.Sources()
+        -- TEN STORE WALKS, EVERY TWO SECONDS. 0.65.0.
+        --
+        -- This is the identical defect 0.61.0 fixed on the Collections tab --
+        -- eight `Summary()` calls, each walking its module's whole store, on
+        -- every two-second refresh -- and this sibling tab, which does TEN
+        -- plus a map POI scan, was not wrapped. Measured at retail scale it
+        -- is the most expensive refresh in the window, and it runs
+        -- continuously while questing because `QUEST_LOG_UPDATE` drives it.
+        --
+        -- Every number in it is already guarded by the same generation.
+        local sources = CN.Memo("ui:sources", CN.collectionGeneration,
+            UI.Sources)
 
         local stale = 0
 
@@ -3659,7 +3670,7 @@ UI.RegisterTab{
                     .. " of " .. #filters.TypeOrder() .. " kinds") or ""))
         elseif hidden > 0 then
             panel.focusNote:SetText("No focus set. " .. hidden .. " kind"
-                .. (hidden == 1 and " is" or "s are")
+                .. CN.Pluralize(hidden, " is", "s are")
                 .. " hidden by your own choices.")
         else
             panel.focusNote:SetText("No focus set: everything is in the list.")

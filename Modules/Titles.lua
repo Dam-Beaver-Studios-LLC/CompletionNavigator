@@ -17,11 +17,8 @@ local Blizzard   = CN.Blizzard
 -- STORAGE
 ------------------------------------------------------------
 
--- Names are shared; known/unknown is per character.
-local function NameStore()
-    return CN.Account("titleNames")
-end
-
+-- Known/unknown is per character. Names are not stored at all: see
+-- `Titles.NameOf`.
 local function CharacterStore(character)
     character = character or CN.character
 
@@ -34,7 +31,6 @@ local function CharacterStore(character)
     return character.titles
 end
 
-Titles.NameStore      = NameStore
 Titles.CharacterStore = CharacterStore
 
 ------------------------------------------------------------
@@ -42,8 +38,7 @@ Titles.CharacterStore = CharacterStore
 ------------------------------------------------------------
 
 function Titles.Scan()
-    local names = NameStore()
-    local mine  = CharacterStore()
+    local mine = CharacterStore()
 
     if not mine then
         return 0, 0
@@ -52,7 +47,15 @@ function Titles.Scan()
     local seen, known = 0, 0
 
     for _, title in ipairs(Blizzard.GetTitles()) do
-        names[title.titleID] = title.name
+        -- `titleNames` IS NOT WRITTEN ANY MORE. 0.65.0.
+        --
+        -- 0.64.0 gave the hidden-objectives list a live client path for
+        -- titles and left this writer alone, so the store went on filling
+        -- with names frozen at whatever language last scanned -- and
+        -- `Titles.Resolve` searched only that store, so a player who changed
+        -- client language could not find their own titles by name.
+        --
+        -- Eighth store to lose a name it did not need to keep.
 
         mine[title.titleID] = title.known or nil
 
@@ -76,14 +79,24 @@ end
 -- SUMMARY
 ------------------------------------------------------------
 
+-- `known` IS THE CLIENT'S OWN LIST LENGTH, NOT A STORED COUNT. 0.65.0.
+--
+-- It used to be `CountKeys(titleNames)` -- the store this version stopped
+-- writing. Left alone it would have been zero on every character forever,
+-- which is the number `/cn titles` and the Titles breakdown both branch on:
+-- both would have told a player who had just scanned to go and scan.
+--
+-- `scanned` is what "no data yet" actually means. The client always knows how
+-- many titles exist; only whether THIS character's known/unknown flags have
+-- been read is a thing the addon has to remember.
 function Titles.Summary()
-    local names = NameStore()
-    local mine  = CharacterStore() or {}
+    local mine = CharacterStore() or {}
 
     local counts = {
-        known     = CN.CountKeys(names),
+        known     = #(Blizzard.GetTitles and Blizzard.GetTitles() or {}),
         onThisOne = CN.CountKeys(mine),
         onAccount = 0,
+        scanned   = (CN.Account("collectionScans") or {}).titles ~= nil,
     }
 
     -- A title counted once if any character has it.
@@ -117,10 +130,26 @@ function Titles.WhoHas(titleID)
     return holders
 end
 
+-- A title's name, from the client. Eighth of these; see `Achievements.NameOf`
+-- for the first. 0.65.0.
+--
+-- NO FALLBACK TO A STORE, for the reason spelled out in `Currencies.NameOf`:
+-- `CN.Account(key)` creates the table it is asked for, so a reader left
+-- pointing at `titleNames` puts back the store migration 18 deleted.
+function Titles.NameOf(titleID)
+    local live = Blizzard.GetTitleName and Blizzard.GetTitleName(titleID)
+
+    if live and live ~= "" then
+        return live
+    end
+
+    return "Title " .. tostring(titleID)
+end
+
 function Titles.Resolve(text)
     local titleID = CN.ToID(text)
 
-    if titleID and NameStore()[titleID] then
+    if titleID and CharacterStore() and CharacterStore()[titleID] ~= nil then
         return titleID
     end
 
@@ -131,7 +160,10 @@ function Titles.Resolve(text)
     local needle  = string.lower(text)
     local matches = {}
 
-    for id, name in pairs(NameStore()) do
+    -- OVER WHAT THIS CHARACTER HAS, NAMED LIVE. See the note in `Scan`.
+    for id in pairs(CharacterStore() or {}) do
+        local name = Titles.NameOf(id)
+
         if name and string.find(string.lower(name), needle, 1, true) then
             table.insert(matches, { id = id, name = name })
         end
@@ -175,7 +207,8 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.TITLE, function(titleID)
     local mine   = CharacterStore()
 
     if mine and mine[titleID] then
-        return states.COMPLETED, "Already earned by this character", NameStore()[titleID]
+        return states.COMPLETED, "Already earned by this character",
+               Titles.NameOf(titleID)
     end
 
     local holders = Titles.WhoHas(titleID)
@@ -226,7 +259,7 @@ CN:RegisterCommand{
     handler = function()
         local counts = Titles.Summary()
 
-        if counts.known == 0 then
+        if not counts.scanned then
             Print("No title data yet. Run /cn titlescan.")
             return
         end
@@ -255,7 +288,7 @@ CN:RegisterCommand{
             return
         end
 
-        Print(NameStore()[titleID] .. " |cff8a8f96(" .. titleID .. ")|r")
+        Print(Titles.NameOf(titleID) .. " |cff8a8f96(" .. titleID .. ")|r")
 
         local holders = Titles.WhoHas(titleID)
 

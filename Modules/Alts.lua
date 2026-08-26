@@ -130,7 +130,7 @@ function Alts.Assignments()
 
             -- "account-wide" is a real answer meaning the question does not
             -- apply, and must never become a suggestion to switch.
-            if ok and bestKey and scope ~= "account-wide"
+            if ok and bestKey and scope ~= CN.scopes.ACCOUNT
                 and bestKey ~= CN.characterKey then
 
                 local character = CN.db and CN.db.characters

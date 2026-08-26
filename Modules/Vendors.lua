@@ -170,6 +170,31 @@ end
 -- once per known recipe, and almost always gets no answer. WhoSells allocates
 -- a result array every time it is called; this does not allocate at all until
 -- there is something to return.
+-- A SELLER ROW, WITH ITS ZONE DERIVED. 0.65.0.
+--
+-- `FirstLocatedSeller` handed back the raw store record, and migration 16
+-- dropped `zone` from those rows because the map id derives it. `WhoSells`
+-- was given the live derivation and the three consumers of THIS function were
+-- not -- so a recommended recipe read "sold by Zen'shiri" with the zone line
+-- silently gone, and the objective's own `zone` field was nil.
+--
+-- One shape for a seller, built in one place.
+function Vendors.SellerFrom(record, npcID)
+    if type(record) ~= "table" then
+        return nil
+    end
+
+    return {
+        npcID = npcID,
+        name  = record.name,
+        zone  = record.mapID and CN.Blizzard.GetMapName(record.mapID)
+            or record.zone,
+        mapID = record.mapID,
+        x     = record.x,
+        y     = record.y,
+    }
+end
+
 function Vendors.FirstLocatedSeller(itemID)
     if not itemID then
         return nil
@@ -189,7 +214,7 @@ function Vendors.FirstLocatedSeller(itemID)
         local record = store[npcID]
 
         if record and record.mapID and record.x and record.y then
-            return record, npcID
+            return Vendors.SellerFrom(record, npcID), npcID
         end
     end
 
@@ -226,18 +251,13 @@ function Vendors.WhoSells(itemID)
         local record = Store()[npcID]
 
         if record then
-            table.insert(sellers, {
-                npcID = npcID,
-                name  = record.name,
-                -- Derived from the map id, live. See the note in the
-                -- capture above.
-                zone  = record.mapID and Blizzard.GetMapName(record.mapID)
-                    or record.zone,
-                mapID = record.mapID,
-                x     = record.x,
-                y     = record.y,
-                price = Vendors.PriceOf(record, itemID),
-            })
+            -- Through the one builder, so this and `FirstLocatedSeller`
+            -- cannot describe a seller differently again. 0.65.0.
+            local seller = Vendors.SellerFrom(record, npcID)
+
+            seller.price = Vendors.PriceOf(record, itemID)
+
+            table.insert(sellers, seller)
         end
     end
 

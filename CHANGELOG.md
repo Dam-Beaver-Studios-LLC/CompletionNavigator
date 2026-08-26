@@ -7,6 +7,71 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.65.0]
+
+Nineteen defects. Fifteen of them were the *reading* half of a change made in
+0.63.0 or 0.64.0: a name the addon correctly stopped storing, still being
+displayed from the store that no longer had it. That produced blank text on
+screen â€” a list entry reading "1. 1275" instead of "Explore Eversong Woods".
+Two mechanical checks were added so this shape is caught by the build rather
+than by a reader.
+
+### Fixed â€” text you read
+
+- **Zone exploration objectives had no name at all.** The recommendation list
+  showed the achievement's number where its name belongs, on every client and
+  in every language. So did the goal line, and so did "This zone" in `/cn
+  exploration`.
+- **A toy you have hidden could not be named**, and a mount goal stopped saying
+  where the mount comes from â€” the sentence that makes the row actionable.
+- **A rare's goal line printed a raw map number** instead of the zone's name.
+- **Three vendor rows lost the zone they are in**, so "where do I buy this"
+  answered with coordinates and no place.
+- **`/cn title <name>` raised a Lua error** rather than printing the title, and
+  a title you already hold reported itself with no name beside it.
+- **`/cn titles` and the Titles breakdown told you to run a scan you had just
+  run** â€” permanently. Both branch on how many titles exist, which had become
+  zero for everyone.
+- **Renown was written in English beside standings written in yours**, and was
+  stored that way, so an alt's row stayed frozen at whatever language that
+  character last logged in with.
+- **"Account-wide" was doing two jobs at once**: the words shown to you *and*
+  the value six guards compare against. Translating it would have flipped every
+  one of those guards false and started recommending that you log out and
+  switch characters for progress that is shared. It is a token now, and the
+  sentence beside it is translated in all eleven locales.
+
+### Fixed â€” behaviour
+
+- **The currency throttle was inverted.** 0.64.0 cleared the timer *before*
+  scanning rather than after, which guaranteed the second full sweep it was
+  written to prevent: pick up one coin a second later and the entire three-pass
+  read ran again.
+- **Hidden mounts were named from disk first** and from the game second, alone
+  among the collections.
+
+### Faster
+
+- **The Sources tab is cached like its two siblings.** It walked ten stores on
+  every refresh â€” twice a second while the window is open.
+- **A quest pin you have already seen no longer rewalks the remembered
+  store.**
+
+### Internal
+
+- **Two build-time checks, because the process rule was not enough.** The rule
+  after 0.63.0 was "when you change a writer, find every reader". It was
+  followed, and it still missed fifteen readers across two releases. So: every
+  candidate the addon can produce is now built at test time and asserted to
+  have a real name, and any file that reads a saved-variable store the upgrade
+  ladder deletes now fails the build. The second one matters more than it
+  looks: asking for a store *creates* it, so a deleted store and a leftover
+  reader do not cancel out â€” the reader silently puts it back, empty, at every
+  login.
+- **The last of the hand-rolled pluralizers, and the last two name stores.**
+  Eight and ninth applications of one rule: persist only what the game cannot
+  hand back for free.
+
 ## [0.64.0]
 
 Twelve defects, found by looking for one specific thing: places where an

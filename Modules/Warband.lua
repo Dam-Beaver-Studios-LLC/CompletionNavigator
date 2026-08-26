@@ -63,6 +63,30 @@ end
 -- Answers for any objective type that has per-character state. Returns
 -- bestKey, detail, scope -- where scope explains why the answer is what it
 -- is, including "account-wide" meaning the question does not apply.
+--
+-- THE SCOPE IS A TOKEN. 0.65.0.
+--
+-- Three places branch on `scope == "account-wide"` and three others PRINT the
+-- same value to the player. That is a string doing two jobs, and the addon
+-- has ten locale tables: the first translation of that sentence turns all
+-- three guards false at once, and `/cn alts` starts recommending a loading
+-- screen to switch characters for account-wide progress -- which the file
+-- that does the recommending says "must never become a suggestion to switch".
+--
+-- The tokens are these, and `CN.ScopeText` turns one into a sentence.
+CN.scopes = {
+    ACCOUNT   = "account-wide",
+    CHARACTER = "character",
+    UNKNOWN   = "unknown",
+}
+
+function CN.ScopeText(scope)
+    if scope == CN.scopes.ACCOUNT then
+        return CN.L["account-wide"]
+    end
+
+    return scope
+end
 -- THE FRESHEST HOLDER, NOT THE ALPHABETICALLY FIRST.
 --
 -- `WhoKnows` and `WhoHas` both `table.sort` their holders, which orders them
@@ -116,7 +140,7 @@ function Warband.WhoShould(objectiveType, id)
         local bestKey, bestRecord, accountWide = module.BestCharacterFor(id)
 
         if accountWide then
-            return nil, nil, "account-wide"
+            return nil, nil, CN.scopes.ACCOUNT
         end
 
         if bestKey then
@@ -181,7 +205,7 @@ function Warband.WhoShould(objectiveType, id)
     if objectiveType == types.PET or objectiveType == types.MOUNT
         or objectiveType == types.TOY or objectiveType == types.ACHIEVEMENT
         or objectiveType == types.APPEARANCE then
-        return nil, nil, "account-wide"
+        return nil, nil, CN.scopes.ACCOUNT
     end
 
     return nil, nil, "not tracked per character"
@@ -197,7 +221,7 @@ end
 function Warband.Suitability(objectiveType, id)
     local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
 
-    if scope == "account-wide" or not bestKey then
+    if scope == CN.scopes.ACCOUNT or not bestKey then
         return 0, nil
     end
 
@@ -445,13 +469,16 @@ CN:RegisterCommand{
 
         local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
 
-        if scope == "account-wide" then
+        if scope == CN.scopes.ACCOUNT then
             Print("That is account-wide; any character counts.")
             return
         end
 
         if not bestKey then
-            Print(tostring(scope) .. ".")
+            -- The SENTENCE, from the token. See `CN.scopes` above: the same
+            -- string was doing both jobs, so translating it would have turned
+            -- three guards false at once. 0.65.0.
+            Print(CN.ScopeText(scope) .. ".")
             return
         end
 

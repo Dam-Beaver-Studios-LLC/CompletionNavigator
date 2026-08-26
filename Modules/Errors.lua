@@ -222,7 +222,7 @@ CN:RegisterCommand{
             local cleared = Errors.Clear()
 
             Print("Cleared " .. cleared
-                .. (cleared == 1 and " recorded error." or " recorded errors."))
+                .. CN.Pluralize(cleared, " recorded error.", " recorded errors."))
             return
         end
 
@@ -285,7 +285,7 @@ CN:RegisterCommand{
             return
         end
 
-        Print(#ring .. (#ring == 1 and " error" or " errors")
+        Print(#ring .. CN.Pluralize(#ring, " error", " errors")
             .. " recorded this session:")
 
         for _, entry in ipairs(ring) do

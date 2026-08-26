@@ -30,6 +30,7 @@ CN.RegisterLocale("ptBR", {
     ["veer"] = "desvie",
     ["turn"] = "vire",
     ["back"] = "volte",
+    ["account-wide"] = "para toda a conta",
     ["nothing actionable"] = "nada a fazer",
     ["Stop cleared"] = "Parada concluÃ­da",
     ["Stop %d of %d cleared"] = "Parada %d de %d concluÃ­da",

@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.64.0"
-CN.dbVersion   = 18
+CN.version     = "0.65.0"
+CN.dbVersion   = 19
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -589,7 +589,7 @@ function CN.Ago(stamp, now)
 
     local days = math.floor(seconds / 86400)
 
-    return days .. (days == 1 and " day ago" or " days ago")
+    return days .. CN.Pluralize(days, " day ago", " days ago")
 end
 
 function CN.Comma(number)
@@ -714,7 +714,7 @@ end
 -- coloured count, usually).
 -- `CN.Pluralize(3, "")` is "s" and `CN.Pluralize(1, "")` is "" -- which is
 -- what twenty-two call sites were writing by hand as
--- `(n == 1 and "" or "s")`, each of them a place the next grammar change
+-- `CN.Pluralize(n, "", "s")`, each of them a place the next grammar change
 -- would have had to find. 0.64.0.
 function CN.Pluralize(number, singular, plural)
     if (tonumber(number) or 0) == 1 then
@@ -789,6 +789,25 @@ CN.factionGlobals = {
     Horde    = "FACTION_HORDE",
     Neutral  = "FACTION_STANDING_LABEL4",
 }
+
+-- "Renown 12", in the client's language. `RENOWN_LEVEL_LABEL` is the game's
+-- own global for the word; absent, the English word is better than nothing
+-- and better than an empty string. 0.65.0.
+function CN.RenownLabel(level)
+    local word = _G.RENOWN_LEVEL_LABEL
+
+    if type(word) ~= "string" or word == "" then
+        word = "Renown "
+    end
+
+    -- The client's string already ends in a space in every locale that ships
+    -- it; a locale that ever stops doing so must not produce "Renown12".
+    if word:sub(-1) ~= " " then
+        word = word .. " "
+    end
+
+    return word .. tostring(level or 0)
+end
 
 function CN.FactionLabel(token)
     if type(token) ~= "string" or token == "" then

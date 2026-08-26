@@ -30,6 +30,7 @@ CN.RegisterLocale("frFR", {
     ["veer"] = "obliquez",
     ["turn"] = "tournez",
     ["back"] = "demi-tour",
+    ["account-wide"] = "Ã  l'Ã©chelle du compte",
     ["nothing actionable"] = "rien Ã  faire",
     ["Stop cleared"] = "Ã‰tape terminÃ©e",
     ["Stop %d of %d cleared"] = "Ã‰tape %d sur %d terminÃ©e",

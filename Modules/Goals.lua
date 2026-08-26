@@ -301,7 +301,16 @@ function Goals.Plan(goal)
         local record = CN.Account("mounts")[goal.id]
 
         if record then
-            plan.source = record.source
+            -- LIVE. 0.65.0.
+            --
+            -- 0.62.0 stopped storing `mounts[id].source` and its own comment
+            -- says "the two places that DISPLAY it read it live" -- this was
+            -- the third, so a mount goal simply lost its "Source:" line and
+            -- the matching reason on the `/cn next` row.
+            local mounts = CN:GetModule("Mounts")
+
+            plan.source = mounts and mounts.SourceText
+                and mounts.SourceText(goal.id, record)
 
             if record.isFactionSpecific then
                 step("Faction-locked. Only obtainable on one faction.")
@@ -341,7 +350,13 @@ function Goals.Plan(goal)
 
         if record then
             plan.mapID, plan.x, plan.y = record.mapID, record.x, record.y
-            plan.zone = record.zone
+
+            -- DERIVED, like the quest branch above. 0.65.0. Migration 15
+            -- dropped `rares[id].zone` on the grounds that it was "read by
+            -- nothing" -- and this read it, so the line became
+            -- "Location known: map 2022" where it used to name the zone.
+            plan.zone = record.mapID and CN.Blizzard.GetMapName(record.mapID)
+                or record.zone
 
             step("Seen " .. (record.sightings or 1) .. " time"
                 .. CN.Pluralize((record.sightings or 1), "") .. " here.")

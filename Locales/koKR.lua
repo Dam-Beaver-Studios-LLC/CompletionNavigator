@@ -27,6 +27,7 @@ CN.RegisterLocale("koKR", {
     ["ahead"] = "ì§ì§„",
     ["turn"] = "ë°©í–¥ ì „í™˜",
     ["back"] = "ë’¤ë¡œ",
+    ["account-wide"] = "ê³„ì • ì „ì²´",
     ["nothing actionable"] = "í•  ì¼ ì—†ìŒ",
     ["Stop cleared"] = "ì§€ì  ì™„ë£Œ",
     ["Stop %d of %d cleared"] = "%d/%d ì§€ì  ì™„ë£Œ",

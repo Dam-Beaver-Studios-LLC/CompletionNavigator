@@ -395,7 +395,7 @@ function Setup.RemindIfNeeded()
 
     CN.PrintBlock(
         CN.Count(#missing, "thing")
-            .. " here " .. (#missing == 1 and "has" or "have")
+            .. " here " .. CN.Pluralize(#missing, "has", "have")
             .. " never been read: "
             .. CN.Muted(string.lower(table.concat(named, ", "))),
         {

@@ -1253,7 +1253,7 @@ mutate "Core.lua" \
     "a clock that moved backwards prints a negative age"
 
 mutate "Core.lua" \
-    "    return days .. (days == 1 and \" day ago\" or \" days ago\")" \
+    "    return days .. CN.Pluralize(days, \" day ago\", \" days ago\")" \
     "    return days .. \" days ago\"" \
     "one day ago is reported in the plural"
 
@@ -2213,6 +2213,67 @@ mutate "Core.lua" \
     "    local global = CN.factionGlobals[token]" \
     "    local global = nil" \
     "the roster prints an untranslated faction token"
+
+# ------------------------------------------------------------
+# 0.65.0
+# ------------------------------------------------------------
+
+mutate "Modules/Exploration.lua" \
+    "                name            = Exploration.NameOf(record.achievementID,
+                    record)," \
+    "                name            = record.name," \
+    "every exploration row renders as its achievement id"
+
+mutate "Modules/Vendors.lua" \
+    "        zone  = record.mapID and CN.Blizzard.GetMapName(record.mapID)
+            or record.zone," \
+    "        zone  = record.zone," \
+    "a recommended recipe loses the zone its vendor is in"
+
+mutate "Modules/Goals.lua" \
+    "            plan.source = mounts and mounts.SourceText
+                and mounts.SourceText(goal.id, record)" \
+    "            plan.source = record.source" \
+    "a mount goal stops saying where the mount comes from"
+
+mutate "Modules/Exploration.lua" \
+    "            local hereDone, hereComplete = Exploration.DoneFor(here)" \
+    "            local hereDone, hereComplete = here.done, here.completed" \
+    "the this-zone line shows another character's exploration"
+
+mutate "Modules/Reputations.lua" \
+    "            record.standing    = CN.RenownLabel(major.renownLevel or 0)" \
+    "            record.standing    = \"Renown \" .. tostring(major.renownLevel or 0)" \
+    "renown is printed in English beside translated standings"
+
+# NOT MUTATED: `CN.scopes.ACCOUNT` and the literal are the same string today,
+# so swapping them cannot change behaviour -- the whole point is that they stop
+# being the same the moment the sentence is translated. A mutation that cannot
+# fail does not belong here; the property is asserted as a source rule in the
+# 0.65.0 block instead.
+
+mutate "Modules/Titles.lua" \
+    "    for id in pairs(CharacterStore() or {}) do
+        local name = Titles.NameOf(id)" \
+    "    for id, name in pairs(CN.Account(\"titleNames\")) do" \
+    "a title cannot be found by name after a language change"
+
+mutate "Modules/Currencies.lua" \
+    "function Currencies.Scan()
+    lastScan = time()" \
+    "function Currencies.Scan()" \
+    "a manual scan arms a second sweep a second later"
+
+mutate "UI.lua" \
+    "        local sources = CN.Memo(\"ui:sources\", CN.collectionGeneration,
+            UI.Sources)" \
+    "        local sources = UI.Sources()" \
+    "the Sources tab rewalks ten stores every two seconds"
+
+mutate "Modules/Quests.lua" \
+    "    if isNew and CN.CountKeys(store) > Quests.rememberedCap then" \
+    "    if CN.CountKeys(store) > Quests.rememberedCap then" \
+    "every quest pin walks the whole remembered store"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

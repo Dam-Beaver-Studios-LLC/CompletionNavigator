@@ -18,8 +18,22 @@ local DebugPrint = CN.DebugPrint
 local Blizzard   = CN.Blizzard
 
 -- Currency quantities are character state; which currencies exist is not.
-local function NameStore()
-    return CN.Account("currencyNames")
+-- A currency's name, from the client. Seventh store to get one of these; see
+-- `Achievements.NameOf` for the first. 0.65.0.
+--
+-- NO FALLBACK TO A STORE. `CN.Account(key)` CREATES the table it is asked
+-- for, so any reader left pointing at `currencyNames` resurrects the store
+-- migration 18 deleted -- an empty one, on every login, forever. The client
+-- answers this instantly and in the player's own language; there is nothing
+-- for a fallback to add.
+function Currencies.NameOf(currencyID)
+    local info = CN.Blizzard.GetCurrency and CN.Blizzard.GetCurrency(currencyID)
+
+    if info and info.name and info.name ~= "" then
+        return info.name
+    end
+
+    return "Currency " .. tostring(currencyID)
 end
 
 local function CharacterStore(character)
@@ -34,7 +48,6 @@ local function CharacterStore(character)
     return character.currencies
 end
 
-Currencies.NameStore      = NameStore
 Currencies.CharacterStore = CharacterStore
 
 ------------------------------------------------------------
@@ -129,9 +142,18 @@ end
 
 Currencies.IsCurrent = IsCurrent
 
+-- When the last sweep ran. Declared here, ABOVE its first use: a local
+-- declared below the line that assigns it is not the same variable -- the
+-- assignment creates a global and the throttle silently stops working.
+local lastScan = 0
+
+-- Every scan stamps the throttle, whichever path asked for it. Before this,
+-- the login scan and the manual one both left the timestamp alone, so the
+-- next coin picked up ran a second full sweep. 0.65.0.
 function Currencies.Scan()
-    local names = NameStore()
-    local mine  = CharacterStore()
+    lastScan = time()
+
+    local mine = CharacterStore()
 
     if not mine then
         return 0, 0, 0
@@ -143,7 +165,15 @@ function Currencies.Scan()
 
     for _, currency in ipairs(Blizzard.GetCurrencyList()) do
         if currency.currencyID then
-            names[currency.currencyID] = currency.name
+            -- `currencyNames` IS NOT WRITTEN ANY MORE. 0.65.0.
+            --
+            -- 0.64.0 gave every reader a live client path and left the writer
+            -- alone, so the store kept filling with names frozen at whatever
+            -- language last scanned -- and `Currencies.Resolve`, which
+            -- searches only the store, could not find a player's own
+            -- currencies by name after a language change.
+            --
+            -- Seventh store to lose a name it did not need to keep.
 
             -- THE CAP APPLIES TO WHAT THE CLIENT SAYS IT APPLIES TO. 0.62.0.
             --
@@ -221,7 +251,7 @@ function Currencies.Capped(character)
         if record.capped and IsCurrent(record, character) then
             table.insert(capped, {
                 currencyID = currencyID,
-                name       = NameStore()[currencyID],
+                name       = Currencies.NameOf(currencyID),
                 -- THE NUMBERS THE CAP WAS MEASURED AGAINST. 0.63.0.
                 --
                 -- 0.62.0 fixed the DETECTION -- a currency whose cap applies
@@ -274,7 +304,7 @@ function Currencies.WeeklyUnfilled(character)
             and IsCurrent(record, character) then
             table.insert(rows, {
                 currencyID = currencyID,
-                name       = NameStore()[currencyID],
+                name       = Currencies.NameOf(currencyID),
                 remaining  = record.weeklyRemaining,
                 earned     = record.earnedThisWeek,
                 maximum    = record.maxWeeklyQuantity,
@@ -318,7 +348,7 @@ end
 function Currencies.Resolve(text)
     local currencyID = CN.ToID(text)
 
-    if currencyID and NameStore()[currencyID] then
+    if currencyID and CharacterStore() and CharacterStore()[currencyID] then
         return currencyID
     end
 
@@ -329,7 +359,14 @@ function Currencies.Resolve(text)
     local needle  = string.lower(text)
     local matches = {}
 
-    for id, name in pairs(NameStore()) do
+    -- SEARCHED OVER WHAT THIS CHARACTER HAS, NAMED LIVE. 0.65.0.
+    --
+    -- This searched the stored name table, which no longer fills -- and even
+    -- before that it was frozen at the last scan's language, so a player who
+    -- changed client language could not find their own currencies by name.
+    for id in pairs(CharacterStore() or {}) do
+        local name = Currencies.NameOf(id)
+
         if name and string.find(string.lower(name), needle, 1, true) then
             table.insert(matches, { id = id, name = name })
         end
@@ -400,8 +437,6 @@ end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true })
 -- EVENTS
 ------------------------------------------------------------
 
-local lastScan = 0
-
 -- SIXTY SECONDS, NOT TEN, AND NOT WHILE THE PLAYER IS LOOKING. 0.64.0.
 --
 -- `CURRENCY_DISPLAY_UPDATE` fires on every coin picked up, so a ten-second
@@ -431,10 +466,24 @@ end
 Currencies.IsFrameOpen = CurrencyFrameOpen
 
 -- So the suite can reach the deferral, which is otherwise behind a minute's
--- wait. A guard nothing can exercise is a guard nothing tests.
+-- wait, and so a caller that genuinely wants the next update to sweep can say
+-- so. A guard nothing can exercise is a guard nothing tests.
+--
+-- NOT called before a manual scan: `Scan` stamps the timestamp itself, and
+-- resetting it first was the 0.64.0 bug that guaranteed a double sweep.
 function Currencies.ForgetLastScan()
     lastScan = 0
 end
+
+-- A NEW SESSION SWEEPS PROMPTLY.
+--
+-- The login scan stamps the throttle like every other path, which is right --
+-- but a player who reloads mid-session should not then wait a minute for the
+-- first update. Clearing on entering the world costs one sweep and keeps the
+-- first currency reading of a session current.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    Currencies.ForgetLastScan()
+end)
 
 CN:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function()
     local now = time()
@@ -522,15 +571,18 @@ CN:RegisterCommand{
     order   = 78,
     help    = "Rescan currencies for this character.",
     handler = function()
-        -- A SCAN THE PLAYER ASKED FOR RE-ARMS THE TIMER. 0.64.0.
+        -- A SCAN THE PLAYER ASKED FOR RE-ARMS THE TIMER -- AFTERWARDS.
         --
-        -- The automatic sweep is a minute apart and defers while the player's
-        -- own currency window is open. Without this, a manual scan left the
-        -- old timestamp in place, so the next automatic sweep could fire
-        -- seconds after the player had just scanned by hand -- doing the
-        -- expensive three-pass read twice for one answer.
-        Currencies.ForgetLastScan()
-
+        -- 0.64.0 wrote this and put it in the wrong place: resetting the
+        -- timestamp BEFORE scanning sets it to zero, which makes the throttle
+        -- test false for the next sixty seconds and guarantees the very
+        -- double sweep the comment says it prevents. Pick up one coin a
+        -- second after a manual scan and the whole three-pass read ran again,
+        -- headers and all.
+        --
+        -- The timestamp belongs to the scan, so `Scan` stamps it itself now
+        -- and every path -- manual, automatic, login -- is throttled the same
+        -- way. 0.65.0.
         local seen, atCap, weekly = Currencies.Scan()
 
         Print("Scanned " .. seen .. " currencies.")

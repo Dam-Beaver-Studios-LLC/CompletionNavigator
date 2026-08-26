@@ -88,7 +88,20 @@ local function BuildRecord(data)
             record.expansion  = major.expansionID
             record.unlocked   = major.isUnlocked
             record.maxedOut   = Blizzard.HasMaximumRenown(factionID)
-            record.standing   = "Renown " .. tostring(major.renownLevel or 0)
+            -- THE CLIENT'S OWN WORD FOR IT. 0.65.0.
+            --
+            -- Every other `standing` on a record is localized -- the client's
+            -- `FACTION_STANDING_LABEL<n>` for a standard faction, its own
+            -- friendship reaction for a friendship one -- and this one was
+            -- hardcoded English AND persisted, so an alt's row was also
+            -- frozen at whatever language that character last scanned in. A
+            -- German player read "Standing: Renown 12" for one faction and
+            -- "Standing: EhrfÃ¼rchtig" for the next.
+            --
+            -- Same defect 0.64.0 fixed for Alliance and Horde on the Warband
+            -- roster, one file over. `RENOWN_LEVEL_LABEL` is a client global.
+            record.renownLevel = major.renownLevel or 0
+            record.standing    = CN.RenownLabel(major.renownLevel or 0)
         end
     else
         record.kind = "STANDARD"
@@ -283,7 +296,7 @@ end
 -- the recommendation engine can say "switch to this alt instead".
 function Reputations.BestCharacterFor(factionID)
     if AccountStore()[factionID] then
-        return nil, nil, "account-wide"
+        return nil, nil, CN.scopes.ACCOUNT
     end
 
     local bestKey, bestRecord

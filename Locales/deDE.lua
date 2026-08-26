@@ -30,6 +30,7 @@ CN.RegisterLocale("deDE", {
     ["veer"] = "abbiegen",
     ["turn"] = "wenden",
     ["back"] = "zurÃ¼ck",
+    ["account-wide"] = "kontoweit",
     ["nothing actionable"] = "nichts zu tun",
     ["Stop cleared"] = "Station erledigt",
     ["Stop %d of %d cleared"] = "Station %d von %d erledigt",

@@ -375,13 +375,24 @@ function Quests.RememberOffer(poi)
 
     -- Only what the client cannot re-derive instantly: no names, no
     -- timestamps beyond the one that makes pruning possible.
+    local isNew = store[poi.questID] == nil
+
     store[poi.questID] = {
         mapID = poi.mapID,
         x     = poi.x and math.floor(poi.x * 1000 + 0.5) / 1000 or nil,
         y     = poi.y and math.floor(poi.y * 1000 + 0.5) / 1000 or nil,
     }
 
-    if CN.CountKeys(store) > Quests.rememberedCap then
+    -- THE CEILING IS TESTED WHEN THE SET GREW, NOT ON EVERY SIGHTING.
+    --
+    -- `CN.CountKeys` walks the whole six-hundred-entry store, and this runs
+    -- once per quest-start pin on every related map -- about thirty pins
+    -- across four maps in a quest hub, so eighteen thousand table iterations
+    -- for one boolean, from a provider on the `QUEST_LOG_UPDATE` firehose.
+    --
+    -- A store that did not gain a key cannot have crossed its ceiling, and
+    -- the caller above already knows whether this id was new. 0.65.0.
+    if isNew and CN.CountKeys(store) > Quests.rememberedCap then
         Quests.PruneRemembered()
     end
 

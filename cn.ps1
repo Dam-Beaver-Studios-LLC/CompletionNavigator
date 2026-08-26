@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.64.0'
+$script:ToolkitVersion = '0.65.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.64.0"
-CN.dbVersion   = 18
+CN.version     = "0.65.0"
+CN.dbVersion   = 19
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -692,7 +692,7 @@ function CN.Ago(stamp, now)
 
     local days = math.floor(seconds / 86400)
 
-    return days .. (days == 1 and " day ago" or " days ago")
+    return days .. CN.Pluralize(days, " day ago", " days ago")
 end
 
 function CN.Comma(number)
@@ -817,7 +817,7 @@ end
 -- coloured count, usually).
 -- `CN.Pluralize(3, "")` is "s" and `CN.Pluralize(1, "")` is "" -- which is
 -- what twenty-two call sites were writing by hand as
--- `(n == 1 and "" or "s")`, each of them a place the next grammar change
+-- `CN.Pluralize(n, "", "s")`, each of them a place the next grammar change
 -- would have had to find. 0.64.0.
 function CN.Pluralize(number, singular, plural)
     if (tonumber(number) or 0) == 1 then
@@ -892,6 +892,25 @@ CN.factionGlobals = {
     Horde    = "FACTION_HORDE",
     Neutral  = "FACTION_STANDING_LABEL4",
 }
+
+-- "Renown 12", in the client's language. `RENOWN_LEVEL_LABEL` is the game's
+-- own global for the word; absent, the English word is better than nothing
+-- and better than an empty string. 0.65.0.
+function CN.RenownLabel(level)
+    local word = _G.RENOWN_LEVEL_LABEL
+
+    if type(word) ~= "string" or word == "" then
+        word = "Renown "
+    end
+
+    -- The client's string already ends in a space in every locale that ships
+    -- it; a locale that ever stops doing so must not produce "Renown12".
+    if word:sub(-1) ~= " " then
+        word = word .. " "
+    end
+
+    return word .. tostring(level or 0)
+end
 
 function CN.FactionLabel(token)
     if type(token) ~= "string" or token == "" then
@@ -2440,6 +2459,67 @@ CN.migrations = {
             CN.DebugPrint("Gave " .. split .. " exploration row(s) a character "
                 .. "dimension, dropped " .. names .. " stored name(s), and "
                 .. "removed " .. totals .. " write-only achievement total(s).")
+        end
+    end,
+
+    -- 18 -> 19. THE LAST TWO NAME STORES, AND A STANDING THAT WAS ENGLISH.
+    --
+    -- `titleNames` and `currencyNames` are localized strings the client
+    -- returns instantly. 0.64.0 gave their READERS a live path and left the
+    -- two writers alone, so both stores went on filling with names frozen at
+    -- whatever language last scanned -- and `Titles.Resolve` and
+    -- `Currencies.Resolve` searched only those stores, so a player who
+    -- changed client language could not find their own titles or currencies
+    -- by name.
+    --
+    -- `reputations[id].standing` is localized for every faction EXCEPT a
+    -- major one, where it was the hardcoded English "Renown 12" -- and
+    -- persisted, so an alt's row was frozen at that character's language too.
+    -- Dropped rather than rewritten: the next scan rebuilds it in the
+    -- player's own language, and a wrong language now is better replaced than
+    -- translated by guesswork.
+    --
+    -- Eighth and ninth applications of one rule: persist only what the client
+    -- cannot re-supply.
+    [18] = function(db)
+        db.account = db.account or {}
+
+        local titles     = CN.CountKeys(db.account.titleNames)
+        local currencies = CN.CountKeys(db.account.currencyNames)
+
+        db.account.titleNames   = nil
+        db.account.currencyNames = nil
+
+        local standings = 0
+
+        for _, record in pairs(db.account.reputations or {}) do
+            if type(record) == "table" and record.kind == "RENOWN"
+                and record.standing ~= nil then
+
+                record.standing = nil
+
+                standings = standings + 1
+            end
+        end
+
+        for _, character in pairs(db.characters or {}) do
+            if type(character) == "table" then
+                for _, record in pairs(character.reputations or {}) do
+                    if type(record) == "table" and record.kind == "RENOWN"
+                        and record.standing ~= nil then
+
+                        record.standing = nil
+
+                        standings = standings + 1
+                    end
+                end
+            end
+        end
+
+        if titles > 0 or currencies > 0 or standings > 0 then
+            CN.DebugPrint("Dropped " .. (titles + currencies)
+                .. " stored name(s) and " .. standings
+                .. " English renown standing(s) the client re-supplies.")
         end
     end,
 }
@@ -5523,6 +5603,11 @@ CN.localeKeys = {
     "turn",
     "back",
     "nothing actionable",
+
+    -- Added in 0.65.0. This sentence was doing two jobs -- three places
+    -- branched on it as a token while three others printed it -- so it is a
+    -- token now and this is the sentence.
+    "account-wide",
     "Stop cleared",
     "Stop %d of %d cleared",
     "Route complete.",
@@ -5610,6 +5695,7 @@ CN.RegisterLocale("deDE", {
     ["veer"] = "abbiegen",
     ["turn"] = "wenden",
     ["back"] = "zurück",
+    ["account-wide"] = "kontoweit",
     ["nothing actionable"] = "nichts zu tun",
     ["Stop cleared"] = "Station erledigt",
     ["Stop %d of %d cleared"] = "Station %d von %d erledigt",
@@ -5658,6 +5744,7 @@ CN.RegisterLocale("esES", {
     ["veer"] = "desvía",
     ["turn"] = "gira",
     ["back"] = "date la vuelta",
+    ["account-wide"] = "para toda la cuenta",
     ["nothing actionable"] = "nada que hacer",
     ["Stop cleared"] = "Parada completada",
     ["Stop %d of %d cleared"] = "Parada %d de %d completada",
@@ -5706,6 +5793,7 @@ CN.RegisterLocale("esMX", {
     ["veer"] = "desvía",
     ["turn"] = "gira",
     ["back"] = "date la vuelta",
+    ["account-wide"] = "para toda la cuenta",
     ["nothing actionable"] = "nada que hacer",
     ["Stop cleared"] = "Parada completada",
     ["Stop %d of %d cleared"] = "Parada %d de %d completada",
@@ -5754,6 +5842,7 @@ CN.RegisterLocale("frFR", {
     ["veer"] = "obliquez",
     ["turn"] = "tournez",
     ["back"] = "demi-tour",
+    ["account-wide"] = "à l'échelle du compte",
     ["nothing actionable"] = "rien à faire",
     ["Stop cleared"] = "Étape terminée",
     ["Stop %d of %d cleared"] = "Étape %d sur %d terminée",
@@ -5802,6 +5891,7 @@ CN.RegisterLocale("itIT", {
     ["veer"] = "devia",
     ["turn"] = "gira",
     ["back"] = "torna indietro",
+    ["account-wide"] = "per tutto l'account",
     ["nothing actionable"] = "niente da fare",
     ["Stop cleared"] = "Tappa completata",
     ["Stop %d of %d cleared"] = "Tappa %d di %d completata",
@@ -5847,6 +5937,7 @@ CN.RegisterLocale("koKR", {
     ["ahead"] = "직진",
     ["turn"] = "방향 전환",
     ["back"] = "뒤로",
+    ["account-wide"] = "계정 전체",
     ["nothing actionable"] = "할 일 없음",
     ["Stop cleared"] = "지점 완료",
     ["Stop %d of %d cleared"] = "%d/%d 지점 완료",
@@ -5890,6 +5981,7 @@ CN.RegisterLocale("ptBR", {
     ["veer"] = "desvie",
     ["turn"] = "vire",
     ["back"] = "volte",
+    ["account-wide"] = "para toda a conta",
     ["nothing actionable"] = "nada a fazer",
     ["Stop cleared"] = "Parada concluída",
     ["Stop %d of %d cleared"] = "Parada %d de %d concluída",
@@ -5935,6 +6027,7 @@ CN.RegisterLocale("ruRU", {
     ["ahead"] = "прямо",
     ["turn"] = "развернуться",
     ["back"] = "назад",
+    ["account-wide"] = "для всей учётной записи",
     ["nothing actionable"] = "нечего делать",
     ["Stop cleared"] = "Точка пройдена",
     ["Stop %d of %d cleared"] = "Точка %d из %d пройдена",
@@ -5979,6 +6072,7 @@ CN.RegisterLocale("zhCN", {
     ["veer"] = "偏转",
     ["turn"] = "转向",
     ["back"] = "折返",
+    ["account-wide"] = "全账号通用",
     ["nothing actionable"] = "暂无可做",
     ["Stop cleared"] = "站点完成",
     ["Stop %d of %d cleared"] = "站点 %d/%d 完成",
@@ -6024,6 +6118,7 @@ CN.RegisterLocale("zhTW", {
     ["ahead"] = "直行",
     ["turn"] = "轉向",
     ["back"] = "折返",
+    ["account-wide"] = "全帳號通用",
     ["nothing actionable"] = "暫無可做",
     ["Stop cleared"] = "站點完成",
     ["Stop %d of %d cleared"] = "站點 %d/%d 完成",
@@ -8330,7 +8425,7 @@ function CN.ExplainEmptyList()
 
     if hidden > 0 then
         table.insert(lines, hidden .. " objective type"
-            .. (hidden == 1 and " is" or "s are")
+            .. CN.Pluralize(hidden, " is", "s are")
             .. " hidden by your filter. " .. CN.Accent("/cn show")
             .. " lists them.")
     end
@@ -8342,7 +8437,7 @@ function CN.ExplainEmptyList()
 
     if failures > 0 then
         table.insert(lines, failures .. " thing"
-            .. (failures == 1 and " has" or "s have")
+            .. CN.Pluralize(failures, " has", "s have")
             .. " gone wrong inside the addon this session, which is enough "
             .. "to empty this list. " .. CN.Accent("/cn errors")
             .. " has the detail.")
@@ -8475,7 +8570,7 @@ CN:RegisterCommand{
         for _, row in ipairs(rows) do
             CN.PrintLine(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
                 row.name, row.average, row.worst, row.calls,
-                row.calls == 1 and "call" or "calls",
+                CN.Pluralize(row.calls, "call", "calls"),
                 row.cached and "" or " |cffffc74fstale|r"))
         end
 
@@ -10138,7 +10233,7 @@ CN:RegisterCommand{
         if #skipped > 0 then
             CN.Print("|cff8a8f96" .. CN.Count(#skipped, "objective")
                 .. " here "
-                .. (#skipped == 1 and "has" or "have")
+                .. CN.Pluralize(#skipped, "has", "have")
                 .. " no coordinates and cannot be routed.|r")
         end
 
@@ -11902,7 +11997,7 @@ UI.RegisterTab{
                 UI.Answer("Nothing is stale. Every source has been read today.")
             else
                 UI.Answer("Read " .. refreshed .. " stale "
-                    .. (refreshed == 1 and "source" or "sources") .. ".")
+                    .. CN.Pluralize(refreshed, "source", "sources") .. ".")
             end
 
             UI.Refresh()
@@ -11920,7 +12015,18 @@ UI.RegisterTab{
     refresh = function(panel)
         local entries = {}
 
-        local sources = UI.Sources()
+        -- TEN STORE WALKS, EVERY TWO SECONDS. 0.65.0.
+        --
+        -- This is the identical defect 0.61.0 fixed on the Collections tab --
+        -- eight `Summary()` calls, each walking its module's whole store, on
+        -- every two-second refresh -- and this sibling tab, which does TEN
+        -- plus a map POI scan, was not wrapped. Measured at retail scale it
+        -- is the most expensive refresh in the window, and it runs
+        -- continuously while questing because `QUEST_LOG_UPDATE` drives it.
+        --
+        -- Every number in it is already guarded by the same generation.
+        local sources = CN.Memo("ui:sources", CN.collectionGeneration,
+            UI.Sources)
 
         local stale = 0
 
@@ -13948,7 +14054,7 @@ UI.RegisterTab{
                     .. " of " .. #filters.TypeOrder() .. " kinds") or ""))
         elseif hidden > 0 then
             panel.focusNote:SetText("No focus set. " .. hidden .. " kind"
-                .. (hidden == 1 and " is" or "s are")
+                .. CN.Pluralize(hidden, " is", "s are")
                 .. " hidden by your own choices.")
         else
             panel.focusNote:SetText("No focus set: everything is in the list.")
@@ -19806,13 +19912,24 @@ function Quests.RememberOffer(poi)
 
     -- Only what the client cannot re-derive instantly: no names, no
     -- timestamps beyond the one that makes pruning possible.
+    local isNew = store[poi.questID] == nil
+
     store[poi.questID] = {
         mapID = poi.mapID,
         x     = poi.x and math.floor(poi.x * 1000 + 0.5) / 1000 or nil,
         y     = poi.y and math.floor(poi.y * 1000 + 0.5) / 1000 or nil,
     }
 
-    if CN.CountKeys(store) > Quests.rememberedCap then
+    -- THE CEILING IS TESTED WHEN THE SET GREW, NOT ON EVERY SIGHTING.
+    --
+    -- `CN.CountKeys` walks the whole six-hundred-entry store, and this runs
+    -- once per quest-start pin on every related map -- about thirty pins
+    -- across four maps in a quest hub, so eighteen thousand table iterations
+    -- for one boolean, from a provider on the `QUEST_LOG_UPDATE` firehose.
+    --
+    -- A store that did not gain a key cannot have crossed its ceiling, and
+    -- the caller above already knows whether this id was new. 0.65.0.
+    if isNew and CN.CountKeys(store) > Quests.rememberedCap then
         Quests.PruneRemembered()
     end
 
@@ -21435,7 +21552,20 @@ local function BuildRecord(data)
             record.expansion  = major.expansionID
             record.unlocked   = major.isUnlocked
             record.maxedOut   = Blizzard.HasMaximumRenown(factionID)
-            record.standing   = "Renown " .. tostring(major.renownLevel or 0)
+            -- THE CLIENT'S OWN WORD FOR IT. 0.65.0.
+            --
+            -- Every other `standing` on a record is localized -- the client's
+            -- `FACTION_STANDING_LABEL<n>` for a standard faction, its own
+            -- friendship reaction for a friendship one -- and this one was
+            -- hardcoded English AND persisted, so an alt's row was also
+            -- frozen at whatever language that character last scanned in. A
+            -- German player read "Standing: Renown 12" for one faction and
+            -- "Standing: Ehrfürchtig" for the next.
+            --
+            -- Same defect 0.64.0 fixed for Alliance and Horde on the Warband
+            -- roster, one file over. `RENOWN_LEVEL_LABEL` is a client global.
+            record.renownLevel = major.renownLevel or 0
+            record.standing    = CN.RenownLabel(major.renownLevel or 0)
         end
     else
         record.kind = "STANDARD"
@@ -21630,7 +21760,7 @@ end
 -- the recommendation engine can say "switch to this alt instead".
 function Reputations.BestCharacterFor(factionID)
     if AccountStore()[factionID] then
-        return nil, nil, "account-wide"
+        return nil, nil, CN.scopes.ACCOUNT
     end
 
     local bestKey, bestRecord
@@ -24167,11 +24297,8 @@ local Blizzard   = CN.Blizzard
 -- STORAGE
 ------------------------------------------------------------
 
--- Names are shared; known/unknown is per character.
-local function NameStore()
-    return CN.Account("titleNames")
-end
-
+-- Known/unknown is per character. Names are not stored at all: see
+-- `Titles.NameOf`.
 local function CharacterStore(character)
     character = character or CN.character
 
@@ -24184,7 +24311,6 @@ local function CharacterStore(character)
     return character.titles
 end
 
-Titles.NameStore      = NameStore
 Titles.CharacterStore = CharacterStore
 
 ------------------------------------------------------------
@@ -24192,8 +24318,7 @@ Titles.CharacterStore = CharacterStore
 ------------------------------------------------------------
 
 function Titles.Scan()
-    local names = NameStore()
-    local mine  = CharacterStore()
+    local mine = CharacterStore()
 
     if not mine then
         return 0, 0
@@ -24202,7 +24327,15 @@ function Titles.Scan()
     local seen, known = 0, 0
 
     for _, title in ipairs(Blizzard.GetTitles()) do
-        names[title.titleID] = title.name
+        -- `titleNames` IS NOT WRITTEN ANY MORE. 0.65.0.
+        --
+        -- 0.64.0 gave the hidden-objectives list a live client path for
+        -- titles and left this writer alone, so the store went on filling
+        -- with names frozen at whatever language last scanned -- and
+        -- `Titles.Resolve` searched only that store, so a player who changed
+        -- client language could not find their own titles by name.
+        --
+        -- Eighth store to lose a name it did not need to keep.
 
         mine[title.titleID] = title.known or nil
 
@@ -24226,14 +24359,24 @@ end
 -- SUMMARY
 ------------------------------------------------------------
 
+-- `known` IS THE CLIENT'S OWN LIST LENGTH, NOT A STORED COUNT. 0.65.0.
+--
+-- It used to be `CountKeys(titleNames)` -- the store this version stopped
+-- writing. Left alone it would have been zero on every character forever,
+-- which is the number `/cn titles` and the Titles breakdown both branch on:
+-- both would have told a player who had just scanned to go and scan.
+--
+-- `scanned` is what "no data yet" actually means. The client always knows how
+-- many titles exist; only whether THIS character's known/unknown flags have
+-- been read is a thing the addon has to remember.
 function Titles.Summary()
-    local names = NameStore()
-    local mine  = CharacterStore() or {}
+    local mine = CharacterStore() or {}
 
     local counts = {
-        known     = CN.CountKeys(names),
+        known     = #(Blizzard.GetTitles and Blizzard.GetTitles() or {}),
         onThisOne = CN.CountKeys(mine),
         onAccount = 0,
+        scanned   = (CN.Account("collectionScans") or {}).titles ~= nil,
     }
 
     -- A title counted once if any character has it.
@@ -24267,10 +24410,26 @@ function Titles.WhoHas(titleID)
     return holders
 end
 
+-- A title's name, from the client. Eighth of these; see `Achievements.NameOf`
+-- for the first. 0.65.0.
+--
+-- NO FALLBACK TO A STORE, for the reason spelled out in `Currencies.NameOf`:
+-- `CN.Account(key)` creates the table it is asked for, so a reader left
+-- pointing at `titleNames` puts back the store migration 18 deleted.
+function Titles.NameOf(titleID)
+    local live = Blizzard.GetTitleName and Blizzard.GetTitleName(titleID)
+
+    if live and live ~= "" then
+        return live
+    end
+
+    return "Title " .. tostring(titleID)
+end
+
 function Titles.Resolve(text)
     local titleID = CN.ToID(text)
 
-    if titleID and NameStore()[titleID] then
+    if titleID and CharacterStore() and CharacterStore()[titleID] ~= nil then
         return titleID
     end
 
@@ -24281,7 +24440,10 @@ function Titles.Resolve(text)
     local needle  = string.lower(text)
     local matches = {}
 
-    for id, name in pairs(NameStore()) do
+    -- OVER WHAT THIS CHARACTER HAS, NAMED LIVE. See the note in `Scan`.
+    for id in pairs(CharacterStore() or {}) do
+        local name = Titles.NameOf(id)
+
         if name and string.find(string.lower(name), needle, 1, true) then
             table.insert(matches, { id = id, name = name })
         end
@@ -24325,7 +24487,8 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.TITLE, function(titleID)
     local mine   = CharacterStore()
 
     if mine and mine[titleID] then
-        return states.COMPLETED, "Already earned by this character", NameStore()[titleID]
+        return states.COMPLETED, "Already earned by this character",
+               Titles.NameOf(titleID)
     end
 
     local holders = Titles.WhoHas(titleID)
@@ -24376,7 +24539,7 @@ CN:RegisterCommand{
     handler = function()
         local counts = Titles.Summary()
 
-        if counts.known == 0 then
+        if not counts.scanned then
             Print("No title data yet. Run /cn titlescan.")
             return
         end
@@ -24405,7 +24568,7 @@ CN:RegisterCommand{
             return
         end
 
-        Print(NameStore()[titleID] .. " |cff8a8f96(" .. titleID .. ")|r")
+        Print(Titles.NameOf(titleID) .. " |cff8a8f96(" .. titleID .. ")|r")
 
         local holders = Titles.WhoHas(titleID)
 
@@ -26549,6 +26712,30 @@ end
 -- Answers for any objective type that has per-character state. Returns
 -- bestKey, detail, scope -- where scope explains why the answer is what it
 -- is, including "account-wide" meaning the question does not apply.
+--
+-- THE SCOPE IS A TOKEN. 0.65.0.
+--
+-- Three places branch on `scope == "account-wide"` and three others PRINT the
+-- same value to the player. That is a string doing two jobs, and the addon
+-- has ten locale tables: the first translation of that sentence turns all
+-- three guards false at once, and `/cn alts` starts recommending a loading
+-- screen to switch characters for account-wide progress -- which the file
+-- that does the recommending says "must never become a suggestion to switch".
+--
+-- The tokens are these, and `CN.ScopeText` turns one into a sentence.
+CN.scopes = {
+    ACCOUNT   = "account-wide",
+    CHARACTER = "character",
+    UNKNOWN   = "unknown",
+}
+
+function CN.ScopeText(scope)
+    if scope == CN.scopes.ACCOUNT then
+        return CN.L["account-wide"]
+    end
+
+    return scope
+end
 -- THE FRESHEST HOLDER, NOT THE ALPHABETICALLY FIRST.
 --
 -- `WhoKnows` and `WhoHas` both `table.sort` their holders, which orders them
@@ -26602,7 +26789,7 @@ function Warband.WhoShould(objectiveType, id)
         local bestKey, bestRecord, accountWide = module.BestCharacterFor(id)
 
         if accountWide then
-            return nil, nil, "account-wide"
+            return nil, nil, CN.scopes.ACCOUNT
         end
 
         if bestKey then
@@ -26667,7 +26854,7 @@ function Warband.WhoShould(objectiveType, id)
     if objectiveType == types.PET or objectiveType == types.MOUNT
         or objectiveType == types.TOY or objectiveType == types.ACHIEVEMENT
         or objectiveType == types.APPEARANCE then
-        return nil, nil, "account-wide"
+        return nil, nil, CN.scopes.ACCOUNT
     end
 
     return nil, nil, "not tracked per character"
@@ -26683,7 +26870,7 @@ end
 function Warband.Suitability(objectiveType, id)
     local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
 
-    if scope == "account-wide" or not bestKey then
+    if scope == CN.scopes.ACCOUNT or not bestKey then
         return 0, nil
     end
 
@@ -26931,13 +27118,16 @@ CN:RegisterCommand{
 
         local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
 
-        if scope == "account-wide" then
+        if scope == CN.scopes.ACCOUNT then
             Print("That is account-wide; any character counts.")
             return
         end
 
         if not bestKey then
-            Print(tostring(scope) .. ".")
+            -- The SENTENCE, from the token. See `CN.scopes` above: the same
+            -- string was doing both jobs, so translating it would have turned
+            -- three guards false at once. 0.65.0.
+            Print(CN.ScopeText(scope) .. ".")
             return
         end
 
@@ -27592,8 +27782,22 @@ local DebugPrint = CN.DebugPrint
 local Blizzard   = CN.Blizzard
 
 -- Currency quantities are character state; which currencies exist is not.
-local function NameStore()
-    return CN.Account("currencyNames")
+-- A currency's name, from the client. Seventh store to get one of these; see
+-- `Achievements.NameOf` for the first. 0.65.0.
+--
+-- NO FALLBACK TO A STORE. `CN.Account(key)` CREATES the table it is asked
+-- for, so any reader left pointing at `currencyNames` resurrects the store
+-- migration 18 deleted -- an empty one, on every login, forever. The client
+-- answers this instantly and in the player's own language; there is nothing
+-- for a fallback to add.
+function Currencies.NameOf(currencyID)
+    local info = CN.Blizzard.GetCurrency and CN.Blizzard.GetCurrency(currencyID)
+
+    if info and info.name and info.name ~= "" then
+        return info.name
+    end
+
+    return "Currency " .. tostring(currencyID)
 end
 
 local function CharacterStore(character)
@@ -27608,7 +27812,6 @@ local function CharacterStore(character)
     return character.currencies
 end
 
-Currencies.NameStore      = NameStore
 Currencies.CharacterStore = CharacterStore
 
 ------------------------------------------------------------
@@ -27703,9 +27906,18 @@ end
 
 Currencies.IsCurrent = IsCurrent
 
+-- When the last sweep ran. Declared here, ABOVE its first use: a local
+-- declared below the line that assigns it is not the same variable -- the
+-- assignment creates a global and the throttle silently stops working.
+local lastScan = 0
+
+-- Every scan stamps the throttle, whichever path asked for it. Before this,
+-- the login scan and the manual one both left the timestamp alone, so the
+-- next coin picked up ran a second full sweep. 0.65.0.
 function Currencies.Scan()
-    local names = NameStore()
-    local mine  = CharacterStore()
+    lastScan = time()
+
+    local mine = CharacterStore()
 
     if not mine then
         return 0, 0, 0
@@ -27717,7 +27929,15 @@ function Currencies.Scan()
 
     for _, currency in ipairs(Blizzard.GetCurrencyList()) do
         if currency.currencyID then
-            names[currency.currencyID] = currency.name
+            -- `currencyNames` IS NOT WRITTEN ANY MORE. 0.65.0.
+            --
+            -- 0.64.0 gave every reader a live client path and left the writer
+            -- alone, so the store kept filling with names frozen at whatever
+            -- language last scanned -- and `Currencies.Resolve`, which
+            -- searches only the store, could not find a player's own
+            -- currencies by name after a language change.
+            --
+            -- Seventh store to lose a name it did not need to keep.
 
             -- THE CAP APPLIES TO WHAT THE CLIENT SAYS IT APPLIES TO. 0.62.0.
             --
@@ -27795,7 +28015,7 @@ function Currencies.Capped(character)
         if record.capped and IsCurrent(record, character) then
             table.insert(capped, {
                 currencyID = currencyID,
-                name       = NameStore()[currencyID],
+                name       = Currencies.NameOf(currencyID),
                 -- THE NUMBERS THE CAP WAS MEASURED AGAINST. 0.63.0.
                 --
                 -- 0.62.0 fixed the DETECTION -- a currency whose cap applies
@@ -27848,7 +28068,7 @@ function Currencies.WeeklyUnfilled(character)
             and IsCurrent(record, character) then
             table.insert(rows, {
                 currencyID = currencyID,
-                name       = NameStore()[currencyID],
+                name       = Currencies.NameOf(currencyID),
                 remaining  = record.weeklyRemaining,
                 earned     = record.earnedThisWeek,
                 maximum    = record.maxWeeklyQuantity,
@@ -27892,7 +28112,7 @@ end
 function Currencies.Resolve(text)
     local currencyID = CN.ToID(text)
 
-    if currencyID and NameStore()[currencyID] then
+    if currencyID and CharacterStore() and CharacterStore()[currencyID] then
         return currencyID
     end
 
@@ -27903,7 +28123,14 @@ function Currencies.Resolve(text)
     local needle  = string.lower(text)
     local matches = {}
 
-    for id, name in pairs(NameStore()) do
+    -- SEARCHED OVER WHAT THIS CHARACTER HAS, NAMED LIVE. 0.65.0.
+    --
+    -- This searched the stored name table, which no longer fills -- and even
+    -- before that it was frozen at the last scan's language, so a player who
+    -- changed client language could not find their own currencies by name.
+    for id in pairs(CharacterStore() or {}) do
+        local name = Currencies.NameOf(id)
+
         if name and string.find(string.lower(name), needle, 1, true) then
             table.insert(matches, { id = id, name = name })
         end
@@ -27974,8 +28201,6 @@ end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true })
 -- EVENTS
 ------------------------------------------------------------
 
-local lastScan = 0
-
 -- SIXTY SECONDS, NOT TEN, AND NOT WHILE THE PLAYER IS LOOKING. 0.64.0.
 --
 -- `CURRENCY_DISPLAY_UPDATE` fires on every coin picked up, so a ten-second
@@ -28005,10 +28230,24 @@ end
 Currencies.IsFrameOpen = CurrencyFrameOpen
 
 -- So the suite can reach the deferral, which is otherwise behind a minute's
--- wait. A guard nothing can exercise is a guard nothing tests.
+-- wait, and so a caller that genuinely wants the next update to sweep can say
+-- so. A guard nothing can exercise is a guard nothing tests.
+--
+-- NOT called before a manual scan: `Scan` stamps the timestamp itself, and
+-- resetting it first was the 0.64.0 bug that guaranteed a double sweep.
 function Currencies.ForgetLastScan()
     lastScan = 0
 end
+
+-- A NEW SESSION SWEEPS PROMPTLY.
+--
+-- The login scan stamps the throttle like every other path, which is right --
+-- but a player who reloads mid-session should not then wait a minute for the
+-- first update. Clearing on entering the world costs one sweep and keeps the
+-- first currency reading of a session current.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    Currencies.ForgetLastScan()
+end)
 
 CN:RegisterEvent("CURRENCY_DISPLAY_UPDATE", function()
     local now = time()
@@ -28096,15 +28335,18 @@ CN:RegisterCommand{
     order   = 78,
     help    = "Rescan currencies for this character.",
     handler = function()
-        -- A SCAN THE PLAYER ASKED FOR RE-ARMS THE TIMER. 0.64.0.
+        -- A SCAN THE PLAYER ASKED FOR RE-ARMS THE TIMER -- AFTERWARDS.
         --
-        -- The automatic sweep is a minute apart and defers while the player's
-        -- own currency window is open. Without this, a manual scan left the
-        -- old timestamp in place, so the next automatic sweep could fire
-        -- seconds after the player had just scanned by hand -- doing the
-        -- expensive three-pass read twice for one answer.
-        Currencies.ForgetLastScan()
-
+        -- 0.64.0 wrote this and put it in the wrong place: resetting the
+        -- timestamp BEFORE scanning sets it to zero, which makes the throttle
+        -- test false for the next sixty seconds and guarantees the very
+        -- double sweep the comment says it prevents. Pick up one coin a
+        -- second after a manual scan and the whole three-pass read ran again,
+        -- headers and all.
+        --
+        -- The timestamp belongs to the scan, so `Scan` stamps it itself now
+        -- and every path -- manual, automatic, login -- is throttled the same
+        -- way. 0.65.0.
         local seen, atCap, weekly = Currencies.Scan()
 
         Print("Scanned " .. seen .. " currencies.")
@@ -28142,8 +28384,12 @@ local Breakdown = CN:RegisterModule("Breakdown")
 local Print = CN.Print
 
 -- "1 are locked" reads as a bug even when the number is right.
+--
+-- Through the shared pluralizer, like everything else. This was the last
+-- private copy of the idea; 0.64.0 removed the other one from this file and
+-- left this. 0.65.0.
 local function Are(count)
-    return count == 1 and "is" or "are"
+    return CN.Pluralize(count, "is", "are")
 end
 
 -- THROUGH THE SHARED ONE. 0.64.0.
@@ -28466,7 +28712,7 @@ Breakdown.Register{
             total     = counts.known,
             remaining = counts.known - counts.onAccount,
             reasons   = reasons,
-            action    = counts.known == 0 and "/cn titlescan" or nil,
+            action    = (not counts.scanned) and "/cn titlescan" or nil,
         }
     end,
 }
@@ -29246,7 +29492,17 @@ CN.RegisterCandidateProvider("Exploration", function()
             table.insert(candidates, CN.NewObjective({
                 id              = record.achievementID,
                 type            = CN.objectiveTypes.EXPLORATION,
-                name            = record.name,
+                -- THROUGH THE ACCESSOR. 0.65.0.
+                --
+                -- `record.name` has been nil since 0.64.0 stopped storing it
+                -- and migration 17 deleted it from disk -- and that release
+                -- wired the replacement accessor into `Closest` and missed
+                -- this, the one place whose output the player actually reads.
+                -- So every exploration row rendered as its achievement id:
+                -- "1. 1275" in `/cn next`, on the map pin, in the heads-up
+                -- line, and "Ignored: nil" when it was hidden.
+                name            = Exploration.NameOf(record.achievementID,
+                    record),
                 accountWide     = true,
                 completionValue = math.max(1, 4 - remaining),
                 travelCost      = 0,
@@ -29378,10 +29634,20 @@ CN:RegisterCommand{
         local here = Exploration.ForCurrentZone()
 
         if here then
-            if here.completed then
+            -- THROUGH THE PER-CHARACTER ACCESSOR. 0.65.0.
+            --
+            -- `Summary`, `Closest` and the provider all go through
+            -- `DoneFor`; this read the flat fields, which hold whichever
+            -- character wrote last. So an alt could type `/cn exploration`
+            -- and read another character's numbers on the "This zone" line
+            -- while "Closest to finishing" three lines below showed its own.
+            local hereDone, hereComplete = Exploration.DoneFor(here)
+
+            if hereComplete then
                 Print("This zone: |cff73b873fully explored|r")
             else
-                Print("This zone: " .. here.done .. " / " .. here.criteria)
+                Print("This zone: " .. (hereDone or 0)
+                    .. " / " .. (here.criteria or 0))
 
                 local missing = Blizzard.GetIncompleteCriteria(here.achievementID, 6)
 
@@ -29681,20 +29947,33 @@ function Filters.DescribeObjective(objectiveType, id)
     end
 
     if objectiveType == types.MOUNT and numericID then
-        local record = CN.Account("mounts")[numericID]
+        -- The same order as every other branch. It is inert today only
+        -- because migration 16 emptied the stored field -- which is to say
+        -- the rule was written down twice in one function and the two copies
+        -- disagreed, waiting for the next release to reinstate a name. 0.65.0.
+        local mounts = CN:GetModule("Mounts")
 
-        if record and record.name then
-            return record.name
+        if mounts and mounts.NameOf then
+            return mounts.NameOf(numericID, CN.Account("mounts")[numericID])
         end
 
-        local live = CN.Blizzard.GetMountByID(numericID)
-
-        return (live and live.name) or ("Mount " .. numericID)
+        return "Mount " .. numericID
     end
 
     if objectiveType == types.TOY and numericID then
-        local record = CN.Account("toys")[numericID]
-        return record and record.name or ("Toy " .. numericID)
+        -- CLIENT FIRST, LIKE ITS FOUR NEIGHBOURS. 0.65.0.
+        --
+        -- 0.64.0 flipped the reputation, currency, recipe and title branches
+        -- to ask the client first and left this one reading a field 0.63.0
+        -- had stopped writing -- so a hidden toy was unnameable, and
+        -- `/cn unhide <name>` could not match it.
+        local toys = CN:GetModule("Toys")
+
+        if toys and toys.NameOf then
+            return toys.NameOf(numericID, CN.Account("toys")[numericID])
+        end
+
+        return "Toy " .. numericID
     end
 
     if (objectiveType == types.RARE or objectiveType == types.TREASURE) and numericID then
@@ -29760,14 +30039,21 @@ function Filters.DescribeObjective(objectiveType, id)
     -- Migration 16's header says it removed "the last of the names the client
     -- hands back for free", and these were still being read from disk with no
     -- fallback to the client that answers instantly.
+    -- THROUGH THE MODULE, NOT A SECOND COPY OF IT. 0.65.0.
+    --
+    -- These two each carried their own live-then-store lookup, written before
+    -- `Currencies.NameOf` and `Titles.NameOf` existed. Two copies of one rule
+    -- drift, and these had already: both still ended at a name store that
+    -- migration 18 deletes -- and `CN.Account(key)` CREATES the table it is
+    -- asked for, so reading it here put the store back, empty, every login.
     if objectiveType == types.CURRENCY and numericID then
-        local info = CN.Blizzard.GetCurrency and CN.Blizzard.GetCurrency(numericID)
+        local currencyModule = CN:GetModule("Currencies")
 
-        if info and info.name then
-            return info.name
+        if currencyModule and currencyModule.NameOf then
+            return currencyModule.NameOf(numericID)
         end
 
-        return CN.Account("currencyNames")[numericID] or ("Currency " .. numericID)
+        return "Currency " .. numericID
     end
 
     if objectiveType == types.RECIPE and numericID then
@@ -29775,13 +30061,13 @@ function Filters.DescribeObjective(objectiveType, id)
     end
 
     if objectiveType == types.TITLE and numericID then
-        local live = CN.Blizzard.GetTitleName and CN.Blizzard.GetTitleName(numericID)
+        local titleModule = CN:GetModule("Titles")
 
-        if live and live ~= "" then
-            return live
+        if titleModule and titleModule.NameOf then
+            return titleModule.NameOf(numericID)
         end
 
-        return CN.Account("titleNames")[numericID] or ("Title " .. numericID)
+        return "Title " .. numericID
     end
 
     return tostring(objectiveType) .. " " .. tostring(id)
@@ -30567,6 +30853,31 @@ end
 -- once per known recipe, and almost always gets no answer. WhoSells allocates
 -- a result array every time it is called; this does not allocate at all until
 -- there is something to return.
+-- A SELLER ROW, WITH ITS ZONE DERIVED. 0.65.0.
+--
+-- `FirstLocatedSeller` handed back the raw store record, and migration 16
+-- dropped `zone` from those rows because the map id derives it. `WhoSells`
+-- was given the live derivation and the three consumers of THIS function were
+-- not -- so a recommended recipe read "sold by Zen'shiri" with the zone line
+-- silently gone, and the objective's own `zone` field was nil.
+--
+-- One shape for a seller, built in one place.
+function Vendors.SellerFrom(record, npcID)
+    if type(record) ~= "table" then
+        return nil
+    end
+
+    return {
+        npcID = npcID,
+        name  = record.name,
+        zone  = record.mapID and CN.Blizzard.GetMapName(record.mapID)
+            or record.zone,
+        mapID = record.mapID,
+        x     = record.x,
+        y     = record.y,
+    }
+end
+
 function Vendors.FirstLocatedSeller(itemID)
     if not itemID then
         return nil
@@ -30586,7 +30897,7 @@ function Vendors.FirstLocatedSeller(itemID)
         local record = store[npcID]
 
         if record and record.mapID and record.x and record.y then
-            return record, npcID
+            return Vendors.SellerFrom(record, npcID), npcID
         end
     end
 
@@ -30623,18 +30934,13 @@ function Vendors.WhoSells(itemID)
         local record = Store()[npcID]
 
         if record then
-            table.insert(sellers, {
-                npcID = npcID,
-                name  = record.name,
-                -- Derived from the map id, live. See the note in the
-                -- capture above.
-                zone  = record.mapID and Blizzard.GetMapName(record.mapID)
-                    or record.zone,
-                mapID = record.mapID,
-                x     = record.x,
-                y     = record.y,
-                price = Vendors.PriceOf(record, itemID),
-            })
+            -- Through the one builder, so this and `FirstLocatedSeller`
+            -- cannot describe a seller differently again. 0.65.0.
+            local seller = Vendors.SellerFrom(record, npcID)
+
+            seller.price = Vendors.PriceOf(record, itemID)
+
+            table.insert(sellers, seller)
         end
     end
 
@@ -31884,7 +32190,7 @@ function Setup.RemindIfNeeded()
 
     CN.PrintBlock(
         CN.Count(#missing, "thing")
-            .. " here " .. (#missing == 1 and "has" or "have")
+            .. " here " .. CN.Pluralize(#missing, "has", "have")
             .. " never been read: "
             .. CN.Muted(string.lower(table.concat(named, ", "))),
         {
@@ -32308,7 +32614,16 @@ function Goals.Plan(goal)
         local record = CN.Account("mounts")[goal.id]
 
         if record then
-            plan.source = record.source
+            -- LIVE. 0.65.0.
+            --
+            -- 0.62.0 stopped storing `mounts[id].source` and its own comment
+            -- says "the two places that DISPLAY it read it live" -- this was
+            -- the third, so a mount goal simply lost its "Source:" line and
+            -- the matching reason on the `/cn next` row.
+            local mounts = CN:GetModule("Mounts")
+
+            plan.source = mounts and mounts.SourceText
+                and mounts.SourceText(goal.id, record)
 
             if record.isFactionSpecific then
                 step("Faction-locked. Only obtainable on one faction.")
@@ -32348,7 +32663,13 @@ function Goals.Plan(goal)
 
         if record then
             plan.mapID, plan.x, plan.y = record.mapID, record.x, record.y
-            plan.zone = record.zone
+
+            -- DERIVED, like the quest branch above. 0.65.0. Migration 15
+            -- dropped `rares[id].zone` on the grounds that it was "read by
+            -- nothing" -- and this read it, so the line became
+            -- "Location known: map 2022" where it used to name the zone.
+            plan.zone = record.mapID and CN.Blizzard.GetMapName(record.mapID)
+                or record.zone
 
             step("Seen " .. (record.sightings or 1) .. " time"
                 .. CN.Pluralize((record.sightings or 1), "") .. " here.")
@@ -37488,7 +37809,7 @@ function Alts.Assignments()
 
             -- "account-wide" is a real answer meaning the question does not
             -- apply, and must never become a suggestion to switch.
-            if ok and bestKey and scope ~= "account-wide"
+            if ok and bestKey and scope ~= CN.scopes.ACCOUNT
                 and bestKey ~= CN.characterKey then
 
                 local character = CN.db and CN.db.characters
@@ -40437,7 +40758,7 @@ CN:RegisterCommand{
 
             local placed = MapPins.Refresh(true)
 
-            Print("Redrew " .. placed .. (placed == 1 and " stop." or " stops."))
+            Print("Redrew " .. placed .. CN.Pluralize(placed, " stop.", " stops."))
             return
         end
 
@@ -45912,7 +46233,7 @@ CN.RegisterCandidateProvider("Instances", function()
                 lockout.defeated .. " of " .. lockout.encounters
                     .. " already defeated" .. CN.DASH .. "those kills expire at the reset",
                 lockout.remaining .. " "
-                    .. (lockout.remaining == 1 and "boss" or "bosses") .. " left",
+                    .. CN.Pluralize(lockout.remaining, "boss", "bosses") .. " left",
             }
 
             if lockout.resetsIn then
@@ -45969,7 +46290,7 @@ CN:RegisterCommand{
         end
 
         Print("Saved to " .. #lockouts
-            .. (#lockouts == 1 and " instance:" or " instances:"))
+            .. CN.Pluralize(#lockouts, " instance:", " instances:"))
 
         for _, lockout in ipairs(lockouts) do
             CN.PrintLine("  " .. Instances.Describe(lockout))
@@ -45989,10 +46310,10 @@ CN:RegisterCommand{
 
         if summary.unfinished > 0 then
             Print(summary.bosses .. " "
-                .. (summary.bosses == 1 and "boss" or "bosses")
+                .. CN.Pluralize(summary.bosses, "boss", "bosses")
                 .. " still available across "
                 .. summary.unfinished
-                .. (summary.unfinished == 1 and " lockout." or " lockouts."))
+                .. CN.Pluralize(summary.unfinished, " lockout.", " lockouts."))
         else
             Print("|cff8a8f96Everything you are saved to is cleared.|r")
         end
@@ -46035,7 +46356,7 @@ CN:RegisterCommand{
         end
 
         Print("\"" .. args .. "\" " .. CN.DASH .. " " .. #results
-            .. (#results == 1 and " encounter:" or " encounters:"))
+            .. CN.Pluralize(#results, " encounter:", " encounters:"))
 
         for _, result in ipairs(results) do
             local line = "  " .. tostring(result.encounter or "?")
@@ -50366,7 +50687,7 @@ CN:RegisterCommand{
             local cleared = Errors.Clear()
 
             Print("Cleared " .. cleared
-                .. (cleared == 1 and " recorded error." or " recorded errors."))
+                .. CN.Pluralize(cleared, " recorded error.", " recorded errors."))
             return
         end
 
@@ -50429,7 +50750,7 @@ CN:RegisterCommand{
             return
         end
 
-        Print(#ring .. (#ring == 1 and " error" or " errors")
+        Print(#ring .. CN.Pluralize(#ring, " error", " errors")
             .. " recorded this session:")
 
         for _, entry in ipairs(ring) do
@@ -50474,7 +50795,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.64.0
+## Version: 0.65.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -50729,6 +51050,71 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.65.0]
+
+Nineteen defects. Fifteen of them were the *reading* half of a change made in
+0.63.0 or 0.64.0: a name the addon correctly stopped storing, still being
+displayed from the store that no longer had it. That produced blank text on
+screen — a list entry reading "1. 1275" instead of "Explore Eversong Woods".
+Two mechanical checks were added so this shape is caught by the build rather
+than by a reader.
+
+### Fixed — text you read
+
+- **Zone exploration objectives had no name at all.** The recommendation list
+  showed the achievement's number where its name belongs, on every client and
+  in every language. So did the goal line, and so did "This zone" in `/cn
+  exploration`.
+- **A toy you have hidden could not be named**, and a mount goal stopped saying
+  where the mount comes from — the sentence that makes the row actionable.
+- **A rare's goal line printed a raw map number** instead of the zone's name.
+- **Three vendor rows lost the zone they are in**, so "where do I buy this"
+  answered with coordinates and no place.
+- **`/cn title <name>` raised a Lua error** rather than printing the title, and
+  a title you already hold reported itself with no name beside it.
+- **`/cn titles` and the Titles breakdown told you to run a scan you had just
+  run** — permanently. Both branch on how many titles exist, which had become
+  zero for everyone.
+- **Renown was written in English beside standings written in yours**, and was
+  stored that way, so an alt's row stayed frozen at whatever language that
+  character last logged in with.
+- **"Account-wide" was doing two jobs at once**: the words shown to you *and*
+  the value six guards compare against. Translating it would have flipped every
+  one of those guards false and started recommending that you log out and
+  switch characters for progress that is shared. It is a token now, and the
+  sentence beside it is translated in all eleven locales.
+
+### Fixed — behaviour
+
+- **The currency throttle was inverted.** 0.64.0 cleared the timer *before*
+  scanning rather than after, which guaranteed the second full sweep it was
+  written to prevent: pick up one coin a second later and the entire three-pass
+  read ran again.
+- **Hidden mounts were named from disk first** and from the game second, alone
+  among the collections.
+
+### Faster
+
+- **The Sources tab is cached like its two siblings.** It walked ten stores on
+  every refresh — twice a second while the window is open.
+- **A quest pin you have already seen no longer rewalks the remembered
+  store.**
+
+### Internal
+
+- **Two build-time checks, because the process rule was not enough.** The rule
+  after 0.63.0 was "when you change a writer, find every reader". It was
+  followed, and it still missed fifteen readers across two releases. So: every
+  candidate the addon can produce is now built at test time and asserted to
+  have a real name, and any file that reads a saved-variable store the upgrade
+  ladder deletes now fails the build. The second one matters more than it
+  looks: asking for a store *creates* it, so a deleted store and a leftover
+  reader do not cancel out — the reader silently puts it back, empty, at every
+  login.
+- **The last of the hand-rolled pluralizers, and the last two name stores.**
+  Eight and ninth applications of one rule: persist only what the game cannot
+  hand back for free.
 
 ## [0.64.0]
 
@@ -55984,7 +56370,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.64.0
+0.65.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -57713,7 +58099,7 @@ mutate "Core.lua" \
     "a clock that moved backwards prints a negative age"
 
 mutate "Core.lua" \
-    "    return days .. (days == 1 and \" day ago\" or \" days ago\")" \
+    "    return days .. CN.Pluralize(days, \" day ago\", \" days ago\")" \
     "    return days .. \" days ago\"" \
     "one day ago is reported in the plural"
 
@@ -58673,6 +59059,67 @@ mutate "Core.lua" \
     "    local global = CN.factionGlobals[token]" \
     "    local global = nil" \
     "the roster prints an untranslated faction token"
+
+# ------------------------------------------------------------
+# 0.65.0
+# ------------------------------------------------------------
+
+mutate "Modules/Exploration.lua" \
+    "                name            = Exploration.NameOf(record.achievementID,
+                    record)," \
+    "                name            = record.name," \
+    "every exploration row renders as its achievement id"
+
+mutate "Modules/Vendors.lua" \
+    "        zone  = record.mapID and CN.Blizzard.GetMapName(record.mapID)
+            or record.zone," \
+    "        zone  = record.zone," \
+    "a recommended recipe loses the zone its vendor is in"
+
+mutate "Modules/Goals.lua" \
+    "            plan.source = mounts and mounts.SourceText
+                and mounts.SourceText(goal.id, record)" \
+    "            plan.source = record.source" \
+    "a mount goal stops saying where the mount comes from"
+
+mutate "Modules/Exploration.lua" \
+    "            local hereDone, hereComplete = Exploration.DoneFor(here)" \
+    "            local hereDone, hereComplete = here.done, here.completed" \
+    "the this-zone line shows another character's exploration"
+
+mutate "Modules/Reputations.lua" \
+    "            record.standing    = CN.RenownLabel(major.renownLevel or 0)" \
+    "            record.standing    = \"Renown \" .. tostring(major.renownLevel or 0)" \
+    "renown is printed in English beside translated standings"
+
+# NOT MUTATED: `CN.scopes.ACCOUNT` and the literal are the same string today,
+# so swapping them cannot change behaviour -- the whole point is that they stop
+# being the same the moment the sentence is translated. A mutation that cannot
+# fail does not belong here; the property is asserted as a source rule in the
+# 0.65.0 block instead.
+
+mutate "Modules/Titles.lua" \
+    "    for id in pairs(CharacterStore() or {}) do
+        local name = Titles.NameOf(id)" \
+    "    for id, name in pairs(CN.Account(\"titleNames\")) do" \
+    "a title cannot be found by name after a language change"
+
+mutate "Modules/Currencies.lua" \
+    "function Currencies.Scan()
+    lastScan = time()" \
+    "function Currencies.Scan()" \
+    "a manual scan arms a second sweep a second later"
+
+mutate "UI.lua" \
+    "        local sources = CN.Memo(\"ui:sources\", CN.collectionGeneration,
+            UI.Sources)" \
+    "        local sources = UI.Sources()" \
+    "the Sources tab rewalks ten stores every two seconds"
+
+mutate "Modules/Quests.lua" \
+    "    if isNew and CN.CountKeys(store) > Quests.rememberedCap then" \
+    "    if CN.CountKeys(store) > Quests.rememberedCap then" \
+    "every quest pin walks the whole remembered store"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -60691,6 +61138,11 @@ end
 -- client has always kept both names in these globals; the stub did not have
 -- them, so the two could not be told apart from here. Deliberately NOT
 -- English, like the class names above.
+-- The client's own word for renown, with its trailing space. Deliberately not
+-- English, like everything else here: a standing that reads "Renown 12" beside
+-- one that reads "Ehrfürchtig" is the defect.
+RENOWN_LEVEL_LABEL         = "Ruf "
+
 FACTION_ALLIANCE           = "Allianz"
 FACTION_HORDE              = "Horde"
 FACTION_STANDING_LABEL4    = "Neutral"
@@ -61697,6 +62149,10 @@ io.stdout:setvbuf("line")
 -- an eager refresh and a deferred one produce the same text -- so it is
 -- asserted against the file. Used sparingly and only where the rule really is
 -- structural.
+-- The .toc order, published so a source lint can walk every file rather than
+-- a hand-kept list that the next new module is not added to.
+CN_TEST_ADDON_FILES = files
+
 function CN_TEST_ReadAddonFile(relative)
     local handle = io.open(ROOT .. "/" .. relative, "r")
 
@@ -67360,7 +67816,12 @@ end)()
         local declaredAt = {}
 
         for number, line in ipairs(lines) do
-            local name = line:match("^%s*local%s+function%s+([%w_]+)%s*%(")
+            -- FILE-LEVEL, like the bare form below: a `local function`
+            -- nested inside another function is scoped to it, and a name
+            -- above it is a different variable entirely. Both real bugs this
+            -- lint has caught -- `IdBefore` in 0.60.0 and `BuildItemIndex` in
+            -- 0.61.0 -- were file-level.
+            local name = line:match("^local%s+function%s+([%w_]+)%s*%(")
 
             if name and not declaredAt[name] then
                 declaredAt[name] = number
@@ -67370,8 +67831,12 @@ end)()
             -- `local NAME` followed later by `function NAME(` are both
             -- correct and must not be flagged, so a bare `local NAME`
             -- counts as the declaration point.
-            local bare = line:match("^%s*local%s+([%w_]+)%s*$")
-                or line:match("^%s*local%s+([%w_]+)%s*=")
+            -- FILE-LEVEL ONLY, for the same scope reason: `local x` inside
+            -- a function is a different variable from one at the top of the
+            -- file, and only the file-level one can be touched from another
+            -- function above it.
+            local bare = line:match("^local%s+([%w_]+)%s*$")
+                or line:match("^local%s+([%w_]+)%s*=")
 
             if bare and not declaredAt[bare] then
                 declaredAt[bare] = number
@@ -67384,17 +67849,51 @@ end)()
 
                 -- Not a comment, and not reached through a table.
                 if not line:match("^%s*%-%-") then
-                    local callAt = line:match("()" .. name .. "%s*%(")
+                    -- CALLS, READS AND ASSIGNMENTS. WIDENED IN 0.65.0.
+                    --
+                    -- This checked only `NAME(`. 0.65.0 moved a throttle
+                    -- timestamp's ASSIGNMENT above its `local` declaration --
+                    -- which in Lua does not error, does not call anything,
+                    -- and quietly creates a GLOBAL while the real local stays
+                    -- at its initial value forever. The throttle simply
+                    -- stopped throttling, in a sweep that expands the
+                    -- player's currency headers.
+                    --
+                    -- A call is one way to touch a name too early. Any
+                    -- mention of it is.
+                    -- A CALL, OR AN ASSIGNMENT. Nothing wider than that.
+                    --
+                    -- A first attempt flagged every mention, which is
+                    -- unworkable: a function PARAMETER named `text` is a
+                    -- different variable from a file-local named `text`, and
+                    -- line-based matching cannot see scope. It produced 1,829
+                    -- reports, none of them real.
+                    --
+                    -- These two forms are unambiguous. `NAME(` above the
+                    -- declaration is the 0.60.0 and 0.61.0 bug; `NAME =` at
+                    -- the start of a statement is the 0.65.0 one, where an
+                    -- assignment above the `local` creates a GLOBAL and the
+                    -- real local keeps its initial value forever. Both are
+                    -- excluded when the name is bound on the same line.
+                    local callAt   = line:match("()" .. name .. "%s*%(")
+                    local assignAt = line:match("^%s*()" .. name .. "%s*=[^=]")
 
-                    if callAt then
-                        local previous = callAt > 1
-                            and line:sub(callAt - 1, callAt - 1) or ""
+                    local usedAt = callAt or assignAt
+
+                    local bound = line:match("^%s*local%s+" .. name)
+                        or line:match("^%s*for%s+[%w_,%s]*" .. name)
+                        or line:match("^%s*function%s+" .. name)
+                        or line:match("function%s*%([^%)]*" .. name)
+
+                    if usedAt and not bound then
+                        local previous = usedAt > 1
+                            and line:sub(usedAt - 1, usedAt - 1) or ""
 
                         if previous ~= "." and previous ~= ":"
                             and not previous:match("[%w_]") then
 
                             table.insert(offenders, relative .. ":" .. number
-                                .. " calls " .. name
+                                .. " uses " .. name
                                 .. ", declared local at line " .. declaration)
                         end
                     end
@@ -67420,13 +67919,88 @@ end)()
     end
 
     assert(#offenders == 0,
-        #offenders .. " local function(s) are called above their own "
-        .. "declaration. In the game that is a nil global, and it throws only "
-        .. "when the line runs.")
+        #offenders .. " local(s) are used above their own declaration. In "
+        .. "the game a read is a nil global, and an assignment silently "
+        .. "creates one while the real local keeps its initial value.")
 
     assert(scanned > 20, "the scan must have read the tree, read " .. scanned)
 
     print("  " .. scanned .. " files, no local function called before it exists")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY OBJECTIVE THE PLAYER SEES HAS A NAME.
+    --
+    -- 0.65.0 found that the Exploration provider had been emitting rows with
+    -- `name = record.name` after 0.64.0 stopped writing that field -- so every
+    -- exploration row rendered as its achievement id: "1. 1275" in `/cn next`,
+    -- on the map pin, in the heads-up line, and "Ignored: nil" when hidden.
+    --
+    -- It shipped because no test asserted that a candidate is CALLED
+    -- anything. Four more findings that release were the same shape: a field a
+    -- recent change stopped writing, still read somewhere else. Reading a
+    -- nil name is the version of that a player sees, so it is checked here,
+    -- for every provider, on every build.
+    ------------------------------------------------------------
+    -- THE STORES MUST BE POPULATED, or a provider that reads an empty one
+    -- emits nothing and this check passes by having nothing to look at --
+    -- which is exactly how the Exploration defect shipped.
+    for _, moduleName in ipairs({
+        "Exploration", "Mounts", "Pets", "Toys", "Achievements", "Currencies",
+        "Reputations", "Titles", "Loremaster",
+    }) do
+        local module = CN:GetModule(moduleName)
+
+        if module and module.Scan then
+            pcall(module.Scan)
+        end
+    end
+
+    local checked, providers = 0, 0
+
+    for name, provider in pairs(CN.candidateProviders) do
+        providers = providers + 1
+
+        local ok, rows = pcall(provider.fn)
+
+        if ok and type(rows) == "table" then
+            for _, objective in ipairs(rows) do
+                assert(objective.name ~= nil,
+                    "provider " .. name .. " emitted an objective with no "
+                    .. "name; it will render as its id")
+
+                assert(type(objective.name) == "string",
+                    "provider " .. name .. " emitted a "
+                    .. type(objective.name) .. " as a name")
+
+                assert(objective.name ~= "",
+                    "provider " .. name .. " emitted an empty name")
+
+                -- The shape a nil field takes once it has been concatenated.
+                assert(not objective.name:find("nil", 1, true),
+                    "provider " .. name .. " emitted a name containing "
+                    .. "\"nil\": " .. objective.name)
+
+                for _, reason in ipairs(objective.reasons or {}) do
+                    assert(type(reason) == "string"
+                        and not reason:find("nil", 1, true),
+                        "provider " .. name .. " emitted a reason containing "
+                        .. "\"nil\": " .. tostring(reason))
+                end
+
+                checked = checked + 1
+            end
+        end
+    end
+
+    assert(providers > 15,
+        "the check must have reached the real provider set, saw " .. providers)
+
+    assert(checked > 0, "and at least one objective")
+
+    print("  " .. checked .. " objectives from " .. providers
+        .. " providers, every one of them named")
 end)()
 
 print("\nOne identity per answer:")
@@ -68746,6 +69320,390 @@ print("\nStubs, audited against a real client:")
             or ""))
 end)()
 
+
+print("\nWhat 0.65.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A SELLER IS DESCRIBED IN ONE PLACE.
+    --
+    -- `FirstLocatedSeller` handed back the raw store record, and migration 16
+    -- dropped `zone` from those rows because the map id derives it. `WhoSells`
+    -- got the live derivation; the three consumers of the other function did
+    -- not -- so a recommended recipe said "sold by Zen'shiri" with the zone
+    -- silently gone.
+    ------------------------------------------------------------
+    local vendorModule = CN:GetModule("Vendors")
+
+    local vendorStore = CN.Account("vendors")
+
+    vendorStore[913001] = {
+        name  = "Trader Halkaz",
+        mapID = 94,
+        x     = 0.31,
+        y     = 0.62,
+        items = { [880002] = 25000 },
+    }
+
+    vendorModule.ForgetItemIndex()
+
+    local seller = vendorModule.FirstLocatedSeller(880002)
+
+    assert(seller, "the seller must be found")
+
+    assert(seller.zone and seller.zone ~= "",
+        "and its zone derived from the map id, not read from a field "
+        .. "migration 16 deleted: " .. tostring(seller.zone))
+
+    local listed = vendorModule.WhoSells(880002)
+
+    assert(listed[1] and listed[1].zone == seller.zone,
+        "both readers describe the same seller the same way")
+
+    vendorStore[913001] = nil
+    vendorModule.ForgetItemIndex()
+
+    print("  a seller's zone is derived wherever a seller is described")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCOPE IS A TOKEN, NOT A SENTENCE THAT THREE GUARDS DEPEND ON.
+    --
+    -- Three places branched on `scope == "account-wide"` and three others
+    -- printed the same value. The first translation of that sentence would
+    -- have turned every guard false at once, and `/cn alts` would start
+    -- recommending a loading screen to switch characters for account-wide
+    -- progress -- the one thing that file says must never happen.
+    ------------------------------------------------------------
+    assert(CN.scopes and CN.scopes.ACCOUNT,
+        "the scope tokens exist")
+
+    assert(CN.ScopeText(CN.scopes.ACCOUNT) == CN.L["account-wide"],
+        "and the sentence comes from the locale table")
+
+    -- EVERY guard, not just one file. The token and the sentence are the
+    -- same string today, which is exactly why a behavioural test cannot see
+    -- the difference -- and why the first translation of that sentence would
+    -- turn every guard false at once.
+    for _, file in ipairs({
+        "Modules/Alts.lua", "Modules/Warband.lua", "Modules/Reputations.lua",
+        "Modules/Goals.lua",
+    }) do
+        local source = CN_TEST_ReadAddonFile(file)
+
+        assert(source, file .. " must be readable")
+
+        for line in source:gmatch("[^\n]+") do
+            if not line:match("^%s*%-%-") then
+                assert(not line:find('== "account-wide"', 1, true)
+                    and not line:find('~= "account-wide"', 1, true),
+                    file .. " compares a scope against the display sentence: "
+                    .. line)
+            end
+        end
+    end
+
+    print("  a scope is a token and its sentence is translated")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A STORE A MIGRATION DELETES MUST HAVE NO READERS LEFT. 0.65.0.
+    --
+    -- `CN.Account(key)` CREATES the table it is asked for. So a migration
+    -- that drops a store and a reader that still asks for it do not cancel
+    -- out -- the reader wins, silently, on the login after the migration
+    -- runs, and every login after that. The store comes back empty, the
+    -- migration's own count reports success, and nothing in the addon looks
+    -- wrong until a denominator built on `CountKeys` reads zero forever.
+    --
+    -- That is exactly what 0.65.0 shipped into review: two stores deleted by
+    -- migration 18 and five readers left behind, one of which -- the Titles
+    -- breakdown -- would have told every player to run a scan they had just
+    -- run.
+    --
+    -- DERIVED, NOT LISTED. The dropped keys are read out of the migration
+    -- ladder itself, so the next store dropped is covered the day it is
+    -- dropped rather than the day someone remembers this test.
+    ------------------------------------------------------------
+    local database = CN_TEST_ReadAddonFile("Database.lua")
+
+    assert(database, "Database.lua must be readable")
+
+    local dropped = {}
+    local anyDropped = false
+
+    for key in database:gmatch("db%.account%.([%w_]+)%s*=%s*nil") do
+        dropped[key]  = true
+        anyDropped    = true
+    end
+
+    assert(anyDropped,
+        "the migration ladder must drop at least one store, or this lint is "
+        .. "asserting nothing")
+
+    for _, relative in ipairs(CN_TEST_ADDON_FILES) do
+        if relative ~= "Database.lua" then
+            local source = CN_TEST_ReadAddonFile(relative)
+
+            assert(source, relative .. " must be readable")
+
+            for line in source:gmatch("[^\n]+") do
+                if not line:match("^%s*%-%-") then
+                    for key in line:gmatch('CN%.Account%("([%w_]+)"%)') do
+                        assert(not dropped[key],
+                            relative .. " still reads a store a migration "
+                            .. "deletes, which puts it back: " .. line)
+                    end
+                end
+            end
+        end
+    end
+
+    print("  no file reads a store the migration ladder deletes")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- RENOWN IS A WORD THE CLIENT OWNS.
+    --
+    -- Every other standing on a record is localized; this one was hardcoded
+    -- English AND persisted, so an alt's row was frozen at that character's
+    -- language too.
+    ------------------------------------------------------------
+    assert(CN.RenownLabel(12) == RENOWN_LEVEL_LABEL .. "12",
+        "the client's own word: " .. CN.RenownLabel(12))
+
+    local reputations = CN:GetModule("Reputations")
+
+    reputations.Scan()
+
+    for id, record in pairs(reputations.AccountStore()) do
+        if record.kind == "RENOWN" then
+            assert(record.standing
+                and record.standing:find(RENOWN_LEVEL_LABEL, 1, true),
+                "faction " .. id .. " must name renown the client's way: "
+                .. tostring(record.standing))
+        end
+    end
+
+    print("  renown is named in the client's language")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A NAME THE CLIENT ANSWERS IS NOT WRITTEN TO DISK.
+    --
+    -- 0.64.0 gave titles and currencies live READ paths and left both WRITERS
+    -- alone, so the stores went on filling with names frozen at the last
+    -- scan's language -- and both `Resolve` functions searched only those
+    -- stores.
+    ------------------------------------------------------------
+    local titles     = CN:GetModule("Titles")
+    local currencyModule = CN:GetModule("Currencies")
+
+    titles.Scan()
+    currencyModule.Scan()
+
+    -- ASSERTED AS ABSENT, NOT AS EMPTY. `CN.Account(key)` CREATES the table
+    -- it is asked for, so the old form -- `CountKeys(CN.Account("titleNames"))
+    -- == 0` -- passed by building the very store it claimed had been deleted.
+    -- Reading the raw account table is the only way to see the difference.
+    assert(rawget(CN.db.account, "titleNames") == nil,
+        "title names are not stored at all")
+
+    assert(rawget(CN.db.account, "currencyNames") == nil,
+        "and neither are currency names")
+
+    -- And both can still be found by name, live.
+    local anyTitle = next(titles.CharacterStore() or {})
+
+    if anyTitle then
+        local name = titles.NameOf(anyTitle)
+
+        assert(type(name) == "string" and not name:find("^Title %d"),
+            "a title still names itself: " .. tostring(name))
+
+        assert(titles.Resolve(name) == anyTitle,
+            "and resolves by that name")
+    end
+
+    print("  titles and currencies are named by the client, not by the "
+        .. "database")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MANUAL SCAN DOES NOT ARM AN IMMEDIATE SECOND ONE.
+    --
+    -- 0.64.0 reset the throttle BEFORE scanning, which sets it to zero and
+    -- guarantees the very double sweep the comment says it prevents: pick up
+    -- one coin a second later and the whole three-pass read ran again.
+    ------------------------------------------------------------
+    local currencyModule = CN:GetModule("Currencies")
+
+    local scans = 0
+
+    local realScan = currencyModule.Scan
+
+    currencyModule.Scan = function(...)
+        scans = scans + 1
+
+        return realScan(...)
+    end
+
+    SlashCmdList.COMPLETIONNAVIGATOR("currencyscan")
+
+    assert(scans == 1, "the manual scan ran once")
+
+    CN.Dispatch("CURRENCY_DISPLAY_UPDATE")
+
+    assert(scans == 1,
+        "and a coin picked up a second later does not run it again: " .. scans)
+
+    currencyModule.Scan = realScan
+
+    print("  scanning by hand does not arm a second sweep a second later")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE FIVE REMAINING 0.65.0 PROPERTIES, EACH ASSERTED DIRECTLY.
+    ------------------------------------------------------------
+    -- A mount goal says where the mount comes from. 0.62.0 stopped storing
+    -- that sentence and this was the third display site, missed at the time.
+    local goalModule = CN:GetModule("Goals")
+    local mountModule = CN:GetModule("Mounts")
+
+    mountModule.Scan()
+
+    local anyMount
+
+    for id, record in pairs(mountModule.Store()) do
+        if not record.collected then
+            anyMount = id
+            break
+        end
+    end
+
+    assert(anyMount, "the fixture must have an uncollected mount")
+
+    local plan = goalModule.Plan({ type = CN.objectiveTypes.MOUNT, id = anyMount })
+
+    assert(plan.source and plan.source ~= "",
+        "a mount goal names its source: " .. tostring(plan.source))
+
+    -- The "This zone" line reads the per-character accessor.
+    local exploreModule = CN:GetModule("Exploration")
+
+    exploreModule.Scan()
+
+    local here = exploreModule.ForCurrentZone()
+
+    assert(here, "the fixture stands in a zone with an achievement")
+
+    -- Another character's flat value must not reach this character's line.
+    here.done      = 999
+    here.completed = false
+
+    local mine = exploreModule.DoneFor(here)
+
+    assert(mine ~= 999,
+        "the flat field is another character's; the accessor is this one's: "
+        .. tostring(mine))
+
+    -- And through the command the player types, which is where it showed.
+    local printed = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(printed, tostring(message))
+
+        return realAdd(chatFrame, message)
+    end
+
+    SlashCmdList.COMPLETIONNAVIGATOR("exploration")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    for _, line in ipairs(printed) do
+        assert(not line:find("999", 1, true),
+            "another character's count reached the This zone line: " .. line)
+    end
+
+    -- The Sources tab is memoized like its two siblings -- asserted by
+    -- REFRESHING THE TAB, which is the path the window takes.
+    local sourceBuilds = 0
+
+    local realSources = CN.UI.Sources
+
+    CN.UI.Sources = function(...)
+        sourceBuilds = sourceBuilds + 1
+
+        return realSources(...)
+    end
+
+    CN.ForgetMemos("ui:sources")
+
+    CN.UI.Show()
+
+    local refreshed = false
+
+    for _, tab in ipairs(CN.UI.tabs or {}) do
+        if tab.name == "Scans" and tab.panel and tab.refresh then
+            tab.refresh(tab.panel)
+            tab.refresh(tab.panel)
+
+            refreshed = true
+        end
+    end
+
+    assert(refreshed,
+        "the Scans tab -- which is what calls UI.Sources -- must actually "
+        .. "have been refreshed, or this proves nothing")
+
+    CN.UI.Sources = realSources
+
+    assert(sourceBuilds <= 1,
+        "the Sources tab is built once per generation, not once per refresh: "
+        .. sourceBuilds)
+
+    -- A quest pin does not walk the whole remembered store.
+    local quests = CN:GetModule("Quests")
+
+    local walks = 0
+
+    local realCount = CN.CountKeys
+
+    CN.CountKeys = function(...)
+        walks = walks + 1
+
+        return realCount(...)
+    end
+
+    local poi = { questID = 975001, mapID = 94, x = 0.4, y = 0.4 }
+
+    quests.RememberOffer(poi)
+
+    local firstWalks = walks
+
+    walks = 0
+
+    -- Seen again: the store did not gain a key, so the ceiling cannot have
+    -- been crossed and must not be recounted.
+    quests.RememberOffer(poi)
+
+    assert(walks < firstWalks or walks == 0,
+        "a pin already remembered must not rewalk the store: " .. walks)
+
+    CN.CountKeys = realCount
+
+    CN.Account("questPins")[975001] = nil
+
+    print("  five properties that had no assertion of their own")
+end)()
 
 print("\nWhat 0.64.0 changed, asserted through the paths the game takes:")
 

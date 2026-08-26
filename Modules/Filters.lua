@@ -271,20 +271,33 @@ function Filters.DescribeObjective(objectiveType, id)
     end
 
     if objectiveType == types.MOUNT and numericID then
-        local record = CN.Account("mounts")[numericID]
+        -- The same order as every other branch. It is inert today only
+        -- because migration 16 emptied the stored field -- which is to say
+        -- the rule was written down twice in one function and the two copies
+        -- disagreed, waiting for the next release to reinstate a name. 0.65.0.
+        local mounts = CN:GetModule("Mounts")
 
-        if record and record.name then
-            return record.name
+        if mounts and mounts.NameOf then
+            return mounts.NameOf(numericID, CN.Account("mounts")[numericID])
         end
 
-        local live = CN.Blizzard.GetMountByID(numericID)
-
-        return (live and live.name) or ("Mount " .. numericID)
+        return "Mount " .. numericID
     end
 
     if objectiveType == types.TOY and numericID then
-        local record = CN.Account("toys")[numericID]
-        return record and record.name or ("Toy " .. numericID)
+        -- CLIENT FIRST, LIKE ITS FOUR NEIGHBOURS. 0.65.0.
+        --
+        -- 0.64.0 flipped the reputation, currency, recipe and title branches
+        -- to ask the client first and left this one reading a field 0.63.0
+        -- had stopped writing -- so a hidden toy was unnameable, and
+        -- `/cn unhide <name>` could not match it.
+        local toys = CN:GetModule("Toys")
+
+        if toys and toys.NameOf then
+            return toys.NameOf(numericID, CN.Account("toys")[numericID])
+        end
+
+        return "Toy " .. numericID
     end
 
     if (objectiveType == types.RARE or objectiveType == types.TREASURE) and numericID then
@@ -350,14 +363,21 @@ function Filters.DescribeObjective(objectiveType, id)
     -- Migration 16's header says it removed "the last of the names the client
     -- hands back for free", and these were still being read from disk with no
     -- fallback to the client that answers instantly.
+    -- THROUGH THE MODULE, NOT A SECOND COPY OF IT. 0.65.0.
+    --
+    -- These two each carried their own live-then-store lookup, written before
+    -- `Currencies.NameOf` and `Titles.NameOf` existed. Two copies of one rule
+    -- drift, and these had already: both still ended at a name store that
+    -- migration 18 deletes -- and `CN.Account(key)` CREATES the table it is
+    -- asked for, so reading it here put the store back, empty, every login.
     if objectiveType == types.CURRENCY and numericID then
-        local info = CN.Blizzard.GetCurrency and CN.Blizzard.GetCurrency(numericID)
+        local currencyModule = CN:GetModule("Currencies")
 
-        if info and info.name then
-            return info.name
+        if currencyModule and currencyModule.NameOf then
+            return currencyModule.NameOf(numericID)
         end
 
-        return CN.Account("currencyNames")[numericID] or ("Currency " .. numericID)
+        return "Currency " .. numericID
     end
 
     if objectiveType == types.RECIPE and numericID then
@@ -365,13 +385,13 @@ function Filters.DescribeObjective(objectiveType, id)
     end
 
     if objectiveType == types.TITLE and numericID then
-        local live = CN.Blizzard.GetTitleName and CN.Blizzard.GetTitleName(numericID)
+        local titleModule = CN:GetModule("Titles")
 
-        if live and live ~= "" then
-            return live
+        if titleModule and titleModule.NameOf then
+            return titleModule.NameOf(numericID)
         end
 
-        return CN.Account("titleNames")[numericID] or ("Title " .. numericID)
+        return "Title " .. numericID
     end
 
     return tostring(objectiveType) .. " " .. tostring(id)

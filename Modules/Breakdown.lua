@@ -24,8 +24,12 @@ local Breakdown = CN:RegisterModule("Breakdown")
 local Print = CN.Print
 
 -- "1 are locked" reads as a bug even when the number is right.
+--
+-- Through the shared pluralizer, like everything else. This was the last
+-- private copy of the idea; 0.64.0 removed the other one from this file and
+-- left this. 0.65.0.
 local function Are(count)
-    return count == 1 and "is" or "are"
+    return CN.Pluralize(count, "is", "are")
 end
 
 -- THROUGH THE SHARED ONE. 0.64.0.
@@ -348,7 +352,7 @@ Breakdown.Register{
             total     = counts.known,
             remaining = counts.known - counts.onAccount,
             reasons   = reasons,
-            action    = counts.known == 0 and "/cn titlescan" or nil,
+            action    = (not counts.scanned) and "/cn titlescan" or nil,
         }
     end,
 }

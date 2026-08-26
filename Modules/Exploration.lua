@@ -331,7 +331,17 @@ CN.RegisterCandidateProvider("Exploration", function()
             table.insert(candidates, CN.NewObjective({
                 id              = record.achievementID,
                 type            = CN.objectiveTypes.EXPLORATION,
-                name            = record.name,
+                -- THROUGH THE ACCESSOR. 0.65.0.
+                --
+                -- `record.name` has been nil since 0.64.0 stopped storing it
+                -- and migration 17 deleted it from disk -- and that release
+                -- wired the replacement accessor into `Closest` and missed
+                -- this, the one place whose output the player actually reads.
+                -- So every exploration row rendered as its achievement id:
+                -- "1. 1275" in `/cn next`, on the map pin, in the heads-up
+                -- line, and "Ignored: nil" when it was hidden.
+                name            = Exploration.NameOf(record.achievementID,
+                    record),
                 accountWide     = true,
                 completionValue = math.max(1, 4 - remaining),
                 travelCost      = 0,
@@ -463,10 +473,20 @@ CN:RegisterCommand{
         local here = Exploration.ForCurrentZone()
 
         if here then
-            if here.completed then
+            -- THROUGH THE PER-CHARACTER ACCESSOR. 0.65.0.
+            --
+            -- `Summary`, `Closest` and the provider all go through
+            -- `DoneFor`; this read the flat fields, which hold whichever
+            -- character wrote last. So an alt could type `/cn exploration`
+            -- and read another character's numbers on the "This zone" line
+            -- while "Closest to finishing" three lines below showed its own.
+            local hereDone, hereComplete = Exploration.DoneFor(here)
+
+            if hereComplete then
                 Print("This zone: |cff73b873fully explored|r")
             else
-                Print("This zone: " .. here.done .. " / " .. here.criteria)
+                Print("This zone: " .. (hereDone or 0)
+                    .. " / " .. (here.criteria or 0))
 
                 local missing = Blizzard.GetIncompleteCriteria(here.achievementID, 6)
 

@@ -1788,6 +1788,11 @@ end
 -- client has always kept both names in these globals; the stub did not have
 -- them, so the two could not be told apart from here. Deliberately NOT
 -- English, like the class names above.
+-- The client's own word for renown, with its trailing space. Deliberately not
+-- English, like everything else here: a standing that reads "Renown 12" beside
+-- one that reads "EhrfÃ¼rchtig" is the defect.
+RENOWN_LEVEL_LABEL         = "Ruf "
+
 FACTION_ALLIANCE           = "Allianz"
 FACTION_HORDE              = "Horde"
 FACTION_STANDING_LABEL4    = "Neutral"
@@ -2794,6 +2799,10 @@ io.stdout:setvbuf("line")
 -- an eager refresh and a deferred one produce the same text -- so it is
 -- asserted against the file. Used sparingly and only where the rule really is
 -- structural.
+-- The .toc order, published so a source lint can walk every file rather than
+-- a hand-kept list that the next new module is not added to.
+CN_TEST_ADDON_FILES = files
+
 function CN_TEST_ReadAddonFile(relative)
     local handle = io.open(ROOT .. "/" .. relative, "r")
 
@@ -8457,7 +8466,12 @@ end)()
         local declaredAt = {}
 
         for number, line in ipairs(lines) do
-            local name = line:match("^%s*local%s+function%s+([%w_]+)%s*%(")
+            -- FILE-LEVEL, like the bare form below: a `local function`
+            -- nested inside another function is scoped to it, and a name
+            -- above it is a different variable entirely. Both real bugs this
+            -- lint has caught -- `IdBefore` in 0.60.0 and `BuildItemIndex` in
+            -- 0.61.0 -- were file-level.
+            local name = line:match("^local%s+function%s+([%w_]+)%s*%(")
 
             if name and not declaredAt[name] then
                 declaredAt[name] = number
@@ -8467,8 +8481,12 @@ end)()
             -- `local NAME` followed later by `function NAME(` are both
             -- correct and must not be flagged, so a bare `local NAME`
             -- counts as the declaration point.
-            local bare = line:match("^%s*local%s+([%w_]+)%s*$")
-                or line:match("^%s*local%s+([%w_]+)%s*=")
+            -- FILE-LEVEL ONLY, for the same scope reason: `local x` inside
+            -- a function is a different variable from one at the top of the
+            -- file, and only the file-level one can be touched from another
+            -- function above it.
+            local bare = line:match("^local%s+([%w_]+)%s*$")
+                or line:match("^local%s+([%w_]+)%s*=")
 
             if bare and not declaredAt[bare] then
                 declaredAt[bare] = number
@@ -8481,17 +8499,51 @@ end)()
 
                 -- Not a comment, and not reached through a table.
                 if not line:match("^%s*%-%-") then
-                    local callAt = line:match("()" .. name .. "%s*%(")
+                    -- CALLS, READS AND ASSIGNMENTS. WIDENED IN 0.65.0.
+                    --
+                    -- This checked only `NAME(`. 0.65.0 moved a throttle
+                    -- timestamp's ASSIGNMENT above its `local` declaration --
+                    -- which in Lua does not error, does not call anything,
+                    -- and quietly creates a GLOBAL while the real local stays
+                    -- at its initial value forever. The throttle simply
+                    -- stopped throttling, in a sweep that expands the
+                    -- player's currency headers.
+                    --
+                    -- A call is one way to touch a name too early. Any
+                    -- mention of it is.
+                    -- A CALL, OR AN ASSIGNMENT. Nothing wider than that.
+                    --
+                    -- A first attempt flagged every mention, which is
+                    -- unworkable: a function PARAMETER named `text` is a
+                    -- different variable from a file-local named `text`, and
+                    -- line-based matching cannot see scope. It produced 1,829
+                    -- reports, none of them real.
+                    --
+                    -- These two forms are unambiguous. `NAME(` above the
+                    -- declaration is the 0.60.0 and 0.61.0 bug; `NAME =` at
+                    -- the start of a statement is the 0.65.0 one, where an
+                    -- assignment above the `local` creates a GLOBAL and the
+                    -- real local keeps its initial value forever. Both are
+                    -- excluded when the name is bound on the same line.
+                    local callAt   = line:match("()" .. name .. "%s*%(")
+                    local assignAt = line:match("^%s*()" .. name .. "%s*=[^=]")
 
-                    if callAt then
-                        local previous = callAt > 1
-                            and line:sub(callAt - 1, callAt - 1) or ""
+                    local usedAt = callAt or assignAt
+
+                    local bound = line:match("^%s*local%s+" .. name)
+                        or line:match("^%s*for%s+[%w_,%s]*" .. name)
+                        or line:match("^%s*function%s+" .. name)
+                        or line:match("function%s*%([^%)]*" .. name)
+
+                    if usedAt and not bound then
+                        local previous = usedAt > 1
+                            and line:sub(usedAt - 1, usedAt - 1) or ""
 
                         if previous ~= "." and previous ~= ":"
                             and not previous:match("[%w_]") then
 
                             table.insert(offenders, relative .. ":" .. number
-                                .. " calls " .. name
+                                .. " uses " .. name
                                 .. ", declared local at line " .. declaration)
                         end
                     end
@@ -8517,13 +8569,88 @@ end)()
     end
 
     assert(#offenders == 0,
-        #offenders .. " local function(s) are called above their own "
-        .. "declaration. In the game that is a nil global, and it throws only "
-        .. "when the line runs.")
+        #offenders .. " local(s) are used above their own declaration. In "
+        .. "the game a read is a nil global, and an assignment silently "
+        .. "creates one while the real local keeps its initial value.")
 
     assert(scanned > 20, "the scan must have read the tree, read " .. scanned)
 
     print("  " .. scanned .. " files, no local function called before it exists")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY OBJECTIVE THE PLAYER SEES HAS A NAME.
+    --
+    -- 0.65.0 found that the Exploration provider had been emitting rows with
+    -- `name = record.name` after 0.64.0 stopped writing that field -- so every
+    -- exploration row rendered as its achievement id: "1. 1275" in `/cn next`,
+    -- on the map pin, in the heads-up line, and "Ignored: nil" when hidden.
+    --
+    -- It shipped because no test asserted that a candidate is CALLED
+    -- anything. Four more findings that release were the same shape: a field a
+    -- recent change stopped writing, still read somewhere else. Reading a
+    -- nil name is the version of that a player sees, so it is checked here,
+    -- for every provider, on every build.
+    ------------------------------------------------------------
+    -- THE STORES MUST BE POPULATED, or a provider that reads an empty one
+    -- emits nothing and this check passes by having nothing to look at --
+    -- which is exactly how the Exploration defect shipped.
+    for _, moduleName in ipairs({
+        "Exploration", "Mounts", "Pets", "Toys", "Achievements", "Currencies",
+        "Reputations", "Titles", "Loremaster",
+    }) do
+        local module = CN:GetModule(moduleName)
+
+        if module and module.Scan then
+            pcall(module.Scan)
+        end
+    end
+
+    local checked, providers = 0, 0
+
+    for name, provider in pairs(CN.candidateProviders) do
+        providers = providers + 1
+
+        local ok, rows = pcall(provider.fn)
+
+        if ok and type(rows) == "table" then
+            for _, objective in ipairs(rows) do
+                assert(objective.name ~= nil,
+                    "provider " .. name .. " emitted an objective with no "
+                    .. "name; it will render as its id")
+
+                assert(type(objective.name) == "string",
+                    "provider " .. name .. " emitted a "
+                    .. type(objective.name) .. " as a name")
+
+                assert(objective.name ~= "",
+                    "provider " .. name .. " emitted an empty name")
+
+                -- The shape a nil field takes once it has been concatenated.
+                assert(not objective.name:find("nil", 1, true),
+                    "provider " .. name .. " emitted a name containing "
+                    .. "\"nil\": " .. objective.name)
+
+                for _, reason in ipairs(objective.reasons or {}) do
+                    assert(type(reason) == "string"
+                        and not reason:find("nil", 1, true),
+                        "provider " .. name .. " emitted a reason containing "
+                        .. "\"nil\": " .. tostring(reason))
+                end
+
+                checked = checked + 1
+            end
+        end
+    end
+
+    assert(providers > 15,
+        "the check must have reached the real provider set, saw " .. providers)
+
+    assert(checked > 0, "and at least one objective")
+
+    print("  " .. checked .. " objectives from " .. providers
+        .. " providers, every one of them named")
 end)()
 
 print("\nOne identity per answer:")
@@ -9843,6 +9970,390 @@ print("\nStubs, audited against a real client:")
             or ""))
 end)()
 
+
+print("\nWhat 0.65.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A SELLER IS DESCRIBED IN ONE PLACE.
+    --
+    -- `FirstLocatedSeller` handed back the raw store record, and migration 16
+    -- dropped `zone` from those rows because the map id derives it. `WhoSells`
+    -- got the live derivation; the three consumers of the other function did
+    -- not -- so a recommended recipe said "sold by Zen'shiri" with the zone
+    -- silently gone.
+    ------------------------------------------------------------
+    local vendorModule = CN:GetModule("Vendors")
+
+    local vendorStore = CN.Account("vendors")
+
+    vendorStore[913001] = {
+        name  = "Trader Halkaz",
+        mapID = 94,
+        x     = 0.31,
+        y     = 0.62,
+        items = { [880002] = 25000 },
+    }
+
+    vendorModule.ForgetItemIndex()
+
+    local seller = vendorModule.FirstLocatedSeller(880002)
+
+    assert(seller, "the seller must be found")
+
+    assert(seller.zone and seller.zone ~= "",
+        "and its zone derived from the map id, not read from a field "
+        .. "migration 16 deleted: " .. tostring(seller.zone))
+
+    local listed = vendorModule.WhoSells(880002)
+
+    assert(listed[1] and listed[1].zone == seller.zone,
+        "both readers describe the same seller the same way")
+
+    vendorStore[913001] = nil
+    vendorModule.ForgetItemIndex()
+
+    print("  a seller's zone is derived wherever a seller is described")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCOPE IS A TOKEN, NOT A SENTENCE THAT THREE GUARDS DEPEND ON.
+    --
+    -- Three places branched on `scope == "account-wide"` and three others
+    -- printed the same value. The first translation of that sentence would
+    -- have turned every guard false at once, and `/cn alts` would start
+    -- recommending a loading screen to switch characters for account-wide
+    -- progress -- the one thing that file says must never happen.
+    ------------------------------------------------------------
+    assert(CN.scopes and CN.scopes.ACCOUNT,
+        "the scope tokens exist")
+
+    assert(CN.ScopeText(CN.scopes.ACCOUNT) == CN.L["account-wide"],
+        "and the sentence comes from the locale table")
+
+    -- EVERY guard, not just one file. The token and the sentence are the
+    -- same string today, which is exactly why a behavioural test cannot see
+    -- the difference -- and why the first translation of that sentence would
+    -- turn every guard false at once.
+    for _, file in ipairs({
+        "Modules/Alts.lua", "Modules/Warband.lua", "Modules/Reputations.lua",
+        "Modules/Goals.lua",
+    }) do
+        local source = CN_TEST_ReadAddonFile(file)
+
+        assert(source, file .. " must be readable")
+
+        for line in source:gmatch("[^\n]+") do
+            if not line:match("^%s*%-%-") then
+                assert(not line:find('== "account-wide"', 1, true)
+                    and not line:find('~= "account-wide"', 1, true),
+                    file .. " compares a scope against the display sentence: "
+                    .. line)
+            end
+        end
+    end
+
+    print("  a scope is a token and its sentence is translated")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A STORE A MIGRATION DELETES MUST HAVE NO READERS LEFT. 0.65.0.
+    --
+    -- `CN.Account(key)` CREATES the table it is asked for. So a migration
+    -- that drops a store and a reader that still asks for it do not cancel
+    -- out -- the reader wins, silently, on the login after the migration
+    -- runs, and every login after that. The store comes back empty, the
+    -- migration's own count reports success, and nothing in the addon looks
+    -- wrong until a denominator built on `CountKeys` reads zero forever.
+    --
+    -- That is exactly what 0.65.0 shipped into review: two stores deleted by
+    -- migration 18 and five readers left behind, one of which -- the Titles
+    -- breakdown -- would have told every player to run a scan they had just
+    -- run.
+    --
+    -- DERIVED, NOT LISTED. The dropped keys are read out of the migration
+    -- ladder itself, so the next store dropped is covered the day it is
+    -- dropped rather than the day someone remembers this test.
+    ------------------------------------------------------------
+    local database = CN_TEST_ReadAddonFile("Database.lua")
+
+    assert(database, "Database.lua must be readable")
+
+    local dropped = {}
+    local anyDropped = false
+
+    for key in database:gmatch("db%.account%.([%w_]+)%s*=%s*nil") do
+        dropped[key]  = true
+        anyDropped    = true
+    end
+
+    assert(anyDropped,
+        "the migration ladder must drop at least one store, or this lint is "
+        .. "asserting nothing")
+
+    for _, relative in ipairs(CN_TEST_ADDON_FILES) do
+        if relative ~= "Database.lua" then
+            local source = CN_TEST_ReadAddonFile(relative)
+
+            assert(source, relative .. " must be readable")
+
+            for line in source:gmatch("[^\n]+") do
+                if not line:match("^%s*%-%-") then
+                    for key in line:gmatch('CN%.Account%("([%w_]+)"%)') do
+                        assert(not dropped[key],
+                            relative .. " still reads a store a migration "
+                            .. "deletes, which puts it back: " .. line)
+                    end
+                end
+            end
+        end
+    end
+
+    print("  no file reads a store the migration ladder deletes")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- RENOWN IS A WORD THE CLIENT OWNS.
+    --
+    -- Every other standing on a record is localized; this one was hardcoded
+    -- English AND persisted, so an alt's row was frozen at that character's
+    -- language too.
+    ------------------------------------------------------------
+    assert(CN.RenownLabel(12) == RENOWN_LEVEL_LABEL .. "12",
+        "the client's own word: " .. CN.RenownLabel(12))
+
+    local reputations = CN:GetModule("Reputations")
+
+    reputations.Scan()
+
+    for id, record in pairs(reputations.AccountStore()) do
+        if record.kind == "RENOWN" then
+            assert(record.standing
+                and record.standing:find(RENOWN_LEVEL_LABEL, 1, true),
+                "faction " .. id .. " must name renown the client's way: "
+                .. tostring(record.standing))
+        end
+    end
+
+    print("  renown is named in the client's language")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A NAME THE CLIENT ANSWERS IS NOT WRITTEN TO DISK.
+    --
+    -- 0.64.0 gave titles and currencies live READ paths and left both WRITERS
+    -- alone, so the stores went on filling with names frozen at the last
+    -- scan's language -- and both `Resolve` functions searched only those
+    -- stores.
+    ------------------------------------------------------------
+    local titles     = CN:GetModule("Titles")
+    local currencyModule = CN:GetModule("Currencies")
+
+    titles.Scan()
+    currencyModule.Scan()
+
+    -- ASSERTED AS ABSENT, NOT AS EMPTY. `CN.Account(key)` CREATES the table
+    -- it is asked for, so the old form -- `CountKeys(CN.Account("titleNames"))
+    -- == 0` -- passed by building the very store it claimed had been deleted.
+    -- Reading the raw account table is the only way to see the difference.
+    assert(rawget(CN.db.account, "titleNames") == nil,
+        "title names are not stored at all")
+
+    assert(rawget(CN.db.account, "currencyNames") == nil,
+        "and neither are currency names")
+
+    -- And both can still be found by name, live.
+    local anyTitle = next(titles.CharacterStore() or {})
+
+    if anyTitle then
+        local name = titles.NameOf(anyTitle)
+
+        assert(type(name) == "string" and not name:find("^Title %d"),
+            "a title still names itself: " .. tostring(name))
+
+        assert(titles.Resolve(name) == anyTitle,
+            "and resolves by that name")
+    end
+
+    print("  titles and currencies are named by the client, not by the "
+        .. "database")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MANUAL SCAN DOES NOT ARM AN IMMEDIATE SECOND ONE.
+    --
+    -- 0.64.0 reset the throttle BEFORE scanning, which sets it to zero and
+    -- guarantees the very double sweep the comment says it prevents: pick up
+    -- one coin a second later and the whole three-pass read ran again.
+    ------------------------------------------------------------
+    local currencyModule = CN:GetModule("Currencies")
+
+    local scans = 0
+
+    local realScan = currencyModule.Scan
+
+    currencyModule.Scan = function(...)
+        scans = scans + 1
+
+        return realScan(...)
+    end
+
+    SlashCmdList.COMPLETIONNAVIGATOR("currencyscan")
+
+    assert(scans == 1, "the manual scan ran once")
+
+    CN.Dispatch("CURRENCY_DISPLAY_UPDATE")
+
+    assert(scans == 1,
+        "and a coin picked up a second later does not run it again: " .. scans)
+
+    currencyModule.Scan = realScan
+
+    print("  scanning by hand does not arm a second sweep a second later")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE FIVE REMAINING 0.65.0 PROPERTIES, EACH ASSERTED DIRECTLY.
+    ------------------------------------------------------------
+    -- A mount goal says where the mount comes from. 0.62.0 stopped storing
+    -- that sentence and this was the third display site, missed at the time.
+    local goalModule = CN:GetModule("Goals")
+    local mountModule = CN:GetModule("Mounts")
+
+    mountModule.Scan()
+
+    local anyMount
+
+    for id, record in pairs(mountModule.Store()) do
+        if not record.collected then
+            anyMount = id
+            break
+        end
+    end
+
+    assert(anyMount, "the fixture must have an uncollected mount")
+
+    local plan = goalModule.Plan({ type = CN.objectiveTypes.MOUNT, id = anyMount })
+
+    assert(plan.source and plan.source ~= "",
+        "a mount goal names its source: " .. tostring(plan.source))
+
+    -- The "This zone" line reads the per-character accessor.
+    local exploreModule = CN:GetModule("Exploration")
+
+    exploreModule.Scan()
+
+    local here = exploreModule.ForCurrentZone()
+
+    assert(here, "the fixture stands in a zone with an achievement")
+
+    -- Another character's flat value must not reach this character's line.
+    here.done      = 999
+    here.completed = false
+
+    local mine = exploreModule.DoneFor(here)
+
+    assert(mine ~= 999,
+        "the flat field is another character's; the accessor is this one's: "
+        .. tostring(mine))
+
+    -- And through the command the player types, which is where it showed.
+    local printed = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(printed, tostring(message))
+
+        return realAdd(chatFrame, message)
+    end
+
+    SlashCmdList.COMPLETIONNAVIGATOR("exploration")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    for _, line in ipairs(printed) do
+        assert(not line:find("999", 1, true),
+            "another character's count reached the This zone line: " .. line)
+    end
+
+    -- The Sources tab is memoized like its two siblings -- asserted by
+    -- REFRESHING THE TAB, which is the path the window takes.
+    local sourceBuilds = 0
+
+    local realSources = CN.UI.Sources
+
+    CN.UI.Sources = function(...)
+        sourceBuilds = sourceBuilds + 1
+
+        return realSources(...)
+    end
+
+    CN.ForgetMemos("ui:sources")
+
+    CN.UI.Show()
+
+    local refreshed = false
+
+    for _, tab in ipairs(CN.UI.tabs or {}) do
+        if tab.name == "Scans" and tab.panel and tab.refresh then
+            tab.refresh(tab.panel)
+            tab.refresh(tab.panel)
+
+            refreshed = true
+        end
+    end
+
+    assert(refreshed,
+        "the Scans tab -- which is what calls UI.Sources -- must actually "
+        .. "have been refreshed, or this proves nothing")
+
+    CN.UI.Sources = realSources
+
+    assert(sourceBuilds <= 1,
+        "the Sources tab is built once per generation, not once per refresh: "
+        .. sourceBuilds)
+
+    -- A quest pin does not walk the whole remembered store.
+    local quests = CN:GetModule("Quests")
+
+    local walks = 0
+
+    local realCount = CN.CountKeys
+
+    CN.CountKeys = function(...)
+        walks = walks + 1
+
+        return realCount(...)
+    end
+
+    local poi = { questID = 975001, mapID = 94, x = 0.4, y = 0.4 }
+
+    quests.RememberOffer(poi)
+
+    local firstWalks = walks
+
+    walks = 0
+
+    -- Seen again: the store did not gain a key, so the ceiling cannot have
+    -- been crossed and must not be recounted.
+    quests.RememberOffer(poi)
+
+    assert(walks < firstWalks or walks == 0,
+        "a pin already remembered must not rewalk the store: " .. walks)
+
+    CN.CountKeys = realCount
+
+    CN.Account("questPins")[975001] = nil
+
+    print("  five properties that had no assertion of their own")
+end)()
 
 print("\nWhat 0.64.0 changed, asserted through the paths the game takes:")
 

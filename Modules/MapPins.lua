@@ -653,7 +653,7 @@ CN:RegisterCommand{
 
             local placed = MapPins.Refresh(true)
 
-            Print("Redrew " .. placed .. (placed == 1 and " stop." or " stops."))
+            Print("Redrew " .. placed .. CN.Pluralize(placed, " stop.", " stops."))
             return
         end
 

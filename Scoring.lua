@@ -2293,7 +2293,7 @@ function CN.ExplainEmptyList()
 
     if hidden > 0 then
         table.insert(lines, hidden .. " objective type"
-            .. (hidden == 1 and " is" or "s are")
+            .. CN.Pluralize(hidden, " is", "s are")
             .. " hidden by your filter. " .. CN.Accent("/cn show")
             .. " lists them.")
     end
@@ -2305,7 +2305,7 @@ function CN.ExplainEmptyList()
 
     if failures > 0 then
         table.insert(lines, failures .. " thing"
-            .. (failures == 1 and " has" or "s have")
+            .. CN.Pluralize(failures, " has", "s have")
             .. " gone wrong inside the addon this session, which is enough "
             .. "to empty this list. " .. CN.Accent("/cn errors")
             .. " has the detail.")
@@ -2438,7 +2438,7 @@ CN:RegisterCommand{
         for _, row in ipairs(rows) do
             CN.PrintLine(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
                 row.name, row.average, row.worst, row.calls,
-                row.calls == 1 and "call" or "calls",
+                CN.Pluralize(row.calls, "call", "calls"),
                 row.cached and "" or " |cffffc74fstale|r"))
         end
 

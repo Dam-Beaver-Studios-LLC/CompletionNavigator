@@ -30,6 +30,7 @@ CN.RegisterLocale("zhCN", {
     ["veer"] = "åè½¬",
     ["turn"] = "è½¬å‘",
     ["back"] = "æŠ˜è¿”",
+    ["account-wide"] = "å…¨è´¦å·é€šç”¨",
     ["nothing actionable"] = "æš‚æ— å¯åš",
     ["Stop cleared"] = "ç«™ç‚¹å®Œæˆ",
     ["Stop %d of %d cleared"] = "ç«™ç‚¹ %d/%d å®Œæˆ",

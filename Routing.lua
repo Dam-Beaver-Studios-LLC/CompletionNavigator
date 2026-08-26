@@ -1567,7 +1567,7 @@ CN:RegisterCommand{
         if #skipped > 0 then
             CN.Print("|cff8a8f96" .. CN.Count(#skipped, "objective")
                 .. " here "
-                .. (#skipped == 1 and "has" or "have")
+                .. CN.Pluralize(#skipped, "has", "have")
                 .. " no coordinates and cannot be routed.|r")
         end
 

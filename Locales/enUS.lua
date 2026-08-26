@@ -39,6 +39,11 @@ CN.localeKeys = {
     "turn",
     "back",
     "nothing actionable",
+
+    -- Added in 0.65.0. This sentence was doing two jobs -- three places
+    -- branched on it as a token while three others printed it -- so it is a
+    -- token now and this is the sentence.
+    "account-wide",
     "Stop cleared",
     "Stop %d of %d cleared",
     "Route complete.",

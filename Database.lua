@@ -994,6 +994,67 @@ CN.migrations = {
                 .. "removed " .. totals .. " write-only achievement total(s).")
         end
     end,
+
+    -- 18 -> 19. THE LAST TWO NAME STORES, AND A STANDING THAT WAS ENGLISH.
+    --
+    -- `titleNames` and `currencyNames` are localized strings the client
+    -- returns instantly. 0.64.0 gave their READERS a live path and left the
+    -- two writers alone, so both stores went on filling with names frozen at
+    -- whatever language last scanned -- and `Titles.Resolve` and
+    -- `Currencies.Resolve` searched only those stores, so a player who
+    -- changed client language could not find their own titles or currencies
+    -- by name.
+    --
+    -- `reputations[id].standing` is localized for every faction EXCEPT a
+    -- major one, where it was the hardcoded English "Renown 12" -- and
+    -- persisted, so an alt's row was frozen at that character's language too.
+    -- Dropped rather than rewritten: the next scan rebuilds it in the
+    -- player's own language, and a wrong language now is better replaced than
+    -- translated by guesswork.
+    --
+    -- Eighth and ninth applications of one rule: persist only what the client
+    -- cannot re-supply.
+    [18] = function(db)
+        db.account = db.account or {}
+
+        local titles     = CN.CountKeys(db.account.titleNames)
+        local currencies = CN.CountKeys(db.account.currencyNames)
+
+        db.account.titleNames   = nil
+        db.account.currencyNames = nil
+
+        local standings = 0
+
+        for _, record in pairs(db.account.reputations or {}) do
+            if type(record) == "table" and record.kind == "RENOWN"
+                and record.standing ~= nil then
+
+                record.standing = nil
+
+                standings = standings + 1
+            end
+        end
+
+        for _, character in pairs(db.characters or {}) do
+            if type(character) == "table" then
+                for _, record in pairs(character.reputations or {}) do
+                    if type(record) == "table" and record.kind == "RENOWN"
+                        and record.standing ~= nil then
+
+                        record.standing = nil
+
+                        standings = standings + 1
+                    end
+                end
+            end
+        end
+
+        if titles > 0 or currencies > 0 or standings > 0 then
+            CN.DebugPrint("Dropped " .. (titles + currencies)
+                .. " stored name(s) and " .. standings
+                .. " English renown standing(s) the client re-supplies.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A
