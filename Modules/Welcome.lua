@@ -187,6 +187,9 @@ function Welcome.Build()
     scan:SetSize(384, 26)
     scan:SetPoint("TOPLEFT", 24, -96)
     scan:SetText("Read my collections now (a few seconds)")
+    -- The client built this label, so `CN.Label` never saw it and the
+    -- text-size setting did not reach it. 0.69.0.
+    CN.AdoptLabel(scan:GetFontString(), "CAPTION")
 
     scan:SetScript("OnClick", function()
         local setup = CN:GetModule("Setup")
@@ -239,6 +242,9 @@ function Welcome.Build()
 
         button:SetSize(180, 24)
         button:SetText(label)
+        -- The client built this label, so `CN.Label` never saw it and the
+        -- text-size setting did not reach it. 0.69.0.
+        CN.AdoptLabel(button:GetFontString(), "CAPTION")
 
         if index == 1 then
             button:SetPoint("TOPLEFT", 24, -140)
@@ -329,6 +335,9 @@ function Welcome.Build()
     dismiss:SetSize(120, 22)
     dismiss:SetPoint("BOTTOM", 0, 16)
     dismiss:SetText("Not now")
+    -- The client built this label, so `CN.Label` never saw it and the
+    -- text-size setting did not reach it. 0.69.0.
+    CN.AdoptLabel(dismiss:GetFontString(), "CAPTION")
     dismiss:SetScript("OnClick", function()
         Welcome.MarkSeen()
 

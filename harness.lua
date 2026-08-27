@@ -10126,7 +10126,273 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
-print("\nWhat 0.68.0 changed, asserted through the paths the game takes:")
+print("\nWhat 0.69.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- HANDING A QUEST IN MOVES THE ZONE YOU ARE IN. 0.69.0.
+    --
+    -- The Loremaster store was written by a full scan and by nothing else,
+    -- and that scan ran at login, on `/cn scanlore`, and from a button. So
+    -- turning a quest in moved nothing on the Journey tab: it went on
+    -- reading the count it had at login. Reported from play as "the
+    -- completion of a quest does not appear to remove it from the journey".
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    lore.Scan()
+
+    local here = lore.ForZone()
+
+    assert(here and here.id, "the fixture stands in a zone with an achievement")
+
+    local record = lore.Records()[here.id]
+
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    record.progress = record.progress or {}
+    record.progress[key] = 3
+    record.criteria      = 12
+    record.completed     = false
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 4, 12
+    end
+
+    CN.ForgetDebounces()
+
+    CN.Dispatch("QUEST_TURNED_IN", 4242)
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(lore.DoneFor(record) == 4,
+        "handing a quest in moves the zone's count without a rescan: "
+        .. tostring(lore.DoneFor(record)))
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 12, 12
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("QUEST_TURNED_IN", 4242)
+
+    assert(record.completed == true, "and a finished zone says so")
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 12, 14
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("QUEST_TURNED_IN", 4242)
+
+    assert(record.completed == false,
+        "and a patch that adds a criterion un-finishes it")
+
+    -- A REFUSAL FROM THE CRITERIA API DOES NOT WIPE THE ROW. The guard
+    -- `Exploration` has carried since 0.61.0 and `Achievements` was given in
+    -- 0.68.0, in the third store of the same shape.
+    CN.Blizzard.GetAchievementProgress = function()
+        return 0, 0
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("QUEST_TURNED_IN", 4242)
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(record.criteria == 14,
+        "a client that answers nothing does not overwrite the row: "
+        .. tostring(record.criteria))
+
+    print("  handing a quest in moves the zone it was in")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE HEADS-UP LINE CAN BE MOVED AND CLOSED. 0.69.0 asserts it.
+    --
+    -- Both were reported from play and both were built -- and nothing in the
+    -- suite ever checked either, so "does it drag" was a question only a
+    -- human could answer, and it sat unverified for nine releases.
+    ------------------------------------------------------------
+    local hud = CN:GetModule("Hud")
+
+    hud.SetEnabled(true)
+
+    local hudFrame = hud.Build and hud.Build()
+
+    assert(hudFrame, "the heads-up line exists once it is turned on")
+
+    assert(hudFrame:IsMovable(),
+        "it is movable, which is what makes a drag possible at all")
+
+    assert(hudFrame.scripts and hudFrame.scripts.OnDragStart,
+        "and something is wired to the start of a drag")
+
+    assert(hudFrame.scripts.OnDragStop,
+        "and to the end of one, which is where the position is remembered")
+
+    hudFrame.scripts.OnDragStop(hudFrame)
+
+    assert(CN.Settings().hudPosition,
+        "where it was dragged to is written down")
+
+    -- AND IT HAS AN x THAT TURNS IT OFF.
+    local closer = hudFrame.close
+
+    assert(closer, "the line carries a close control")
+
+    assert(closer.scripts and closer.scripts.OnClick,
+        "which is clickable")
+
+    closer.scripts.OnClick(closer)
+
+    assert(hud.IsEnabled() == false,
+        "and clicking it turns the line off, rather than hiding it until the "
+        .. "next login")
+
+    hud.SetEnabled(false)
+
+    print("  the heads-up line drags, remembers where, and closes")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE REMAINING 0.69.0 PROPERTIES.
+    ------------------------------------------------------------
+    -- A deadline that counts for nothing says so where the player looks.
+    -- 0.68.0 put the explanation in `ExplainScore`, which has one caller.
+    local unreachable = {
+        type       = CN.objectiveTypes.QUEST,
+        id         = 972001,
+        name       = "Far Away",
+        expiresIn  = 60,
+        travelCost = 20,
+        reasons    = { "available to pick up in the next zone" },
+    }
+
+    local explained = false
+
+    for _, reason in ipairs(CN.Reasons(unreachable)) do
+        if reason:find("expires before you could get there", 1, true) then
+            explained = true
+        end
+    end
+
+    assert(explained,
+        "the reasons list -- which /cn why, the row tooltip and the heads-up "
+        .. "line all read -- says why a visible clock counted for nothing")
+
+    -- And a deadline that IS reachable says nothing of the kind.
+    local reachable = {
+        type       = CN.objectiveTypes.QUEST,
+        id         = 972002,
+        name       = "Close By",
+        expiresIn  = 3600,
+        travelCost = 2,
+    }
+
+    for _, reason in ipairs(CN.Reasons(reachable)) do
+        assert(not reason:find("expires before", 1, true),
+            "and says nothing when the player can get there: " .. reason)
+    end
+
+    -- ASKING WHICH ALT SHOULD DO SOMETHING IS NOT OFFERING IT.
+    local altOffers = 0
+
+    CN.RegisterRecommendationHook("cn-test-alts", function()
+        altOffers = altOffers + 1
+    end)
+
+    local alts = CN:GetModule("Alts")
+
+    alts.Assignments()
+
+    CN.recommendationHooks["cn-test-alts"] = nil
+
+    assert(altOffers == 0,
+        "`/cn alts` asks the ranking a question and does not tell the player "
+        .. "it showed them twenty rows: " .. altOffers)
+
+    -- A RARE WITH NO STORED COUNT IS NOT REPORTED AS SEEN ONCE.
+    local goalModule = CN:GetModule("Goals")
+
+    local rareStore = CN.Account("rares")
+
+    rareStore[973001] = {
+        vignetteID = 973001,
+        name       = "Nameless Rare",
+        kind       = "RARE",
+        mapID      = 94,
+        x          = 0.5,
+        y          = 0.5,
+    }
+
+    local plan = goalModule.Plan({ type = CN.objectiveTypes.RARE, id = 973001 })
+
+    for _, step in ipairs(plan.steps or {}) do
+        assert(not tostring(step.text or step):find("Seen 1 time", 1, true),
+            "a rare with no stored count says nothing about how often it has "
+            .. "been seen, rather than claiming once")
+    end
+
+    -- And a real count is still reported.
+    rareStore[973001].sightings = 4
+
+    local counted = false
+
+    for _, step in ipairs(goals.Plan({
+        type = CN.objectiveTypes.RARE, id = 973001 }).steps or {}) do
+
+        if tostring(step.text or step):find("Seen 4 times", 1, true) then
+            counted = true
+        end
+    end
+
+    assert(counted, "a rare with a real count still reports it")
+
+    rareStore[973001] = nil
+
+    -- THE SEARCH NAMES TABS THE WAY THE TAB STRIP DOES.
+    CN.UI.Show()
+    CN.UI.RefreshAllTabs()
+
+    -- `CN.L` is read-only, which is right -- so the property is asserted the
+    -- way the tab strip proves it: whatever the strip draws for a tab is what
+    -- the search must call it.
+    local named = CN.UI.SearchElsewhere("e")
+
+    if named then
+        for _, tab in ipairs(CN.UI.tabs) do
+            local drawn = CN.L[tab.name]
+
+            if drawn and drawn ~= tab.name
+                and named:find(tab.name .. " (", 1, true) then
+
+                error("the search names a tab '" .. tab.name .. "' while the "
+                    .. "tab strip draws '" .. drawn .. "': " .. named)
+            end
+        end
+    end
+
+    -- And the source says it, because every locale shipped today translates
+    -- all eleven to themselves in English -- so no fixture can tell the two
+    -- apart, and a behavioural test here would pass against either.
+    do
+        local source = CN_TEST_ReadAddonFile("UI.lua")
+
+        assert(source, "UI.lua must be readable")
+
+        assert(not source:find('parts, hit.tab .. " ("', 1, true),
+            "the cross-tab hint prints the tab's translated name, not its "
+            .. "internal key")
+    end
+
+    print("  the remaining 0.69.0 properties hold")
+end)()
+
 
 ;(function()
     ------------------------------------------------------------
@@ -10197,20 +10463,56 @@ end)()
         "and a caller that cannot estimate the journey gets the old curve "
         .. "exactly, rather than a guess")
 
-    -- The estimate is journey plus this player's own measured work time.
+    -- THE ESTIMATE IS THE JOURNEY, AND ONLY WHEN IT IS A MEASUREMENT.
     local needed = CN.SecondsNeeded({
         type       = CN.objectiveTypes.QUEST,
         travelCost = 4,
     })
 
-    assert(needed and needed >= 4 * CN.secondsPerCostPoint,
+    assert(needed == 4 * CN.secondsPerCostPoint,
         "the journey is counted in seconds, not in cost points: "
         .. tostring(needed))
 
-    assert(CN.SecondsNeeded({ type = CN.objectiveTypes.QUEST }) == nil
-        or CN.SecondsNeeded({ type = CN.objectiveTypes.QUEST }) > 0,
-        "an objective with no journey is either unknown or a real number, "
-        .. "never zero")
+    assert(CN.SecondsNeeded({ type = CN.objectiveTypes.QUEST }) == nil,
+        "an objective with no journey has no estimate at all")
+
+    -- A SATURATED COST IS THE MODEL SAYING IT STOPPED COUNTING, NOT A
+    -- TWENTY-MINUTE FLIGHT. `Session.NoteOffered` already refuses to subtract
+    -- one; this must refuse to add one, or every world quest the router
+    -- cannot yet route loses its whole deadline signal.
+    local travelModule = CN:GetModule("Travel")
+
+    assert(CN.SecondsNeeded({
+        type       = CN.objectiveTypes.QUEST,
+        travelCost = travelModule.maximumCost,
+    }) == nil, "a journey at the saturation point is not a measurement")
+
+    assert(CN.SecondsNeeded({
+        type       = CN.objectiveTypes.QUEST,
+        travelCost = CN.fallbackZoneCost,
+    }) == nil, "and neither is the constant used for a zone it cannot route")
+
+    -- AND THE WHOLE-TYPE WORK MEDIAN IS NOT PART OF IT. A quest thirty yards
+    -- away with five minutes left is urgent, whatever the median quest on
+    -- this account has taken.
+    local session = CN:GetModule("Session")
+
+    local durations = session.Durations()
+
+    local heldDurations = durations[CN.objectiveTypes.QUEST]
+
+    durations[CN.objectiveTypes.QUEST] = { 600, 600, 600, 600, 600 }
+
+    session.NoteDurationsChanged()
+
+    assert(CN.UrgencyBonus(300, CN.SecondsNeeded({
+        type       = CN.objectiveTypes.QUEST,
+        travelCost = 0.5,
+    })) > 0, "a five-minute deadline thirty yards away is still urgent")
+
+    durations[CN.objectiveTypes.QUEST] = heldDurations
+
+    session.NoteDurationsChanged()
 
     -- AND `/cn why` SHOWS THE SAME ARITHMETIC THE RANKING DID.
     local breakdown = CN.ExplainScore({
@@ -10218,7 +10520,7 @@ end)()
         id         = 970001,
         name       = "Test",
         expiresIn  = 600,
-        travelCost = 40,
+        travelCost = 30,
     })
 
     local announced = false
@@ -10269,18 +10571,31 @@ end)()
     assert(upgraded.account.loremaster[2].done == nil,
         "and its per-character count still goes")
 
-    -- Migration 21 repairs the accounts that ran the first version of 20.
+    -- MIGRATION 21 TAKES NOTHING. 0.69.0.
+    --
+    -- It used to empty the whole store to force a rebuild of one account-wide
+    -- flag -- and `progress` is keyed by character, which the client can only
+    -- report for whoever is logged in. That destroyed every alt's criteria
+    -- progress to repair a boolean.
     local damaged = {
         version = 21,
-        account = { loremaster = { [2] = { criteria = 12, progress = {} } } },
+        account = {
+            loremaster = {
+                [2] = { criteria = 12, progress = { ["Realm-Alt"] = 9 } },
+            },
+        },
         characters = {},
         settings   = {},
     }
 
     CN.migrations[21](damaged)
 
-    assert(CN.CountKeys(damaged.account.loremaster) == 0,
-        "a store that lost the flag is emptied so the login scan rebuilds it")
+    assert(damaged.account.loremaster[2],
+        "a row is not thrown away to repair a flag on it")
+
+    assert(damaged.account.loremaster[2].progress["Realm-Alt"] == 9,
+        "and an alt's criteria progress -- which only that alt can supply -- "
+        .. "survives")
 
     -- AND THE LOGIN SCAN REBUILDS AN INCOMPLETE STORE, not only an empty one.
     local loremaster = CN:GetModule("Loremaster")
@@ -10290,29 +10605,103 @@ end)()
     local records = loremaster.Records and loremaster.Records()
         or CN.Account("loremaster")
 
+    -- A ROW A SCAN ACTUALLY PRODUCES. Earlier blocks inject synthetic rows
+    -- for their own purposes, and a scan does not rewrite one the client has
+    -- never heard of -- so picking the first key in the store tests whether
+    -- the fixture is tidy rather than whether the repair works.
+    for id in pairs(records) do
+        records[id] = nil
+    end
+
+    loremaster.Scan()
+
     local anyID = next(records)
 
     assert(anyID, "the fixture has quest achievements")
 
-    records[anyID].completed = nil
+    local function ScansAtLogin()
+        local scans = 0
 
-    local scans = 0
+        local realScan = loremaster.Scan
 
-    local realScan = loremaster.Scan
+        loremaster.Scan = function(...)
+            scans = scans + 1
 
-    loremaster.Scan = function(...)
-        scans = scans + 1
+            return realScan(...)
+        end
 
-        return realScan(...)
+        CN.RunHooks(CN.loginHooks)
+
+        loremaster.Scan = realScan
+
+        return scans
     end
 
-    CN.RunHooks(CN.loginHooks)
+    -- THIS CHARACTER'S PROGRESS PRESENT ON EVERY ROW, so the only thing
+    -- absent is the account-wide flag -- otherwise the other branch repairs
+    -- it on the way past and this proves nothing.
+    local ownKey = CN.characterKey or CN.GetCharacterKey()
 
-    loremaster.Scan = realScan
+    for _, record in pairs(records) do
+        record.progress = record.progress or {}
+        record.progress[ownKey] = record.progress[ownKey] or 0
+    end
 
-    assert(scans > 0,
-        "a store with a row missing its flag is rescanned at login; only "
+    records[anyID].completed = nil
+
+    ScansAtLogin()
+
+    assert(records[anyID].completed ~= nil,
+        "a store with a row missing its flag is repaired at login; only "
         .. "'empty' was checked, and after the first character it never is")
+
+    -- AND ON THIS CHARACTER'S OWN DIMENSION, which is the half that matters
+    -- to an alt: `completed` is account-wide, so the first character to log
+    -- in after an upgrade repairs it for everybody and locks every other
+    -- character out of the rescan -- while the thing THEY are missing is
+    -- their own progress.
+    loremaster.Scan()
+
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    for _, record in pairs(records) do
+        if type(record.progress) == "table" then
+            record.progress[key] = nil
+        end
+    end
+
+    -- ASSERTED ON THE STORE, NOT ON A CALL COUNT. Several login hooks scan
+    -- something, so counting calls proves only that a login happened; what
+    -- matters is whether THIS character's own figures came back.
+    ScansAtLogin()
+
+    local repaired = 0
+
+    for _, record in pairs(records) do
+        if type(record.progress) == "table" and record.progress[key] ~= nil then
+            repaired = repaired + 1
+        end
+    end
+
+    assert(repaired > 0,
+        "a character with no progress of its own gets it back at login, even "
+        .. "though the account-wide flag is intact -- otherwise the first "
+        .. "character to log in repairs the flag and locks every other one "
+        .. "out of the rescan they need")
+
+    -- AND SAID IN THE SOURCE, because the two conditions are hard to tell
+    -- apart from the outside: the account-wide one repairs the same rows on
+    -- the way past, so a behavioural test can pass with only half of it.
+    do
+        local source = CN_TEST_ReadAddonFile("Modules/Loremaster.lua")
+
+        assert(source, "Modules/Loremaster.lua must be readable")
+
+        assert(source:find("record.progress[key] == nil", 1, true),
+            "the login scan triggers on THIS character's own progress being "
+            .. "absent, not only on the account-wide flag -- which the first "
+            .. "character to log in repairs for everybody")
+    end
 
     -- A TEXT SEARCH DOES NOT TELL THE ADDON IT OFFERED YOU ANYTHING.
     CN.UI.Hide()
@@ -14050,6 +14439,25 @@ end)()
                 local text = file:read("*a")
 
                 file:close()
+
+                -- CODE, NOT PROSE. 0.69.0.
+                --
+                -- This searched the whole file for a reader's name, comments
+                -- included -- so a comment EXPLAINING why something no longer
+                -- calls `CN.TravelCost` reported the file as calling it. The
+                -- same trap the CI preflight documents having closed: "the
+                -- check passed on prose and said nothing", in the other
+                -- direction. A lint that reads comments is a lint that can be
+                -- talked out of, and talked into.
+                local code = {}
+
+                for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+                    if not line:match("^%s*%-%-") then
+                        table.insert(code, (line:gsub("%s%-%-[^\"]*$", "")))
+                    end
+                end
+
+                text = table.concat(code, "\n")
 
                 -- One provider per file in this addon, so the file is the
                 -- unit. `events = { ... }` on the registration is what

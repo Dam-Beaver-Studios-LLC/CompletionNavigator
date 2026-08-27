@@ -672,7 +672,10 @@ CN.RegisterSelfTest{
     area = "engine",
     name = "the engine can answer 'what next'",
     run  = function()
-        local results = CN.Recommend(1)
+        -- QUIETLY. A diagnostic must not teach the addon anything about how
+        -- the player plays: `/cn selftest` runs on demand and its result is
+        -- a pass or a fail, not a recommendation anybody acted on. 0.69.0.
+        local results = CN.Recommend(1, true)
 
         if not results or #results == 0 then
             return SKIP, "nothing actionable right now" .. CN.DASH .. "try /cn setup, or "

@@ -1164,18 +1164,22 @@ CN.migrations = {
     -- the achievement API -- so it is emptied rather than patched, and the
     -- login scan that fires on an empty store rebuilds it correctly. Nothing
     -- is lost that the client cannot hand back.
-    [21] = function(db)
-        db.account = db.account or {}
-
-        local held = CN.CountKeys(db.account.loremaster)
-
-        if held > 0 then
-            db.account.loremaster = {}
-
-            CN.DebugPrint("Cleared " .. held .. " quest achievement row(s) so "
-                .. "the next login rebuilds them; migration 20 removed a flag "
-                .. "they cannot rewrite on their own.")
-        end
+    [21] = function()
+        -- DELIBERATELY EMPTY, AND KEPT SO THE LADDER STAYS CONTINUOUS.
+        --
+        -- This used to empty `account.loremaster` outright, to force the
+        -- login scan to rebuild what the first version of migration 20 had
+        -- taken. Its own comment claimed "nothing is lost that the client
+        -- cannot hand back" and that was wrong: `record.progress` is keyed by
+        -- character, and the client can only ever report the character
+        -- currently logged in. Emptying the store destroyed every ALT's
+        -- criteria progress to repair one account-wide flag.
+        --
+        -- The repair belongs where it can actually be made: the login scan
+        -- rewrites `completed` for every row and this character's progress
+        -- for its own, and 0.69.0 triggers it on either being absent. Each
+        -- character repairs itself the first time it plays, and nobody's work
+        -- is thrown away to do it.
     end,
 }
 

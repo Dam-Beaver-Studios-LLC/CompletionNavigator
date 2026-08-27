@@ -123,7 +123,11 @@ function Alts.Assignments()
 
     local seen = {}
 
-    for _, objective in ipairs(CN.Recommend(Alts.considered) or {}) do
+    -- QUIETLY: this asks "which character should do each of these" and
+    -- prints a handful of names. Nothing here is shown to the player as a
+    -- recommendation, and counting twenty rows as offered -- and starting a
+    -- work clock on each -- is the defect 0.68.0 added `quiet` for. 0.69.0.
+    for _, objective in ipairs(CN.Recommend(Alts.considered, true) or {}) do
         if Alts.switchableTypes[objective.type] then
             local ok, bestKey, detail, scope =
                 pcall(warband.WhoShould, objective.type, objective.id)

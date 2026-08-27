@@ -154,29 +154,55 @@ end
 -- kind of thing takes. Either half may be unknown, and an unknown half is
 -- left out rather than guessed -- an estimate built on a guess would refuse
 -- urgency to things the player could easily have reached.
+-- THE JOURNEY ONLY, AND ONLY WHEN IT IS A MEASUREMENT. Rewritten in 0.69.0.
+--
+-- The first version of this added `Session.TypicalSeconds(type)` -- the
+-- median of every completion of that TYPE on the account -- to the journey,
+-- and `UrgencyBonus` then zeroed anything whose deadline was shorter. Two
+-- things were wrong with that, and together they inverted the curve in
+-- exactly the window it was written for.
+--
+-- One: a whole-type median is not about this objective. Campaign quests,
+-- escorts and world quests share one bucket, so a median of eight minutes
+-- was ordinary -- and a "kill 8 boars" world quest thirty yards away with
+-- five minutes left scored zero urgency, below one with three days on it.
+-- World quests carry no other deadline signal, so that removed the whole of
+-- it.
+--
+-- Two: `travelCost` is not always a measurement. `CN.TravelCost` returns
+-- `unknownLocationCost` for a same-map miss and `fallbackZoneCost` -- which
+-- is `Travel.maximumCost`, the saturation point -- for anything it cannot
+-- route. Multiplied out, that is twenty minutes of fabricated journey, and
+-- the client answers `mapID, nil, nil` for a window after every loading
+-- screen. `Session.NoteOffered` already refuses to subtract a cost at the
+-- ceiling, on the grounds that it is "the model saying far away, I stopped
+-- counting" -- and this trusted the identical number. One rule, written
+-- twice, drifted immediately.
+--
+-- What remains is a fact rather than an estimate: a journey the model
+-- actually costed, below its own saturation point. If that alone is longer
+-- than the time left, the player cannot arrive, and no amount of curve
+-- shape makes that urgent.
 function CN.SecondsNeeded(objective)
     if type(objective) ~= "table" then
         return nil
     end
 
-    local seconds = nil
-
     local cost = objective.travelCost
 
-    if type(cost) == "number" and cost > 0 and CN.secondsPerCostPoint then
-        seconds = cost * CN.secondsPerCostPoint
+    if type(cost) ~= "number" or cost <= 0 or not CN.secondsPerCostPoint then
+        return nil
     end
 
-    local session = CN.modules and CN:GetModule("Session")
+    local travel = CN.modules and CN:GetModule("Travel")
 
-    local work = session and session.TypicalSeconds
-        and session.TypicalSeconds(objective.type)
+    local ceiling = (travel and travel.maximumCost) or 40
 
-    if type(work) == "number" and work > 0 then
-        seconds = (seconds or 0) + work
+    if cost >= ceiling then
+        return nil
     end
 
-    return seconds
+    return cost * CN.secondsPerCostPoint
 end
 
 -- Priority profiles have two independent levers:
@@ -466,6 +492,27 @@ function CN.Reasons(objective)
             for _, key in ipairs(keys) do
                 composed[#composed + 1] = held[key]
             end
+        end
+    end
+
+    -- A DEADLINE THAT COUNTS FOR NOTHING SAYS SO HERE. 0.69.0.
+    --
+    -- 0.68.0 stopped an unreachable deadline from earning urgency, and put
+    -- the explanation in `CN.ExplainScore` -- which has exactly one caller,
+    -- `/cn order`. So the surface a player would actually use, `/cn why`,
+    -- said nothing at all, and the row still carried a visible clock while
+    -- sitting thirtieth. The most surprising thing a list can contain is a
+    -- number that plainly matters and evidently did not.
+    --
+    -- Said where every reader already looks: the reasons list feeds `/cn
+    -- why`, the row tooltip and the heads-up line.
+    if objective.expiresIn then
+        local needed = CN.SecondsNeeded(objective)
+
+        if needed and objective.expiresIn < needed then
+            composed[#composed + 1] =
+                "it expires before you could get there, so its deadline "
+                .. "counts for nothing here"
         end
     end
 
@@ -2609,12 +2656,21 @@ CN:RegisterCommand{
         for index, objective in ipairs(results) do
             local away
 
-            if objective.travelCost and objective.travelCost > 0
-                and CN.secondsPerCostPoint and session
-                and session.FormatDuration then
+            -- THE SAME RULE THE TOOLTIPS USE. 0.69.0.
+            --
+            -- `CN.TravelCost` never refuses: on a miss it returns the
+            -- pessimism constant the scorer ranks an unknown location with.
+            -- Rendering that as a duration prints "20m away" for something
+            -- the player can see from where they are standing, which is the
+            -- defect `UI.DistanceLine` was written for -- and this, one of
+            -- the ten day-one commands, was not converted with it.
+            --
+            -- `CN.SecondsNeeded` is the one place that decides whether a
+            -- journey is a measurement.
+            local measured = CN.SecondsNeeded(objective)
 
-                away = session.FormatDuration(objective.travelCost
-                    * CN.secondsPerCostPoint)
+            if measured and session and session.FormatDuration then
+                away = session.FormatDuration(measured)
             end
 
             CN.PrintLine(index .. ". "

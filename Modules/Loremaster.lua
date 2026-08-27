@@ -812,6 +812,67 @@ CN:RegisterCommand{
 -- A row with no `completed` flag is the shape of that damage, and it is also
 -- the shape of a row written before the flag existed. Both want the same
 -- thing.
+-- THE ZONE YOU ARE IN, WHEN YOU HAND SOMETHING IN. 0.69.0.
+--
+-- The store was written by `Loremaster.Scan` and by nothing else, and `Scan`
+-- ran at login, on `/cn scanlore`, and from the Journey tab's "Rescan zones"
+-- button. So turning in a quest moved nothing: the Journey tab went on
+-- reading the count it had at login, and the zone the player had just
+-- advanced still said what it said an hour ago.
+--
+-- That is a reported symptom -- "the completion of a quest does not appear to
+-- remove it from the journey" -- and it is not the recommendation list, which
+-- has always been invalidated on `QUEST_TURNED_IN`. It is this store, which
+-- nothing invalidated at all.
+--
+-- ONE ACHIEVEMENT, NOT THE TREE. A full scan walks every quest achievement in
+-- the game and is why it was never put on an event. The zone the player is
+-- standing in is the only row a turn-in can move, and refreshing it is two
+-- client calls -- the same shape `Exploration.RefreshCurrentZone` has used
+-- since 0.61.0, in the sibling store this fix never reached.
+--
+-- Debounced, because a quest chain can hand in three at once.
+function Loremaster.RefreshCurrentZone()
+    local here = Loremaster.ForZone()
+
+    if not here or not here.id then
+        return false
+    end
+
+    local record = Records()[here.id]
+
+    if not record then
+        return false
+    end
+
+    local done, criteria = Blizzard.GetAchievementProgress(here.id)
+
+    -- NOT OVER GOOD DATA WITH NOTHING. A refusal from the criteria API
+    -- answers `0, 0`, and writing that in loses the row -- the guard
+    -- `Exploration` carries, and the one `Achievements` was given in 0.68.0
+    -- after it did exactly this.
+    if not criteria or criteria <= 0 then
+        return false
+    end
+
+    record.criteria = criteria
+
+    record.progress = record.progress or {}
+    record.progress[CN.characterKey or CN.GetCharacterKey()] = done
+
+    -- SET AND CLEARED BOTH, so a zone that gains a criterion in a patch can
+    -- stop being finished.
+    record.completed = (done >= criteria) and true or false
+
+    return true
+end
+
+CN:RegisterEvent("QUEST_TURNED_IN", function()
+    CN.Debounce("Loremaster.zone", 2, function()
+        pcall(Loremaster.RefreshCurrentZone)
+    end)
+end)
+
 CN:OnLogin(function()
     local records = Records()
 
@@ -821,11 +882,35 @@ CN:OnLogin(function()
         return
     end
 
-    for _, record in pairs(records) do
-        if type(record) == "table" and record.completed == nil then
-            Loremaster.Scan()
+    -- AND ON THIS CHARACTER'S OWN DIMENSION. 0.69.0.
+    --
+    -- `completed` is account-wide, so once ANY character has repaired it no
+    -- other character ever triggers a rescan again -- and `progress` is
+    -- per-character, which is precisely what an alt is missing. So the first
+    -- character to log in after the upgrade fixed the store for itself and
+    -- locked every other character out of the repair: `/cn zones` reported
+    -- "not started, 120 to do" for zones an alt had fully quested, with no
+    -- way back short of finding `/cn scanlore`.
+    --
+    -- A scan is cheap and runs once per login. Two conditions, both about
+    -- something that is genuinely absent.
+    local key = CN.characterKey or CN.GetCharacterKey()
 
-            return
+    for _, record in pairs(records) do
+        if type(record) == "table" then
+            if record.completed == nil then
+                Loremaster.Scan()
+
+                return
+            end
+
+            if type(record.progress) ~= "table"
+                or record.progress[key] == nil then
+
+                Loremaster.Scan()
+
+                return
+            end
         end
     end
 end)

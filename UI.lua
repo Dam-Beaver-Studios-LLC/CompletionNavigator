@@ -664,6 +664,19 @@ local function BuildWindow()
     -- note reserves the muted, disabled face for text that does not.
     window.elsewhere = CN.Label(window, "OVERLAY", "SMALL")
     window.elsewhere:SetPoint("RIGHT", searchLabel, "LEFT", -8, 0)
+
+    -- BOUNDED ON BOTH EDGES. 0.69.0.
+    --
+    -- Anchored on one edge a font string grows in the other direction without
+    -- limit, and this one can carry four tab names and their counts -- about
+    -- 290 pixels at normal size and 435 at Text 150%, in roughly 325 of room.
+    -- The overflow is drawn outside the window, over the world.
+    window.elsewhere:SetPoint("LEFT", window, "LEFT", CN.SPACE.M, 0)
+
+    if window.elsewhere.SetWordWrap then
+        window.elsewhere:SetWordWrap(false)
+    end
+
     window.elsewhere:SetJustifyH("RIGHT")
     window.elsewhere:SetTextColor(CN.Rgb("ACCENT"))
     window.elsewhere:SetText("")
@@ -1231,40 +1244,32 @@ end
 --
 -- This is the only caller that needs all eleven at once, and it is
 -- user-initiated.
--- WHICH TAB REFRESHES WRITE SOMETHING. 0.68.0.
+-- QUIET, NOT SKIPPED. 0.69.0.
 --
--- `/cn find` refreshes every tab so the search has something to look at, and
--- it does that with the window closed. Two of those refreshes are not
--- read-only: the Next tab calls `CN.Recommend`, which counts every row as
--- having been shown to the player and starts session clocks on the top ones,
--- and it overwrites `CN.currentRecommendation`. So typing a search recorded
--- twelve objectives as offered and started their work clocks.
+-- 0.68.0 stopped `/cn find` refreshing the two tabs whose refresh records
+-- something -- and a tab that is not refreshed has an empty list, so the
+-- search could no longer match anything on them. `/cn find <the objective
+-- ranked fourth>` answered "nothing in the window matches", for the tab whose
+-- entire purpose is that objective, while its own help says it searches every
+-- tab at once.
 --
--- Named rather than guessed at: a tab whose refresh has a side effect is a
--- thing this file has to know about, and the searcher skips exactly those
--- when the player is not looking at the window.
-UI.writingTabs = {
-    Next = true,
-    Zone = true,
-}
-
-function UI.RefreshAllTabs(forSearch)
+-- The fix for the side effect already existed and was applied one line too
+-- far: `CN.Recommend(limit, quiet)`. The Next tab asks quietly when nobody is
+-- looking at the window, which is the same condition, and the rows are built
+-- either way.
+function UI.RefreshAllTabs()
     -- THE WINDOW FIRST. A function that promises every tab has to make sure
     -- there is something for a tab to be a panel of: `BuildPanel` cannot
     -- build anything before the window body exists, and on a fresh login it
     -- does not. 0.67.0.
     UI.BuildWindow()
 
-    local hidden = not (window and window:IsShown())
-
     local refreshed = 0
 
     for _, tab in ipairs(UI.tabs) do
         UI.BuildPanel(tab)
 
-        local skip = forSearch and hidden and UI.writingTabs[tab.name]
-
-        if tab.refresh and tab.panel and not skip then
+        if tab.refresh and tab.panel then
             if pcall(tab.refresh, tab.panel) then
                 refreshed = refreshed + 1
             end
@@ -1282,7 +1287,17 @@ function UI.SearchElsewhere(text)
 
     for _, hit in ipairs(UI.SearchAll(text)) do
         if hit.tab ~= current then
-            table.insert(parts, hit.tab .. " (" .. hit.count .. ")")
+            -- NAMED THE WAY THE TAB STRIP NAMES IT. 0.69.0.
+            --
+            -- `hit.tab` is the internal English key; the strip itself draws
+            -- `CN.L[tab.name]`, and all eleven are translated in every
+            -- shipped locale. So a German player read "Also on: Collections
+            -- (12)" beside a tab labelled Sammlungen -- a pointer to a tab
+            -- that does not exist by that name anywhere on their screen.
+            --
+            -- The token stays the token; only the printing changes.
+            table.insert(parts,
+                (CN.L[hit.tab] or hit.tab) .. " (" .. hit.count .. ")")
         end
 
         if #parts >= 4 then
@@ -1613,10 +1628,16 @@ UI.RegisterTab{
                         -- on some of them. It also counted over sixty while
                         -- the list behind the tooltip draws twelve, so the
                         -- sentence promised rows that were not there.
-                        for _, objective in ipairs(
-                            CN.Recommend(UI.listLimit, true) or {}) do
+                        -- FROM THE SECOND ROW. 0.69.0.
+                        --
+                        -- Rank one is the headline ABOVE the list, so the
+                        -- list draws eleven of the twelve -- and a type whose
+                        -- only representative was the headline claimed "1 row
+                        -- in the list" over a list containing none of it.
+                        local ranked = CN.Recommend(UI.listLimit, true) or {}
 
-                            if objective.type == objectiveType then
+                        for index = 2, #ranked do
+                            if ranked[index].type == objectiveType then
                                 holding = holding + 1
                             end
                         end
@@ -1652,7 +1673,13 @@ UI.RegisterTab{
         panel.filter:SetText("Filter types")
 
 
-        local results = CN.Recommend(UI.listLimit)
+        -- ASKED QUIETLY WHEN NOBODY IS LOOKING. 0.69.0.
+        --
+        -- A refresh with the window hidden happens for one reason -- `/cn
+        -- find` builds every tab so it has something to search -- and a row
+        -- nobody can see was not offered to anybody. See `CN.Recommend`.
+        local results = CN.Recommend(UI.listLimit,
+            not (window and window:IsShown()))
 
         -- A CONTROL THAT CANNOT ACT MUST NOT LOOK LIKE IT CAN.
         --
@@ -2496,7 +2523,20 @@ UI.RegisterTab{
                         if record and (record.sightings or 0) > 1 then
                             table.insert(lines, "You have met it "
                                 .. CN.Count(record.sightings, "time") .. ".")
-                        elseif record and record.sightings == 1 then
+                        elseif record and record.sightings == 1
+                            and record.firstSeen
+                            and (time() - record.firstSeen)
+                                < (rares.sightingGap or 600) then
+
+                            -- AND THE RECORD HAS TO BE NEW, NOT JUST THE
+                            -- COUNTER. 0.69.0.
+                            --
+                            -- Migration 19 cleared every stored count, so the
+                            -- NEXT encounter with a rare farmed for a year
+                            -- writes 1 and this said "first time" again --
+                            -- the same confident wrong claim, one sighting
+                            -- later, with a `firstSeen` from months ago
+                            -- sitting on the same table.
                             table.insert(lines, "First time you have met it.")
                         end
 
@@ -4556,7 +4596,7 @@ CN:RegisterCommand{
         -- `UI.Frame()`, which is a pure accessor -- `return window` -- so on
         -- a fresh login it built nothing and the command answered "nothing
         -- matches" for things the addon plainly had. 0.67.0.
-        UI.RefreshAllTabs(true)
+        UI.RefreshAllTabs()
 
         local hits = UI.SearchAll(args)
 
@@ -4570,7 +4610,7 @@ CN:RegisterCommand{
         Print("Matches for |cffffc74f" .. args .. "|r:")
 
         for _, hit in ipairs(hits) do
-            CN.PrintLine("  " .. hit.tab .. " |cff8a8f96("
+            CN.PrintLine("  " .. (CN.L[hit.tab] or hit.tab) .. " |cff8a8f96("
                 .. CN.Count(hit.count, "match", "matches") .. ")|r"
                 .. (hit.first and (" " .. CN.DASH .. " " .. hit.first) or ""))
         end

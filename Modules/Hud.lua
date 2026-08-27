@@ -575,6 +575,9 @@ function Hud.RegisterOptionsPanel()
     scan:SetSize(190, 24)
     scan:SetPoint("TOPLEFT", 16, -190)
     scan:SetText("Scan my collections")
+    -- The client built this label, so `CN.Label` never saw it and the
+    -- text-size setting did not reach it. 0.69.0.
+    CN.AdoptLabel(scan:GetFontString(), "CAPTION")
     scan:SetScript("OnClick", function()
         local setup = CN:GetModule("Setup")
 
@@ -587,6 +590,9 @@ function Hud.RegisterOptionsPanel()
     open:SetSize(160, 24)
     open:SetPoint("LEFT", scan, "RIGHT", 8, 0)
     open:SetText("Open the window")
+    -- The client built this label, so `CN.Label` never saw it and the
+    -- text-size setting did not reach it. 0.69.0.
+    CN.AdoptLabel(open:GetFontString(), "CAPTION")
     open:SetScript("OnClick", function()
         if CompletionNavigator_ToggleUI then
             CompletionNavigator_ToggleUI()

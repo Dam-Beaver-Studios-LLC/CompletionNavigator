@@ -7,6 +7,88 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.69.0]
+
+Fifteen defects, and an answer to two of the three things that have been
+waiting on somebody logging in.
+
+### Fixed â€” the ranking
+
+- **The 0.68.0 urgency guard was wrong in the ordinary case.** It refused
+  urgency to anything whose deadline was shorter than the journey *plus the
+  median time this account takes over that whole type of thing* â€” so a "kill 8
+  boars" world quest thirty yards away with five minutes left scored no
+  urgency at all, because four campaign quests had set the median at eight
+  minutes. World quests carry no other deadline signal, so that removed all of
+  it. It also trusted a travel cost the addon uses to mean "far away, I
+  stopped counting" â€” twenty minutes of journey that was never measured, which
+  the client produces routinely for a window after every loading screen. The
+  guard now fires only on a journey the model actually costed.
+- **A deadline that counts for nothing now says so where you would look.**
+  The explanation was added to a screen with one caller, `/cn order`. It is in
+  the reasons list now, which is what `/cn why`, the row tooltip and the
+  heads-up line all read.
+- **`/cn alts` and `/cn selftest` were teaching the addon that twenty
+  objectives had been shown to you** every time you ran them.
+
+### Fixed â€” a quest you turn in
+
+- **Handing in a quest did not move the Journey tab.** Zone progress was
+  written by a full scan and by nothing else, and that scan runs at login, on
+  `/cn scanlore`, and from the "Rescan zones" button â€” so the zone you had
+  just advanced went on reporting the count it had when you logged in. This is
+  the reported symptom, and it was never the recommendation list, which has
+  always updated on turn-in. The zone you are standing in refreshes now, from
+  two client calls, debounced so a chain handing in three at once costs one
+  refresh.
+
+### Fixed â€” alts
+
+- **An alt could be permanently locked out of the 0.68.0 repair.** The rescan
+  that fixed the Loremaster store triggered on a flag that is shared by the
+  whole account, so the first character to log in fixed it for everybody and
+  every other character then had no trigger left â€” while the thing *they* were
+  missing was their own per-zone progress. And the migration that forced that
+  repair emptied the store outright, which threw away every alt's progress to
+  restore one boolean. It takes nothing now, and each character repairs itself
+  the first time it plays.
+
+### Fixed â€” numbers and text
+
+- **`/cn list` printed the addon's internal "somewhere unknown" constant as a
+  distance** â€” "20m away" for something you can see from where you are
+  standing. It was the one day-one command the 0.68.0 fix did not reach.
+- **`/cn goal` on a rare said "Seen 1 time here"** for a rare with no stored
+  count, and the tooltip said "First time you have met it" again on the very
+  next encounter after an upgrade.
+- **The cross-tab search named tabs in English** â€” "Also on: Collections (12)"
+  beside a tab strip reading *Sammlungen*.
+- **The search hint could be drawn outside the window**, over the game, when
+  four tabs matched at larger text sizes.
+- **A type filter claimed rows the list does not contain** â€” it counted twelve
+  while the list draws eleven, the twelfth being the headline above it.
+- **The Welcome screen and the Hud options panel ignored the text-size
+  setting**, which the release that introduced it named as fixed.
+- **A store with a reader and no writer** was being recreated empty and
+  written to disk at every logout, for ever, to answer nothing.
+
+### Verified rather than fixed
+
+- **The heads-up line can be dragged and closed**, and now the test suite says
+  so. Both were built releases ago and neither had ever been checked by
+  anything but a person â€” so "does it drag" was a question only playing could
+  answer. It is movable, dragged from anywhere on it, clamped to the screen,
+  its position is remembered across sessions, and the **x** in its corner
+  turns it off rather than hiding it until the next login.
+
+### Internal
+
+- **A build lint was reading comments.** The check that every provider
+  declares the events it depends on searched the whole file for a function
+  name â€” so a comment *explaining* why something no longer calls that function
+  reported it as calling it. It reads code now, which is the same correction
+  the CI preflight made for the same reason.
+
 ## [0.68.0]
 
 Fourteen defects. Eleven of them were in what 0.67.0 itself added, including

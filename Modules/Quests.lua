@@ -527,12 +527,24 @@ function Quests.NearbyRememberedMaps(playerMap)
         -- journey, so it is not pretended: it sorts last on the same constant
         -- the scorer uses for an unknown location, which is what that
         -- constant is for.
-        local cost = sample and CN.TravelCost(mapID, sample.x, sample.y)
-            or CN.unknownLocationCost
+        -- AN EXPLICIT BRANCH, BECAUSE `CN.TravelCost` NEVER REFUSES. 0.69.0.
+        --
+        -- Written as an `and ... or` it reads as protection against a nil
+        -- cost -- which cannot happen, and which this file says cannot happen
+        -- a thousand lines down. A guard that cannot fire is one nobody can
+        -- reason about, and it would silently swallow the day `CN.TravelCost`
+        -- learns to refuse.
+        local cost
+
+        if sample then
+            cost = CN.TravelCost(mapID, sample.x, sample.y)
+        else
+            cost = CN.unknownLocationCost
+        end
 
         table.insert(maps, {
             mapID = mapID,
-            cost  = cost or CN.unknownLocationCost,
+            cost  = cost,
             pins  = pins,
         })
     end

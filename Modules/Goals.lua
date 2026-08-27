@@ -358,8 +358,18 @@ function Goals.Plan(goal)
             plan.zone = record.mapID and CN.Blizzard.GetMapName(record.mapID)
                 or record.zone
 
-            step("Seen " .. (record.sightings or 1) .. " time"
-                .. CN.Pluralize((record.sightings or 1), "") .. " here.")
+            -- SAID ONLY WHEN THERE IS A COUNT. 0.69.0.
+            --
+            -- Migration 19 deleted every stored sighting count because a
+            -- missing number is better than a confidently wrong one, and
+            -- this substituted 1 for the missing one -- telling a player who
+            -- had farmed a rare weekly for a year that they had seen it once.
+            -- 0.68.0 fixed the identical claim on the tooltip and left this
+            -- sibling, which is the shape this project keeps finding.
+            if record.sightings then
+                step("Seen " .. record.sightings .. " time"
+                    .. CN.Pluralize(record.sightings, "") .. " here.")
+            end
         end
     end
 

@@ -2408,10 +2408,12 @@ mutate "Core.lua" \
 # Asserted as a source rule in the 0.67.0 block instead.
 
 mutate "UI.lua" \
-    "        UI.BuildPanel(tab)
+    "    for _, tab in ipairs(UI.tabs) do
+        UI.BuildPanel(tab)
 
-        local skip = forSearch and hidden and UI.writingTabs[tab.name]" \
-    "        local skip = forSearch and hidden and UI.writingTabs[tab.name]" \
+        if tab.refresh and tab.panel then" \
+    "    for _, tab in ipairs(UI.tabs) do
+        if tab.refresh and tab.panel then" \
     "the search is blind to every tab the player has not clicked"
 
 mutate "Design.lua" \
@@ -2525,8 +2527,8 @@ mutate "Scoring.lua" \
     "a deadline the player cannot reach is scored as urgent"
 
 mutate "Scoring.lua" \
-    "        seconds = cost * CN.secondsPerCostPoint" \
-    "        seconds = cost" \
+    "    return cost * CN.secondsPerCostPoint" \
+    "    return cost" \
     "a journey in cost points is treated as a journey in seconds"
 
 mutate "Database.lua" \
@@ -2540,19 +2542,20 @@ mutate "Database.lua" \
     "a migration deletes an account-wide flag nothing rewrites"
 
 mutate "Modules/Loremaster.lua" \
-    "        if type(record) == \"table\" and record.completed == nil then
-            Loremaster.Scan()
+    "            if record.completed == nil then
+                Loremaster.Scan()
 
-            return
-        end" \
-    "        if false then
-            return
-        end" \
+                return
+            end" \
+    "            if false then
+                return
+            end" \
     "a store missing a field is never rebuilt"
 
 mutate "UI.lua" \
-    "        local skip = forSearch and hidden and UI.writingTabs[tab.name]" \
-    "        local skip = false" \
+    "        local results = CN.Recommend(UI.listLimit,
+            not (window and window:IsShown()))" \
+    "        local results = CN.Recommend(UI.listLimit)" \
     "a text search starts session clocks on twelve objectives"
 
 mutate "UI.lua" \
@@ -2582,6 +2585,80 @@ mutate "Modules/Quests.lua" \
         end" \
     "        sample = pins[1]" \
     "a zone is priced from a pin that has no position"
+
+############################################################
+# 0.69.0
+############################################################
+
+mutate "Modules/Loremaster.lua" \
+    "CN:RegisterEvent(\"QUEST_TURNED_IN\", function()
+    CN.Debounce(\"Loremaster.zone\", 2, function()
+        pcall(Loremaster.RefreshCurrentZone)
+    end)
+end)" \
+    "" \
+    "handing a quest in leaves the journey saying what it said at login"
+
+mutate "Modules/Loremaster.lua" \
+    "    if not criteria or criteria <= 0 then
+        return false
+    end
+
+    record.criteria = criteria" \
+    "    record.criteria = criteria" \
+    "a refusal from the criteria API wipes the zone row"
+
+mutate "Scoring.lua" \
+    "    if cost >= ceiling then
+        return nil
+    end" \
+    "    if false then
+        return nil
+    end" \
+    "a journey the model could not cost is treated as twenty minutes"
+
+mutate "Scoring.lua" \
+    "        if needed and objective.expiresIn < needed then
+            composed[#composed + 1] =" \
+    "        if false then
+            composed[#composed + 1] =" \
+    "a deadline that counts for nothing is never explained"
+
+mutate "Modules/Loremaster.lua" \
+    "            if type(record.progress) ~= \"table\"
+                or record.progress[key] == nil then
+
+                Loremaster.Scan()
+
+                return
+            end" \
+    "            if false then
+                return
+            end" \
+    "an alt is locked out of the repair by the character before it"
+
+mutate "Database.lua" \
+    "    [21] = function()" \
+    "    [21] = function(db) db.account.loremaster = {}" \
+    "a migration throws away every alt's progress to repair a flag"
+
+mutate "Modules/Alts.lua" \
+    "    for _, objective in ipairs(CN.Recommend(Alts.considered, true) or {}) do" \
+    "    for _, objective in ipairs(CN.Recommend(Alts.considered) or {}) do" \
+    "asking which alt should do something counts as offering it"
+
+mutate "Modules/Goals.lua" \
+    "            if record.sightings then
+                step(\"Seen \" .. record.sightings .. \" time\"" \
+    "            if true then
+                step(\"Seen \" .. (record.sightings or 1) .. \" time\"" \
+    "a rare with no stored count is reported as seen once"
+
+mutate "UI.lua" \
+    "            table.insert(parts,
+                (CN.L[hit.tab] or hit.tab) .. \" (\" .. hit.count .. \")\")" \
+    "            table.insert(parts, hit.tab .. \" (\" .. hit.count .. \")\")" \
+    "the search names tabs in English beside a translated tab strip"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.68.0'
+$script:ToolkitVersion = '0.69.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.68.0"
+CN.version     = "0.69.0"
 CN.dbVersion   = 22
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -2899,18 +2899,22 @@ CN.migrations = {
     -- the achievement API -- so it is emptied rather than patched, and the
     -- login scan that fires on an empty store rebuilds it correctly. Nothing
     -- is lost that the client cannot hand back.
-    [21] = function(db)
-        db.account = db.account or {}
-
-        local held = CN.CountKeys(db.account.loremaster)
-
-        if held > 0 then
-            db.account.loremaster = {}
-
-            CN.DebugPrint("Cleared " .. held .. " quest achievement row(s) so "
-                .. "the next login rebuilds them; migration 20 removed a flag "
-                .. "they cannot rewrite on their own.")
-        end
+    [21] = function()
+        -- DELIBERATELY EMPTY, AND KEPT SO THE LADDER STAYS CONTINUOUS.
+        --
+        -- This used to empty `account.loremaster` outright, to force the
+        -- login scan to rebuild what the first version of migration 20 had
+        -- taken. Its own comment claimed "nothing is lost that the client
+        -- cannot hand back" and that was wrong: `record.progress` is keyed by
+        -- character, and the client can only ever report the character
+        -- currently logged in. Emptying the store destroyed every ALT's
+        -- criteria progress to repair one account-wide flag.
+        --
+        -- The repair belongs where it can actually be made: the login scan
+        -- rewrites `completed` for every row and this character's progress
+        -- for its own, and 0.69.0 triggers it on either being absent. Each
+        -- character repairs itself the first time it plays, and nobody's work
+        -- is thrown away to do it.
     end,
 }
 
@@ -6693,29 +6697,55 @@ end
 -- kind of thing takes. Either half may be unknown, and an unknown half is
 -- left out rather than guessed -- an estimate built on a guess would refuse
 -- urgency to things the player could easily have reached.
+-- THE JOURNEY ONLY, AND ONLY WHEN IT IS A MEASUREMENT. Rewritten in 0.69.0.
+--
+-- The first version of this added `Session.TypicalSeconds(type)` -- the
+-- median of every completion of that TYPE on the account -- to the journey,
+-- and `UrgencyBonus` then zeroed anything whose deadline was shorter. Two
+-- things were wrong with that, and together they inverted the curve in
+-- exactly the window it was written for.
+--
+-- One: a whole-type median is not about this objective. Campaign quests,
+-- escorts and world quests share one bucket, so a median of eight minutes
+-- was ordinary -- and a "kill 8 boars" world quest thirty yards away with
+-- five minutes left scored zero urgency, below one with three days on it.
+-- World quests carry no other deadline signal, so that removed the whole of
+-- it.
+--
+-- Two: `travelCost` is not always a measurement. `CN.TravelCost` returns
+-- `unknownLocationCost` for a same-map miss and `fallbackZoneCost` -- which
+-- is `Travel.maximumCost`, the saturation point -- for anything it cannot
+-- route. Multiplied out, that is twenty minutes of fabricated journey, and
+-- the client answers `mapID, nil, nil` for a window after every loading
+-- screen. `Session.NoteOffered` already refuses to subtract a cost at the
+-- ceiling, on the grounds that it is "the model saying far away, I stopped
+-- counting" -- and this trusted the identical number. One rule, written
+-- twice, drifted immediately.
+--
+-- What remains is a fact rather than an estimate: a journey the model
+-- actually costed, below its own saturation point. If that alone is longer
+-- than the time left, the player cannot arrive, and no amount of curve
+-- shape makes that urgent.
 function CN.SecondsNeeded(objective)
     if type(objective) ~= "table" then
         return nil
     end
 
-    local seconds = nil
-
     local cost = objective.travelCost
 
-    if type(cost) == "number" and cost > 0 and CN.secondsPerCostPoint then
-        seconds = cost * CN.secondsPerCostPoint
+    if type(cost) ~= "number" or cost <= 0 or not CN.secondsPerCostPoint then
+        return nil
     end
 
-    local session = CN.modules and CN:GetModule("Session")
+    local travel = CN.modules and CN:GetModule("Travel")
 
-    local work = session and session.TypicalSeconds
-        and session.TypicalSeconds(objective.type)
+    local ceiling = (travel and travel.maximumCost) or 40
 
-    if type(work) == "number" and work > 0 then
-        seconds = (seconds or 0) + work
+    if cost >= ceiling then
+        return nil
     end
 
-    return seconds
+    return cost * CN.secondsPerCostPoint
 end
 
 -- Priority profiles have two independent levers:
@@ -7005,6 +7035,27 @@ function CN.Reasons(objective)
             for _, key in ipairs(keys) do
                 composed[#composed + 1] = held[key]
             end
+        end
+    end
+
+    -- A DEADLINE THAT COUNTS FOR NOTHING SAYS SO HERE. 0.69.0.
+    --
+    -- 0.68.0 stopped an unreachable deadline from earning urgency, and put
+    -- the explanation in `CN.ExplainScore` -- which has exactly one caller,
+    -- `/cn order`. So the surface a player would actually use, `/cn why`,
+    -- said nothing at all, and the row still carried a visible clock while
+    -- sitting thirtieth. The most surprising thing a list can contain is a
+    -- number that plainly matters and evidently did not.
+    --
+    -- Said where every reader already looks: the reasons list feeds `/cn
+    -- why`, the row tooltip and the heads-up line.
+    if objective.expiresIn then
+        local needed = CN.SecondsNeeded(objective)
+
+        if needed and objective.expiresIn < needed then
+            composed[#composed + 1] =
+                "it expires before you could get there, so its deadline "
+                .. "counts for nothing here"
         end
     end
 
@@ -9148,12 +9199,21 @@ CN:RegisterCommand{
         for index, objective in ipairs(results) do
             local away
 
-            if objective.travelCost and objective.travelCost > 0
-                and CN.secondsPerCostPoint and session
-                and session.FormatDuration then
+            -- THE SAME RULE THE TOOLTIPS USE. 0.69.0.
+            --
+            -- `CN.TravelCost` never refuses: on a miss it returns the
+            -- pessimism constant the scorer ranks an unknown location with.
+            -- Rendering that as a duration prints "20m away" for something
+            -- the player can see from where they are standing, which is the
+            -- defect `UI.DistanceLine` was written for -- and this, one of
+            -- the ten day-one commands, was not converted with it.
+            --
+            -- `CN.SecondsNeeded` is the one place that decides whether a
+            -- journey is a measurement.
+            local measured = CN.SecondsNeeded(objective)
 
-                away = session.FormatDuration(objective.travelCost
-                    * CN.secondsPerCostPoint)
+            if measured and session and session.FormatDuration then
+                away = session.FormatDuration(measured)
             end
 
             CN.PrintLine(index .. ". "
@@ -11554,6 +11614,19 @@ local function BuildWindow()
     -- note reserves the muted, disabled face for text that does not.
     window.elsewhere = CN.Label(window, "OVERLAY", "SMALL")
     window.elsewhere:SetPoint("RIGHT", searchLabel, "LEFT", -8, 0)
+
+    -- BOUNDED ON BOTH EDGES. 0.69.0.
+    --
+    -- Anchored on one edge a font string grows in the other direction without
+    -- limit, and this one can carry four tab names and their counts -- about
+    -- 290 pixels at normal size and 435 at Text 150%, in roughly 325 of room.
+    -- The overflow is drawn outside the window, over the world.
+    window.elsewhere:SetPoint("LEFT", window, "LEFT", CN.SPACE.M, 0)
+
+    if window.elsewhere.SetWordWrap then
+        window.elsewhere:SetWordWrap(false)
+    end
+
     window.elsewhere:SetJustifyH("RIGHT")
     window.elsewhere:SetTextColor(CN.Rgb("ACCENT"))
     window.elsewhere:SetText("")
@@ -12121,40 +12194,32 @@ end
 --
 -- This is the only caller that needs all eleven at once, and it is
 -- user-initiated.
--- WHICH TAB REFRESHES WRITE SOMETHING. 0.68.0.
+-- QUIET, NOT SKIPPED. 0.69.0.
 --
--- `/cn find` refreshes every tab so the search has something to look at, and
--- it does that with the window closed. Two of those refreshes are not
--- read-only: the Next tab calls `CN.Recommend`, which counts every row as
--- having been shown to the player and starts session clocks on the top ones,
--- and it overwrites `CN.currentRecommendation`. So typing a search recorded
--- twelve objectives as offered and started their work clocks.
+-- 0.68.0 stopped `/cn find` refreshing the two tabs whose refresh records
+-- something -- and a tab that is not refreshed has an empty list, so the
+-- search could no longer match anything on them. `/cn find <the objective
+-- ranked fourth>` answered "nothing in the window matches", for the tab whose
+-- entire purpose is that objective, while its own help says it searches every
+-- tab at once.
 --
--- Named rather than guessed at: a tab whose refresh has a side effect is a
--- thing this file has to know about, and the searcher skips exactly those
--- when the player is not looking at the window.
-UI.writingTabs = {
-    Next = true,
-    Zone = true,
-}
-
-function UI.RefreshAllTabs(forSearch)
+-- The fix for the side effect already existed and was applied one line too
+-- far: `CN.Recommend(limit, quiet)`. The Next tab asks quietly when nobody is
+-- looking at the window, which is the same condition, and the rows are built
+-- either way.
+function UI.RefreshAllTabs()
     -- THE WINDOW FIRST. A function that promises every tab has to make sure
     -- there is something for a tab to be a panel of: `BuildPanel` cannot
     -- build anything before the window body exists, and on a fresh login it
     -- does not. 0.67.0.
     UI.BuildWindow()
 
-    local hidden = not (window and window:IsShown())
-
     local refreshed = 0
 
     for _, tab in ipairs(UI.tabs) do
         UI.BuildPanel(tab)
 
-        local skip = forSearch and hidden and UI.writingTabs[tab.name]
-
-        if tab.refresh and tab.panel and not skip then
+        if tab.refresh and tab.panel then
             if pcall(tab.refresh, tab.panel) then
                 refreshed = refreshed + 1
             end
@@ -12172,7 +12237,17 @@ function UI.SearchElsewhere(text)
 
     for _, hit in ipairs(UI.SearchAll(text)) do
         if hit.tab ~= current then
-            table.insert(parts, hit.tab .. " (" .. hit.count .. ")")
+            -- NAMED THE WAY THE TAB STRIP NAMES IT. 0.69.0.
+            --
+            -- `hit.tab` is the internal English key; the strip itself draws
+            -- `CN.L[tab.name]`, and all eleven are translated in every
+            -- shipped locale. So a German player read "Also on: Collections
+            -- (12)" beside a tab labelled Sammlungen -- a pointer to a tab
+            -- that does not exist by that name anywhere on their screen.
+            --
+            -- The token stays the token; only the printing changes.
+            table.insert(parts,
+                (CN.L[hit.tab] or hit.tab) .. " (" .. hit.count .. ")")
         end
 
         if #parts >= 4 then
@@ -12503,10 +12578,16 @@ UI.RegisterTab{
                         -- on some of them. It also counted over sixty while
                         -- the list behind the tooltip draws twelve, so the
                         -- sentence promised rows that were not there.
-                        for _, objective in ipairs(
-                            CN.Recommend(UI.listLimit, true) or {}) do
+                        -- FROM THE SECOND ROW. 0.69.0.
+                        --
+                        -- Rank one is the headline ABOVE the list, so the
+                        -- list draws eleven of the twelve -- and a type whose
+                        -- only representative was the headline claimed "1 row
+                        -- in the list" over a list containing none of it.
+                        local ranked = CN.Recommend(UI.listLimit, true) or {}
 
-                            if objective.type == objectiveType then
+                        for index = 2, #ranked do
+                            if ranked[index].type == objectiveType then
                                 holding = holding + 1
                             end
                         end
@@ -12542,7 +12623,13 @@ UI.RegisterTab{
         panel.filter:SetText("Filter types")
 
 
-        local results = CN.Recommend(UI.listLimit)
+        -- ASKED QUIETLY WHEN NOBODY IS LOOKING. 0.69.0.
+        --
+        -- A refresh with the window hidden happens for one reason -- `/cn
+        -- find` builds every tab so it has something to search -- and a row
+        -- nobody can see was not offered to anybody. See `CN.Recommend`.
+        local results = CN.Recommend(UI.listLimit,
+            not (window and window:IsShown()))
 
         -- A CONTROL THAT CANNOT ACT MUST NOT LOOK LIKE IT CAN.
         --
@@ -13386,7 +13473,20 @@ UI.RegisterTab{
                         if record and (record.sightings or 0) > 1 then
                             table.insert(lines, "You have met it "
                                 .. CN.Count(record.sightings, "time") .. ".")
-                        elseif record and record.sightings == 1 then
+                        elseif record and record.sightings == 1
+                            and record.firstSeen
+                            and (time() - record.firstSeen)
+                                < (rares.sightingGap or 600) then
+
+                            -- AND THE RECORD HAS TO BE NEW, NOT JUST THE
+                            -- COUNTER. 0.69.0.
+                            --
+                            -- Migration 19 cleared every stored count, so the
+                            -- NEXT encounter with a rare farmed for a year
+                            -- writes 1 and this said "first time" again --
+                            -- the same confident wrong claim, one sighting
+                            -- later, with a `firstSeen` from months ago
+                            -- sitting on the same table.
                             table.insert(lines, "First time you have met it.")
                         end
 
@@ -15446,7 +15546,7 @@ CN:RegisterCommand{
         -- `UI.Frame()`, which is a pure accessor -- `return window` -- so on
         -- a fresh login it built nothing and the command answered "nothing
         -- matches" for things the addon plainly had. 0.67.0.
-        UI.RefreshAllTabs(true)
+        UI.RefreshAllTabs()
 
         local hits = UI.SearchAll(args)
 
@@ -15460,7 +15560,7 @@ CN:RegisterCommand{
         Print("Matches for |cffffc74f" .. args .. "|r:")
 
         for _, hit in ipairs(hits) do
-            CN.PrintLine("  " .. hit.tab .. " |cff8a8f96("
+            CN.PrintLine("  " .. (CN.L[hit.tab] or hit.tab) .. " |cff8a8f96("
                 .. CN.Count(hit.count, "match", "matches") .. ")|r"
                 .. (hit.first and (" " .. CN.DASH .. " " .. hit.first) or ""))
         end
@@ -21109,12 +21209,24 @@ function Quests.NearbyRememberedMaps(playerMap)
         -- journey, so it is not pretended: it sorts last on the same constant
         -- the scorer uses for an unknown location, which is what that
         -- constant is for.
-        local cost = sample and CN.TravelCost(mapID, sample.x, sample.y)
-            or CN.unknownLocationCost
+        -- AN EXPLICIT BRANCH, BECAUSE `CN.TravelCost` NEVER REFUSES. 0.69.0.
+        --
+        -- Written as an `and ... or` it reads as protection against a nil
+        -- cost -- which cannot happen, and which this file says cannot happen
+        -- a thousand lines down. A guard that cannot fire is one nobody can
+        -- reason about, and it would silently swallow the day `CN.TravelCost`
+        -- learns to refuse.
+        local cost
+
+        if sample then
+            cost = CN.TravelCost(mapID, sample.x, sample.y)
+        else
+            cost = CN.unknownLocationCost
+        end
 
         table.insert(maps, {
             mapID = mapID,
-            cost  = cost or CN.unknownLocationCost,
+            cost  = cost,
             pins  = pins,
         })
     end
@@ -34265,8 +34377,18 @@ function Goals.Plan(goal)
             plan.zone = record.mapID and CN.Blizzard.GetMapName(record.mapID)
                 or record.zone
 
-            step("Seen " .. (record.sightings or 1) .. " time"
-                .. CN.Pluralize((record.sightings or 1), "") .. " here.")
+            -- SAID ONLY WHEN THERE IS A COUNT. 0.69.0.
+            --
+            -- Migration 19 deleted every stored sighting count because a
+            -- missing number is better than a confidently wrong one, and
+            -- this substituted 1 for the missing one -- telling a player who
+            -- had farmed a rare weekly for a year that they had seen it once.
+            -- 0.68.0 fixed the identical claim on the tooltip and left this
+            -- sibling, which is the shape this project keeps finding.
+            if record.sightings then
+                step("Seen " .. record.sightings .. " time"
+                    .. CN.Pluralize(record.sightings, "") .. " here.")
+            end
         end
     end
 
@@ -37081,6 +37203,67 @@ CN:RegisterCommand{
 -- A row with no `completed` flag is the shape of that damage, and it is also
 -- the shape of a row written before the flag existed. Both want the same
 -- thing.
+-- THE ZONE YOU ARE IN, WHEN YOU HAND SOMETHING IN. 0.69.0.
+--
+-- The store was written by `Loremaster.Scan` and by nothing else, and `Scan`
+-- ran at login, on `/cn scanlore`, and from the Journey tab's "Rescan zones"
+-- button. So turning in a quest moved nothing: the Journey tab went on
+-- reading the count it had at login, and the zone the player had just
+-- advanced still said what it said an hour ago.
+--
+-- That is a reported symptom -- "the completion of a quest does not appear to
+-- remove it from the journey" -- and it is not the recommendation list, which
+-- has always been invalidated on `QUEST_TURNED_IN`. It is this store, which
+-- nothing invalidated at all.
+--
+-- ONE ACHIEVEMENT, NOT THE TREE. A full scan walks every quest achievement in
+-- the game and is why it was never put on an event. The zone the player is
+-- standing in is the only row a turn-in can move, and refreshing it is two
+-- client calls -- the same shape `Exploration.RefreshCurrentZone` has used
+-- since 0.61.0, in the sibling store this fix never reached.
+--
+-- Debounced, because a quest chain can hand in three at once.
+function Loremaster.RefreshCurrentZone()
+    local here = Loremaster.ForZone()
+
+    if not here or not here.id then
+        return false
+    end
+
+    local record = Records()[here.id]
+
+    if not record then
+        return false
+    end
+
+    local done, criteria = Blizzard.GetAchievementProgress(here.id)
+
+    -- NOT OVER GOOD DATA WITH NOTHING. A refusal from the criteria API
+    -- answers `0, 0`, and writing that in loses the row -- the guard
+    -- `Exploration` carries, and the one `Achievements` was given in 0.68.0
+    -- after it did exactly this.
+    if not criteria or criteria <= 0 then
+        return false
+    end
+
+    record.criteria = criteria
+
+    record.progress = record.progress or {}
+    record.progress[CN.characterKey or CN.GetCharacterKey()] = done
+
+    -- SET AND CLEARED BOTH, so a zone that gains a criterion in a patch can
+    -- stop being finished.
+    record.completed = (done >= criteria) and true or false
+
+    return true
+end
+
+CN:RegisterEvent("QUEST_TURNED_IN", function()
+    CN.Debounce("Loremaster.zone", 2, function()
+        pcall(Loremaster.RefreshCurrentZone)
+    end)
+end)
+
 CN:OnLogin(function()
     local records = Records()
 
@@ -37090,11 +37273,35 @@ CN:OnLogin(function()
         return
     end
 
-    for _, record in pairs(records) do
-        if type(record) == "table" and record.completed == nil then
-            Loremaster.Scan()
+    -- AND ON THIS CHARACTER'S OWN DIMENSION. 0.69.0.
+    --
+    -- `completed` is account-wide, so once ANY character has repaired it no
+    -- other character ever triggers a rescan again -- and `progress` is
+    -- per-character, which is precisely what an alt is missing. So the first
+    -- character to log in after the upgrade fixed the store for itself and
+    -- locked every other character out of the repair: `/cn zones` reported
+    -- "not started, 120 to do" for zones an alt had fully quested, with no
+    -- way back short of finding `/cn scanlore`.
+    --
+    -- A scan is cheap and runs once per login. Two conditions, both about
+    -- something that is genuinely absent.
+    local key = CN.characterKey or CN.GetCharacterKey()
 
-            return
+    for _, record in pairs(records) do
+        if type(record) == "table" then
+            if record.completed == nil then
+                Loremaster.Scan()
+
+                return
+            end
+
+            if type(record.progress) ~= "table"
+                or record.progress[key] == nil then
+
+                Loremaster.Scan()
+
+                return
+            end
         end
     end
 end)
@@ -39431,7 +39638,11 @@ function Alts.Assignments()
 
     local seen = {}
 
-    for _, objective in ipairs(CN.Recommend(Alts.considered) or {}) do
+    -- QUIETLY: this asks "which character should do each of these" and
+    -- prints a handful of names. Nothing here is shown to the player as a
+    -- recommendation, and counting twenty rows as offered -- and starting a
+    -- work clock on each -- is the defect 0.68.0 added `quiet` for. 0.69.0.
+    for _, objective in ipairs(CN.Recommend(Alts.considered, true) or {}) do
         if Alts.switchableTypes[objective.type] then
             local ok, bestKey, detail, scope =
                 pcall(warband.WhoShould, objective.type, objective.id)
@@ -50235,7 +50446,10 @@ CN.RegisterSelfTest{
     area = "engine",
     name = "the engine can answer 'what next'",
     run  = function()
-        local results = CN.Recommend(1)
+        -- QUIETLY. A diagnostic must not teach the addon anything about how
+        -- the player plays: `/cn selftest` runs on demand and its result is
+        -- a pass or a fail, not a recommendation anybody acted on. 0.69.0.
+        local results = CN.Recommend(1, true)
 
         if not results or #results == 0 then
             return SKIP, "nothing actionable right now" .. CN.DASH .. "try /cn setup, or "
@@ -51237,6 +51451,9 @@ function Welcome.Build()
     scan:SetSize(384, 26)
     scan:SetPoint("TOPLEFT", 24, -96)
     scan:SetText("Read my collections now (a few seconds)")
+    -- The client built this label, so `CN.Label` never saw it and the
+    -- text-size setting did not reach it. 0.69.0.
+    CN.AdoptLabel(scan:GetFontString(), "CAPTION")
 
     scan:SetScript("OnClick", function()
         local setup = CN:GetModule("Setup")
@@ -51289,6 +51506,9 @@ function Welcome.Build()
 
         button:SetSize(180, 24)
         button:SetText(label)
+        -- The client built this label, so `CN.Label` never saw it and the
+        -- text-size setting did not reach it. 0.69.0.
+        CN.AdoptLabel(button:GetFontString(), "CAPTION")
 
         if index == 1 then
             button:SetPoint("TOPLEFT", 24, -140)
@@ -51379,6 +51599,9 @@ function Welcome.Build()
     dismiss:SetSize(120, 22)
     dismiss:SetPoint("BOTTOM", 0, 16)
     dismiss:SetText("Not now")
+    -- The client built this label, so `CN.Label` never saw it and the
+    -- text-size setting did not reach it. 0.69.0.
+    CN.AdoptLabel(dismiss:GetFontString(), "CAPTION")
     dismiss:SetScript("OnClick", function()
         Welcome.MarkSeen()
 
@@ -52035,6 +52258,9 @@ function Hud.RegisterOptionsPanel()
     scan:SetSize(190, 24)
     scan:SetPoint("TOPLEFT", 16, -190)
     scan:SetText("Scan my collections")
+    -- The client built this label, so `CN.Label` never saw it and the
+    -- text-size setting did not reach it. 0.69.0.
+    CN.AdoptLabel(scan:GetFontString(), "CAPTION")
     scan:SetScript("OnClick", function()
         local setup = CN:GetModule("Setup")
 
@@ -52047,6 +52273,9 @@ function Hud.RegisterOptionsPanel()
     open:SetSize(160, 24)
     open:SetPoint("LEFT", scan, "RIGHT", 8, 0)
     open:SetText("Open the window")
+    -- The client built this label, so `CN.Label` never saw it and the
+    -- text-size setting did not reach it. 0.69.0.
+    CN.AdoptLabel(open:GetFontString(), "CAPTION")
     open:SetScript("OnClick", function()
         if CompletionNavigator_ToggleUI then
             CompletionNavigator_ToggleUI()
@@ -52621,7 +52850,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.68.0
+## Version: 0.69.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -52876,6 +53105,88 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.69.0]
+
+Fifteen defects, and an answer to two of the three things that have been
+waiting on somebody logging in.
+
+### Fixed — the ranking
+
+- **The 0.68.0 urgency guard was wrong in the ordinary case.** It refused
+  urgency to anything whose deadline was shorter than the journey *plus the
+  median time this account takes over that whole type of thing* — so a "kill 8
+  boars" world quest thirty yards away with five minutes left scored no
+  urgency at all, because four campaign quests had set the median at eight
+  minutes. World quests carry no other deadline signal, so that removed all of
+  it. It also trusted a travel cost the addon uses to mean "far away, I
+  stopped counting" — twenty minutes of journey that was never measured, which
+  the client produces routinely for a window after every loading screen. The
+  guard now fires only on a journey the model actually costed.
+- **A deadline that counts for nothing now says so where you would look.**
+  The explanation was added to a screen with one caller, `/cn order`. It is in
+  the reasons list now, which is what `/cn why`, the row tooltip and the
+  heads-up line all read.
+- **`/cn alts` and `/cn selftest` were teaching the addon that twenty
+  objectives had been shown to you** every time you ran them.
+
+### Fixed — a quest you turn in
+
+- **Handing in a quest did not move the Journey tab.** Zone progress was
+  written by a full scan and by nothing else, and that scan runs at login, on
+  `/cn scanlore`, and from the "Rescan zones" button — so the zone you had
+  just advanced went on reporting the count it had when you logged in. This is
+  the reported symptom, and it was never the recommendation list, which has
+  always updated on turn-in. The zone you are standing in refreshes now, from
+  two client calls, debounced so a chain handing in three at once costs one
+  refresh.
+
+### Fixed — alts
+
+- **An alt could be permanently locked out of the 0.68.0 repair.** The rescan
+  that fixed the Loremaster store triggered on a flag that is shared by the
+  whole account, so the first character to log in fixed it for everybody and
+  every other character then had no trigger left — while the thing *they* were
+  missing was their own per-zone progress. And the migration that forced that
+  repair emptied the store outright, which threw away every alt's progress to
+  restore one boolean. It takes nothing now, and each character repairs itself
+  the first time it plays.
+
+### Fixed — numbers and text
+
+- **`/cn list` printed the addon's internal "somewhere unknown" constant as a
+  distance** — "20m away" for something you can see from where you are
+  standing. It was the one day-one command the 0.68.0 fix did not reach.
+- **`/cn goal` on a rare said "Seen 1 time here"** for a rare with no stored
+  count, and the tooltip said "First time you have met it" again on the very
+  next encounter after an upgrade.
+- **The cross-tab search named tabs in English** — "Also on: Collections (12)"
+  beside a tab strip reading *Sammlungen*.
+- **The search hint could be drawn outside the window**, over the game, when
+  four tabs matched at larger text sizes.
+- **A type filter claimed rows the list does not contain** — it counted twelve
+  while the list draws eleven, the twelfth being the headline above it.
+- **The Welcome screen and the Hud options panel ignored the text-size
+  setting**, which the release that introduced it named as fixed.
+- **A store with a reader and no writer** was being recreated empty and
+  written to disk at every logout, for ever, to answer nothing.
+
+### Verified rather than fixed
+
+- **The heads-up line can be dragged and closed**, and now the test suite says
+  so. Both were built releases ago and neither had ever been checked by
+  anything but a person — so "does it drag" was a question only playing could
+  answer. It is movable, dragged from anywhere on it, clamped to the screen,
+  its position is remembered across sessions, and the **x** in its corner
+  turns it off rather than hiding it until the next login.
+
+### Internal
+
+- **A build lint was reading comments.** The check that every provider
+  declares the events it depends on searched the whole file for a function
+  name — so a comment *explaining* why something no longer calls that function
+  reported it as calling it. It reads code now, which is the same correction
+  the CI preflight made for the same reason.
 
 ## [0.68.0]
 
@@ -58526,7 +58837,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.68.0
+0.69.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -61433,10 +61744,12 @@ mutate "Core.lua" \
 # Asserted as a source rule in the 0.67.0 block instead.
 
 mutate "UI.lua" \
-    "        UI.BuildPanel(tab)
+    "    for _, tab in ipairs(UI.tabs) do
+        UI.BuildPanel(tab)
 
-        local skip = forSearch and hidden and UI.writingTabs[tab.name]" \
-    "        local skip = forSearch and hidden and UI.writingTabs[tab.name]" \
+        if tab.refresh and tab.panel then" \
+    "    for _, tab in ipairs(UI.tabs) do
+        if tab.refresh and tab.panel then" \
     "the search is blind to every tab the player has not clicked"
 
 mutate "Design.lua" \
@@ -61550,8 +61863,8 @@ mutate "Scoring.lua" \
     "a deadline the player cannot reach is scored as urgent"
 
 mutate "Scoring.lua" \
-    "        seconds = cost * CN.secondsPerCostPoint" \
-    "        seconds = cost" \
+    "    return cost * CN.secondsPerCostPoint" \
+    "    return cost" \
     "a journey in cost points is treated as a journey in seconds"
 
 mutate "Database.lua" \
@@ -61565,19 +61878,20 @@ mutate "Database.lua" \
     "a migration deletes an account-wide flag nothing rewrites"
 
 mutate "Modules/Loremaster.lua" \
-    "        if type(record) == \"table\" and record.completed == nil then
-            Loremaster.Scan()
+    "            if record.completed == nil then
+                Loremaster.Scan()
 
-            return
-        end" \
-    "        if false then
-            return
-        end" \
+                return
+            end" \
+    "            if false then
+                return
+            end" \
     "a store missing a field is never rebuilt"
 
 mutate "UI.lua" \
-    "        local skip = forSearch and hidden and UI.writingTabs[tab.name]" \
-    "        local skip = false" \
+    "        local results = CN.Recommend(UI.listLimit,
+            not (window and window:IsShown()))" \
+    "        local results = CN.Recommend(UI.listLimit)" \
     "a text search starts session clocks on twelve objectives"
 
 mutate "UI.lua" \
@@ -61607,6 +61921,80 @@ mutate "Modules/Quests.lua" \
         end" \
     "        sample = pins[1]" \
     "a zone is priced from a pin that has no position"
+
+############################################################
+# 0.69.0
+############################################################
+
+mutate "Modules/Loremaster.lua" \
+    "CN:RegisterEvent(\"QUEST_TURNED_IN\", function()
+    CN.Debounce(\"Loremaster.zone\", 2, function()
+        pcall(Loremaster.RefreshCurrentZone)
+    end)
+end)" \
+    "" \
+    "handing a quest in leaves the journey saying what it said at login"
+
+mutate "Modules/Loremaster.lua" \
+    "    if not criteria or criteria <= 0 then
+        return false
+    end
+
+    record.criteria = criteria" \
+    "    record.criteria = criteria" \
+    "a refusal from the criteria API wipes the zone row"
+
+mutate "Scoring.lua" \
+    "    if cost >= ceiling then
+        return nil
+    end" \
+    "    if false then
+        return nil
+    end" \
+    "a journey the model could not cost is treated as twenty minutes"
+
+mutate "Scoring.lua" \
+    "        if needed and objective.expiresIn < needed then
+            composed[#composed + 1] =" \
+    "        if false then
+            composed[#composed + 1] =" \
+    "a deadline that counts for nothing is never explained"
+
+mutate "Modules/Loremaster.lua" \
+    "            if type(record.progress) ~= \"table\"
+                or record.progress[key] == nil then
+
+                Loremaster.Scan()
+
+                return
+            end" \
+    "            if false then
+                return
+            end" \
+    "an alt is locked out of the repair by the character before it"
+
+mutate "Database.lua" \
+    "    [21] = function()" \
+    "    [21] = function(db) db.account.loremaster = {}" \
+    "a migration throws away every alt's progress to repair a flag"
+
+mutate "Modules/Alts.lua" \
+    "    for _, objective in ipairs(CN.Recommend(Alts.considered, true) or {}) do" \
+    "    for _, objective in ipairs(CN.Recommend(Alts.considered) or {}) do" \
+    "asking which alt should do something counts as offering it"
+
+mutate "Modules/Goals.lua" \
+    "            if record.sightings then
+                step(\"Seen \" .. record.sightings .. \" time\"" \
+    "            if true then
+                step(\"Seen \" .. (record.sightings or 1) .. \" time\"" \
+    "a rare with no stored count is reported as seen once"
+
+mutate "UI.lua" \
+    "            table.insert(parts,
+                (CN.L[hit.tab] or hit.tab) .. \" (\" .. hit.count .. \")\")" \
+    "            table.insert(parts, hit.tab .. \" (\" .. hit.count .. \")\")" \
+    "the search names tabs in English beside a translated tab strip"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -71963,7 +72351,273 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
-print("\nWhat 0.68.0 changed, asserted through the paths the game takes:")
+print("\nWhat 0.69.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- HANDING A QUEST IN MOVES THE ZONE YOU ARE IN. 0.69.0.
+    --
+    -- The Loremaster store was written by a full scan and by nothing else,
+    -- and that scan ran at login, on `/cn scanlore`, and from a button. So
+    -- turning a quest in moved nothing on the Journey tab: it went on
+    -- reading the count it had at login. Reported from play as "the
+    -- completion of a quest does not appear to remove it from the journey".
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    lore.Scan()
+
+    local here = lore.ForZone()
+
+    assert(here and here.id, "the fixture stands in a zone with an achievement")
+
+    local record = lore.Records()[here.id]
+
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    record.progress = record.progress or {}
+    record.progress[key] = 3
+    record.criteria      = 12
+    record.completed     = false
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 4, 12
+    end
+
+    CN.ForgetDebounces()
+
+    CN.Dispatch("QUEST_TURNED_IN", 4242)
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(lore.DoneFor(record) == 4,
+        "handing a quest in moves the zone's count without a rescan: "
+        .. tostring(lore.DoneFor(record)))
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 12, 12
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("QUEST_TURNED_IN", 4242)
+
+    assert(record.completed == true, "and a finished zone says so")
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 12, 14
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("QUEST_TURNED_IN", 4242)
+
+    assert(record.completed == false,
+        "and a patch that adds a criterion un-finishes it")
+
+    -- A REFUSAL FROM THE CRITERIA API DOES NOT WIPE THE ROW. The guard
+    -- `Exploration` has carried since 0.61.0 and `Achievements` was given in
+    -- 0.68.0, in the third store of the same shape.
+    CN.Blizzard.GetAchievementProgress = function()
+        return 0, 0
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("QUEST_TURNED_IN", 4242)
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(record.criteria == 14,
+        "a client that answers nothing does not overwrite the row: "
+        .. tostring(record.criteria))
+
+    print("  handing a quest in moves the zone it was in")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE HEADS-UP LINE CAN BE MOVED AND CLOSED. 0.69.0 asserts it.
+    --
+    -- Both were reported from play and both were built -- and nothing in the
+    -- suite ever checked either, so "does it drag" was a question only a
+    -- human could answer, and it sat unverified for nine releases.
+    ------------------------------------------------------------
+    local hud = CN:GetModule("Hud")
+
+    hud.SetEnabled(true)
+
+    local hudFrame = hud.Build and hud.Build()
+
+    assert(hudFrame, "the heads-up line exists once it is turned on")
+
+    assert(hudFrame:IsMovable(),
+        "it is movable, which is what makes a drag possible at all")
+
+    assert(hudFrame.scripts and hudFrame.scripts.OnDragStart,
+        "and something is wired to the start of a drag")
+
+    assert(hudFrame.scripts.OnDragStop,
+        "and to the end of one, which is where the position is remembered")
+
+    hudFrame.scripts.OnDragStop(hudFrame)
+
+    assert(CN.Settings().hudPosition,
+        "where it was dragged to is written down")
+
+    -- AND IT HAS AN x THAT TURNS IT OFF.
+    local closer = hudFrame.close
+
+    assert(closer, "the line carries a close control")
+
+    assert(closer.scripts and closer.scripts.OnClick,
+        "which is clickable")
+
+    closer.scripts.OnClick(closer)
+
+    assert(hud.IsEnabled() == false,
+        "and clicking it turns the line off, rather than hiding it until the "
+        .. "next login")
+
+    hud.SetEnabled(false)
+
+    print("  the heads-up line drags, remembers where, and closes")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE REMAINING 0.69.0 PROPERTIES.
+    ------------------------------------------------------------
+    -- A deadline that counts for nothing says so where the player looks.
+    -- 0.68.0 put the explanation in `ExplainScore`, which has one caller.
+    local unreachable = {
+        type       = CN.objectiveTypes.QUEST,
+        id         = 972001,
+        name       = "Far Away",
+        expiresIn  = 60,
+        travelCost = 20,
+        reasons    = { "available to pick up in the next zone" },
+    }
+
+    local explained = false
+
+    for _, reason in ipairs(CN.Reasons(unreachable)) do
+        if reason:find("expires before you could get there", 1, true) then
+            explained = true
+        end
+    end
+
+    assert(explained,
+        "the reasons list -- which /cn why, the row tooltip and the heads-up "
+        .. "line all read -- says why a visible clock counted for nothing")
+
+    -- And a deadline that IS reachable says nothing of the kind.
+    local reachable = {
+        type       = CN.objectiveTypes.QUEST,
+        id         = 972002,
+        name       = "Close By",
+        expiresIn  = 3600,
+        travelCost = 2,
+    }
+
+    for _, reason in ipairs(CN.Reasons(reachable)) do
+        assert(not reason:find("expires before", 1, true),
+            "and says nothing when the player can get there: " .. reason)
+    end
+
+    -- ASKING WHICH ALT SHOULD DO SOMETHING IS NOT OFFERING IT.
+    local altOffers = 0
+
+    CN.RegisterRecommendationHook("cn-test-alts", function()
+        altOffers = altOffers + 1
+    end)
+
+    local alts = CN:GetModule("Alts")
+
+    alts.Assignments()
+
+    CN.recommendationHooks["cn-test-alts"] = nil
+
+    assert(altOffers == 0,
+        "`/cn alts` asks the ranking a question and does not tell the player "
+        .. "it showed them twenty rows: " .. altOffers)
+
+    -- A RARE WITH NO STORED COUNT IS NOT REPORTED AS SEEN ONCE.
+    local goalModule = CN:GetModule("Goals")
+
+    local rareStore = CN.Account("rares")
+
+    rareStore[973001] = {
+        vignetteID = 973001,
+        name       = "Nameless Rare",
+        kind       = "RARE",
+        mapID      = 94,
+        x          = 0.5,
+        y          = 0.5,
+    }
+
+    local plan = goalModule.Plan({ type = CN.objectiveTypes.RARE, id = 973001 })
+
+    for _, step in ipairs(plan.steps or {}) do
+        assert(not tostring(step.text or step):find("Seen 1 time", 1, true),
+            "a rare with no stored count says nothing about how often it has "
+            .. "been seen, rather than claiming once")
+    end
+
+    -- And a real count is still reported.
+    rareStore[973001].sightings = 4
+
+    local counted = false
+
+    for _, step in ipairs(goals.Plan({
+        type = CN.objectiveTypes.RARE, id = 973001 }).steps or {}) do
+
+        if tostring(step.text or step):find("Seen 4 times", 1, true) then
+            counted = true
+        end
+    end
+
+    assert(counted, "a rare with a real count still reports it")
+
+    rareStore[973001] = nil
+
+    -- THE SEARCH NAMES TABS THE WAY THE TAB STRIP DOES.
+    CN.UI.Show()
+    CN.UI.RefreshAllTabs()
+
+    -- `CN.L` is read-only, which is right -- so the property is asserted the
+    -- way the tab strip proves it: whatever the strip draws for a tab is what
+    -- the search must call it.
+    local named = CN.UI.SearchElsewhere("e")
+
+    if named then
+        for _, tab in ipairs(CN.UI.tabs) do
+            local drawn = CN.L[tab.name]
+
+            if drawn and drawn ~= tab.name
+                and named:find(tab.name .. " (", 1, true) then
+
+                error("the search names a tab '" .. tab.name .. "' while the "
+                    .. "tab strip draws '" .. drawn .. "': " .. named)
+            end
+        end
+    end
+
+    -- And the source says it, because every locale shipped today translates
+    -- all eleven to themselves in English -- so no fixture can tell the two
+    -- apart, and a behavioural test here would pass against either.
+    do
+        local source = CN_TEST_ReadAddonFile("UI.lua")
+
+        assert(source, "UI.lua must be readable")
+
+        assert(not source:find('parts, hit.tab .. " ("', 1, true),
+            "the cross-tab hint prints the tab's translated name, not its "
+            .. "internal key")
+    end
+
+    print("  the remaining 0.69.0 properties hold")
+end)()
+
 
 ;(function()
     ------------------------------------------------------------
@@ -72034,20 +72688,56 @@ end)()
         "and a caller that cannot estimate the journey gets the old curve "
         .. "exactly, rather than a guess")
 
-    -- The estimate is journey plus this player's own measured work time.
+    -- THE ESTIMATE IS THE JOURNEY, AND ONLY WHEN IT IS A MEASUREMENT.
     local needed = CN.SecondsNeeded({
         type       = CN.objectiveTypes.QUEST,
         travelCost = 4,
     })
 
-    assert(needed and needed >= 4 * CN.secondsPerCostPoint,
+    assert(needed == 4 * CN.secondsPerCostPoint,
         "the journey is counted in seconds, not in cost points: "
         .. tostring(needed))
 
-    assert(CN.SecondsNeeded({ type = CN.objectiveTypes.QUEST }) == nil
-        or CN.SecondsNeeded({ type = CN.objectiveTypes.QUEST }) > 0,
-        "an objective with no journey is either unknown or a real number, "
-        .. "never zero")
+    assert(CN.SecondsNeeded({ type = CN.objectiveTypes.QUEST }) == nil,
+        "an objective with no journey has no estimate at all")
+
+    -- A SATURATED COST IS THE MODEL SAYING IT STOPPED COUNTING, NOT A
+    -- TWENTY-MINUTE FLIGHT. `Session.NoteOffered` already refuses to subtract
+    -- one; this must refuse to add one, or every world quest the router
+    -- cannot yet route loses its whole deadline signal.
+    local travelModule = CN:GetModule("Travel")
+
+    assert(CN.SecondsNeeded({
+        type       = CN.objectiveTypes.QUEST,
+        travelCost = travelModule.maximumCost,
+    }) == nil, "a journey at the saturation point is not a measurement")
+
+    assert(CN.SecondsNeeded({
+        type       = CN.objectiveTypes.QUEST,
+        travelCost = CN.fallbackZoneCost,
+    }) == nil, "and neither is the constant used for a zone it cannot route")
+
+    -- AND THE WHOLE-TYPE WORK MEDIAN IS NOT PART OF IT. A quest thirty yards
+    -- away with five minutes left is urgent, whatever the median quest on
+    -- this account has taken.
+    local session = CN:GetModule("Session")
+
+    local durations = session.Durations()
+
+    local heldDurations = durations[CN.objectiveTypes.QUEST]
+
+    durations[CN.objectiveTypes.QUEST] = { 600, 600, 600, 600, 600 }
+
+    session.NoteDurationsChanged()
+
+    assert(CN.UrgencyBonus(300, CN.SecondsNeeded({
+        type       = CN.objectiveTypes.QUEST,
+        travelCost = 0.5,
+    })) > 0, "a five-minute deadline thirty yards away is still urgent")
+
+    durations[CN.objectiveTypes.QUEST] = heldDurations
+
+    session.NoteDurationsChanged()
 
     -- AND `/cn why` SHOWS THE SAME ARITHMETIC THE RANKING DID.
     local breakdown = CN.ExplainScore({
@@ -72055,7 +72745,7 @@ end)()
         id         = 970001,
         name       = "Test",
         expiresIn  = 600,
-        travelCost = 40,
+        travelCost = 30,
     })
 
     local announced = false
@@ -72106,18 +72796,31 @@ end)()
     assert(upgraded.account.loremaster[2].done == nil,
         "and its per-character count still goes")
 
-    -- Migration 21 repairs the accounts that ran the first version of 20.
+    -- MIGRATION 21 TAKES NOTHING. 0.69.0.
+    --
+    -- It used to empty the whole store to force a rebuild of one account-wide
+    -- flag -- and `progress` is keyed by character, which the client can only
+    -- report for whoever is logged in. That destroyed every alt's criteria
+    -- progress to repair a boolean.
     local damaged = {
         version = 21,
-        account = { loremaster = { [2] = { criteria = 12, progress = {} } } },
+        account = {
+            loremaster = {
+                [2] = { criteria = 12, progress = { ["Realm-Alt"] = 9 } },
+            },
+        },
         characters = {},
         settings   = {},
     }
 
     CN.migrations[21](damaged)
 
-    assert(CN.CountKeys(damaged.account.loremaster) == 0,
-        "a store that lost the flag is emptied so the login scan rebuilds it")
+    assert(damaged.account.loremaster[2],
+        "a row is not thrown away to repair a flag on it")
+
+    assert(damaged.account.loremaster[2].progress["Realm-Alt"] == 9,
+        "and an alt's criteria progress -- which only that alt can supply -- "
+        .. "survives")
 
     -- AND THE LOGIN SCAN REBUILDS AN INCOMPLETE STORE, not only an empty one.
     local loremaster = CN:GetModule("Loremaster")
@@ -72127,29 +72830,103 @@ end)()
     local records = loremaster.Records and loremaster.Records()
         or CN.Account("loremaster")
 
+    -- A ROW A SCAN ACTUALLY PRODUCES. Earlier blocks inject synthetic rows
+    -- for their own purposes, and a scan does not rewrite one the client has
+    -- never heard of -- so picking the first key in the store tests whether
+    -- the fixture is tidy rather than whether the repair works.
+    for id in pairs(records) do
+        records[id] = nil
+    end
+
+    loremaster.Scan()
+
     local anyID = next(records)
 
     assert(anyID, "the fixture has quest achievements")
 
-    records[anyID].completed = nil
+    local function ScansAtLogin()
+        local scans = 0
 
-    local scans = 0
+        local realScan = loremaster.Scan
 
-    local realScan = loremaster.Scan
+        loremaster.Scan = function(...)
+            scans = scans + 1
 
-    loremaster.Scan = function(...)
-        scans = scans + 1
+            return realScan(...)
+        end
 
-        return realScan(...)
+        CN.RunHooks(CN.loginHooks)
+
+        loremaster.Scan = realScan
+
+        return scans
     end
 
-    CN.RunHooks(CN.loginHooks)
+    -- THIS CHARACTER'S PROGRESS PRESENT ON EVERY ROW, so the only thing
+    -- absent is the account-wide flag -- otherwise the other branch repairs
+    -- it on the way past and this proves nothing.
+    local ownKey = CN.characterKey or CN.GetCharacterKey()
 
-    loremaster.Scan = realScan
+    for _, record in pairs(records) do
+        record.progress = record.progress or {}
+        record.progress[ownKey] = record.progress[ownKey] or 0
+    end
 
-    assert(scans > 0,
-        "a store with a row missing its flag is rescanned at login; only "
+    records[anyID].completed = nil
+
+    ScansAtLogin()
+
+    assert(records[anyID].completed ~= nil,
+        "a store with a row missing its flag is repaired at login; only "
         .. "'empty' was checked, and after the first character it never is")
+
+    -- AND ON THIS CHARACTER'S OWN DIMENSION, which is the half that matters
+    -- to an alt: `completed` is account-wide, so the first character to log
+    -- in after an upgrade repairs it for everybody and locks every other
+    -- character out of the rescan -- while the thing THEY are missing is
+    -- their own progress.
+    loremaster.Scan()
+
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    for _, record in pairs(records) do
+        if type(record.progress) == "table" then
+            record.progress[key] = nil
+        end
+    end
+
+    -- ASSERTED ON THE STORE, NOT ON A CALL COUNT. Several login hooks scan
+    -- something, so counting calls proves only that a login happened; what
+    -- matters is whether THIS character's own figures came back.
+    ScansAtLogin()
+
+    local repaired = 0
+
+    for _, record in pairs(records) do
+        if type(record.progress) == "table" and record.progress[key] ~= nil then
+            repaired = repaired + 1
+        end
+    end
+
+    assert(repaired > 0,
+        "a character with no progress of its own gets it back at login, even "
+        .. "though the account-wide flag is intact -- otherwise the first "
+        .. "character to log in repairs the flag and locks every other one "
+        .. "out of the rescan they need")
+
+    -- AND SAID IN THE SOURCE, because the two conditions are hard to tell
+    -- apart from the outside: the account-wide one repairs the same rows on
+    -- the way past, so a behavioural test can pass with only half of it.
+    do
+        local source = CN_TEST_ReadAddonFile("Modules/Loremaster.lua")
+
+        assert(source, "Modules/Loremaster.lua must be readable")
+
+        assert(source:find("record.progress[key] == nil", 1, true),
+            "the login scan triggers on THIS character's own progress being "
+            .. "absent, not only on the account-wide flag -- which the first "
+            .. "character to log in repairs for everybody")
+    end
 
     -- A TEXT SEARCH DOES NOT TELL THE ADDON IT OFFERED YOU ANYTHING.
     CN.UI.Hide()
@@ -75887,6 +76664,25 @@ end)()
                 local text = file:read("*a")
 
                 file:close()
+
+                -- CODE, NOT PROSE. 0.69.0.
+                --
+                -- This searched the whole file for a reader's name, comments
+                -- included -- so a comment EXPLAINING why something no longer
+                -- calls `CN.TravelCost` reported the file as calling it. The
+                -- same trap the CI preflight documents having closed: "the
+                -- check passed on prose and said nothing", in the other
+                -- direction. A lint that reads comments is a lint that can be
+                -- talked out of, and talked into.
+                local code = {}
+
+                for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+                    if not line:match("^%s*%-%-") then
+                        table.insert(code, (line:gsub("%s%-%-[^\"]*$", "")))
+                    end
+                end
+
+                text = table.concat(code, "\n")
 
                 -- One provider per file in this addon, so the file is the
                 -- unit. `events = { ... }` on the registration is what
