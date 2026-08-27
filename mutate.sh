@@ -144,7 +144,7 @@ mutate "Core.lua" \
     "modulo truncates toward zero instead of flooring"
 
 mutate "Scoring.lua" \
-    "        if math.abs(term.value) > 0.001 then" \
+    "        if math.abs(term.value) > 0.001 or term.keepAtZero then" \
     "        if true then" \
     "the ranking explanation lists terms worth nothing"
 
@@ -2408,12 +2408,10 @@ mutate "Core.lua" \
 # Asserted as a source rule in the 0.67.0 block instead.
 
 mutate "UI.lua" \
-    "    for _, tab in ipairs(UI.tabs) do
-        UI.BuildPanel(tab)
+    "        UI.BuildPanel(tab)
 
-        if tab.refresh and tab.panel then" \
-    "    for _, tab in ipairs(UI.tabs) do
-        if tab.refresh and tab.panel then" \
+        local skip = forSearch and hidden and UI.writingTabs[tab.name]" \
+    "        local skip = forSearch and hidden and UI.writingTabs[tab.name]" \
     "the search is blind to every tab the player has not clicked"
 
 mutate "Design.lua" \
@@ -2490,6 +2488,100 @@ mutate "Modules/Setup.lua" \
     "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\" }," \
     "" \
     "a new character never scans the one store with a per-character split"
+
+############################################################
+# 0.68.0
+############################################################
+
+mutate "Events.lua" \
+    "        if loadedAddon ~= ADDON_NAME then
+            Dispatch(event, ...)
+
+            return
+        end" \
+    "        if loadedAddon ~= ADDON_NAME then
+            return
+        end" \
+    "a handler waiting for another addon to load is never called"
+
+mutate "Scoring.lua" \
+    "    if quiet then
+        return results
+    end" \
+    "    if false then
+        return results
+    end" \
+    "counting the ranking tells the player it was offered"
+
+mutate "Scoring.lua" \
+    "    if type(secondsNeeded) == \"number\" and secondsNeeded > 0
+        and secondsLeft < secondsNeeded then
+
+        return 0
+    end" \
+    "    if false then
+        return 0
+    end" \
+    "a deadline the player cannot reach is scored as urgent"
+
+mutate "Scoring.lua" \
+    "        seconds = cost * CN.secondsPerCostPoint" \
+    "        seconds = cost" \
+    "a journey in cost points is treated as a journey in seconds"
+
+mutate "Database.lua" \
+    "        for _, record in pairs(db.account.loremaster or {}) do
+            if type(record) == \"table\" and record.done ~= nil then
+                record.done = nil" \
+    "        for _, record in pairs(db.account.loremaster or {}) do
+            if type(record) == \"table\" and record.done ~= nil then
+                record.done      = nil
+                record.completed = nil" \
+    "a migration deletes an account-wide flag nothing rewrites"
+
+mutate "Modules/Loremaster.lua" \
+    "        if type(record) == \"table\" and record.completed == nil then
+            Loremaster.Scan()
+
+            return
+        end" \
+    "        if false then
+            return
+        end" \
+    "a store missing a field is never rebuilt"
+
+mutate "UI.lua" \
+    "        local skip = forSearch and hidden and UI.writingTabs[tab.name]" \
+    "        local skip = false" \
+    "a text search starts session clocks on twelve objectives"
+
+mutate "UI.lua" \
+    "        if button.GetFontString then
+            CN.AdoptLabel(button:GetFontString(), \"CAPTION\")
+        end" \
+    "        if false then
+            CN.AdoptLabel(nil, \"CAPTION\")
+        end" \
+    "the tab captions ignore the text-size setting"
+
+mutate "UI.lua" \
+    "        if check.Fit then
+            check.Fit()
+        end" \
+    "        if false then
+            check.Fit()
+        end" \
+    "a checkbox hit area is measured once and never again"
+
+mutate "Modules/Quests.lua" \
+    "        for _, pin in ipairs(pins) do
+            if pin.x and pin.y then
+                sample = pin
+                break
+            end
+        end" \
+    "        sample = pins[1]" \
+    "a zone is priced from a pin that has no position"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.67.2"
-CN.dbVersion   = 21
+CN.version     = "0.68.0"
+CN.dbVersion   = 22
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -971,6 +971,18 @@ function CN.Memo(key, generation, build)
     memos[key] = {
         generation = generation,
         value      = value,
+        -- ARRAY-SHAPED MEMOS ONLY, AND DELIBERATELY SO. 0.68.0.
+        --
+        -- `#value` is zero for a hash table and zero on every read of one, so
+        -- this catches an append to a LIST and nothing else -- eight of the
+        -- eleven memos in this addon return hash tables and are not covered.
+        --
+        -- Counting keys instead was tried and reverted: several memoized
+        -- summaries are legitimately annotated by their readers, so a key
+        -- count fires eighteen times a session and defeats the caching it
+        -- exists to protect. A cache that rebuilds constantly is a worse
+        -- outcome than a guard with a stated limit, and an append to a
+        -- returned list is the shape this has actually taken.
         count      = type(value) == "table" and #value or nil,
     }
 

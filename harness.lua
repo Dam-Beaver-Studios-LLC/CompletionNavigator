@@ -154,6 +154,23 @@ local function Frame()
     -- could ask, and the window's entire typography was invisible to the
     -- suite. Seventeenth entry in the list of defects a stub simpler than the
     -- client made unobservable. 0.66.0.
+    -- A TEMPLATED BUTTON ARRIVES WITH ITS OWN LABEL, AND THIS HAD NONE.
+    --
+    -- `GetFontString` fell through to the universal stub, which answers any
+    -- call with another stub -- truthy, and truthy again when asked for its
+    -- font. So "does this button's caption wear the player's text size" was
+    -- a question that answered yes whatever the addon did, and the mutation
+    -- for it survived. Eighteenth entry in the list. 0.68.0.
+    function f:SetFontString(value) f.fontString = value end
+
+    function f:GetFontString()
+        if not rawget(f, "fontString") then
+            f.fontString = f:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        end
+
+        return rawget(f, "fontString")
+    end
+
     function f:CreateFontString(_, layer, template)
         local fs = Frame()
 
@@ -10109,7 +10126,313 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
-print("\nWhat 0.67.0 changed, asserted through the paths the game takes:")
+print("\nWhat 0.68.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- ASKING FOR THE RANKING IS NOT OFFERING IT. 0.68.0.
+    --
+    -- Every `CN.Recommend` fired the recommendation hooks, and two of the
+    -- three WRITE: `Preference` counts each row as shown to the player -- the
+    -- denominator of a ratio that moves a type's score by up to a quarter --
+    -- and `Session` starts a work clock on the top rows. 0.67.0 added a
+    -- tooltip that asked for sixty rows on every hover and a text search that
+    -- refreshed every tab with the window shut.
+    ------------------------------------------------------------
+    local hookFired = 0
+
+    CN.RegisterRecommendationHook("cn-test-quiet", function()
+        hookFired = hookFired + 1
+    end)
+
+    CN.Recommend(5)
+
+    assert(hookFired == 1, "an ordinary ask offers what it returns")
+
+    CN.Recommend(5, true)
+
+    assert(hookFired == 1,
+        "a quiet ask does not: " .. hookFired .. " hook call(s)")
+
+    -- The rows are the same either way; only the announcement differs.
+    local loud  = CN.Recommend(5)
+    local quiet = CN.Recommend(5, true)
+
+    assert(#loud == #quiet, "a quiet ask returns the same rows")
+
+    CN.recommendationHooks["cn-test-quiet"] = nil
+
+    -- AND THE TYPE-FILTER TOOLTIP USES IT, over the rows the tab draws.
+    local source = CN_TEST_ReadAddonFile("UI.lua")
+
+    assert(source, "UI.lua must be readable")
+
+    assert(source:find("CN.Recommend(UI.listLimit, true)", 1, true),
+        "the type-filter tooltip asks quietly, and over the same number of "
+        .. "rows the list shows")
+
+    assert(not source:find("CN.Recommend(60)", 1, true),
+        "and nothing asks for sixty rows to count twelve")
+
+    print("  counting the ranking does not tell the player it was offered")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DEADLINE YOU CANNOT MEET IS NOT URGENT. 0.68.0.
+    --
+    -- Backlog item 18. The urgency term is the heaviest in the table and the
+    -- last two hours are its squared part -- so a world quest with eight
+    -- minutes left, twelve minutes of flying away, was scored as the most
+    -- urgent thing in the game.
+    ------------------------------------------------------------
+    local reachable = CN.UrgencyBonus(600, 120)
+
+    assert(reachable > 0, "ten minutes left and two to get there is urgent")
+
+    assert(CN.UrgencyBonus(600, 1200) == 0,
+        "ten minutes left and twenty to get there is not urgent at all")
+
+    assert(CN.UrgencyBonus(600) == reachable,
+        "and a caller that cannot estimate the journey gets the old curve "
+        .. "exactly, rather than a guess")
+
+    -- The estimate is journey plus this player's own measured work time.
+    local needed = CN.SecondsNeeded({
+        type       = CN.objectiveTypes.QUEST,
+        travelCost = 4,
+    })
+
+    assert(needed and needed >= 4 * CN.secondsPerCostPoint,
+        "the journey is counted in seconds, not in cost points: "
+        .. tostring(needed))
+
+    assert(CN.SecondsNeeded({ type = CN.objectiveTypes.QUEST }) == nil
+        or CN.SecondsNeeded({ type = CN.objectiveTypes.QUEST }) > 0,
+        "an objective with no journey is either unknown or a real number, "
+        .. "never zero")
+
+    -- AND `/cn why` SHOWS THE SAME ARITHMETIC THE RANKING DID.
+    local breakdown = CN.ExplainScore({
+        type       = CN.objectiveTypes.QUEST,
+        id         = 970001,
+        name       = "Test",
+        expiresIn  = 600,
+        travelCost = 40,
+    })
+
+    local announced = false
+
+    for _, term in ipairs(breakdown or {}) do
+        if type(term) == "table" and tostring(term.label):find("too soon") then
+            announced = true
+
+            assert(term.value == 0,
+                "and it is worth nothing, not merely labelled")
+        end
+    end
+
+    assert(announced,
+        "the breakdown names a deadline the player cannot reach, rather than "
+        .. "showing a term with no explanation")
+
+    print("  an expiring objective you cannot reach in time is not urgent")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE REMAINING 0.68.0 PROPERTIES.
+    ------------------------------------------------------------
+    -- Migration 20 clears `done` from both progress stores and `completed`
+    -- from exploration ONLY. Loremaster's `completed` is account-wide by
+    -- design and is still written by every scan -- deleting it removed a live
+    -- field that nothing rewrites, and the visible result was `/cn zones`
+    -- recommending finished zones.
+    local upgraded = {
+        version = 20,
+        account = {
+            exploration = { [1] = { done = 4, completed = true, progress = {} } },
+            loremaster  = { [2] = { done = 9, completed = true, progress = {} } },
+        },
+        characters = {},
+        settings   = {},
+    }
+
+    CN.migrations[20](upgraded)
+
+    assert(upgraded.account.exploration[1].completed == nil,
+        "exploration's flag is per-character and goes")
+
+    assert(upgraded.account.loremaster[2].completed == true,
+        "Loremaster's is account-wide and stays")
+
+    assert(upgraded.account.loremaster[2].done == nil,
+        "and its per-character count still goes")
+
+    -- Migration 21 repairs the accounts that ran the first version of 20.
+    local damaged = {
+        version = 21,
+        account = { loremaster = { [2] = { criteria = 12, progress = {} } } },
+        characters = {},
+        settings   = {},
+    }
+
+    CN.migrations[21](damaged)
+
+    assert(CN.CountKeys(damaged.account.loremaster) == 0,
+        "a store that lost the flag is emptied so the login scan rebuilds it")
+
+    -- AND THE LOGIN SCAN REBUILDS AN INCOMPLETE STORE, not only an empty one.
+    local loremaster = CN:GetModule("Loremaster")
+
+    loremaster.Scan()
+
+    local records = loremaster.Records and loremaster.Records()
+        or CN.Account("loremaster")
+
+    local anyID = next(records)
+
+    assert(anyID, "the fixture has quest achievements")
+
+    records[anyID].completed = nil
+
+    local scans = 0
+
+    local realScan = loremaster.Scan
+
+    loremaster.Scan = function(...)
+        scans = scans + 1
+
+        return realScan(...)
+    end
+
+    CN.RunHooks(CN.loginHooks)
+
+    loremaster.Scan = realScan
+
+    assert(scans > 0,
+        "a store with a row missing its flag is rescanned at login; only "
+        .. "'empty' was checked, and after the first character it never is")
+
+    -- A TEXT SEARCH DOES NOT TELL THE ADDON IT OFFERED YOU ANYTHING.
+    CN.UI.Hide()
+
+    local offerCount = 0
+
+    CN.RegisterRecommendationHook("cn-test-search", function()
+        offerCount = offerCount + 1
+    end)
+
+    SlashCmdList.COMPLETIONNAVIGATOR("find e")
+
+    CN.recommendationHooks["cn-test-search"] = nil
+
+    assert(offerCount == 0,
+        "searching with the window closed offers nothing: " .. offerCount
+        .. " hook call(s)")
+
+    -- THE TAB CAPTIONS WEAR THE TEXT SIZE.
+    CN.UI.Show()
+
+    assert(CN.SetTextScale(1.5), "the size can be set")
+
+    local captioned = 0
+
+    local windowFrame = CN.UI.Frame()
+
+    -- MEASURED, not merely "has a font object": the stub answers most calls
+    -- with another stub, so anything short of a size is a question that
+    -- answers yes whatever the addon does.
+    local baseline = _G[CN.FONT.CAPTION] and select(2, _G[CN.FONT.CAPTION]:GetFont())
+
+    for _, button in ipairs((windowFrame and windowFrame.tabButtons) or {}) do
+        local caption = button.GetFontString and button:GetFontString()
+
+        local faceObject = caption and caption.GetFontObject and caption:GetFontObject()
+
+        if faceObject and faceObject.GetFont and baseline then
+            local _, size = faceObject:GetFont()
+
+            if type(size) == "number" and size > baseline then
+                captioned = captioned + 1
+            end
+        end
+    end
+
+    assert(captioned > 0,
+        "the tab captions grow with the setting, like the rows under them")
+
+    CN.SetTextScale(1.0)
+
+    -- A ZONE IS PRICED FROM A PIN THAT HAS A POSITION.
+    local quests = CN:GetModule("Quests")
+
+    local playerMap = CN.GetPlayerPosition()
+
+    local far = playerMap + 700
+
+    local remembered = quests.Remembered()
+
+    -- The LOWER id has no coordinates, so the old code would have chosen it
+    -- and priced the whole zone as unreachable.
+    remembered[971001] = { mapID = far }
+    remembered[971002] = { mapID = far, x = 0.5, y = 0.5 }
+
+    quests.pinRevision = quests.pinRevision + 1
+
+    local priced
+
+    for _, map in ipairs(quests.NearbyRememberedMaps(playerMap)) do
+        if map.mapID == far then
+            priced = map
+        end
+    end
+
+    assert(priced, "the zone is considered at all")
+
+    assert(priced.cost < CN.fallbackZoneCost,
+        "and it is priced from the pin that has a position, not written off "
+        .. "as unreachable: " .. tostring(priced.cost))
+
+    remembered[971001] = nil
+    remembered[971002] = nil
+
+    quests.pinRevision = quests.pinRevision + 1
+
+    -- A CHECKBOX'S CLICKABLE AREA IS RE-MEASURED, NOT MEASURED ONCE.
+    --
+    -- `Fit` was published and called exactly once, at build time. At 150%
+    -- text the label is half again as wide as the invisible button behind
+    -- it, so the last third of the words showed no tooltip and did not
+    -- toggle the box.
+    do
+        local box
+
+        for _, tab in ipairs(CN.UI.tabs) do
+            for _, value in pairs(tab.panel or {}) do
+                if not box and type(value) == "table"
+                    and rawget(value, "reach") and rawget(value, "Fit")
+                    and rawget(value, "Refresh") then
+
+                    box = value
+                end
+            end
+        end
+
+        if box then
+            box.reach:SetWidth(1)
+
+            box.Refresh()
+
+            assert(box.reach:GetWidth() > 1,
+                "refreshing a checkbox re-measures the area its words can be "
+                .. "clicked in: " .. tostring(box.reach:GetWidth()))
+        end
+    end
+
+    print("  the remaining 0.68.0 properties hold")
+end)()
+
 
 ;(function()
     ------------------------------------------------------------
@@ -10332,7 +10655,7 @@ end)()
 
         assert(source, "UI.lua must be readable")
 
-        local body = source:match("function UI%.RefreshAllTabs%(%)(.-)\nend")
+        local body = source:match("function UI%.RefreshAllTabs%b()(.-)\nend")
 
         assert(body, "UI.RefreshAllTabs must be findable in the source")
 
@@ -19178,11 +19501,39 @@ end)()
         "a handler registered for ADDON_LOADED must be called, loadedFired "
         .. loadedFired .. " time(s)")
 
-    -- And not for somebody else's addon.
+    -- AND FOR SOMEBODY ELSE'S ADDON, WHICH IS THE ONLY REASON TO WANT IT.
+    -- 0.68.0.
+    --
+    -- This used to assert the opposite. The client loads `Blizzard_TokenUI`,
+    -- `Blizzard_Collections` and the rest on demand, and there is no other
+    -- announcement that one of those frames now exists -- so a handler that
+    -- fires only on OUR load fires at the one moment the frame it is waiting
+    -- for is guaranteed absent. 0.67.0 registered exactly such a handler for
+    -- the currency panel and it was inert.
+    eventFrame.scripts.OnEvent(eventFrame, "ADDON_LOADED", "Blizzard_TokenUI")
+
+    assert(loadedFired == 2,
+        "another addon loading reaches the handler too, loadedFired "
+        .. loadedFired .. " time(s)")
+
+    -- The database initialization stays ours alone: running it on somebody
+    -- else's load is the opposite mistake.
+    local initialised = 0
+
+    local realInit = CN.InitializeDatabase
+
+    CN.InitializeDatabase = function(...)
+        initialised = initialised + 1
+
+        return realInit(...)
+    end
+
     eventFrame.scripts.OnEvent(eventFrame, "ADDON_LOADED", "SomeOtherAddon")
 
-    assert(loadedFired == 1,
-        "and not for another addon loading, loadedFired " .. loadedFired .. " time(s)")
+    CN.InitializeDatabase = realInit
+
+    assert(initialised == 0,
+        "another addon loading must not re-initialize this addon's database")
 
     print("  ADDON_LOADED reaches the handlers the registry accepted")
 end)()

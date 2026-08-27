@@ -240,6 +240,22 @@ CN:RegisterCommand{
         -- Printed first and unconditionally, because a handler that never
         -- runs is the failure most likely to be mistaken for "there is just
         -- nothing to do".
+        -- A CACHE THAT SOMEBODY WROTE INTO IS WORTH SAYING OUT LOUD. 0.68.0.
+        --
+        -- `CN.Memo` notices when a reader has modified what it handed out,
+        -- rebuilds rather than serving the damage, and records it -- and the
+        -- counter it keeps was written and read by nothing, which is the
+        -- state five migrations in this addon exist to clean up. It belongs
+        -- here: this is the command whose job is "what went wrong that you
+        -- did not see".
+        if (CN.memoMutations or 0) > 0 then
+            CN.PrintLine(CN.Bad(CN.Count(CN.memoMutations,
+                "cached list was", "cached lists were")
+                .. " modified after being handed out, and rebuilt."))
+            CN.PrintLine("  " .. CN.Muted("Harmless to you; it means a list "
+                .. "grew every time it was read until this caught it."))
+        end
+
         local rejected = 0
 
         for event, why in pairs(CN.rejectedEvents or {}) do

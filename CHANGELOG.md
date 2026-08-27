@@ -7,6 +7,81 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.68.0]
+
+Fourteen defects. Eleven of them were in what 0.67.0 itself added, including
+two that were quietly teaching the addon the wrong things about how you play.
+
+### Fixed â€” the addon learning from things you never saw
+
+- **Hovering the type filters told the addon it had shown you sixty
+  objectives.** Asking for the ranking is how the addon records what it
+  offered you â€” that count is the denominator of the ratio that moves a
+  type's score by up to a quarter, and the top rows get a work clock started
+  on them. A tooltip added last release asked for sixty rows on every hover
+  while the list behind it draws twelve. Mousing down the checkbox list
+  recorded rows you have never seen as shown, and started timing them.
+- **`/cn find` did the same thing with the window closed** â€” twelve
+  objectives marked as offered and clocked, as a side effect of typing a
+  search.
+- **A deadline you cannot possibly meet was scored as the most urgent thing in
+  the game.** A world quest with eight minutes left, twelve minutes of flying
+  away, sat at the top of the list. The addon holds both halves of that
+  arithmetic â€” the journey, and how long this kind of work takes *you*,
+  measured â€” and was using neither. `/cn why` now says "deadline (too soon to
+  reach)" rather than dropping the term silently.
+
+### Fixed â€” wrong numbers on screen
+
+- **Every completed Loremaster achievement came back as unfinished.** A
+  migration last release deleted a flag that is account-wide by design and
+  that nothing rewrites, so `/cn zones` put "Loremaster of Khaz Algar 120/120"
+  at the top of "worth doing next" with the reason "100% done â€” finishing is
+  cheaper than starting". Repaired on upgrade, and the store now rebuilds
+  itself when it is missing something rather than only when it is empty.
+- **Two tooltips reported distances at double the addon's own estimate**, and
+  printed "About 40 minutes away" for a rare thirty yards off whenever the
+  client had not yet answered about your position â€” the internal
+  "somewhere unknown" constant, rendered as a measurement. A journey the addon
+  cannot estimate is now not described at all.
+- **"Gone in 42m left whether you do it or not."** A value-column string
+  interpolated into a sentence, which also opened a colour code mid-sentence
+  when the game would not say how long was left.
+- **A rare you have farmed for a year said "First time you have met it."**
+  The upgrade that dropped inflated sighting counts turned a missing number
+  into a confident wrong claim.
+- **Quests in a neighbouring zone could be silently dropped.** The zone was
+  priced from whichever remembered quest had the lowest id, and if that one
+  had no stored coordinates the whole zone was treated as unreachable â€” up to
+  twenty available quests one flight point away, invisible.
+
+### Fixed â€” the interface
+
+- **The currency sweep still never resumed after you closed the Currency
+  tab.** Last release hooked that window's close, on an event the addon
+  discards for every addon but itself â€” so the handler could only fire at the
+  one moment the window is guaranteed not to exist. It was written,
+  commented, and inert.
+- **The eleven tab captions, the Welcome screen and the Hud panel ignored the
+  text-size setting**, which the change that introduced it named as the thing
+  it was fixing.
+- **A checkbox's clickable area was measured once.** At 150% text the label is
+  half again as wide as the button behind it, so the last third of the words
+  showed no tooltip and did not toggle the box.
+- **The "Also on:" search hint was drawn underneath the tab strip** in the
+  muted, disabled face this addon reserves for text that carries no
+  information. It sits beside the filter box now, in the accent colour.
+
+### Internal
+
+- **`CN.Recommend` can be asked quietly.** One ranking path, one place that
+  decides whether an ask counts as an offer â€” rather than a second function
+  that would drift from the first.
+- **The cache-mutation counter is reported by `/cn errors`** instead of being
+  written and read by nothing, and its guard now documents what it does and
+  does not cover: it catches a list being appended to, which is the shape this
+  has taken both times, and not a key added to a table.
+
 ## [0.67.2]
 
 Still nothing in the addon. Two releases in a row were diagnosed as build

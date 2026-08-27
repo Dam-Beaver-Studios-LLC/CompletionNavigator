@@ -82,7 +82,24 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
         local loadedAddon = ...
 
+        -- DISPATCHED FOR EVERY ADDON, NOT ONLY OUR OWN. 0.68.0.
+        --
+        -- The whole reason a handler wants this event is to notice a
+        -- SEPARATE addon arriving -- the client loads `Blizzard_TokenUI`,
+        -- `Blizzard_Collections` and the rest on demand, and there is no
+        -- other announcement that a frame now exists. This branch returned
+        -- before `Dispatch` for anything that was not us, so the one handler
+        -- registered for it (the currency panel's close hook, 0.67.0) could
+        -- only ever fire at the one moment its frame is guaranteed absent.
+        --
+        -- It was written, accepted, commented, and inert.
+        --
+        -- The initialization below still happens only for us: that part is
+        -- about OUR database, and running it on somebody else's load would be
+        -- the opposite mistake.
         if loadedAddon ~= ADDON_NAME then
+            Dispatch(event, ...)
+
             return
         end
 

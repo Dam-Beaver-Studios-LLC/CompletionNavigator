@@ -504,9 +504,31 @@ function Quests.NearbyRememberedMaps(playerMap)
     for mapID, pins in pairs(byMap) do
         table.sort(pins, function(a, b) return a.questID < b.questID end)
 
-        local sample = pins[1]
+        -- A PIN THAT HAS COORDINATES, NOT MERELY THE LOWEST ID. 0.68.0.
+        --
+        -- `RememberOffer` stores `x` and `y` only when the client gave them,
+        -- and it does not always. Pricing a zone from a pin with no position
+        -- makes `Travel.CostFor` refuse, `CN.TravelCost` fall through to its
+        -- pessimism constant, and the zone sort last -- so up to twenty
+        -- available quests one flight point away silently never appeared,
+        -- while a farther zone whose lowest-id pin happened to have
+        -- coordinates did.
+        local sample
 
-        local cost = CN.TravelCost(mapID, sample.x, sample.y)
+        for _, pin in ipairs(pins) do
+            if pin.x and pin.y then
+                sample = pin
+                break
+            end
+        end
+
+        -- No pin in the whole zone has a position. The zone is still worth
+        -- offering -- the quests are real -- but nothing here can price the
+        -- journey, so it is not pretended: it sorts last on the same constant
+        -- the scorer uses for an unknown location, which is what that
+        -- constant is for.
+        local cost = sample and CN.TravelCost(mapID, sample.x, sample.y)
+            or CN.unknownLocationCost
 
         table.insert(maps, {
             mapID = mapID,

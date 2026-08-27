@@ -801,9 +801,32 @@ CN:RegisterCommand{
     end,
 }
 
+-- SCANNED WHEN THE STORE IS EMPTY, OR WHEN IT IS INCOMPLETE. 0.68.0.
+--
+-- "Empty" was the only trigger, and after the first character it is never
+-- empty again -- so a store that lost a field, or one written by a version
+-- that did not record something this one reads, stayed wrong for the life of
+-- the account unless the player found `/cn scanlore`. Migration 20 produced
+-- exactly that state and the addon had no way back out of it.
+--
+-- A row with no `completed` flag is the shape of that damage, and it is also
+-- the shape of a row written before the flag existed. Both want the same
+-- thing.
 CN:OnLogin(function()
-    if CN.CountKeys(Records()) == 0 then
+    local records = Records()
+
+    if CN.CountKeys(records) == 0 then
         Loremaster.Scan()
+
+        return
+    end
+
+    for _, record in pairs(records) do
+        if type(record) == "table" and record.completed == nil then
+            Loremaster.Scan()
+
+            return
+        end
     end
 end)
 

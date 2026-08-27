@@ -1112,22 +1112,69 @@ CN.migrations = {
 
         local cleared = 0
 
-        for _, store in ipairs({ db.account.exploration, db.account.loremaster }) do
-            for _, record in pairs(store or {}) do
-                if type(record) == "table"
-                    and (record.done ~= nil or record.completed ~= nil) then
+        -- `done` FROM BOTH; `completed` FROM EXPLORATION ONLY. Corrected in
+        -- 0.68.0, and repaired by migration 21 for anyone who ran the first
+        -- version of this. Loremaster's `completed` is ACCOUNT-wide by
+        -- design -- an achievement is earned once for the whole account, as
+        -- that file says in as many words -- and it is still written by every
+        -- scan. Deleting it here removed a live field that nothing rewrites,
+        -- because the Loremaster login scan only runs when the store is
+        -- EMPTY.
+        for _, record in pairs(db.account.exploration or {}) do
+            if type(record) == "table"
+                and (record.done ~= nil or record.completed ~= nil) then
 
-                    record.done      = nil
-                    record.completed = nil
+                record.done      = nil
+                record.completed = nil
 
-                    cleared = cleared + 1
-                end
+                cleared = cleared + 1
+            end
+        end
+
+        for _, record in pairs(db.account.loremaster or {}) do
+            if type(record) == "table" and record.done ~= nil then
+                record.done = nil
+
+                cleared = cleared + 1
             end
         end
 
         if cleared > 0 then
             CN.DebugPrint("Cleared " .. cleared .. " shared progress figure(s)"
                 .. " that belonged to whichever character wrote last.")
+        end
+    end,
+
+    -- 21 -> 22. REPAIRING WHAT MIGRATION 20 TOOK.
+    --
+    -- The first version of migration 20 deleted `completed` from every
+    -- Loremaster record as well as from every exploration one. Exploration
+    -- was right; Loremaster was not -- that flag is account-wide, is still
+    -- written by every scan, and nothing rewrites it in between because the
+    -- login scan only fires when the store is EMPTY.
+    --
+    -- The visible result was the addon recommending finished zones: `/cn
+    -- zones` put "Loremaster of Khaz Algar 120/120" at the top of "worth
+    -- doing next" with the reason "100% done -- finishing is cheaper than
+    -- starting", and the Journey tab listed every completed achievement as
+    -- closest to finished.
+    --
+    -- The whole store is re-derivable from the client -- name, category,
+    -- criteria count, completion and this character's progress all come from
+    -- the achievement API -- so it is emptied rather than patched, and the
+    -- login scan that fires on an empty store rebuilds it correctly. Nothing
+    -- is lost that the client cannot hand back.
+    [21] = function(db)
+        db.account = db.account or {}
+
+        local held = CN.CountKeys(db.account.loremaster)
+
+        if held > 0 then
+            db.account.loremaster = {}
+
+            CN.DebugPrint("Cleared " .. held .. " quest achievement row(s) so "
+                .. "the next login rebuilds them; migration 20 removed a flag "
+                .. "they cannot rewrite on their own.")
         end
     end,
 }

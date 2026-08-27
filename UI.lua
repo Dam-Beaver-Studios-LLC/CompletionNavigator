@@ -77,12 +77,66 @@ local window, minimapButton
 -- handler behaves when a slash command reaches it.
 --
 -- Never both: the same sentence in two places reads as two things happening.
+-- HOW FAR AWAY, IN TIME THE PLAYER RECOGNISES. 0.68.0.
+--
+-- Two 0.67.0 tooltips printed `CN.TravelCost` as minutes. It is not minutes:
+-- a cost point is `Travel.secondsPerCostPoint` seconds -- thirty -- so every
+-- one of those lines reported double the addon's own estimate. And
+-- `CN.TravelCost` never returns nil: on a miss it returns the pessimism
+-- constant the scorer uses to rank an unknown location, so "About 40 minutes
+-- away" was printed for a rare thirty yards off whenever the client had not
+-- yet answered about the player's position.
+--
+-- A journey the addon cannot estimate is not described at all. Saying nothing
+-- is the honest form of not knowing, and every other travel line in this
+-- addon already works that way.
+-- HOW MANY ROWS THE MAIN LIST DRAWS. Named once, because a tooltip that
+-- counts over a different number than the list shows is making a promise
+-- about rows that are not there. 0.68.0.
+UI.listLimit = 12
+
+function UI.DistanceLine(mapID, x, y)
+    if not mapID or not x or not y then
+        return nil
+    end
+
+    local travel = CN:GetModule("Travel")
+
+    if not travel or not travel.EstimateSeconds then
+        return nil
+    end
+
+    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+
+    if not playerMap or not playerX or not playerY then
+        return nil
+    end
+
+    local seconds, confident = travel.EstimateSeconds(
+        playerMap, playerX, playerY, mapID, x, y)
+
+    if not seconds or not confident then
+        return nil
+    end
+
+    local session = CN:GetModule("Session")
+
+    local text = session and session.FormatDuration
+        and session.FormatDuration(seconds)
+
+    if not text then
+        return nil
+    end
+
+    return "About " .. text .. " away by the route this addon would take."
+end
+
 -- The line under the filter box. Separate from `UI.Answer` on purpose: a
 -- search hint and the result of a button press are two different sentences
 -- and neither may silently replace the other.
 function UI.ShowElsewhere(text)
     if window and window.elsewhere then
-        window.elsewhere:SetText(text and CN.Muted(text) or "")
+        window.elsewhere:SetText(text and CN.Accent(text) or "")
 
         return true
     end
@@ -375,6 +429,16 @@ local function AddCheckbox(parent, text, getter, setter, tooltip)
 
     check.Refresh = function()
         check:SetChecked(getter() and true or false)
+
+        -- THE HIT AREA IS RE-MEASURED, NOT MEASURED ONCE. 0.68.0.
+        --
+        -- `Fit` was published and called exactly once, at build time. At
+        -- Text 150% the label is half again as wide as the invisible button
+        -- behind it, so the last third of the words showed no tooltip and did
+        -- not toggle the box -- while the same words at 100% did both.
+        if check.Fit then
+            check.Fit()
+        end
     end
 
     AttachTooltip(check, tooltip)
@@ -588,8 +652,18 @@ local function BuildWindow()
     end)
 
     -- The cross-tab hint's own line, so it cannot overwrite an answer.
-    window.elsewhere = CN.Label(window, "OVERLAY", "LABEL")
-    window.elsewhere:SetPoint("TOPRIGHT", search, "BOTTOMRIGHT", 0, -2)
+    -- BESIDE THE BOX, NOT UNDER IT. 0.68.0.
+    --
+    -- Anchored below the search box it descended into the tab strip -- the
+    -- strip starts six pixels under the box's bottom edge, and the tab
+    -- buttons are frames, so they draw over a font string on the window. At
+    -- Text 150% it was a line of text behind the first row of tabs.
+    --
+    -- SMALL and ACCENT, not LABEL and MUTED: this line carries information --
+    -- which tabs hold what you are looking for -- and this file's own palette
+    -- note reserves the muted, disabled face for text that does not.
+    window.elsewhere = CN.Label(window, "OVERLAY", "SMALL")
+    window.elsewhere:SetPoint("RIGHT", searchLabel, "LEFT", -8, 0)
     window.elsewhere:SetJustifyH("RIGHT")
     window.elsewhere:SetTextColor(CN.Rgb("ACCENT"))
     window.elsewhere:SetText("")
@@ -702,6 +776,19 @@ function UI.RebuildTabs()
         end
 
         button:SetText(CN.L[tab.name])
+
+        -- THE TAB CAPTIONS TOO. 0.68.0.
+        --
+        -- 0.67.0 adopted the labels of buttons and checkboxes built by
+        -- `AddButton` / `AddCheckbox` and left these -- the eleven captions
+        -- the change's own comment names as one of the three things that
+        -- stayed at 100% while the rows around them grew.
+        --
+        -- Adopted BEFORE the width is measured below, so the button is sized
+        -- to the text the player will actually see.
+        if button.GetFontString then
+            CN.AdoptLabel(button:GetFontString(), "CAPTION")
+        end
 
         -- GetTextWidth exists on Button, but guard anyway: a nil or
         -- non-numeric return here would break the whole window.
@@ -1144,19 +1231,40 @@ end
 --
 -- This is the only caller that needs all eleven at once, and it is
 -- user-initiated.
-function UI.RefreshAllTabs()
+-- WHICH TAB REFRESHES WRITE SOMETHING. 0.68.0.
+--
+-- `/cn find` refreshes every tab so the search has something to look at, and
+-- it does that with the window closed. Two of those refreshes are not
+-- read-only: the Next tab calls `CN.Recommend`, which counts every row as
+-- having been shown to the player and starts session clocks on the top ones,
+-- and it overwrites `CN.currentRecommendation`. So typing a search recorded
+-- twelve objectives as offered and started their work clocks.
+--
+-- Named rather than guessed at: a tab whose refresh has a side effect is a
+-- thing this file has to know about, and the searcher skips exactly those
+-- when the player is not looking at the window.
+UI.writingTabs = {
+    Next = true,
+    Zone = true,
+}
+
+function UI.RefreshAllTabs(forSearch)
     -- THE WINDOW FIRST. A function that promises every tab has to make sure
     -- there is something for a tab to be a panel of: `BuildPanel` cannot
     -- build anything before the window body exists, and on a fresh login it
     -- does not. 0.67.0.
     UI.BuildWindow()
 
+    local hidden = not (window and window:IsShown())
+
     local refreshed = 0
 
     for _, tab in ipairs(UI.tabs) do
         UI.BuildPanel(tab)
 
-        if tab.refresh and tab.panel then
+        local skip = forSearch and hidden and UI.writingTabs[tab.name]
+
+        if tab.refresh and tab.panel and not skip then
             if pcall(tab.refresh, tab.panel) then
                 refreshed = refreshed + 1
             end
@@ -1495,7 +1603,19 @@ UI.RegisterTab{
 
                         local holding = 0
 
-                        for _, objective in ipairs(CN.Recommend(60) or {}) do
+                        -- QUIET, AND OVER THE ROWS THE TAB ACTUALLY DRAWS.
+                        -- 0.68.0.
+                        --
+                        -- This asked for sixty rows on every hover, which
+                        -- fired the recommendation hooks -- so mousing down
+                        -- the checkbox list recorded ranks 13 to 60 as having
+                        -- been shown to the player and started session clocks
+                        -- on some of them. It also counted over sixty while
+                        -- the list behind the tooltip draws twelve, so the
+                        -- sentence promised rows that were not there.
+                        for _, objective in ipairs(
+                            CN.Recommend(UI.listLimit, true) or {}) do
+
                             if objective.type == objectiveType then
                                 holding = holding + 1
                             end
@@ -1532,7 +1652,7 @@ UI.RegisterTab{
         panel.filter:SetText("Filter types")
 
 
-        local results = CN.Recommend(12)
+        local results = CN.Recommend(UI.listLimit)
 
         -- A CONTROL THAT CANNOT ACT MUST NOT LOOK LIKE IT CAN.
         --
@@ -2289,10 +2409,23 @@ UI.RegisterTab{
                     tooltip = function()
                         local lines = { tostring(worldQuest.name) }
 
-                        table.insert(lines, "Gone in "
-                            .. tostring(opportunities.FormatTimeLeft(
-                                worldQuest.secondsLeft))
-                            .. " whether you do it or not.")
+                        -- THE RAW SECONDS, FORMATTED FOR A SENTENCE. 0.68.0.
+                        --
+                        -- `FormatTimeLeft` is written for the value column
+                        -- and returns "42m left", "expired", or a colour-coded
+                        -- "unknown time left" -- so this read "Gone in 42m
+                        -- left whether you do it or not", and opened a colour
+                        -- escape in the middle of a sentence when the client
+                        -- would not answer.
+                        local session = CN:GetModule("Session")
+
+                        if worldQuest.secondsLeft and worldQuest.secondsLeft > 0
+                            and session and session.FormatDuration then
+
+                            table.insert(lines, "Gone in "
+                                .. session.FormatDuration(worldQuest.secondsLeft)
+                                .. " whether you do it or not.")
+                        end
 
                         if worldQuest.tagName and worldQuest.tagName ~= "" then
                             table.insert(lines, tostring(worldQuest.tagName)
@@ -2302,13 +2435,11 @@ UI.RegisterTab{
                             table.insert(lines, "Elite.")
                         end
 
-                        local cost = CN.TravelCost(worldQuest.mapID,
+                        local far = UI.DistanceLine(worldQuest.mapID,
                             worldQuest.x, worldQuest.y)
 
-                        if cost then
-                            table.insert(lines, "About "
-                                .. CN.Count(math.floor(cost + 0.5), "minute")
-                                .. " away by the route this addon would take.")
+                        if far then
+                            table.insert(lines, far)
                         end
 
                         table.insert(lines, "Click to set a waypoint.")
@@ -2354,10 +2485,18 @@ UI.RegisterTab{
 
                         local record = CN.Account("rares")[vignette.vignetteID]
 
+                        -- THREE STATES, NOT TWO. 0.68.0.
+                        --
+                        -- Migration 19 dropped every stored sighting count on
+                        -- the stated grounds that a missing number is better
+                        -- than a confidently wrong one -- and this turned the
+                        -- missing one straight back into a confident claim.
+                        -- A player who had farmed a rare weekly for a year
+                        -- was told "first time you have met it".
                         if record and (record.sightings or 0) > 1 then
                             table.insert(lines, "You have met it "
                                 .. CN.Count(record.sightings, "time") .. ".")
-                        elseif record then
+                        elseif record and record.sightings == 1 then
                             table.insert(lines, "First time you have met it.")
                         end
 
@@ -2366,13 +2505,11 @@ UI.RegisterTab{
                                 .. "cleared it since the last weekly reset.")
                         end
 
-                        local cost = CN.TravelCost(vignette.mapID,
+                        local far = UI.DistanceLine(vignette.mapID,
                             vignette.x, vignette.y)
 
-                        if cost then
-                            table.insert(lines, "About "
-                                .. CN.Count(math.floor(cost + 0.5), "minute")
-                                .. " away.")
+                        if far then
+                            table.insert(lines, far)
                         end
 
                         table.insert(lines, "Click to set a waypoint.")
@@ -4419,7 +4556,7 @@ CN:RegisterCommand{
         -- `UI.Frame()`, which is a pure accessor -- `return window` -- so on
         -- a fresh login it built nothing and the command answered "nothing
         -- matches" for things the addon plainly had. 0.67.0.
-        UI.RefreshAllTabs()
+        UI.RefreshAllTabs(true)
 
         local hits = UI.SearchAll(args)
 

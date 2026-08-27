@@ -96,8 +96,31 @@ CN.urgencyWeight         = 4.0
 CN.urgencyLongHorizonSeconds = 7 * 86400
 CN.urgencyLongShare          = 0.35
 
-function CN.UrgencyBonus(secondsLeft)
+-- AND A DEADLINE YOU CANNOT MEET IS NOT URGENT. 0.68.0.
+--
+-- Backlog item 18. The curve was never fitted against anything, and the one
+-- thing it could get plainly wrong was ranking a deadline the player has no
+-- way of meeting ABOVE the things they can actually do. A world quest with
+-- eight minutes left, twelve minutes of flying away, was scored as the most
+-- urgent thing in the game: the term is the heaviest in the table, and eight
+-- minutes is deep into the squared part of the ramp.
+--
+-- The addon already holds both halves of the answer -- the journey, from the
+-- travel model, and how long this kind of work takes this player, measured.
+-- Using them costs nothing and removes the one row a player would point at
+-- and say the list is wrong.
+--
+-- `secondsNeeded` is optional and the curve is unchanged without it: a caller
+-- that cannot estimate the journey gets exactly the old behaviour rather than
+-- a guess.
+function CN.UrgencyBonus(secondsLeft, secondsNeeded)
     if type(secondsLeft) ~= "number" or secondsLeft <= 0 then
+        return 0
+    end
+
+    if type(secondsNeeded) == "number" and secondsNeeded > 0
+        and secondsLeft < secondsNeeded then
+
         return 0
     end
 
@@ -122,6 +145,38 @@ function CN.UrgencyBonus(secondsLeft)
     end
 
     return value
+end
+
+-- HOW LONG THIS WOULD ACTUALLY TAKE, JOURNEY INCLUDED.
+--
+-- Travel is held in cost points, which are `CN.secondsPerCostPoint` seconds
+-- each; the work itself is whatever this player's own completions say this
+-- kind of thing takes. Either half may be unknown, and an unknown half is
+-- left out rather than guessed -- an estimate built on a guess would refuse
+-- urgency to things the player could easily have reached.
+function CN.SecondsNeeded(objective)
+    if type(objective) ~= "table" then
+        return nil
+    end
+
+    local seconds = nil
+
+    local cost = objective.travelCost
+
+    if type(cost) == "number" and cost > 0 and CN.secondsPerCostPoint then
+        seconds = cost * CN.secondsPerCostPoint
+    end
+
+    local session = CN.modules and CN:GetModule("Session")
+
+    local work = session and session.TypicalSeconds
+        and session.TypicalSeconds(objective.type)
+
+    if type(work) == "number" and work > 0 then
+        seconds = (seconds or 0) + work
+    end
+
+    return seconds
 end
 
 -- Priority profiles have two independent levers:
@@ -586,7 +641,9 @@ function CN.ScoreObjective(objective)
     -- `expiresIn` is the established field name; providers that know a
     -- deadline already set it.
     if objective.expiresIn then
-        worth = worth + CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight
+        worth = worth
+            + CN.UrgencyBonus(objective.expiresIn, CN.SecondsNeeded(objective))
+                * CN.urgencyWeight
     end
     -- `objective.nearbyBonus` used to be summed here as a term of its own.
     -- Nothing ever set it. The WEIGHT is live -- it scales the batch bonus
@@ -1923,7 +1980,26 @@ function CN.RegisterRecommendationHook(name, handler)
     CN.recommendationHooks[name] = handler
 end
 
-function CN.Recommend(limit)
+-- ASKING IS NOT OFFERING. 0.68.0.
+--
+-- Every call to this fires the recommendation hooks, and two of the three
+-- WRITE: `Preference` counts each row as having been shown to the player --
+-- the denominator of the ratio that moves a type's score by up to 25% -- and
+-- `Session` starts a work clock on the top rows, which becomes the measured
+-- duration when one is finished. Both modules' own headers say the invariant:
+-- a row nobody saw was not offered.
+--
+-- So a caller that only wants to COUNT something poisoned both. 0.67.0 added
+-- a tooltip that asked for sixty rows on every hover, and a text search that
+-- refreshed every tab with the window closed; between them, ranks 13 to 60 --
+-- rendered nowhere, ever -- were recorded as shown, and ranks 13 to 25 had
+-- session clocks started. Fifteen minutes of hovering became fifteen minutes
+-- of "work time" for whatever was finished next.
+--
+-- `quiet` is the whole fix, and it is deliberately a parameter rather than a
+-- second function: one ranking path, one place that decides whether an ask
+-- counts as an offer.
+function CN.Recommend(limit, quiet)
     limit = limit or 1
 
     local list = Ranked()
@@ -1932,6 +2008,10 @@ function CN.Recommend(limit)
 
     for index = 1, math.min(limit, #list) do
         results[index] = list[index]
+    end
+
+    if quiet then
+        return results
     end
 
     for _, handler in pairs(CN.recommendationHooks) do
@@ -2018,9 +2098,20 @@ function CN.ExplainScore(objective)
     }
 
     if objective.expiresIn then
+        -- THE SAME ARGUMENTS THE SCORER USED. `/cn why` exists to show the
+        -- arithmetic the ranking did, and a breakdown that recomputes a term
+        -- differently is a breakdown of some other list.
+        local needed = CN.SecondsNeeded(objective)
+
+        local unreachable = needed and objective.expiresIn < needed
+
         table.insert(terms, {
-            label = "deadline",
-            value = CN.UrgencyBonus(objective.expiresIn) * CN.urgencyWeight,
+            label = unreachable
+                and "deadline (too soon to reach)"
+                or "deadline",
+            value = CN.UrgencyBonus(objective.expiresIn, needed)
+                * CN.urgencyWeight,
+            keepAtZero = unreachable or nil,
         })
     end
 
@@ -2145,10 +2236,18 @@ function CN.ExplainScore(objective)
         end
     end
 
+    -- A ZERO THAT EXPLAINS SOMETHING IS NOT NOISE. 0.68.0.
+    --
+    -- Terms worth nothing are dropped, which is right: a list of twenty rows
+    -- reading "0.00" explains less than a list of six. But a deadline scored
+    -- at zero BECAUSE the player cannot reach it in time is the single most
+    -- surprising thing this list can contain -- the row carries a visible
+    -- clock and no urgency -- and dropping it leaves the one question `/cn
+    -- why` exists to answer unanswered.
     local kept = {}
 
     for _, term in ipairs(terms) do
-        if math.abs(term.value) > 0.001 then
+        if math.abs(term.value) > 0.001 or term.keepAtZero then
             table.insert(kept, term)
         end
     end
