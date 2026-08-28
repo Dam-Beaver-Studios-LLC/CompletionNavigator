@@ -592,16 +592,35 @@ function Session.NoteOffered(objective)
     --                      it either, so zero is the consistent answer
     --   a SATURATED cost   the model saying "far away, I stopped counting" --
     --                      not a measurement, and not subtractable
-    local travelSeconds, travelKnown = 0, true
+    -- THROUGH THE ONE FUNCTION THAT OWNS THE RULE. 0.70.0.
+    --
+    -- This was a second copy of "is this cost a measurement", written before
+    -- `CN.SecondsNeeded` existed and then left in place when it did -- and
+    -- the comment on that function names THIS one as the authority it was
+    -- copied from. The two disagreed immediately: a quest with no known
+    -- location carries `CN.unknownLocationCost`, which this subtracted as
+    -- four minutes of journey from a measured span, biasing the learned work
+    -- time down. That is the class of error the paragraph above exists to
+    -- prevent.
+    --
+    -- `CN.SecondsNeeded` is nil for anything that was not costed and for
+    -- anything at the clamp, which is exactly the two cases described above.
+    local travelSeconds = CN.SecondsNeeded and CN.SecondsNeeded(objective)
 
-    if type(objective.travelCost) == "number" and CN.secondsPerCostPoint then
-        travelSeconds = objective.travelCost * CN.secondsPerCostPoint
+    local travelKnown = travelSeconds ~= nil
 
-        local travel = CN:GetModule("Travel")
+    if not travelSeconds then
+        travelSeconds = 0
 
-        local ceiling = (travel and travel.maximumCost) or 40
+        -- NO JOURNEY AT ALL IS A KNOWN ZERO; A JOURNEY NOBODY MEASURED IS
+        -- NOT. That is the distinction the paragraph above draws, and it is
+        -- the whole reason this is not simply `travelCost or 0`: an objective
+        -- with no travel cost is placeless -- there is nothing to subtract
+        -- and nothing unknown about it -- while one carrying a constant the
+        -- router invented has a journey whose length nobody established.
+        local cost = objective.travelCost
 
-        travelKnown = objective.travelCost < ceiling
+        travelKnown = cost == nil or cost == 0
     end
 
     local held = offeredAt[key]

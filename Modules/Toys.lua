@@ -197,6 +197,8 @@ CN.RegisterCandidateProvider("Toys", function()
                 -- penalty against exactly the collection types this file
                 -- exists to surface.
                 travelCost      = CN.TravelCost(seller.mapID, seller.x, seller.y),
+                travelCosted     = select(2, CN.TravelCost(seller.mapID,
+                    seller.x, seller.y)) or nil,
                 reasons         = reasons,
             })
         end)

@@ -298,7 +298,9 @@ CN.RegisterCandidateProvider("Opportunities", function()
         -- and a flat out-of-zone penalty, the same way quests have been
         -- since 0.42.0. World quests are exactly where this matters: they
         -- are scattered across a continent and they expire.
-        local travel = CN.TravelCost(worldQuest.mapID, worldQuest.x, worldQuest.y)
+        -- `costed` SAYS WHETHER THE MODEL ANSWERED. See `Rares`. 0.70.0.
+        local travel, costed = CN.TravelCost(worldQuest.mapID,
+            worldQuest.x, worldQuest.y)
 
         if worldQuest.mapID == playerMap then
             table.insert(reasons, "in your current zone")
@@ -317,6 +319,7 @@ CN.RegisterCandidateProvider("Opportunities", function()
             -- setting both charged one deadline through two curves, and only
             -- one of them appears in `/cn urgency`.
             travelCost       = travel,
+            travelCosted     = costed or nil,
             expiresIn        = worldQuest.secondsLeft,
             reasons          = reasons,
         }))

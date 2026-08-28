@@ -7,6 +7,66 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.70.0]
+
+Eleven defects, and the honest headline is that **last release's fix for the
+reported quest-turn-in problem did not work.** Most of what follows is the
+rest of that mistake and its neighbours.
+
+### Fixed â€” the quest turn-in, properly this time
+
+- **0.69.0 wired the zone refresh to the wrong event.** `QUEST_TURNED_IN`
+  fires *before* the game moves the achievement criteria, and the throttle
+  around it runs on the first call â€” so for the ordinary case, one quest
+  handed in, it read the number it already had and wrote it straight back.
+  The reported symptom was unchanged. It listens for the criteria actually
+  moving now, which is what the sibling module has always done.
+- **And it told nothing.** The store changed and no part of the ranking was
+  marked stale, so the recommendation kept its old "8 of 12 left in this
+  zone".
+- **It also cleared an achievement the account had already earned.** The flag
+  was being derived by comparing two numbers that belong to *you*, while the
+  flag itself belongs to the *account* â€” so an alt three quests into a zone
+  the main had finished un-earned it in passing, and the addon started
+  recommending a completed zone. It asks the game directly now.
+- **And it could rewrite the wrong continent's zone.** Zone names repeat â€”
+  two Nagrands, two Shadowmoon Valleys, three Dalarans â€” and the lookup
+  matches on name. Where the name is ambiguous it now declines rather than
+  guessing; the next login corrects everything anyway.
+
+### Fixed â€” distances that were never measured
+
+- **"About 20 minutes away" for something you can see from where you are
+  standing.** The travel model never refuses: when it cannot work a journey
+  out it hands back a placeholder, and every caller but one was throwing away
+  the flag that says which is which. Four more places price content that is
+  not anywhere at all â€” the Great Vault, a dungeon, a crafting order â€” with a
+  small routing weight, and `/cn list` printed those as distances too.
+- **The 0.69.0 deadline rule inverted itself at the top of its range.** Travel
+  cost is capped, so every genuine journey over twenty minutes lands on the
+  cap and became indistinguishable from "could not route this" â€” which was
+  exempted. The result: of two world quests eight minutes from expiring, the
+  *farther* one kept full urgency and the nearer one lost all of it.
+- **A journey nobody measured was being subtracted from your measured task
+  times**, biasing everything the addon has learned about how long things take
+  you downward.
+
+### Fixed â€” the rest
+
+- **A scan at a cold moment could empty the whole Journey tab.** When the game
+  declines to answer about criteria it answers zero, and the full scan wrote
+  that in â€” while its own sibling forty lines below, and two other modules,
+  all guard against exactly that.
+- **A full walk of every quest achievement in the game, on every login, of
+  every character, for ever.** The 0.69.0 rescan condition asked a question
+  that can never become false. It records that a character has scanned
+  instead.
+- **`/cn rep <name>` could not find a faction after a client language
+  change** â€” the third command of that shape, where the other two were
+  converted two releases ago.
+- **`/cn find` wrote quest pins to disk.** Building every tab so the search
+  has something to read reached a function that records what it walks past.
+
 ## [0.69.0]
 
 Fifteen defects, and an answer to two of the three things that have been

@@ -290,7 +290,19 @@ end
 --
 -- Sources are unioned and each result says where it came from, because when
 -- this is wrong again the first question will be "which source found it".
-function Quests.AvailableOnMap(mapID)
+-- `quiet` MEANS "READ, DO NOT RECORD". 0.70.0.
+--
+-- This writes: every quest-start pin it walks past is filed into the
+-- remembered store, which is a SavedVariable, and each new one moves the
+-- shortlist revision. That is right when the player is playing, and wrong
+-- when something is merely reading -- `/cn find` refreshes every tab so the
+-- search has rows to look at, and the Journey tab's refresh reaches here, so
+-- typing a search with the window shut wrote pins to disk and forced a
+-- shortlist rebuild.
+--
+-- The same distinction `CN.Recommend(limit, quiet)` draws one file over, for
+-- the same reason and from the same command.
+function Quests.AvailableOnMap(mapID, quiet)
     mapID = mapID or select(1, CN.GetPlayerPosition())
 
     if not mapID then
@@ -325,7 +337,9 @@ function Quests.AvailableOnMap(mapID)
             if poi.isQuestStart and not poi.inProgress then
                 consider(poi, "map")
 
-                Quests.RememberOffer(poi)
+                if not quiet then
+                    Quests.RememberOffer(poi)
+                end
             end
         end
     end
@@ -1503,7 +1517,7 @@ CN.RegisterCandidateProvider("Quests", function()
         -- so every located quest in the log was scored as though the player
         -- were standing on top of it. It healed on the next rebuild, but
         -- arriving in a zone is precisely when somebody types `/cn next`.
-        local travel
+        local travel, costed
 
         -- An available quest carries its own pin, which is more current than
         -- anything recorded earlier.
@@ -1599,6 +1613,7 @@ CN.RegisterCandidateProvider("Quests", function()
             local measured, fromTravel = CN.TravelCost(mapID, x, y)
 
             travel = measured
+            costed = fromTravel or nil
 
             if fromTravel and mapID ~= playerMap then
                 table.insert(reasons, "another zone, costed by how long the "
@@ -1629,6 +1644,7 @@ CN.RegisterCandidateProvider("Quests", function()
             state             = CN.objectiveStates.AVAILABLE,
             completionValue   = value,
             travelCost        = travel,
+            travelCosted      = costed,
             expiresIn         = expiry,
             reasons           = reasons,
         }))

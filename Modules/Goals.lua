@@ -463,12 +463,13 @@ CN.RegisterCandidateProvider("Goals", function()
                     table.insert(reasons, plan.source)
                 end
 
-                local travel
+                local travel, costed
 
                 if plan.mapID then
                     -- Costed like everything else, rather than a flat
                     -- penalty for "not here" while holding the coordinates.
-                    travel = CN.TravelCost(plan.mapID, plan.x, plan.y)
+                    -- `costed` says whether the model answered. 0.70.0.
+                    travel, costed = CN.TravelCost(plan.mapID, plan.x, plan.y)
                 end
 
                 table.insert(candidates, CN.NewObjective({
@@ -482,6 +483,7 @@ CN.RegisterCandidateProvider("Goals", function()
                     accountWide     = true,
                     completionValue = 6,
                     travelCost      = travel,
+                    travelCosted    = costed or nil,
                     reasons         = reasons,
                 }))
             end

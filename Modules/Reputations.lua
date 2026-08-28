@@ -273,7 +273,22 @@ function Reputations.Resolve(text)
     local needle  = string.lower(text)
     local matches = {}
 
-    for id, name in pairs(NameStore()) do
+    -- NAMED LIVE, LIKE TITLES AND CURRENCIES. 0.70.0.
+    --
+    -- Migration 18 converted `Titles.Resolve` and `Currencies.Resolve` off
+    -- their persisted name stores, because a store fills with names frozen at
+    -- whatever language last scanned -- so a player who changed client
+    -- language could not find their own by name. This is the third `Resolve`
+    -- of the same shape and it was not converted: `/cn rep Ehrenfeste` and
+    -- `/cn goal reputation Ehrenfeste` answered nothing, in the same session
+    -- where `/cn hidden` -- which asks the client first -- printed the German
+    -- name correctly.
+    --
+    -- The store is still the fallback: unlike titles and currencies, the
+    -- client will not name a faction the character has never encountered.
+    for id in pairs(NameStore()) do
+        local name = Reputations.NameOf(id)
+
         if name and string.find(string.lower(name), needle, 1, true) then
             table.insert(matches, { id = id, name = name })
         end
@@ -319,6 +334,22 @@ function Reputations.StandingText(record)
     end
 
     return Blizzard.GetStandingLabel(record.reaction)
+end
+
+-- A FACTION'S NAME, FROM THE CLIENT, FALLING BACK TO THE STORE. 0.70.0.
+--
+-- Eleventh of these; see `Achievements.NameOf` for the first. The fallback is
+-- real here in a way it was not for titles and currencies: `GetFactionByID`
+-- answers for factions the character has met, and the store is how the addon
+-- can still name one an alt has never encountered.
+function Reputations.NameOf(factionID)
+    local data = Blizzard.GetFactionByID and Blizzard.GetFactionByID(factionID)
+
+    if data and data.name and data.name ~= "" then
+        return data.name
+    end
+
+    return NameStore()[factionID]
 end
 
 -- Returns the best-standing character for a character-specific faction, so

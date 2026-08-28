@@ -896,10 +896,15 @@ mutate "UI.lua" \
 # 0.56.0
 ############################################################
 
-mutate "Modules/Session.lua" \
-    "        travelKnown = objective.travelCost < ceiling" \
-    "        travelKnown = true" \
-    "a journey estimate that hit its ceiling is subtracted anyway"
+# RE-ANCHORED IN 0.70.0: the ceiling test moved into `CN.SecondsNeeded`, which
+# is now the one place that decides whether a cost is a measurement.
+# NOT MUTATED: the ceiling test moved into `CN.SecondsNeeded` in 0.70.0, and
+# `travelKnown` is now a restatement of "did that function answer". Forcing it
+# true changes only which of two nil-producing paths is taken, so no assertion
+# can see the difference. The property that matters -- one copy of the rule --
+# is asserted as a source rule in the 0.70.0 block, with a negative control.
+
+
 
 mutate "Modules/Session.lua" \
     "        if span > Session.instantSpanSeconds then" \
@@ -1366,8 +1371,8 @@ mutate "Modules/Quests.lua" \
     "a quest with no location is cheaper than one you can see"
 
 mutate "Modules/Rares.lua" \
-    "                travel = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)" \
-    "                travel = 1" \
+    "                travel, costed = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)" \
+    "                travel, costed = 1, true" \
     "a rare is priced by a number rather than by the journey"
 
 mutate "Core.lua" \
@@ -2113,10 +2118,10 @@ mutate "Modules/Quests.lua" \
 
 mutate "Modules/Opportunities.lua" \
     "            travelCost       = travel,
-            expiresIn        = worldQuest.secondsLeft," \
+            travelCosted     = costed or nil," \
     "            limitedTimeBonus = Opportunities.Urgency(worldQuest.secondsLeft),
             travelCost       = travel,
-            expiresIn        = worldQuest.secondsLeft," \
+            travelCosted     = costed or nil," \
     "one deadline is charged twice through two curves"
 
 mutate "Modules/Breakdown.lua" \
@@ -2216,8 +2221,16 @@ mutate "Providers/StaticData.lua" \
     "the block reason has to be parsed back out of English prose"
 
 mutate "Modules/Loremaster.lua" \
-    "        local heldName = Loremaster.NameOf(id, record)" \
-    "        local heldName = record.name" \
+    "    for id, record in pairs(Records()) do
+        local heldName = Loremaster.NameOf(id, record)
+
+        if heldName and string.find(heldName, zoneName, 1, true) then
+            local better" \
+    "    for id, record in pairs(Records()) do
+        local heldName = record.name
+
+        if heldName and string.find(heldName, zoneName, 1, true) then
+            local better" \
     "the zone achievement is matched against a stored name"
 
 mutate "Core.lua" \
@@ -2527,8 +2540,10 @@ mutate "Scoring.lua" \
     "a deadline the player cannot reach is scored as urgent"
 
 mutate "Scoring.lua" \
-    "    return cost * CN.secondsPerCostPoint" \
-    "    return cost" \
+    "    return cost * CN.secondsPerCostPoint
+end" \
+    "    return cost
+end" \
     "a journey in cost points is treated as a journey in seconds"
 
 mutate "Database.lua" \
@@ -2542,14 +2557,14 @@ mutate "Database.lua" \
     "a migration deletes an account-wide flag nothing rewrites"
 
 mutate "Modules/Loremaster.lua" \
-    "            if record.completed == nil then
-                Loremaster.Scan()
+    "        if type(record) == \"table\" and record.completed == nil then
+            Loremaster.Scan()
 
-                return
-            end" \
-    "            if false then
-                return
-            end" \
+            return
+        end" \
+    "        if false then
+            return
+        end" \
     "a store missing a field is never rebuilt"
 
 mutate "UI.lua" \
@@ -2591,9 +2606,13 @@ mutate "Modules/Quests.lua" \
 ############################################################
 
 mutate "Modules/Loremaster.lua" \
-    "CN:RegisterEvent(\"QUEST_TURNED_IN\", function()
+    "CN:RegisterEvent(\"CRITERIA_UPDATE\", function()
     CN.Debounce(\"Loremaster.zone\", 2, function()
-        pcall(Loremaster.RefreshCurrentZone)
+        local ok, moved = pcall(Loremaster.RefreshCurrentZone)
+
+        if ok and moved then
+            CN.InvalidateProvider(\"Loremaster\")
+        end
     end)
 end)" \
     "" \
@@ -2604,12 +2623,12 @@ mutate "Modules/Loremaster.lua" \
         return false
     end
 
-    record.criteria = criteria" \
-    "    record.criteria = criteria" \
+    local key = CN.characterKey or CN.GetCharacterKey()" \
+    "    local key = CN.characterKey or CN.GetCharacterKey()" \
     "a refusal from the criteria API wipes the zone row"
 
 mutate "Scoring.lua" \
-    "    if cost >= ceiling then
+    "    if not objective.travelCosted then
         return nil
     end" \
     "    if false then
@@ -2625,16 +2644,14 @@ mutate "Scoring.lua" \
     "a deadline that counts for nothing is never explained"
 
 mutate "Modules/Loremaster.lua" \
-    "            if type(record.progress) ~= \"table\"
-                or record.progress[key] == nil then
+    "    if not CN.Account(\"loremasterScans\")[key] then
+        Loremaster.Scan()
 
-                Loremaster.Scan()
-
-                return
-            end" \
-    "            if false then
-                return
-            end" \
+        return
+    end" \
+    "    if false then
+        return
+    end" \
     "an alt is locked out of the repair by the character before it"
 
 mutate "Database.lua" \
@@ -2659,6 +2676,62 @@ mutate "UI.lua" \
                 (CN.L[hit.tab] or hit.tab) .. \" (\" .. hit.count .. \")\")" \
     "            table.insert(parts, hit.tab .. \" (\" .. hit.count .. \")\")" \
     "the search names tabs in English beside a translated tab strip"
+
+############################################################
+# 0.70.0
+############################################################
+
+mutate "Modules/Loremaster.lua" \
+    "    local earned = Blizzard.IsAchievementEarned and Blizzard.IsAchievementEarned(id)
+
+    if earned ~= nil then
+        record.completed = earned
+    end" \
+    "    record.completed = (done >= criteria) and true or false" \
+    "an alt part-way through a zone un-earns the account's achievement"
+
+mutate "Modules/Loremaster.lua" \
+    "            if found then
+                return nil
+            end" \
+    "            if false then
+                return nil
+            end" \
+    "a turn-in rewrites a same-named zone in another expansion"
+
+mutate "Modules/Loremaster.lua" \
+    "                if criteria and criteria > 0 then
+                    held.criteria = criteria" \
+    "                if true then
+                    held.criteria = criteria" \
+    "a scan at a cold moment empties the whole journey"
+
+mutate "Scoring.lua" \
+    "    if seconds >= ceiling then
+        return nil
+    end" \
+    "    if false then
+        return nil
+    end" \
+    "a clamped journey is printed as though it were a duration"
+
+mutate "Modules/Session.lua" \
+    "    local travelSeconds = CN.SecondsNeeded and CN.SecondsNeeded(objective)" \
+    "    local travelSeconds = objective.travelCost
+        and objective.travelCost * CN.secondsPerCostPoint" \
+    "an invented journey is subtracted from a measured span"
+
+mutate "Modules/Quests.lua" \
+    "                if not quiet then
+                    Quests.RememberOffer(poi)
+                end" \
+    "                Quests.RememberOffer(poi)" \
+    "a text search writes quest pins to disk"
+
+mutate "Modules/Reputations.lua" \
+    "        local name = Reputations.NameOf(id)" \
+    "        local name = NameStore()[id]" \
+    "a faction cannot be found by name after a language change"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

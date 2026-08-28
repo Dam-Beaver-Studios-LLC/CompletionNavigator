@@ -147,62 +147,80 @@ function CN.UrgencyBonus(secondsLeft, secondsNeeded)
     return value
 end
 
--- HOW LONG THIS WOULD ACTUALLY TAKE, JOURNEY INCLUDED.
+-- WHETHER THE JOURNEY WAS COSTED AT ALL, AND HOW LONG IT IS AT LEAST.
 --
--- Travel is held in cost points, which are `CN.secondsPerCostPoint` seconds
--- each; the work itself is whatever this player's own completions say this
--- kind of thing takes. Either half may be unknown, and an unknown half is
--- left out rather than guessed -- an estimate built on a guess would refuse
--- urgency to things the player could easily have reached.
--- THE JOURNEY ONLY, AND ONLY WHEN IT IS A MEASUREMENT. Rewritten in 0.69.0.
+-- Two questions with different right answers, and 0.68.0 and 0.69.0 each
+-- collapsed them into one function. The history is worth keeping because both
+-- mistakes are easy to make again.
 --
--- The first version of this added `Session.TypicalSeconds(type)` -- the
--- median of every completion of that TYPE on the account -- to the journey,
--- and `UrgencyBonus` then zeroed anything whose deadline was shorter. Two
--- things were wrong with that, and together they inverted the curve in
--- exactly the window it was written for.
---
--- One: a whole-type median is not about this objective. Campaign quests,
--- escorts and world quests share one bucket, so a median of eight minutes
--- was ordinary -- and a "kill 8 boars" world quest thirty yards away with
--- five minutes left scored zero urgency, below one with three days on it.
--- World quests carry no other deadline signal, so that removed the whole of
+-- 0.68.0 added `Session.TypicalSeconds(type)` -- the median of every
+-- completion of that TYPE on the account -- to the journey. A whole-type
+-- median is not about this objective: campaign quests, escorts and world
+-- quests share one bucket, so a "kill 8 boars" world quest thirty yards away
+-- with five minutes left scored no urgency at all, below one with three days
+-- on it. World quests carry no other deadline signal, so that removed all of
 -- it.
 --
--- Two: `travelCost` is not always a measurement. `CN.TravelCost` returns
--- `unknownLocationCost` for a same-map miss and `fallbackZoneCost` -- which
--- is `Travel.maximumCost`, the saturation point -- for anything it cannot
--- route. Multiplied out, that is twenty minutes of fabricated journey, and
--- the client answers `mapID, nil, nil` for a window after every loading
--- screen. `Session.NoteOffered` already refuses to subtract a cost at the
--- ceiling, on the grounds that it is "the model saying far away, I stopped
--- counting" -- and this trusted the identical number. One rule, written
--- twice, drifted immediately.
+-- 0.69.0 removed the median and returned nil whenever the cost reached
+-- `Travel.maximumCost` -- and `Travel.CostFor` CLAMPS there, so every real
+-- journey over twenty minutes lands on exactly 40 and became
+-- indistinguishable from "I could not route this". A quest 39.9 away lost its
+-- urgency and the one 40 away -- farther, and certainly unreachable -- kept
+-- all of it. The rule inverted itself at the top of its own range.
 --
--- What remains is a fact rather than an estimate: a journey the model
--- actually costed, below its own saturation point. If that alone is longer
--- than the time left, the player cannot arrive, and no amount of curve
--- shape makes that urgent.
-function CN.SecondsNeeded(objective)
-    if type(objective) ~= "table" then
+-- It also trusted `CN.unknownLocationCost`, which is 8 and therefore under
+-- the ceiling, and four providers hard-code small routing weights for things
+-- that are not anywhere at all -- so `/cn list` printed "2m away" for the
+-- Great Vault.
+--
+-- `travelCosted` settles it. Only the providers that actually asked the
+-- travel model set it, so nothing else can be mistaken for a measurement.
+local function CostedSeconds(objective)
+    if type(objective) ~= "table" or not CN.secondsPerCostPoint then
+        return nil
+    end
+
+    if not objective.travelCosted then
         return nil
     end
 
     local cost = objective.travelCost
 
-    if type(cost) ~= "number" or cost <= 0 or not CN.secondsPerCostPoint then
+    if type(cost) ~= "number" or cost <= 0 then
+        return nil
+    end
+
+    return cost * CN.secondsPerCostPoint
+end
+
+-- FOR DISPLAY: a duration, or nothing. At the clamp the model has stopped
+-- counting, so the figure is a floor rather than a journey, and printing it
+-- as one is the defect this exists to stop.
+function CN.SecondsNeeded(objective)
+    local seconds = CostedSeconds(objective)
+
+    if not seconds then
         return nil
     end
 
     local travel = CN.modules and CN:GetModule("Travel")
 
-    local ceiling = (travel and travel.maximumCost) or 40
+    local ceiling = ((travel and travel.maximumCost) or 40)
+        * CN.secondsPerCostPoint
 
-    if cost >= ceiling then
+    if seconds >= ceiling then
         return nil
     end
 
-    return cost * CN.secondsPerCostPoint
+    return seconds
+end
+
+-- FOR THE DEADLINE TEST: a LOWER BOUND, which is all "can I get there in
+-- time" needs. At the clamp the journey is AT LEAST twenty minutes, so a
+-- deadline shorter than that is unreachable whether or not the exact figure
+-- is knowable -- and that is precisely the case 0.69.0 exempted.
+function CN.MinimumSecondsNeeded(objective)
+    return CostedSeconds(objective)
 end
 
 -- Priority profiles have two independent levers:
@@ -507,7 +525,7 @@ function CN.Reasons(objective)
     -- Said where every reader already looks: the reasons list feeds `/cn
     -- why`, the row tooltip and the heads-up line.
     if objective.expiresIn then
-        local needed = CN.SecondsNeeded(objective)
+        local needed = CN.MinimumSecondsNeeded(objective)
 
         if needed and objective.expiresIn < needed then
             composed[#composed + 1] =
@@ -689,7 +707,8 @@ function CN.ScoreObjective(objective)
     -- deadline already set it.
     if objective.expiresIn then
         worth = worth
-            + CN.UrgencyBonus(objective.expiresIn, CN.SecondsNeeded(objective))
+            + CN.UrgencyBonus(objective.expiresIn,
+                CN.MinimumSecondsNeeded(objective))
                 * CN.urgencyWeight
     end
     -- `objective.nearbyBonus` used to be summed here as a term of its own.
@@ -2148,7 +2167,7 @@ function CN.ExplainScore(objective)
         -- THE SAME ARGUMENTS THE SCORER USED. `/cn why` exists to show the
         -- arithmetic the ranking did, and a breakdown that recomputes a term
         -- differently is a breakdown of some other list.
-        local needed = CN.SecondsNeeded(objective)
+        local needed = CN.MinimumSecondsNeeded(objective)
 
         local unreachable = needed and objective.expiresIn < needed
 

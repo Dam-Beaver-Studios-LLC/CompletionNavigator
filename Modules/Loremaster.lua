@@ -229,7 +229,6 @@ function Loremaster.Scan()
                 -- migrations 4, 5, 14, 15 and 16 were the others.
                 held.categoryID = category.categoryID
                 held.completed = achievement.completed and true or false
-                held.criteria  = criteria
 
                 -- THE FLAT FIELD IS NO LONGER WRITTEN. 0.66.0. See the same
                 -- change in `Exploration.NoteProgress`.
@@ -239,8 +238,24 @@ function Loremaster.Scan()
                 -- here meant the fallback returned whoever scanned last
                 -- rather than something old, so an alt with no entry of its
                 -- own was handed the main's criteria count as its own.
-                held.progress  = held.progress or {}
-                held.progress[CN.characterKey or CN.GetCharacterKey()] = done
+                -- NOT OVER GOOD DATA WITH NOTHING. 0.70.0.
+                --
+                -- `GetAchievementProgress` answers `0, 0` when the criteria
+                -- API is unavailable, and this wrote that straight in --
+                -- `Closest` filters on `criteria > 0`, so one scan at a cold
+                -- moment emptied the whole Journey tab and `/cn zones`, and
+                -- stamped the Scans tab "just now" on the way.
+                --
+                -- The guard `Exploration` has carried since 0.61.0, that
+                -- `Achievements` was given in 0.68.0, and that this file's
+                -- OWN new sibling forty lines down has -- in the third
+                -- writer, thirty lines from the comment naming the other two.
+                if criteria and criteria > 0 then
+                    held.criteria = criteria
+
+                    held.progress = held.progress or {}
+                    held.progress[CN.characterKey or CN.GetCharacterKey()] = done
+                end
 
                 store[id] = held
 
@@ -248,6 +263,20 @@ function Loremaster.Scan()
             end
         end
     end
+
+    -- WHO HAS SCANNED, RECORDED RATHER THAN INFERRED. 0.70.0.
+    --
+    -- The login rescan asked "does every row carry this character's
+    -- progress?" -- and `Scan` writes progress only for achievements the
+    -- category walk returns, so any row it cannot reach this session (a
+    -- category the client has not populated yet at login, an achievement
+    -- retired in a patch) keeps that entry nil for ever. The condition was
+    -- then true on every login of every character, and each firing is the
+    -- full tree walk this file says is "why it was never put on an event".
+    --
+    -- A marker says what actually happened.
+    CN.Account("loremasterScans")[CN.characterKey or CN.GetCharacterKey()] =
+        time()
 
     CN.MarkScanned("loremaster")
 
@@ -624,7 +653,10 @@ CN:RegisterCommand{
 -- and the client knows which quests are campaign quests. Splitting the zone's
 -- work along that line costs one API call per quest and matches the plan the
 -- player already has in their head.
-function Loremaster.SplitZoneWork(mapID)
+-- `quiet` is passed straight through to `Quests.AvailableOnMap`: this is a
+-- read, and the Journey tab's refresh runs with the window closed whenever
+-- somebody types `/cn find`. 0.70.0.
+function Loremaster.SplitZoneWork(mapID, quiet)
     local quests = CN:GetModule("Quests")
 
     if not quests then
@@ -633,7 +665,7 @@ function Loremaster.SplitZoneWork(mapID)
 
     local split = { story = {}, side = {} }
 
-    for _, poi in ipairs(quests.AvailableOnMap(mapID)) do
+    for _, poi in ipairs(quests.AvailableOnMap(mapID, quiet)) do
         if Blizzard.IsQuestCampaign(poi.questID) then
             table.insert(split.story, poi)
         else
@@ -831,21 +863,71 @@ CN:RegisterCommand{
 -- client calls -- the same shape `Exploration.RefreshCurrentZone` has used
 -- since 0.61.0, in the sibling store this fix never reached.
 --
--- Debounced, because a quest chain can hand in three at once.
+-- WHICH RECORD, AND ONLY WHEN THERE IS EXACTLY ONE. 0.70.0.
+--
+-- `ForZone` matches an achievement NAME against the zone name with a
+-- substring test, and its own comment admits that is "imperfect and honest
+-- about being so". That was fine while it only decided what to DISPLAY.
+-- 0.69.0 made it decide which row a turn-in rewrites, and zone names repeat
+-- across expansions -- Outland's Nagrand and Draenor's, two Shadowmoon
+-- Valleys, three Dalarans -- so handing a quest in on one continent could
+-- rewrite the other continent's row.
+--
+-- A write needs certainty a display does not. When the zone name matches more
+-- than one achievement, this refuses rather than guessing: the full scan
+-- still corrects everything at the next login, and a stale count is a much
+-- smaller error than a confident wrong one in somebody else's expansion.
+local function UnambiguousZoneRecord()
+    local mapID = select(1, CN.GetPlayerPosition())
+
+    if not mapID then
+        return nil
+    end
+
+    local zoneName = Blizzard.GetMapName(mapID)
+
+    if not zoneName or zoneName == "" then
+        return nil
+    end
+
+    local found, foundID
+
+    for id, record in pairs(Records()) do
+        local heldName = Loremaster.NameOf(id, record)
+
+        if heldName and string.find(heldName, zoneName, 1, true) then
+            if found then
+                return nil
+            end
+
+            found, foundID = record, id
+        end
+    end
+
+    return found, foundID
+end
+
+Loremaster.UnambiguousZoneRecord = UnambiguousZoneRecord
+
+-- CRITERIA PROGRESS ONLY. THE EARNED FLAG IS NOT DERIVED FROM IT. 0.70.0.
+--
+-- 0.69.0 wrote `record.completed = (done >= criteria)`, and those two
+-- quantities are scoped differently: criteria progress is what THIS character
+-- has done, and the earned flag belongs to the ACCOUNT. So an alt at 3 of 12
+-- standing in a zone the main had finished cleared the account's flag on the
+-- way past, and `/cn zones` began recommending a zone already earned -- the
+-- exact symptom two migrations were written to repair, reintroduced by the
+-- code repairing it.
+--
+-- The client answers the account question directly, so it is asked directly.
 function Loremaster.RefreshCurrentZone()
-    local here = Loremaster.ForZone()
+    local record, id = UnambiguousZoneRecord()
 
-    if not here or not here.id then
+    if not record or not id then
         return false
     end
 
-    local record = Records()[here.id]
-
-    if not record then
-        return false
-    end
-
-    local done, criteria = Blizzard.GetAchievementProgress(here.id)
+    local done, criteria = Blizzard.GetAchievementProgress(id)
 
     -- NOT OVER GOOD DATA WITH NOTHING. A refusal from the criteria API
     -- answers `0, 0`, and writing that in loses the row -- the guard
@@ -855,21 +937,48 @@ function Loremaster.RefreshCurrentZone()
         return false
     end
 
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    local before = record.progress and record.progress[key]
+
     record.criteria = criteria
 
     record.progress = record.progress or {}
-    record.progress[CN.characterKey or CN.GetCharacterKey()] = done
+    record.progress[key] = done
 
-    -- SET AND CLEARED BOTH, so a zone that gains a criterion in a patch can
-    -- stop being finished.
-    record.completed = (done >= criteria) and true or false
+    -- ASKED, NOT INFERRED. And left alone when the client will not answer,
+    -- rather than guessed at from the numbers above.
+    local earned = Blizzard.IsAchievementEarned and Blizzard.IsAchievementEarned(id)
 
-    return true
+    if earned ~= nil then
+        record.completed = earned
+    end
+
+    return before ~= done
 end
 
-CN:RegisterEvent("QUEST_TURNED_IN", function()
+-- `CRITERIA_UPDATE`, NOT `QUEST_TURNED_IN`. 0.70.0.
+--
+-- 0.69.0 wired this to the turn-in, which fires BEFORE the client has moved
+-- the criteria -- and `CN.Debounce` is leading-edge, so the single-turn-in
+-- case ran once, immediately, and read the number it already had. The fix for
+-- a reported symptom did nothing for the ordinary form of it.
+--
+-- `CRITERIA_UPDATE` is the event that fires when the criteria actually move,
+-- and it is what the sibling this was modelled on has always used. Reading
+-- one file and copying half of it is how this project keeps producing the
+-- same defect.
+--
+-- AND IT TELLS THE RANKING. A store change that dispatches nothing leaves the
+-- provider's cached row saying "8 of 12 left" until a zone change -- which is
+-- the other half `Exploration` does and this did not.
+CN:RegisterEvent("CRITERIA_UPDATE", function()
     CN.Debounce("Loremaster.zone", 2, function()
-        pcall(Loremaster.RefreshCurrentZone)
+        local ok, moved = pcall(Loremaster.RefreshCurrentZone)
+
+        if ok and moved then
+            CN.InvalidateProvider("Loremaster")
+        end
     end)
 end)
 
@@ -887,30 +996,32 @@ CN:OnLogin(function()
     -- `completed` is account-wide, so once ANY character has repaired it no
     -- other character ever triggers a rescan again -- and `progress` is
     -- per-character, which is precisely what an alt is missing. So the first
-    -- character to log in after the upgrade fixed the store for itself and
+    -- character to log in after an upgrade fixed the store for itself and
     -- locked every other character out of the repair: `/cn zones` reported
-    -- "not started, 120 to do" for zones an alt had fully quested, with no
-    -- way back short of finding `/cn scanlore`.
+    -- "not started, 120 to do" for zones an alt had fully quested.
     --
-    -- A scan is cheap and runs once per login. Two conditions, both about
-    -- something that is genuinely absent.
+    -- ASKED OF A MARKER, NOT OF THE ROWS. 0.70.0. The first version walked
+    -- the store looking for a row missing this character's progress -- and
+    -- `Scan` only writes progress for rows the category walk returns, so a
+    -- row it cannot reach keeps that entry nil for ever and the condition was
+    -- true on every login, of every character, for the life of the account.
+    -- A full tree walk per login, to discover that a retired achievement is
+    -- still retired.
     local key = CN.characterKey or CN.GetCharacterKey()
 
+    if not CN.Account("loremasterScans")[key] then
+        Loremaster.Scan()
+
+        return
+    end
+
+    -- The account-wide half stays a row check: it repairs a store that lost
+    -- the flag, which is a thing that happened once, to everybody.
     for _, record in pairs(records) do
-        if type(record) == "table" then
-            if record.completed == nil then
-                Loremaster.Scan()
+        if type(record) == "table" and record.completed == nil then
+            Loremaster.Scan()
 
-                return
-            end
-
-            if type(record.progress) ~= "table"
-                or record.progress[key] == nil then
-
-                Loremaster.Scan()
-
-                return
-            end
+            return
         end
     end
 end)

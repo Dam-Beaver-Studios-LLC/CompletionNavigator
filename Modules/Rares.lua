@@ -403,10 +403,17 @@ CN.RegisterCandidateProvider("Rares", function()
             -- means "you are standing on it", and `CN.IsPlaceless` reads it
             -- that way, so a rare the client would not place was scored as
             -- free AND exempt from the unknown-location cost.
-            local travel
+            -- `costed` SAYS WHETHER THE MODEL ANSWERED. 0.70.0.
+            --
+            -- `CN.TravelCost` never refuses -- on a miss it hands back the
+            -- constant the scorer ranks an unknown location with -- and every
+            -- caller but one threw the second return away. So nothing
+            -- downstream could tell a twenty-minute flight from "I could not
+            -- work this out", and `/cn list` printed the second as the first.
+            local travel, costed
 
             if vignette.x and vignette.y then
-                travel = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)
+                travel, costed = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)
 
                 if playerX and playerY then
                     table.insert(reasons, "in your current zone")
@@ -421,6 +428,7 @@ CN.RegisterCandidateProvider("Rares", function()
                 x                = vignette.x,
                 y                = vignette.y,
                 accountWide      = false,
+                travelCosted     = costed or nil,
                 state            = CN.objectiveStates.AVAILABLE,
                 completionValue  = 2,
 

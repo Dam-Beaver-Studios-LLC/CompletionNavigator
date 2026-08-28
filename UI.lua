@@ -3237,7 +3237,14 @@ UI.RegisterTab{
                 })
             end
 
-            local split = lore.SplitZoneWork()
+            -- READ-ONLY WHEN NOBODY IS LOOKING. 0.70.0.
+            --
+            -- This reaches `Quests.AvailableOnMap`, which files every pin it
+            -- walks past into a SavedVariable -- and a refresh with the
+            -- window hidden happens for one reason: `/cn find` builds every
+            -- tab so the search has rows. A search must not write to disk.
+            local split = lore.SplitZoneWork(nil,
+                not (window and window:IsShown()))
 
             if #split.story > 0 or #split.side > 0 then
                 table.insert(entries, {

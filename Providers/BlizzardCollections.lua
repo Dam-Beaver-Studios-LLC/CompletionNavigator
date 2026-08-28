@@ -529,6 +529,29 @@ function Blizzard.GetAchievementPoints(achievementID)
     return points
 end
 
+-- WHETHER THE ACCOUNT HAS EARNED IT, BY ID. 0.70.0.
+--
+-- The only route to this was `GetAchievementInCategory`, which walks a
+-- category by index -- so a caller that has an achievement ID and wants one
+-- boolean had to either walk the tree or derive it from criteria counts.
+-- Deriving it is wrong: criteria progress is per CHARACTER and the earned
+-- flag is per ACCOUNT, and 0.69.0 shipped exactly that mistake.
+--
+-- `GetAchievementInfo(id)` answers directly. Fourth return is the flag.
+function Blizzard.IsAchievementEarned(achievementID)
+    if not GetAchievementInfo or not achievementID then
+        return nil
+    end
+
+    local ok, _, _, _, completed = pcall(GetAchievementInfo, achievementID)
+
+    if not ok then
+        return nil
+    end
+
+    return completed and true or false
+end
+
 -- Returns completedCriteria, totalCriteria for one achievement.
 -- The achievement's name, straight from the client.
 --

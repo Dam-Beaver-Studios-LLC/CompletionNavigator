@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.69.0'
+$script:ToolkitVersion = '0.70.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.69.0"
+CN.version     = "0.70.0"
 CN.dbVersion   = 22
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -6690,62 +6690,80 @@ function CN.UrgencyBonus(secondsLeft, secondsNeeded)
     return value
 end
 
--- HOW LONG THIS WOULD ACTUALLY TAKE, JOURNEY INCLUDED.
+-- WHETHER THE JOURNEY WAS COSTED AT ALL, AND HOW LONG IT IS AT LEAST.
 --
--- Travel is held in cost points, which are `CN.secondsPerCostPoint` seconds
--- each; the work itself is whatever this player's own completions say this
--- kind of thing takes. Either half may be unknown, and an unknown half is
--- left out rather than guessed -- an estimate built on a guess would refuse
--- urgency to things the player could easily have reached.
--- THE JOURNEY ONLY, AND ONLY WHEN IT IS A MEASUREMENT. Rewritten in 0.69.0.
+-- Two questions with different right answers, and 0.68.0 and 0.69.0 each
+-- collapsed them into one function. The history is worth keeping because both
+-- mistakes are easy to make again.
 --
--- The first version of this added `Session.TypicalSeconds(type)` -- the
--- median of every completion of that TYPE on the account -- to the journey,
--- and `UrgencyBonus` then zeroed anything whose deadline was shorter. Two
--- things were wrong with that, and together they inverted the curve in
--- exactly the window it was written for.
---
--- One: a whole-type median is not about this objective. Campaign quests,
--- escorts and world quests share one bucket, so a median of eight minutes
--- was ordinary -- and a "kill 8 boars" world quest thirty yards away with
--- five minutes left scored zero urgency, below one with three days on it.
--- World quests carry no other deadline signal, so that removed the whole of
+-- 0.68.0 added `Session.TypicalSeconds(type)` -- the median of every
+-- completion of that TYPE on the account -- to the journey. A whole-type
+-- median is not about this objective: campaign quests, escorts and world
+-- quests share one bucket, so a "kill 8 boars" world quest thirty yards away
+-- with five minutes left scored no urgency at all, below one with three days
+-- on it. World quests carry no other deadline signal, so that removed all of
 -- it.
 --
--- Two: `travelCost` is not always a measurement. `CN.TravelCost` returns
--- `unknownLocationCost` for a same-map miss and `fallbackZoneCost` -- which
--- is `Travel.maximumCost`, the saturation point -- for anything it cannot
--- route. Multiplied out, that is twenty minutes of fabricated journey, and
--- the client answers `mapID, nil, nil` for a window after every loading
--- screen. `Session.NoteOffered` already refuses to subtract a cost at the
--- ceiling, on the grounds that it is "the model saying far away, I stopped
--- counting" -- and this trusted the identical number. One rule, written
--- twice, drifted immediately.
+-- 0.69.0 removed the median and returned nil whenever the cost reached
+-- `Travel.maximumCost` -- and `Travel.CostFor` CLAMPS there, so every real
+-- journey over twenty minutes lands on exactly 40 and became
+-- indistinguishable from "I could not route this". A quest 39.9 away lost its
+-- urgency and the one 40 away -- farther, and certainly unreachable -- kept
+-- all of it. The rule inverted itself at the top of its own range.
 --
--- What remains is a fact rather than an estimate: a journey the model
--- actually costed, below its own saturation point. If that alone is longer
--- than the time left, the player cannot arrive, and no amount of curve
--- shape makes that urgent.
-function CN.SecondsNeeded(objective)
-    if type(objective) ~= "table" then
+-- It also trusted `CN.unknownLocationCost`, which is 8 and therefore under
+-- the ceiling, and four providers hard-code small routing weights for things
+-- that are not anywhere at all -- so `/cn list` printed "2m away" for the
+-- Great Vault.
+--
+-- `travelCosted` settles it. Only the providers that actually asked the
+-- travel model set it, so nothing else can be mistaken for a measurement.
+local function CostedSeconds(objective)
+    if type(objective) ~= "table" or not CN.secondsPerCostPoint then
+        return nil
+    end
+
+    if not objective.travelCosted then
         return nil
     end
 
     local cost = objective.travelCost
 
-    if type(cost) ~= "number" or cost <= 0 or not CN.secondsPerCostPoint then
+    if type(cost) ~= "number" or cost <= 0 then
+        return nil
+    end
+
+    return cost * CN.secondsPerCostPoint
+end
+
+-- FOR DISPLAY: a duration, or nothing. At the clamp the model has stopped
+-- counting, so the figure is a floor rather than a journey, and printing it
+-- as one is the defect this exists to stop.
+function CN.SecondsNeeded(objective)
+    local seconds = CostedSeconds(objective)
+
+    if not seconds then
         return nil
     end
 
     local travel = CN.modules and CN:GetModule("Travel")
 
-    local ceiling = (travel and travel.maximumCost) or 40
+    local ceiling = ((travel and travel.maximumCost) or 40)
+        * CN.secondsPerCostPoint
 
-    if cost >= ceiling then
+    if seconds >= ceiling then
         return nil
     end
 
-    return cost * CN.secondsPerCostPoint
+    return seconds
+end
+
+-- FOR THE DEADLINE TEST: a LOWER BOUND, which is all "can I get there in
+-- time" needs. At the clamp the journey is AT LEAST twenty minutes, so a
+-- deadline shorter than that is unreachable whether or not the exact figure
+-- is knowable -- and that is precisely the case 0.69.0 exempted.
+function CN.MinimumSecondsNeeded(objective)
+    return CostedSeconds(objective)
 end
 
 -- Priority profiles have two independent levers:
@@ -7050,7 +7068,7 @@ function CN.Reasons(objective)
     -- Said where every reader already looks: the reasons list feeds `/cn
     -- why`, the row tooltip and the heads-up line.
     if objective.expiresIn then
-        local needed = CN.SecondsNeeded(objective)
+        local needed = CN.MinimumSecondsNeeded(objective)
 
         if needed and objective.expiresIn < needed then
             composed[#composed + 1] =
@@ -7232,7 +7250,8 @@ function CN.ScoreObjective(objective)
     -- deadline already set it.
     if objective.expiresIn then
         worth = worth
-            + CN.UrgencyBonus(objective.expiresIn, CN.SecondsNeeded(objective))
+            + CN.UrgencyBonus(objective.expiresIn,
+                CN.MinimumSecondsNeeded(objective))
                 * CN.urgencyWeight
     end
     -- `objective.nearbyBonus` used to be summed here as a term of its own.
@@ -8691,7 +8710,7 @@ function CN.ExplainScore(objective)
         -- THE SAME ARGUMENTS THE SCORER USED. `/cn why` exists to show the
         -- arithmetic the ranking did, and a breakdown that recomputes a term
         -- differently is a breakdown of some other list.
-        local needed = CN.SecondsNeeded(objective)
+        local needed = CN.MinimumSecondsNeeded(objective)
 
         local unreachable = needed and objective.expiresIn < needed
 
@@ -14187,7 +14206,14 @@ UI.RegisterTab{
                 })
             end
 
-            local split = lore.SplitZoneWork()
+            -- READ-ONLY WHEN NOBODY IS LOOKING. 0.70.0.
+            --
+            -- This reaches `Quests.AvailableOnMap`, which files every pin it
+            -- walks past into a SavedVariable -- and a refresh with the
+            -- window hidden happens for one reason: `/cn find` builds every
+            -- tab so the search has rows. A search must not write to disk.
+            local split = lore.SplitZoneWork(nil,
+                not (window and window:IsShown()))
 
             if #split.story > 0 or #split.side > 0 then
                 table.insert(entries, {
@@ -17837,6 +17863,29 @@ function Blizzard.GetAchievementPoints(achievementID)
     return points
 end
 
+-- WHETHER THE ACCOUNT HAS EARNED IT, BY ID. 0.70.0.
+--
+-- The only route to this was `GetAchievementInCategory`, which walks a
+-- category by index -- so a caller that has an achievement ID and wants one
+-- boolean had to either walk the tree or derive it from criteria counts.
+-- Deriving it is wrong: criteria progress is per CHARACTER and the earned
+-- flag is per ACCOUNT, and 0.69.0 shipped exactly that mistake.
+--
+-- `GetAchievementInfo(id)` answers directly. Fourth return is the flag.
+function Blizzard.IsAchievementEarned(achievementID)
+    if not GetAchievementInfo or not achievementID then
+        return nil
+    end
+
+    local ok, _, _, _, completed = pcall(GetAchievementInfo, achievementID)
+
+    if not ok then
+        return nil
+    end
+
+    return completed and true or false
+end
+
 -- Returns completedCriteria, totalCriteria for one achievement.
 -- The achievement's name, straight from the client.
 --
@@ -20972,7 +21021,19 @@ end
 --
 -- Sources are unioned and each result says where it came from, because when
 -- this is wrong again the first question will be "which source found it".
-function Quests.AvailableOnMap(mapID)
+-- `quiet` MEANS "READ, DO NOT RECORD". 0.70.0.
+--
+-- This writes: every quest-start pin it walks past is filed into the
+-- remembered store, which is a SavedVariable, and each new one moves the
+-- shortlist revision. That is right when the player is playing, and wrong
+-- when something is merely reading -- `/cn find` refreshes every tab so the
+-- search has rows to look at, and the Journey tab's refresh reaches here, so
+-- typing a search with the window shut wrote pins to disk and forced a
+-- shortlist rebuild.
+--
+-- The same distinction `CN.Recommend(limit, quiet)` draws one file over, for
+-- the same reason and from the same command.
+function Quests.AvailableOnMap(mapID, quiet)
     mapID = mapID or select(1, CN.GetPlayerPosition())
 
     if not mapID then
@@ -21007,7 +21068,9 @@ function Quests.AvailableOnMap(mapID)
             if poi.isQuestStart and not poi.inProgress then
                 consider(poi, "map")
 
-                Quests.RememberOffer(poi)
+                if not quiet then
+                    Quests.RememberOffer(poi)
+                end
             end
         end
     end
@@ -22185,7 +22248,7 @@ CN.RegisterCandidateProvider("Quests", function()
         -- so every located quest in the log was scored as though the player
         -- were standing on top of it. It healed on the next rebuild, but
         -- arriving in a zone is precisely when somebody types `/cn next`.
-        local travel
+        local travel, costed
 
         -- An available quest carries its own pin, which is more current than
         -- anything recorded earlier.
@@ -22281,6 +22344,7 @@ CN.RegisterCandidateProvider("Quests", function()
             local measured, fromTravel = CN.TravelCost(mapID, x, y)
 
             travel = measured
+            costed = fromTravel or nil
 
             if fromTravel and mapID ~= playerMap then
                 table.insert(reasons, "another zone, costed by how long the "
@@ -22311,6 +22375,7 @@ CN.RegisterCandidateProvider("Quests", function()
             state             = CN.objectiveStates.AVAILABLE,
             completionValue   = value,
             travelCost        = travel,
+            travelCosted      = costed,
             expiresIn         = expiry,
             reasons           = reasons,
         }))
@@ -23143,7 +23208,22 @@ function Reputations.Resolve(text)
     local needle  = string.lower(text)
     local matches = {}
 
-    for id, name in pairs(NameStore()) do
+    -- NAMED LIVE, LIKE TITLES AND CURRENCIES. 0.70.0.
+    --
+    -- Migration 18 converted `Titles.Resolve` and `Currencies.Resolve` off
+    -- their persisted name stores, because a store fills with names frozen at
+    -- whatever language last scanned -- so a player who changed client
+    -- language could not find their own by name. This is the third `Resolve`
+    -- of the same shape and it was not converted: `/cn rep Ehrenfeste` and
+    -- `/cn goal reputation Ehrenfeste` answered nothing, in the same session
+    -- where `/cn hidden` -- which asks the client first -- printed the German
+    -- name correctly.
+    --
+    -- The store is still the fallback: unlike titles and currencies, the
+    -- client will not name a faction the character has never encountered.
+    for id in pairs(NameStore()) do
+        local name = Reputations.NameOf(id)
+
         if name and string.find(string.lower(name), needle, 1, true) then
             table.insert(matches, { id = id, name = name })
         end
@@ -23189,6 +23269,22 @@ function Reputations.StandingText(record)
     end
 
     return Blizzard.GetStandingLabel(record.reaction)
+end
+
+-- A FACTION'S NAME, FROM THE CLIENT, FALLING BACK TO THE STORE. 0.70.0.
+--
+-- Eleventh of these; see `Achievements.NameOf` for the first. The fallback is
+-- real here in a way it was not for titles and currencies: `GetFactionByID`
+-- answers for factions the character has met, and the store is how the addon
+-- can still name one an alt has never encountered.
+function Reputations.NameOf(factionID)
+    local data = Blizzard.GetFactionByID and Blizzard.GetFactionByID(factionID)
+
+    if data and data.name and data.name ~= "" then
+        return data.name
+    end
+
+    return NameStore()[factionID]
 end
 
 -- Returns the best-standing character for a character-specific faction, so
@@ -25330,6 +25426,8 @@ CN.RegisterCandidateProvider("Toys", function()
                 -- penalty against exactly the collection types this file
                 -- exists to surface.
                 travelCost      = CN.TravelCost(seller.mapID, seller.x, seller.y),
+                travelCosted     = select(2, CN.TravelCost(seller.mapID,
+                    seller.x, seller.y)) or nil,
                 reasons         = reasons,
             })
         end)
@@ -27961,7 +28059,9 @@ CN.RegisterCandidateProvider("Opportunities", function()
         -- and a flat out-of-zone penalty, the same way quests have been
         -- since 0.42.0. World quests are exactly where this matters: they
         -- are scattered across a continent and they expire.
-        local travel = CN.TravelCost(worldQuest.mapID, worldQuest.x, worldQuest.y)
+        -- `costed` SAYS WHETHER THE MODEL ANSWERED. See `Rares`. 0.70.0.
+        local travel, costed = CN.TravelCost(worldQuest.mapID,
+            worldQuest.x, worldQuest.y)
 
         if worldQuest.mapID == playerMap then
             table.insert(reasons, "in your current zone")
@@ -27980,6 +28080,7 @@ CN.RegisterCandidateProvider("Opportunities", function()
             -- setting both charged one deadline through two curves, and only
             -- one of them appears in `/cn urgency`.
             travelCost       = travel,
+            travelCosted     = costed or nil,
             expiresIn        = worldQuest.secondsLeft,
             reasons          = reasons,
         }))
@@ -29072,10 +29173,17 @@ CN.RegisterCandidateProvider("Rares", function()
             -- means "you are standing on it", and `CN.IsPlaceless` reads it
             -- that way, so a rare the client would not place was scored as
             -- free AND exempt from the unknown-location cost.
-            local travel
+            -- `costed` SAYS WHETHER THE MODEL ANSWERED. 0.70.0.
+            --
+            -- `CN.TravelCost` never refuses -- on a miss it hands back the
+            -- constant the scorer ranks an unknown location with -- and every
+            -- caller but one threw the second return away. So nothing
+            -- downstream could tell a twenty-minute flight from "I could not
+            -- work this out", and `/cn list` printed the second as the first.
+            local travel, costed
 
             if vignette.x and vignette.y then
-                travel = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)
+                travel, costed = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)
 
                 if playerX and playerY then
                     table.insert(reasons, "in your current zone")
@@ -29090,6 +29198,7 @@ CN.RegisterCandidateProvider("Rares", function()
                 x                = vignette.x,
                 y                = vignette.y,
                 accountWide      = false,
+                travelCosted     = costed or nil,
                 state            = CN.objectiveStates.AVAILABLE,
                 completionValue  = 2,
 
@@ -32810,6 +32919,8 @@ CN.RegisterCandidateProvider("Vendors", function()
                 -- penalty against exactly the collection types this file
                 -- exists to surface.
                 travelCost      = CN.TravelCost(seller.mapID, seller.x, seller.y),
+                travelCosted     = select(2, CN.TravelCost(seller.mapID,
+                    seller.x, seller.y)) or nil,
                 reasons         = reasons,
             })
         end)
@@ -34482,12 +34593,13 @@ CN.RegisterCandidateProvider("Goals", function()
                     table.insert(reasons, plan.source)
                 end
 
-                local travel
+                local travel, costed
 
                 if plan.mapID then
                     -- Costed like everything else, rather than a flat
                     -- penalty for "not here" while holding the coordinates.
-                    travel = CN.TravelCost(plan.mapID, plan.x, plan.y)
+                    -- `costed` says whether the model answered. 0.70.0.
+                    travel, costed = CN.TravelCost(plan.mapID, plan.x, plan.y)
                 end
 
                 table.insert(candidates, CN.NewObjective({
@@ -34501,6 +34613,7 @@ CN.RegisterCandidateProvider("Goals", function()
                     accountWide     = true,
                     completionValue = 6,
                     travelCost      = travel,
+                    travelCosted    = costed or nil,
                     reasons         = reasons,
                 }))
             end
@@ -36620,7 +36733,6 @@ function Loremaster.Scan()
                 -- migrations 4, 5, 14, 15 and 16 were the others.
                 held.categoryID = category.categoryID
                 held.completed = achievement.completed and true or false
-                held.criteria  = criteria
 
                 -- THE FLAT FIELD IS NO LONGER WRITTEN. 0.66.0. See the same
                 -- change in `Exploration.NoteProgress`.
@@ -36630,8 +36742,24 @@ function Loremaster.Scan()
                 -- here meant the fallback returned whoever scanned last
                 -- rather than something old, so an alt with no entry of its
                 -- own was handed the main's criteria count as its own.
-                held.progress  = held.progress or {}
-                held.progress[CN.characterKey or CN.GetCharacterKey()] = done
+                -- NOT OVER GOOD DATA WITH NOTHING. 0.70.0.
+                --
+                -- `GetAchievementProgress` answers `0, 0` when the criteria
+                -- API is unavailable, and this wrote that straight in --
+                -- `Closest` filters on `criteria > 0`, so one scan at a cold
+                -- moment emptied the whole Journey tab and `/cn zones`, and
+                -- stamped the Scans tab "just now" on the way.
+                --
+                -- The guard `Exploration` has carried since 0.61.0, that
+                -- `Achievements` was given in 0.68.0, and that this file's
+                -- OWN new sibling forty lines down has -- in the third
+                -- writer, thirty lines from the comment naming the other two.
+                if criteria and criteria > 0 then
+                    held.criteria = criteria
+
+                    held.progress = held.progress or {}
+                    held.progress[CN.characterKey or CN.GetCharacterKey()] = done
+                end
 
                 store[id] = held
 
@@ -36639,6 +36767,20 @@ function Loremaster.Scan()
             end
         end
     end
+
+    -- WHO HAS SCANNED, RECORDED RATHER THAN INFERRED. 0.70.0.
+    --
+    -- The login rescan asked "does every row carry this character's
+    -- progress?" -- and `Scan` writes progress only for achievements the
+    -- category walk returns, so any row it cannot reach this session (a
+    -- category the client has not populated yet at login, an achievement
+    -- retired in a patch) keeps that entry nil for ever. The condition was
+    -- then true on every login of every character, and each firing is the
+    -- full tree walk this file says is "why it was never put on an event".
+    --
+    -- A marker says what actually happened.
+    CN.Account("loremasterScans")[CN.characterKey or CN.GetCharacterKey()] =
+        time()
 
     CN.MarkScanned("loremaster")
 
@@ -37015,7 +37157,10 @@ CN:RegisterCommand{
 -- and the client knows which quests are campaign quests. Splitting the zone's
 -- work along that line costs one API call per quest and matches the plan the
 -- player already has in their head.
-function Loremaster.SplitZoneWork(mapID)
+-- `quiet` is passed straight through to `Quests.AvailableOnMap`: this is a
+-- read, and the Journey tab's refresh runs with the window closed whenever
+-- somebody types `/cn find`. 0.70.0.
+function Loremaster.SplitZoneWork(mapID, quiet)
     local quests = CN:GetModule("Quests")
 
     if not quests then
@@ -37024,7 +37169,7 @@ function Loremaster.SplitZoneWork(mapID)
 
     local split = { story = {}, side = {} }
 
-    for _, poi in ipairs(quests.AvailableOnMap(mapID)) do
+    for _, poi in ipairs(quests.AvailableOnMap(mapID, quiet)) do
         if Blizzard.IsQuestCampaign(poi.questID) then
             table.insert(split.story, poi)
         else
@@ -37222,21 +37367,71 @@ CN:RegisterCommand{
 -- client calls -- the same shape `Exploration.RefreshCurrentZone` has used
 -- since 0.61.0, in the sibling store this fix never reached.
 --
--- Debounced, because a quest chain can hand in three at once.
+-- WHICH RECORD, AND ONLY WHEN THERE IS EXACTLY ONE. 0.70.0.
+--
+-- `ForZone` matches an achievement NAME against the zone name with a
+-- substring test, and its own comment admits that is "imperfect and honest
+-- about being so". That was fine while it only decided what to DISPLAY.
+-- 0.69.0 made it decide which row a turn-in rewrites, and zone names repeat
+-- across expansions -- Outland's Nagrand and Draenor's, two Shadowmoon
+-- Valleys, three Dalarans -- so handing a quest in on one continent could
+-- rewrite the other continent's row.
+--
+-- A write needs certainty a display does not. When the zone name matches more
+-- than one achievement, this refuses rather than guessing: the full scan
+-- still corrects everything at the next login, and a stale count is a much
+-- smaller error than a confident wrong one in somebody else's expansion.
+local function UnambiguousZoneRecord()
+    local mapID = select(1, CN.GetPlayerPosition())
+
+    if not mapID then
+        return nil
+    end
+
+    local zoneName = Blizzard.GetMapName(mapID)
+
+    if not zoneName or zoneName == "" then
+        return nil
+    end
+
+    local found, foundID
+
+    for id, record in pairs(Records()) do
+        local heldName = Loremaster.NameOf(id, record)
+
+        if heldName and string.find(heldName, zoneName, 1, true) then
+            if found then
+                return nil
+            end
+
+            found, foundID = record, id
+        end
+    end
+
+    return found, foundID
+end
+
+Loremaster.UnambiguousZoneRecord = UnambiguousZoneRecord
+
+-- CRITERIA PROGRESS ONLY. THE EARNED FLAG IS NOT DERIVED FROM IT. 0.70.0.
+--
+-- 0.69.0 wrote `record.completed = (done >= criteria)`, and those two
+-- quantities are scoped differently: criteria progress is what THIS character
+-- has done, and the earned flag belongs to the ACCOUNT. So an alt at 3 of 12
+-- standing in a zone the main had finished cleared the account's flag on the
+-- way past, and `/cn zones` began recommending a zone already earned -- the
+-- exact symptom two migrations were written to repair, reintroduced by the
+-- code repairing it.
+--
+-- The client answers the account question directly, so it is asked directly.
 function Loremaster.RefreshCurrentZone()
-    local here = Loremaster.ForZone()
+    local record, id = UnambiguousZoneRecord()
 
-    if not here or not here.id then
+    if not record or not id then
         return false
     end
 
-    local record = Records()[here.id]
-
-    if not record then
-        return false
-    end
-
-    local done, criteria = Blizzard.GetAchievementProgress(here.id)
+    local done, criteria = Blizzard.GetAchievementProgress(id)
 
     -- NOT OVER GOOD DATA WITH NOTHING. A refusal from the criteria API
     -- answers `0, 0`, and writing that in loses the row -- the guard
@@ -37246,21 +37441,48 @@ function Loremaster.RefreshCurrentZone()
         return false
     end
 
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    local before = record.progress and record.progress[key]
+
     record.criteria = criteria
 
     record.progress = record.progress or {}
-    record.progress[CN.characterKey or CN.GetCharacterKey()] = done
+    record.progress[key] = done
 
-    -- SET AND CLEARED BOTH, so a zone that gains a criterion in a patch can
-    -- stop being finished.
-    record.completed = (done >= criteria) and true or false
+    -- ASKED, NOT INFERRED. And left alone when the client will not answer,
+    -- rather than guessed at from the numbers above.
+    local earned = Blizzard.IsAchievementEarned and Blizzard.IsAchievementEarned(id)
 
-    return true
+    if earned ~= nil then
+        record.completed = earned
+    end
+
+    return before ~= done
 end
 
-CN:RegisterEvent("QUEST_TURNED_IN", function()
+-- `CRITERIA_UPDATE`, NOT `QUEST_TURNED_IN`. 0.70.0.
+--
+-- 0.69.0 wired this to the turn-in, which fires BEFORE the client has moved
+-- the criteria -- and `CN.Debounce` is leading-edge, so the single-turn-in
+-- case ran once, immediately, and read the number it already had. The fix for
+-- a reported symptom did nothing for the ordinary form of it.
+--
+-- `CRITERIA_UPDATE` is the event that fires when the criteria actually move,
+-- and it is what the sibling this was modelled on has always used. Reading
+-- one file and copying half of it is how this project keeps producing the
+-- same defect.
+--
+-- AND IT TELLS THE RANKING. A store change that dispatches nothing leaves the
+-- provider's cached row saying "8 of 12 left" until a zone change -- which is
+-- the other half `Exploration` does and this did not.
+CN:RegisterEvent("CRITERIA_UPDATE", function()
     CN.Debounce("Loremaster.zone", 2, function()
-        pcall(Loremaster.RefreshCurrentZone)
+        local ok, moved = pcall(Loremaster.RefreshCurrentZone)
+
+        if ok and moved then
+            CN.InvalidateProvider("Loremaster")
+        end
     end)
 end)
 
@@ -37278,30 +37500,32 @@ CN:OnLogin(function()
     -- `completed` is account-wide, so once ANY character has repaired it no
     -- other character ever triggers a rescan again -- and `progress` is
     -- per-character, which is precisely what an alt is missing. So the first
-    -- character to log in after the upgrade fixed the store for itself and
+    -- character to log in after an upgrade fixed the store for itself and
     -- locked every other character out of the repair: `/cn zones` reported
-    -- "not started, 120 to do" for zones an alt had fully quested, with no
-    -- way back short of finding `/cn scanlore`.
+    -- "not started, 120 to do" for zones an alt had fully quested.
     --
-    -- A scan is cheap and runs once per login. Two conditions, both about
-    -- something that is genuinely absent.
+    -- ASKED OF A MARKER, NOT OF THE ROWS. 0.70.0. The first version walked
+    -- the store looking for a row missing this character's progress -- and
+    -- `Scan` only writes progress for rows the category walk returns, so a
+    -- row it cannot reach keeps that entry nil for ever and the condition was
+    -- true on every login, of every character, for the life of the account.
+    -- A full tree walk per login, to discover that a retired achievement is
+    -- still retired.
     local key = CN.characterKey or CN.GetCharacterKey()
 
+    if not CN.Account("loremasterScans")[key] then
+        Loremaster.Scan()
+
+        return
+    end
+
+    -- The account-wide half stays a row check: it repairs a store that lost
+    -- the flag, which is a thing that happened once, to everybody.
     for _, record in pairs(records) do
-        if type(record) == "table" then
-            if record.completed == nil then
-                Loremaster.Scan()
+        if type(record) == "table" and record.completed == nil then
+            Loremaster.Scan()
 
-                return
-            end
-
-            if type(record.progress) ~= "table"
-                or record.progress[key] == nil then
-
-                Loremaster.Scan()
-
-                return
-            end
+            return
         end
     end
 end)
@@ -38733,16 +38957,35 @@ function Session.NoteOffered(objective)
     --                      it either, so zero is the consistent answer
     --   a SATURATED cost   the model saying "far away, I stopped counting" --
     --                      not a measurement, and not subtractable
-    local travelSeconds, travelKnown = 0, true
+    -- THROUGH THE ONE FUNCTION THAT OWNS THE RULE. 0.70.0.
+    --
+    -- This was a second copy of "is this cost a measurement", written before
+    -- `CN.SecondsNeeded` existed and then left in place when it did -- and
+    -- the comment on that function names THIS one as the authority it was
+    -- copied from. The two disagreed immediately: a quest with no known
+    -- location carries `CN.unknownLocationCost`, which this subtracted as
+    -- four minutes of journey from a measured span, biasing the learned work
+    -- time down. That is the class of error the paragraph above exists to
+    -- prevent.
+    --
+    -- `CN.SecondsNeeded` is nil for anything that was not costed and for
+    -- anything at the clamp, which is exactly the two cases described above.
+    local travelSeconds = CN.SecondsNeeded and CN.SecondsNeeded(objective)
 
-    if type(objective.travelCost) == "number" and CN.secondsPerCostPoint then
-        travelSeconds = objective.travelCost * CN.secondsPerCostPoint
+    local travelKnown = travelSeconds ~= nil
 
-        local travel = CN:GetModule("Travel")
+    if not travelSeconds then
+        travelSeconds = 0
 
-        local ceiling = (travel and travel.maximumCost) or 40
+        -- NO JOURNEY AT ALL IS A KNOWN ZERO; A JOURNEY NOBODY MEASURED IS
+        -- NOT. That is the distinction the paragraph above draws, and it is
+        -- the whole reason this is not simply `travelCost or 0`: an objective
+        -- with no travel cost is placeless -- there is nothing to subtract
+        -- and nothing unknown about it -- while one carrying a constant the
+        -- router invented has a journey whose length nobody established.
+        local cost = objective.travelCost
 
-        travelKnown = objective.travelCost < ceiling
+        travelKnown = cost == nil or cost == 0
     end
 
     local held = offeredAt[key]
@@ -52850,7 +53093,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.69.0
+## Version: 0.70.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -53105,6 +53348,66 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.70.0]
+
+Eleven defects, and the honest headline is that **last release's fix for the
+reported quest-turn-in problem did not work.** Most of what follows is the
+rest of that mistake and its neighbours.
+
+### Fixed — the quest turn-in, properly this time
+
+- **0.69.0 wired the zone refresh to the wrong event.** `QUEST_TURNED_IN`
+  fires *before* the game moves the achievement criteria, and the throttle
+  around it runs on the first call — so for the ordinary case, one quest
+  handed in, it read the number it already had and wrote it straight back.
+  The reported symptom was unchanged. It listens for the criteria actually
+  moving now, which is what the sibling module has always done.
+- **And it told nothing.** The store changed and no part of the ranking was
+  marked stale, so the recommendation kept its old "8 of 12 left in this
+  zone".
+- **It also cleared an achievement the account had already earned.** The flag
+  was being derived by comparing two numbers that belong to *you*, while the
+  flag itself belongs to the *account* — so an alt three quests into a zone
+  the main had finished un-earned it in passing, and the addon started
+  recommending a completed zone. It asks the game directly now.
+- **And it could rewrite the wrong continent's zone.** Zone names repeat —
+  two Nagrands, two Shadowmoon Valleys, three Dalarans — and the lookup
+  matches on name. Where the name is ambiguous it now declines rather than
+  guessing; the next login corrects everything anyway.
+
+### Fixed — distances that were never measured
+
+- **"About 20 minutes away" for something you can see from where you are
+  standing.** The travel model never refuses: when it cannot work a journey
+  out it hands back a placeholder, and every caller but one was throwing away
+  the flag that says which is which. Four more places price content that is
+  not anywhere at all — the Great Vault, a dungeon, a crafting order — with a
+  small routing weight, and `/cn list` printed those as distances too.
+- **The 0.69.0 deadline rule inverted itself at the top of its range.** Travel
+  cost is capped, so every genuine journey over twenty minutes lands on the
+  cap and became indistinguishable from "could not route this" — which was
+  exempted. The result: of two world quests eight minutes from expiring, the
+  *farther* one kept full urgency and the nearer one lost all of it.
+- **A journey nobody measured was being subtracted from your measured task
+  times**, biasing everything the addon has learned about how long things take
+  you downward.
+
+### Fixed — the rest
+
+- **A scan at a cold moment could empty the whole Journey tab.** When the game
+  declines to answer about criteria it answers zero, and the full scan wrote
+  that in — while its own sibling forty lines below, and two other modules,
+  all guard against exactly that.
+- **A full walk of every quest achievement in the game, on every login, of
+  every character, for ever.** The 0.69.0 rescan condition asked a question
+  that can never become false. It records that a character has scanned
+  instead.
+- **`/cn rep <name>` could not find a faction after a client language
+  change** — the third command of that shape, where the other two were
+  converted two releases ago.
+- **`/cn find` wrote quest pins to disk.** Building every tab so the search
+  has something to read reached a function that records what it walks past.
 
 ## [0.69.0]
 
@@ -58837,7 +59140,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.69.0
+0.70.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -60232,10 +60535,15 @@ mutate "UI.lua" \
 # 0.56.0
 ############################################################
 
-mutate "Modules/Session.lua" \
-    "        travelKnown = objective.travelCost < ceiling" \
-    "        travelKnown = true" \
-    "a journey estimate that hit its ceiling is subtracted anyway"
+# RE-ANCHORED IN 0.70.0: the ceiling test moved into `CN.SecondsNeeded`, which
+# is now the one place that decides whether a cost is a measurement.
+# NOT MUTATED: the ceiling test moved into `CN.SecondsNeeded` in 0.70.0, and
+# `travelKnown` is now a restatement of "did that function answer". Forcing it
+# true changes only which of two nil-producing paths is taken, so no assertion
+# can see the difference. The property that matters -- one copy of the rule --
+# is asserted as a source rule in the 0.70.0 block, with a negative control.
+
+
 
 mutate "Modules/Session.lua" \
     "        if span > Session.instantSpanSeconds then" \
@@ -60702,8 +61010,8 @@ mutate "Modules/Quests.lua" \
     "a quest with no location is cheaper than one you can see"
 
 mutate "Modules/Rares.lua" \
-    "                travel = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)" \
-    "                travel = 1" \
+    "                travel, costed = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)" \
+    "                travel, costed = 1, true" \
     "a rare is priced by a number rather than by the journey"
 
 mutate "Core.lua" \
@@ -61449,10 +61757,10 @@ mutate "Modules/Quests.lua" \
 
 mutate "Modules/Opportunities.lua" \
     "            travelCost       = travel,
-            expiresIn        = worldQuest.secondsLeft," \
+            travelCosted     = costed or nil," \
     "            limitedTimeBonus = Opportunities.Urgency(worldQuest.secondsLeft),
             travelCost       = travel,
-            expiresIn        = worldQuest.secondsLeft," \
+            travelCosted     = costed or nil," \
     "one deadline is charged twice through two curves"
 
 mutate "Modules/Breakdown.lua" \
@@ -61552,8 +61860,16 @@ mutate "Providers/StaticData.lua" \
     "the block reason has to be parsed back out of English prose"
 
 mutate "Modules/Loremaster.lua" \
-    "        local heldName = Loremaster.NameOf(id, record)" \
-    "        local heldName = record.name" \
+    "    for id, record in pairs(Records()) do
+        local heldName = Loremaster.NameOf(id, record)
+
+        if heldName and string.find(heldName, zoneName, 1, true) then
+            local better" \
+    "    for id, record in pairs(Records()) do
+        local heldName = record.name
+
+        if heldName and string.find(heldName, zoneName, 1, true) then
+            local better" \
     "the zone achievement is matched against a stored name"
 
 mutate "Core.lua" \
@@ -61863,8 +62179,10 @@ mutate "Scoring.lua" \
     "a deadline the player cannot reach is scored as urgent"
 
 mutate "Scoring.lua" \
-    "    return cost * CN.secondsPerCostPoint" \
-    "    return cost" \
+    "    return cost * CN.secondsPerCostPoint
+end" \
+    "    return cost
+end" \
     "a journey in cost points is treated as a journey in seconds"
 
 mutate "Database.lua" \
@@ -61878,14 +62196,14 @@ mutate "Database.lua" \
     "a migration deletes an account-wide flag nothing rewrites"
 
 mutate "Modules/Loremaster.lua" \
-    "            if record.completed == nil then
-                Loremaster.Scan()
+    "        if type(record) == \"table\" and record.completed == nil then
+            Loremaster.Scan()
 
-                return
-            end" \
-    "            if false then
-                return
-            end" \
+            return
+        end" \
+    "        if false then
+            return
+        end" \
     "a store missing a field is never rebuilt"
 
 mutate "UI.lua" \
@@ -61927,9 +62245,13 @@ mutate "Modules/Quests.lua" \
 ############################################################
 
 mutate "Modules/Loremaster.lua" \
-    "CN:RegisterEvent(\"QUEST_TURNED_IN\", function()
+    "CN:RegisterEvent(\"CRITERIA_UPDATE\", function()
     CN.Debounce(\"Loremaster.zone\", 2, function()
-        pcall(Loremaster.RefreshCurrentZone)
+        local ok, moved = pcall(Loremaster.RefreshCurrentZone)
+
+        if ok and moved then
+            CN.InvalidateProvider(\"Loremaster\")
+        end
     end)
 end)" \
     "" \
@@ -61940,12 +62262,12 @@ mutate "Modules/Loremaster.lua" \
         return false
     end
 
-    record.criteria = criteria" \
-    "    record.criteria = criteria" \
+    local key = CN.characterKey or CN.GetCharacterKey()" \
+    "    local key = CN.characterKey or CN.GetCharacterKey()" \
     "a refusal from the criteria API wipes the zone row"
 
 mutate "Scoring.lua" \
-    "    if cost >= ceiling then
+    "    if not objective.travelCosted then
         return nil
     end" \
     "    if false then
@@ -61961,16 +62283,14 @@ mutate "Scoring.lua" \
     "a deadline that counts for nothing is never explained"
 
 mutate "Modules/Loremaster.lua" \
-    "            if type(record.progress) ~= \"table\"
-                or record.progress[key] == nil then
+    "    if not CN.Account(\"loremasterScans\")[key] then
+        Loremaster.Scan()
 
-                Loremaster.Scan()
-
-                return
-            end" \
-    "            if false then
-                return
-            end" \
+        return
+    end" \
+    "    if false then
+        return
+    end" \
     "an alt is locked out of the repair by the character before it"
 
 mutate "Database.lua" \
@@ -61995,6 +62315,62 @@ mutate "UI.lua" \
                 (CN.L[hit.tab] or hit.tab) .. \" (\" .. hit.count .. \")\")" \
     "            table.insert(parts, hit.tab .. \" (\" .. hit.count .. \")\")" \
     "the search names tabs in English beside a translated tab strip"
+
+############################################################
+# 0.70.0
+############################################################
+
+mutate "Modules/Loremaster.lua" \
+    "    local earned = Blizzard.IsAchievementEarned and Blizzard.IsAchievementEarned(id)
+
+    if earned ~= nil then
+        record.completed = earned
+    end" \
+    "    record.completed = (done >= criteria) and true or false" \
+    "an alt part-way through a zone un-earns the account's achievement"
+
+mutate "Modules/Loremaster.lua" \
+    "            if found then
+                return nil
+            end" \
+    "            if false then
+                return nil
+            end" \
+    "a turn-in rewrites a same-named zone in another expansion"
+
+mutate "Modules/Loremaster.lua" \
+    "                if criteria and criteria > 0 then
+                    held.criteria = criteria" \
+    "                if true then
+                    held.criteria = criteria" \
+    "a scan at a cold moment empties the whole journey"
+
+mutate "Scoring.lua" \
+    "    if seconds >= ceiling then
+        return nil
+    end" \
+    "    if false then
+        return nil
+    end" \
+    "a clamped journey is printed as though it were a duration"
+
+mutate "Modules/Session.lua" \
+    "    local travelSeconds = CN.SecondsNeeded and CN.SecondsNeeded(objective)" \
+    "    local travelSeconds = objective.travelCost
+        and objective.travelCost * CN.secondsPerCostPoint" \
+    "an invented journey is subtracted from a measured span"
+
+mutate "Modules/Quests.lua" \
+    "                if not quiet then
+                    Quests.RememberOffer(poi)
+                end" \
+    "                Quests.RememberOffer(poi)" \
+    "a text search writes quest pins to disk"
+
+mutate "Modules/Reputations.lua" \
+    "        local name = Reputations.NameOf(id)" \
+    "        local name = NameStore()[id]" \
+    "a faction cannot be found by name after a language change"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -72351,17 +72727,225 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
-print("\nWhat 0.69.0 changed, asserted through the paths the game takes:")
+print("\nWhat 0.70.0 changed, asserted through the paths the game takes:")
 
 ;(function()
     ------------------------------------------------------------
-    -- HANDING A QUEST IN MOVES THE ZONE YOU ARE IN. 0.69.0.
+    -- A COST NOBODY MEASURED IS NOT A JOURNEY. 0.70.0.
+    --
+    -- `CN.TravelCost` never refuses -- on a miss it hands back the constant
+    -- the scorer ranks an unknown location with -- and every caller but one
+    -- threw away the second return that says whether the model answered. So
+    -- nothing downstream could tell a real flight from a fabricated one, and
+    -- `/cn list` printed "2m away" for the Great Vault.
+    ------------------------------------------------------------
+    for _, file in ipairs({
+        "Modules/Rares.lua", "Modules/Opportunities.lua",
+        "Modules/Goals.lua", "Modules/Quests.lua",
+        "Modules/Toys.lua", "Modules/Vendors.lua",
+    }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(text, file .. " must be readable")
+
+        assert(text:find("travelCosted", 1, true),
+            file .. " asks the travel model and throws away its answer about "
+            .. "whether it could answer")
+    end
+
+    assert(CN.SecondsNeeded({ travelCost = 8 }) == nil,
+        "an unflagged cost is not a journey, whatever its size")
+
+    assert(CN.SecondsNeeded({ travelCost = 8, travelCosted = true })
+        == 8 * CN.secondsPerCostPoint,
+        "and a flagged one is")
+
+    print("  a travel cost is a journey only when the model produced it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE REMAINING 0.70.0 PROPERTIES.
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    lore.Scan()
+
+    -- A TURN-IN DOES NOT REWRITE A SAME-NAMED ZONE IN ANOTHER EXPANSION.
+    --
+    -- The lookup matches an achievement NAME against the zone name, and zone
+    -- names repeat -- two Nagrands, two Shadowmoon Valleys, three Dalarans.
+    -- That was tolerable while it only chose what to DISPLAY. 0.69.0 made it
+    -- choose which row a turn-in rewrites.
+    local here = lore.ForZone()
+
+    assert(here and here.id, "the fixture stands in a zone with an achievement")
+
+    local records = lore.Records()
+
+    local rival = 999321
+
+    records[rival] = {
+        achievementID = rival,
+        categoryID    = 1,
+        criteria      = 20,
+        completed     = false,
+        progress      = {},
+    }
+
+    CN_TEST_MakeAchievement(rival, lore.NameOf(here.id, records[here.id]),
+        20, 0)
+
+    local doneBefore = lore.DoneFor(records[here.id])
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 17, 20
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(lore.DoneFor(records[here.id]) == doneBefore,
+        "with two achievements matching the zone name, neither is rewritten "
+        .. "-- a write needs certainty a display does not")
+
+    records[rival] = nil
+
+    -- A SCAN AT A COLD MOMENT DOES NOT EMPTY THE JOURNEY.
+    --
+    -- `GetAchievementProgress` answers `0, 0` when the criteria API is
+    -- unavailable, and `Closest` filters on `criteria > 0` -- so one scan at
+    -- the wrong moment emptied the whole Journey tab and `/cn zones`, and
+    -- stamped the Scans tab "just now" on the way out.
+    local heldCriteria = records[here.id].criteria
+
+    assert((heldCriteria or 0) > 0, "the row has a real criteria count")
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 0, 0
+    end
+
+    lore.Scan()
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(records[here.id].criteria == heldCriteria,
+        "a client that answers nothing does not empty the store: "
+        .. tostring(records[here.id].criteria))
+
+    -- A JOURNEY AT THE CEILING IS NOT SUBTRACTED FROM A MEASURED SPAN.
+    local session = CN:GetModule("Session")
+
+    local travelModule = CN:GetModule("Travel")
+
+    session.Durations()[CN.objectiveTypes.TREASURE] = nil
+
+    CN_TEST_CLOCK = 900000
+
+    session.NoteOffered({
+        type         = CN.objectiveTypes.TREASURE,
+        id           = 975001,
+        travelCost   = travelModule.maximumCost,
+        travelCosted = true,
+    })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 300
+
+    assert(session.NoteCompleted(CN.objectiveTypes.TREASURE, 975001) == nil,
+        "a span measured against a journey the model stopped counting is not "
+        .. "a sample")
+
+    -- AND THE TEST FOR IT LIVES IN ONE PLACE.
+    --
+    -- `Session` carried its own copy of "is this cost a measurement" -- the
+    -- ceiling comparison written out inline -- while `CN.SecondsNeeded`'s own
+    -- comment named `Session` as the authority it was copied from. The two
+    -- disagreed about `unknownLocationCost` immediately, and a journey nobody
+    -- measured was being subtracted from a measured span.
+    do
+        local text = CN_TEST_ReadAddonFile("Modules/Session.lua")
+
+        assert(text, "Modules/Session.lua must be readable")
+
+        assert(text:find("CN.SecondsNeeded(objective)", 1, true),
+            "Session asks the one function that owns the rule")
+
+        for line in text:gmatch("[^\n]+") do
+            if not line:match("^%s*%-%-") then
+                assert(not line:find("maximumCost", 1, true),
+                    "and does not keep a second copy of the ceiling test: "
+                    .. line)
+            end
+        end
+    end
+
+    -- A TEXT SEARCH DOES NOT WRITE QUEST PINS TO DISK.
+    local quests = CN:GetModule("Quests")
+
+    local remembered = quests.Remembered()
+
+    for id in pairs(remembered) do
+        remembered[id] = nil
+    end
+
+    quests.AvailableOnMap(nil, true)
+
+    assert(CN.CountKeys(remembered) == 0,
+        "a read-only walk records nothing: " .. CN.CountKeys(remembered))
+
+    quests.AvailableOnMap()
+
+    assert(CN.CountKeys(remembered) > 0,
+        "and an ordinary one still does, or the store would never fill")
+
+    -- A FACTION IS FOUND BY THE NAME THE CLIENT USES.
+    local reputations = CN:GetModule("Reputations")
+
+    reputations.Scan()
+
+    local factionID, factionName
+
+    for id in pairs(reputations.AccountStore()) do
+        local named = reputations.NameOf(id)
+
+        if named and named ~= "" then
+            factionID, factionName = id, named
+            break
+        end
+    end
+
+    if factionID then
+        -- The store holds a name from an older language; the client answers
+        -- in the current one. The player types what is on their screen.
+        CN.Account("factionNames")[factionID] = "Ein Alter Name"
+
+        assert(reputations.Resolve(factionName) == factionID,
+            "a faction is found by the name the client gives it, not by the "
+            .. "one frozen in the store: " .. tostring(factionName))
+    end
+
+    print("  the remaining 0.70.0 properties hold")
+end)()
+
+
+;(function()
+    ------------------------------------------------------------
+    -- FINISHING A QUEST MOVES THE ZONE YOU ARE IN. 0.69.0, corrected 0.70.0.
     --
     -- The Loremaster store was written by a full scan and by nothing else,
     -- and that scan ran at login, on `/cn scanlore`, and from a button. So
     -- turning a quest in moved nothing on the Journey tab: it went on
     -- reading the count it had at login. Reported from play as "the
     -- completion of a quest does not appear to remove it from the journey".
+    --
+    -- 0.69.0 wired the refresh to `QUEST_TURNED_IN`, which fires BEFORE the
+    -- client moves the criteria -- so it read the number it already had and
+    -- the reported symptom was unchanged. `CRITERIA_UPDATE` is the event that
+    -- fires when they move, and is what the sibling module has always used.
     ------------------------------------------------------------
     local lore = CN:GetModule("Loremaster")
 
@@ -72388,7 +72972,7 @@ print("\nWhat 0.69.0 changed, asserted through the paths the game takes:")
 
     CN.ForgetDebounces()
 
-    CN.Dispatch("QUEST_TURNED_IN", 4242)
+    CN.Dispatch("CRITERIA_UPDATE")
 
     CN.Blizzard.GetAchievementProgress = realProgress
 
@@ -72396,24 +72980,61 @@ print("\nWhat 0.69.0 changed, asserted through the paths the game takes:")
         "handing a quest in moves the zone's count without a rescan: "
         .. tostring(lore.DoneFor(record)))
 
+    -- THE ACCOUNT EARNING IT IS WHAT MAKES IT FINISHED, and the client is
+    -- what says so.
+    local realEarnedFlag = CN.Blizzard.IsAchievementEarned
+
+    CN.Blizzard.IsAchievementEarned = function() return true end
+
     CN.Blizzard.GetAchievementProgress = function()
         return 12, 12
     end
 
     CN.ForgetDebounces()
-    CN.Dispatch("QUEST_TURNED_IN", 4242)
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.IsAchievementEarned = realEarnedFlag
 
     assert(record.completed == true, "and a finished zone says so")
+
+    -- THE EARNED FLAG IS ASKED FOR, NOT DERIVED FROM THE CRITERIA.
+    --
+    -- Those two are scoped differently: criteria progress is what THIS
+    -- character has done and the flag belongs to the account. 0.69.0 wrote
+    -- `completed = (done >= criteria)`, so an alt at 3 of 12 standing in a
+    -- zone the main had finished cleared the account's flag on the way past.
+    local realEarned = CN.Blizzard.IsAchievementEarned
+
+    CN.Blizzard.IsAchievementEarned = function() return true end
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 3, 12
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.IsAchievementEarned = realEarned
+
+    assert(record.completed == true,
+        "an alt part-way through a zone the account has already earned does "
+        .. "not un-earn it")
+
+    CN.Blizzard.IsAchievementEarned = function() return false end
 
     CN.Blizzard.GetAchievementProgress = function()
         return 12, 14
     end
 
     CN.ForgetDebounces()
-    CN.Dispatch("QUEST_TURNED_IN", 4242)
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.IsAchievementEarned = realEarnedFlag
 
     assert(record.completed == false,
-        "and a patch that adds a criterion un-finishes it")
+        "and a patch that adds a criterion un-finishes it -- when the CLIENT "
+        .. "says the account no longer has it, not because two per-character "
+        .. "numbers no longer match")
 
     -- A REFUSAL FROM THE CRITERIA API DOES NOT WIPE THE ROW. The guard
     -- `Exploration` has carried since 0.61.0 and `Achievements` was given in
@@ -72423,7 +73044,7 @@ print("\nWhat 0.69.0 changed, asserted through the paths the game takes:")
     end
 
     CN.ForgetDebounces()
-    CN.Dispatch("QUEST_TURNED_IN", 4242)
+    CN.Dispatch("CRITERIA_UPDATE")
 
     CN.Blizzard.GetAchievementProgress = realProgress
 
@@ -72493,9 +73114,10 @@ end)()
         type       = CN.objectiveTypes.QUEST,
         id         = 972001,
         name       = "Far Away",
-        expiresIn  = 60,
-        travelCost = 20,
-        reasons    = { "available to pick up in the next zone" },
+        expiresIn    = 60,
+        travelCost   = 20,
+        travelCosted = true,
+        reasons      = { "available to pick up in the next zone" },
     }
 
     local explained = false
@@ -72515,8 +73137,9 @@ end)()
         type       = CN.objectiveTypes.QUEST,
         id         = 972002,
         name       = "Close By",
-        expiresIn  = 3600,
-        travelCost = 2,
+        expiresIn    = 3600,
+        travelCost   = 2,
+        travelCosted = true,
     }
 
     for _, reason in ipairs(CN.Reasons(reachable)) do
@@ -72690,8 +73313,9 @@ end)()
 
     -- THE ESTIMATE IS THE JOURNEY, AND ONLY WHEN IT IS A MEASUREMENT.
     local needed = CN.SecondsNeeded({
-        type       = CN.objectiveTypes.QUEST,
-        travelCost = 4,
+        type         = CN.objectiveTypes.QUEST,
+        travelCost   = 4,
+        travelCosted = true,
     })
 
     assert(needed == 4 * CN.secondsPerCostPoint,
@@ -72701,6 +73325,16 @@ end)()
     assert(CN.SecondsNeeded({ type = CN.objectiveTypes.QUEST }) == nil,
         "an objective with no journey has no estimate at all")
 
+    -- AND A COST NOBODY MEASURED IS NOT A JOURNEY. Four providers hard-code
+    -- small routing weights for content that is not anywhere -- the Great
+    -- Vault, a dungeon, a crafting order -- and the quest provider uses a
+    -- constant for a quest whose location it does not know. None of those is
+    -- a distance, and `/cn list` printed all of them as one.
+    assert(CN.SecondsNeeded({
+        type       = CN.objectiveTypes.CURRENCY,
+        travelCost = 3,
+    }) == nil, "a routing weight is not a measured journey")
+
     -- A SATURATED COST IS THE MODEL SAYING IT STOPPED COUNTING, NOT A
     -- TWENTY-MINUTE FLIGHT. `Session.NoteOffered` already refuses to subtract
     -- one; this must refuse to add one, or every world quest the router
@@ -72708,14 +73342,28 @@ end)()
     local travelModule = CN:GetModule("Travel")
 
     assert(CN.SecondsNeeded({
-        type       = CN.objectiveTypes.QUEST,
-        travelCost = travelModule.maximumCost,
-    }) == nil, "a journey at the saturation point is not a measurement")
+        type         = CN.objectiveTypes.QUEST,
+        travelCost   = travelModule.maximumCost,
+        travelCosted = true,
+    }) == nil, "a journey at the saturation point is not a duration to print")
 
-    assert(CN.SecondsNeeded({
-        type       = CN.objectiveTypes.QUEST,
-        travelCost = CN.fallbackZoneCost,
-    }) == nil, "and neither is the constant used for a zone it cannot route")
+    -- BUT IT IS STILL A LOWER BOUND, and that is what the deadline test
+    -- needs. 0.69.0 exempted the clamp from the test entirely, so the
+    -- FARTHER of two unreachable quests kept its full urgency while the
+    -- nearer one lost all of it.
+    local clamped = {
+        type         = CN.objectiveTypes.QUEST,
+        travelCost   = travelModule.maximumCost,
+        travelCosted = true,
+    }
+
+    assert(CN.MinimumSecondsNeeded(clamped)
+        == travelModule.maximumCost * CN.secondsPerCostPoint,
+        "at the clamp the journey is at least the clamp, which is all "
+        .. "'can I get there in time' needs to know")
+
+    assert(CN.UrgencyBonus(300, CN.MinimumSecondsNeeded(clamped)) == 0,
+        "so a five-minute deadline twenty minutes away is not urgent")
 
     -- AND THE WHOLE-TYPE WORK MEDIAN IS NOT PART OF IT. A quest thirty yards
     -- away with five minutes left is urgent, whatever the median quest on
@@ -72730,9 +73378,10 @@ end)()
 
     session.NoteDurationsChanged()
 
-    assert(CN.UrgencyBonus(300, CN.SecondsNeeded({
-        type       = CN.objectiveTypes.QUEST,
-        travelCost = 0.5,
+    assert(CN.UrgencyBonus(300, CN.MinimumSecondsNeeded({
+        type         = CN.objectiveTypes.QUEST,
+        travelCost   = 0.5,
+        travelCosted = true,
     })) > 0, "a five-minute deadline thirty yards away is still urgent")
 
     durations[CN.objectiveTypes.QUEST] = heldDurations
@@ -72744,8 +73393,9 @@ end)()
         type       = CN.objectiveTypes.QUEST,
         id         = 970001,
         name       = "Test",
-        expiresIn  = 600,
-        travelCost = 30,
+        expiresIn    = 600,
+        travelCost   = 30,
+        travelCosted = true,
     })
 
     local announced = false
@@ -72885,9 +73535,16 @@ end)()
     -- in after an upgrade repairs it for everybody and locks every other
     -- character out of the rescan -- while the thing THEY are missing is
     -- their own progress.
+    --
+    -- ASKED OF A MARKER SINCE 0.70.0, because inferring it from the rows made
+    -- the condition permanently true: `Scan` writes progress only for rows
+    -- the category walk returns, so a row it cannot reach kept that entry nil
+    -- for ever and every login walked the whole achievement tree to find out.
     loremaster.Scan()
 
     local key = CN.characterKey or CN.GetCharacterKey()
+
+    CN.Account("loremasterScans")[key] = nil
 
     for _, record in pairs(records) do
         if type(record.progress) == "table" then
@@ -72908,6 +73565,10 @@ end)()
         end
     end
 
+    assert(CN.Account("loremasterScans")[key],
+        "and the scan is recorded against the character that ran it, so the "
+        .. "next login does not walk the whole achievement tree again")
+
     assert(repaired > 0,
         "a character with no progress of its own gets it back at login, even "
         .. "though the account-wide flag is intact -- otherwise the first "
@@ -72922,9 +73583,9 @@ end)()
 
         assert(source, "Modules/Loremaster.lua must be readable")
 
-        assert(source:find("record.progress[key] == nil", 1, true),
-            "the login scan triggers on THIS character's own progress being "
-            .. "absent, not only on the account-wide flag -- which the first "
+        assert(source:find('CN.Account("loremasterScans")[key]', 1, true),
+            "the login scan triggers on whether THIS character has ever "
+            .. "scanned, not only on the account-wide flag -- which the first "
             .. "character to log in repairs for everybody")
     end
 
@@ -78135,7 +78796,10 @@ end)()
     -- this tree with CRLF line endings, so a literal newline match passes in
     -- the repository and fails in the scaffold -- which is the environment
     -- the PowerShell suite actually checks.
-    assert(text:find("\n%s*local travel%s*\r?\n"),
+    -- `local travel, costed` since 0.70.0: the second is the travel model's
+    -- own "did I actually answer" flag, which every caller but one used to
+    -- throw away. Both still start nil, which is the property.
+    assert(text:find("\n%s*local travel, costed%s*\r?\n"),
         "and start from nil, not from zero")
 
     print("  one price for an unknown location, and zero means zero")
@@ -80380,8 +81044,12 @@ print("\nWhat 0.56.0 changed, asserted through the paths the game takes:")
         .. "separable journey in it")
 
     -- A REAL COST STILL WORKS, and still subtracts.
+    -- `travelCosted`, because since 0.70.0 a cost is only subtractable when
+    -- the travel model actually produced it -- a routing constant is not a
+    -- journey, and subtracting one biases the learned work time down.
     session.NoteOffered({
         type = CN.objectiveTypes.RARE, id = 56002, travelCost = 2,
+        travelCosted = true,
     })
 
     CN_TEST_CLOCK = CN_TEST_CLOCK + 300
@@ -80401,6 +81069,7 @@ print("\nWhat 0.56.0 changed, asserted through the paths the game takes:")
 
     session.NoteOffered({
         type = CN.objectiveTypes.RARE, id = 56003, travelCost = 20,
+        travelCosted = true,
     })
 
     CN_TEST_CLOCK = CN_TEST_CLOCK + 10
@@ -80411,6 +81080,7 @@ print("\nWhat 0.56.0 changed, asserted through the paths the game takes:")
 
     session.NoteOffered({
         type = CN.objectiveTypes.RARE, id = 56004, travelCost = 20,
+        travelCosted = true,
     })
 
     CN_TEST_CLOCK = CN_TEST_CLOCK + 500
@@ -81423,6 +82093,7 @@ end)()
     -- Offered from a long way off.
     session.NoteOffered({
         type = CN.objectiveTypes.TREASURE, id = 57100, travelCost = 20,
+        travelCosted = true,
     })
 
     -- The player flies there. It is offered again, from next door.
@@ -81430,6 +82101,7 @@ end)()
 
     session.NoteOffered({
         type = CN.objectiveTypes.TREASURE, id = 57100, travelCost = 1,
+        travelCosted = true,
     })
 
     CN_TEST_CLOCK = CN_TEST_CLOCK + 200
@@ -81479,6 +82151,7 @@ print("\nWhat 0.55.0 changed, asserted through the paths the game takes:")
     -- swallows the whole span. This is the shape the floor exists for.
     session.NoteOffered({
         type = CN.objectiveTypes.TREASURE, id = 55001, travelCost = 3,
+        travelCosted = true,
     })
 
     local elapsed = session.NoteCompleted(CN.objectiveTypes.TREASURE, 55001)
@@ -81510,6 +82183,7 @@ print("\nWhat 0.55.0 changed, asserted through the paths the game takes:")
 
     session.NoteOffered({
         type = CN.objectiveTypes.TREASURE, id = 55003, travelCost = 50,
+        travelCosted = true,
     })
 
     CN_TEST_CLOCK = CN_TEST_CLOCK + 2400
@@ -87471,9 +88145,10 @@ print("\nThe numbers the addon prints are the numbers it means:")
         CN_TEST_CLOCK = 200000 + (index * 1000)
 
         session.NoteOffered({
-            type       = CN.objectiveTypes.QUEST,
-            id         = questID,
-            travelCost = travelCost,
+            type         = CN.objectiveTypes.QUEST,
+            id           = questID,
+            travelCost   = travelCost,
+            travelCosted = true,
         })
 
         -- Six minutes of travel, then ninety seconds of work.
