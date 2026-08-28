@@ -284,7 +284,14 @@ function Loremaster.Scan()
     if measured == 0 then
         DebugPrint("Loremaster scan measured nothing; not recording it.")
 
-        return scanned
+        -- AND IT SAYS SO OUT LOUD. 0.72.0.
+        --
+        -- 0.71.0 stopped the marker and went on returning `scanned`, which
+        -- counts every row the walk REACHED -- so `/cn scanlore` at a cold
+        -- moment printed "Quest achievements scanned: 412" over a store that
+        -- had recorded nothing, and the Journey tab stayed empty. A count is
+        -- not a result.
+        return scanned, 0
     end
 
     -- WHO HAS SCANNED, RECORDED RATHER THAN INFERRED. 0.70.0.
@@ -305,7 +312,11 @@ function Loremaster.Scan()
 
     DebugPrint("Loremaster scan: " .. scanned .. " quest achievements.")
 
-    return scanned
+    -- The zone index is resolved from this store, so a scan that changed it
+    -- invalidates every remembered answer.
+    Loremaster.ForgetZoneIndex()
+
+    return scanned, measured
 end
 
 ------------------------------------------------------------
@@ -378,7 +389,27 @@ end
 -- 90% through this one" and "you have not started this one" are different
 -- suggestions and blending them by fraction would bury every fresh zone under
 -- every half-finished one forever.
-function Loremaster.Closest(limit)
+-- NAMES ARE RESOLVED FOR THE ROWS THAT SURVIVE, NOT FOR THE STORE. 0.72.0.
+--
+-- Both `Loremaster.NameOf` and `Loremaster.CategoryOf` are `pcall` plus a
+-- client call, and this resolved both for EVERY unfinished record before
+-- sorting and throwing all but `limit` away. Several hundred rows on a mature
+-- account, twice each, on a function the Journey tab calls from every
+-- `UI.Refresh` -- which data events drive as often as every two seconds.
+--
+-- Sorting on the numbers, truncating, and naming what is left makes that
+-- O(limit) client calls instead of O(store). The tie-breaks that used the
+-- name now use the id, which is stable, free, and just as deterministic.
+--
+-- AND THE UNTOUCHED HALF IS NO LONGER TRUNCATED AWAY.
+--
+-- The two lists were concatenated and cut from the end, so an account with
+-- `limit` or more partly-done zones lost every untouched one -- and
+-- `NextZones` asks for 50, which is an ordinary number of started zones for
+-- the completionist this file was written for. The header below says a zone
+-- you have never set foot in must be recommendable; it was not, for exactly
+-- the players it was written for. Each half now keeps its own share.
+function Loremaster.Closest(limit, freshShare)
     local started, untouched = {}, {}
 
     for id, record in pairs(Records()) do
@@ -402,8 +433,7 @@ function Loremaster.Closest(limit)
 
             local row = {
                 id       = id,
-                name     = Loremaster.NameOf(id, record),
-                category = Loremaster.CategoryOf(record),
+                record   = record,
                 done     = done,
                 criteria = record.criteria,
                 fraction = done / record.criteria,
@@ -434,25 +464,39 @@ function Loremaster.Closest(limit)
             return a.criteria < b.criteria
         end
 
-        return tostring(a.name) < tostring(b.name)
+        return a.id < b.id
     end)
-
-    local ordered = {}
-
-    for _, row in ipairs(started) do
-        table.insert(ordered, row)
-    end
-
-    for _, row in ipairs(untouched) do
-        table.insert(ordered, row)
-    end
 
     -- Truncate. Deliberately NOT CN.CapCandidates: that re-sorts, and the
     -- ordering above is the entire product of this function.
     limit = limit or 10
 
-    while #ordered > limit do
-        table.remove(ordered)
+    -- A quarter of the room is held for zones not yet begun -- and only as
+    -- much of it as there are fresh zones to fill it with, so a player with
+    -- none loses nothing.
+    --
+    -- Deliberately zero for a small limit: asked for two, this function is
+    -- being asked "what is closest to done", and the reserve exists for the
+    -- long lists where the started half runs to fifty and buries the rest.
+    local fresh = math.min(#untouched, freshShare or math.floor(limit / 4))
+
+    local room = math.max(0, limit - fresh)
+
+    local ordered = {}
+
+    for index = 1, math.min(#started, room) do
+        table.insert(ordered, started[index])
+    end
+
+    for index = 1, math.min(#untouched, limit - #ordered) do
+        table.insert(ordered, untouched[index])
+    end
+
+    -- The client calls, at last, and only for what is being shown.
+    for _, row in ipairs(ordered) do
+        row.name     = Loremaster.NameOf(row.id, row.record)
+        row.category = Loremaster.CategoryOf(row.record)
+        row.record   = nil
     end
 
     return ordered, #started, #untouched
@@ -479,13 +523,45 @@ end
 --
 -- `Exploration.ForCurrentZone` has solved this since 0.62.0 and this is that
 -- solution, not a third invention: the zone name must appear as a whole word
--- run anchored at the END of the achievement name, and the map id is learned
--- on the first successful match so the genuine duplicates -- two Nagrands,
--- three Dalarans -- are resolved once, by something that cannot be
--- duplicated, rather than re-guessed on every criteria update.
+-- run anchored at the END of the achievement name.
 --
--- It is also what makes this affordable on `CRITERIA_UPDATE`: after the first
--- match it is an integer comparison, not a walk with a client call per row.
+-- WHAT 0.71.0 THEN GOT WRONG ABOUT REMEMBERING THE ANSWER, fixed in 0.72.0.
+--
+-- It matched on `GetZoneText()` -- correctly -- and then cached the answer
+-- under `CN.GetPlayerPosition()`, which is `GetBestMapForUnit`: the CITY map
+-- indoors. That is the same wrong value defect (1) above is about, moved from
+-- the match to the memory of it, and it is the fourth time this one map call
+-- has been used for a question it does not answer.
+--
+-- Three things followed. The cache never converged, because walking out of a
+-- building missed and re-stamped a different id, so the walk it exists to
+-- avoid ran on every threshold. The stamp was PERSISTED, so it wrote a
+-- SavedVariable on every zone transition. And because "unfinished first" can
+-- change its mind when the story achievement completes, one zone could end up
+-- with two records holding two map ids -- the completed one indoors and the
+-- companion outdoors -- so the tab showed a different achievement depending
+-- on which side of a doorway the player stood. Exactly the hash-order
+-- symptom 0.71.0 set out to remove, reintroduced by the fix for it.
+--
+-- The key is now the zone name, which is what the match was actually made on,
+-- and the cache is SESSION-LOCAL. A name is a display string and this file
+-- never branches on it -- it is a cache key, and the walk that fills it is
+-- the same walk that would run without it. Nothing about a localized string
+-- is worth writing to disk, and a session is exactly as long as the answer
+-- stays true.
+local zoneIndex = {}
+
+-- Only a change to WHICH RECORDS EXIST invalidates this -- a scan. Earning
+-- an achievement does not, because the winner is chosen fresh on every
+-- lookup; see the note inside `ZoneRecord`.
+function Loremaster.ForgetZoneIndex(zone)
+    if zone then
+        zoneIndex[zone] = nil
+    else
+        zoneIndex = {}
+    end
+end
+
 -- WHICH OF TWO LEGITIMATE ZONE MATCHES IS THE ZONE'S OWN. 0.71.0.
 --
 -- Every modern zone has more than one achievement whose name ends in the zone
@@ -507,7 +583,13 @@ end
 -- Every step is total and deterministic; there is no path that returns "I
 -- cannot tell", because refusing is what made 0.70.0 do nothing everywhere.
 function Loremaster.BetterZoneMatch(record, name, id, best, bestName, bestID)
-    if not best then
+    -- A HELD CANDIDATE WITH NO NAME IS NOT A HELD CANDIDATE. 0.72.0.
+    --
+    -- This is called from one place with three variables that are always set
+    -- together, so the `not best` test was enough -- but it is a published
+    -- function with its own test, which is an invitation to call it from a
+    -- second place, and `#bestName` on a nil throws rather than degrading.
+    if not best or not bestName or not bestID then
         return true
     end
 
@@ -525,62 +607,83 @@ function Loremaster.BetterZoneMatch(record, name, id, best, bestName, bestID)
     return id < bestID
 end
 
-local function ZoneRecord()
-    local mapID = CN.GetPlayerPosition()
-
-    local store = Records()
-
-    if mapID then
-        for id, record in pairs(store) do
-            if record.mapID == mapID then
-                return record, id
-            end
-        end
-    end
-
-    local zone = GetZoneText and GetZoneText()
+local function ZoneRecord(zone)
+    zone = zone or (GetZoneText and GetZoneText())
 
     if not zone or zone == "" then
         return nil
     end
 
-    local needle = string.lower(zone)
+    local store = Records()
 
-    local function Names(candidate)
-        if not candidate then
-            return false
+    -- WHAT IS CACHED IS THE MATCH, NOT THE WINNER.
+    --
+    -- The two halves of this answer age differently. WHICH achievements are
+    -- named after this zone depends only on their names, which do not change
+    -- while the client is running -- and finding them is the whole expense:
+    -- a walk of the store with a `pcall` and a client call per row. WHICH of
+    -- those is the zone's own depends on `completed`, which changes the
+    -- instant the player earns one.
+    --
+    -- Caching the winner, as the first draft of this did, made the second
+    -- fact as stale as the first: earning the story achievement left the tab
+    -- showing it at 60/60 while its companion sat open and unmentioned, until
+    -- the next login. Caching only the candidate list keeps the expensive
+    -- half and re-decides the cheap half every time -- a loop over two or
+    -- three entries with no client calls in it.
+    local matches = zoneIndex[zone]
+
+    if not matches then
+        local needle = string.lower(zone)
+
+        local function Names(candidate)
+            if not candidate then
+                return false
+            end
+
+            candidate = string.lower(candidate)
+
+            if candidate == needle then
+                return true
+            end
+
+            -- Ends with the zone name, preceded by a space: "Loremaster of
+            -- Nagrand" matches "Nagrand", and an achievement about Shadowmoon
+            -- Valley does not match "Shadowmoon".
+            return string.sub(candidate, -(#needle + 1)) == (" " .. needle)
         end
 
-        candidate = string.lower(candidate)
+        matches = {}
 
-        if candidate == needle then
-            return true
+        for id, record in pairs(store) do
+            local heldName = Loremaster.NameOf(id, record)
+
+            if Names(heldName) then
+                table.insert(matches, { id = id, name = heldName })
+            end
         end
 
-        -- Ends with the zone name, preceded by a space: "Loremaster of
-        -- Nagrand" matches "Nagrand", and an achievement about Shadowmoon
-        -- Valley does not match "Shadowmoon".
-        return string.sub(candidate, -(#needle + 1)) == (" " .. needle)
+        -- Sorted so the list itself does not carry hash order into anything
+        -- that reads it, and remembered even when EMPTY: a dungeon, a raid
+        -- and a capital have no achievement named after them, and those are
+        -- the places `CRITERIA_UPDATE` fires hardest, so caching only the
+        -- hits would leave the full walk running on the events that can
+        -- least afford it.
+        table.sort(matches, function(a, b) return a.id < b.id end)
+
+        zoneIndex[zone] = matches
     end
 
     local best, bestID, bestName
 
-    for id, record in pairs(store) do
-        local heldName = Loremaster.NameOf(id, record)
+    for _, match in ipairs(matches) do
+        local record = store[match.id]
 
-        if Names(heldName) then
-            if Loremaster.BetterZoneMatch(record, heldName, id,
-                                          best, bestName, bestID) then
+        if record and Loremaster.BetterZoneMatch(record, match.name, match.id,
+                                                 best, bestName, bestID) then
 
-                best, bestID, bestName = record, id, heldName
-            end
+            best, bestID, bestName = record, match.id, match.name
         end
-    end
-
-    if best and mapID then
-        -- Learned, so the ambiguity is resolved once rather than every time,
-        -- and by the map, which cannot be duplicated.
-        best.mapID = mapID
     end
 
     return best, bestID
@@ -602,43 +705,19 @@ Loremaster.ZoneRecord = ZoneRecord
 function Loremaster.ForZone(mapID)
     local record, id
 
+    -- ONE MATCH, ONE ORDERING, ONE PLACE. 0.72.0.
+    --
+    -- This branch used to carry its own copy of both: a PLAIN SUBSTRING test
+    -- where the current-zone path anchors at the end, and an inlined
+    -- duplicate of `BetterZoneMatch`. So a caller asking about "Shadowmoon"
+    -- got Shadowmoon Valley, and the two orderings were already free to
+    -- drift -- in a release whose notes say "one lookup now".
+    --
+    -- It was also unreachable: every caller in the addon passes nothing.
+    -- Untested code that gives a different answer from its neighbour, sitting
+    -- where the next caller will find it.
     if mapID and mapID ~= CN.GetPlayerPosition() then
-        -- A zone the player is not standing in: no learned index applies, so
-        -- the name is all there is. Kept for callers that ask about
-        -- somewhere else; nothing in the addon does today.
-        local zoneName = Blizzard.GetMapName(mapID)
-
-        if not zoneName or zoneName == "" then
-            return nil
-        end
-
-        local needle = string.lower(zoneName)
-
-        local bestName
-
-        for held, candidate in pairs(Records()) do
-            local heldName = Loremaster.NameOf(held, candidate)
-
-            if heldName and string.find(string.lower(heldName), needle, 1, true) then
-                local better
-
-                if not record then
-                    better = true
-                elseif (record.completed and true or false)
-                    ~= (candidate.completed and true or false) then
-
-                    better = not candidate.completed
-                elseif #heldName ~= #bestName then
-                    better = #heldName < #bestName
-                else
-                    better = held < id
-                end
-
-                if better then
-                    record, id, bestName = candidate, held, heldName
-                end
-            end
-        end
+        record, id = ZoneRecord(Blizzard.GetMapName(mapID))
     else
         record, id = ZoneRecord()
     end
@@ -692,6 +771,36 @@ function Loremaster.NextZones(limit)
     end
 
     local currentZone = Loremaster.ForZone()
+
+    -- THE ZONE YOU ARE STANDING IN IS ALWAYS A CANDIDATE. 0.72.0.
+    --
+    -- "You are already here" is worth two points and costs nothing to act on,
+    -- and it could only be awarded to a zone that had already survived the
+    -- truncation above -- so on the account with the most zones in progress,
+    -- which is the one that most needs the advice, the cheapest suggestion
+    -- available was the one most likely to be cut before it could be made.
+    local carrying = false
+
+    for _, row in ipairs(rows) do
+        if currentZone and row.id == currentZone.id then
+            carrying = true
+            break
+        end
+    end
+
+    if currentZone and not carrying and (currentZone.criteria or 0) > 0
+        and not currentZone.completed
+        and currentZone.done < currentZone.criteria then
+
+        table.insert(rows, {
+            id       = currentZone.id,
+            name     = currentZone.name,
+            category = Loremaster.CategoryOf(Records()[currentZone.id]),
+            done     = currentZone.done,
+            criteria = currentZone.criteria,
+            fraction = currentZone.done / currentZone.criteria,
+        })
+    end
 
     local scored = {}
 
@@ -987,7 +1096,18 @@ CN:RegisterCommand{
     order   = 27,
     help    = "Rescan quest achievements by zone and expansion.",
     handler = function()
-        Print("Quest achievements scanned: " .. Loremaster.Scan() .. ".")
+        local scanned, measured = Loremaster.Scan()
+
+        if measured == 0 then
+            Print("The game would not answer about criteria just now"
+                .. CN.DASH .. "nothing was recorded.")
+            Print("|cff8a8f96Try again in a few seconds; this is usual for "
+                .. "the first moments after a loading screen.|r")
+            return
+        end
+
+        Print("Quest achievements scanned: " .. scanned
+            .. "   Measured: " .. measured)
     end,
 }
 

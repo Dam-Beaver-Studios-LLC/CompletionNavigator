@@ -620,7 +620,28 @@ function Session.NoteOffered(objective)
         -- router invented has a journey whose length nobody established.
         local cost = objective.travelCost
 
+        -- AND A ROW WITH NO PLACE IN IT HAS NO JOURNEY TO SUBTRACT. 0.72.0.
+        --
+        -- Several providers set a small hand-picked `travelCost` -- 2 or 3 --
+        -- for something that has no coordinates at all: an instance lockout,
+        -- the vault, a thing you are waiting on. It is a ranking nudge, not a
+        -- measurement, so it carries no `travelCosted` flag and 0.71.0's move
+        -- to `CN.SecondsNeeded` began rejecting every one of those samples.
+        --
+        -- Permanently, and silently: `Session.TypicalSeconds("INSTANCE")`
+        -- could never become non-nil again, so `/cn plan` reported "not
+        -- measured" for those rows for the life of the account. The version
+        -- before this kept the samples with a small bias; this version kept
+        -- none.
+        --
+        -- The question that actually matters is the one `EstimateHub` asks:
+        -- will the planner add a travel leg back for this row? It prices a
+        -- hub from its coordinates, so a row without them gets nothing added
+        -- and needs nothing subtracted. A row WITH coordinates and no
+        -- confident cost is still rejected, which is what the paragraph above
+        -- is for.
         travelKnown = cost == nil or cost == 0
+            or not (objective.mapID and objective.x and objective.y)
     end
 
     local held = offeredAt[key]

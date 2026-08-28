@@ -61,7 +61,7 @@ local function BuildRecord(data)
         factionID   = factionID,
         name        = data.name,
         reaction    = data.reaction,
-        standing    = Blizzard.GetStandingLabel(data.reaction),
+        -- `standing` IS NOT STORED. 0.72.0. See `StandingText`.
         current     = (data.currentStanding or 0) - (data.currentReactionThreshold or 0),
         maximum     = (data.nextReactionThreshold or 0) - (data.currentReactionThreshold or 0),
         raw         = data.currentStanding,
@@ -73,7 +73,16 @@ local function BuildRecord(data)
 
     if friendship then
         record.kind     = "FRIENDSHIP"
-        record.standing = friendship.reaction or record.standing
+        -- THE ONE STANDING THAT MUST BE KEPT, AND NAMED SO IT IS OBVIOUS.
+        --
+        -- A friendship's rank is a free-text string the client supplies -- "Best
+        -- Friend", "Trusted" -- and it supplies it only for the character
+        -- currently logged in. There is no number to re-derive it from, so
+        -- this is the single case where the word itself is the data, and it
+        -- is what lets the Warband view say where an ALT stands. It is
+        -- deliberately not called `standing`, so that nothing reaches for it
+        -- as though it were the general case.
+        record.friendshipStanding = friendship.reaction
         record.current  = (friendship.standing or 0) - (friendship.reactionThreshold or 0)
         record.maximum  = (friendship.nextThreshold or 0) - (friendship.reactionThreshold or 0)
     elseif Blizzard.IsMajorFaction(factionID) then
@@ -101,7 +110,6 @@ local function BuildRecord(data)
             -- Same defect 0.64.0 fixed for Alliance and Horde on the Warband
             -- roster, one file over. `RENOWN_LEVEL_LABEL` is a client global.
             record.renownLevel = major.renownLevel or 0
-            record.standing    = CN.RenownLabel(major.renownLevel or 0)
         end
     else
         record.kind = "STANDARD"
@@ -329,8 +337,22 @@ function Reputations.StandingText(record)
         return CN.RenownLabel(record.renownLevel or record.renown or 0)
     end
 
-    if record.standing and record.standing ~= "" then
-        return record.standing
+    -- ONLY THE ONE THE CLIENT CANNOT RE-SUPPLY. 0.72.0.
+    --
+    -- This read `record.standing` in preference to deriving, and
+    -- `BuildRecord` wrote that field on every scan -- including for RENOWN,
+    -- which migration 18 exists to strip. So the migration was undone by the
+    -- next `/cn repscan`, and every alt's row was frozen at the language and
+    -- the rank that character last scanned in: a German player reading
+    -- "EhrfÃ¼rchtig" for one faction and "Renown 12" for the next, which is
+    -- the exact symptom 0.65.0 and 0.66.0 were both written to end.
+    --
+    -- `reaction` and `renownLevel` are numbers and are kept. The word is
+    -- derived, in the language of whoever is reading it.
+    if record.kind == "FRIENDSHIP" and record.friendshipStanding
+        and record.friendshipStanding ~= "" then
+
+        return record.friendshipStanding
     end
 
     return Blizzard.GetStandingLabel(record.reaction)

@@ -2106,9 +2106,9 @@ mutate "Modules/Currencies.lua" \
     "a currency capped on earnings is measured against the balance"
 
 mutate "Modules/Achievements.lua" \
-    "        if watched[achievementID]
-            and record.criteria and record.criteria > 0 then" \
-    "        if record.criteria and record.criteria > 0 then" \
+    "            if watched[achievementID]
+                and record.criteria and record.criteria > 0 then" \
+    "            if record.criteria and record.criteria > 0 then" \
     "the criteria sweep polls every tracked achievement every five seconds"
 
 mutate "Character.lua" \
@@ -2241,12 +2241,12 @@ mutate "Providers/StaticData.lua" \
     "the block reason has to be parsed back out of English prose"
 
 mutate "Modules/Loremaster.lua" \
-    "        local heldName = Loremaster.NameOf(id, record)
+    "            local heldName = Loremaster.NameOf(id, record)
 
-        if Names(heldName) then" \
-    "        local heldName = record.name
+            if Names(heldName) then" \
+    "            local heldName = record.name
 
-        if Names(heldName) then" \
+            if Names(heldName) then" \
     "the zone achievement is matched against a stored name"
 
 mutate "Core.lua" \
@@ -2282,8 +2282,8 @@ mutate "Modules/Exploration.lua" \
     "the this-zone line shows another character's exploration"
 
 mutate "Modules/Reputations.lua" \
-    "            record.standing    = CN.RenownLabel(major.renownLevel or 0)" \
-    "            record.standing    = \"Renown \" .. tostring(major.renownLevel or 0)" \
+    "        return CN.RenownLabel(record.renownLevel or record.renown or 0)" \
+    "        return \"Renown \" .. tostring(record.renownLevel or record.renown or 0)" \
     "renown is printed in English beside translated standings"
 
 # NOT MUTATED: `CN.scopes.ACCOUNT` and the literal are the same string today,
@@ -2706,16 +2706,11 @@ mutate "Modules/Loremaster.lua" \
     "    record.completed = (done >= criteria) and true or false" \
     "an alt part-way through a zone un-earns the account's achievement"
 
-mutate "Modules/Loremaster.lua" \
-    "    if best and mapID then
-        -- Learned, so the ambiguity is resolved once rather than every time,
-        -- and by the map, which cannot be duplicated.
-        best.mapID = mapID
-    end" \
-    "    if false then
-        best.mapID = mapID
-    end" \
-    "the zone is re-guessed on every criteria update instead of learned"
+# RETIRED IN 0.72.0. This mutated `best.mapID = mapID` -- the persisted map
+# stamp, which 0.72.0 removed outright because the value came from
+# `GetBestMapForUnit` and was therefore the city map indoors. Its successor is
+# "every criteria update walks the whole achievement store again", below,
+# which mutates the session index that replaced it.
 
 mutate "Modules/Loremaster.lua" \
     "                if criteria and criteria > 0 then
@@ -2762,8 +2757,9 @@ mutate "Providers/BlizzardCollections.lua" \
     "an achievement the client cannot answer about is reported unearned"
 
 mutate "Modules/Loremaster.lua" \
-    "    if measured == 0 then" \
-    "    if false then" \
+    "        return scanned, 0
+    end" \
+    "    end" \
     "a scan that measured nothing records itself as done"
 
 mutate "Modules/Loremaster.lua" \
@@ -2772,8 +2768,8 @@ mutate "Modules/Loremaster.lua" \
     "the zone match is an unanchored substring again"
 
 mutate "Modules/Loremaster.lua" \
-    "    local zone = GetZoneText and GetZoneText()" \
-    "    local zone = Blizzard.GetMapName(mapID)" \
+    "    zone = zone or (GetZoneText and GetZoneText())" \
+    "    zone = Blizzard.GetMapName(CN.GetPlayerPosition())" \
     "standing in a city finds no zone at all"
 
 mutate "Modules/Loremaster.lua" \
@@ -2796,6 +2792,75 @@ mutate "Modules/Reputations.lua" \
     "            name            = Reputations.NameOf(record.factionID)," \
     "            name            = record.name," \
     "a faction is listed under the language that last scanned it"
+
+# ---- 0.72.0 ----
+
+mutate "Modules/Loremaster.lua" \
+    "    local matches = zoneIndex[zone]
+
+    if not matches then" \
+    "    local matches = nil
+
+    if not matches then" \
+    "every criteria update walks the whole achievement store again"
+
+mutate "Modules/Loremaster.lua" \
+    "        zoneIndex[zone] = matches" \
+    "        if #matches > 0 then zoneIndex[zone] = matches end" \
+    "a zone with no achievement pays the full walk on every event"
+
+mutate "Modules/Loremaster.lua" \
+    "    local fresh = math.min(#untouched, freshShare or math.floor(limit / 4))" \
+    "    local fresh = 0" \
+    "a zone never begun cannot be recommended to a player who has begun many"
+
+mutate "Modules/Loremaster.lua" \
+    "        row.name     = Loremaster.NameOf(row.id, row.record)" \
+    "        row.name     = tostring(row.id)" \
+    "the zone list shows achievement ids instead of names"
+
+mutate "Modules/Loremaster.lua" \
+    "        return scanned, 0" \
+    "        return scanned, 1" \
+    "a scan that recorded nothing reports a count as though it had"
+
+mutate "Modules/Session.lua" \
+    "        travelKnown = cost == nil or cost == 0
+            or not (objective.mapID and objective.x and objective.y)" \
+    "        travelKnown = cost == nil or cost == 0" \
+    "the planner can never learn how long an instance takes"
+
+mutate "Modules/Session.lua" \
+    "        travelKnown = cost == nil or cost == 0
+            or not (objective.mapID and objective.x and objective.y)" \
+    "        travelKnown = true" \
+    "a journey the model stopped counting is subtracted from a measured span"
+
+mutate "Scoring.lua" \
+    "    if CN.MinimumSecondsNeeded(objective) then" \
+    "    if false then" \
+    "the farthest objectives show no distance at all, reading as unknown"
+
+mutate "Modules/Reputations.lua" \
+    "        return record.friendshipStanding" \
+    "        return nil" \
+    "a friendship rank is lost, and it is the one the client will not re-supply"
+
+mutate "Modules/Quests.lua" \
+    "    local store = Remembered()
+
+    if store[questID] then
+        store[questID] = nil" \
+    "    local store = Remembered()
+
+    if false then
+        store[questID] = nil" \
+    "a quest handed in is left on the map until something else prunes it"
+
+mutate "Modules/Exploration.lua" \
+    "    return before ~= done" \
+    "    return true" \
+    "every criteria update throws away the exploration provider's cached rows"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

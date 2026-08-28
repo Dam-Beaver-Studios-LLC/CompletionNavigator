@@ -377,6 +377,21 @@ CN.RegisterCandidateProvider("Vendors", function()
     -- a row.
     local sellable = Vendors.ItemIndex()
 
+    -- ONE LOOKUP PER ITEM. 0.72.0. See the note in `Modules/Toys.lua`: the
+    -- same duplication, in the same shape, missed by the same fix.
+    local sellers = {}
+
+    local function SellerFor(itemID)
+        local held = sellers[itemID]
+
+        if held == nil then
+            held = Vendors.FirstLocatedSeller(itemID) or false
+            sellers[itemID] = held
+        end
+
+        return held or nil
+    end
+
     local candidates, considered, dropped = CN.CollectBounded(sellable, nil,
         function(itemID)
             if known[itemID] or not names[itemID] then
@@ -388,7 +403,7 @@ CN.RegisterCandidateProvider("Vendors", function()
                 return nil
             end
 
-            local seller = Vendors.FirstLocatedSeller(itemID)
+            local seller = SellerFor(itemID)
 
             if not seller then
                 return nil
@@ -412,7 +427,7 @@ CN.RegisterCandidateProvider("Vendors", function()
         -- comes from `names`, which `evaluate` above has already required to
         -- be present.
         function(itemID)
-            local seller = Vendors.FirstLocatedSeller(itemID)
+            local seller = SellerFor(itemID)
 
             if not seller then
                 return nil

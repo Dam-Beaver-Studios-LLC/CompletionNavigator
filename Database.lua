@@ -1181,6 +1181,68 @@ CN.migrations = {
         -- character repairs itself the first time it plays, and nobody's work
         -- is thrown away to do it.
     end,
+
+    -- A STAMP THAT SHOULD NEVER HAVE BEEN WRITTEN DOWN. 0.72.0.
+    --
+    -- 0.71.0 cached "which achievement is this zone" onto the record itself,
+    -- as `record.mapID`, taken from `GetBestMapForUnit` -- which answers with
+    -- the CITY map indoors. So the value is wrong wherever it differs from
+    -- the zone it was matched by, it was rewritten on every threshold
+    -- crossed, and one zone could end up with two records each claiming a
+    -- different map.
+    --
+    -- The lookup is remembered in memory now, for the session, under the zone
+    -- name it was actually matched on. Nothing about it belongs on disk.
+    -- Removed here rather than left inert, because a field left behind is a
+    -- field the next reader will believe.
+    [22] = function(db)
+        local account = db.account
+
+        if not account or type(account.loremaster) ~= "table" then
+            return
+        end
+
+        for _, record in pairs(account.loremaster) do
+            if type(record) == "table" then
+                record.mapID = nil
+            end
+        end
+    end,
+
+    -- AND THE LOCALIZED STANDING MIGRATION 18 ONLY HALF-REMOVED. 0.72.0.
+    --
+    -- 18 stripped `standing` from RENOWN rows because it had been persisted
+    -- as hardcoded English. It did not stop the SCANNER writing it, so the
+    -- next `/cn repscan` put it straight back -- for every kind of faction,
+    -- not just RENOWN -- and `StandingText` preferred the stored copy to its
+    -- own derivation. A migration undone by the ordinary use of the addon.
+    --
+    -- 0.72.0 stopped writing it. This removes what the last three years of
+    -- scans left behind, on account rows and on every character's, so that
+    -- the derivation is the only thing anything can read. The exception is
+    -- `friendshipStanding`, which is written under its own name precisely
+    -- because the client will not re-supply it for an alt.
+    [23] = function(db)
+        local function Strip(store)
+            if type(store) ~= "table" then
+                return
+            end
+
+            for _, record in pairs(store) do
+                if type(record) == "table" then
+                    record.standing = nil
+                end
+            end
+        end
+
+        Strip(db.account and db.account.reputations)
+
+        for _, character in pairs(db.characters or {}) do
+            if type(character) == "table" then
+                Strip(character.reputations)
+            end
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

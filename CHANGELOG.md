@@ -7,6 +7,80 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.72.0]
+
+**The zone fix worked, and then cached its answer under the wrong key.**
+0.71.0 matched the zone correctly and then remembered the match under
+`GetBestMapForUnit` â€” the city map indoors, the same wrong value the release
+was written to remove, moved from the match into the memory of it. This
+release stops writing it down at all.
+
+### Fixed â€” the journey, and the cost of keeping it current
+
+- **The learned zone stamp never settled and was written to disk.** Walking
+  into a building stamped one map, walking out stamped another, and the walk
+  the stamp exists to avoid ran on every threshold crossed. It also let one
+  zone hold two records with two maps, so the tab could show a different
+  achievement on the two sides of a doorway â€” the hash-order symptom 0.71.0
+  set out to end, reintroduced by the fix for it. The match is remembered in
+  memory now, for the session, keyed on the zone name it was actually matched
+  on, and the old field is removed from saved data.
+- **What is remembered is the match, not the winner.** Which achievements are
+  named after a zone depends only on their names and does not change while the
+  game is running; which of them is the zone's own depends on whether you have
+  earned it, and that can change at any moment. Earning a zone's story
+  achievement now moves the tab onto its companion immediately instead of at
+  the next login.
+- **The zone list resolved a name and a category for every row in the store
+  before throwing all but twelve away.** Two client calls per row, several
+  hundred rows, from every refresh of the Journey tab. It sorts on the
+  numbers, cuts, and names what is left.
+- **A zone you had never set foot in could not be recommended** to the only
+  player it matters to. Started and untouched zones were concatenated and cut
+  from the end, so an account with fifty zones in progress lost every fresh
+  one before the list was scored. A quarter of the room is held for them, and
+  the zone you are standing in is always a candidate.
+- **`/cn scanlore` reported a count for a scan that recorded nothing.** 0.71.0
+  stopped such a scan marking itself as done and went on returning the number
+  of rows it had walked past. It now says what happened.
+- **A turn-in made about twelve hundred client calls to forget one pin.** The
+  event hands over the quest id; the full sweep of the remembered-quest store
+  ran anyway, on every turn-in, four times over at the end of a chain.
+- **Toys and recipes looked up the same vendor twice per item.** 0.71.0
+  collapsed the duplicated travel cost in both files and walked past the
+  identical duplication one line above it.
+- **The achievement criteria sweep dropped every update after the first in a
+  burst** â€” including the one that crossed the boundary it was watching for â€”
+  and never ran again until an unrelated update arrived. It now uses the same
+  throttle its two siblings do, which answers at the start of a burst and
+  again at the end.
+- **Exploration rebuilt its recommendations on every criteria update**,
+  whether or not a number had moved. Its sibling was given that test last
+  release; the file it was copied from was not.
+
+### Fixed â€” what the numbers say
+
+- **The tooltip and `/cn list` gave different distances for the same
+  objective.** The list stopped measuring past twenty minutes and printed
+  nothing; the tooltip measured anyway and printed "About 47 minutes away".
+  One function decides now â€” and instead of going silent for the farthest
+  objectives, which reads as "unknown" rather than "very far", it says the
+  journey is over twenty minutes.
+- **The planner could never learn how long an instance, a vault run or a
+  waiting objective takes.** Those rows carry a small hand-picked travel cost
+  and no coordinates; 0.71.0 began rejecting every completion of them as
+  unmeasurable, so `/cn plan` reported "not measured" for them permanently. A
+  row with no place in it has no journey to subtract.
+- **Every reputation scan undid a migration.** The addon has stripped the
+  stored, localized standing from renown factions since 0.66.0, and the
+  scanner wrote it straight back on the next `/cn repscan` â€” for every kind of
+  faction â€” while the reader preferred the stored copy to deriving one. An
+  alt's standing showed in whatever language and at whatever rank that
+  character last scanned. Nothing localized is stored now; the one genuine
+  exception, a friendship's free-text rank, is kept under its own name.
+- **A zone already finished drew as unfinished on the Journey tab** â€” gold,
+  full bar, "60 / 60" â€” on the row a player looks at most.
+
 ## [0.71.0]
 
 **The quest-turn-in fix has been claimed three times and did not work any of

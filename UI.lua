@@ -95,42 +95,37 @@ local window, minimapButton
 -- about rows that are not there. 0.68.0.
 UI.listLimit = 12
 
+-- THROUGH THE SAME FUNCTION `/cn list` USES, AND THROUGH THE CACHE. 0.72.0.
+--
+-- This called `Travel.EstimateSeconds` directly. Two consequences, both
+-- visible: it skipped `Travel.CostFor`'s cache, so every hover ran a fresh
+-- walk of the flight network; and it applied the confidence flag but not the
+-- clamp, so a rare forty minutes away printed a confident duration in the
+-- tooltip while its row in `/cn list` printed no distance at all.
+--
+-- `CN.TravelText` is the one place that turns a journey into words.
 function UI.DistanceLine(mapID, x, y)
     if not mapID or not x or not y then
         return nil
     end
 
-    local travel = CN:GetModule("Travel")
+    local cost, costed = CN.TravelCost(mapID, x, y)
 
-    if not travel or not travel.EstimateSeconds then
-        return nil
-    end
-
-    local playerMap, playerX, playerY = CN.GetPlayerPosition()
-
-    if not playerMap or not playerX or not playerY then
-        return nil
-    end
-
-    local seconds, confident = travel.EstimateSeconds(
-        playerMap, playerX, playerY, mapID, x, y)
-
-    -- THE SAME RULE THE REST OF THE ADDON USES SINCE 0.71.0: the travel
-    -- model's own confidence flag, which `CN.TravelCost` now carries out to
-    -- every provider and `CN.SecondsNeeded` requires. Two definitions of
-    -- "measured" is how the same rare showed a distance here and none in
-    -- `/cn list`.
-    if not seconds or not confident then
-        return nil
-    end
-
-    local session = CN:GetModule("Session")
-
-    local text = session and session.FormatDuration
-        and session.FormatDuration(seconds)
+    local text, exact = CN.TravelText({
+        mapID        = mapID,
+        x            = x,
+        y            = y,
+        travelCost   = cost,
+        travelCosted = costed or nil,
+    })
 
     if not text then
         return nil
+    end
+
+    if not exact then
+        return "More than " .. string.gsub(text, "^over ", "")
+            .. " away; the addon stops measuring past that."
     end
 
     return "About " .. text .. " away by the route this addon would take."
@@ -3233,10 +3228,27 @@ UI.RegisterTab{
                     fraction = zone.done / zone.criteria
                 end
 
+                -- AND A FINISHED ZONE IS SAID TO BE FINISHED. 0.72.0.
+                --
+                -- This row ignored `zone.completed`, so a zone the account
+                -- had already earned drew in the unfinished gold with a full
+                -- bar and "60 / 60" beside it -- reading, on the tab a player
+                -- looks at most, as a piece of work still to do.
+                --
+                -- Every other surface already carried this rule: the
+                -- candidate provider returns early on it, `PrintAchievement`
+                -- colours it green, and `Closest` gained `done < criteria`
+                -- last release. Fourth copy, first one the player sees.
+                local done = zone.completed
+                    or (fraction ~= nil and zone.done >= zone.criteria)
+
                 table.insert(entries, {
-                    text     = "|cffffc74fHere|r  " .. tostring(zone.name),
+                    text     = (done and (CN.Good("Here") .. "  ")
+                        or "|cffffc74fHere|r  ") .. tostring(zone.name),
                     value    = fraction
-                        and CN.Body(zone.done .. " / " .. zone.criteria)
+                        and (done
+                            and CN.Good(zone.done .. " / " .. zone.criteria)
+                            or CN.Body(zone.done .. " / " .. zone.criteria))
                         or nil,
                     fraction = fraction,
                 })

@@ -735,8 +735,31 @@ function Quests.RememberedZones()
     return zones
 end
 
-CN:RegisterEvent("QUEST_TURNED_IN", function()
-    Quests.PruneRemembered()
+-- THE EVENT HANDS YOU THE ID. USE IT. 0.72.0.
+--
+-- This ran the full sweep on every turn-in: a walk of the remembered store,
+-- capped at 600 rows, with `IsQuestCompletedOnAccount` and `IsQuestInLog` --
+-- two client calls -- on each, plus a `CN.CountKeys` pass. Twelve hundred
+-- client calls to remove one entry, at the end of every quest, and four times
+-- over in the bursts at the end of a chain.
+--
+-- The one quest that just changed is the argument. The full sweep still runs
+-- where it is actually needed: `RememberOffer` calls it when the store
+-- crosses its cap, and the login hook covers anything completed elsewhere.
+CN:RegisterEvent("QUEST_TURNED_IN", function(_, questID)
+    if not questID then
+        -- No id: the client did not say which. Fall back to the sweep rather
+        -- than leaving a stale pin on the map.
+        Quests.PruneRemembered()
+        return
+    end
+
+    local store = Remembered()
+
+    if store[questID] then
+        store[questID] = nil
+        Quests.pinRevision = Quests.pinRevision + 1
+    end
 end)
 
 CN:RegisterCommand{

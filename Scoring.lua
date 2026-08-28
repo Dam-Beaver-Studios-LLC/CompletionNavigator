@@ -215,6 +215,56 @@ function CN.SecondsNeeded(objective)
     return seconds
 end
 
+-- HOW FAR AWAY A THING IS, IN WORDS, FOR EVERY SURFACE THAT SAYS SO. 0.72.0.
+--
+-- `CN.SecondsNeeded` returns nil at or above the travel model's clamp, which
+-- is right for arithmetic -- twenty minutes is where the estimate stops being
+-- a measurement -- and wrong as a thing to render, because both callers then
+-- printed NOTHING for the farthest objectives in the list. A row with no
+-- distance reads as "unknown", and the rows the player most wants warned
+-- about are exactly the ones that got no warning.
+--
+-- The two callers also disagreed. `/cn list` went through `SecondsNeeded` and
+-- honoured the clamp; `UI.DistanceLine` called `Travel.EstimateSeconds`
+-- directly, honoured only the confidence flag, and cheerfully printed "About
+-- 47 minutes away" for a rare whose row in the list showed no distance at
+-- all. Same objective, same moment, two answers -- which is the exact defect
+-- 0.71.0's "one definition of a measured journey" was written to end, still
+-- standing in the two places a player actually reads.
+--
+-- One function now, and it answers for the far case instead of going quiet.
+-- Returns the phrase, and whether it is an exact figure or a floor. Both
+-- callers render the two cases differently and neither should be reading the
+-- string to find out which it got.
+function CN.TravelText(objective)
+    local exact = CN.SecondsNeeded(objective)
+
+    local session = CN.modules and CN:GetModule("Session")
+
+    if exact then
+        local text = session and session.FormatDuration
+            and session.FormatDuration(exact)
+
+        return text, true
+    end
+
+    -- Costed, but past the clamp: the model is confident it is far and not
+    -- confident about how far. Say the first half.
+    if CN.MinimumSecondsNeeded(objective) then
+        local travel = CN.modules and CN:GetModule("Travel")
+
+        local ceiling = ((travel and travel.maximumCost) or 40)
+            * CN.secondsPerCostPoint
+
+        local text = session and session.FormatDuration
+            and session.FormatDuration(ceiling)
+
+        return text and ("over " .. text) or nil, false
+    end
+
+    return nil
+end
+
 -- FOR THE DEADLINE TEST: a LOWER BOUND, which is all "can I get there in
 -- time" needs. At the clamp the journey is AT LEAST twenty minutes, so a
 -- deadline shorter than that is unreachable whether or not the exact figure
@@ -2681,8 +2731,6 @@ CN:RegisterCommand{
         --
         -- Replaced with the figure the ranking already computed that a person
         -- can act on: how far away it is.
-        local session = CN:GetModule("Session")
-
         CN.Print("The top " .. #results .. ":")
 
         for index, objective in ipairs(results) do
@@ -2699,11 +2747,7 @@ CN:RegisterCommand{
             --
             -- `CN.SecondsNeeded` is the one place that decides whether a
             -- journey is a measurement.
-            local measured = CN.SecondsNeeded(objective)
-
-            if measured and session and session.FormatDuration then
-                away = session.FormatDuration(measured)
-            end
+            away = CN.TravelText(objective)
 
             CN.PrintLine(index .. ". "
                 .. CN.Primary(tostring(objective.name or objective.id))

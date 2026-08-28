@@ -420,92 +420,101 @@ end)
 
 -- Criteria updates fire constantly during play. Refresh the tracked rows
 -- rather than rescanning thousands of achievements, and throttle even that.
-local lastCriteriaSweep = 0
 
 -- Published rather than a literal, so the throttle is a knob the suite can
 -- turn. A guard nothing can reach is a guard nothing tests.
 Achievements.criteriaSweepSeconds = 5
 
+-- THROUGH `CN.Debounce`, LIKE BOTH ITS SIBLINGS. 0.72.0.
+--
+-- This was a hand-rolled leading-edge throttle with NO TRAILING RUN -- the
+-- exact shape `UI.RequestRefresh` documents as wrong and replaced, and the
+-- shape the two other `CRITERIA_UPDATE` handlers in this addon
+-- (`Exploration`, `Loremaster`) already avoid.
+--
+-- A single discovery fires several criteria updates in a row. The first was
+-- answered against pre-move state and the rest were DROPPED -- including the
+-- one that actually crossed the `IsNearlyDone` boundary -- so an achievement
+-- reaching 38 of 40 stayed off the shortlist until an unrelated criteria
+-- update happened along more than five seconds later. `CN.Debounce` gives the
+-- leading answer AND one trailing run, which is what makes the last update in
+-- a burst the one that counts.
 CN:RegisterEvent("CRITERIA_UPDATE", function()
-    local now = time()
+    CN.Debounce("Achievements.criteria",
+        Achievements.criteriaSweepSeconds, function()
 
-    if now - lastCriteriaSweep < Achievements.criteriaSweepSeconds then
-        return
-    end
+        -- THE SHORTLIST, NOT THE WHOLE STORE. 0.62.0.
+        --
+        -- This walked every incomplete tracked achievement and called
+        -- `GetAchievementProgress` on each -- and that function makes one client
+        -- call PER CRITERION. At retail scale it is several hundred rows of five
+        -- to forty criteria: a few thousand client calls, every five seconds, for
+        -- as long as CRITERIA_UPDATE keeps firing, which is continuously while
+        -- questing or raiding. Measured on the game's own Lua 5.1: 21.4 ms per
+        -- sweep, more than a frame, twelve times a minute.
+        --
+        -- Only rows near the boundary can change what the addon SHOWS: the
+        -- provider reads the shortlist, and a row at 3 of 40 moving to 4 of 40
+        -- changes nothing anybody sees until it is within the threshold. So the
+        -- sweep covers the shortlist plus anything the player has pinned as a
+        -- goal, which is a dozen rows rather than several hundred.
+        --
+        -- The rest are picked up by the next full scan, exactly as before -- this
+        -- store has always been a snapshot refreshed on demand.
+        local store = Store()
 
-    lastCriteriaSweep = now
+        local watched = {}
 
-    -- THE SHORTLIST, NOT THE WHOLE STORE. 0.62.0.
-    --
-    -- This walked every incomplete tracked achievement and called
-    -- `GetAchievementProgress` on each -- and that function makes one client
-    -- call PER CRITERION. At retail scale it is several hundred rows of five
-    -- to forty criteria: a few thousand client calls, every five seconds, for
-    -- as long as CRITERIA_UPDATE keeps firing, which is continuously while
-    -- questing or raiding. Measured on the game's own Lua 5.1: 21.4 ms per
-    -- sweep, more than a frame, twelve times a minute.
-    --
-    -- Only rows near the boundary can change what the addon SHOWS: the
-    -- provider reads the shortlist, and a row at 3 of 40 moving to 4 of 40
-    -- changes nothing anybody sees until it is within the threshold. So the
-    -- sweep covers the shortlist plus anything the player has pinned as a
-    -- goal, which is a dozen rows rather than several hundred.
-    --
-    -- The rest are picked up by the next full scan, exactly as before -- this
-    -- store has always been a snapshot refreshed on demand.
-    local store = Store()
-
-    local watched = {}
-
-    for _, entry in ipairs(Achievements.Shortlist()) do
-        watched[entry.id] = true
-    end
-
-    local goals = CN:GetModule("Goals")
-
-    if goals and goals.List then
-        for _, goal in ipairs(goals.List() or {}) do
-            if goal and goal.type == CN.objectiveTypes.ACHIEVEMENT and goal.id then
-                watched[goal.id] = true
-            end
+        for _, entry in ipairs(Achievements.Shortlist()) do
+            watched[entry.id] = true
         end
-    end
 
-    for achievementID, record in pairs(store) do
-        if watched[achievementID]
-            and record.criteria and record.criteria > 0 then
+        local goals = CN:GetModule("Goals")
 
-            -- BOTH RETURNS, BECAUSE A REFUSAL LOOKS LIKE ZERO. 0.67.0.
-            --
-            -- `GetAchievementProgress` answers `0, 0` when the criteria API
-            -- is unavailable -- early in a loading screen, or before the
-            -- achievement UI has loaded -- and this discarded the second
-            -- return, so a refusal was written into the store as real
-            -- progress. One `CRITERIA_UPDATE` at the wrong moment rewrote
-            -- every watched row to zero, `IsNearlyDone` went false, and an
-            -- achievement at 38 of 40 dropped out of `/cn next` until a full
-            -- `/cn achievescan`, which nothing runs on its own.
-            --
-            -- `Exploration.RefreshCurrentZone` guards this exact case, under
-            -- the header "NOT OVER GOOD DATA WITH NOTHING". The guard was
-            -- never carried to the sibling.
-            local done, criteria = Blizzard.GetAchievementProgress(achievementID)
-
-            if criteria and criteria > 0 and done ~= record.done then
-                local wasNear = IsNearlyDone(record)
-
-                record.done     = done
-
-                -- Only a change that crosses the shortlist boundary can
-                -- change what the provider would produce. Bumping the
-                -- revision on every criteria tick would rebuild the
-                -- shortlist constantly and give back the saving.
-                if wasNear ~= IsNearlyDone(record) then
-                    Achievements.revision = Achievements.revision + 1
+        if goals and goals.List then
+            for _, goal in ipairs(goals.List() or {}) do
+                if goal and goal.type == CN.objectiveTypes.ACHIEVEMENT and goal.id then
+                    watched[goal.id] = true
                 end
             end
         end
-    end
+
+        for achievementID, record in pairs(store) do
+            if watched[achievementID]
+                and record.criteria and record.criteria > 0 then
+
+                -- BOTH RETURNS, BECAUSE A REFUSAL LOOKS LIKE ZERO. 0.67.0.
+                --
+                -- `GetAchievementProgress` answers `0, 0` when the criteria API
+                -- is unavailable -- early in a loading screen, or before the
+                -- achievement UI has loaded -- and this discarded the second
+                -- return, so a refusal was written into the store as real
+                -- progress. One `CRITERIA_UPDATE` at the wrong moment rewrote
+                -- every watched row to zero, `IsNearlyDone` went false, and an
+                -- achievement at 38 of 40 dropped out of `/cn next` until a full
+                -- `/cn achievescan`, which nothing runs on its own.
+                --
+                -- `Exploration.RefreshCurrentZone` guards this exact case, under
+                -- the header "NOT OVER GOOD DATA WITH NOTHING". The guard was
+                -- never carried to the sibling.
+                local done, criteria = Blizzard.GetAchievementProgress(achievementID)
+
+                if criteria and criteria > 0 and done ~= record.done then
+                    local wasNear = IsNearlyDone(record)
+
+                    record.done     = done
+
+                    -- Only a change that crosses the shortlist boundary can
+                    -- change what the provider would produce. Bumping the
+                    -- revision on every criteria tick would rebuild the
+                    -- shortlist constantly and give back the saving.
+                    if wasNear ~= IsNearlyDone(record) then
+                        Achievements.revision = Achievements.revision + 1
+                    end
+                end
+            end
+        end
+    end)
 end)
 
 ------------------------------------------------------------

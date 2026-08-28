@@ -147,6 +147,31 @@ CN.RegisterCandidateProvider("Toys", function()
 
     local playerMap = select(1, CN.GetPlayerPosition())
 
+    -- ONE LOOKUP PER ITEM, LIKE THE TRAVEL COST BESIDE IT. 0.72.0.
+    --
+    -- 0.71.0 collapsed the double `CN.TravelCost` call in this provider and
+    -- walked past the identical duplication one line above it.
+    -- `CN.CollectBounded` runs `evaluate` for every row in the store and
+    -- `build` for every survivor, and both closures asked
+    -- `FirstLocatedSeller` the same question -- which walks the npc list,
+    -- allocates a table, and makes a `GetMapName` client call. Over the whole
+    -- toy box, on every rebuild.
+    --
+    -- "A fix that lands at one call site is not finished" is a standing rule
+    -- here, and this is the call site it named.
+    local sellers = {}
+
+    local function SellerFor(itemID)
+        local held = sellers[itemID]
+
+        if held == nil then
+            held = vendors.FirstLocatedSeller(itemID) or false
+            sellers[itemID] = held
+        end
+
+        return held or nil
+    end
+
     local candidates, considered, dropped = CN.CollectBounded(Store(), nil,
         function(itemID, record)
             if record.collected then
@@ -158,7 +183,7 @@ CN.RegisterCandidateProvider("Toys", function()
                 return nil
             end
 
-            local seller = vendors.FirstLocatedSeller(itemID)
+            local seller = SellerFor(itemID)
 
             if not seller then
                 return nil
@@ -167,7 +192,7 @@ CN.RegisterCandidateProvider("Toys", function()
             return (seller.mapID == playerMap) and 3 or 2
         end,
         function(itemID, record, value)
-            local seller = vendors.FirstLocatedSeller(itemID)
+            local seller = SellerFor(itemID)
 
             if not seller then
                 return nil

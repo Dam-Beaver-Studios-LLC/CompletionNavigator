@@ -419,9 +419,20 @@ local function RefreshCurrentZone()
     -- differently -- and so both file it under the character it belongs to.
     -- This function is wired to `ZONE_CHANGED_NEW_AREA`, so before 0.64.0 an
     -- alt flying through a zone overwrote the main's progress in passing.
+    -- MOVED, NOT MERELY READABLE. 0.72.0.
+    --
+    -- This returned true whenever the criteria API answered at all, and the
+    -- `CRITERIA_UPDATE` handler below turns that into
+    -- `CN.InvalidateProvider("Exploration")` -- so every debounce window
+    -- while questing threw away the provider's cached rows and rebuilt them,
+    -- whether or not a single number had changed. `Loremaster` was given the
+    -- `before ~= done` test in 0.71.0; the sibling it was copied FROM never
+    -- got it.
+    local before = Exploration.DoneFor(record)
+
     Exploration.NoteProgress(record, done, done and done >= criteria)
 
-    return true
+    return before ~= done
 end
 
 Exploration.RefreshCurrentZone = RefreshCurrentZone
