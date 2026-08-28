@@ -1813,10 +1813,16 @@ Travel.costCacheCap = 512
 Travel.costCacheYards = 20
 
 local costCache, costCacheCount = {}, 0
+
+-- Whether the model was confident about each cached cost. Kept beside the
+-- cache rather than inside it so nothing that reads a cost by key has to know
+-- about a second shape. 0.71.0.
+local confidentCache = {}
 local costCacheMap, costCacheX, costCacheY
 
 function Travel.ForgetCosts()
     costCache, costCacheCount = {}, 0
+    confidentCache = {}
     costCacheMap, costCacheX, costCacheY = nil, nil, nil
 end
 
@@ -1859,6 +1865,7 @@ function Travel.CostFor(mapID, x, y)
 
     if moved then
         costCache, costCacheCount = {}, 0
+        confidentCache = {}
         costCacheMap = playerMap
         costCacheX, costCacheY = playerX, playerY
     end
@@ -1873,13 +1880,24 @@ function Travel.CostFor(mapID, x, y)
     local held = costCache[key]
 
     if held ~= nil then
-        return held
+        return held, confidentCache[key]
     end
 
-    local seconds = Travel.EstimateSeconds(playerMap, playerX, playerY, mapID, x, y)
+    -- THE MODEL'S OWN CONFIDENCE, CARRIED RATHER THAN DROPPED. 0.71.0.
+    --
+    -- `EstimateSeconds` returns whether it is confident in the figure -- a
+    -- multi-hop route through a flight network it is partly guessing at is
+    -- not the same claim as a walk across a zone -- and this threw that away.
+    -- So the addon ended up with two different rules for "is this journey a
+    -- measurement": the window's tooltips required confidence, and `/cn list`
+    -- and the deadline guard required only that a number came back. The same
+    -- rare could show a distance in one and not the other.
+    local seconds, confident = Travel.EstimateSeconds(
+        playerMap, playerX, playerY, mapID, x, y)
 
     if costCacheCount >= Travel.costCacheCap then
         costCache, costCacheCount = {}, 0
+        confidentCache = {}
     end
 
     if not seconds then
@@ -1907,7 +1925,11 @@ function Travel.CostFor(mapID, x, y)
     costCache[key]  = cost
     costCacheCount  = costCacheCount + 1
 
-    return cost
+    -- CACHED AS A PAIR, so the second reader of a cached cost gets the same
+    -- answer about it as the first.
+    confidentCache[key] = confident and true or false
+
+    return cost, confident and true or false
 end
 
 -- Published so providers do not each have to decide what to do when the
@@ -1928,10 +1950,23 @@ CN.fallbackZoneCost = 40
 function CN.TravelCost(mapID, x, y)
     local travel = CN:GetModule("Travel")
 
-    local cost = travel and travel.CostFor(mapID, x, y)
+    -- THE MODEL'S OWN CONFIDENCE, NOT "IT RETURNED A NUMBER". 0.71.0.
+    --
+    -- This reported `true` for anything `CostFor` answered at all, and
+    -- `CostFor` answers for a multi-hop route through a flight network it is
+    -- partly guessing at as readily as for a walk across a zone. The window's
+    -- tooltips already asked `EstimateSeconds` for its confidence flag and
+    -- printed nothing without it -- so the addon carried two different rules
+    -- for "is this journey a measurement", and the same rare could show a
+    -- distance in the tooltip and none in `/cn list`, or the reverse.
+    local cost, confident
+
+    if travel then
+        cost, confident = travel.CostFor(mapID, x, y)
+    end
 
     if cost then
-        return cost, true
+        return cost, confident and true or false
     end
 
     local playerMap = CN.GetPlayerPosition()

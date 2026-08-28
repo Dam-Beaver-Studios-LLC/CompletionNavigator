@@ -2168,6 +2168,12 @@ function GetAchievementInfo(a, b)
     return id, data.name, data.points, data.completed, 1, 1, 2026, "desc", 0, 1
 end
 
+-- An id the fixture's client actually knows, for tests that need to tell
+-- "the client answered" from "the client did not". 0.71.0.
+function CN_TEST_KnownAchievementID()
+    return (next(achievementData))
+end
+
 function GetAchievementNumCriteria(id)
     return achievementData[id] and achievementData[id].criteria or 0
 end
@@ -10126,7 +10132,298 @@ print("\nStubs, audited against a real client:")
 end)()
 
 
-print("\nWhat 0.70.0 changed, asserted through the paths the game takes:")
+print("\nWhat 0.71.0 changed, asserted through the paths the game takes:")
+
+;(function()
+    ------------------------------------------------------------
+    -- NOT ANSWERING IS NOT ANSWERING "NO". 0.71.0.
+    --
+    -- `GetAchievementInfo` does not throw for an id it cannot answer about --
+    -- it returns nothing -- so a `pcall` guard cannot catch that case, and
+    -- the function returned FALSE. Its caller writes the result into an
+    -- account-wide earned flag whenever it is not nil.
+    ------------------------------------------------------------
+    local earned = CN.Blizzard.IsAchievementEarned
+
+    assert(earned, "the accessor exists")
+
+    assert(earned(987654321) == nil,
+        "an id the client will not answer about produces nothing, not a "
+        .. "confident 'not earned'")
+
+    -- An id the client DOES answer about produces a boolean. Taken from the
+    -- fixture's own achievement table rather than from the addon's store,
+    -- which can hold rows the client has never heard of.
+    local known = CN_TEST_KnownAchievementID and CN_TEST_KnownAchievementID()
+
+    if known then
+        assert(type(earned(known)) == "boolean",
+            "and an id it does answer about produces a boolean")
+    end
+
+    print("  an achievement the client cannot name is not reported unearned")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCAN THAT MEASURED NOTHING DOES NOT RECORD ITSELF. 0.71.0.
+    --
+    -- The criteria API routinely answers `0, 0` at `PLAYER_LOGIN`, which is
+    -- why the writer guards against it -- and the marker saying "this
+    -- character has scanned" was written anyway, outside the loop. So an
+    -- alt's first login after upgrading recorded nothing, stamped itself
+    -- done, and never rescanned again: `/cn zones` said "not started" for
+    -- every zone it had fully quested, permanently.
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    CN.Account("loremasterScans")[key] = nil
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function()
+        return 0, 0
+    end
+
+    lore.Scan()
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(CN.Account("loremasterScans")[key] == nil,
+        "a scan the client would not answer for is not recorded as having "
+        .. "happened")
+
+    lore.Scan()
+
+    assert(CN.Account("loremasterScans")[key],
+        "and one that measured something is")
+
+    print("  a scan that measured nothing does not claim to have run")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE DEFINITION OF "MEASURED JOURNEY". 0.71.0.
+    --
+    -- The window's tooltips asked the travel model for its confidence flag
+    -- and printed nothing without it; `/cn list` and the deadline guard
+    -- required only that a number came back, and `CN.TravelCost` reported
+    -- `true` for anything at all. So the same rare could show a distance in
+    -- one and not the other.
+    ------------------------------------------------------------
+    local travel = CN:GetModule("Travel")
+
+    local realEstimate = travel.EstimateSeconds
+
+    travel.EstimateSeconds = function()
+        return 300, false
+    end
+
+    travel.ForgetCosts()
+
+    local _, confident = CN.TravelCost(94, 0.5, 0.5)
+
+    travel.EstimateSeconds = realEstimate
+    travel.ForgetCosts()
+
+    assert(confident == false,
+        "a route the model is not confident about is not reported as a "
+        .. "measurement")
+
+    -- AND `travelCosted` IS PART OF WHAT MAKES A ROW THE SAME ROW.
+    --
+    -- The reuse shortcut hands back the previous table when its identity
+    -- fields match, so a field left out of that list keeps its old value for
+    -- ever. `travelCost` clamps at exactly 40 and the fallback constant IS
+    -- 40, so a row that gained a real measurement between two builds kept
+    -- `travelCosted` nil -- losing its deadline guard permanently.
+    local source = CN_TEST_ReadAddonFile("Scoring.lua")
+
+    assert(source, "Scoring.lua must be readable")
+
+    local fields = source:match("local IDENTITY_FIELDS = {(.-)}")
+
+    assert(fields, "the identity list must be findable")
+
+    assert(fields:find("travelCosted", 1, true),
+        "travelCosted is part of what makes a candidate the same candidate")
+
+    print("  one definition of a measured journey, and it survives reuse")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE REMAINING 0.71.0 PROPERTIES.
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    lore.Scan()
+
+    local records = lore.Records()
+
+    -- THE ZONE NAME MUST BE A WHOLE WORD RUN AT THE END, not a substring.
+    --
+    -- An unanchored match makes "Shadowmoon" find "Shadowmoon Valley", and
+    -- makes every "Sojourner of <Zone>" a rival to the zone's own story
+    -- achievement -- which is what made 0.70.0 refuse everywhere.
+    local zone = GetZoneText()
+
+    -- THE ZONE NAME INSIDE A LONGER NAME IS NOT THE ZONE.
+    --
+    -- Under an unanchored match "Explorer of <Zone> and Beyond" is as good a
+    -- match as "<Zone>" itself, which is what made every "Sojourner of
+    -- <Zone>" a rival and 0.70.0 refuse everywhere.
+    local trailing = 999401
+
+    records[trailing] = {
+        achievementID = trailing,
+        categoryID    = 1,
+        criteria      = 10,
+        completed     = false,
+        progress      = {},
+    }
+
+    -- SHORTER than the real one, so only the anchor can rule it out -- the
+    -- shortest-name tie-break would otherwise save this test from itself.
+    CN_TEST_MakeAchievement(trailing, zone .. "!", 10, 0)
+
+    -- AND A SECOND LEGITIMATE MATCH IS BROKEN THE SAME WAY EVERY TIME.
+    --
+    -- Two achievements can both end in the zone name -- the story one and its
+    -- companion -- and which is chosen must not depend on what `pairs`
+    -- happened to reach first, or the tab shows a different zone achievement
+    -- on different logins with nothing having changed.
+    local rivalName = 999402
+
+    records[rivalName] = {
+        achievementID = rivalName,
+        categoryID    = 1,
+        criteria      = 10,
+        completed     = false,
+        progress      = {},
+    }
+
+    CN_TEST_MakeAchievement(rivalName, "Sojourner of " .. zone, 10, 0)
+
+    local first
+
+    for _ = 1, 6 do
+        for _, record in pairs(records) do
+            record.mapID = nil
+        end
+
+        local picked = lore.ForZone()
+
+        assert(picked, "a zone is found")
+
+        assert(picked.id ~= trailing,
+            "an achievement with the zone name buried inside it is not the "
+            .. "zone: " .. tostring(picked.name))
+
+        first = first or picked.id
+
+        assert(picked.id == first,
+            "and the same one is chosen every time, rather than whichever "
+            .. "the hash order reached first")
+
+        assert(picked.id ~= rivalName,
+            "and a companion achievement is not mistaken for the zone's own: "
+            .. tostring(picked.name))
+    end
+
+    -- AND THE TIE-BREAK ITSELF, ARGUMENT BY ARGUMENT.
+    --
+    -- Asserting on `ForZone`'s answer cannot test this: `pairs` order over one
+    -- table is stable inside a single process, so a comparison that always
+    -- answered "no" -- keep whichever was reached first -- passed the loop
+    -- above six times out of six. The property is "the same answer whatever
+    -- the order", and the only way to test that without controlling the hash
+    -- is to ask the comparison directly, in both orders.
+    local better = lore.BetterZoneMatch
+
+    local unfinished = { completed = false }
+    local finished   = { completed = true }
+
+    assert(better(unfinished, "Nagrand", 1, nil, nil, nil),
+        "anything beats nothing")
+
+    assert(better(unfinished, "Loremaster of Nagrand", 2,
+                  finished, "Nagrand", 1),
+        "an unfinished zone achievement beats a finished shorter one")
+
+    assert(not better(finished, "Nagrand", 1,
+                      unfinished, "Loremaster of Nagrand", 2),
+        "and the same pair answers the same way when it arrives reversed")
+
+    assert(better(unfinished, "Nagrand", 9,
+                  unfinished, "Sojourner of Nagrand", 2),
+        "the shorter name wins even from the higher ID")
+
+    assert(not better(unfinished, "Sojourner of Nagrand", 2,
+                      unfinished, "Nagrand", 9),
+        "and reversing the pair does not reverse the winner")
+
+    assert(better(unfinished, "Aaaaaaa", 3, unfinished, "Bbbbbbb", 4),
+        "equal-length names fall through to the lower ID")
+
+    assert(not better(unfinished, "Bbbbbbb", 4, unfinished, "Aaaaaaa", 3),
+        "and that, too, is the same answer in either order")
+
+    records[trailing]  = nil
+    records[rivalName] = nil
+
+    -- A ZONE WITH NOTHING LEFT IS NOT THE CLOSEST THING TO FINISHING.
+    local empty = 999402
+
+    records[empty] = {
+        achievementID = empty,
+        categoryID    = 1,
+        criteria      = 60,
+        completed     = false,
+        progress      = { [CN.characterKey or CN.GetCharacterKey()] = 60 },
+    }
+
+    CN_TEST_MakeAchievement(empty, "Loremaster of Nowhere", 60, 60)
+
+    for _, row in ipairs(lore.Closest(20) or {}) do
+        assert(row.id ~= empty,
+            "a zone whose criteria are all done is not offered as the "
+            .. "closest thing to finishing")
+    end
+
+    records[empty] = nil
+
+    -- A FACTION IS LISTED UNDER THE NAME THE CLIENT USES.
+    local reputations = CN:GetModule("Reputations")
+
+    reputations.Scan()
+
+    local factionID = next(reputations.AccountStore())
+
+    if factionID then
+        local live = reputations.NameOf(factionID)
+
+        reputations.AccountStore()[factionID].name = "Ein Alter Name"
+
+        CN.InvalidateProvider("Reputations", true)
+
+        for _, objective in ipairs(CN.Recommend(60, true) or {}) do
+            if objective.type == CN.objectiveTypes.REPUTATION
+                and objective.id == factionID then
+
+                assert(objective.name == live,
+                    "a faction is listed under the name the client gives it, "
+                    .. "not the one frozen in the store: "
+                    .. tostring(objective.name))
+            end
+        end
+    end
+
+    print("  the remaining 0.71.0 properties hold")
+end)()
+
 
 ;(function()
     ------------------------------------------------------------
@@ -10195,8 +10492,6 @@ end)()
     CN_TEST_MakeAchievement(rival, lore.NameOf(here.id, records[here.id]),
         20, 0)
 
-    local doneBefore = lore.DoneFor(records[here.id])
-
     local realProgress = CN.Blizzard.GetAchievementProgress
 
     CN.Blizzard.GetAchievementProgress = function()
@@ -10208,11 +10503,63 @@ end)()
 
     CN.Blizzard.GetAchievementProgress = realProgress
 
-    assert(lore.DoneFor(records[here.id]) == doneBefore,
-        "with two achievements matching the zone name, neither is rewritten "
-        .. "-- a write needs certainty a display does not")
+    -- A SECOND ACHIEVEMENT WITH THE SAME NAME DOES NOT STOP THE REFRESH. It
+    -- is broken by the same tie-break the display has always used, and then
+    -- settled permanently by the learned map id.
+    assert(lore.DoneFor(records[here.id]) == 17,
+        "the zone the player is standing in is still refreshed when another "
+        .. "achievement shares its name: "
+        .. tostring(lore.DoneFor(records[here.id])))
+
+    assert(records[here.id].mapID == CN.GetPlayerPosition(),
+        "and the answer is learned, so the next criteria update is an "
+        .. "integer comparison rather than a walk with a client call per row")
+
+    -- AND THE DISPLAY AGREES WITH THE WRITE, which is the whole point of one
+    -- lookup: 0.70.0 had the tab picking a record happily while the refresh
+    -- picked nothing, so the number on screen was one nothing could move.
+    assert(lore.ForZone().id == here.id,
+        "the tab and the refresh name the same zone")
 
     records[rival] = nil
+
+    -- AND IT WORKS IN A CITY, which is where campaign quests are handed in.
+    --
+    -- `GetBestMapForUnit` answers with the CITY's own map when the player is
+    -- standing in one -- this addon says so in three other files -- so a
+    -- lookup keyed on the map's name finds no achievement at all in
+    -- Dornogal, Valdrakken or Orgrimmar. 0.70.0 keyed on exactly that, so the
+    -- whole turn-in refresh was inert for every turn-in made indoors.
+    do
+        for _, record in pairs(records) do
+            record.mapID = nil
+        end
+
+        local realMapName = CN.Blizzard.GetMapName
+
+        CN.Blizzard.GetMapName = function(id)
+            if id == CN.GetPlayerPosition() then
+                return "Dornogal"
+            end
+
+            return realMapName(id)
+        end
+
+        CN.Blizzard.GetAchievementProgress = function()
+            return 11, 20
+        end
+
+        CN.ForgetDebounces()
+        CN.Dispatch("CRITERIA_UPDATE")
+
+        CN.Blizzard.GetMapName          = realMapName
+        CN.Blizzard.GetAchievementProgress = realProgress
+
+        assert(lore.DoneFor(records[here.id]) == 11,
+            "standing in a city, the zone around it is still the zone whose "
+            .. "progress a turn-in moves: "
+            .. tostring(lore.DoneFor(records[here.id])))
+    end
 
     -- A SCAN AT A COLD MOMENT DOES NOT EMPTY THE JOURNEY.
     --

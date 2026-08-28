@@ -200,6 +200,10 @@ function Loremaster.Scan()
 
     local scanned = 0
 
+    -- How many rows the client actually answered about. See the marker at
+    -- the bottom: a scan that measured nothing must not record itself.
+    local measured = 0
+
     for _, category in ipairs(Loremaster.QuestCategories()) do
         local total = select(1, Blizzard.GetCategoryCounts(category.categoryID))
 
@@ -255,6 +259,8 @@ function Loremaster.Scan()
 
                     held.progress = held.progress or {}
                     held.progress[CN.characterKey or CN.GetCharacterKey()] = done
+
+                    measured = measured + 1
                 end
 
                 store[id] = held
@@ -262,6 +268,23 @@ function Loremaster.Scan()
                 scanned = scanned + 1
             end
         end
+    end
+
+    -- AND ONLY WHEN IT MEASURED SOMETHING. 0.71.0.
+    --
+    -- The marker was written unconditionally, so a scan that ran at a moment
+    -- the criteria API would not answer -- which is routine at `PLAYER_LOGIN`
+    -- and is the reason the guard above exists -- recorded nothing, stamped
+    -- itself as done, and put "just now" on the Scans tab. The login rescan
+    -- then never fired again for that character, and `/cn zones` reported
+    -- "not started" for every zone it had fully quested, permanently.
+    --
+    -- The 0.69.0 condition it replaced was accidentally repairing this on the
+    -- next login; 0.70.0 removed the repair along with its cost.
+    if measured == 0 then
+        DebugPrint("Loremaster scan measured nothing; not recording it.")
+
+        return scanned
     end
 
     -- WHO HAS SCANNED, RECORDED RATHER THAN INFERRED. 0.70.0.
@@ -359,8 +382,23 @@ function Loremaster.Closest(limit)
     local started, untouched = {}, {}
 
     for id, record in pairs(Records()) do
-        if not record.completed and (record.criteria or 0) > 0 then
-            local done = Loremaster.DoneFor(record) or 0
+        local done = Loremaster.DoneFor(record) or 0
+
+        -- NOTHING LEFT IS NOT "CLOSEST TO FINISHING". 0.71.0.
+        --
+        -- The candidate provider has always carried this rule -- `if
+        -- remaining <= 0 ... return` -- and the two DISPLAY paths did not, so
+        -- a row whose criteria are all done but whose earned flag is stale
+        -- sorted to the top of `/cn zones` with the reason "100% done --
+        -- finishing is cheaper than starting", and to the top of the Journey
+        -- tab's "closest to finished" printed as 60/60 in the unfinished
+        -- colour. The addon telling the player, first, to go and finish a
+        -- zone with nothing in it.
+        --
+        -- The same rule written twice, and the third copy is in `Exploration`
+        -- with the same omission.
+        if not record.completed and (record.criteria or 0) > 0
+            and done < record.criteria then
 
             local row = {
                 id       = id,
@@ -420,82 +458,202 @@ function Loremaster.Closest(limit)
     return ordered, #started, #untouched
 end
 
--- The quest achievement that matches the zone you are standing in.
+-- WHICH RECORD THIS ZONE IS, LEARNED BY MAP ID. Rewritten in 0.71.0.
 --
--- Matched by name, which is imperfect and honest about being so: the client
--- does not link an achievement to a map. "Loremaster of Khaz Algar" will not
--- match "Isle of Dorn", and it is not supposed to -- the per-zone achievement
--- is the one that will.
-function Loremaster.ForZone(mapID)
-    mapID = mapID or select(1, CN.GetPlayerPosition())
-
-    if not mapID then
-        return nil
+-- Three releases have claimed to fix a reported symptom -- "the completion of
+-- a quest does not appear to remove it from the journey" -- and none of them
+-- worked. 0.69.0 listened for the wrong event. 0.70.0 fixed the event and
+-- introduced this lookup, which was inert in two separate ways:
+--
+--   1. It keyed on `GetMapName(GetBestMapForUnit(...))`, which answers with
+--      the CITY when the player is standing in one -- and this file's own
+--      neighbour says so in as many words. No achievement contains
+--      "Dornogal", so the whole path did nothing for any turn-in made in a
+--      capital, which is where campaign turn-ins happen.
+--
+--   2. It refused whenever two achievements contained the zone name, on the
+--      grounds that duplicate ZONE names are ambiguous -- and every modern
+--      zone ships a story achievement AND a "Sojourner of <Zone>" companion,
+--      so it refused everywhere. `ForZone` picked one happily for display, so
+--      the tab showed a count that nothing ever moved.
+--
+-- `Exploration.ForCurrentZone` has solved this since 0.62.0 and this is that
+-- solution, not a third invention: the zone name must appear as a whole word
+-- run anchored at the END of the achievement name, and the map id is learned
+-- on the first successful match so the genuine duplicates -- two Nagrands,
+-- three Dalarans -- are resolved once, by something that cannot be
+-- duplicated, rather than re-guessed on every criteria update.
+--
+-- It is also what makes this affordable on `CRITERIA_UPDATE`: after the first
+-- match it is an integer comparison, not a walk with a client call per row.
+-- WHICH OF TWO LEGITIMATE ZONE MATCHES IS THE ZONE'S OWN. 0.71.0.
+--
+-- Every modern zone has more than one achievement whose name ends in the zone
+-- name: the story one and its "Sojourner of <Zone>" companion, at least. Both
+-- are legitimate matches, so SOMETHING has to choose, and what it must not
+-- choose by is whichever `pairs` reached first -- that shows a different zone
+-- achievement on different logins with nothing having changed, and it is the
+-- reason this is a named function with its own test rather than four lines
+-- inside a loop where only the hash order could observe it.
+--
+-- The order, in full:
+--   1. an unfinished one beats a finished one -- the tab is about what is
+--      left, and a completed zone achievement has nothing left to say;
+--   2. then the SHORTER name, which is the one about the zone rather than
+--      about the zone plus a side collection;
+--   3. then the lower ID, so that two achievements with names of equal length
+--      still resolve the same way every time.
+--
+-- Every step is total and deterministic; there is no path that returns "I
+-- cannot tell", because refusing is what made 0.70.0 do nothing everywhere.
+function Loremaster.BetterZoneMatch(record, name, id, best, bestName, bestID)
+    if not best then
+        return true
     end
 
-    local zoneName = Blizzard.GetMapName(mapID)
+    local heldDone = best.completed and true or false
+    local mineDone = record.completed and true or false
 
-    if not zoneName or zoneName == "" then
-        return nil
+    if heldDone ~= mineDone then
+        return not mineDone
     end
 
-    -- A DETERMINISTIC PICK, NOT WHATEVER `pairs` HANDED BACK FIRST. 0.61.0.
-    --
-    -- The zone name is a SUBSTRING match, so standing in Dalaran matched
-    -- every achievement with "Dalaran" in its name, and the tie-break was
-    -- only "prefer an unfinished one". Among several unfinished matches the
-    -- winner was whichever `pairs` reached first -- which Lua does not
-    -- promise to keep stable, and which in practice changed between sessions.
-    -- The Journey tab showed a different zone achievement for the same zone
-    -- on different logins, with nothing in the game having changed.
-    --
-    -- The ordering, in full:
-    --
-    --   1. Unfinished before finished. A completed zone achievement is not
-    --      what you want while standing in the zone.
-    --   2. The SHORTEST matching name. "Loremaster of Khaz Algar" contains
-    --      no zone name; "Isle of Dorn Explorer" and "Isle of Dorn" both
-    --      match a player on the Isle of Dorn, and the shorter one is the
-    --      one that is ABOUT the zone rather than about the zone plus
-    --      something else.
-    --   3. Lowest id. Arbitrary, but the same arbitrary answer every time,
-    --      which is the whole point.
-    local best, bestRecord, bestName
+    if #name ~= #bestName then
+        return #name < #bestName
+    end
 
-    for id, record in pairs(Records()) do
-        local heldName = Loremaster.NameOf(id, record)
+    return id < bestID
+end
 
-        if heldName and string.find(heldName, zoneName, 1, true) then
-            local better
+local function ZoneRecord()
+    local mapID = CN.GetPlayerPosition()
 
-            if not bestRecord then
-                better = true
-            elseif (bestRecord.completed and true or false)
-                ~= (record.completed and true or false) then
+    local store = Records()
 
-                better = not record.completed
-            elseif #heldName ~= #bestName then
-                better = #heldName < #bestName
-            else
-                better = id < best.id
-            end
-
-            if better then
-                bestRecord = record
-                bestName   = heldName
-
-                best = {
-                    id        = id,
-                    name      = heldName,
-                    completed = record.completed,
-                    done      = Loremaster.DoneFor(record) or 0,
-                    criteria  = record.criteria or 0,
-                }
+    if mapID then
+        for id, record in pairs(store) do
+            if record.mapID == mapID then
+                return record, id
             end
         end
     end
 
-    return best
+    local zone = GetZoneText and GetZoneText()
+
+    if not zone or zone == "" then
+        return nil
+    end
+
+    local needle = string.lower(zone)
+
+    local function Names(candidate)
+        if not candidate then
+            return false
+        end
+
+        candidate = string.lower(candidate)
+
+        if candidate == needle then
+            return true
+        end
+
+        -- Ends with the zone name, preceded by a space: "Loremaster of
+        -- Nagrand" matches "Nagrand", and an achievement about Shadowmoon
+        -- Valley does not match "Shadowmoon".
+        return string.sub(candidate, -(#needle + 1)) == (" " .. needle)
+    end
+
+    local best, bestID, bestName
+
+    for id, record in pairs(store) do
+        local heldName = Loremaster.NameOf(id, record)
+
+        if Names(heldName) then
+            if Loremaster.BetterZoneMatch(record, heldName, id,
+                                          best, bestName, bestID) then
+
+                best, bestID, bestName = record, id, heldName
+            end
+        end
+    end
+
+    if best and mapID then
+        -- Learned, so the ambiguity is resolved once rather than every time,
+        -- and by the map, which cannot be duplicated.
+        best.mapID = mapID
+    end
+
+    return best, bestID
+end
+
+Loremaster.ZoneRecord = ZoneRecord
+
+-- ONE LOOKUP, USED BY THE DISPLAY AND BY THE WRITE. 0.71.0.
+--
+-- `ForZone` had its own copy of the name match, and 0.70.0 added a second,
+-- stricter one for the write path -- so the tab picked a record and the
+-- refresh picked nothing, and the number on screen was one nothing could
+-- move. Two copies of one rule, drifted before the release that added the
+-- second one had shipped.
+--
+-- The `mapID` argument survives for callers that ask about a zone they are
+-- not standing in; the current-zone case, which is every caller today, goes
+-- through the learned index.
+function Loremaster.ForZone(mapID)
+    local record, id
+
+    if mapID and mapID ~= CN.GetPlayerPosition() then
+        -- A zone the player is not standing in: no learned index applies, so
+        -- the name is all there is. Kept for callers that ask about
+        -- somewhere else; nothing in the addon does today.
+        local zoneName = Blizzard.GetMapName(mapID)
+
+        if not zoneName or zoneName == "" then
+            return nil
+        end
+
+        local needle = string.lower(zoneName)
+
+        local bestName
+
+        for held, candidate in pairs(Records()) do
+            local heldName = Loremaster.NameOf(held, candidate)
+
+            if heldName and string.find(string.lower(heldName), needle, 1, true) then
+                local better
+
+                if not record then
+                    better = true
+                elseif (record.completed and true or false)
+                    ~= (candidate.completed and true or false) then
+
+                    better = not candidate.completed
+                elseif #heldName ~= #bestName then
+                    better = #heldName < #bestName
+                else
+                    better = held < id
+                end
+
+                if better then
+                    record, id, bestName = candidate, held, heldName
+                end
+            end
+        end
+    else
+        record, id = ZoneRecord()
+    end
+
+    if not record or not id then
+        return nil
+    end
+
+    return {
+        id        = id,
+        name      = Loremaster.NameOf(id, record),
+        completed = record.completed,
+        done      = Loremaster.DoneFor(record) or 0,
+        criteria  = record.criteria or 0,
+    }
 end
 
 ------------------------------------------------------------
@@ -863,51 +1021,7 @@ CN:RegisterCommand{
 -- client calls -- the same shape `Exploration.RefreshCurrentZone` has used
 -- since 0.61.0, in the sibling store this fix never reached.
 --
--- WHICH RECORD, AND ONLY WHEN THERE IS EXACTLY ONE. 0.70.0.
---
--- `ForZone` matches an achievement NAME against the zone name with a
--- substring test, and its own comment admits that is "imperfect and honest
--- about being so". That was fine while it only decided what to DISPLAY.
--- 0.69.0 made it decide which row a turn-in rewrites, and zone names repeat
--- across expansions -- Outland's Nagrand and Draenor's, two Shadowmoon
--- Valleys, three Dalarans -- so handing a quest in on one continent could
--- rewrite the other continent's row.
---
--- A write needs certainty a display does not. When the zone name matches more
--- than one achievement, this refuses rather than guessing: the full scan
--- still corrects everything at the next login, and a stale count is a much
--- smaller error than a confident wrong one in somebody else's expansion.
-local function UnambiguousZoneRecord()
-    local mapID = select(1, CN.GetPlayerPosition())
 
-    if not mapID then
-        return nil
-    end
-
-    local zoneName = Blizzard.GetMapName(mapID)
-
-    if not zoneName or zoneName == "" then
-        return nil
-    end
-
-    local found, foundID
-
-    for id, record in pairs(Records()) do
-        local heldName = Loremaster.NameOf(id, record)
-
-        if heldName and string.find(heldName, zoneName, 1, true) then
-            if found then
-                return nil
-            end
-
-            found, foundID = record, id
-        end
-    end
-
-    return found, foundID
-end
-
-Loremaster.UnambiguousZoneRecord = UnambiguousZoneRecord
 
 -- CRITERIA PROGRESS ONLY. THE EARNED FLAG IS NOT DERIVED FROM IT. 0.70.0.
 --
@@ -921,7 +1035,7 @@ Loremaster.UnambiguousZoneRecord = UnambiguousZoneRecord
 --
 -- The client answers the account question directly, so it is asked directly.
 function Loremaster.RefreshCurrentZone()
-    local record, id = UnambiguousZoneRecord()
+    local record, id = ZoneRecord()
 
     if not record or not id then
         return false

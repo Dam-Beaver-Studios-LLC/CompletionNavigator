@@ -426,6 +426,21 @@ CN.RegisterCandidateProvider("Vendors", function()
                 table.insert(reasons, "in " .. seller.zone)
             end
 
+            -- ONE CALL, BOTH ANSWERS. 0.71.0.
+            --
+            -- 0.70.0 added the confidence flag here with a second
+            -- `CN.TravelCost` call inside a `select(2, ...)`, and the travel
+            -- model deliberately does not cache a refusal -- so for any
+            -- seller it could not route, both calls ran a full estimate:
+            -- four client conversions and a scan of the flight network,
+            -- twice, per row, in the two highest-volume located providers.
+            --
+            -- Worse than the cost: the two calls are independent, so a
+            -- coordinate conversion that failed between them produced a row
+            -- with a real measured journey and no flag saying so -- silently
+            -- losing its distance line and its deadline guard.
+            local travel, costed = CN.TravelCost(seller.mapID, seller.x, seller.y)
+
             return CN.NewObjective({
                 id              = itemID,
                 type            = CN.objectiveTypes.RECIPE,
@@ -441,9 +456,8 @@ CN.RegisterCandidateProvider("Vendors", function()
                 -- spot was charged three. A systematic twenty-two point
                 -- penalty against exactly the collection types this file
                 -- exists to surface.
-                travelCost      = CN.TravelCost(seller.mapID, seller.x, seller.y),
-                travelCosted     = select(2, CN.TravelCost(seller.mapID,
-                    seller.x, seller.y)) or nil,
+                travelCost      = travel,
+                travelCosted    = costed or nil,
                 reasons         = reasons,
             })
         end)

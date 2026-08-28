@@ -543,9 +543,23 @@ function Blizzard.IsAchievementEarned(achievementID)
         return nil
     end
 
-    local ok, _, _, _, completed = pcall(GetAchievementInfo, achievementID)
+    local ok, id, _, _, completed = pcall(GetAchievementInfo, achievementID)
 
-    if not ok then
+    -- NOT ANSWERING IS NOT ANSWERING "NO". 0.71.0.
+    --
+    -- `GetAchievementInfo` does not throw for an id it cannot answer about --
+    -- it returns nothing -- so `ok` is true, `completed` is nil, and this
+    -- returned FALSE. The `pcall` guard could only ever catch a hard error,
+    -- and the case the nil contract was written for fell straight through it.
+    --
+    -- The caller writes the result into an account-wide earned flag whenever
+    -- it is not nil, so one `CRITERIA_UPDATE` in the seconds after a loading
+    -- screen un-earned a zone the account had finished -- which is the defect
+    -- 0.70.0's changelog says it fixed, arriving through a different door.
+    --
+    -- The first return is the id: if the client answered at all, that is
+    -- there.
+    if not ok or not id then
         return nil
     end
 

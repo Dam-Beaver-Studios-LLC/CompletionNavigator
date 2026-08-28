@@ -445,11 +445,13 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.REPUTATION, function(factionID)
 
     if record.kind == "RENOWN" then
         if record.unlocked == false then
-            return states.LOCKED, CN.blockReasons.CAMPAIGN_INCOMPLETE, record.name
+            return states.LOCKED, CN.blockReasons.CAMPAIGN_INCOMPLETE,
+                   Reputations.NameOf(factionID)
         end
 
         if record.maxedOut and not (record.paragon and record.paragon.pending) then
-            return states.COMPLETED, "Maximum Renown reached", record.name
+            return states.COMPLETED, "Maximum Renown reached",
+                   Reputations.NameOf(factionID)
         end
 
         return states.AVAILABLE, nil, nil
@@ -457,7 +459,7 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.REPUTATION, function(factionID)
 
     if record.reaction and record.reaction >= 8
         and not (record.paragon and record.paragon.pending) then
-        return states.COMPLETED, "Exalted", record.name
+        return states.COMPLETED, "Exalted", Reputations.NameOf(factionID)
     end
 
     if scope == "character" then
@@ -552,7 +554,11 @@ CN.RegisterCandidateProvider("Reputations", function()
         return CN.NewObjective({
             id              = record.factionID,
             type            = CN.objectiveTypes.REPUTATION,
-            name            = record.name,
+            -- NAMED LIVE. 0.71.0: the store holds whatever language last
+            -- scanned, and only factions THIS character has met are
+            -- rewritten -- so an account-wide row met by the main kept its
+            -- old name on every other character and in every other language.
+            name            = Reputations.NameOf(record.factionID),
             accountWide     = accountWide,
             completionValue = value,
             reasons         = reasons,
@@ -739,7 +745,7 @@ CN:RegisterCommand{
             return
         end
 
-        Print(record.name .. " |cff8a8f96(" .. factionID .. ")|r")
+        Print(Reputations.NameOf(factionID) .. " |cff8a8f96(" .. factionID .. ")|r")
         Print("Standing: " .. tostring(Reputations.StandingText(record))
             .. " - " .. tostring(record.current) .. "/" .. tostring(record.maximum))
         Print("Scope: " .. (record.accountWide
@@ -789,7 +795,8 @@ CN:RegisterCommand{
         local function report(store, scopeLabel)
             for factionID, record in pairs(store) do
                 if record.paragon and record.paragon.pending then
-                    CN.PrintLine(record.name .. " |cff8a8f96(" .. scopeLabel .. ")|r"
+                    CN.PrintLine(Reputations.NameOf(factionID)
+                        .. " |cff8a8f96(" .. scopeLabel .. ")|r"
                         .. " - reward ready")
                     found = found + 1
                 end

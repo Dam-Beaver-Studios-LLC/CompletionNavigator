@@ -7,6 +7,78 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.71.0]
+
+**The quest-turn-in fix has been claimed three times and did not work any of
+them.** 0.69.0 listened for the wrong event. 0.70.0 fixed the event and
+introduced a zone lookup that was inert two separate ways. This release
+replaces the invention with the solution the neighbouring module has used
+since 0.62.0.
+
+### Fixed â€” the journey, for real this time
+
+- **In a city, the addon could not tell which zone you were in.** The lookup
+  asked the game for your map, which answers with *Dornogal* when you are
+  standing in Dornogal â€” and no achievement is named after a capital. So the
+  refresh did nothing for any quest handed in indoors, which is where campaign
+  turn-ins happen. It reads the surrounding zone now.
+- **Everywhere else it refused on purpose.** It declined whenever two
+  achievements contained the zone name, to avoid confusing the two Nagrands â€”
+  and every modern zone ships a story achievement *and* a "Sojourner of
+  <Zone>" companion, so it declined in all of them. The name is matched as a
+  whole word at the end now, the true duplicates are settled by learning the
+  map, and that learning also makes the refresh an integer comparison instead
+  of a walk with a client call per row on the game's busiest questing event.
+- **The tab and the refresh were using different lookups**, so the tab picked
+  a zone happily while the refresh picked nothing, and the number on screen
+  was one nothing could move. One lookup now.
+- **Which of a zone's two achievements it showed depended on hash order.** A
+  zone's story achievement and its "Sojourner of <Zone>" companion are both
+  legitimate matches; the choice between them is now a named, total rule â€”
+  unfinished first, then the shorter name, then the lower ID â€” so the tab
+  shows the same one on every login rather than whichever the table happened
+  to reach first.
+- **An achievement the game will not answer about was recorded as not
+  earned** â€” and the guard written to prevent that could not fire, because the
+  game returns nothing rather than failing. One `CRITERIA_UPDATE` in the
+  seconds after a loading screen un-earned a zone the account had finished.
+- **A scan that measured nothing recorded itself as having run.** The criteria
+  API routinely answers nothing at login, which is why the writer guards
+  against it â€” and the marker saying "this character has scanned" was written
+  anyway. An alt's first login after upgrading recorded nothing, marked itself
+  done, and never rescanned: "not started" for every zone it had fully
+  quested, permanently.
+- **`/cn zones` and the Journey tab put zones with nothing left in them at the
+  top**, with the reason "100% done â€” finishing is cheaper than starting". The
+  recommendation list has always had that rule; the two display paths did not.
+
+### Fixed â€” distances
+
+- **One definition of a measured journey, instead of two.** The window's
+  tooltips asked the travel model whether it was confident and printed nothing
+  when it was not; `/cn list` and the deadline guard accepted any number that
+  came back â€” including a multi-hop route through a flight network the model
+  is partly guessing at. The same rare could show a distance in one and not
+  the other.
+- **A row could keep a stale answer about its own journey for ever.** When the
+  addon reuses an unchanged candidate it compares a list of fields, and the
+  new "was this journey measured" flag was not on it. Because the capped and
+  fabricated costs are both exactly the same number, a row that gained a real
+  measurement kept the old answer â€” and lost its deadline guard permanently.
+- **Two providers priced every journey twice**, and the travel model
+  deliberately does not cache a failure, so for any vendor it could not route
+  that was two full estimates per row in the two highest-volume providers.
+
+### Fixed â€” other
+
+- **The addon could not find a faction by the name it had just printed.**
+  Reputation names came off disk in whatever language last scanned, while the
+  lookup asked the game â€” so a list row read one thing and searching for it
+  found nothing. Five readers now ask the game first.
+- **A provider registered after login never taught the window to redraw for
+  its events.** The same closed-registry defect a previous release documented
+  fixing, in the second of the two passes that has it.
+
 ## [0.70.0]
 
 Eleven defects, and the honest headline is that **last release's fix for the

@@ -1926,11 +1926,31 @@ mutate "Modules/Loremaster.lua" \
     "another character is shown whichever character scanned last"
 
 mutate "Modules/Loremaster.lua" \
-    "            elseif #heldName ~= #bestName then
-                better = #heldName < #bestName" \
-    "            elseif false then
-                better = #record.name < #bestRecord.name" \
+    "    if #name ~= #bestName then
+        return #name < #bestName
+    end
+
+    return id < bestID" \
+    "    return false" \
     "a zone picks a different achievement on every login"
+
+mutate "Modules/Loremaster.lua" \
+    "    if #name ~= #bestName then
+        return #name < #bestName
+    end" \
+    "    if #name ~= #bestName then
+        return #name > #bestName
+    end" \
+    "the zone shows its side-collection achievement instead of its story"
+
+mutate "Modules/Loremaster.lua" \
+    "    if heldDone ~= mineDone then
+        return not mineDone
+    end" \
+    "    if heldDone ~= mineDone then
+        return mineDone
+    end" \
+    "a finished zone achievement hides the one still in progress"
 
 mutate "Modules/Progress.lua" \
     "    elseif Progress.knownResetAt then" \
@@ -2221,16 +2241,12 @@ mutate "Providers/StaticData.lua" \
     "the block reason has to be parsed back out of English prose"
 
 mutate "Modules/Loremaster.lua" \
-    "    for id, record in pairs(Records()) do
-        local heldName = Loremaster.NameOf(id, record)
+    "        local heldName = Loremaster.NameOf(id, record)
 
-        if heldName and string.find(heldName, zoneName, 1, true) then
-            local better" \
-    "    for id, record in pairs(Records()) do
-        local heldName = record.name
+        if Names(heldName) then" \
+    "        local heldName = record.name
 
-        if heldName and string.find(heldName, zoneName, 1, true) then
-            local better" \
+        if Names(heldName) then" \
     "the zone achievement is matched against a stored name"
 
 mutate "Core.lua" \
@@ -2691,13 +2707,15 @@ mutate "Modules/Loremaster.lua" \
     "an alt part-way through a zone un-earns the account's achievement"
 
 mutate "Modules/Loremaster.lua" \
-    "            if found then
-                return nil
-            end" \
-    "            if false then
-                return nil
-            end" \
-    "a turn-in rewrites a same-named zone in another expansion"
+    "    if best and mapID then
+        -- Learned, so the ambiguity is resolved once rather than every time,
+        -- and by the map, which cannot be duplicated.
+        best.mapID = mapID
+    end" \
+    "    if false then
+        best.mapID = mapID
+    end" \
+    "the zone is re-guessed on every criteria update instead of learned"
 
 mutate "Modules/Loremaster.lua" \
     "                if criteria and criteria > 0 then
@@ -2732,6 +2750,52 @@ mutate "Modules/Reputations.lua" \
     "        local name = Reputations.NameOf(id)" \
     "        local name = NameStore()[id]" \
     "a faction cannot be found by name after a language change"
+
+############################################################
+# 0.71.0
+############################################################
+
+mutate "Providers/BlizzardCollections.lua" \
+    "    local ok, id, _, _, completed = pcall(GetAchievementInfo, achievementID)" \
+    "    local ok, _, _, _, completed = pcall(GetAchievementInfo, achievementID)
+    local id = true" \
+    "an achievement the client cannot answer about is reported unearned"
+
+mutate "Modules/Loremaster.lua" \
+    "    if measured == 0 then" \
+    "    if false then" \
+    "a scan that measured nothing records itself as done"
+
+mutate "Modules/Loremaster.lua" \
+    "        return string.sub(candidate, -(#needle + 1)) == (\" \" .. needle)" \
+    "        return string.find(candidate, needle, 1, true) ~= nil" \
+    "the zone match is an unanchored substring again"
+
+mutate "Modules/Loremaster.lua" \
+    "    local zone = GetZoneText and GetZoneText()" \
+    "    local zone = Blizzard.GetMapName(mapID)" \
+    "standing in a city finds no zone at all"
+
+mutate "Modules/Loremaster.lua" \
+    "        if not record.completed and (record.criteria or 0) > 0
+            and done < record.criteria then" \
+    "        if not record.completed and (record.criteria or 0) > 0 then" \
+    "a zone with nothing left is the closest thing to finishing"
+
+mutate "Scoring.lua" \
+    "    \"travelCost\", \"travelCosted\", \"mapID\", \"x\", \"y\"," \
+    "    \"travelCost\", \"mapID\", \"x\", \"y\"," \
+    "a reused candidate carries a stale answer about its own journey"
+
+mutate "Modules/Travel.lua" \
+    "        return cost, confident and true or false" \
+    "        return cost, true" \
+    "a route the model is unsure of is reported as measured"
+
+mutate "Modules/Reputations.lua" \
+    "            name            = Reputations.NameOf(record.factionID)," \
+    "            name            = record.name," \
+    "a faction is listed under the language that last scanned it"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

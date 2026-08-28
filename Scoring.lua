@@ -964,6 +964,19 @@ function CN.RegisterCandidateProvider(name, provider, options)
         CN.SubscribeToInvalidationEvents()
     end
 
+    -- AND THE WINDOW'S OWN SUBSCRIPTION, WHICH IS A SECOND CLOSED REGISTRY.
+    -- 0.71.0.
+    --
+    -- The paragraph above describes this defect and fixes one of the two
+    -- passes that has it. `UI.SubscribeToRefreshEvents` also iterates the
+    -- provider registry exactly once, at login -- so a provider registered
+    -- afterwards is invalidated correctly and the open window never learns to
+    -- redraw for its events. Nothing ships one today; the generation hook in
+    -- `cn.ps1` exists to add them.
+    if CN.UI and CN.UI.SubscribeToRefreshEvents and CN.UI.refreshEventCount then
+        CN.UI.SubscribeToRefreshEvents()
+    end
+
     return true
 end
 
@@ -1550,7 +1563,7 @@ end
 local IDENTITY_FIELDS = {
     "type", "id", "name", "phase", "state",
     "completionValue", "limitedTimeBonus", "expiresIn",
-    "travelCost", "mapID", "x", "y",
+    "travelCost", "travelCosted", "mapID", "x", "y",
     "accountWide",
 }
 

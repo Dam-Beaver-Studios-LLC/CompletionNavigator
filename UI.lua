@@ -115,6 +115,11 @@ function UI.DistanceLine(mapID, x, y)
     local seconds, confident = travel.EstimateSeconds(
         playerMap, playerX, playerY, mapID, x, y)
 
+    -- THE SAME RULE THE REST OF THE ADDON USES SINCE 0.71.0: the travel
+    -- model's own confidence flag, which `CN.TravelCost` now carries out to
+    -- every provider and `CN.SecondsNeeded` requires. Two definitions of
+    -- "measured" is how the same rare showed a distance here and none in
+    -- `/cn list`.
     if not seconds or not confident then
         return nil
     end

@@ -182,7 +182,11 @@ function Exploration.Closest(limit)
 
         done = done or 0
 
-        if not completed and (record.criteria or 0) > 0 then
+        -- AND SOMETHING ACTUALLY LEFT. 0.71.0, the same correction as
+        -- `Loremaster.Closest`: a row whose criteria are all done but whose
+        -- flag has not caught up is not the closest thing to finishing.
+        if not completed and (record.criteria or 0) > 0
+            and done < record.criteria then
             table.insert(rows, {
                 achievementID = record.achievementID,
                 name          = Exploration.NameOf(achievementID, record),
