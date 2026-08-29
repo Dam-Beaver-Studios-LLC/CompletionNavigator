@@ -80,7 +80,8 @@ end
 local frame, ticker
 
 -- Sixteen for the button plus two of margin. See where the label is anchored.
-Hud.closeWidth = 18
+-- `Hud.closeWidth` REMOVED. 0.78.0: it restated the width the control itself
+-- sizes from, in another file. `CN.CLOSE_WIDTH` is the one number.
 
 local function Build()
     if frame or not CreateFrame then
@@ -150,7 +151,7 @@ local function Build()
     -- stops short of it instead.
     frame.label = CN.Label(frame, "OVERLAY", "HEAD")
     frame.label:SetPoint("TOPLEFT", inset, -inset)
-    frame.label:SetPoint("TOPRIGHT", -(inset + Hud.closeWidth), -inset)
+    frame.label:SetPoint("TOPRIGHT", -(inset + CN.CLOSE_WIDTH), -inset)
     frame.label:SetJustifyH("LEFT")
 
     frame.detail = CN.Label(frame, "OVERLAY", "SMALL")
@@ -305,7 +306,10 @@ function Hud.Refresh()
         -- describing the same activity in near-identical words with unrelated
         -- numbers. The follow frame now says "3 left here"; this one keeps
         -- the route-level count, which is the one a glanceable line wants.
-        detail = string.format("stop %d of %d",
+        -- TRANSLATED. 0.78.0: this sat two lines under a `CN.L` lookup and
+        -- was assembled from an English literal, which is the same defect as
+        -- the route-complete line one frame away.
+        detail = string.format(CN.L["stop %d of %d"],
             math.min((follow.completed or 0) + 1, follow.startedWith),
             follow.startedWith)
     end

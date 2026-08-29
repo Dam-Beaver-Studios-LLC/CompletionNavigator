@@ -313,7 +313,17 @@ function Progress.NoteCompleted(questID)
 
     store.today   = (store.today or 0) + 1
     store.session = (store.session or 0) + 1
-    store.total   = (store.total or 0) + 1
+
+    -- `store.total` IS NOT WRITTEN ANY MORE. 0.78.0.
+    --
+    -- Incremented on every turn-in and read by nothing: `Progress.Summary`
+    -- takes its lifetime figure from `Progress.LifetimeCompleted()`, which is
+    -- the client's own count and which this file's header calls "the real
+    -- lifetime total".
+    --
+    -- Sixth store to lose a field it did not need to keep -- `record.done`,
+    -- `zone`, `currencyNames`, `achievementTotals` and the achievement flat
+    -- field were the others -- and migration 29 removes it.
 
     if (store.best or 0) < store.today then
         store.best    = store.today

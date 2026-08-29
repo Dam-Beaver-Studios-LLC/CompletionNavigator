@@ -47,6 +47,15 @@ CN.localeKeys = {
     "Stop cleared",
     "Stop %d of %d cleared",
     "Route complete.",
+
+    -- 0.78.0. Two sentences that were assembled from a translated fragment
+    -- and an English literal, so a German client read a translated headline
+    -- followed by untranslated prose -- the pattern `Modules/Inventory.lua`
+    -- records as a defect and `Modules/Follow.lua` reproduced one release
+    -- after citing it.
+    "All %d stops done.",
+    "All 1 stop done.",
+    "stop %d of %d",
     "estimated",
     "unknown",
     "solo",

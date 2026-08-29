@@ -1447,8 +1447,24 @@ CN.migrations = {
     [27] = function()
     end,
 
+    -- 0.77.0's VERSION OF THIS LOOKED IN A TABLE THAT DOES NOT EXIST.
+    --
+    -- It cleared from `db.account.settings` and `character.preferences`.
+    -- Settings live at `db.settings` -- `AccountSettings()` returns that, the
+    -- account defaults have no `settings` key, and nothing in the tree ever
+    -- asks `CN.Account("settings")`. So the migration ran, found nothing,
+    -- stamped itself done, and the headline fix of that release reached
+    -- nobody: every legacy `{point, x, y}` survived, and
+    -- `CN.RestoreFramePosition` falls back to `placement.point` for the
+    -- missing relative point -- which is exactly the broken anchor it was
+    -- written to stop using.
+    --
+    -- Version 29 has shipped, so this one cannot be re-run. Kept as an empty
+    -- function so the ladder stays continuous; the real reset is [29] below.
+    [28] = function()
+    end,
+
     -- THE FRAME POSITIONS THREE FRAMES SAVED WITHOUT A RELATIVE POINT.
-    -- 0.77.0.
     --
     -- The heads-up line, the follow list and the arrow all stored
     -- `{ point, x, y }` and restored with the anchor standing in for the
@@ -1461,7 +1477,9 @@ CN.migrations = {
     -- no way to tell whether it was ever wrong. Cleared, so each frame starts
     -- from its default and is placed once more, rather than restored to
     -- somewhere the player never put it.
-    [28] = function(db)
+    --
+    -- IN `db.settings`, which is where they actually are. See [28].
+    [29] = function(db)
         local function Reset(store, key)
             if type(store) ~= "table" then
                 return
@@ -1476,18 +1494,40 @@ CN.migrations = {
             end
         end
 
-        local settings = db.account and db.account.settings
+        for _, key in ipairs({ "hudPosition", "arrowPosition",
+                               "followPosition" }) do
+            Reset(db.settings, key)
 
-        Reset(settings, "hudPosition")
-        Reset(settings, "arrowPosition")
-        Reset(settings, "followPosition")
-
-        for _, character in pairs(db.characters or {}) do
-            if type(character) == "table" then
-                Reset(character.preferences, "hudPosition")
-                Reset(character.settings, "arrowPosition")
-                Reset(character.settings, "followPosition")
+            for _, character in pairs(db.characters or {}) do
+                if type(character) == "table" then
+                    Reset(character.settings, key)
+                end
             end
+        end
+
+        -- AND THE EMPTY TABLE THE ARROW WROTE ON EVERY FIRST BUILD. 0.78.0.
+        --
+        -- `settings.arrowPosition = settings.arrowPosition or {}` put a
+        -- permanent empty table in saved data for a player who never moved
+        -- the arrow, which nothing read and which would defeat any later
+        -- reset keyed on the entry being present.
+        if type(db.settings) == "table"
+            and type(db.settings.arrowPosition) == "table"
+            and db.settings.arrowPosition.point == nil then
+
+            db.settings.arrowPosition = nil
+        end
+
+        -- A LIFETIME TOTAL THE CLIENT ALREADY KEEPS. 0.78.0.
+        --
+        -- `Progress` incremented `total` on every turn-in and read it back
+        -- nowhere: `Progress.Summary` takes its lifetime figure from the
+        -- client, which that file's own header calls "the real lifetime
+        -- total". Sixth store to lose a field it did not need to keep.
+        if type(db.account) == "table"
+            and type(db.account.progress) == "table" then
+
+            db.account.progress.total = nil
         end
     end,
 }

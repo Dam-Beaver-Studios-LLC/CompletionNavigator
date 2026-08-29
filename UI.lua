@@ -1176,8 +1176,7 @@ function UI.SearchAll(text)
                 -- textures and all -- so a hex fragment matched every row on
                 -- every tab while the tab in front of the player correctly
                 -- matched none. Two predicates for one question.
-                local haystack = CN.SortKey(entry.text)
-                    .. " " .. CN.SortKey(entry.value)
+                local haystack = CN.SearchKey(entry.text, entry.value)
 
                 if haystack:find(needle, 1, true) then
                     count = count + 1
@@ -4783,8 +4782,14 @@ CN:RegisterCommand{
                 .. CN.YesNo(CompletionNavigatorMinimapButton:IsShown()))
             table.insert(lines, "  hidden by setting: "
                 .. CN.YesNo(CN.Settings().minimap.hide))
+            -- DEGREES, WHICH IS WHAT IT IS. 0.78.0.
+            --
+            -- Written as `math.deg(...)` and read as `math.rad(...)`, with a
+            -- default of 225 -- so this diagnostic printed "angle: 225.00
+            -- rad", which is thirty-five full turns.
             table.insert(lines, "  angle: "
-                .. string.format("%.2f rad", CN.Settings().minimap.angle or 0))
+                .. string.format("%.0f degrees",
+                    CN.Settings().minimap.angle or 0))
         end
 
         table.insert(lines, "Registered tabs: " .. #UI.tabs)

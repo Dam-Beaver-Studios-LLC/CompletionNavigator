@@ -7,6 +7,80 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.78.0]
+
+**Last release's headline fix reached nobody.** The migration that was meant
+to clear the broken frame positions looked in `db.account.settings` â€” a table
+this addon does not have. Settings live at `db.settings`. So it ran, found
+nothing, stamped itself done, and every position saved in the broken shape
+survived and was restored against the same wrong anchor. If the heads-up box
+still would not stay where you put it after 0.77.0, that is why. The real
+reset runs now.
+
+### Fixed â€” 0.77.0's own damage
+
+- **The window filter stopped matching numbers.** 0.77.0 ran the name-cleaning
+  function over the *value* column too, and that function strips leading
+  punctuation and digits â€” which is right for a name and destructive for the
+  column the numbers live in. "6 left" became "left"; "40 / 60" and "85%"
+  became nothing at all. So filtering by any number matched no row, and the
+  cross-tab counts were computed from the same erased text â€” the exact
+  mismatch that change was written to remove, still there for every numeric
+  row.
+- **`/cn travel`'s walking comparison was never marked as an estimate.** The
+  confidence helper compares against named levels and was handed a raw
+  boolean, which matches neither â€” so it returned the *measured* form always,
+  in the one line whose comment says a measured figure and a default are not
+  the same claim.
+- **The new "no map pin here" caveat printed above its own headline**, and at
+  four of six call sites had no headline at all â€” a bare indented sentence
+  with nothing over it, on every hub advance in follow mode inside an
+  instance.
+- **Auto-advance charged players who have it switched off.** The "is this on"
+  test sat inside the throttled body, so every minimap vignette still
+  allocated a closure and scheduled a timer for the default setting. All eight
+  events also shared one throttle, so a quest turn-in arriving mid-burst lost
+  its immediate answer â€” on the single moment the feature exists for.
+
+### Fixed â€” code untouched for many releases
+
+- **A rare somebody else killed was recommended for ever.** The client tells
+  the addon a rare is dead; the reader both filtered those out *and* dropped
+  the flag from the rows it built, so the code that records "seen already
+  dead" could never see one. Every clear fell back to a "it vanished within
+  150 yards of me" guess, which misses anything finished while you rode past.
+- **Turning the arrow off left it redrawing ten times a second** â€” rotation,
+  colour and two text updates on a hidden frame, for the rest of the session.
+  The close button 0.77.0 added made it trivially easy to hit. `/cd navdiag`
+  now reports whether that redraw is running.
+- **Hiding or deferring the Great Vault claim did nothing.** Both "collect
+  your free thing" rows skipped the hide-and-defer checks their own
+  neighbouring loops apply, so right-clicking one said "Deferred for an hour"
+  and it was back on the next refresh. The vault row's id was `0`, which the
+  addon's own parser rejects, so `/cn unhide` could not name it back either.
+- **Treasures could not be explained.** The module emits rares and treasures
+  from one store and only rares had an eligibility rule, so half its rows
+  answered "unknown" â€” `/cn why` said nothing useful and the auto-advance
+  staleness test fell through to a full scan every time.
+- **Every coin picked up rebuilt the currency recommendations.** That event
+  fires constantly, which is why the *scan* behind it is throttled to a
+  minute; the rebuild was not throttled at all.
+- **`/cn currencies` announced fourteen weekly rows and showed eight**, with
+  nothing to say it had stopped. `/cn travel`'s teleport list did the same at
+  five.
+- **"Route complete. 12 stops, all done."** was still half-translated after
+  the release that fixed the plural and cited the half-translation as the
+  defect. Both halves are translatable keys now, and so is the heads-up
+  line's "stop N of M".
+- **The close button's footprint was defined in two files**, and the two
+  frames that gained one in 0.77.0 reserved no room for it â€” so the right end
+  of the follow header was a live click that stopped the route, with nothing
+  drawn there.
+- **`/cn uistatus` reported the minimap angle in radians.** It is degrees, and
+  the default is 225, so it printed "225.00 rad" â€” thirty-five full turns.
+- Plus: the arrow wrote an empty table into saved data on every first build,
+  and a lifetime turn-in counter was incremented for ever and read by nothing.
+
 ## [0.77.0]
 
 **The heads-up box drags and then does not stay â€” this fixes that, and gives

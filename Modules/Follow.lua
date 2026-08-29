@@ -283,14 +283,21 @@ function Follow.NoteStopCleared()
     if total > 0 and Follow.completed >= total and not Follow.celebrated then
         Follow.celebrated = true
 
-        -- PLURALISED, AND NOT HALF-TRANSLATED. 0.77.0.
+        -- TRANSLATED ALL THE WAY THROUGH. 0.78.0.
         --
-        -- "1 stops" in the addon's one celebratory line, and an English
-        -- literal bolted onto a `CN.L` lookup -- so a translated client read
-        -- a translated headline followed by untranslated prose.
-        -- `Modules/Inventory.lua` records that exact pattern as a defect.
-        Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r "
-            .. CN.Count(total, "stop") .. ", all done.")
+        -- 0.77.0 fixed the plural and left the half-translation it was citing
+        -- as the defect: `CN.Count` hardcodes "stop"/"stops" and ", all
+        -- done." was a literal, so a German client read "Route abgeschlossen.
+        -- 12 stops, all done."
+        --
+        -- Both halves are keys now, and the singular is its own key rather
+        -- than a format string with a 1 in it, because a language that
+        -- inflects differently at one cannot be served by substitution.
+        local tail = total == 1
+            and CN.L["All 1 stop done."]
+            or string.format(CN.L["All %d stops done."], total)
+
+        Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r " .. tail)
 
         Follow.Celebrate()
     end
@@ -532,6 +539,15 @@ local function BuildFrame()
 
     frame.header = CN.Label(frame, "OVERLAY", "HEAD")
     frame.header:SetPoint("TOPLEFT", inset, -CN.SPACE.S)
+
+    -- AND A RIGHT-EDGE STOP, so the header does not run under the hover x.
+    -- 0.78.0.
+    --
+    -- Alpha 0 does not disable mouse input, so without this the right end of
+    -- the header row is a click that stops the route -- with nothing drawn
+    -- there to say so. `Modules/Hud.lua` reserves the same width for the same
+    -- reason.
+    frame.header:SetPoint("TOPRIGHT", -(inset + CN.CLOSE_WIDTH), -CN.SPACE.S)
     frame.header:SetJustifyH("LEFT")
 
     frame.body = CN.Label(frame, "OVERLAY", "SMALL")

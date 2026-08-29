@@ -431,7 +431,18 @@ CN.RegisterCandidateProvider("Currencies", function()
     end
 
     return candidates
-end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true })
+-- A COOLDOWN, BECAUSE THIS EVENT FIRES ON EVERY COIN PICKED UP. 0.78.0.
+--
+-- This file's own note six lines down says exactly that, which is why the
+-- SCAN is throttled to sixty seconds -- and the provider had no cooldown at
+-- all, so it was marked dirty and rebuilt on every firing, each rebuild
+-- walking the whole character store through `Capped()` and making a live
+-- client call per capped row.
+--
+-- Thirty seconds costs nothing in freshness: capped-ness cannot change
+-- faster than the sixty-second scan that computes it. `Modules/Rares.lua`
+-- sets 5 for the same reason and `Modules/Orders.lua` sets 30.
+end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true, cooldown = 30 })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -627,6 +638,18 @@ CN:RegisterCommand{
                 CN.PrintLine("  " .. tostring(currency.name)
                     .. " |cff8a8f96" .. currency.earned .. " / " .. currency.maximum
                     .. ", " .. currency.remaining .. " left this week|r")
+            end
+
+            -- A CAP NOBODY CAN SEE READS AS "THAT WAS EVERYTHING". 0.78.0.
+            --
+            -- The headline announced the real count and the list stopped at
+            -- eight with nothing said, so a player with fourteen was told
+            -- fourteen and shown eight. Three other commands print "and N
+            -- more" for the same shape and `Design.lua`'s own header names
+            -- this inconsistency.
+            if #weekly > 8 then
+                CN.PrintLine(CN.Muted("  ... and " .. (#weekly - 8)
+                    .. " more"))
             end
         end
 

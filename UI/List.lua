@@ -531,7 +531,7 @@ local function CreateList(parent)
         -- AND THE VALUE COLUMN. 0.77.0. The cross-tab count searched it and
         -- this did not, so "Also on: Collections (12)" led to a tab that said
         -- "Nothing here matches". One predicate now.
-        local haystack = SortKey(entry.text) .. " " .. SortKey(entry.value)
+        local haystack = CN.SearchKey(entry.text, entry.value)
 
         -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
         -- name, not a regular expression, and a stray bracket must not throw.

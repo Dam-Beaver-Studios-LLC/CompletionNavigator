@@ -1824,7 +1824,7 @@ mutate "Modules/Warband.lua" \
     "a deleted alt sorting first hides a character you played yesterday"
 
 mutate "Modules/Hud.lua" \
-    "    frame.label:SetPoint(\"TOPRIGHT\", -(inset + Hud.closeWidth), -inset)" \
+    "    frame.label:SetPoint(\"TOPRIGHT\", -(inset + CN.CLOSE_WIDTH), -inset)" \
     "    frame.label:SetPoint(\"TOPRIGHT\", -inset, -inset)" \
     "the close button sits on top of the end of the objective's name"
 
@@ -3372,8 +3372,8 @@ mutate "Core.lua" \
     "a search for a colour code matches every row on every tab"
 
 mutate "UI/List.lua" \
-    "        local haystack = SortKey(entry.text) .. \" \" .. SortKey(entry.value)" \
-    "        local haystack = SortKey(entry.text)" \
+    "        local haystack = CN.SearchKey(entry.text, entry.value)" \
+    "        local haystack = CN.SortKey(entry.text)" \
     "a tab counted as matching says nothing here matches"
 
 mutate "UI.lua" \
@@ -3422,25 +3422,155 @@ mutate "Modules/Travel.lua" \
     "running the whole way is quoted at flying speed"
 
 mutate "Routing.lua" \
-    "    if why then
-        CN.PrintLine(CN.Muted(tostring(why)))
-    end" \
-    "    if false then
-        CN.PrintLine(CN.Muted(tostring(why)))
-    end" \
+    "            if why then
+                CN.PrintLine(CN.Muted(tostring(why)))
+            end" \
+    "            if false then
+                CN.PrintLine(CN.Muted(tostring(why)))
+            end" \
     "a waypoint with no map pin is reported as a waypoint with one"
 
 mutate "Routing.lua" \
-    "        CN.Debounce(\"Routing.autoAdvance\", 2, function()
+    "        CN.Debounce(\"Routing.autoAdvance.vignette\", 2, function()
             CN.AutoAdvance(event)
         end)" \
     "        CN.AutoAdvance(event)" \
     "every minimap vignette rescans the whole candidate list"
 
+# RETIRED IN 0.78.0: the whole tail is a translated key now, and its
+# successor is "a translated headline is followed by untranslated prose",
+# which mutates the key lookup back into the hardcoded English.
+
+# ---- 0.78.0 ----
+
+mutate "Core.lua" \
+    "    return CN.SortKey(text) .. \" \" .. string.lower(CN.Strip(value))" \
+    "    return CN.SortKey(text) .. \" \" .. CN.SortKey(value)" \
+    "filtering the window by any number matches nothing"
+
+mutate "Database.lua" \
+    "            Reset(db.settings, key)" \
+    "            Reset(db.account and db.account.settings, key)" \
+    "the frame reset looks in a table that does not exist"
+
+mutate "Database.lua" \
+    "        if type(db.account) == \"table\"
+            and type(db.account.progress) == \"table\" then
+
+            db.account.progress.total = nil
+        end" \
+    "        if false then
+            db.account.progress.total = nil
+        end" \
+    "a count the client already keeps stays on disk for ever"
+
+mutate "Modules/Travel.lua" \
+    "                    and CN.WithConfidence(onFoot,
+                        CN.ConfidenceFor(runMeasured))" \
+    "                    and CN.WithConfidence(onFoot, runMeasured)" \
+    "an estimated walking time is printed as a measured one"
+
+mutate "Routing.lua" \
+    "    return true, why
+end" \
+    "    if why then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end
+
+    return true
+end" \
+    "a caveat prints above the headline it belongs under"
+
+mutate "Routing.lua" \
+    "        if not CN.IsAutoWaypointEnabled() then
+            return
+        end
+
+        if not firehose then" \
+    "        if false then
+            return
+        end
+
+        if not firehose then" \
+    "a player with auto-waypoint off pays for every minimap vignette"
+
+mutate "Routing.lua" \
+    "        if not firehose then
+            CN.AutoAdvance(event)
+            return
+        end" \
+    "        if false then
+            CN.AutoAdvance(event)
+            return
+        end" \
+    "a turn-in during a vignette burst is answered two seconds late"
+
+mutate "Modules/Navigation.lua" \
+    "        if not Navigation.IsArrowEnabled() then
+            Navigation.StopTicker()
+        end" \
+    "        if false then
+            Navigation.StopTicker()
+        end" \
+    "turning the arrow off leaves it redrawing ten times a second"
+
+mutate "Modules/Rares.lua" \
+    "            isDead     = vignette.isDead and true or false," \
+    "            isDead     = nil," \
+    "a rare somebody else killed is recommended for ever"
+
+mutate "Modules/Rares.lua" \
+    "    local active = Rares.GetAll(mapID)" \
+    "    local active = Rares.GetActive(mapID)" \
+    "the learning pass never sees a vignette the client flagged dead"
+
+mutate "Modules/Rares.lua" \
+    "        if not vignette.isDead then
+            table.insert(active, vignette)
+        end" \
+    "        table.insert(active, vignette)" \
+    "a dead rare is offered as something to go and kill"
+
+mutate "Modules/Rares.lua" \
+    "CN.RegisterEligibilityChecker(CN.objectiveTypes.TREASURE, Eligibility)" \
+    "local unusedChecker = Eligibility" \
+    "half of what this module offers cannot be explained"
+
+mutate "Modules/Vault.lua" \
+    "    if Blizzard.HasAvailableWeeklyRewards()
+        and not CN.IsIgnored(CN.objectiveTypes.CURRENCY, \"vault\")
+        and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, \"vault\") then" \
+    "    if Blizzard.HasAvailableWeeklyRewards() then" \
+    "deferring the vault reward says it worked and it did not"
+
+mutate "Modules/Orders.lua" \
+    "    if Orders.HasClaimable()
+        and not CN.IsIgnored(CN.objectiveTypes.RECIPE, \"claim\")
+        and not CN.IsDeferred(CN.objectiveTypes.RECIPE, \"claim\") then" \
+    "    if Orders.HasClaimable() then" \
+    "deferring a finished crafting order says it worked and it did not"
+
+mutate "Modules/Currencies.lua" \
+    "volatile = true, cooldown = 30 })" \
+    "volatile = true })" \
+    "every coin picked up rebuilds the currency candidates"
+
+mutate "Modules/Currencies.lua" \
+    "            if #weekly > 8 then" \
+    "            if false then" \
+    "a list of fourteen announces fourteen and shows eight"
+
 mutate "Modules/Follow.lua" \
-    "            .. CN.Count(total, \"stop\") .. \", all done.\")" \
-    "            .. total .. \" stops, all done.\")" \
-    "the route that finished had 1 stops in it"
+    "        local tail = total == 1
+            and CN.L[\"All 1 stop done.\"]
+            or string.format(CN.L[\"All %d stops done.\"], total)" \
+    "        local tail = CN.Count(total, \"stop\") .. \", all done.\"" \
+    "a translated headline is followed by untranslated prose"
+
+mutate "Modules/Follow.lua" \
+    "    frame.header:SetPoint(\"TOPRIGHT\", -(inset + CN.CLOSE_WIDTH), -CN.SPACE.S)" \
+    "    local unusedStop = CN.CLOSE_WIDTH" \
+    "the right end of the follow header is a click that stops the route"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

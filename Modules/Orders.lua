@@ -137,7 +137,13 @@ CN.RegisterCandidateProvider("Orders", function()
         end
     end
 
-    if Orders.HasClaimable() then
+    -- AND HIDING OR DEFERRING IT WORKS. 0.78.0. See the same fix in
+    -- `Modules/Vault.lua`: the loop above this one guards on both and the
+    -- claim row did not, so deferring it said one thing and did another.
+    if Orders.HasClaimable()
+        and not CN.IsIgnored(CN.objectiveTypes.RECIPE, "claim")
+        and not CN.IsDeferred(CN.objectiveTypes.RECIPE, "claim") then
+
         table.insert(candidates, CN.NewObjective({
             id               = "claim",
             type             = CN.objectiveTypes.RECIPE,

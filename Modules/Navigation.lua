@@ -337,11 +337,14 @@ local function BuildArrow()
     arrow:RegisterForDrag("LeftButton")
     arrow:SetClampedToScreen(true)
 
-    local settings = Settings()
-
-    settings.arrowPosition = settings.arrowPosition or {}
-
-    CN.RestoreFramePosition(arrow, settings.arrowPosition,
+    -- NOT `settings.arrowPosition = settings.arrowPosition or {}`. 0.78.0.
+    --
+    -- That wrote a permanent empty table into saved data for a player who
+    -- never moved the arrow -- read by nothing, since the restore falls
+    -- through to the fallback when there is no `point` -- and it would defeat
+    -- any later reset keyed on the entry being present. The two sibling
+    -- frames never did it.
+    CN.RestoreFramePosition(arrow, Settings().arrowPosition,
         { point = "CENTER", relativePoint = "CENTER", x = 0, y = 160 })
 
     arrow.texture = arrow:CreateTexture(nil, "ARTWORK")
@@ -1102,6 +1105,21 @@ local function Refresh()
     if not target or not Navigation.IsArrowEnabled() then
         Blank()
         arrow:Hide()
+
+        -- AND THE TICKER STOPS WITH IT. 0.78.0.
+        --
+        -- `provider.SetWaypoint` starts a ten-per-second ticker and only
+        -- `Navigation.Clear` ever stopped it -- so `/cn arrow off`, and the
+        -- x this release put ON the arrow, hid the frame and left the ticker
+        -- running for the rest of the session: `NoteMotion`, a rotation, a
+        -- vertex colour and two `SetText` calls, ten times a second, on a
+        -- frame nobody can see.
+        --
+        -- The x made that trivially easy to hit, which is how it was found.
+        if not Navigation.IsArrowEnabled() then
+            Navigation.StopTicker()
+        end
+
         return
     end
 
@@ -1251,6 +1269,13 @@ function Navigation.StopTicker()
     end
 end
 
+-- Published so `/cd navdiag` and the suite can see whether the ten-per-second
+-- redraw is running. A ticker over a hidden frame is invisible by definition,
+-- which is how it survived from the day the arrow was written.
+function Navigation.IsTicking()
+    return ticker ~= nil
+end
+
 ------------------------------------------------------------
 -- DIAGNOSIS
 ------------------------------------------------------------
@@ -1272,6 +1297,16 @@ function Navigation.Diagnose()
     local function add(label, value)
         table.insert(report, { label = label, value = tostring(value) })
     end
+
+    -- AND WHETHER THE REDRAW IS RUNNING. 0.78.0.
+    --
+    -- The ticker was started by every waypoint and stopped only by
+    -- `Navigation.Clear`, so turning the arrow off left it redrawing a hidden
+    -- frame ten times a second for the rest of the session. Invisible by
+    -- definition, which is why it survived -- and why the command whose whole
+    -- job is "everything the arrow is thinking" should say it.
+    add("arrow enabled", CN.YesNo(Navigation.IsArrowEnabled()))
+    add("redraw ticker", CN.YesNo(Navigation.IsTicking()))
 
     if not target then
         add("target", "none" .. CN.DASH .. "nothing is being tracked")

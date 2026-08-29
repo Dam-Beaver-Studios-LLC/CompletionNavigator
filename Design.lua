@@ -432,6 +432,16 @@ end
 --
 -- An outline is one call and it is the difference between "readable at a
 -- glance" and "readable if the ground happens to be dark".
+-- HOW MUCH ROOM THE HOVER X TAKES ALONG A FRAME'S TOP-RIGHT EDGE. 0.78.0.
+--
+-- 0.77.0 hardcoded 16 in the control and `Modules/Hud.lua` restated 18 in
+-- another file so its label could clear the button -- one number, two places.
+-- Alpha 0 does NOT disable mouse input, which is exactly why the room has to
+-- be reserved: the two frames that did not reserve it had a live click in
+-- their top-right corner that stopped the route or hid the arrow, with
+-- nothing drawn there.
+CN.CLOSE_WIDTH = 18
+
 -- A HOVER X ON A FRAME DRAWN OVER THE WORLD. 0.77.0.
 --
 -- The heads-up line got one when a player asked for it in as many words: a
@@ -454,7 +464,7 @@ function CN.AttachCloseControl(frame, onClose, tooltip, closeTooltip)
 
     local close = CreateFrame("Button", nil, frame)
 
-    close:SetSize(16, 16)
+    close:SetSize(CN.CLOSE_WIDTH - 2, CN.CLOSE_WIDTH - 2)
     close:SetPoint("TOPRIGHT", -2, -2)
 
     -- A DRAG STARTED IN THAT CORNER STILL MOVES THE FRAME.

@@ -2345,8 +2345,19 @@ CN:RegisterCommand{
             -- And marked, like every other duration in this file: a figure
             -- from a measured run speed and one from the default are not the
             -- same claim.
+            -- THROUGH `CN.ConfidenceFor`, NOT A RAW BOOLEAN. 0.78.0.
+            --
+            -- `CN.WithConfidence` compares its second argument against the
+            -- `CN.confidence` STRINGS. A boolean matches neither, so it fell
+            -- through and returned the text unmarked -- the measured form,
+            -- always. The comment two lines up described behaviour the code
+            -- did not have, and both siblings in this file and in `Session`
+            -- already did it correctly.
             Print(string.format("  |cff8a8f96running the whole way: %s|r",
-                onFoot and CN.WithConfidence(onFoot, runMeasured) or "unknown"))
+                onFoot
+                    and CN.WithConfidence(onFoot,
+                        CN.ConfidenceFor(runMeasured))
+                    or CN.L["unknown"]))
         elseif detail and detail.mode == "self" then
             local flySpeed, flyMeasured = Travel.SelfFlightSpeed()
 
@@ -2365,6 +2376,13 @@ CN:RegisterCommand{
 
             if #teleports == 0 then
                 Print("  |cff8a8f96no hearthstone or teleport available|r")
+            end
+
+            -- AND SAYS SO WHEN IT STOPS. 0.78.0. A cap nobody can see reads
+            -- as "that was everything"; see the same fix in
+            -- `Modules/Currencies.lua`.
+            if #teleports > 5 then
+                Print("  |cff8a8f96showing 5 of " .. #teleports .. "|r")
             end
 
             for index, teleport in ipairs(teleports) do

@@ -91,19 +91,20 @@ function CN.SetWaypoint(mapID, x, y, title)
 
     CN.DebugPrint("Waypoint set via " .. tostring(name) .. ".")
 
-    -- AND A CAVEAT THE PROVIDER ATTACHED TO A SUCCESS. 0.77.0.
+    -- AND A CAVEAT THE PROVIDER ATTACHED TO A SUCCESS IS RETURNED, NOT
+    -- PRINTED. 0.78.0.
     --
     -- The native provider answers `true, "the arrow is set; the game does not
-    -- allow a map pin here"` on a dungeon, raid or continent map -- and this
-    -- read the second return only on FAILURE, so the sentence written to
-    -- explain why no pin appeared was discarded, and the player was told
-    -- "Waypoint set" while the world map stayed empty. A dead writer, and a
-    -- player left thinking it had failed.
-    if why then
-        CN.PrintLine(CN.Muted(tostring(why)))
-    end
-
-    return true
+    -- allow a map pin here"` on a dungeon, raid or continent map, and 0.77.0
+    -- correctly stopped discarding that -- and printed it HERE, before the
+    -- caller's own headline, so the player read an unprefixed indented
+    -- sentence and then "Waypoint set" underneath it, backwards. Four of the
+    -- six callers print no headline at all, so those produced a bare
+    -- continuation line with nothing above it -- on every hub advance in
+    -- follow mode, inside an instance.
+    --
+    -- A continuation belongs to whoever wrote the headline it continues.
+    return true, why
 end
 
 -- The single entry point for "take me there", used by /cn go, the Navigate
@@ -123,8 +124,17 @@ function CN.NavigateToObjective(objective)
     local name = tostring(objective.name or objective.id or "that objective")
 
     if objective.mapID and objective.x and objective.y then
-        if CN.SetWaypoint(objective.mapID, objective.x, objective.y, name) then
+        local placed, why = CN.SetWaypoint(objective.mapID, objective.x,
+            objective.y, name)
+
+        if placed then
             CN.Print("Waypoint set: " .. name)
+
+            -- The caveat, UNDER its own headline. See `CN.SetWaypoint`.
+            if why then
+                CN.PrintLine(CN.Muted(tostring(why)))
+            end
+
             return true
         end
 
@@ -142,8 +152,15 @@ function CN.NavigateToObjective(objective)
             if mapID and x and y then
                 objective.mapID, objective.x, objective.y = mapID, x, y
 
-                if CN.SetWaypoint(mapID, x, y, name) then
+                local placed, why = CN.SetWaypoint(mapID, x, y, name)
+
+                if placed then
                     CN.Print("Waypoint set: " .. name)
+
+                    if why then
+                        CN.PrintLine(CN.Muted(tostring(why)))
+                    end
+
                     return true
                 end
 
@@ -1335,8 +1352,34 @@ for _, event in ipairs({
     "VIGNETTE_MINIMAP_UPDATED",
     "ZONE_CHANGED_NEW_AREA",
 }) do
+    -- ONE KEY PER SHAPE OF EVENT, AND THE FEATURE CHECK OUTSIDE. 0.78.0.
+    --
+    -- 0.77.0 put all eight on one key. `CN.Debounce` is leading-edge with ONE
+    -- trailing run, so a `QUEST_TURNED_IN` arriving mid-vignette-burst lost
+    -- its leading edge -- up to two seconds of delay on the single moment
+    -- this feature exists for -- and, arriving third or later, had its
+    -- closure discarded outright while the debug line named a vignette.
+    --
+    -- The vignette event is the only firehose; the other seven are single
+    -- moments and each deserves its own immediate answer.
+    --
+    -- And the "is this switched on" test was INSIDE the debounced body, so
+    -- every vignette allocated a closure and scheduled a timer for a player
+    -- who has auto-waypoint off -- which is the default, and therefore almost
+    -- everyone.
+    local firehose = (event == "VIGNETTE_MINIMAP_UPDATED")
+
     CN:RegisterEvent(event, function()
-        -- THROTTLED, BECAUSE ONE OF THESE IS A FIREHOSE. 0.77.0.
+        if not CN.IsAutoWaypointEnabled() then
+            return
+        end
+
+        if not firehose then
+            CN.AutoAdvance(event)
+            return
+        end
+
+        -- THROTTLED, BECAUSE THIS ONE IS A FIREHOSE. 0.77.0.
         --
         -- `VIGNETTE_MINIMAP_UPDATED` fires many times a second while moving
         -- through any zone with rares or treasures in it -- which is exactly
@@ -1352,7 +1395,7 @@ for _, event in ipairs({
         --
         -- `Navigation.Arrive` still calls `CN.AutoAdvance` directly and
         -- passes `force`: arriving somewhere is a single moment, not a burst.
-        CN.Debounce("Routing.autoAdvance", 2, function()
+        CN.Debounce("Routing.autoAdvance.vignette", 2, function()
             CN.AutoAdvance(event)
         end)
     end)

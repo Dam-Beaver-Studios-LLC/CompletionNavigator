@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.77.0"
-CN.dbVersion   = 29
+CN.version     = "0.78.0"
+CN.dbVersion   = 30
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -855,6 +855,26 @@ function CN.SortKey(text)
     text = text:gsub("^[%s%p%d]+", "")
 
     return string.lower(text)
+end
+
+-- WHAT A ROW SAYS, FOR SEARCHING IT. 0.78.0.
+--
+-- The name and the value column need different treatment and 0.77.0 gave
+-- them the same one. `CN.SortKey` strips LEADING punctuation and digits,
+-- which is right for a name -- "  12. Kill Ten Rats" sorts under K -- and
+-- destructive for the value column, which is where the numbers live:
+--
+--   "6 left"  -> "left"     "85%"     -> ""
+--   "40 / 60" -> ""         "1,234"   -> ""
+--
+-- So filtering the window by any number matched nothing, and the "Also on:"
+-- counts were computed from the same erased text -- which is the mismatch
+-- that change was written to remove, still there for every numeric row.
+--
+-- One helper, used by the filter and by the cross-tab search, so the two
+-- cannot drift again.
+function CN.SearchKey(text, value)
+    return CN.SortKey(text) .. " " .. string.lower(CN.Strip(value))
 end
 
 

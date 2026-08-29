@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.77.0'
+$script:ToolkitVersion = '0.78.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.77.0"
-CN.dbVersion   = 29
+CN.version     = "0.78.0"
+CN.dbVersion   = 30
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -960,6 +960,26 @@ function CN.SortKey(text)
     return string.lower(text)
 end
 
+-- WHAT A ROW SAYS, FOR SEARCHING IT. 0.78.0.
+--
+-- The name and the value column need different treatment and 0.77.0 gave
+-- them the same one. `CN.SortKey` strips LEADING punctuation and digits,
+-- which is right for a name -- "  12. Kill Ten Rats" sorts under K -- and
+-- destructive for the value column, which is where the numbers live:
+--
+--   "6 left"  -> "left"     "85%"     -> ""
+--   "40 / 60" -> ""         "1,234"   -> ""
+--
+-- So filtering the window by any number matched nothing, and the "Also on:"
+-- counts were computed from the same erased text -- which is the mismatch
+-- that change was written to remove, still there for every numeric row.
+--
+-- One helper, used by the filter and by the cross-tab search, so the two
+-- cannot drift again.
+function CN.SearchKey(text, value)
+    return CN.SortKey(text) .. " " .. string.lower(CN.Strip(value))
+end
+
 
 function CN.TokenLabel(token)
     if type(token) ~= "string" or token == "" then
@@ -1568,6 +1588,16 @@ end
 --
 -- An outline is one call and it is the difference between "readable at a
 -- glance" and "readable if the ground happens to be dark".
+-- HOW MUCH ROOM THE HOVER X TAKES ALONG A FRAME'S TOP-RIGHT EDGE. 0.78.0.
+--
+-- 0.77.0 hardcoded 16 in the control and `Modules/Hud.lua` restated 18 in
+-- another file so its label could clear the button -- one number, two places.
+-- Alpha 0 does NOT disable mouse input, which is exactly why the room has to
+-- be reserved: the two frames that did not reserve it had a live click in
+-- their top-right corner that stopped the route or hid the arrow, with
+-- nothing drawn there.
+CN.CLOSE_WIDTH = 18
+
 -- A HOVER X ON A FRAME DRAWN OVER THE WORLD. 0.77.0.
 --
 -- The heads-up line got one when a player asked for it in as many words: a
@@ -1590,7 +1620,7 @@ function CN.AttachCloseControl(frame, onClose, tooltip, closeTooltip)
 
     local close = CreateFrame("Button", nil, frame)
 
-    close:SetSize(16, 16)
+    close:SetSize(CN.CLOSE_WIDTH - 2, CN.CLOSE_WIDTH - 2)
     close:SetPoint("TOPRIGHT", -2, -2)
 
     -- A DRAG STARTED IN THAT CORNER STILL MOVES THE FRAME.
@@ -3359,8 +3389,24 @@ CN.migrations = {
     [27] = function()
     end,
 
+    -- 0.77.0's VERSION OF THIS LOOKED IN A TABLE THAT DOES NOT EXIST.
+    --
+    -- It cleared from `db.account.settings` and `character.preferences`.
+    -- Settings live at `db.settings` -- `AccountSettings()` returns that, the
+    -- account defaults have no `settings` key, and nothing in the tree ever
+    -- asks `CN.Account("settings")`. So the migration ran, found nothing,
+    -- stamped itself done, and the headline fix of that release reached
+    -- nobody: every legacy `{point, x, y}` survived, and
+    -- `CN.RestoreFramePosition` falls back to `placement.point` for the
+    -- missing relative point -- which is exactly the broken anchor it was
+    -- written to stop using.
+    --
+    -- Version 29 has shipped, so this one cannot be re-run. Kept as an empty
+    -- function so the ladder stays continuous; the real reset is [29] below.
+    [28] = function()
+    end,
+
     -- THE FRAME POSITIONS THREE FRAMES SAVED WITHOUT A RELATIVE POINT.
-    -- 0.77.0.
     --
     -- The heads-up line, the follow list and the arrow all stored
     -- `{ point, x, y }` and restored with the anchor standing in for the
@@ -3373,7 +3419,9 @@ CN.migrations = {
     -- no way to tell whether it was ever wrong. Cleared, so each frame starts
     -- from its default and is placed once more, rather than restored to
     -- somewhere the player never put it.
-    [28] = function(db)
+    --
+    -- IN `db.settings`, which is where they actually are. See [28].
+    [29] = function(db)
         local function Reset(store, key)
             if type(store) ~= "table" then
                 return
@@ -3388,18 +3436,40 @@ CN.migrations = {
             end
         end
 
-        local settings = db.account and db.account.settings
+        for _, key in ipairs({ "hudPosition", "arrowPosition",
+                               "followPosition" }) do
+            Reset(db.settings, key)
 
-        Reset(settings, "hudPosition")
-        Reset(settings, "arrowPosition")
-        Reset(settings, "followPosition")
-
-        for _, character in pairs(db.characters or {}) do
-            if type(character) == "table" then
-                Reset(character.preferences, "hudPosition")
-                Reset(character.settings, "arrowPosition")
-                Reset(character.settings, "followPosition")
+            for _, character in pairs(db.characters or {}) do
+                if type(character) == "table" then
+                    Reset(character.settings, key)
+                end
             end
+        end
+
+        -- AND THE EMPTY TABLE THE ARROW WROTE ON EVERY FIRST BUILD. 0.78.0.
+        --
+        -- `settings.arrowPosition = settings.arrowPosition or {}` put a
+        -- permanent empty table in saved data for a player who never moved
+        -- the arrow, which nothing read and which would defeat any later
+        -- reset keyed on the entry being present.
+        if type(db.settings) == "table"
+            and type(db.settings.arrowPosition) == "table"
+            and db.settings.arrowPosition.point == nil then
+
+            db.settings.arrowPosition = nil
+        end
+
+        -- A LIFETIME TOTAL THE CLIENT ALREADY KEEPS. 0.78.0.
+        --
+        -- `Progress` incremented `total` on every turn-in and read it back
+        -- nowhere: `Progress.Summary` takes its lifetime figure from the
+        -- client, which that file's own header calls "the real lifetime
+        -- total". Sixth store to lose a field it did not need to keep.
+        if type(db.account) == "table"
+            and type(db.account.progress) == "table" then
+
+            db.account.progress.total = nil
         end
     end,
 }
@@ -6523,6 +6593,15 @@ CN.localeKeys = {
     "Stop cleared",
     "Stop %d of %d cleared",
     "Route complete.",
+
+    -- 0.78.0. Two sentences that were assembled from a translated fragment
+    -- and an English literal, so a German client read a translated headline
+    -- followed by untranslated prose -- the pattern `Modules/Inventory.lua`
+    -- records as a defect and `Modules/Follow.lua` reproduced one release
+    -- after citing it.
+    "All %d stops done.",
+    "All 1 stop done.",
+    "stop %d of %d",
     "estimated",
     "unknown",
     "solo",
@@ -6612,6 +6691,9 @@ CN.RegisterLocale("deDE", {
     ["Stop cleared"] = "Station erledigt",
     ["Stop %d of %d cleared"] = "Station %d von %d erledigt",
     ["Route complete."] = "Route abgeschlossen.",
+    ["All %d stops done."] = "Alle %d Stopps erledigt.",
+    ["All 1 stop done."] = "Alle 1 Stopp erledigt.",
+    ["stop %d of %d"] = "Stopp %d von %d",
     ["estimated"] = "geschätzt",
     ["unknown"] = "unbekannt",
     ["solo"] = "allein",
@@ -6661,6 +6743,9 @@ CN.RegisterLocale("esES", {
     ["Stop cleared"] = "Parada completada",
     ["Stop %d of %d cleared"] = "Parada %d de %d completada",
     ["Route complete."] = "Ruta completada.",
+    ["All %d stops done."] = "Las %d paradas completadas.",
+    ["All 1 stop done."] = "1 parada completada.",
+    ["stop %d of %d"] = "parada %d de %d",
     ["estimated"] = "estimado",
     ["unknown"] = "desconocido",
     ["solo"] = "en solitario",
@@ -6710,6 +6795,9 @@ CN.RegisterLocale("esMX", {
     ["Stop cleared"] = "Parada completada",
     ["Stop %d of %d cleared"] = "Parada %d de %d completada",
     ["Route complete."] = "Ruta completada.",
+    ["All %d stops done."] = "Las %d paradas completadas.",
+    ["All 1 stop done."] = "1 parada completada.",
+    ["stop %d of %d"] = "parada %d de %d",
     ["estimated"] = "estimado",
     ["unknown"] = "desconocido",
     ["solo"] = "en solitario",
@@ -6759,6 +6847,9 @@ CN.RegisterLocale("frFR", {
     ["Stop cleared"] = "Étape terminée",
     ["Stop %d of %d cleared"] = "Étape %d sur %d terminée",
     ["Route complete."] = "Itinéraire terminé.",
+    ["All %d stops done."] = "Les %d etapes terminees.",
+    ["All 1 stop done."] = "1 etape terminee.",
+    ["stop %d of %d"] = "etape %d sur %d",
     ["estimated"] = "estimé",
     ["unknown"] = "inconnu",
     ["solo"] = "seul",
@@ -6808,6 +6899,9 @@ CN.RegisterLocale("itIT", {
     ["Stop cleared"] = "Tappa completata",
     ["Stop %d of %d cleared"] = "Tappa %d di %d completata",
     ["Route complete."] = "Percorso completato.",
+    ["All %d stops done."] = "Tutte le %d tappe completate.",
+    ["All 1 stop done."] = "1 tappa completata.",
+    ["stop %d of %d"] = "tappa %d di %d",
     ["estimated"] = "stimato",
     ["unknown"] = "sconosciuto",
     ["solo"] = "da solo",
@@ -6852,6 +6946,9 @@ CN.RegisterLocale("koKR", {
     ["account-wide"] = "계정 전체",
     ["nothing actionable"] = "할 일 없음",
     ["Stop cleared"] = "지점 완료",
+    ["All %d stops done."] = "%d개 지점 모두 완료.",
+    ["All 1 stop done."] = "1개 지점 완료.",
+    ["stop %d of %d"] = "%d / %d 지점",
     ["Stop %d of %d cleared"] = "%d/%d 지점 완료",
     ["estimated"] = "추정치",
     ["unknown"] = "알 수 없음",
@@ -6896,6 +6993,9 @@ CN.RegisterLocale("ptBR", {
     ["account-wide"] = "para toda a conta",
     ["nothing actionable"] = "nada a fazer",
     ["Stop cleared"] = "Parada concluída",
+    ["All %d stops done."] = "Todas as %d paradas concluidas.",
+    ["All 1 stop done."] = "1 parada concluida.",
+    ["stop %d of %d"] = "parada %d de %d",
     ["Stop %d of %d cleared"] = "Parada %d de %d concluída",
     ["Route complete."] = "Rota concluída.",
     ["estimated"] = "estimado",
@@ -6942,6 +7042,9 @@ CN.RegisterLocale("ruRU", {
     ["account-wide"] = "для всей учётной записи",
     ["nothing actionable"] = "нечего делать",
     ["Stop cleared"] = "Точка пройдена",
+    ["All %d stops done."] = "Vse %d ostanovok zaversheny.",
+    ["All 1 stop done."] = "1 ostanovka zavershena.",
+    ["stop %d of %d"] = "ostanovka %d iz %d",
     ["Stop %d of %d cleared"] = "Точка %d из %d пройдена",
     ["estimated"] = "оценка",
     ["unknown"] = "неизвестно",
@@ -6987,6 +7090,9 @@ CN.RegisterLocale("zhCN", {
     ["account-wide"] = "全账号通用",
     ["nothing actionable"] = "暂无可做",
     ["Stop cleared"] = "站点完成",
+    ["All %d stops done."] = "全部 %d 个站点已完成。",
+    ["All 1 stop done."] = "1 个站点已完成。",
+    ["stop %d of %d"] = "站点 %d / %d",
     ["Stop %d of %d cleared"] = "站点 %d/%d 完成",
     ["Route complete."] = "路线完成。",
     ["estimated"] = "估算",
@@ -7033,6 +7139,9 @@ CN.RegisterLocale("zhTW", {
     ["account-wide"] = "全帳號通用",
     ["nothing actionable"] = "暫無可做",
     ["Stop cleared"] = "站點完成",
+    ["All %d stops done."] = "全部 %d 個站點已完成。",
+    ["All 1 stop done."] = "1 個站點已完成。",
+    ["stop %d of %d"] = "站點 %d / %d",
     ["Stop %d of %d cleared"] = "站點 %d/%d 完成",
     ["estimated"] = "估算",
     ["unknown"] = "未知",
@@ -9915,19 +10024,20 @@ function CN.SetWaypoint(mapID, x, y, title)
 
     CN.DebugPrint("Waypoint set via " .. tostring(name) .. ".")
 
-    -- AND A CAVEAT THE PROVIDER ATTACHED TO A SUCCESS. 0.77.0.
+    -- AND A CAVEAT THE PROVIDER ATTACHED TO A SUCCESS IS RETURNED, NOT
+    -- PRINTED. 0.78.0.
     --
     -- The native provider answers `true, "the arrow is set; the game does not
-    -- allow a map pin here"` on a dungeon, raid or continent map -- and this
-    -- read the second return only on FAILURE, so the sentence written to
-    -- explain why no pin appeared was discarded, and the player was told
-    -- "Waypoint set" while the world map stayed empty. A dead writer, and a
-    -- player left thinking it had failed.
-    if why then
-        CN.PrintLine(CN.Muted(tostring(why)))
-    end
-
-    return true
+    -- allow a map pin here"` on a dungeon, raid or continent map, and 0.77.0
+    -- correctly stopped discarding that -- and printed it HERE, before the
+    -- caller's own headline, so the player read an unprefixed indented
+    -- sentence and then "Waypoint set" underneath it, backwards. Four of the
+    -- six callers print no headline at all, so those produced a bare
+    -- continuation line with nothing above it -- on every hub advance in
+    -- follow mode, inside an instance.
+    --
+    -- A continuation belongs to whoever wrote the headline it continues.
+    return true, why
 end
 
 -- The single entry point for "take me there", used by /cn go, the Navigate
@@ -9947,8 +10057,17 @@ function CN.NavigateToObjective(objective)
     local name = tostring(objective.name or objective.id or "that objective")
 
     if objective.mapID and objective.x and objective.y then
-        if CN.SetWaypoint(objective.mapID, objective.x, objective.y, name) then
+        local placed, why = CN.SetWaypoint(objective.mapID, objective.x,
+            objective.y, name)
+
+        if placed then
             CN.Print("Waypoint set: " .. name)
+
+            -- The caveat, UNDER its own headline. See `CN.SetWaypoint`.
+            if why then
+                CN.PrintLine(CN.Muted(tostring(why)))
+            end
+
             return true
         end
 
@@ -9966,8 +10085,15 @@ function CN.NavigateToObjective(objective)
             if mapID and x and y then
                 objective.mapID, objective.x, objective.y = mapID, x, y
 
-                if CN.SetWaypoint(mapID, x, y, name) then
+                local placed, why = CN.SetWaypoint(mapID, x, y, name)
+
+                if placed then
                     CN.Print("Waypoint set: " .. name)
+
+                    if why then
+                        CN.PrintLine(CN.Muted(tostring(why)))
+                    end
+
                     return true
                 end
 
@@ -11159,8 +11285,34 @@ for _, event in ipairs({
     "VIGNETTE_MINIMAP_UPDATED",
     "ZONE_CHANGED_NEW_AREA",
 }) do
+    -- ONE KEY PER SHAPE OF EVENT, AND THE FEATURE CHECK OUTSIDE. 0.78.0.
+    --
+    -- 0.77.0 put all eight on one key. `CN.Debounce` is leading-edge with ONE
+    -- trailing run, so a `QUEST_TURNED_IN` arriving mid-vignette-burst lost
+    -- its leading edge -- up to two seconds of delay on the single moment
+    -- this feature exists for -- and, arriving third or later, had its
+    -- closure discarded outright while the debug line named a vignette.
+    --
+    -- The vignette event is the only firehose; the other seven are single
+    -- moments and each deserves its own immediate answer.
+    --
+    -- And the "is this switched on" test was INSIDE the debounced body, so
+    -- every vignette allocated a closure and scheduled a timer for a player
+    -- who has auto-waypoint off -- which is the default, and therefore almost
+    -- everyone.
+    local firehose = (event == "VIGNETTE_MINIMAP_UPDATED")
+
     CN:RegisterEvent(event, function()
-        -- THROTTLED, BECAUSE ONE OF THESE IS A FIREHOSE. 0.77.0.
+        if not CN.IsAutoWaypointEnabled() then
+            return
+        end
+
+        if not firehose then
+            CN.AutoAdvance(event)
+            return
+        end
+
+        -- THROTTLED, BECAUSE THIS ONE IS A FIREHOSE. 0.77.0.
         --
         -- `VIGNETTE_MINIMAP_UPDATED` fires many times a second while moving
         -- through any zone with rares or treasures in it -- which is exactly
@@ -11176,7 +11328,7 @@ for _, event in ipairs({
         --
         -- `Navigation.Arrive` still calls `CN.AutoAdvance` directly and
         -- passes `force`: arriving somewhere is a single moment, not a burst.
-        CN.Debounce("Routing.autoAdvance", 2, function()
+        CN.Debounce("Routing.autoAdvance.vignette", 2, function()
             CN.AutoAdvance(event)
         end)
     end)
@@ -12759,8 +12911,7 @@ function UI.SearchAll(text)
                 -- textures and all -- so a hex fragment matched every row on
                 -- every tab while the tab in front of the player correctly
                 -- matched none. Two predicates for one question.
-                local haystack = CN.SortKey(entry.text)
-                    .. " " .. CN.SortKey(entry.value)
+                local haystack = CN.SearchKey(entry.text, entry.value)
 
                 if haystack:find(needle, 1, true) then
                     count = count + 1
@@ -16366,8 +16517,14 @@ CN:RegisterCommand{
                 .. CN.YesNo(CompletionNavigatorMinimapButton:IsShown()))
             table.insert(lines, "  hidden by setting: "
                 .. CN.YesNo(CN.Settings().minimap.hide))
+            -- DEGREES, WHICH IS WHAT IT IS. 0.78.0.
+            --
+            -- Written as `math.deg(...)` and read as `math.rad(...)`, with a
+            -- default of 225 -- so this diagnostic printed "angle: 225.00
+            -- rad", which is thirty-five full turns.
             table.insert(lines, "  angle: "
-                .. string.format("%.2f rad", CN.Settings().minimap.angle or 0))
+                .. string.format("%.0f degrees",
+                    CN.Settings().minimap.angle or 0))
         end
 
         table.insert(lines, "Registered tabs: " .. #UI.tabs)
@@ -16954,7 +17111,7 @@ local function CreateList(parent)
         -- AND THE VALUE COLUMN. 0.77.0. The cross-tab count searched it and
         -- this did not, so "Also on: Collections (12)" led to a tab that said
         -- "Nothing here matches". One predicate now.
-        local haystack = SortKey(entry.text) .. " " .. SortKey(entry.value)
+        local haystack = CN.SearchKey(entry.text, entry.value)
 
         -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
         -- name, not a regular expression, and a stray bracket must not throw.
@@ -30086,25 +30243,49 @@ Rares.CharacterKills = CharacterKills
 ------------------------------------------------------------
 
 -- Vignettes currently visible, classified and located.
+-- EVERY VIGNETTE THE CLIENT REPORTS, DEAD ONES INCLUDED. 0.78.0.
+--
+-- `GetActive` filters the dead out AND drops the flag from the rows it
+-- builds, so `VignetteWork` -- which reads `vignette.isDead` to record that a
+-- rare was seen already dead -- could never see one. `wasDead` was therefore
+-- false for every row, and the branch in `NoteDisappearances` commented as
+-- "needs no inference at all" was unreachable.
+--
+-- So every clear fell through to the "it vanished within 150 yards of me"
+-- guess, and a rare somebody else killed, or one tagged and finished while
+-- the player rode past two hundred yards away, was never marked cleared --
+-- and the addon went on recommending it.
+--
+-- The filter belongs to the two surfaces that want live rares. The learning
+-- pass wants what the client actually said.
+function Rares.GetAll(mapID)
+    local seen = {}
+
+    for _, vignette in ipairs(Blizzard.GetVignettes(mapID)) do
+        table.insert(seen, {
+            guid       = vignette.guid,
+            vignetteID = vignette.vignetteID,
+            name       = vignette.name,
+            kind       = Blizzard.ClassifyVignette(vignette.atlas),
+            mapID      = vignette.mapID,
+            x          = vignette.x,
+            y          = vignette.y,
+            inFogOfWar = vignette.inFogOfWar,
+            isDead     = vignette.isDead and true or false,
+        })
+    end
+
+    return seen
+end
+
 function Rares.GetActive(mapID)
     mapID = mapID or select(1, CN.GetPlayerPosition())
 
     local active = {}
 
-    for _, vignette in ipairs(Blizzard.GetVignettes(mapID)) do
-        local kind = Blizzard.ClassifyVignette(vignette.atlas)
-
+    for _, vignette in ipairs(Rares.GetAll(mapID)) do
         if not vignette.isDead then
-            table.insert(active, {
-                guid       = vignette.guid,
-                vignetteID = vignette.vignetteID,
-                name       = vignette.name,
-                kind       = kind,
-                mapID      = vignette.mapID,
-                x          = vignette.x,
-                y          = vignette.y,
-                inFogOfWar = vignette.inFogOfWar,
-            })
+            table.insert(active, vignette)
         end
     end
 
@@ -30375,12 +30556,21 @@ end
 -- ELIGIBILITY
 ------------------------------------------------------------
 
-CN.RegisterEligibilityChecker(CN.objectiveTypes.RARE, function(vignetteID)
+-- FOR BOTH TYPES THIS FILE EMITS. 0.78.0.
+--
+-- The provider below produces `RARE` and `TREASURE` rows from one store, and
+-- only `RARE` had a checker -- so roughly half of what this module puts on
+-- the list resolved to `UNKNOWN` in `CN.Explain`. `/cn why` on a treasure
+-- said nothing useful, and the auto-advance staleness test had to fall
+-- through to a linear scan of the whole candidate list every time.
+--
+-- One closure, registered twice, with wording that fits either.
+local function Eligibility(vignetteID)
     local states = CN.objectiveStates
     local record = Store()[vignetteID]
 
     if not record then
-        return states.UNKNOWN, "Never seen this rare", nil
+        return states.UNKNOWN, "Never seen this one", nil
     end
 
     if Rares.IsClearedByCharacter(vignetteID) then
@@ -30388,7 +30578,10 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.RARE, function(vignetteID)
     end
 
     return states.AVAILABLE, nil, nil
-end)
+end
+
+CN.RegisterEligibilityChecker(CN.objectiveTypes.RARE, Eligibility)
+CN.RegisterEligibilityChecker(CN.objectiveTypes.TREASURE, Eligibility)
 
 ------------------------------------------------------------
 -- CANDIDATES
@@ -30505,7 +30698,10 @@ end, { events = { "VIGNETTE_MINIMAP_UPDATED", "VIGNETTES_UPDATED", "ZONE_CHANGED
 local function VignetteWork()
     local mapID = select(1, CN.GetPlayerPosition())
 
-    local active = Rares.GetActive(mapID)
+    -- EVERY VIGNETTE, NOT THE LIVE ONES. 0.78.0. See `Rares.GetAll`: this
+    -- reads `isDead` a few lines down, and `GetActive` had already removed
+    -- every row that would have carried it.
+    local active = Rares.GetAll(mapID)
 
     local currentGuids = {}
 
@@ -31111,7 +31307,18 @@ CN.RegisterCandidateProvider("Currencies", function()
     end
 
     return candidates
-end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true })
+-- A COOLDOWN, BECAUSE THIS EVENT FIRES ON EVERY COIN PICKED UP. 0.78.0.
+--
+-- This file's own note six lines down says exactly that, which is why the
+-- SCAN is throttled to sixty seconds -- and the provider had no cooldown at
+-- all, so it was marked dirty and rebuilt on every firing, each rebuild
+-- walking the whole character store through `Capped()` and making a live
+-- client call per capped row.
+--
+-- Thirty seconds costs nothing in freshness: capped-ness cannot change
+-- faster than the sixty-second scan that computes it. `Modules/Rares.lua`
+-- sets 5 for the same reason and `Modules/Orders.lua` sets 30.
+end, { events = { "CURRENCY_DISPLAY_UPDATE" }, volatile = true, cooldown = 30 })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -31307,6 +31514,18 @@ CN:RegisterCommand{
                 CN.PrintLine("  " .. tostring(currency.name)
                     .. " |cff8a8f96" .. currency.earned .. " / " .. currency.maximum
                     .. ", " .. currency.remaining .. " left this week|r")
+            end
+
+            -- A CAP NOBODY CAN SEE READS AS "THAT WAS EVERYTHING". 0.78.0.
+            --
+            -- The headline announced the real count and the list stopped at
+            -- eight with nothing said, so a player with fourteen was told
+            -- fourteen and shown eight. Three other commands print "and N
+            -- more" for the same shape and `Design.lua`'s own header names
+            -- this inconsistency.
+            if #weekly > 8 then
+                CN.PrintLine(CN.Muted("  ... and " .. (#weekly - 8)
+                    .. " more"))
             end
         end
 
@@ -37735,7 +37954,17 @@ function Progress.NoteCompleted(questID)
 
     store.today   = (store.today or 0) + 1
     store.session = (store.session or 0) + 1
-    store.total   = (store.total or 0) + 1
+
+    -- `store.total` IS NOT WRITTEN ANY MORE. 0.78.0.
+    --
+    -- Incremented on every turn-in and read by nothing: `Progress.Summary`
+    -- takes its lifetime figure from `Progress.LifetimeCompleted()`, which is
+    -- the client's own count and which this file's header calls "the real
+    -- lifetime total".
+    --
+    -- Sixth store to lose a field it did not need to keep -- `record.done`,
+    -- `zone`, `currencyNames`, `achievementTotals` and the achievement flat
+    -- field were the others -- and migration 29 removes it.
 
     if (store.best or 0) < store.today then
         store.best    = store.today
@@ -40193,14 +40422,21 @@ function Follow.NoteStopCleared()
     if total > 0 and Follow.completed >= total and not Follow.celebrated then
         Follow.celebrated = true
 
-        -- PLURALISED, AND NOT HALF-TRANSLATED. 0.77.0.
+        -- TRANSLATED ALL THE WAY THROUGH. 0.78.0.
         --
-        -- "1 stops" in the addon's one celebratory line, and an English
-        -- literal bolted onto a `CN.L` lookup -- so a translated client read
-        -- a translated headline followed by untranslated prose.
-        -- `Modules/Inventory.lua` records that exact pattern as a defect.
-        Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r "
-            .. CN.Count(total, "stop") .. ", all done.")
+        -- 0.77.0 fixed the plural and left the half-translation it was citing
+        -- as the defect: `CN.Count` hardcodes "stop"/"stops" and ", all
+        -- done." was a literal, so a German client read "Route abgeschlossen.
+        -- 12 stops, all done."
+        --
+        -- Both halves are keys now, and the singular is its own key rather
+        -- than a format string with a 1 in it, because a language that
+        -- inflects differently at one cannot be served by substitution.
+        local tail = total == 1
+            and CN.L["All 1 stop done."]
+            or string.format(CN.L["All %d stops done."], total)
+
+        Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r " .. tail)
 
         Follow.Celebrate()
     end
@@ -40442,6 +40678,15 @@ local function BuildFrame()
 
     frame.header = CN.Label(frame, "OVERLAY", "HEAD")
     frame.header:SetPoint("TOPLEFT", inset, -CN.SPACE.S)
+
+    -- AND A RIGHT-EDGE STOP, so the header does not run under the hover x.
+    -- 0.78.0.
+    --
+    -- Alpha 0 does not disable mouse input, so without this the right end of
+    -- the header row is a click that stops the route -- with nothing drawn
+    -- there to say so. `Modules/Hud.lua` reserves the same width for the same
+    -- reason.
+    frame.header:SetPoint("TOPRIGHT", -(inset + CN.CLOSE_WIDTH), -CN.SPACE.S)
     frame.header:SetJustifyH("LEFT")
 
     frame.body = CN.Label(frame, "OVERLAY", "SMALL")
@@ -42744,9 +42989,23 @@ CN.RegisterCandidateProvider("Vault", function()
 
     -- An unclaimed vault from last week outranks everything: it is free, it
     -- takes thirty seconds, and it expires.
-    if Blizzard.HasAvailableWeeklyRewards() then
+    -- AND HIDING OR DEFERRING IT WORKS. 0.78.0.
+    --
+    -- Every other provider in the tree guards on both, and the loop directly
+    -- below this one does -- while the claim row did not. So right-clicking
+    -- "Collect your Great Vault reward" on the heads-up line printed
+    -- "Deferred for an hour" and it was back on the next refresh: the addon
+    -- telling the player it had done something it had not.
+    --
+    -- The id is a string now. It was `0`, which `CN.ToID` rejects, so
+    -- `/cn unhide` could never name it back either; `Modules/Orders.lua` uses
+    -- "claim" for the same shape and the filter falls back to the raw string.
+    if Blizzard.HasAvailableWeeklyRewards()
+        and not CN.IsIgnored(CN.objectiveTypes.CURRENCY, "vault")
+        and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, "vault") then
+
         table.insert(candidates, CN.NewObjective({
-            id               = 0,
+            id               = "vault",
             type             = CN.objectiveTypes.CURRENCY,
             name             = "Collect your Great Vault reward",
             accountWide      = false,
@@ -43193,11 +43452,14 @@ local function BuildArrow()
     arrow:RegisterForDrag("LeftButton")
     arrow:SetClampedToScreen(true)
 
-    local settings = Settings()
-
-    settings.arrowPosition = settings.arrowPosition or {}
-
-    CN.RestoreFramePosition(arrow, settings.arrowPosition,
+    -- NOT `settings.arrowPosition = settings.arrowPosition or {}`. 0.78.0.
+    --
+    -- That wrote a permanent empty table into saved data for a player who
+    -- never moved the arrow -- read by nothing, since the restore falls
+    -- through to the fallback when there is no `point` -- and it would defeat
+    -- any later reset keyed on the entry being present. The two sibling
+    -- frames never did it.
+    CN.RestoreFramePosition(arrow, Settings().arrowPosition,
         { point = "CENTER", relativePoint = "CENTER", x = 0, y = 160 })
 
     arrow.texture = arrow:CreateTexture(nil, "ARTWORK")
@@ -43958,6 +44220,21 @@ local function Refresh()
     if not target or not Navigation.IsArrowEnabled() then
         Blank()
         arrow:Hide()
+
+        -- AND THE TICKER STOPS WITH IT. 0.78.0.
+        --
+        -- `provider.SetWaypoint` starts a ten-per-second ticker and only
+        -- `Navigation.Clear` ever stopped it -- so `/cn arrow off`, and the
+        -- x this release put ON the arrow, hid the frame and left the ticker
+        -- running for the rest of the session: `NoteMotion`, a rotation, a
+        -- vertex colour and two `SetText` calls, ten times a second, on a
+        -- frame nobody can see.
+        --
+        -- The x made that trivially easy to hit, which is how it was found.
+        if not Navigation.IsArrowEnabled() then
+            Navigation.StopTicker()
+        end
+
         return
     end
 
@@ -44107,6 +44384,13 @@ function Navigation.StopTicker()
     end
 end
 
+-- Published so `/cd navdiag` and the suite can see whether the ten-per-second
+-- redraw is running. A ticker over a hidden frame is invisible by definition,
+-- which is how it survived from the day the arrow was written.
+function Navigation.IsTicking()
+    return ticker ~= nil
+end
+
 ------------------------------------------------------------
 -- DIAGNOSIS
 ------------------------------------------------------------
@@ -44128,6 +44412,16 @@ function Navigation.Diagnose()
     local function add(label, value)
         table.insert(report, { label = label, value = tostring(value) })
     end
+
+    -- AND WHETHER THE REDRAW IS RUNNING. 0.78.0.
+    --
+    -- The ticker was started by every waypoint and stopped only by
+    -- `Navigation.Clear`, so turning the arrow off left it redrawing a hidden
+    -- frame ten times a second for the rest of the session. Invisible by
+    -- definition, which is why it survived -- and why the command whose whole
+    -- job is "everything the arrow is thinking" should say it.
+    add("arrow enabled", CN.YesNo(Navigation.IsArrowEnabled()))
+    add("redraw ticker", CN.YesNo(Navigation.IsTicking()))
 
     if not target then
         add("target", "none" .. CN.DASH .. "nothing is being tracked")
@@ -50352,8 +50646,19 @@ CN:RegisterCommand{
             -- And marked, like every other duration in this file: a figure
             -- from a measured run speed and one from the default are not the
             -- same claim.
+            -- THROUGH `CN.ConfidenceFor`, NOT A RAW BOOLEAN. 0.78.0.
+            --
+            -- `CN.WithConfidence` compares its second argument against the
+            -- `CN.confidence` STRINGS. A boolean matches neither, so it fell
+            -- through and returned the text unmarked -- the measured form,
+            -- always. The comment two lines up described behaviour the code
+            -- did not have, and both siblings in this file and in `Session`
+            -- already did it correctly.
             Print(string.format("  |cff8a8f96running the whole way: %s|r",
-                onFoot and CN.WithConfidence(onFoot, runMeasured) or "unknown"))
+                onFoot
+                    and CN.WithConfidence(onFoot,
+                        CN.ConfidenceFor(runMeasured))
+                    or CN.L["unknown"]))
         elseif detail and detail.mode == "self" then
             local flySpeed, flyMeasured = Travel.SelfFlightSpeed()
 
@@ -50372,6 +50677,13 @@ CN:RegisterCommand{
 
             if #teleports == 0 then
                 Print("  |cff8a8f96no hearthstone or teleport available|r")
+            end
+
+            -- AND SAYS SO WHEN IT STOPS. 0.78.0. A cap nobody can see reads
+            -- as "that was everything"; see the same fix in
+            -- `Modules/Currencies.lua`.
+            if #teleports > 5 then
+                Print("  |cff8a8f96showing 5 of " .. #teleports .. "|r")
             end
 
             for index, teleport in ipairs(teleports) do
@@ -53483,7 +53795,13 @@ CN.RegisterCandidateProvider("Orders", function()
         end
     end
 
-    if Orders.HasClaimable() then
+    -- AND HIDING OR DEFERRING IT WORKS. 0.78.0. See the same fix in
+    -- `Modules/Vault.lua`: the loop above this one guards on both and the
+    -- claim row did not, so deferring it said one thing and did another.
+    if Orders.HasClaimable()
+        and not CN.IsIgnored(CN.objectiveTypes.RECIPE, "claim")
+        and not CN.IsDeferred(CN.objectiveTypes.RECIPE, "claim") then
+
         table.insert(candidates, CN.NewObjective({
             id               = "claim",
             type             = CN.objectiveTypes.RECIPE,
@@ -54538,7 +54856,8 @@ end
 local frame, ticker
 
 -- Sixteen for the button plus two of margin. See where the label is anchored.
-Hud.closeWidth = 18
+-- `Hud.closeWidth` REMOVED. 0.78.0: it restated the width the control itself
+-- sizes from, in another file. `CN.CLOSE_WIDTH` is the one number.
 
 local function Build()
     if frame or not CreateFrame then
@@ -54608,7 +54927,7 @@ local function Build()
     -- stops short of it instead.
     frame.label = CN.Label(frame, "OVERLAY", "HEAD")
     frame.label:SetPoint("TOPLEFT", inset, -inset)
-    frame.label:SetPoint("TOPRIGHT", -(inset + Hud.closeWidth), -inset)
+    frame.label:SetPoint("TOPRIGHT", -(inset + CN.CLOSE_WIDTH), -inset)
     frame.label:SetJustifyH("LEFT")
 
     frame.detail = CN.Label(frame, "OVERLAY", "SMALL")
@@ -54763,7 +55082,10 @@ function Hud.Refresh()
         -- describing the same activity in near-identical words with unrelated
         -- numbers. The follow frame now says "3 left here"; this one keeps
         -- the route-level count, which is the one a glanceable line wants.
-        detail = string.format("stop %d of %d",
+        -- TRANSLATED. 0.78.0: this sat two lines under a `CN.L` lookup and
+        -- was assembled from an English literal, which is the same defect as
+        -- the route-complete line one frame away.
+        detail = string.format(CN.L["stop %d of %d"],
             math.min((follow.completed or 0) + 1, follow.startedWith),
             follow.startedWith)
     end
@@ -55705,7 +56027,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.77.0
+## Version: 0.78.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -55960,6 +56282,80 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.78.0]
+
+**Last release's headline fix reached nobody.** The migration that was meant
+to clear the broken frame positions looked in `db.account.settings` — a table
+this addon does not have. Settings live at `db.settings`. So it ran, found
+nothing, stamped itself done, and every position saved in the broken shape
+survived and was restored against the same wrong anchor. If the heads-up box
+still would not stay where you put it after 0.77.0, that is why. The real
+reset runs now.
+
+### Fixed — 0.77.0's own damage
+
+- **The window filter stopped matching numbers.** 0.77.0 ran the name-cleaning
+  function over the *value* column too, and that function strips leading
+  punctuation and digits — which is right for a name and destructive for the
+  column the numbers live in. "6 left" became "left"; "40 / 60" and "85%"
+  became nothing at all. So filtering by any number matched no row, and the
+  cross-tab counts were computed from the same erased text — the exact
+  mismatch that change was written to remove, still there for every numeric
+  row.
+- **`/cn travel`'s walking comparison was never marked as an estimate.** The
+  confidence helper compares against named levels and was handed a raw
+  boolean, which matches neither — so it returned the *measured* form always,
+  in the one line whose comment says a measured figure and a default are not
+  the same claim.
+- **The new "no map pin here" caveat printed above its own headline**, and at
+  four of six call sites had no headline at all — a bare indented sentence
+  with nothing over it, on every hub advance in follow mode inside an
+  instance.
+- **Auto-advance charged players who have it switched off.** The "is this on"
+  test sat inside the throttled body, so every minimap vignette still
+  allocated a closure and scheduled a timer for the default setting. All eight
+  events also shared one throttle, so a quest turn-in arriving mid-burst lost
+  its immediate answer — on the single moment the feature exists for.
+
+### Fixed — code untouched for many releases
+
+- **A rare somebody else killed was recommended for ever.** The client tells
+  the addon a rare is dead; the reader both filtered those out *and* dropped
+  the flag from the rows it built, so the code that records "seen already
+  dead" could never see one. Every clear fell back to a "it vanished within
+  150 yards of me" guess, which misses anything finished while you rode past.
+- **Turning the arrow off left it redrawing ten times a second** — rotation,
+  colour and two text updates on a hidden frame, for the rest of the session.
+  The close button 0.77.0 added made it trivially easy to hit. `/cd navdiag`
+  now reports whether that redraw is running.
+- **Hiding or deferring the Great Vault claim did nothing.** Both "collect
+  your free thing" rows skipped the hide-and-defer checks their own
+  neighbouring loops apply, so right-clicking one said "Deferred for an hour"
+  and it was back on the next refresh. The vault row's id was `0`, which the
+  addon's own parser rejects, so `/cn unhide` could not name it back either.
+- **Treasures could not be explained.** The module emits rares and treasures
+  from one store and only rares had an eligibility rule, so half its rows
+  answered "unknown" — `/cn why` said nothing useful and the auto-advance
+  staleness test fell through to a full scan every time.
+- **Every coin picked up rebuilt the currency recommendations.** That event
+  fires constantly, which is why the *scan* behind it is throttled to a
+  minute; the rebuild was not throttled at all.
+- **`/cn currencies` announced fourteen weekly rows and showed eight**, with
+  nothing to say it had stopped. `/cn travel`'s teleport list did the same at
+  five.
+- **"Route complete. 12 stops, all done."** was still half-translated after
+  the release that fixed the plural and cited the half-translation as the
+  defect. Both halves are translatable keys now, and so is the heads-up
+  line's "stop N of M".
+- **The close button's footprint was defined in two files**, and the two
+  frames that gained one in 0.77.0 reserved no room for it — so the right end
+  of the follow header was a live click that stopped the route, with nothing
+  drawn there.
+- **`/cn uistatus` reported the minimap angle in radians.** It is degrees, and
+  the default is 225, so it printed "225.00 rad" — thirty-five full turns.
+- Plus: the arrow wrote an empty table into saved data on every first build,
+  and a lifetime turn-in counter was incremented for ever and read by nothing.
 
 ## [0.77.0]
 
@@ -62319,7 +62715,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.77.0
+0.78.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -64642,7 +65038,7 @@ mutate "Modules/Warband.lua" \
     "a deleted alt sorting first hides a character you played yesterday"
 
 mutate "Modules/Hud.lua" \
-    "    frame.label:SetPoint(\"TOPRIGHT\", -(inset + Hud.closeWidth), -inset)" \
+    "    frame.label:SetPoint(\"TOPRIGHT\", -(inset + CN.CLOSE_WIDTH), -inset)" \
     "    frame.label:SetPoint(\"TOPRIGHT\", -inset, -inset)" \
     "the close button sits on top of the end of the objective's name"
 
@@ -66190,8 +66586,8 @@ mutate "Core.lua" \
     "a search for a colour code matches every row on every tab"
 
 mutate "UI/List.lua" \
-    "        local haystack = SortKey(entry.text) .. \" \" .. SortKey(entry.value)" \
-    "        local haystack = SortKey(entry.text)" \
+    "        local haystack = CN.SearchKey(entry.text, entry.value)" \
+    "        local haystack = CN.SortKey(entry.text)" \
     "a tab counted as matching says nothing here matches"
 
 mutate "UI.lua" \
@@ -66240,25 +66636,155 @@ mutate "Modules/Travel.lua" \
     "running the whole way is quoted at flying speed"
 
 mutate "Routing.lua" \
-    "    if why then
-        CN.PrintLine(CN.Muted(tostring(why)))
-    end" \
-    "    if false then
-        CN.PrintLine(CN.Muted(tostring(why)))
-    end" \
+    "            if why then
+                CN.PrintLine(CN.Muted(tostring(why)))
+            end" \
+    "            if false then
+                CN.PrintLine(CN.Muted(tostring(why)))
+            end" \
     "a waypoint with no map pin is reported as a waypoint with one"
 
 mutate "Routing.lua" \
-    "        CN.Debounce(\"Routing.autoAdvance\", 2, function()
+    "        CN.Debounce(\"Routing.autoAdvance.vignette\", 2, function()
             CN.AutoAdvance(event)
         end)" \
     "        CN.AutoAdvance(event)" \
     "every minimap vignette rescans the whole candidate list"
 
+# RETIRED IN 0.78.0: the whole tail is a translated key now, and its
+# successor is "a translated headline is followed by untranslated prose",
+# which mutates the key lookup back into the hardcoded English.
+
+# ---- 0.78.0 ----
+
+mutate "Core.lua" \
+    "    return CN.SortKey(text) .. \" \" .. string.lower(CN.Strip(value))" \
+    "    return CN.SortKey(text) .. \" \" .. CN.SortKey(value)" \
+    "filtering the window by any number matches nothing"
+
+mutate "Database.lua" \
+    "            Reset(db.settings, key)" \
+    "            Reset(db.account and db.account.settings, key)" \
+    "the frame reset looks in a table that does not exist"
+
+mutate "Database.lua" \
+    "        if type(db.account) == \"table\"
+            and type(db.account.progress) == \"table\" then
+
+            db.account.progress.total = nil
+        end" \
+    "        if false then
+            db.account.progress.total = nil
+        end" \
+    "a count the client already keeps stays on disk for ever"
+
+mutate "Modules/Travel.lua" \
+    "                    and CN.WithConfidence(onFoot,
+                        CN.ConfidenceFor(runMeasured))" \
+    "                    and CN.WithConfidence(onFoot, runMeasured)" \
+    "an estimated walking time is printed as a measured one"
+
+mutate "Routing.lua" \
+    "    return true, why
+end" \
+    "    if why then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end
+
+    return true
+end" \
+    "a caveat prints above the headline it belongs under"
+
+mutate "Routing.lua" \
+    "        if not CN.IsAutoWaypointEnabled() then
+            return
+        end
+
+        if not firehose then" \
+    "        if false then
+            return
+        end
+
+        if not firehose then" \
+    "a player with auto-waypoint off pays for every minimap vignette"
+
+mutate "Routing.lua" \
+    "        if not firehose then
+            CN.AutoAdvance(event)
+            return
+        end" \
+    "        if false then
+            CN.AutoAdvance(event)
+            return
+        end" \
+    "a turn-in during a vignette burst is answered two seconds late"
+
+mutate "Modules/Navigation.lua" \
+    "        if not Navigation.IsArrowEnabled() then
+            Navigation.StopTicker()
+        end" \
+    "        if false then
+            Navigation.StopTicker()
+        end" \
+    "turning the arrow off leaves it redrawing ten times a second"
+
+mutate "Modules/Rares.lua" \
+    "            isDead     = vignette.isDead and true or false," \
+    "            isDead     = nil," \
+    "a rare somebody else killed is recommended for ever"
+
+mutate "Modules/Rares.lua" \
+    "    local active = Rares.GetAll(mapID)" \
+    "    local active = Rares.GetActive(mapID)" \
+    "the learning pass never sees a vignette the client flagged dead"
+
+mutate "Modules/Rares.lua" \
+    "        if not vignette.isDead then
+            table.insert(active, vignette)
+        end" \
+    "        table.insert(active, vignette)" \
+    "a dead rare is offered as something to go and kill"
+
+mutate "Modules/Rares.lua" \
+    "CN.RegisterEligibilityChecker(CN.objectiveTypes.TREASURE, Eligibility)" \
+    "local unusedChecker = Eligibility" \
+    "half of what this module offers cannot be explained"
+
+mutate "Modules/Vault.lua" \
+    "    if Blizzard.HasAvailableWeeklyRewards()
+        and not CN.IsIgnored(CN.objectiveTypes.CURRENCY, \"vault\")
+        and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, \"vault\") then" \
+    "    if Blizzard.HasAvailableWeeklyRewards() then" \
+    "deferring the vault reward says it worked and it did not"
+
+mutate "Modules/Orders.lua" \
+    "    if Orders.HasClaimable()
+        and not CN.IsIgnored(CN.objectiveTypes.RECIPE, \"claim\")
+        and not CN.IsDeferred(CN.objectiveTypes.RECIPE, \"claim\") then" \
+    "    if Orders.HasClaimable() then" \
+    "deferring a finished crafting order says it worked and it did not"
+
+mutate "Modules/Currencies.lua" \
+    "volatile = true, cooldown = 30 })" \
+    "volatile = true })" \
+    "every coin picked up rebuilds the currency candidates"
+
+mutate "Modules/Currencies.lua" \
+    "            if #weekly > 8 then" \
+    "            if false then" \
+    "a list of fourteen announces fourteen and shows eight"
+
 mutate "Modules/Follow.lua" \
-    "            .. CN.Count(total, \"stop\") .. \", all done.\")" \
-    "            .. total .. \" stops, all done.\")" \
-    "the route that finished had 1 stops in it"
+    "        local tail = total == 1
+            and CN.L[\"All 1 stop done.\"]
+            or string.format(CN.L[\"All %d stops done.\"], total)" \
+    "        local tail = CN.Count(total, \"stop\") .. \", all done.\"" \
+    "a translated headline is followed by untranslated prose"
+
+mutate "Modules/Follow.lua" \
+    "    frame.header:SetPoint(\"TOPRIGHT\", -(inset + CN.CLOSE_WIDTH), -CN.SPACE.S)" \
+    "    local unusedStop = CN.CLOSE_WIDTH" \
+    "the right end of the follow header is a click that stops the route"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -74235,7 +74761,30 @@ print("\nArrow diagnosis:")
     local idle = diagNav.Diagnose()
 
     assert(#idle >= 1, "there is always a report")
-    assert(idle[1].value:find("none"), "and it says nothing is tracked")
+
+    -- SEARCHED, NOT INDEXED. 0.78.0 put the arrow's own state above the
+    -- target, because a ticker redrawing a hidden frame is invisible by
+    -- definition and this is the command that exists to make it visible.
+    local saidNone = false
+
+    for _, row in ipairs(idle) do
+        if row.label == "target" and row.value:find("none") then
+            saidNone = true
+        end
+    end
+
+    assert(saidNone, "and it says nothing is tracked")
+
+    local reportedTicker = false
+
+    for _, row in ipairs(idle) do
+        if row.label == "redraw ticker" then
+            reportedTicker = true
+        end
+    end
+
+    assert(reportedTicker,
+        "and whether the ten-per-second redraw is running")
 
     -- With a target it must expose every intermediate value, because the
     -- point is to replace a player describing the arrow in prose.
@@ -82929,8 +83478,14 @@ end)()
     local hudCloseFrame = hud.Build()
 
     if hudCloseFrame and hudCloseFrame.close then
-        assert(hud.closeWidth and hud.closeWidth >= 16,
+        -- ONE CONSTANT, IN ONE FILE. 0.78.0: `Hud.closeWidth` restated the
+        -- width the control itself sizes from, so the two could drift and
+        -- two other frames reserved nothing at all.
+        assert(CN.CLOSE_WIDTH and CN.CLOSE_WIDTH >= 16,
             "the label has to keep clear of the button, by at least its width")
+
+        assert(hud.closeWidth == nil,
+            "and the module does not keep a second copy of it")
 
         -- ASSERTED ON THE ANCHOR, not on the constant: the defect was the
         -- label's right edge, and a constant nobody uses is not a fix.
@@ -82940,10 +83495,10 @@ end)()
         assert(labelRight and closeRight,
             "both must be anchored to the top-right edge")
 
-        assert(math.abs(labelRight.x) >= math.abs(closeRight.x) + hud.closeWidth,
+        assert(math.abs(labelRight.x) >= math.abs(closeRight.x) + CN.CLOSE_WIDTH,
             "the name must stop before the button starts: label at "
             .. tostring(labelRight.x) .. ", button at "
-            .. tostring(closeRight.x) .. " and " .. hud.closeWidth .. " wide")
+            .. tostring(closeRight.x) .. " and " .. CN.CLOSE_WIDTH .. " wide")
 
         assert(hudCloseFrame.close:GetScript("OnDragStart"),
             "and a drag started on the button still moves the line")
@@ -97656,12 +98211,31 @@ end)()
 
     assert(ui and list, "both files must be readable")
 
-    assert(string.find(ui, "CN.SortKey(entry.text)", 1, true),
+    assert(string.find(ui, "CN.SearchKey(entry.text, entry.value)", 1, true),
         "the cross-tab search asks through the one function")
 
-    assert(string.find(list, "SortKey(entry.value)", 1, true),
-        "and the tab's own filter searches the value column too, so the "
-        .. "count and the filtered list are the same predicate")
+    assert(string.find(list, "CN.SearchKey(entry.text, entry.value)", 1, true),
+        "and so does the tab's own filter, so the count and the filtered "
+        .. "list are the same predicate")
+
+    -- AND THE VALUE COLUMN KEEPS ITS NUMBERS. 0.78.0.
+    --
+    -- `SortKey` strips LEADING punctuation and digits, which is right for a
+    -- name and destructive for the column the numbers live in: "6 left"
+    -- became "left", "40 / 60" and "85%" became nothing at all. So filtering
+    -- by any number matched no row, and the cross-tab counts were computed
+    -- from the same erased text -- the very mismatch that change removed,
+    -- still there for every numeric row.
+    assert(CN.SearchKey("|cffffc74f  12. Kill Ten Rats|r", "40 / 60")
+        == "kill ten rats 40 / 60",
+        "the name loses its markers and the value keeps its digits: "
+        .. CN.SearchKey("|cffffc74f  12. Kill Ten Rats|r", "40 / 60"))
+
+    assert(CN.SearchKey("Anything", "85%") == "anything 85%",
+        "a percentage survives: " .. CN.SearchKey("Anything", "85%"))
+
+    assert(CN.SearchKey("Anything", nil) == "anything ",
+        "and no value is no value")
 
     print("  the cross-tab search and the tab's filter ask one question")
 end)()
@@ -97783,18 +98357,58 @@ end)()
         return realAdvance(...)
     end
 
+    local heldAuto = CN.Settings().autoWaypoint
+
+    CN.Settings().autoWaypoint = true
+
     CN.ForgetDebounces()
 
     for _ = 1, 20 do
         CN.Dispatch("VIGNETTE_MINIMAP_UPDATED")
     end
 
-    CN.AutoAdvance = realAdvance
-
     assert(advances > 0, "the first vignette in a burst is answered at once")
 
     assert(advances < 20,
         "and twenty in the same window do not each pay for it: " .. advances)
+
+    -- AND A COMPLETION EVENT IS NOT SWALLOWED BY THE BURST. 0.78.0.
+    --
+    -- 0.77.0 put all eight events on one debounce key, and `CN.Debounce` is
+    -- leading-edge with ONE trailing run -- so a turn-in arriving mid-burst
+    -- lost its leading edge entirely, which is up to two seconds of delay on
+    -- the single moment this feature exists for, and arriving third or later
+    -- had its closure discarded while the debug line named a vignette.
+    advances = 0
+
+    CN.Dispatch("QUEST_TURNED_IN", 900123)
+
+    assert(advances > 0,
+        "a turn-in during a vignette burst is answered at once, not queued "
+        .. "behind it")
+
+    -- AND A PLAYER WITH THE FEATURE OFF PAYS NOTHING.
+    --
+    -- The "is this switched on" test was INSIDE the debounced body, so every
+    -- vignette allocated a closure and scheduled a timer for a player who has
+    -- auto-waypoint off -- which is the default, and therefore almost
+    -- everyone.
+    CN.Settings().autoWaypoint = false
+
+    CN.ForgetDebounces()
+
+    advances = 0
+
+    for _ = 1, 20 do
+        CN.Dispatch("VIGNETTE_MINIMAP_UPDATED")
+    end
+
+    assert(advances == 0,
+        "a player with auto-waypoint off is not charged for it: " .. advances)
+
+    CN.Settings().autoWaypoint = heldAuto
+
+    CN.AutoAdvance = realAdvance
 
     print("  the refresh subscription is wired once per event")
 end)()
@@ -97955,14 +98569,528 @@ end)()
     assert(not string.find(follow, '.. " stops, "', 1, true),
         "the count is pluralised rather than always plural")
 
-    assert(string.find(follow, 'CN.Count(total, "stop")', 1, true),
-        "through the helper that exists for it")
+    -- AND TRANSLATED ALL THE WAY THROUGH. 0.78.0.
+    --
+    -- 0.77.0 fixed the plural with `CN.Count`, which hardcodes the English
+    -- word, and left ", all done." as a literal -- so a German client read a
+    -- translated headline followed by untranslated prose, which is the defect
+    -- that release's own comment cited.
+    local bolted = false
 
-    assert(CN.Count(1, "stop") == "1 stop"
-        and CN.Count(3, "stop") == "3 stops",
-        "and that helper says what it should: " .. CN.Count(1, "stop"))
+    for line in string.gmatch(follow, "[^\n]+") do
+        if not string.find(line, "^%s*%-%-")
+            and string.find(line, '.. ", all done."', 1, true) then
+
+            bolted = true
+        end
+    end
+
+    assert(not bolted,
+        "no English tail is bolted onto a translated headline")
+
+    assert(string.find(follow, 'CN.L["All %d stops done."]', 1, true)
+        and string.find(follow, 'CN.L["All 1 stop done."]', 1, true),
+        "both forms are keys, so a language that inflects at one is served")
+
+    assert(CN.L["All 1 stop done."] and CN.L["All %d stops done."]
+        and CN.L["stop %d of %d"],
+        "and the keys exist")
 
     print("  one stop is one stop")
+end)()
+
+print("\nWhat 0.78.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE FRAME RESET LOOKS WHERE THE POSITIONS ACTUALLY ARE.
+    ------------------------------------------------------------
+    -- 0.77.0's migration cleared from `db.account.settings` and
+    -- `character.preferences`. Settings live at `db.settings` -- the account
+    -- defaults have no `settings` key and nothing asks
+    -- `CN.Account("settings")` -- so the migration ran, found nothing,
+    -- stamped itself done, and the headline fix of that release reached
+    -- nobody: every legacy `{point, x, y}` survived and was restored against
+    -- the same broken anchor.
+    local aged = {
+        version = 27,
+        settings = {
+            hudPosition   = { point = "TOP", x = 0, y = -220 },
+            arrowPosition = { point = "CENTER", relativePoint = "CENTER",
+                              x = 4, y = 5 },
+            followPosition = { point = "TOPLEFT", x = 40, y = -200 },
+        },
+        account = { progress = { total = 412, today = 3 } },
+        characters = { ["Realm-Alt"] = { settings = {
+            hudPosition = { point = "TOP", x = 1, y = 2 },
+        } } },
+    }
+
+    CN.RunMigrations(aged)
+
+    assert(aged.settings.hudPosition == nil,
+        "a position saved without a relative point is cleared")
+
+    assert(aged.settings.followPosition == nil, "all three of them")
+
+    assert(aged.settings.arrowPosition
+        and aged.settings.arrowPosition.x == 4,
+        "and one saved WITH one is kept: nothing is thrown away that was "
+        .. "written correctly")
+
+    assert(aged.characters["Realm-Alt"].settings.hudPosition == nil,
+        "on every character's store too")
+
+    -- AND THE LIFETIME COUNT THE CLIENT ALREADY KEEPS.
+    assert(aged.account.progress.total == nil,
+        "a field written on every turn-in and read by nothing is removed")
+
+    assert(aged.account.progress.today == 3,
+        "and the ones that are read are not")
+
+    -- AN EMPTY TABLE THE ARROW USED TO WRITE ON EVERY BUILD.
+    local emptied = {
+        version = 27,
+        settings = { arrowPosition = {} },
+        account = {},
+        characters = {},
+    }
+
+    CN.RunMigrations(emptied)
+
+    assert(emptied.settings.arrowPosition == nil,
+        "an empty position table is not left in saved data")
+
+    print("  the frame reset looks where the positions actually are")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AND NOTHING WRITES A POSITION WITHOUT ITS RELATIVE POINT.
+    ------------------------------------------------------------
+    -- The migration only helps if the code stopped producing the shape. A
+    -- build check on the save side, and one on the arrow's empty table.
+    for _, file in ipairs({ "Modules/Hud.lua", "Modules/Follow.lua",
+                            "Modules/Navigation.lua", "UI.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(text, file .. " must be readable")
+
+        assert(not string.find(text, "{ point = point, x = x, y = y }", 1, true),
+            file .. " does not write a position without its relative point")
+    end
+
+    -- CODE, NOT COMMENTS: the note explaining the removal quotes the line it
+    -- removed, and a check that cannot tell the two apart fails on its own
+    -- documentation.
+    local navigation = CN_TEST_ReadAddonFile("Modules/Navigation.lua")
+
+    local writesEmpty = false
+
+    for line in string.gmatch(navigation, "[^\n]+") do
+        if not string.find(line, "^%s*%-%-")
+            and string.find(line,
+                "settings.arrowPosition = settings.arrowPosition or {}",
+                1, true) then
+
+            writesEmpty = true
+        end
+    end
+
+    assert(not writesEmpty,
+        "and the arrow does not put an empty table in saved data on every "
+        .. "build")
+
+    print("  nothing writes a position without its relative point")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE VALUE COLUMN KEEPS ITS NUMBERS.
+    ------------------------------------------------------------
+    -- `CN.SortKey` strips LEADING punctuation and digits, which is right for
+    -- a name and destructive for the column the numbers live in. 0.77.0 ran
+    -- it over both, so "6 left" became "left" and "40 / 60" and "85%" became
+    -- nothing -- and filtering the window by any number matched no row, while
+    -- the cross-tab counts were computed from the same erased text.
+    local cases = {
+        { "Anything", "6 left",    "anything 6 left" },
+        { "Anything", "40 / 60",   "anything 40 / 60" },
+        { "Anything", "85%",       "anything 85%" },
+        { "Anything", "1,234",     "anything 1,234" },
+        { "Anything", "12 of 15",  "anything 12 of 15" },
+    }
+
+    for _, case in ipairs(cases) do
+        assert(CN.SearchKey(case[1], case[2]) == case[3],
+            "the value column survives: " .. case[2] .. " -> "
+            .. CN.SearchKey(case[1], case[2]))
+    end
+
+    -- And the name still loses its markers and its markup.
+    assert(CN.SearchKey("|cffffc74f  3. Kill Ten Rats|r", "") == "kill ten rats ",
+        "while the name is still stripped: "
+        .. CN.SearchKey("|cffffc74f  3. Kill Ten Rats|r", ""))
+
+    print("  the value column keeps its numbers")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ESTIMATED DURATION IS MARKED AS ONE.
+    ------------------------------------------------------------
+    -- `CN.WithConfidence` compares against the `CN.confidence` STRINGS. A
+    -- boolean matches neither, so it fell through and returned the measured
+    -- form -- always -- in the one line whose comment says a measured figure
+    -- and a default are not the same claim.
+    assert(CN.WithConfidence("5m", true) == CN.WithConfidence("5m", false),
+        "a raw boolean produces the SAME answer either way -- which is the "
+        .. "defect: it matches neither confidence level, so the function "
+        .. "falls through and returns the measured form always")
+
+    assert(CN.WithConfidence("5m", CN.ConfidenceFor(false))
+        ~= CN.WithConfidence("5m", CN.ConfidenceFor(true)),
+        "and the helper that turns one into a level does")
+
+    local travel = CN_TEST_ReadAddonFile("Modules/Travel.lua")
+
+    assert(travel, "Modules/Travel.lua must be readable")
+
+    assert(not string.find(travel, "CN.WithConfidence(onFoot, runMeasured)",
+            1, true),
+        "no caller passes a raw boolean as a confidence level")
+
+    print("  an estimated duration is marked as one")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CAVEAT IS A CONTINUATION OF SOMEBODY'S HEADLINE.
+    ------------------------------------------------------------
+    -- 0.77.0 printed the "no map pin here" sentence from inside
+    -- `CN.SetWaypoint`, which returns to a caller that then prints its own
+    -- headline -- so the player read an unprefixed indented line first and
+    -- the branded headline second. Four of the six callers print no headline
+    -- at all, so those produced a bare continuation with nothing above it.
+    local routing = CN_TEST_ReadAddonFile("Routing.lua")
+
+    assert(routing, "Routing.lua must be readable")
+
+    local start = string.find(routing, "function CN.SetWaypoint", 1, true)
+
+    local body = string.sub(routing, start,
+        start + (string.find(routing, "\nend", start, true) or start) - start
+            + 4)
+
+    assert(string.find(body, "return true, why", 1, true),
+        "the caveat is returned to whoever wrote the headline")
+
+    assert(not string.find(body, "CN.PrintLine(CN.Muted(tostring(why)))",
+            1, true),
+        "and not printed from underneath them")
+
+    -- AND IT ACTUALLY REACHES THE PLAYER, UNDER the headline. A caveat the
+    -- caller drops is the same as the one 0.76.0 discarded: the player is
+    -- told "Waypoint set" and the world map stays empty.
+    local caveat = "the game does not allow a map pin here"
+
+    CN.RegisterWaypointProvider("HarnessCaveat", {
+        Name = function() return "HarnessCaveat" end,
+        IsAvailable = function() return true end,
+        SetWaypoint = function()
+            return true, caveat
+        end,
+        Clear = function() end,
+    }, 1)
+
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(spoken, tostring(message))
+
+        return realAdd(chatFrame, message)
+    end
+
+    CN.NavigateToObjective({
+        type = CN.objectiveTypes.RARE, id = 981001, name = "Caveated Rare",
+        mapID = 94, x = 0.4, y = 0.4,
+    })
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local headline, caveatAt
+
+    for index, line in ipairs(spoken) do
+        if string.find(line, "Waypoint set", 1, true) then
+            headline = index
+        end
+
+        if string.find(line, caveat, 1, true) then
+            caveatAt = index
+        end
+    end
+
+    assert(caveatAt, "the caveat reaches the player: "
+        .. table.concat(spoken, " | "))
+
+    assert(headline and caveatAt > headline,
+        "and lands UNDER the headline it belongs to, not above it")
+
+    CN.waypointProviders["HarnessCaveat"] = nil
+
+    print("  a caveat is a continuation of somebody's headline")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ARROW STOPS TICKING WHEN IT IS TURNED OFF.
+    ------------------------------------------------------------
+    local navigation = CN:GetModule("Navigation")
+
+    local arrowSettings = CN.Settings()
+
+    local heldArrow = arrowSettings.arrow
+
+    arrowSettings.arrow = true
+
+    navigation.StartTicker()
+
+    assert(navigation.IsTicking and navigation.IsTicking(),
+        "the ticker runs while the arrow is on")
+
+    -- `provider.SetWaypoint` starts a ten-per-second ticker and only
+    -- `Navigation.Clear` ever stopped it -- so `/cn arrow off`, and the x
+    -- this release put ON the arrow, hid the frame and left the ticker
+    -- running for the rest of the session over a frame nobody can see.
+    arrowSettings.arrow = false
+
+    navigation.Refresh()
+
+    assert(not (navigation.IsTicking and navigation.IsTicking()),
+        "and stops when it is turned off, rather than redrawing a hidden "
+        .. "frame ten times a second for the rest of the session")
+
+    arrowSettings.arrow = heldArrow
+
+    print("  the arrow stops ticking when it is turned off")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CLAIM YOU HID STAYS HIDDEN.
+    ------------------------------------------------------------
+    -- Every other provider guards on both, and in each of these two files the
+    -- loop directly below the claim row did -- while the claim row did not.
+    -- So deferring "Collect your Great Vault reward" printed "Deferred for an
+    -- hour" and it was back on the next refresh: the addon telling the player
+    -- it had done something it had not.
+    for _, file in ipairs({ "Modules/Vault.lua", "Modules/Orders.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(text, file .. " must be readable")
+
+        local claim = string.find(text, "if Blizzard.HasAvailableWeeklyRewards()",
+                1, true)
+            or string.find(text, "if Orders.HasClaimable()", 1, true)
+
+        assert(claim, file .. " has a claim row")
+
+        local window = string.sub(text, claim, claim + 400)
+
+        assert(string.find(window, "CN.IsIgnored", 1, true)
+            and string.find(window, "CN.IsDeferred", 1, true),
+            file .. "'s claim row can be hidden and deferred")
+    end
+
+    -- AND ITS ID CAN BE TYPED BACK. `0` is rejected by `CN.ToID`, so
+    -- `/cn unhide` could never name the vaultText row back either.
+    local vaultText = CN_TEST_ReadAddonFile("Modules/Vault.lua")
+
+    assert(not string.find(vaultText, "id               = 0,", 1, true),
+        "and its id is something a player can type")
+
+    print("  a claim you hid stays hidden")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A RARE THE CLIENT SAYS IS DEAD IS RECORDED AS DEAD.
+    ------------------------------------------------------------
+    local raresModule = CN:GetModule("Rares")
+
+    -- `GetActive` filtered the dead out AND dropped the flag from the rows it
+    -- built, so `VignetteWork` -- which reads `isDead` to record that a rare
+    -- was seen already dead -- could never see one. Every clear fell through
+    -- to the "it vanished within 150 yards of me" guess, so a rare somebody
+    -- else killed was never marked cleared and the addon kept recommending
+    -- it.
+    assert(raresModule.GetAll, "the unfiltered reader exists")
+
+    local all = raresModule.GetAll(select(1, CN.GetPlayerPosition()))
+
+    assert(type(all) == "table", "and answers with a list")
+
+    local carriesFlag = true
+
+    for _, vignette in ipairs(all) do
+        if vignette.isDead == nil then
+            carriesFlag = false
+        end
+    end
+
+    assert(carriesFlag,
+        "every row carries what the client said about whether it is dead")
+
+    local live = raresModule.GetActive(select(1, CN.GetPlayerPosition()))
+
+    for _, vignette in ipairs(live) do
+        assert(not vignette.isDead,
+            "and the live list still holds only live ones")
+    end
+
+    local text = CN_TEST_ReadAddonFile("Modules/Rares.lua")
+
+    assert(text and string.find(text, "local active = Rares.GetAll(mapID)",
+            1, true),
+        "and the learning pass reads the unfiltered one")
+
+    print("  a rare the client says is dead is recorded as dead")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- BOTH TYPES THIS MODULE EMITS CAN BE EXPLAINED.
+    ------------------------------------------------------------
+    -- The provider produces RARE and TREASURE rows from one store and only
+    -- RARE had a checker, so half of what it puts on the list resolved to
+    -- UNKNOWN in `CN.Explain` -- `/cn why` on a treasure said nothing useful,
+    -- and the staleness test fell through to a linear scan every time.
+    local raresModule = CN:GetModule("Rares")
+
+    local store = raresModule.Store()
+
+    local treasure = 983001
+
+    store[treasure] = { vignetteID = treasure, name = "A Chest",
+                        kind = "TREASURE" }
+
+    -- A type with no registered checker answers UNKNOWN with no reason at
+    -- all. A type with one answers about the row.
+    local state, reason = CN.Explain(CN.objectiveTypes.TREASURE, treasure)
+
+    assert(state == CN.objectiveStates.AVAILABLE,
+        "a treasure the addon has seen is available: " .. tostring(state)
+        .. " / " .. tostring(reason))
+
+    raresModule.NoteCleared(treasure)
+
+    local cleared = CN.Explain(CN.objectiveTypes.TREASURE, treasure)
+
+    assert(cleared == CN.objectiveStates.COMPLETED,
+        "and one this character has cleared is completed: "
+        .. tostring(cleared))
+
+    store[treasure] = nil
+
+    print("  both types this module emits can be explained")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LIST THAT STOPS SAYS THAT IT STOPPED.
+    ------------------------------------------------------------
+    -- A cap nobody can see reads as "that was everything".
+    for _, file in ipairs({ "Modules/Currencies.lua", "Modules/Travel.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(text, file .. " must be readable")
+
+        assert(string.find(text, "more", 1, true)
+            or string.find(text, "showing 5 of", 1, true),
+            file .. " says when it truncated a list")
+    end
+
+    -- AND THE FOURTEEN-VS-EIGHT CASE IS OBSERVED, not merely searched for.
+    local currencyModule = CN:GetModule("Currencies")
+
+    local realWeekly = currencyModule.WeeklyUnfilled
+
+    currencyModule.WeeklyUnfilled = function()
+        local rows = {}
+
+        for index = 1, 14 do
+            table.insert(rows, { name = "Coin " .. index, earned = index,
+                                 maximum = 100, remaining = 100 - index })
+        end
+
+        return rows
+    end
+
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(spoken, tostring(message))
+
+        return realAdd(chatFrame, message)
+    end
+
+    CN.HandleSlashCommand("currencies")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+    currencyModule.WeeklyUnfilled = realWeekly
+
+    local joined = table.concat(spoken, " ")
+
+    assert(string.find(joined, "and 6 more", 1, true),
+        "a list of fourteen that shows eight says so: " .. joined)
+
+    -- AND THE COIN FIREHOSE DOES NOT REBUILD THE PROVIDER EVERY TIME.
+    --
+    -- `CURRENCY_DISPLAY_UPDATE` fires on every coin picked up, which is why
+    -- the SCAN behind it is throttled to a minute -- and the provider had no
+    -- cooldown at all, so every firing marked it dirty and each rebuild
+    -- walked the whole store and made a live client call per capped row.
+    local provider = CN.candidateProviders
+        and CN.candidateProviders["Currencies"]
+
+    assert(provider, "the provider is registered")
+
+    assert((provider.cooldown or 0) > 0,
+        "and is throttled, because its event fires on every coin picked up: "
+        .. tostring(provider.cooldown))
+
+    print("  a list that stops says that it stopped")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE CONSTANT FOR THE CLOSE CONTROL'S FOOTPRINT.
+    ------------------------------------------------------------
+    assert(CN.CLOSE_WIDTH and CN.CLOSE_WIDTH >= 16,
+        "the width is published once")
+
+    local hudModule = CN:GetModule("Hud")
+
+    assert(hudModule.closeWidth == nil,
+        "and no module keeps a second copy of it")
+
+    -- AND THE TWO FRAMES THAT RESERVED NO ROOM NOW DO.
+    --
+    -- Alpha 0 does not disable mouse input, which is why the room has to be
+    -- reserved: without it the right end of the follow header is a live click
+    -- that stops the route, with nothing drawn there to say so.
+    local follow = CN_TEST_ReadAddonFile("Modules/Follow.lua")
+
+    assert(follow and string.find(follow,
+            'frame.header:SetPoint("TOPRIGHT", -(inset + CN.CLOSE_WIDTH)',
+            1, true),
+        "the follow header stops before the button starts")
+
+    print("  one constant for the close control's footprint")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

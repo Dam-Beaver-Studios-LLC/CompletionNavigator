@@ -54,25 +54,49 @@ Rares.CharacterKills = CharacterKills
 ------------------------------------------------------------
 
 -- Vignettes currently visible, classified and located.
+-- EVERY VIGNETTE THE CLIENT REPORTS, DEAD ONES INCLUDED. 0.78.0.
+--
+-- `GetActive` filters the dead out AND drops the flag from the rows it
+-- builds, so `VignetteWork` -- which reads `vignette.isDead` to record that a
+-- rare was seen already dead -- could never see one. `wasDead` was therefore
+-- false for every row, and the branch in `NoteDisappearances` commented as
+-- "needs no inference at all" was unreachable.
+--
+-- So every clear fell through to the "it vanished within 150 yards of me"
+-- guess, and a rare somebody else killed, or one tagged and finished while
+-- the player rode past two hundred yards away, was never marked cleared --
+-- and the addon went on recommending it.
+--
+-- The filter belongs to the two surfaces that want live rares. The learning
+-- pass wants what the client actually said.
+function Rares.GetAll(mapID)
+    local seen = {}
+
+    for _, vignette in ipairs(Blizzard.GetVignettes(mapID)) do
+        table.insert(seen, {
+            guid       = vignette.guid,
+            vignetteID = vignette.vignetteID,
+            name       = vignette.name,
+            kind       = Blizzard.ClassifyVignette(vignette.atlas),
+            mapID      = vignette.mapID,
+            x          = vignette.x,
+            y          = vignette.y,
+            inFogOfWar = vignette.inFogOfWar,
+            isDead     = vignette.isDead and true or false,
+        })
+    end
+
+    return seen
+end
+
 function Rares.GetActive(mapID)
     mapID = mapID or select(1, CN.GetPlayerPosition())
 
     local active = {}
 
-    for _, vignette in ipairs(Blizzard.GetVignettes(mapID)) do
-        local kind = Blizzard.ClassifyVignette(vignette.atlas)
-
+    for _, vignette in ipairs(Rares.GetAll(mapID)) do
         if not vignette.isDead then
-            table.insert(active, {
-                guid       = vignette.guid,
-                vignetteID = vignette.vignetteID,
-                name       = vignette.name,
-                kind       = kind,
-                mapID      = vignette.mapID,
-                x          = vignette.x,
-                y          = vignette.y,
-                inFogOfWar = vignette.inFogOfWar,
-            })
+            table.insert(active, vignette)
         end
     end
 
@@ -343,12 +367,21 @@ end
 -- ELIGIBILITY
 ------------------------------------------------------------
 
-CN.RegisterEligibilityChecker(CN.objectiveTypes.RARE, function(vignetteID)
+-- FOR BOTH TYPES THIS FILE EMITS. 0.78.0.
+--
+-- The provider below produces `RARE` and `TREASURE` rows from one store, and
+-- only `RARE` had a checker -- so roughly half of what this module puts on
+-- the list resolved to `UNKNOWN` in `CN.Explain`. `/cn why` on a treasure
+-- said nothing useful, and the auto-advance staleness test had to fall
+-- through to a linear scan of the whole candidate list every time.
+--
+-- One closure, registered twice, with wording that fits either.
+local function Eligibility(vignetteID)
     local states = CN.objectiveStates
     local record = Store()[vignetteID]
 
     if not record then
-        return states.UNKNOWN, "Never seen this rare", nil
+        return states.UNKNOWN, "Never seen this one", nil
     end
 
     if Rares.IsClearedByCharacter(vignetteID) then
@@ -356,7 +389,10 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.RARE, function(vignetteID)
     end
 
     return states.AVAILABLE, nil, nil
-end)
+end
+
+CN.RegisterEligibilityChecker(CN.objectiveTypes.RARE, Eligibility)
+CN.RegisterEligibilityChecker(CN.objectiveTypes.TREASURE, Eligibility)
 
 ------------------------------------------------------------
 -- CANDIDATES
@@ -473,7 +509,10 @@ end, { events = { "VIGNETTE_MINIMAP_UPDATED", "VIGNETTES_UPDATED", "ZONE_CHANGED
 local function VignetteWork()
     local mapID = select(1, CN.GetPlayerPosition())
 
-    local active = Rares.GetActive(mapID)
+    -- EVERY VIGNETTE, NOT THE LIVE ONES. 0.78.0. See `Rares.GetAll`: this
+    -- reads `isDead` a few lines down, and `GetActive` had already removed
+    -- every row that would have carried it.
+    local active = Rares.GetAll(mapID)
 
     local currentGuids = {}
 

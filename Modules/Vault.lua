@@ -251,9 +251,23 @@ CN.RegisterCandidateProvider("Vault", function()
 
     -- An unclaimed vault from last week outranks everything: it is free, it
     -- takes thirty seconds, and it expires.
-    if Blizzard.HasAvailableWeeklyRewards() then
+    -- AND HIDING OR DEFERRING IT WORKS. 0.78.0.
+    --
+    -- Every other provider in the tree guards on both, and the loop directly
+    -- below this one does -- while the claim row did not. So right-clicking
+    -- "Collect your Great Vault reward" on the heads-up line printed
+    -- "Deferred for an hour" and it was back on the next refresh: the addon
+    -- telling the player it had done something it had not.
+    --
+    -- The id is a string now. It was `0`, which `CN.ToID` rejects, so
+    -- `/cn unhide` could never name it back either; `Modules/Orders.lua` uses
+    -- "claim" for the same shape and the filter falls back to the raw string.
+    if Blizzard.HasAvailableWeeklyRewards()
+        and not CN.IsIgnored(CN.objectiveTypes.CURRENCY, "vault")
+        and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, "vault") then
+
         table.insert(candidates, CN.NewObjective({
-            id               = 0,
+            id               = "vault",
             type             = CN.objectiveTypes.CURRENCY,
             name             = "Collect your Great Vault reward",
             accountWide      = false,
