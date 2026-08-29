@@ -2516,7 +2516,7 @@ mutate "Modules/Filters.lua" \
     "an id that is not a number is described with the internal enum"
 
 mutate "Modules/Setup.lua" \
-    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\", measured = true }," \
+    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\", measured = true, perCharacter = \"HasScanned\" }," \
     "" \
     "a new character never scans the one store with a per-character split"
 
@@ -2892,7 +2892,7 @@ mutate "Modules/Loremaster.lua" \
     "two same-named zones moving at once teaches the addon a guess"
 
 mutate "Modules/Loremaster.lua" \
-    "        local decisive = named > 0 and named == rows - retired" \
+    "        local decisive = (named == rows)" \
     "        local decisive = named > 0" \
     "a zone walked while the client was half awake is kept for the session"
 
@@ -2902,8 +2902,9 @@ mutate "Modules/Loremaster.lua" \
     "a list headed closest to finished holds zones never begun"
 
 mutate "Modules/Loremaster.lua" \
-    "    local before = Loremaster.DoneFor(record) or 0" \
-    "    local before = record.progress and record.progress[key]" \
+    "    local before = record and (Loremaster.DoneFor(record) or 0)" \
+    "    local before = record and record.progress
+        and record.progress[CN.characterKey or CN.GetCharacterKey()]" \
     "the first sight of a zone is reported as a change to it"
 
 mutate "Modules/Loremaster.lua" \
@@ -3077,8 +3078,12 @@ mutate "Modules/Errors.lua" \
 # ---- 0.75.0 ----
 
 mutate "Modules/Achievements.lua" \
-    "                        Achievements.NoteProgress(held, done)" \
-    "                        held.done = done" \
+    "                            Achievements.NoteProgress(held, done)
+
+                            answered = answered + 1" \
+    "                            held.done = done
+
+                            answered = answered + 1" \
     "the achievement scan writes a figure every other character inherits"
 
 mutate "Modules/Achievements.lua" \
@@ -3116,21 +3121,16 @@ mutate "Modules/Loremaster.lua" \
     "a criteria update anywhere binds the wrong one of two same-named zones"
 
 mutate "Modules/Loremaster.lua" \
-    "            if criteria and criteria > 0 and done and done > before then" \
-    "            if criteria and criteria > 0 and done and done ~= before then" \
+    "                if done > before then" \
+    "                if done ~= before then" \
     "progress going backwards is taken as evidence about a zone"
 
-mutate "Modules/Loremaster.lua" \
-    "                    everNamed[id] = false
-                end
-            end
-        end" \
-    "                    everNamed[id] = false
-                    retired = retired + 1
-                end
-            end
-        end" \
-    "the walk that discovers a refusal settles on a list the refusal holed"
+# RETIRED IN 0.76.0. This mutated the "provisionally retired" bookkeeping,
+# which existed only because `Loremaster.Scan` never deleted a row for an
+# achievement the game had retired. 0.76.0 deletes the row, so the exact test
+# is reachable again and the whole mechanism is gone. Its successor is
+# "a retired achievement keeps its row and the client never names it again",
+# below.
 
 mutate "Modules/Loremaster.lua" \
     "    for achievementID in pairs(bindings) do
@@ -3180,9 +3180,124 @@ mutate "Database.lua" \
 
 mutate "Modules/Goals.lua" \
     "            local done = (achievements and achievements.DoneFor
-                and achievements.DoneFor(record)) or record.done or 0" \
+                and achievements.DoneFor(record)) or 0" \
     "            local done = record.done or 0" \
     "a pinned achievement reports another character's criteria"
+
+# ---- 0.76.0 ----
+
+mutate "Modules/Loremaster.lua" \
+    "    for id in pairs(store) do
+        if not seen[id] then
+            store[id] = nil
+        end
+    end" \
+    "    for id in pairs(store) do
+        if false then
+            store[id] = nil
+        end
+    end" \
+    "a retired achievement keeps its row and the client never names it again"
+
+mutate "Modules/Loremaster.lua" \
+    "                record.progress[characterKey] = done" \
+    "                local unused = done" \
+    "a losing candidate's baseline goes stale and nothing can be learned"
+
+mutate "Modules/Loremaster.lua" \
+    "    local before = record and (Loremaster.DoneFor(record) or 0)
+
+    local learned = LearnZoneBinding(matches, zoneMap)" \
+    "    local learned = LearnZoneBinding(matches, zoneMap)
+
+    local before = record and (Loremaster.DoneFor(record) or 0)" \
+    "a turn-in never reports that it moved anything, ever again"
+
+mutate "Modules/Loremaster.lua" \
+    "    if not unknown then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "the learning sweep runs in every zone on every criteria burst"
+
+mutate "Modules/Loremaster.lua" \
+    "    if learnedAt[key] and now - learnedAt[key] < Loremaster.learnIntervalSeconds then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "a zone that has nothing to teach is asked again every two seconds"
+
+mutate "Modules/Loremaster.lua" \
+    "                        Print(\"Zone progress read: \" .. got .. \" of \"" \
+    "                        Print(\"Zone progress read: \" .. retried .. \" of \"" \
+    "the retry announces the rows it walked past, not the rows it read"
+
+mutate "Modules/Achievements.lua" \
+    "                seen[achievement.achievementID] = true
+
+                if achievement.completed then" \
+    "                if achievement.completed then" \
+    "an alt's scan deletes every achievement row the main had progress on"
+
+mutate "Modules/Achievements.lua" \
+    "    if answered == 0 then" \
+    "    if false then" \
+    "a cold achievement scan prunes the store and stamps itself done"
+
+mutate "Modules/Achievements.lua" \
+    "                        if criteria > 0 then
+                            held.criteria = criteria" \
+    "                        if true then
+                            held.criteria = criteria" \
+    "a client that answers nothing overwrites real criteria with zero"
+
+mutate "Modules/Setup.lua" \
+    "    if step.perCharacter then" \
+    "    if false then" \
+    "an alt is never asked to read its own progress"
+
+mutate "Modules/Setup.lua" \
+    "        if step.perCharacter and not StepDoneHere(step) then
+            return false
+        end" \
+    "        if false then
+            return false
+        end" \
+    "a main that ran setup silences the reminder for every alt"
+
+mutate "Modules/Errors.lua" \
+    "                notice.seen = true
+
+                shown = shown + 1" \
+    "                shown = shown + 1" \
+    "a notice read from the command cannot be cleared by the command"
+
+mutate "Database.lua" \
+    "        if db.friendshipRanksCarried then
+            return
+        end" \
+    "        if false then
+            return
+        end" \
+    "a database that lost nothing is accused of losing something"
+
+mutate "Database.lua" \
+    "        if blanked > 0 then" \
+    "        if false then" \
+    "achievement recommendations vanish and nothing says why"
+
+mutate "Modules/Loremaster.lua" \
+    "            for _, zoneMapID in pairs(Loremaster.Bindings()) do
+                zones[zoneMapID] = true
+            end" \
+    "            for achievementID in pairs(Loremaster.Bindings()) do
+                zones[achievementID] = true
+            end" \
+    "forgetting one zone reports having forgotten three"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

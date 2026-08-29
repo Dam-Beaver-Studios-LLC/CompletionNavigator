@@ -315,6 +315,16 @@ CN:RegisterCommand{
             if dropped > 0 then
                 Print("Cleared " .. dropped .. CN.Pluralize(dropped,
                     " notice.", " notices."))
+            elseif #Errors.Notices() > 0 then
+                -- SAYS WHY, rather than nothing. An unread notice is not
+                -- something a command about errors discards by accident, and
+                -- silence here reads as a command that did not work.
+                Print("|cff8a8f96" .. #Errors.Notices()
+                    .. CN.Pluralize(#Errors.Notices(), " notice is",
+                        " notices are")
+                    .. " still waiting to be read; run |r"
+                    .. CN.Accent("/cn errors")
+                    .. "|cff8a8f96 first.|r")
             end
 
             return
@@ -353,14 +363,25 @@ CN:RegisterCommand{
             if type(notice) == "table" and notice.text then
                 CN.PrintLine(CN.Bad(tostring(notice.text)))
 
+                -- PRINTING IT IS SHOWING IT. 0.76.0.
+                --
+                -- `seen` was set only by the login pass, which 0.75.0
+                -- deferred twelve seconds -- and `clear` removes only seen
+                -- notices. So a player who read the notice HERE and followed
+                -- the addon's own instruction got "Cleared 0 recorded
+                -- errors", the notice stayed, and the login timer printed the
+                -- same block again seconds later.
+                notice.seen = true
+
                 shown = shown + 1
             end
         end
 
         if shown > 0 then
-            CN.PrintLine("  " .. CN.Muted("Already read? ")
+            CN.PrintLine("  " .. CN.Muted("Read it? ")
                 .. CN.Accent("/cn errors clear")
-                .. CN.Muted(" removes it."))
+                .. CN.Muted(CN.Pluralize(shown, " removes it.",
+                    " removes them.")))
         end
 
         if (CN.memoMutations or 0) > 0 then

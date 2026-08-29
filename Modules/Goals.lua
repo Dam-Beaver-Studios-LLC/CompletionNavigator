@@ -386,8 +386,12 @@ function Goals.Plan(goal)
             -- character scanned last.
             local achievements = CN:GetModule("Achievements")
 
+            -- `record.done` IS GONE. Migration 26 removed it and nothing
+            -- writes it any more, so the old fallback was a reader of a
+            -- field that cannot exist -- the shape this project keeps
+            -- finding.
             local done = (achievements and achievements.DoneFor
-                and achievements.DoneFor(record)) or record.done or 0
+                and achievements.DoneFor(record)) or 0
 
             local remaining = (record.criteria or 0) - done
 

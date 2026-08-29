@@ -7,6 +7,93 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.76.0]
+
+**Two of last release's fixes destroyed the data they were written to
+protect.** Both were mine. If you upgraded through 0.75.0 and ran an
+achievement scan on an alt, or ran one in the first seconds after logging in,
+this is the release that stops it and tells you what to do about it.
+
+### Fixed â€” data loss in the achievement scan
+
+- **A scan on an alt deleted every achievement row the main had progress
+  on.** 0.75.0 replaced a store wipe with a prune, and marked a row as "still
+  exists" only inside the branch that stored it â€” a branch gated on *this*
+  character's progress. So on a fresh alt, nearly every row was neither stored
+  nor marked, and the prune deleted it, taking the main's readings with it.
+  That is exactly the loss the wipe was removed to prevent, brought back in a
+  different shape. A row is now marked when the game returns it, which is what
+  the prune was ever about.
+- **A scan run before the game was ready overwrote real criteria with
+  zeroes** and then pruned everything it had not confirmed. The criteria API
+  answers `0, 0` while the client is still loading, and `/cn setup` is most
+  often run exactly then. Two sibling scans have carried this guard since
+  0.61.0 and 0.71.0; this third writer had none. A scan that read nothing now
+  changes nothing.
+
+### Fixed â€” the upgrade that silently emptied your recommendations
+
+0.75.0's migration cleared the old shared criteria field, correctly â€” but for
+an upgrading account that field was the only figure nearly every row had, so
+the achievement shortlist, `/cn next`'s achievement rows and every goal plan
+went empty at once, with nothing to say why and nothing that would fix it on
+its own.
+
+- **The addon now says so**, and names the command that repairs it.
+- **A character that has not read its own progress is asked to.** 0.75.0 added
+  the function for this and never called it, so the store behind it was
+  written and read by nothing. Setup judged the two per-character scans by an
+  account-wide stamp, so a main that had run setup silenced the prompt for
+  every alt that never had.
+
+### Fixed â€” the zone learner, which could not learn and could learn wrongly
+
+- **It only ever refreshed the winner's baseline.** The other candidate's
+  reading went stale the moment you quested there and stayed stale â€” so on the
+  next criteria update it read above its own baseline and counted as a second
+  mover, and nothing was ever learned. For the player who works both Nagrands,
+  which is the only player it was written for, the mechanism was dead. Worse,
+  a criteria update from anywhere â€” a pet battle, a raid â€” could find only the
+  stale row above its baseline and bind a phantom. A comparison is only
+  evidence against a baseline something maintains; it maintains one now.
+- **It ran a per-criterion sweep on every criteria burst.** Every modern zone
+  has at least two candidates, so this asked the game a hundred-odd questions
+  every two seconds while questing, to re-derive an answer that changes at
+  most once per zone. It stops when there is nothing left to learn, and is
+  throttled otherwise.
+- **And a turn-in still reports that it moved something.** The learning pass
+  writes fresh readings back, so it had to be ordered after the reading that
+  decides whether anything changed â€” otherwise the invalidation that carries a
+  turn-in into the ranking would have been permanently silent.
+
+### Fixed â€” a workaround, by removing what it worked around
+
+- **The zone store never deleted anything.** An achievement retired in a game
+  patch kept its row for the life of the account, and the client will never
+  name it again â€” which is the single reason 0.75.0 had to invent a table of
+  "rows the client has ever named" and a rule about which walk may settle. That
+  rule was itself wrong: two lookups inside one cold window marked the whole
+  store retired and then cached a list with the zone's own achievement
+  missing, for the rest of the session. Rows the game no longer returns are
+  deleted now, the exact test is back, and the workaround is gone.
+
+### Fixed â€” smaller, all user-facing
+
+- **The cold-scan retry announced the rows it walked past, not the rows it
+  read** â€” "412" for a scan that read 40. The same mistake fixed at
+  `/cn scanlore` in 0.72.0 and at the Rescan button in 0.74.0, in a third
+  place one release later.
+- **`/cn errors` told you to clear a notice and then refused to.** Reading it
+  in the command did not count as having seen it, and only seen notices were
+  cleared â€” so you got "Cleared 0 recorded errors" and the notice came back
+  twelve seconds later at login. Printing it counts now.
+- **A database that lost nothing was told it had.** The friendship-rank notice
+  fired for accounts that upgraded through the *corrected* migration and never
+  lost anything.
+- **`/cn zones forget` counted achievements and called them zones** â€” three
+  learned in one zone read as "Forgot 3 learned zones" â€” and said "Forgot 0"
+  when there had never been anything to forget.
+
 ## [0.75.0]
 
 **Last release's zone binding had the relation the wrong way round, and the

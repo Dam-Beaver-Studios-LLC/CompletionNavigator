@@ -1223,6 +1223,11 @@ CN.migrations = {
     -- `friendshipStanding`, which is written under its own name precisely
     -- because the client will not re-supply it for an alt.
     [23] = function(db)
+        -- HOW MANY RANKS THIS MIGRATION CARRIED ACROSS. Read by 25, which
+        -- otherwise accuses 0.72.0 of a loss that never happened on this
+        -- database; see the note there.
+        local carried = 0
+
         local function Strip(store)
             if type(store) ~= "table" then
                 return
@@ -1251,6 +1256,8 @@ CN.migrations = {
                         and record.standing ~= "" then
 
                         record.friendshipStanding = record.standing
+
+                        carried = carried + 1
                     end
 
                     record.standing = nil
@@ -1264,6 +1271,14 @@ CN.migrations = {
             if type(character) == "table" then
                 Strip(character.reputations)
             end
+        end
+
+        -- Even at zero: what matters to 25 is that this database took the
+        -- CORRECTED path, not how much it found on the way.
+        db.friendshipRanksCarried = true
+
+        if carried > 0 then
+            DebugPrint("Carried " .. carried .. " friendship rank(s).")
         end
     end,
 
@@ -1306,6 +1321,22 @@ CN.migrations = {
     -- time it logs in. What the addon owes the player is to say so, once,
     -- rather than let them find a blank column and wonder. Prompt, never act.
     [25] = function(db)
+        -- A DATABASE THAT TOOK THE CORRECTED PATH LOST NOTHING. 0.76.0.
+        --
+        -- Migration 23 was fixed in 0.73.0 to carry a friendship's rank
+        -- across instead of deleting it. An account upgrading from below 23
+        -- therefore runs the corrected version and loses nothing -- and then
+        -- fell straight into this, which counted every row without a
+        -- `friendshipStanding` (including ones that never had a standing
+        -- string at all) and reported them as destroyed by 0.72.0.
+        --
+        -- A wrong number in the one message whose stated purpose is honesty
+        -- about data loss, which is the same class of error this migration
+        -- was already corrected for once.
+        if db.friendshipRanksCarried then
+            return
+        end
+
         local lost = 0
 
         -- NOT THIS CHARACTER. Corrected in 0.75.0.
@@ -1340,8 +1371,11 @@ CN.migrations = {
 
             table.insert(db.account.notices, {
                 at   = time(),
-                text = lost .. " friendship rank(s) on other characters were "
-                    .. "lost by a defect in version 0.72.0. Each character "
+                text = lost .. CN.Pluralize(lost, " friendship rank",
+                        " friendship ranks")
+                    .. " on other characters "
+                    .. CN.Pluralize(lost, "was", "were")
+                    .. " lost by a defect in version 0.72.0. Each character "
                     .. "restores its own the next time it logs in.",
             })
         end
@@ -1366,11 +1400,51 @@ CN.migrations = {
             return
         end
 
+        local blanked = 0
+
         for _, record in pairs(account.achievements) do
-            if type(record) == "table" then
+            if type(record) == "table" and record.done ~= nil then
                 record.done = nil
+                blanked = blanked + 1
             end
         end
+
+        -- AND IT SAYS SO, BECAUSE NOTHING ELSE WOULD. 0.76.0.
+        --
+        -- 0.74.0's scan never wrote the per-character table, and the criteria
+        -- sweep touches only a dozen rows -- so for an upgrading account the
+        -- flat field was the ONLY figure nearly every row had, and clearing
+        -- it empties the shortlist, `/cn next`'s achievement rows and every
+        -- goal plan at once.
+        --
+        -- Nothing recovers on its own: the achievement scan has no login hook
+        -- and no event. The reminder is repaired separately, by asking each
+        -- character whether IT has scanned rather than reading an
+        -- account-wide stamp -- but a player whose recommendations changed
+        -- underneath them is owed the sentence.
+        if blanked > 0 then
+            db.account = db.account or {}
+            db.account.notices = db.account.notices or {}
+
+            table.insert(db.account.notices, {
+                at   = time(),
+                text = "Achievement criteria progress is now recorded per "
+                    .. "character. Run /cn achievescan on each character "
+                    .. "once; until then its achievement recommendations "
+                    .. "will be missing.",
+            })
+        end
+    end,
+
+    -- DELIBERATELY EMPTY, AND KEPT SO THE LADDER STAYS CONTINUOUS.
+    --
+    -- 0.76.0 changes no stored shape of its own: every fix in it is to code
+    -- that reads or writes what is already there. The version is bumped so
+    -- that a database upgrading from 0.75.0 still runs migration 26's notice
+    -- path if it has not, and the ladder rule -- one migration per step, no
+    -- gaps -- is the reason this is a function rather than a hole. Migration
+    -- 21 is the precedent.
+    [27] = function()
     end,
 }
 

@@ -167,6 +167,11 @@ function Achievements.Scan()
     -- which is what the wipe was actually for.
     local seen = {}
 
+    -- How many rows the criteria API actually answered about. See the guard
+    -- below: a scan that answered for nothing must not prune, stamp, or
+    -- record itself.
+    local answered = 0
+
     Achievements.revision = Achievements.revision + 1
 
     local scanned, completed, nearlyDone = 0, 0, 0
@@ -190,6 +195,24 @@ function Achievements.Scan()
             if achievement then
                 scanned = scanned + 1
 
+                -- REACHED, NOT STORED. 0.76.0.
+                --
+                -- 0.75.0 marked a row seen only inside the branch that
+                -- stored it -- and that branch is gated on THIS character's
+                -- progress. So on an alt, every achievement the main had
+                -- progress on and the alt did not was neither stored nor
+                -- marked, and the prune below deleted the row, taking the
+                -- main's readings with it.
+                --
+                -- `/cn achievescan` on a fresh alt therefore destroyed the
+                -- main's criteria data for nearly every achievement: exactly
+                -- the loss 0.75.0 removed the store wipe to prevent, brought
+                -- straight back as a character-relative prune.
+                --
+                -- The prune's job is to drop what the GAME no longer returns.
+                -- That is what this records.
+                seen[achievement.achievementID] = true
+
                 if achievement.completed then
                     completed = completed + 1
                 else
@@ -211,13 +234,37 @@ function Achievements.Scan()
 
                         held.achievementID = achievement.achievementID
                         held.categoryID    = categoryID
-                        held.criteria      = criteria
 
-                        Achievements.NoteProgress(held, done)
+                        -- NOT OVER GOOD DATA WITH NOTHING. 0.76.0.
+                        --
+                        -- `GetAchievementProgress` answers `0, 0` when the
+                        -- criteria API is unavailable, which is routine for a
+                        -- window after logging in -- and `/cn setup`, by this
+                        -- addon's own note, is most often run exactly then.
+                        -- This wrote the refusal straight in: a stored 40
+                        -- became 0, `IsNearlyDone` went false, and the row
+                        -- left the shortlist.
+                        --
+                        -- The guard `Exploration` has carried since 0.61.0,
+                        -- `Loremaster` since 0.71.0, and that this file's own
+                        -- criteria sweep four hundred lines down already had.
+                        -- Third writer, no guard.
+                        if criteria > 0 then
+                            held.criteria = criteria
+
+                            Achievements.NoteProgress(held, done)
+
+                            answered = answered + 1
+                        elseif held.criteria == nil then
+                            -- Genuinely a criteria-less achievement, and new
+                            -- to the store. A stored `criteria > 0` is never
+                            -- overwritten with a refusal.
+                            held.criteria = 0
+
+                            Achievements.NoteProgress(held, done)
+                        end
 
                         store[achievement.achievementID] = held
-
-                        seen[achievement.achievementID] = true
 
                         -- THROUGH THE ONE RULE. 0.62.0.
                         --
@@ -240,6 +287,18 @@ function Achievements.Scan()
         end
     end
 
+    -- AND A SCAN THE CLIENT WOULD NOT ANSWER FOR CHANGES NOTHING. 0.76.0.
+    --
+    -- Pruning, stamping and recording all follow from having read something.
+    -- A cold scan that read nothing would otherwise delete every row it could
+    -- not confirm, mark itself done, and silence the reminder that would have
+    -- sent the player back.
+    if answered == 0 then
+        DebugPrint("Achievement scan answered for nothing; not recording it.")
+
+        return scanned, completed, nearlyDone, 0
+    end
+
     -- ROWS THE CLIENT NO LONGER RETURNS, dropped explicitly. This is what the
     -- wipe at the top used to accomplish, without taking every other
     -- character's readings with it.
@@ -260,7 +319,7 @@ function Achievements.Scan()
 
     CN.MarkScanned("achievements")
 
-    return scanned, completed, nearlyDone
+    return scanned, completed, nearlyDone, answered
 end
 
 -- Whether THIS character has ever read its own criteria progress.

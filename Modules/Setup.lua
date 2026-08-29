@@ -48,9 +48,9 @@ Setup.steps = {
     -- character to scan had recorded. Eleven collections were offered on the
     -- setup screen and the twelfth, which is the one with a per-character
     -- dimension, was not.
-    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true },
+    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true, perCharacter = "HasScanned" },
     { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
-    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements" },
+    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements", measured = true, perCharacter = "HasScanned" },
     { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },
     { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan",     unit = "mounts" },
     { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan",     unit = "species" },
@@ -383,13 +383,38 @@ end
 --
 -- Named for the scans, distinct from `Setup.Outstanding` above, which is
 -- about the two subsystems no scan can ever reach.
+-- A STEP THAT READS SOMETHING PER CHARACTER IS DONE PER CHARACTER. 0.76.0.
+--
+-- `Setup.StepDone` reads account-wide stamps, so once ANY character had run
+-- a step, every other character was treated as having run it -- and for the
+-- two stores whose readings are per character, that is exactly wrong. An alt
+-- was never listed as needing a scan and silently read whatever the main's
+-- had left behind.
+--
+-- 0.75.0 added `Achievements.HasScanned` for this and never called it; the
+-- store behind it was written and read by nothing, which is the shape five
+-- migrations in this addon exist to clean up.
+local function StepDoneHere(step)
+    if step.perCharacter then
+        local module = CN:GetModule(step.module)
+
+        local answers = module and module[step.perCharacter]
+
+        if type(answers) == "function" then
+            return answers() and true or false
+        end
+    end
+
+    return Setup.StepDone(step.key) or Setup.StepDone(step.module)
+end
+
+Setup.StepDoneHere = StepDoneHere
+
 function Setup.NeverScanned()
     local missing = {}
 
     for _, step in ipairs(Setup.steps) do
-        if not Setup.StepDone(step.key)
-            and not Setup.StepDone(step.module) then
-
+        if not StepDoneHere(step) then
             table.insert(missing, step.label)
         end
     end
@@ -399,6 +424,17 @@ end
 
 function Setup.HasRun()
     local record = CN.Account("setup")
+
+    -- AND NOT WHEN A PER-CHARACTER STEP IS OUTSTANDING. 0.76.0.
+    --
+    -- `completedAt` is account-wide, so a main that had run setup silenced
+    -- the reminder for every alt that never had -- including the two steps
+    -- whose readings belong to the character that made them.
+    for _, step in ipairs(Setup.steps) do
+        if step.perCharacter and not StepDoneHere(step) then
+            return false
+        end
+    end
 
     -- The old flag still counts, so an existing install is not told to run
     -- setup again for want of stamps it could not have written.
