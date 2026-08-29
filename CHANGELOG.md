@@ -7,6 +7,85 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.77.0]
+
+**The heads-up box drags and then does not stay â€” this fixes that, and gives
+the follow list and the arrow the same close button the heads-up line already
+had.** Three of the four movable frames saved their position without the
+corner they were anchored *to*, so when that differed from the anchor itself
+the offsets came back applied against a different corner of the screen and the
+frame reappeared somewhere the player never put it. One function now, used by
+all four.
+
+### Fixed â€” data loss in both scans, from last release
+
+- **A half-warm client deleted every row in the categories that stayed
+  quiet.** 0.76.0 added a prune to the zone and achievement scans, gated on a
+  whole-store counter â€” and both walks are *per category*. So the ordinary
+  case, where one expansion answers and three do not, deleted every row in the
+  three, taking every character's readings with them. A row is only a
+  candidate for deletion when the category it belongs to answered.
+
+### Added â€” a way out of every frame drawn over the world
+
+- **The follow list and the arrow now have a hover x and a tooltip**, the same
+  control the heads-up line got when you asked for one. The follow frame could
+  previously only be dismissed by knowing `/cn follow`, and the arrow ate world
+  clicks in its own footprint with nothing on screen explaining why.
+- **`/cn uistatus` no longer throws away your window position.** Running the
+  diagnostic while the window happened to be closed â€” its state most of the
+  time â€” silently discarded a position you had set, recentred the window and
+  forced it open. It reports now, and offers `/cn uistatus reset` as the
+  repair. It also shows the relative anchor, which is the field the bug above
+  was hiding in.
+
+### Fixed â€” features that never worked
+
+- **`/cn bags` has never once reported a carried recipe.** The class id was
+  read one position short of where the client returns it, so the variable held
+  an icon file id and the test against "recipe" was never true on any client.
+  The whole feature, dead in one missing placeholder.
+- **`/cn travel` quoted "running the whole way" at flying speed** â€” it asked
+  for the speed of whatever you are doing *now*, and anyone reading that
+  command is normally mounted. A fifty-minute walk read as fourteen minutes,
+  which makes the flight the line exists to justify look like a bad idea.
+- **A waypoint set on a dungeon or raid map said "Waypoint set" and showed no
+  map pin.** The sentence explaining why was composed by the provider and then
+  discarded, because the caller read it only on failure.
+
+### Fixed â€” search, and things shown to the player
+
+- **The cross-tab search and the tab's own filter asked different
+  questions.** The "Also on:" counts searched the raw text, colour codes
+  included, so typing any hex fragment reported a match on every row of every
+  tab and none where you were standing â€” and a term that appeared only in the
+  right-hand column was counted and then not found when you clicked through.
+- **Bank ages were printed in raw hours**: "seen 336h ago" for a bank read a
+  fortnight before.
+- **Nine commands padded their columns with spaces.** WoW ships no monospace
+  chat font, so that produces a ragged edge that reads as a bug rather than a
+  table â€” the rule this addon states in two places and fixed in the window,
+  while the chat side kept it. `/cn elsewhere` was the worst: a day-to-day
+  command whose names are long enough to wrap mid-row. A build check now fails
+  on a new one.
+- **"Route complete. 1 stops, everything on it done."** â€” unpluralised, and an
+  English literal bolted onto a translated headline.
+- **`/cn mode <profile>` answered with no headline**, so its two lines arrived
+  as orphan text in the middle of the chat frame.
+
+### Fixed â€” cost, and two rules written twice
+
+- **Auto-advance ran on every minimap vignette.** That event fires many times
+  a second while moving through any zone with rares in it â€” which is exactly
+  when auto-waypoint is on â€” and each firing ran a linear scan of the whole
+  candidate list and a full re-rank with the recommendation hooks live. It is
+  throttled now, like the three other firehose events in the addon.
+- **The window's refresh subscription was not idempotent** while its sibling
+  was, so a late-registered provider would have added another forty redraw
+  handlers each time.
+- **`/cn why` rebuilt the ranking weights by hand** â€” in the one function whose
+  own header promises it does the same arithmetic the scorer does.
+
 ## [0.76.0]
 
 **Two of last release's fixes destroyed the data they were written to

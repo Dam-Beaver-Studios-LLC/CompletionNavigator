@@ -18,8 +18,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.76.0"
-CN.dbVersion   = 28
+CN.version     = "0.77.0"
+CN.dbVersion   = 29
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -838,6 +838,25 @@ function CN.Strip(text)
 
     return text
 end
+
+-- WHAT A ROW SAYS, WITH THE MARKUP TAKEN OFF. 0.77.0.
+--
+-- Hoisted out of `UI/List.lua`, where it was a local that the list's own
+-- filter used and the cross-tab search did not -- so `/cn find` and the
+-- "Also on:" counts searched the RAW text, colour codes and all, while the
+-- tab you were standing on searched this. Typing any hex fragment reported a
+-- match on every row of every tab and none on the one in front of you.
+--
+-- Leading markers go too: "  ", "x ", "> ", "! ", "12. ". A row is what it
+-- says, not how it is decorated or where it sits in a list.
+function CN.SortKey(text)
+    text = CN.Strip(text)
+
+    text = text:gsub("^[%s%p%d]+", "")
+
+    return string.lower(text)
+end
+
 
 function CN.TokenLabel(token)
     if type(token) ~= "string" or token == "" then

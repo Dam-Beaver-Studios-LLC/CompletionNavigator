@@ -283,8 +283,14 @@ function Follow.NoteStopCleared()
     if total > 0 and Follow.completed >= total and not Follow.celebrated then
         Follow.celebrated = true
 
-        Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r " .. total .. " stops, "
-            .. "everything on it done.")
+        -- PLURALISED, AND NOT HALF-TRANSLATED. 0.77.0.
+        --
+        -- "1 stops" in the addon's one celebratory line, and an English
+        -- literal bolted onto a `CN.L` lookup -- so a translated client read
+        -- a translated headline followed by untranslated prose.
+        -- `Modules/Inventory.lua` records that exact pattern as a defect.
+        Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r "
+            .. CN.Count(total, "stop") .. ", all done.")
 
         Follow.Celebrate()
     end
@@ -504,16 +510,8 @@ local function BuildFrame()
     frame:RegisterForDrag("LeftButton")
     frame:SetClampedToScreen(true)
 
-    local saved = Settings()
-
-    saved.followPosition = saved.followPosition or {}
-
-    frame:SetPoint(
-        saved.followPosition.point or "TOPLEFT",
-        UIParent,
-        saved.followPosition.point or "TOPLEFT",
-        saved.followPosition.x or 40,
-        saved.followPosition.y or -200)
+    CN.RestoreFramePosition(frame, Settings().followPosition,
+        { point = "TOPLEFT", relativePoint = "TOPLEFT", x = 40, y = -200 })
 
     -- Panelled and marked, for the reason spelled out in Modules/Hud.lua:
     -- text drawn over the world with no ground under it reads as text that
@@ -549,10 +547,26 @@ local function BuildFrame()
     frame:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
 
-        local point, _, _, x, y = self:GetPoint()
-
-        Settings().followPosition = { point = point, x = x, y = y }
+        Settings().followPosition = CN.SaveFramePosition(self)
+            or Settings().followPosition
     end)
+
+    -- AND A WAY OUT OF IT. 0.77.0.
+    --
+    -- This frame is drawn over the world, is mouse-enabled and draggable, and
+    -- said neither -- so the only way to be rid of it was to know `/cn
+    -- follow`. The heads-up line got a hover x when a player asked for one;
+    -- this is the same control, from the same helper.
+    CN.AttachCloseControl(frame,
+        function()
+            Follow.Stop()
+
+            CN.Print("Follow mode off. " .. CN.Aside(CN.Accent("/cn follow")
+                .. " starts it again"))
+        end,
+        "The stop you are walking to. Drag to move it. The x stops "
+        .. "following.",
+        "Stop following. /cn follow starts it again.")
 
     frame:Hide()
 

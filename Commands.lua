@@ -629,17 +629,30 @@ CN:RegisterCommand{
         end
 
         -- A bare profile name: weighting only, unchanged behaviour.
+        local known = false
+
         for _, mode in ipairs(CN.priorityModes) do
             if mode == requested then
-                settings.priorityMode = requested
-
-                CN.InvalidateCandidates()
-
-                CN.PrintLine("Ranking weight set to |cffffc74f" .. requested .. "|r.")
-                CN.PrintLine("|cff8a8f96Weighting only; your type filters are "
-                    .. "untouched.|r")
-                return
+                known = true
+                break
             end
+        end
+
+        if known then
+            settings.priorityMode = requested
+
+            CN.InvalidateCandidates()
+
+            -- HEADLINE, THEN CONTINUATION. 0.77.0.
+            --
+            -- Both lines were `PrintLine`, so the whole answer arrived as two
+            -- indented continuations with no "Completion Navigator:" above
+            -- them -- orphan text in the middle of the player's chat. Every
+            -- other branch of this handler uses `Print`.
+            Print("Ranking weight set to |cffffc74f" .. requested .. "|r.")
+            CN.PrintLine("|cff8a8f96Weighting only; your type filters are "
+                .. "untouched.|r")
+            return
         end
 
         Print("Unknown mode: " .. requested)

@@ -851,8 +851,9 @@ CN:RegisterCommand{
                 break
             end
 
-            CN.PrintLine(string.format("  %-28s %d",
-                tostring(zone.name or zone.mapID), zone.count))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            CN.PrintLine("  " .. CN.Body(tostring(zone.name or zone.mapID))
+                .. CN.Aside(tostring(zone.count)))
         end
 
         Print("|cff8a8f96This is what the addon has actually seen, not every "
@@ -2117,9 +2118,10 @@ CN:RegisterCommand{
             .. " (" .. tostring(Blizzard.GetMapName(report.mapID) or "?") .. "):")
 
         for _, row in ipairs(report.maps) do
-            CN.PrintLine(string.format("  %-28s %3d pins, %2d starts, %2d usable",
-                tostring(row.name or row.mapID),
-                row.pois, row.starts, row.usable))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            CN.PrintLine("  " .. CN.Body(tostring(row.name or row.mapID))
+                .. CN.Aside(row.pois .. " pins, " .. row.starts
+                    .. " starts, " .. row.usable .. " usable"))
         end
 
         Print("Rejected: " .. report.counts.inLog .. " already in your log, "

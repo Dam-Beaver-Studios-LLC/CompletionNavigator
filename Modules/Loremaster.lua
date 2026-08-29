@@ -224,8 +224,12 @@ function Loremaster.Scan(fromRetry)
     -- the bottom: a scan that measured nothing must not record itself.
     local measured = 0
 
-    -- Which ids the category walk reached this time. See the prune below.
+    -- Which ids the category walk reached this time, and which CATEGORIES
+    -- actually answered. See the prune below: the second is what makes the
+    -- first safe to delete against.
     local seen = {}
+
+    local answeringCategories = {}
 
     for _, category in ipairs(Loremaster.QuestCategories()) do
         local total = select(1, Blizzard.GetCategoryCounts(category.categoryID))
@@ -289,6 +293,8 @@ function Loremaster.Scan(fromRetry)
                 store[id] = held
 
                 seen[id] = true
+
+                answeringCategories[category.categoryID] = true
 
                 scanned = scanned + 1
             end
@@ -417,8 +423,25 @@ function Loremaster.Scan(fromRetry)
     -- Only after a scan that measured something, so a cold client never
     -- deletes anything. `progress` for other characters goes with the row,
     -- and that is correct: the achievement no longer exists.
-    for id in pairs(store) do
-        if not seen[id] then
+    -- PER CATEGORY, NOT PER SCAN. Corrected in 0.77.0, before it shipped
+    -- twice.
+    --
+    -- 0.76.0 gated this on a whole-store counter and the walk is per
+    -- CATEGORY. `QuestCategories` silently drops any category the client has
+    -- not populated, and `GetCategoryCounts` answers 0 for one it has not
+    -- filled -- so the ordinary half-warm client, where one expansion answers
+    -- and three do not, produced `measured > 0` and then deleted every row in
+    -- the three that stayed quiet, taking every character's progress with
+    -- them. The comment eight lines up warns about exactly that shape as a
+    -- stale nil; this had turned it into a delete.
+    --
+    -- A row is only a candidate for deletion when the category it belongs to
+    -- ANSWERED this time. A row with no stored category is never deleted:
+    -- there is nothing to check it against.
+    for id, record in pairs(store) do
+        local categoryID = type(record) == "table" and record.categoryID
+
+        if not seen[id] and categoryID and answeringCategories[categoryID] then
             store[id] = nil
         end
     end

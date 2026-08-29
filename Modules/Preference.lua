@@ -934,8 +934,10 @@ CN:RegisterCommand{
 
             local multiplier, reason = Preference.Multiplier(entry.type)
 
-            local line = string.format("  %-16s %d of %d acted on",
-                label, entry.row.acted, entry.row.shown)
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            local line = "  " .. CN.Body(label) .. "  "
+                .. entry.row.acted .. " of " .. entry.row.shown
+                .. " acted on"
 
             if not Preference.IsCreditable(entry.type) then
                 -- Only reachable from a database written before 0.55.0 and

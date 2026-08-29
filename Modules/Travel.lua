@@ -2294,7 +2294,25 @@ CN:RegisterCommand{
         if detail and detail.mode == "fly" then
             local session = CN:GetModule("Session")
 
-            local runSpeed = session and session.Speed() or 7
+            -- ON FOOT MEANS ON FOOT. 0.77.0.
+            --
+            -- `Session.Speed()` with no argument answers for the bucket the
+            -- player is in RIGHT NOW -- and a player reading `/cn travel` is
+            -- normally mounted or skyriding, so the "running the whole way"
+            -- figure was quoted at roughly three and a half times the true
+            -- speed. A fifty-minute walk read as fourteen minutes, which
+            -- makes the flight this line exists to justify look like a bad
+            -- idea.
+            --
+            -- The sixteen-line header on `EstimateSeconds` documents this
+            -- exact defect being fixed there; this was the last no-argument
+            -- caller left in the tree.
+            local runSpeed, runMeasured = 7, false
+
+            if session and session.Speed then
+                runSpeed, runMeasured = session.Speed(false)
+                runSpeed = runSpeed or 7
+            end
 
             Print(string.format(
                 "  |cff8a8f96%.0f yd to %s, %.0f yd in the air, %.0f yd at the "
@@ -2320,10 +2338,15 @@ CN:RegisterCommand{
                 end
             end
 
+            local onFoot = session and session.FormatDuration
+                and session.FormatDuration(
+                    detail.yards / math.max(0.5, runSpeed))
+
+            -- And marked, like every other duration in this file: a figure
+            -- from a measured run speed and one from the default are not the
+            -- same claim.
             Print(string.format("  |cff8a8f96running the whole way: %s|r",
-                session and session.FormatDuration
-                    and session.FormatDuration(detail.yards / math.max(0.5, runSpeed))
-                    or "unknown"))
+                onFoot and CN.WithConfidence(onFoot, runMeasured) or "unknown"))
         elseif detail and detail.mode == "self" then
             local flySpeed, flyMeasured = Travel.SelfFlightSpeed()
 

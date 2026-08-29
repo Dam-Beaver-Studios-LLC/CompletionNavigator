@@ -1446,6 +1446,50 @@ CN.migrations = {
     -- 21 is the precedent.
     [27] = function()
     end,
+
+    -- THE FRAME POSITIONS THREE FRAMES SAVED WITHOUT A RELATIVE POINT.
+    -- 0.77.0.
+    --
+    -- The heads-up line, the follow list and the arrow all stored
+    -- `{ point, x, y }` and restored with the anchor standing in for the
+    -- relative point. Where the two differ the offsets were re-applied
+    -- against a different corner of the screen, so the frame came back a
+    -- screen away from where it was left and was then pinned to an edge --
+    -- which is the reported "it drags and does not stay".
+    --
+    -- A stored position with no `relativePoint` is one of those, and there is
+    -- no way to tell whether it was ever wrong. Cleared, so each frame starts
+    -- from its default and is placed once more, rather than restored to
+    -- somewhere the player never put it.
+    [28] = function(db)
+        local function Reset(store, key)
+            if type(store) ~= "table" then
+                return
+            end
+
+            local held = store[key]
+
+            if type(held) == "table" and held.point
+                and not held.relativePoint then
+
+                store[key] = nil
+            end
+        end
+
+        local settings = db.account and db.account.settings
+
+        Reset(settings, "hudPosition")
+        Reset(settings, "arrowPosition")
+        Reset(settings, "followPosition")
+
+        for _, character in pairs(db.characters or {}) do
+            if type(character) == "table" then
+                Reset(character.preferences, "hudPosition")
+                Reset(character.settings, "arrowPosition")
+                Reset(character.settings, "followPosition")
+            end
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A
@@ -1904,8 +1948,10 @@ CN:RegisterCommand{
 
         for _, row in ipairs(rows) do
             if row.bytes > 4096 and shown < 12 then
-                CN.PrintLine(string.format("  %-20s %6.0f KB  |cff8a8f96%d rows|r",
-                    row.name, row.bytes / 1024, row.count))
+                -- NO COLUMN PADDING. 0.77.0. See `Routing.lua`.
+                CN.PrintLine("  " .. CN.Body(row.name) .. "  "
+                    .. string.format("%.0f KB", row.bytes / 1024)
+                    .. CN.Aside(row.count .. " rows"))
 
                 shown = shown + 1
             end

@@ -341,12 +341,8 @@ local function BuildArrow()
 
     settings.arrowPosition = settings.arrowPosition or {}
 
-    arrow:SetPoint(
-        settings.arrowPosition.point or "CENTER",
-        UIParent,
-        settings.arrowPosition.point or "CENTER",
-        settings.arrowPosition.x or 0,
-        settings.arrowPosition.y or 160)
+    CN.RestoreFramePosition(arrow, settings.arrowPosition,
+        { point = "CENTER", relativePoint = "CENTER", x = 0, y = 160 })
 
     arrow.texture = arrow:CreateTexture(nil, "ARTWORK")
     arrow.texture:SetAllPoints()
@@ -383,12 +379,34 @@ local function BuildArrow()
     arrow:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
 
-        local point, _, _, x, y = self:GetPoint()
-
         local saved = Settings()
 
-        saved.arrowPosition = { point = point, x = x, y = y }
+        saved.arrowPosition = CN.SaveFramePosition(self)
+            or saved.arrowPosition
     end)
+
+    -- AND A WAY OUT OF IT. 0.77.0.
+    --
+    -- The arrow eats world clicks in its 56x56 footprint -- it is
+    -- mouse-enabled so it can be dragged -- with nothing on screen explaining
+    -- why the ground under it does not respond. The tooltip answers that
+    -- question; the x answers it better.
+    CN.AttachCloseControl(arrow,
+        function()
+            -- THE SAME SETTING `/cn arrow off` WRITES, so the command and
+            -- the control agree afterwards. Hiding it alone would bring it
+            -- back on the next refresh, and a control that undoes itself is
+            -- worse than no control.
+            Settings().arrow = false
+
+            arrow:Hide()
+
+            CN.Print("Arrow off. " .. CN.Aside(CN.Accent("/cn arrow on")
+                .. " brings it back"))
+        end,
+        "Points at what you are navigating to. Drag to move it. The x hides "
+        .. "it.",
+        "Hide the arrow. /cn arrow on brings it back.")
 
     arrow:Hide()
 
@@ -1340,7 +1358,9 @@ CN:RegisterCommand{
         Print("Arrow diagnosis:")
 
         for _, row in ipairs(report) do
-            CN.PrintLine(string.format("  |cff8a8f96%-18s|r %s", row.label, row.value))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            CN.PrintLine("  " .. CN.Muted(tostring(row.label)) .. "  "
+                .. tostring(row.value))
         end
 
         -- THE ONE THING THAT MAKES EVERY OTHER LINE HERE UNTRUSTWORTHY.

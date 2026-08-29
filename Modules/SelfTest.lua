@@ -773,7 +773,9 @@ CN:RegisterCommand{
                 colour = "|cff8a8f96"
             end
 
-            CN.PrintLine(string.format("  %s%-4s|r %s", colour, check.status, check.name))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            CN.PrintLine("  " .. colour .. check.status .. "|r  "
+                .. check.name)
 
             if check.detail then
                 CN.PrintLine("        |cff8a8f96" .. check.detail .. "|r")

@@ -2200,17 +2200,17 @@ function CN.ExplainScore(objective)
     local mode     = (settings and settings.priorityMode) or "balanced"
     local profile  = CN.priorityProfiles[mode] or {}
 
-    local w = {}
-
-    for key, value in pairs(CN.scoreWeights) do
-        w[key] = value
-    end
-
-    if profile.weights then
-        for key, value in pairs(profile.weights) do
-            w[key] = value
-        end
-    end
+    -- THROUGH THE FUNCTION THE SCORER USES. 0.77.0.
+    --
+    -- This copied the defaults and the profile overrides by hand, in the
+    -- function whose own header promises "the same arithmetic
+    -- `ScoreObjective` does; if the two ever disagree, this is wrong".
+    -- Identical output today, and a rule written twice sitting inside the
+    -- function that exists to prove the two agree.
+    --
+    -- `EffectiveWeights` also memoizes per mode, which is why the scorer
+    -- stopped building this per objective in the first place.
+    local w = EffectiveWeights(mode, profile)
 
     local travel = objective.travelCost
 
@@ -2433,11 +2433,13 @@ CN:RegisterCommand{
             local scaled = math.floor((value / (1 + CN.urgencyLongShare))
                 * width + 0.5)
 
-            CN.PrintLine(string.format("  %-11s |cff5dd2fb%s|r|cff5a5f66%s|r %.2f",
-                point.label,
-                string.rep("=", scaled),
-                string.rep("-", width - scaled),
-                value))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`:
+            -- WoW ships no monospace chat font, so padding to a width makes a
+            -- ragged edge that reads as a bug rather than as a table.
+            CN.PrintLine("  " .. CN.Body(point.label) .. "  "
+                .. "|cff5dd2fb" .. string.rep("=", scaled) .. "|r"
+                .. "|cff5a5f66" .. string.rep("-", width - scaled) .. "|r"
+                .. CN.Aside(string.format("%.2f", value)))
         end
 
         CN.Print("|cff8a8f96Multiplied by " .. CN.urgencyWeight
@@ -2675,10 +2677,12 @@ CN:RegisterCommand{
         CN.Print("Providers, slowest first:")
 
         for _, row in ipairs(rows) do
-            CN.PrintLine(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
-                row.name, row.average, row.worst, row.calls,
-                CN.Pluralize(row.calls, "call", "calls"),
-                row.cached and "" or " |cffffc74fstale|r"))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            CN.PrintLine("  " .. CN.Body(row.name)
+                .. CN.Aside(string.format("avg %.2fms, worst %.2fms, %d %s",
+                    row.average, row.worst, row.calls,
+                    CN.Pluralize(row.calls, "call", "calls")))
+                .. (row.cached and "" or " |cffffc74fstale|r"))
         end
 
         -- A cap nobody can see reads as "that was everything".

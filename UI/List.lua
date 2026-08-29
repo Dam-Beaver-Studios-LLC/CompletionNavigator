@@ -425,14 +425,10 @@ local function CreateList(parent)
     --
     -- Strips colour openers, the `|r` that closes them, inline textures, and
     -- then any leading punctuation and digits the row uses as a marker.
-    local function SortKey(text)
-        text = CN.Strip(text)
-
-        -- Leading markers: "  ", "x ", "> ", "! ", "12. ".
-        text = text:gsub("^[%s%p%d]+", "")
-
-        return string.lower(text)
-    end
+    -- ONE DEFINITION, IN CORE. 0.77.0. It was a local here and the
+    -- cross-tab search could not reach it, so the two searched different
+    -- strings; see the header on `CN.SortKey`.
+    local SortKey = CN.SortKey
 
     list.SortKey = SortKey
 
@@ -531,7 +527,11 @@ local function CreateList(parent)
 
         -- The same stripped text the sort uses: a filter that searches the
         -- colour codes is a filter where `cff` matches everything.
-        local haystack = SortKey(entry.text)
+        --
+        -- AND THE VALUE COLUMN. 0.77.0. The cross-tab count searched it and
+        -- this did not, so "Also on: Collections (12)" led to a tab that said
+        -- "Nothing here matches". One predicate now.
+        local haystack = SortKey(entry.text) .. " " .. SortKey(entry.value)
 
         -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
         -- name, not a regular expression, and a stray bracket must not throw.

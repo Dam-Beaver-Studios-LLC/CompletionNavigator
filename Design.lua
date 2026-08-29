@@ -432,6 +432,164 @@ end
 --
 -- An outline is one call and it is the difference between "readable at a
 -- glance" and "readable if the ground happens to be dark".
+-- A HOVER X ON A FRAME DRAWN OVER THE WORLD. 0.77.0.
+--
+-- The heads-up line got one when a player asked for it in as many words: a
+-- frame that appears over the world and cannot be dismissed from itself is a
+-- frame people uninstall the addon to be rid of. The other two frames this
+-- addon draws over the world -- the follow list and the waypoint arrow -- are
+-- also mouse-enabled and draggable, and neither said so nor offered a way
+-- out. The follow frame could only be dismissed by knowing `/cn follow`; the
+-- arrow ate world clicks in a 56x56 footprint with nothing on screen
+-- explaining why.
+--
+-- Hoisted rather than copied, because that is three sites for one control.
+--
+-- `onClose` is what the x does; `tooltip` is what the whole frame says on
+-- hover. Both optional: a frame with no tooltip still gets its x.
+function CN.AttachCloseControl(frame, onClose, tooltip, closeTooltip)
+    if not frame or not CreateFrame then
+        return nil
+    end
+
+    local close = CreateFrame("Button", nil, frame)
+
+    close:SetSize(16, 16)
+    close:SetPoint("TOPRIGHT", -2, -2)
+
+    -- A DRAG STARTED IN THAT CORNER STILL MOVES THE FRAME.
+    --
+    -- The button takes the mouse, so without this the top-right corner is a
+    -- dead zone for dragging -- and the tooltip promises the frame can be
+    -- dragged.
+    close:RegisterForDrag("LeftButton")
+
+    close:SetScript("OnDragStart", function()
+        if frame.StartMoving then
+            frame:StartMoving()
+        end
+    end)
+
+    close:SetScript("OnDragStop", function()
+        local stop = frame:GetScript("OnDragStop")
+
+        if stop then
+            stop(frame)
+        end
+    end)
+
+    close.label = CN.Label(close, "OVERLAY", "SMALL")
+    close.label:SetPoint("CENTER")
+    close.label:SetText(CN.Muted("x"))
+
+    CN.Outline(close.label, 11, "MUTED")
+
+    -- Only while the mouse is over the frame. A permanent X on something
+    -- whose whole job is to be glanced at is one more thing to read.
+    close:SetAlpha(0)
+
+    close:SetScript("OnEnter", function(self)
+        self:SetAlpha(1)
+
+        self.label:SetText(CN.Bad("x"))
+    end)
+
+    close:SetScript("OnLeave", function(self)
+        self.label:SetText(CN.Muted("x"))
+
+        if not frame:IsMouseOver() then
+            self:SetAlpha(0)
+        end
+    end)
+
+    close:SetScript("OnClick", function()
+        if onClose then
+            onClose()
+        end
+    end)
+
+    if CN.UI and CN.UI.AttachTooltip then
+        if closeTooltip then
+            CN.UI.AttachTooltip(close, closeTooltip)
+        end
+
+        if tooltip then
+            CN.UI.AttachTooltip(frame, tooltip)
+        end
+    end
+
+    frame.close = close
+
+    -- The X appears with the cursor and goes with it.
+    frame:HookScript("OnEnter", function()
+        close:SetAlpha(1)
+    end)
+
+    frame:HookScript("OnLeave", function()
+        if not close:IsMouseOver() then
+            close:SetAlpha(0)
+        end
+    end)
+
+    return close
+end
+
+-- WHERE A FRAME THE PLAYER MOVED SHOULD GO BACK. 0.77.0.
+--
+-- `GetPoint` returns `point, relativeTo, relativePoint, x, y`. Three of the
+-- four movable frames in this addon discarded the THIRD return and then
+-- restored with `SetPoint(point, UIParent, point, x, y)` -- substituting the
+-- anchor for the relative point.
+--
+-- `StopMovingOrSizing` re-anchors a frame as it sees fit and does not promise
+-- the two corners match. When they differ, the saved offsets are re-applied
+-- against a different corner of the screen, so the frame comes back a screen
+-- away from where it was left and is then pinned to an edge by
+-- `SetClampedToScreen`. It drags, and it does not stay -- which is the
+-- reported complaint, half-answered.
+--
+-- `UI.SavePosition` got this right and its three siblings did not, so it is
+-- one function now rather than a rule written four times.
+function CN.SaveFramePosition(frame)
+    if not frame or not frame.GetPoint then
+        return nil
+    end
+
+    local point, _, relativePoint, x, y = frame:GetPoint()
+
+    if not point then
+        return nil
+    end
+
+    return {
+        point         = point,
+        relativePoint = relativePoint or point,
+        x             = x or 0,
+        y             = y or 0,
+    }
+end
+
+-- `fallback` is used when nothing has been saved yet, and takes the same
+-- shape. Cleared first, because a frame that is already anchored somewhere
+-- accumulates points rather than moving.
+function CN.RestoreFramePosition(frame, saved, fallback)
+    if not frame or not frame.SetPoint then
+        return
+    end
+
+    local placement = (type(saved) == "table" and saved.point and saved)
+        or fallback or {}
+
+    frame:ClearAllPoints()
+
+    frame:SetPoint(
+        placement.point or "CENTER",
+        UIParent,
+        placement.relativePoint or placement.point or "CENTER",
+        placement.x or 0,
+        placement.y or 0)
+end
+
 function CN.Outline(fontString, size, role)
     if not fontString or not fontString.SetFont then
         return false

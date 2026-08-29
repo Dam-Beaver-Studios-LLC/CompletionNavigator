@@ -172,6 +172,9 @@ function Achievements.Scan()
     -- record itself.
     local answered = 0
 
+    -- Which categories the client actually populated this time.
+    local answeringCategories = {}
+
     Achievements.revision = Achievements.revision + 1
 
     local scanned, completed, nearlyDone = 0, 0, 0
@@ -212,6 +215,12 @@ function Achievements.Scan()
                 -- The prune's job is to drop what the GAME no longer returns.
                 -- That is what this records.
                 seen[achievement.achievementID] = true
+
+                -- AND WHICH CATEGORY ANSWERED. See the prune below: the walk
+                -- is per category and 0.76.0 gated the prune on a whole-store
+                -- counter, so one expansion answering licensed the deletion
+                -- of every row in the ones that did not.
+                answeringCategories[categoryID] = true
 
                 if achievement.completed then
                     completed = completed + 1
@@ -302,8 +311,17 @@ function Achievements.Scan()
     -- ROWS THE CLIENT NO LONGER RETURNS, dropped explicitly. This is what the
     -- wipe at the top used to accomplish, without taking every other
     -- character's readings with it.
-    for achievementID in pairs(store) do
-        if not seen[achievementID] then
+    -- PER CATEGORY, NOT PER SCAN. Corrected in 0.77.0; see the sibling in
+    -- `Modules/Loremaster.lua` for the whole argument. A row whose category
+    -- did not answer is not a row the game has stopped returning -- it is a
+    -- row nobody asked about -- and a row with no stored category has nothing
+    -- to check against.
+    for achievementID, record in pairs(store) do
+        local categoryID = type(record) == "table" and record.categoryID
+
+        if not seen[achievementID] and categoryID
+            and answeringCategories[categoryID] then
+
             store[achievementID] = nil
         end
     end

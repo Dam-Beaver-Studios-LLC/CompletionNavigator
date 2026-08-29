@@ -91,6 +91,18 @@ function CN.SetWaypoint(mapID, x, y, title)
 
     CN.DebugPrint("Waypoint set via " .. tostring(name) .. ".")
 
+    -- AND A CAVEAT THE PROVIDER ATTACHED TO A SUCCESS. 0.77.0.
+    --
+    -- The native provider answers `true, "the arrow is set; the game does not
+    -- allow a map pin here"` on a dungeon, raid or continent map -- and this
+    -- read the second return only on FAILURE, so the sentence written to
+    -- explain why no pin appeared was discarded, and the player was told
+    -- "Waypoint set" while the world map stayed empty. A dead writer, and a
+    -- player left thinking it had failed.
+    if why then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end
+
     return true
 end
 
@@ -1324,7 +1336,25 @@ for _, event in ipairs({
     "ZONE_CHANGED_NEW_AREA",
 }) do
     CN:RegisterEvent(event, function()
-        CN.AutoAdvance(event)
+        -- THROTTLED, BECAUSE ONE OF THESE IS A FIREHOSE. 0.77.0.
+        --
+        -- `VIGNETTE_MINIMAP_UPDATED` fires many times a second while moving
+        -- through any zone with rares or treasures in it -- which is exactly
+        -- when a player has auto-waypoint switched on. Each firing ran
+        -- `CN.Explain`, then on the common "unknown" path a LINEAR SCAN of
+        -- the whole candidate list, then a full `CN.Recommend(1)` with the
+        -- recommendation hooks live.
+        --
+        -- `CN.Debounce` is leading-edge with one trailing run, which is the
+        -- right shape here: the first vignette in a burst is answered at
+        -- once, and the state after the burst is answered once more. Three
+        -- other modules already route their firehose events through it.
+        --
+        -- `Navigation.Arrive` still calls `CN.AutoAdvance` directly and
+        -- passes `force`: arriving somewhere is a single moment, not a burst.
+        CN.Debounce("Routing.autoAdvance", 2, function()
+            CN.AutoAdvance(event)
+        end)
     end)
 end
 
@@ -1432,9 +1462,20 @@ CN:RegisterCommand{
                 lastZone = row.zone
             end
 
-            CN.PrintLine(string.format("  %-34s |cff8a8f96%s|r",
-                tostring(row.objective.name or row.objective.id),
-                session and session.FormatDuration
+            -- NO COLUMN PADDING. 0.77.0.
+            --
+            -- `%-34s` pads to a width, and WoW ships no monospace chat font
+            -- -- so this produced a ragged right edge that reads as a bug
+            -- rather than as a table, which is the rule `Design.lua` and
+            -- `UI/List.lua` both state and the reason the window was moved to
+            -- anchored fontstrings. The chat side kept the padding.
+            --
+            -- `/cn elsewhere` was the worst of the six: it is a day-to-day
+            -- command and its objective names are long enough to wrap
+            -- mid-row.
+            CN.PrintLine("  " .. CN.Body(
+                    tostring(row.objective.name or row.objective.id))
+                .. CN.Aside(session and session.FormatDuration
                     and session.FormatDuration(row.seconds)
                     or (math.floor(row.seconds / 60) .. "m")))
         end

@@ -406,7 +406,20 @@ function Inventory.Recipes()
     end
 
     for _, item in ipairs(Inventory.Scan()) do
-        local ok, _, _, _, _, classID = pcall(C_Item.GetItemInfoInstant, item.itemID)
+        -- ONE MORE PLACEHOLDER. 0.77.0.
+        --
+        -- `GetItemInfoInstant` returns `itemID, itemType, itemSubType,
+        -- itemEquipLoc, icon, classID, subclassID`, and through `pcall` those
+        -- land at positions 2 through 8. This was one short, so the variable
+        -- called `classID` was actually receiving the ICON -- a file id in
+        -- the six figures -- and `classID == 9` was never true on any client.
+        --
+        -- So this function has returned an empty list since it was written,
+        -- and `/cn bags` has never once reported a carried recipe: the entire
+        -- feature the thirty-line header above describes, dead in one
+        -- underscore.
+        local ok, _, _, _, _, _, classID =
+            pcall(C_Item.GetItemInfoInstant, item.itemID)
 
         if ok and classID == 9 then
             item.kind = CN.objectiveTypes.RECIPE
@@ -831,15 +844,21 @@ CN:RegisterCommand{
         -- questions. What is in this character's bank is reachable by this
         -- character; what is in the Warband bank is reachable by all of them,
         -- and that difference is the whole reason to mention either.
+        -- THROUGH `CN.Ago`. 0.77.0.
+        --
+        -- This was raw hours, rendered as "seen 336h ago" for a bank read a
+        -- fortnight before. `CN.Ago` exists for exactly this, its own header
+        -- names "97h 12m" as the wrong shape for a stored reading, and the
+        -- Scans tab has used it correctly all along.
         local function Age(store)
-            return math.floor(math.max(0, time() - store.scannedAt) / 3600)
+            return CN.Ago(store and store.scannedAt) or "never"
         end
 
         local bank = Inventory.BankStore()
 
         if bank.scannedAt then
             CN.PrintLine(CN.Muted("Your bank: " .. Inventory.Kinds(bank)
-                .. " kinds of item, seen " .. Age(bank) .. "h ago " .. CN.DASH
+                .. " kinds of item, seen " .. Age(bank) .. " " .. CN.DASH
                 .. " the client only describes it while you are standing at "
                 .. "one."))
         end
@@ -849,7 +868,7 @@ CN:RegisterCommand{
         if warband.scannedAt then
             CN.PrintLine(CN.Muted("Warband bank: "
                 .. Inventory.Kinds(warband)
-                .. " kinds of item, seen " .. Age(warband) .. "h ago "
+                .. " kinds of item, seen " .. Age(warband) .. " "
                 .. CN.DASH .. " reachable from every character."))
         end
 

@@ -747,14 +747,11 @@ function UI.SavePosition()
         return
     end
 
-    local point, _, relativePoint, x, y = window:GetPoint()
-
-    CN.Settings().window = {
-        point         = point,
-        relativePoint = relativePoint,
-        x             = x,
-        y             = y,
-    }
+    -- THROUGH THE ONE FUNCTION. 0.77.0. This site was the one that was
+    -- right; its three siblings were not, so the rule lives in Design.lua now
+    -- and all four read from it.
+    CN.Settings().window = CN.SaveFramePosition(window)
+        or CN.Settings().window
 end
 
 function UI.RestorePosition()
@@ -764,8 +761,7 @@ function UI.RestorePosition()
         return
     end
 
-    window:ClearAllPoints()
-    window:SetPoint(saved.point, UIParent, saved.relativePoint, saved.x, saved.y)
+    CN.RestoreFramePosition(window, saved)
 end
 
 ------------------------------------------------------------
@@ -1174,8 +1170,14 @@ function UI.SearchAll(text)
                 -- Plain find, for the reason the list's own filter gives:
                 -- somebody typing "mount (2)" is typing a name, not a
                 -- pattern, and a stray bracket must not throw.
-                local haystack = string.lower(tostring(entry.text or "")
-                    .. " " .. tostring(entry.value or ""))
+                --
+                -- AND THROUGH `CN.SortKey`, which is what that filter uses.
+                -- 0.77.0. This searched the raw text -- colour codes,
+                -- textures and all -- so a hex fragment matched every row on
+                -- every tab while the tab in front of the player correctly
+                -- matched none. Two predicates for one question.
+                local haystack = CN.SortKey(entry.text)
+                    .. " " .. CN.SortKey(entry.value)
 
                 if haystack:find(needle, 1, true) then
                     count = count + 1
@@ -4626,10 +4628,28 @@ local function SubscribeToRefreshEvents()
     -- Sorted, so the registration order is the same on every login.
     table.sort(names)
 
+    -- WIRED ONCE PER EVENT. 0.77.0.
+    --
+    -- This is called from `CN.RegisterCandidateProvider`, and so is
+    -- `SubscribeToInvalidationEvents` -- which tracks what it has already
+    -- wired, with a comment saying it must, because the handler list "would
+    -- grow without bound if a module registered providers in a loop". This
+    -- pass was added for the same reason from the same two lines and had no
+    -- such set: every late provider registration appended another forty
+    -- handlers, one per wanted event, each calling `UI.RequestRefresh`.
+    --
+    -- Latent while nothing ships a late provider, and live the moment one
+    -- does -- which the note on that hook says is the point of it.
+    UI.subscribedRefreshEvents = UI.subscribedRefreshEvents or {}
+
     for _, event in ipairs(names) do
-        CN:RegisterEvent(event, function()
-            UI.RequestRefresh()
-        end)
+        if not UI.subscribedRefreshEvents[event] then
+            UI.subscribedRefreshEvents[event] = true
+
+            CN:RegisterEvent(event, function()
+                UI.RequestRefresh()
+            end)
+        end
     end
 
     UI.refreshEventCount = #names
@@ -4710,9 +4730,10 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "uistatus",
+    args    = "[reset]",
     order   = 7,
     help    = "Diagnose the window and minimap button.",
-    handler = function()
+    handler = function(args)
         -- `UI.Frame()`, not the global. The global is published by the client
         -- when the frame is NAMED, and this addon creates it through
         -- `SafeCreateFrame`, which falls back to an unnamed frame if the
@@ -4740,9 +4761,16 @@ CN:RegisterCommand{
                 .. " x " .. math.floor(frame:GetHeight() or 0) .. " px")
             table.insert(lines, "  strata: " .. tostring(frame:GetFrameStrata()))
 
-            local point, _, _, x, y = frame:GetPoint()
+            -- AND THE RELATIVE POINT. 0.77.0.
+            --
+            -- The field three frames used to discard is the field a
+            -- diagnostic about frame position most needs to show. Reporting
+            -- the anchor alone is how "it drags and does not stay" looks
+            -- fine here.
+            local point, _, relativePoint, x, y = frame:GetPoint()
 
             table.insert(lines, "  anchored: " .. tostring(point)
+                .. " to " .. tostring(relativePoint)
                 .. " at " .. math.floor(x or 0) .. ", " .. math.floor(y or 0))
         end
 
@@ -4762,14 +4790,31 @@ CN:RegisterCommand{
         table.insert(lines, "Registered tabs: " .. #UI.tabs)
         table.insert(lines, "Minimap frame exists: " .. CN.YesNo(Minimap ~= nil))
 
-        if frame and not frame:IsShown() then
-            table.insert(lines, CN.Accent("Forcing the window open and centering it."))
+        -- PROMPT, NEVER ACT. 0.77.0.
+        --
+        -- This threw away the saved window position, recentred the window and
+        -- forced it open whenever it happened to be CLOSED -- which is its
+        -- state most of the time. A command whose help is "diagnose" and
+        -- whose args were none, quietly discarding something the player had
+        -- deliberately set, in the one command a player runs BECAUSE
+        -- something already looks wrong.
+        --
+        -- It offers the repair and does it on request.
+        local reset = string.lower(CN.Trim(args or "")) == "reset"
+
+        if frame and reset then
+            table.insert(lines, CN.Accent("Recentring the window and opening "
+                .. "it."))
 
             CN.Settings().window = nil
 
             frame:ClearAllPoints()
             frame:SetPoint("CENTER")
             frame:Show()
+        elseif frame and not frame:IsShown() then
+            table.insert(lines, CN.Muted("The window is closed. ")
+                .. CN.Accent("/cn uistatus reset")
+                .. CN.Muted(" recentres it and opens it."))
         end
 
         CN.PrintBlock("UI diagnostics:", lines)

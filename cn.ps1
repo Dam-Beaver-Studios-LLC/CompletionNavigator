@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.76.0'
+$script:ToolkitVersion = '0.77.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.76.0"
-CN.dbVersion   = 28
+CN.version     = "0.77.0"
+CN.dbVersion   = 29
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -942,6 +942,25 @@ function CN.Strip(text)
     return text
 end
 
+-- WHAT A ROW SAYS, WITH THE MARKUP TAKEN OFF. 0.77.0.
+--
+-- Hoisted out of `UI/List.lua`, where it was a local that the list's own
+-- filter used and the cross-tab search did not -- so `/cn find` and the
+-- "Also on:" counts searched the RAW text, colour codes and all, while the
+-- tab you were standing on searched this. Typing any hex fragment reported a
+-- match on every row of every tab and none on the one in front of you.
+--
+-- Leading markers go too: "  ", "x ", "> ", "! ", "12. ". A row is what it
+-- says, not how it is decorated or where it sits in a list.
+function CN.SortKey(text)
+    text = CN.Strip(text)
+
+    text = text:gsub("^[%s%p%d]+", "")
+
+    return string.lower(text)
+end
+
+
 function CN.TokenLabel(token)
     if type(token) ~= "string" or token == "" then
         return tostring(token)
@@ -1549,6 +1568,164 @@ end
 --
 -- An outline is one call and it is the difference between "readable at a
 -- glance" and "readable if the ground happens to be dark".
+-- A HOVER X ON A FRAME DRAWN OVER THE WORLD. 0.77.0.
+--
+-- The heads-up line got one when a player asked for it in as many words: a
+-- frame that appears over the world and cannot be dismissed from itself is a
+-- frame people uninstall the addon to be rid of. The other two frames this
+-- addon draws over the world -- the follow list and the waypoint arrow -- are
+-- also mouse-enabled and draggable, and neither said so nor offered a way
+-- out. The follow frame could only be dismissed by knowing `/cn follow`; the
+-- arrow ate world clicks in a 56x56 footprint with nothing on screen
+-- explaining why.
+--
+-- Hoisted rather than copied, because that is three sites for one control.
+--
+-- `onClose` is what the x does; `tooltip` is what the whole frame says on
+-- hover. Both optional: a frame with no tooltip still gets its x.
+function CN.AttachCloseControl(frame, onClose, tooltip, closeTooltip)
+    if not frame or not CreateFrame then
+        return nil
+    end
+
+    local close = CreateFrame("Button", nil, frame)
+
+    close:SetSize(16, 16)
+    close:SetPoint("TOPRIGHT", -2, -2)
+
+    -- A DRAG STARTED IN THAT CORNER STILL MOVES THE FRAME.
+    --
+    -- The button takes the mouse, so without this the top-right corner is a
+    -- dead zone for dragging -- and the tooltip promises the frame can be
+    -- dragged.
+    close:RegisterForDrag("LeftButton")
+
+    close:SetScript("OnDragStart", function()
+        if frame.StartMoving then
+            frame:StartMoving()
+        end
+    end)
+
+    close:SetScript("OnDragStop", function()
+        local stop = frame:GetScript("OnDragStop")
+
+        if stop then
+            stop(frame)
+        end
+    end)
+
+    close.label = CN.Label(close, "OVERLAY", "SMALL")
+    close.label:SetPoint("CENTER")
+    close.label:SetText(CN.Muted("x"))
+
+    CN.Outline(close.label, 11, "MUTED")
+
+    -- Only while the mouse is over the frame. A permanent X on something
+    -- whose whole job is to be glanced at is one more thing to read.
+    close:SetAlpha(0)
+
+    close:SetScript("OnEnter", function(self)
+        self:SetAlpha(1)
+
+        self.label:SetText(CN.Bad("x"))
+    end)
+
+    close:SetScript("OnLeave", function(self)
+        self.label:SetText(CN.Muted("x"))
+
+        if not frame:IsMouseOver() then
+            self:SetAlpha(0)
+        end
+    end)
+
+    close:SetScript("OnClick", function()
+        if onClose then
+            onClose()
+        end
+    end)
+
+    if CN.UI and CN.UI.AttachTooltip then
+        if closeTooltip then
+            CN.UI.AttachTooltip(close, closeTooltip)
+        end
+
+        if tooltip then
+            CN.UI.AttachTooltip(frame, tooltip)
+        end
+    end
+
+    frame.close = close
+
+    -- The X appears with the cursor and goes with it.
+    frame:HookScript("OnEnter", function()
+        close:SetAlpha(1)
+    end)
+
+    frame:HookScript("OnLeave", function()
+        if not close:IsMouseOver() then
+            close:SetAlpha(0)
+        end
+    end)
+
+    return close
+end
+
+-- WHERE A FRAME THE PLAYER MOVED SHOULD GO BACK. 0.77.0.
+--
+-- `GetPoint` returns `point, relativeTo, relativePoint, x, y`. Three of the
+-- four movable frames in this addon discarded the THIRD return and then
+-- restored with `SetPoint(point, UIParent, point, x, y)` -- substituting the
+-- anchor for the relative point.
+--
+-- `StopMovingOrSizing` re-anchors a frame as it sees fit and does not promise
+-- the two corners match. When they differ, the saved offsets are re-applied
+-- against a different corner of the screen, so the frame comes back a screen
+-- away from where it was left and is then pinned to an edge by
+-- `SetClampedToScreen`. It drags, and it does not stay -- which is the
+-- reported complaint, half-answered.
+--
+-- `UI.SavePosition` got this right and its three siblings did not, so it is
+-- one function now rather than a rule written four times.
+function CN.SaveFramePosition(frame)
+    if not frame or not frame.GetPoint then
+        return nil
+    end
+
+    local point, _, relativePoint, x, y = frame:GetPoint()
+
+    if not point then
+        return nil
+    end
+
+    return {
+        point         = point,
+        relativePoint = relativePoint or point,
+        x             = x or 0,
+        y             = y or 0,
+    }
+end
+
+-- `fallback` is used when nothing has been saved yet, and takes the same
+-- shape. Cleared first, because a frame that is already anchored somewhere
+-- accumulates points rather than moving.
+function CN.RestoreFramePosition(frame, saved, fallback)
+    if not frame or not frame.SetPoint then
+        return
+    end
+
+    local placement = (type(saved) == "table" and saved.point and saved)
+        or fallback or {}
+
+    frame:ClearAllPoints()
+
+    frame:SetPoint(
+        placement.point or "CENTER",
+        UIParent,
+        placement.relativePoint or placement.point or "CENTER",
+        placement.x or 0,
+        placement.y or 0)
+end
+
 function CN.Outline(fontString, size, role)
     if not fontString or not fontString.SetFont then
         return false
@@ -3181,6 +3358,50 @@ CN.migrations = {
     -- 21 is the precedent.
     [27] = function()
     end,
+
+    -- THE FRAME POSITIONS THREE FRAMES SAVED WITHOUT A RELATIVE POINT.
+    -- 0.77.0.
+    --
+    -- The heads-up line, the follow list and the arrow all stored
+    -- `{ point, x, y }` and restored with the anchor standing in for the
+    -- relative point. Where the two differ the offsets were re-applied
+    -- against a different corner of the screen, so the frame came back a
+    -- screen away from where it was left and was then pinned to an edge --
+    -- which is the reported "it drags and does not stay".
+    --
+    -- A stored position with no `relativePoint` is one of those, and there is
+    -- no way to tell whether it was ever wrong. Cleared, so each frame starts
+    -- from its default and is placed once more, rather than restored to
+    -- somewhere the player never put it.
+    [28] = function(db)
+        local function Reset(store, key)
+            if type(store) ~= "table" then
+                return
+            end
+
+            local held = store[key]
+
+            if type(held) == "table" and held.point
+                and not held.relativePoint then
+
+                store[key] = nil
+            end
+        end
+
+        local settings = db.account and db.account.settings
+
+        Reset(settings, "hudPosition")
+        Reset(settings, "arrowPosition")
+        Reset(settings, "followPosition")
+
+        for _, character in pairs(db.characters or {}) do
+            if type(character) == "table" then
+                Reset(character.preferences, "hudPosition")
+                Reset(character.settings, "arrowPosition")
+                Reset(character.settings, "followPosition")
+            end
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A
@@ -3639,8 +3860,10 @@ CN:RegisterCommand{
 
         for _, row in ipairs(rows) do
             if row.bytes > 4096 and shown < 12 then
-                CN.PrintLine(string.format("  %-20s %6.0f KB  |cff8a8f96%d rows|r",
-                    row.name, row.bytes / 1024, row.count))
+                -- NO COLUMN PADDING. 0.77.0. See `Routing.lua`.
+                CN.PrintLine("  " .. CN.Body(row.name) .. "  "
+                    .. string.format("%.0f KB", row.bytes / 1024)
+                    .. CN.Aside(row.count .. " rows"))
 
                 shown = shown + 1
             end
@@ -5919,17 +6142,30 @@ CN:RegisterCommand{
         end
 
         -- A bare profile name: weighting only, unchanged behaviour.
+        local known = false
+
         for _, mode in ipairs(CN.priorityModes) do
             if mode == requested then
-                settings.priorityMode = requested
-
-                CN.InvalidateCandidates()
-
-                CN.PrintLine("Ranking weight set to |cffffc74f" .. requested .. "|r.")
-                CN.PrintLine("|cff8a8f96Weighting only; your type filters are "
-                    .. "untouched.|r")
-                return
+                known = true
+                break
             end
+        end
+
+        if known then
+            settings.priorityMode = requested
+
+            CN.InvalidateCandidates()
+
+            -- HEADLINE, THEN CONTINUATION. 0.77.0.
+            --
+            -- Both lines were `PrintLine`, so the whole answer arrived as two
+            -- indented continuations with no "Completion Navigator:" above
+            -- them -- orphan text in the middle of the player's chat. Every
+            -- other branch of this handler uses `Print`.
+            Print("Ranking weight set to |cffffc74f" .. requested .. "|r.")
+            CN.PrintLine("|cff8a8f96Weighting only; your type filters are "
+                .. "untouched.|r")
+            return
         end
 
         Print("Unknown mode: " .. requested)
@@ -9008,17 +9244,17 @@ function CN.ExplainScore(objective)
     local mode     = (settings and settings.priorityMode) or "balanced"
     local profile  = CN.priorityProfiles[mode] or {}
 
-    local w = {}
-
-    for key, value in pairs(CN.scoreWeights) do
-        w[key] = value
-    end
-
-    if profile.weights then
-        for key, value in pairs(profile.weights) do
-            w[key] = value
-        end
-    end
+    -- THROUGH THE FUNCTION THE SCORER USES. 0.77.0.
+    --
+    -- This copied the defaults and the profile overrides by hand, in the
+    -- function whose own header promises "the same arithmetic
+    -- `ScoreObjective` does; if the two ever disagree, this is wrong".
+    -- Identical output today, and a rule written twice sitting inside the
+    -- function that exists to prove the two agree.
+    --
+    -- `EffectiveWeights` also memoizes per mode, which is why the scorer
+    -- stopped building this per objective in the first place.
+    local w = EffectiveWeights(mode, profile)
 
     local travel = objective.travelCost
 
@@ -9241,11 +9477,13 @@ CN:RegisterCommand{
             local scaled = math.floor((value / (1 + CN.urgencyLongShare))
                 * width + 0.5)
 
-            CN.PrintLine(string.format("  %-11s |cff5dd2fb%s|r|cff5a5f66%s|r %.2f",
-                point.label,
-                string.rep("=", scaled),
-                string.rep("-", width - scaled),
-                value))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`:
+            -- WoW ships no monospace chat font, so padding to a width makes a
+            -- ragged edge that reads as a bug rather than as a table.
+            CN.PrintLine("  " .. CN.Body(point.label) .. "  "
+                .. "|cff5dd2fb" .. string.rep("=", scaled) .. "|r"
+                .. "|cff5a5f66" .. string.rep("-", width - scaled) .. "|r"
+                .. CN.Aside(string.format("%.2f", value)))
         end
 
         CN.Print("|cff8a8f96Multiplied by " .. CN.urgencyWeight
@@ -9483,10 +9721,12 @@ CN:RegisterCommand{
         CN.Print("Providers, slowest first:")
 
         for _, row in ipairs(rows) do
-            CN.PrintLine(string.format("  %-14s avg %.2fms  worst %.2fms  (%d %s)%s",
-                row.name, row.average, row.worst, row.calls,
-                CN.Pluralize(row.calls, "call", "calls"),
-                row.cached and "" or " |cffffc74fstale|r"))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            CN.PrintLine("  " .. CN.Body(row.name)
+                .. CN.Aside(string.format("avg %.2fms, worst %.2fms, %d %s",
+                    row.average, row.worst, row.calls,
+                    CN.Pluralize(row.calls, "call", "calls")))
+                .. (row.cached and "" or " |cffffc74fstale|r"))
         end
 
         -- A cap nobody can see reads as "that was everything".
@@ -9674,6 +9914,18 @@ function CN.SetWaypoint(mapID, x, y, title)
     end
 
     CN.DebugPrint("Waypoint set via " .. tostring(name) .. ".")
+
+    -- AND A CAVEAT THE PROVIDER ATTACHED TO A SUCCESS. 0.77.0.
+    --
+    -- The native provider answers `true, "the arrow is set; the game does not
+    -- allow a map pin here"` on a dungeon, raid or continent map -- and this
+    -- read the second return only on FAILURE, so the sentence written to
+    -- explain why no pin appeared was discarded, and the player was told
+    -- "Waypoint set" while the world map stayed empty. A dead writer, and a
+    -- player left thinking it had failed.
+    if why then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end
 
     return true
 end
@@ -10908,7 +11160,25 @@ for _, event in ipairs({
     "ZONE_CHANGED_NEW_AREA",
 }) do
     CN:RegisterEvent(event, function()
-        CN.AutoAdvance(event)
+        -- THROTTLED, BECAUSE ONE OF THESE IS A FIREHOSE. 0.77.0.
+        --
+        -- `VIGNETTE_MINIMAP_UPDATED` fires many times a second while moving
+        -- through any zone with rares or treasures in it -- which is exactly
+        -- when a player has auto-waypoint switched on. Each firing ran
+        -- `CN.Explain`, then on the common "unknown" path a LINEAR SCAN of
+        -- the whole candidate list, then a full `CN.Recommend(1)` with the
+        -- recommendation hooks live.
+        --
+        -- `CN.Debounce` is leading-edge with one trailing run, which is the
+        -- right shape here: the first vignette in a burst is answered at
+        -- once, and the state after the burst is answered once more. Three
+        -- other modules already route their firehose events through it.
+        --
+        -- `Navigation.Arrive` still calls `CN.AutoAdvance` directly and
+        -- passes `force`: arriving somewhere is a single moment, not a burst.
+        CN.Debounce("Routing.autoAdvance", 2, function()
+            CN.AutoAdvance(event)
+        end)
     end)
 end
 
@@ -11016,9 +11286,20 @@ CN:RegisterCommand{
                 lastZone = row.zone
             end
 
-            CN.PrintLine(string.format("  %-34s |cff8a8f96%s|r",
-                tostring(row.objective.name or row.objective.id),
-                session and session.FormatDuration
+            -- NO COLUMN PADDING. 0.77.0.
+            --
+            -- `%-34s` pads to a width, and WoW ships no monospace chat font
+            -- -- so this produced a ragged right edge that reads as a bug
+            -- rather than as a table, which is the rule `Design.lua` and
+            -- `UI/List.lua` both state and the reason the window was moved to
+            -- anchored fontstrings. The chat side kept the padding.
+            --
+            -- `/cn elsewhere` was the worst of the six: it is a day-to-day
+            -- command and its objective names are long enough to wrap
+            -- mid-row.
+            CN.PrintLine("  " .. CN.Body(
+                    tostring(row.objective.name or row.objective.id))
+                .. CN.Aside(session and session.FormatDuration
                     and session.FormatDuration(row.seconds)
                     or (math.floor(row.seconds / 60) .. "m")))
         end
@@ -12049,14 +12330,11 @@ function UI.SavePosition()
         return
     end
 
-    local point, _, relativePoint, x, y = window:GetPoint()
-
-    CN.Settings().window = {
-        point         = point,
-        relativePoint = relativePoint,
-        x             = x,
-        y             = y,
-    }
+    -- THROUGH THE ONE FUNCTION. 0.77.0. This site was the one that was
+    -- right; its three siblings were not, so the rule lives in Design.lua now
+    -- and all four read from it.
+    CN.Settings().window = CN.SaveFramePosition(window)
+        or CN.Settings().window
 end
 
 function UI.RestorePosition()
@@ -12066,8 +12344,7 @@ function UI.RestorePosition()
         return
     end
 
-    window:ClearAllPoints()
-    window:SetPoint(saved.point, UIParent, saved.relativePoint, saved.x, saved.y)
+    CN.RestoreFramePosition(window, saved)
 end
 
 ------------------------------------------------------------
@@ -12476,8 +12753,14 @@ function UI.SearchAll(text)
                 -- Plain find, for the reason the list's own filter gives:
                 -- somebody typing "mount (2)" is typing a name, not a
                 -- pattern, and a stray bracket must not throw.
-                local haystack = string.lower(tostring(entry.text or "")
-                    .. " " .. tostring(entry.value or ""))
+                --
+                -- AND THROUGH `CN.SortKey`, which is what that filter uses.
+                -- 0.77.0. This searched the raw text -- colour codes,
+                -- textures and all -- so a hex fragment matched every row on
+                -- every tab while the tab in front of the player correctly
+                -- matched none. Two predicates for one question.
+                local haystack = CN.SortKey(entry.text)
+                    .. " " .. CN.SortKey(entry.value)
 
                 if haystack:find(needle, 1, true) then
                     count = count + 1
@@ -15928,10 +16211,28 @@ local function SubscribeToRefreshEvents()
     -- Sorted, so the registration order is the same on every login.
     table.sort(names)
 
+    -- WIRED ONCE PER EVENT. 0.77.0.
+    --
+    -- This is called from `CN.RegisterCandidateProvider`, and so is
+    -- `SubscribeToInvalidationEvents` -- which tracks what it has already
+    -- wired, with a comment saying it must, because the handler list "would
+    -- grow without bound if a module registered providers in a loop". This
+    -- pass was added for the same reason from the same two lines and had no
+    -- such set: every late provider registration appended another forty
+    -- handlers, one per wanted event, each calling `UI.RequestRefresh`.
+    --
+    -- Latent while nothing ships a late provider, and live the moment one
+    -- does -- which the note on that hook says is the point of it.
+    UI.subscribedRefreshEvents = UI.subscribedRefreshEvents or {}
+
     for _, event in ipairs(names) do
-        CN:RegisterEvent(event, function()
-            UI.RequestRefresh()
-        end)
+        if not UI.subscribedRefreshEvents[event] then
+            UI.subscribedRefreshEvents[event] = true
+
+            CN:RegisterEvent(event, function()
+                UI.RequestRefresh()
+            end)
+        end
     end
 
     UI.refreshEventCount = #names
@@ -16012,9 +16313,10 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "uistatus",
+    args    = "[reset]",
     order   = 7,
     help    = "Diagnose the window and minimap button.",
-    handler = function()
+    handler = function(args)
         -- `UI.Frame()`, not the global. The global is published by the client
         -- when the frame is NAMED, and this addon creates it through
         -- `SafeCreateFrame`, which falls back to an unnamed frame if the
@@ -16042,9 +16344,16 @@ CN:RegisterCommand{
                 .. " x " .. math.floor(frame:GetHeight() or 0) .. " px")
             table.insert(lines, "  strata: " .. tostring(frame:GetFrameStrata()))
 
-            local point, _, _, x, y = frame:GetPoint()
+            -- AND THE RELATIVE POINT. 0.77.0.
+            --
+            -- The field three frames used to discard is the field a
+            -- diagnostic about frame position most needs to show. Reporting
+            -- the anchor alone is how "it drags and does not stay" looks
+            -- fine here.
+            local point, _, relativePoint, x, y = frame:GetPoint()
 
             table.insert(lines, "  anchored: " .. tostring(point)
+                .. " to " .. tostring(relativePoint)
                 .. " at " .. math.floor(x or 0) .. ", " .. math.floor(y or 0))
         end
 
@@ -16064,14 +16373,31 @@ CN:RegisterCommand{
         table.insert(lines, "Registered tabs: " .. #UI.tabs)
         table.insert(lines, "Minimap frame exists: " .. CN.YesNo(Minimap ~= nil))
 
-        if frame and not frame:IsShown() then
-            table.insert(lines, CN.Accent("Forcing the window open and centering it."))
+        -- PROMPT, NEVER ACT. 0.77.0.
+        --
+        -- This threw away the saved window position, recentred the window and
+        -- forced it open whenever it happened to be CLOSED -- which is its
+        -- state most of the time. A command whose help is "diagnose" and
+        -- whose args were none, quietly discarding something the player had
+        -- deliberately set, in the one command a player runs BECAUSE
+        -- something already looks wrong.
+        --
+        -- It offers the repair and does it on request.
+        local reset = string.lower(CN.Trim(args or "")) == "reset"
+
+        if frame and reset then
+            table.insert(lines, CN.Accent("Recentring the window and opening "
+                .. "it."))
 
             CN.Settings().window = nil
 
             frame:ClearAllPoints()
             frame:SetPoint("CENTER")
             frame:Show()
+        elseif frame and not frame:IsShown() then
+            table.insert(lines, CN.Muted("The window is closed. ")
+                .. CN.Accent("/cn uistatus reset")
+                .. CN.Muted(" recentres it and opens it."))
         end
 
         CN.PrintBlock("UI diagnostics:", lines)
@@ -16522,14 +16848,10 @@ local function CreateList(parent)
     --
     -- Strips colour openers, the `|r` that closes them, inline textures, and
     -- then any leading punctuation and digits the row uses as a marker.
-    local function SortKey(text)
-        text = CN.Strip(text)
-
-        -- Leading markers: "  ", "x ", "> ", "! ", "12. ".
-        text = text:gsub("^[%s%p%d]+", "")
-
-        return string.lower(text)
-    end
+    -- ONE DEFINITION, IN CORE. 0.77.0. It was a local here and the
+    -- cross-tab search could not reach it, so the two searched different
+    -- strings; see the header on `CN.SortKey`.
+    local SortKey = CN.SortKey
 
     list.SortKey = SortKey
 
@@ -16628,7 +16950,11 @@ local function CreateList(parent)
 
         -- The same stripped text the sort uses: a filter that searches the
         -- colour codes is a filter where `cff` matches everything.
-        local haystack = SortKey(entry.text)
+        --
+        -- AND THE VALUE COLUMN. 0.77.0. The cross-tab count searched it and
+        -- this did not, so "Also on: Collections (12)" led to a tab that said
+        -- "Nothing here matches". One predicate now.
+        local haystack = SortKey(entry.text) .. " " .. SortKey(entry.value)
 
         -- Plain find, not a pattern: somebody typing "mount (2)" is typing a
         -- name, not a regular expression, and a stray bracket must not throw.
@@ -22116,8 +22442,9 @@ CN:RegisterCommand{
                 break
             end
 
-            CN.PrintLine(string.format("  %-28s %d",
-                tostring(zone.name or zone.mapID), zone.count))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            CN.PrintLine("  " .. CN.Body(tostring(zone.name or zone.mapID))
+                .. CN.Aside(tostring(zone.count)))
         end
 
         Print("|cff8a8f96This is what the addon has actually seen, not every "
@@ -23382,9 +23709,10 @@ CN:RegisterCommand{
             .. " (" .. tostring(Blizzard.GetMapName(report.mapID) or "?") .. "):")
 
         for _, row in ipairs(report.maps) do
-            CN.PrintLine(string.format("  %-28s %3d pins, %2d starts, %2d usable",
-                tostring(row.name or row.mapID),
-                row.pois, row.starts, row.usable))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            CN.PrintLine("  " .. CN.Body(tostring(row.name or row.mapID))
+                .. CN.Aside(row.pois .. " pins, " .. row.starts
+                    .. " starts, " .. row.usable .. " usable"))
         end
 
         Print("Rejected: " .. report.counts.inLog .. " already in your log, "
@@ -24579,6 +24907,9 @@ function Achievements.Scan()
     -- record itself.
     local answered = 0
 
+    -- Which categories the client actually populated this time.
+    local answeringCategories = {}
+
     Achievements.revision = Achievements.revision + 1
 
     local scanned, completed, nearlyDone = 0, 0, 0
@@ -24619,6 +24950,12 @@ function Achievements.Scan()
                 -- The prune's job is to drop what the GAME no longer returns.
                 -- That is what this records.
                 seen[achievement.achievementID] = true
+
+                -- AND WHICH CATEGORY ANSWERED. See the prune below: the walk
+                -- is per category and 0.76.0 gated the prune on a whole-store
+                -- counter, so one expansion answering licensed the deletion
+                -- of every row in the ones that did not.
+                answeringCategories[categoryID] = true
 
                 if achievement.completed then
                     completed = completed + 1
@@ -24709,8 +25046,17 @@ function Achievements.Scan()
     -- ROWS THE CLIENT NO LONGER RETURNS, dropped explicitly. This is what the
     -- wipe at the top used to accomplish, without taking every other
     -- character's readings with it.
-    for achievementID in pairs(store) do
-        if not seen[achievementID] then
+    -- PER CATEGORY, NOT PER SCAN. Corrected in 0.77.0; see the sibling in
+    -- `Modules/Loremaster.lua` for the whole argument. A row whose category
+    -- did not answer is not a row the game has stopped returning -- it is a
+    -- row nobody asked about -- and a row with no stored category has nothing
+    -- to check against.
+    for achievementID, record in pairs(store) do
+        local categoryID = type(record) == "table" and record.categoryID
+
+        if not seen[achievementID] and categoryID
+            and answeringCategories[categoryID] then
+
             store[achievementID] = nil
         end
     end
@@ -37825,8 +38171,12 @@ function Loremaster.Scan(fromRetry)
     -- the bottom: a scan that measured nothing must not record itself.
     local measured = 0
 
-    -- Which ids the category walk reached this time. See the prune below.
+    -- Which ids the category walk reached this time, and which CATEGORIES
+    -- actually answered. See the prune below: the second is what makes the
+    -- first safe to delete against.
     local seen = {}
+
+    local answeringCategories = {}
 
     for _, category in ipairs(Loremaster.QuestCategories()) do
         local total = select(1, Blizzard.GetCategoryCounts(category.categoryID))
@@ -37890,6 +38240,8 @@ function Loremaster.Scan(fromRetry)
                 store[id] = held
 
                 seen[id] = true
+
+                answeringCategories[category.categoryID] = true
 
                 scanned = scanned + 1
             end
@@ -38018,8 +38370,25 @@ function Loremaster.Scan(fromRetry)
     -- Only after a scan that measured something, so a cold client never
     -- deletes anything. `progress` for other characters goes with the row,
     -- and that is correct: the achievement no longer exists.
-    for id in pairs(store) do
-        if not seen[id] then
+    -- PER CATEGORY, NOT PER SCAN. Corrected in 0.77.0, before it shipped
+    -- twice.
+    --
+    -- 0.76.0 gated this on a whole-store counter and the walk is per
+    -- CATEGORY. `QuestCategories` silently drops any category the client has
+    -- not populated, and `GetCategoryCounts` answers 0 for one it has not
+    -- filled -- so the ordinary half-warm client, where one expansion answers
+    -- and three do not, produced `measured > 0` and then deleted every row in
+    -- the three that stayed quiet, taking every character's progress with
+    -- them. The comment eight lines up warns about exactly that shape as a
+    -- stale nil; this had turned it into a delete.
+    --
+    -- A row is only a candidate for deletion when the category it belongs to
+    -- ANSWERED this time. A row with no stored category is never deleted:
+    -- there is nothing to check it against.
+    for id, record in pairs(store) do
+        local categoryID = type(record) == "table" and record.categoryID
+
+        if not seen[id] and categoryID and answeringCategories[categoryID] then
             store[id] = nil
         end
     end
@@ -39824,8 +40193,14 @@ function Follow.NoteStopCleared()
     if total > 0 and Follow.completed >= total and not Follow.celebrated then
         Follow.celebrated = true
 
-        Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r " .. total .. " stops, "
-            .. "everything on it done.")
+        -- PLURALISED, AND NOT HALF-TRANSLATED. 0.77.0.
+        --
+        -- "1 stops" in the addon's one celebratory line, and an English
+        -- literal bolted onto a `CN.L` lookup -- so a translated client read
+        -- a translated headline followed by untranslated prose.
+        -- `Modules/Inventory.lua` records that exact pattern as a defect.
+        Print("|cff5dd2fb" .. CN.L["Route complete."] .. "|r "
+            .. CN.Count(total, "stop") .. ", all done.")
 
         Follow.Celebrate()
     end
@@ -40045,16 +40420,8 @@ local function BuildFrame()
     frame:RegisterForDrag("LeftButton")
     frame:SetClampedToScreen(true)
 
-    local saved = Settings()
-
-    saved.followPosition = saved.followPosition or {}
-
-    frame:SetPoint(
-        saved.followPosition.point or "TOPLEFT",
-        UIParent,
-        saved.followPosition.point or "TOPLEFT",
-        saved.followPosition.x or 40,
-        saved.followPosition.y or -200)
+    CN.RestoreFramePosition(frame, Settings().followPosition,
+        { point = "TOPLEFT", relativePoint = "TOPLEFT", x = 40, y = -200 })
 
     -- Panelled and marked, for the reason spelled out in Modules/Hud.lua:
     -- text drawn over the world with no ground under it reads as text that
@@ -40090,10 +40457,26 @@ local function BuildFrame()
     frame:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
 
-        local point, _, _, x, y = self:GetPoint()
-
-        Settings().followPosition = { point = point, x = x, y = y }
+        Settings().followPosition = CN.SaveFramePosition(self)
+            or Settings().followPosition
     end)
+
+    -- AND A WAY OUT OF IT. 0.77.0.
+    --
+    -- This frame is drawn over the world, is mouse-enabled and draggable, and
+    -- said neither -- so the only way to be rid of it was to know `/cn
+    -- follow`. The heads-up line got a hover x when a player asked for one;
+    -- this is the same control, from the same helper.
+    CN.AttachCloseControl(frame,
+        function()
+            Follow.Stop()
+
+            CN.Print("Follow mode off. " .. CN.Aside(CN.Accent("/cn follow")
+                .. " starts it again"))
+        end,
+        "The stop you are walking to. Drag to move it. The x stops "
+        .. "following.",
+        "Stop following. /cn follow starts it again.")
 
     frame:Hide()
 
@@ -42088,12 +42471,15 @@ CN:RegisterCommand{
             local character = CN.db and CN.db.characters
                 and CN.db.characters[row.key]
 
-            CN.PrintLine(string.format("  %s%-18s|r %-4s %-10s |cff8a8f96%s|r",
-                row.isCurrent and "|cff73b873" or "|cfff2f4f6",
-                tostring(row.name),
-                tostring(row.level or "?"),
-                CN.TokenLabel(row.class or ""),
-                Alts.DescribeAge(character)))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            -- Three widths in one line, in a proportional font, produced
+            -- three ragged edges rather than three columns.
+            CN.PrintLine("  "
+                .. (row.isCurrent and "|cff73b873" or "|cfff2f4f6")
+                .. tostring(row.name) .. "|r"
+                .. CN.Aside(tostring(row.level or "?") .. " "
+                    .. CN.TokenLabel(row.class or ""))
+                .. " |cff8a8f96" .. Alts.DescribeAge(character) .. "|r")
         end
 
         Print("|cff8a8f96Everything here is what each character recorded the "
@@ -42811,12 +43197,8 @@ local function BuildArrow()
 
     settings.arrowPosition = settings.arrowPosition or {}
 
-    arrow:SetPoint(
-        settings.arrowPosition.point or "CENTER",
-        UIParent,
-        settings.arrowPosition.point or "CENTER",
-        settings.arrowPosition.x or 0,
-        settings.arrowPosition.y or 160)
+    CN.RestoreFramePosition(arrow, settings.arrowPosition,
+        { point = "CENTER", relativePoint = "CENTER", x = 0, y = 160 })
 
     arrow.texture = arrow:CreateTexture(nil, "ARTWORK")
     arrow.texture:SetAllPoints()
@@ -42853,12 +43235,34 @@ local function BuildArrow()
     arrow:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
 
-        local point, _, _, x, y = self:GetPoint()
-
         local saved = Settings()
 
-        saved.arrowPosition = { point = point, x = x, y = y }
+        saved.arrowPosition = CN.SaveFramePosition(self)
+            or saved.arrowPosition
     end)
+
+    -- AND A WAY OUT OF IT. 0.77.0.
+    --
+    -- The arrow eats world clicks in its 56x56 footprint -- it is
+    -- mouse-enabled so it can be dragged -- with nothing on screen explaining
+    -- why the ground under it does not respond. The tooltip answers that
+    -- question; the x answers it better.
+    CN.AttachCloseControl(arrow,
+        function()
+            -- THE SAME SETTING `/cn arrow off` WRITES, so the command and
+            -- the control agree afterwards. Hiding it alone would bring it
+            -- back on the next refresh, and a control that undoes itself is
+            -- worse than no control.
+            Settings().arrow = false
+
+            arrow:Hide()
+
+            CN.Print("Arrow off. " .. CN.Aside(CN.Accent("/cn arrow on")
+                .. " brings it back"))
+        end,
+        "Points at what you are navigating to. Drag to move it. The x hides "
+        .. "it.",
+        "Hide the arrow. /cn arrow on brings it back.")
 
     arrow:Hide()
 
@@ -43810,7 +44214,9 @@ CN:RegisterCommand{
         Print("Arrow diagnosis:")
 
         for _, row in ipairs(report) do
-            CN.PrintLine(string.format("  |cff8a8f96%-18s|r %s", row.label, row.value))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            CN.PrintLine("  " .. CN.Muted(tostring(row.label)) .. "  "
+                .. tostring(row.value))
         end
 
         -- THE ONE THING THAT MAKES EVERY OTHER LINE HERE UNTRUSTWORTHY.
@@ -46289,7 +46695,20 @@ function Inventory.Recipes()
     end
 
     for _, item in ipairs(Inventory.Scan()) do
-        local ok, _, _, _, _, classID = pcall(C_Item.GetItemInfoInstant, item.itemID)
+        -- ONE MORE PLACEHOLDER. 0.77.0.
+        --
+        -- `GetItemInfoInstant` returns `itemID, itemType, itemSubType,
+        -- itemEquipLoc, icon, classID, subclassID`, and through `pcall` those
+        -- land at positions 2 through 8. This was one short, so the variable
+        -- called `classID` was actually receiving the ICON -- a file id in
+        -- the six figures -- and `classID == 9` was never true on any client.
+        --
+        -- So this function has returned an empty list since it was written,
+        -- and `/cn bags` has never once reported a carried recipe: the entire
+        -- feature the thirty-line header above describes, dead in one
+        -- underscore.
+        local ok, _, _, _, _, _, classID =
+            pcall(C_Item.GetItemInfoInstant, item.itemID)
 
         if ok and classID == 9 then
             item.kind = CN.objectiveTypes.RECIPE
@@ -46714,15 +47133,21 @@ CN:RegisterCommand{
         -- questions. What is in this character's bank is reachable by this
         -- character; what is in the Warband bank is reachable by all of them,
         -- and that difference is the whole reason to mention either.
+        -- THROUGH `CN.Ago`. 0.77.0.
+        --
+        -- This was raw hours, rendered as "seen 336h ago" for a bank read a
+        -- fortnight before. `CN.Ago` exists for exactly this, its own header
+        -- names "97h 12m" as the wrong shape for a stored reading, and the
+        -- Scans tab has used it correctly all along.
         local function Age(store)
-            return math.floor(math.max(0, time() - store.scannedAt) / 3600)
+            return CN.Ago(store and store.scannedAt) or "never"
         end
 
         local bank = Inventory.BankStore()
 
         if bank.scannedAt then
             CN.PrintLine(CN.Muted("Your bank: " .. Inventory.Kinds(bank)
-                .. " kinds of item, seen " .. Age(bank) .. "h ago " .. CN.DASH
+                .. " kinds of item, seen " .. Age(bank) .. " " .. CN.DASH
                 .. " the client only describes it while you are standing at "
                 .. "one."))
         end
@@ -46732,7 +47157,7 @@ CN:RegisterCommand{
         if warband.scannedAt then
             CN.PrintLine(CN.Muted("Warband bank: "
                 .. Inventory.Kinds(warband)
-                .. " kinds of item, seen " .. Age(warband) .. "h ago "
+                .. " kinds of item, seen " .. Age(warband) .. " "
                 .. CN.DASH .. " reachable from every character."))
         end
 
@@ -49876,7 +50301,25 @@ CN:RegisterCommand{
         if detail and detail.mode == "fly" then
             local session = CN:GetModule("Session")
 
-            local runSpeed = session and session.Speed() or 7
+            -- ON FOOT MEANS ON FOOT. 0.77.0.
+            --
+            -- `Session.Speed()` with no argument answers for the bucket the
+            -- player is in RIGHT NOW -- and a player reading `/cn travel` is
+            -- normally mounted or skyriding, so the "running the whole way"
+            -- figure was quoted at roughly three and a half times the true
+            -- speed. A fifty-minute walk read as fourteen minutes, which
+            -- makes the flight this line exists to justify look like a bad
+            -- idea.
+            --
+            -- The sixteen-line header on `EstimateSeconds` documents this
+            -- exact defect being fixed there; this was the last no-argument
+            -- caller left in the tree.
+            local runSpeed, runMeasured = 7, false
+
+            if session and session.Speed then
+                runSpeed, runMeasured = session.Speed(false)
+                runSpeed = runSpeed or 7
+            end
 
             Print(string.format(
                 "  |cff8a8f96%.0f yd to %s, %.0f yd in the air, %.0f yd at the "
@@ -49902,10 +50345,15 @@ CN:RegisterCommand{
                 end
             end
 
+            local onFoot = session and session.FormatDuration
+                and session.FormatDuration(
+                    detail.yards / math.max(0.5, runSpeed))
+
+            -- And marked, like every other duration in this file: a figure
+            -- from a measured run speed and one from the default are not the
+            -- same claim.
             Print(string.format("  |cff8a8f96running the whole way: %s|r",
-                session and session.FormatDuration
-                    and session.FormatDuration(detail.yards / math.max(0.5, runSpeed))
-                    or "unknown"))
+                onFoot and CN.WithConfidence(onFoot, runMeasured) or "unknown"))
         elseif detail and detail.mode == "self" then
             local flySpeed, flyMeasured = Travel.SelfFlightSpeed()
 
@@ -51507,8 +51955,10 @@ CN:RegisterCommand{
 
             local multiplier, reason = Preference.Multiplier(entry.type)
 
-            local line = string.format("  %-16s %d of %d acted on",
-                label, entry.row.acted, entry.row.shown)
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            local line = "  " .. CN.Body(label) .. "  "
+                .. entry.row.acted .. " of " .. entry.row.shown
+                .. " acted on"
 
             if not Preference.IsCreditable(entry.type) then
                 -- Only reachable from a database written before 0.55.0 and
@@ -52870,7 +53320,9 @@ CN:RegisterCommand{
                 colour = "|cff8a8f96"
             end
 
-            CN.PrintLine(string.format("  %s%-4s|r %s", colour, check.status, check.name))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            CN.PrintLine("  " .. colour .. check.status .. "|r  "
+                .. check.name)
 
             if check.detail then
                 CN.PrintLine("        |cff8a8f96" .. check.detail .. "|r")
@@ -54114,10 +54566,8 @@ local function Build()
     frame:RegisterForDrag("LeftButton")
     frame:SetClampedToScreen(true)
 
-    local placement = Preferences().hudPosition or {}
-
-    frame:SetPoint(placement.point or "TOP", UIParent,
-        placement.point or "TOP", placement.x or 0, placement.y or -220)
+    CN.RestoreFramePosition(frame, Preferences().hudPosition,
+        { point = "TOP", relativePoint = "TOP", x = 0, y = -220 })
 
     -- A PANEL, AND THE ADDON'S OWN MARK ON IT.
     --
@@ -54173,9 +54623,8 @@ local function Build()
     frame:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
 
-        local point, _, _, x, y = self:GetPoint()
-
-        Preferences().hudPosition = { point = point, x = x, y = y }
+        Preferences().hudPosition = CN.SaveFramePosition(self)
+            or Preferences().hudPosition
     end)
 
     -- IT NAMES THE NEXT THING AND COULD NOT BE CLICKED.
@@ -54231,90 +54680,29 @@ local function Build()
     -- Reported from play: it "should also be able to be closed or turned off
     -- by clicking an x or other appropriate icon or button in or on the heads
     -- up box itself".
-    local close = CreateFrame("Button", nil, frame)
-
-    close:SetSize(16, 16)
-    close:SetPoint("TOPRIGHT", -2, -2)
-
-    -- A DRAG STARTED IN THAT CORNER STILL MOVES THE LINE.
+    -- THROUGH THE ONE HELPER. 0.77.0.
     --
-    -- The button takes the mouse, so without this the top-right eighteen
-    -- pixels were a dead zone for dragging -- and the tooltip promises the
-    -- whole line can be dragged.
-    close:RegisterForDrag("LeftButton")
+    -- This was the first of these and it was the only one: the follow list
+    -- and the arrow are also drawn over the world, also mouse-enabled, also
+    -- draggable, and offered no way out at all. Hoisted into
+    -- `CN.AttachCloseControl` so all three read from one definition rather
+    -- than two of them going without.
+    CN.AttachCloseControl(frame,
+        function()
+            -- TURNED OFF, NOT HIDDEN.
+            --
+            -- Hiding it would bring it back on the next refresh, and a
+            -- control that undoes itself is worse than no control. This is
+            -- the same setting the Settings checkbox and `/cn hud` write, so
+            -- all three agree afterwards.
+            Hud.SetEnabled(false)
 
-    close:SetScript("OnDragStart", function()
-        frame:StartMoving()
-    end)
-
-    close:SetScript("OnDragStop", function()
-        local stop = frame:GetScript("OnDragStop")
-
-        if stop then
-            stop(frame)
-        end
-    end)
-
-    close.label = CN.Label(close, "OVERLAY", "SMALL")
-    close.label:SetPoint("CENTER")
-    close.label:SetText(CN.Muted("x"))
-
-    CN.Outline(close.label, 11, "MUTED")
-
-    -- Only while the mouse is over the line. A permanent X on a frame whose
-    -- whole job is to be glanced at is one more thing to read.
-    close:SetAlpha(0)
-
-    close:SetScript("OnEnter", function(self)
-        self:SetAlpha(1)
-
-        self.label:SetText(CN.Bad("x"))
-    end)
-
-    close:SetScript("OnLeave", function(self)
-        self.label:SetText(CN.Muted("x"))
-
-        if not frame:IsMouseOver() then
-            self:SetAlpha(0)
-        end
-    end)
-
-    close:SetScript("OnClick", function()
-        -- TURNED OFF, NOT HIDDEN.
-        --
-        -- Hiding it would bring it back on the next refresh, and a control
-        -- that undoes itself is worse than no control. This is the same
-        -- setting the Settings checkbox and `/cn hud` write, so all three
-        -- agree afterwards.
-        Hud.SetEnabled(false)
-
-        CN.Print("Heads-up line off. " .. CN.Aside(CN.Accent("/cn hud")
-            .. " brings it back"))
-    end)
-
-    if CN.UI and CN.UI.AttachTooltip then
-        CN.UI.AttachTooltip(close, "Turn the heads-up line off. /cn hud "
-            .. "brings it back.")
-    end
-
-    frame.close = close
-
-    -- The X appears with the cursor and goes with it.
-    frame:SetScript("OnEnter", function()
-        close:SetAlpha(1)
-    end)
-
-    frame:SetScript("OnLeave", function()
-        if not close:IsMouseOver() then
-            close:SetAlpha(0)
-        end
-    end)
-
-    if CN.UI and CN.UI.AttachTooltip then
-        CN.UI.AttachTooltip(frame,
-            "Click to navigate to this. Right-click to put it off for an "
-            .. "hour. Drag to move this line. The x turns it off.")
-    end
+            CN.Print("Heads-up line off. " .. CN.Aside(CN.Accent("/cn hud")
+                .. " brings it back"))
+        end,
+        "Click to navigate to this. Right-click to put it off for an hour. "
+        .. "Drag to move this line. The x turns it off.",
+        "Turn the heads-up line off. /cn hud brings it back.")
 
     frame:SetScale(Hud.Scale())
 
@@ -55317,7 +55705,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.76.0
+## Version: 0.77.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -55572,6 +55960,85 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.77.0]
+
+**The heads-up box drags and then does not stay — this fixes that, and gives
+the follow list and the arrow the same close button the heads-up line already
+had.** Three of the four movable frames saved their position without the
+corner they were anchored *to*, so when that differed from the anchor itself
+the offsets came back applied against a different corner of the screen and the
+frame reappeared somewhere the player never put it. One function now, used by
+all four.
+
+### Fixed — data loss in both scans, from last release
+
+- **A half-warm client deleted every row in the categories that stayed
+  quiet.** 0.76.0 added a prune to the zone and achievement scans, gated on a
+  whole-store counter — and both walks are *per category*. So the ordinary
+  case, where one expansion answers and three do not, deleted every row in the
+  three, taking every character's readings with them. A row is only a
+  candidate for deletion when the category it belongs to answered.
+
+### Added — a way out of every frame drawn over the world
+
+- **The follow list and the arrow now have a hover x and a tooltip**, the same
+  control the heads-up line got when you asked for one. The follow frame could
+  previously only be dismissed by knowing `/cn follow`, and the arrow ate world
+  clicks in its own footprint with nothing on screen explaining why.
+- **`/cn uistatus` no longer throws away your window position.** Running the
+  diagnostic while the window happened to be closed — its state most of the
+  time — silently discarded a position you had set, recentred the window and
+  forced it open. It reports now, and offers `/cn uistatus reset` as the
+  repair. It also shows the relative anchor, which is the field the bug above
+  was hiding in.
+
+### Fixed — features that never worked
+
+- **`/cn bags` has never once reported a carried recipe.** The class id was
+  read one position short of where the client returns it, so the variable held
+  an icon file id and the test against "recipe" was never true on any client.
+  The whole feature, dead in one missing placeholder.
+- **`/cn travel` quoted "running the whole way" at flying speed** — it asked
+  for the speed of whatever you are doing *now*, and anyone reading that
+  command is normally mounted. A fifty-minute walk read as fourteen minutes,
+  which makes the flight the line exists to justify look like a bad idea.
+- **A waypoint set on a dungeon or raid map said "Waypoint set" and showed no
+  map pin.** The sentence explaining why was composed by the provider and then
+  discarded, because the caller read it only on failure.
+
+### Fixed — search, and things shown to the player
+
+- **The cross-tab search and the tab's own filter asked different
+  questions.** The "Also on:" counts searched the raw text, colour codes
+  included, so typing any hex fragment reported a match on every row of every
+  tab and none where you were standing — and a term that appeared only in the
+  right-hand column was counted and then not found when you clicked through.
+- **Bank ages were printed in raw hours**: "seen 336h ago" for a bank read a
+  fortnight before.
+- **Nine commands padded their columns with spaces.** WoW ships no monospace
+  chat font, so that produces a ragged edge that reads as a bug rather than a
+  table — the rule this addon states in two places and fixed in the window,
+  while the chat side kept it. `/cn elsewhere` was the worst: a day-to-day
+  command whose names are long enough to wrap mid-row. A build check now fails
+  on a new one.
+- **"Route complete. 1 stops, everything on it done."** — unpluralised, and an
+  English literal bolted onto a translated headline.
+- **`/cn mode <profile>` answered with no headline**, so its two lines arrived
+  as orphan text in the middle of the chat frame.
+
+### Fixed — cost, and two rules written twice
+
+- **Auto-advance ran on every minimap vignette.** That event fires many times
+  a second while moving through any zone with rares in it — which is exactly
+  when auto-waypoint is on — and each firing ran a linear scan of the whole
+  candidate list and a full re-rank with the recommendation hooks live. It is
+  throttled now, like the three other firehose events in the addon.
+- **The window's refresh subscription was not idempotent** while its sibling
+  was, so a late-registered provider would have added another forty redraw
+  handlers each time.
+- **`/cn why` rebuilt the ranking weights by hand** — in the one function whose
+  own header promises it does the same arithmetic the scorer does.
 
 ## [0.76.0]
 
@@ -61852,7 +62319,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.76.0
+0.77.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -62378,8 +62845,25 @@ trap 'rm -rf "$WORK"' EXIT
 PASSED=0
 SURVIVED=0
 
+# A BACKTICK IN AN ANCHOR IS A COMMAND, NOT A CHARACTER. 0.77.0.
+#
+# The anchors are double-quoted, so the shell runs anything between backticks
+# and substitutes its output -- and this file's own prose style puts Lua names
+# in backticks everywhere. A 0.77.0 anchor copied a comment line verbatim,
+# the shell tried to run `EffectiveWeights`, and the mutation silently became
+# inapplicable rather than failing: it was reported as stale, which reads like
+# a re-anchoring chore rather than a bug in this script.
+#
+# Refuse the whole run rather than quietly testing one thing fewer.
 mutate() {
     local file="$1" from="$2" to="$3" label="$4"
+
+    case "$from$to" in
+        *'`'*)
+            echo "ANCHOR CONTAINS A BACKTICK, which the shell would run: $label"
+            exit 2
+            ;;
+    esac
 
     rm -rf "$WORK/tree"
     cp -r "$TREE" "$WORK/tree"
@@ -62856,10 +63340,9 @@ mutate "Scoring.lua" \
     "        worth = (worth + cost) * profile.types[objective.type] - cost" \
     "a focus multiplies a total that crosses zero"
 
-mutate "Modules/Travel.lua" \
-    "        runSpeed, runMeasured = session.Speed(false)" \
-    "        runSpeed, runMeasured = session.Speed()" \
-    "running is costed at whatever speed you are moving now"
+# RETIRED IN 0.77.0: a duplicate of "running the whole way is quoted at
+# flying speed", below, which anchors on the same line at its real
+# indentation.
 
 mutate "Modules/Travel.lua" \
     "CN.fallbackZoneCost = 40" \
@@ -63654,9 +64137,9 @@ mutate "Core.lua" \
     "    text = text" \
     "the list sorts on the colour in front of a name instead of the name"
 
-mutate "UI/List.lua" \
-    "        text = text:gsub(\"^[%s%p%d]+\", \"\")" \
-    "        text = text" \
+mutate "Core.lua" \
+    "    text = text:gsub(\"^[%s%p%d]+\", \"\")" \
+    "    text = text" \
     "a route number sorts ahead of the name it belongs to"
 
 mutate "UI.lua" \
@@ -64061,12 +64544,12 @@ mutate "Modules/Hud.lua" \
     "the heads-up line sits below everything and cannot be clicked"
 
 mutate "Modules/Hud.lua" \
-    "        Hud.SetEnabled(false)
+    "            Hud.SetEnabled(false)
 
-        CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
-    "        frame:Hide()
+            CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
+    "            frame:Hide()
 
-        CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
+            CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
     "the x hides the heads-up line and the next refresh brings it back"
 
 mutate "UI.lua" \
@@ -65438,8 +65921,12 @@ mutate "Modules/Achievements.lua" \
     "the achievement scan writes a figure every other character inherits"
 
 mutate "Modules/Achievements.lua" \
-    "    for achievementID in pairs(store) do
-        if not seen[achievementID] then
+    "    for achievementID, record in pairs(store) do
+        local categoryID = type(record) == \"table\" and record.categoryID
+
+        if not seen[achievementID] and categoryID
+            and answeringCategories[categoryID] then
+
             store[achievementID] = nil
         end
     end" \
@@ -65538,12 +66025,16 @@ mutate "Modules/Goals.lua" \
 # ---- 0.76.0 ----
 
 mutate "Modules/Loremaster.lua" \
-    "    for id in pairs(store) do
-        if not seen[id] then
+    "    for id, record in pairs(store) do
+        local categoryID = type(record) == \"table\" and record.categoryID
+
+        if not seen[id] and categoryID and answeringCategories[categoryID] then
             store[id] = nil
         end
     end" \
-    "    for id in pairs(store) do
+    "    for id, record in pairs(store) do
+        local categoryID = record
+
         if false then
             store[id] = nil
         end
@@ -65588,10 +66079,8 @@ mutate "Modules/Loremaster.lua" \
     "the retry announces the rows it walked past, not the rows it read"
 
 mutate "Modules/Achievements.lua" \
-    "                seen[achievement.achievementID] = true
-
-                if achievement.completed then" \
-    "                if achievement.completed then" \
+    "                answeringCategories[categoryID] = true" \
+    "                local unusedCategory = categoryID" \
     "an alt's scan deletes every achievement row the main had progress on"
 
 mutate "Modules/Achievements.lua" \
@@ -65649,6 +66138,127 @@ mutate "Modules/Loremaster.lua" \
                 zones[achievementID] = true
             end" \
     "forgetting one zone reports having forgotten three"
+
+# ---- 0.77.0 ----
+
+mutate "Modules/Loremaster.lua" \
+    "        if not seen[id] and categoryID and answeringCategories[categoryID] then" \
+    "        if not seen[id] then" \
+    "a half-warm scan deletes every zone row in the categories that stayed quiet"
+
+mutate "Modules/Achievements.lua" \
+    "        if not seen[achievementID] and categoryID
+            and answeringCategories[categoryID] then" \
+    "        if not seen[achievementID] then" \
+    "a half-warm scan deletes every achievement row in the quiet categories"
+
+mutate "Design.lua" \
+    "    local point, _, relativePoint, x, y = frame:GetPoint()" \
+    "    local point, _, _, x, y = frame:GetPoint()
+    local relativePoint = point" \
+    "a frame the player moved comes back a screen away from where they left it"
+
+mutate "Design.lua" \
+    "    frame:ClearAllPoints()
+
+    frame:SetPoint(
+        placement.point or \"CENTER\"," \
+    "    frame:SetPoint(
+        placement.point or \"CENTER\"," \
+    "a frame restored twice accumulates anchors instead of moving"
+
+mutate "Design.lua" \
+    "    close:RegisterForDrag(\"LeftButton\")" \
+    "    local unusedDrag = \"LeftButton\"" \
+    "the corner with the x in it is a dead zone for dragging"
+
+mutate "Design.lua" \
+    "    close:SetScript(\"OnClick\", function()
+        if onClose then
+            onClose()
+        end
+    end)" \
+    "    close:SetScript(\"OnClick\", function()
+    end)" \
+    "the x on a frame drawn over the world does nothing"
+
+mutate "Core.lua" \
+    "function CN.SortKey(text)
+    text = CN.Strip(text)" \
+    "function CN.SortKey(text)
+    text = tostring(text or \"\")" \
+    "a search for a colour code matches every row on every tab"
+
+mutate "UI/List.lua" \
+    "        local haystack = SortKey(entry.text) .. \" \" .. SortKey(entry.value)" \
+    "        local haystack = SortKey(entry.text)" \
+    "a tab counted as matching says nothing here matches"
+
+mutate "UI.lua" \
+    "        local reset = string.lower(CN.Trim(args or \"\")) == \"reset\"
+
+        if frame and reset then" \
+    "        local reset = true
+
+        if frame and reset then" \
+    "running the window diagnostic throws away the saved window position"
+
+mutate "UI.lua" \
+    "        if not UI.subscribedRefreshEvents[event] then
+            UI.subscribedRefreshEvents[event] = true
+
+            CN:RegisterEvent(event, function()
+                UI.RequestRefresh()
+            end)
+        end" \
+    "        CN:RegisterEvent(event, function()
+            UI.RequestRefresh()
+        end)" \
+    "every late provider adds another forty redraw handlers"
+
+mutate "Scoring.lua" \
+    "    -- stopped building this per objective in the first place.
+    local w = EffectiveWeights(mode, profile)" \
+    "    local w = {}" \
+    "the explanation of a score is not the score"
+
+mutate "Modules/Inventory.lua" \
+    "        local ok, _, _, _, _, _, classID =
+            pcall(C_Item.GetItemInfoInstant, item.itemID)" \
+    "        local ok, _, _, _, _, classID =
+            pcall(C_Item.GetItemInfoInstant, item.itemID)" \
+    "a recipe in your bags is never found"
+
+mutate "Modules/Inventory.lua" \
+    "            return CN.Ago(store and store.scannedAt) or \"never\"" \
+    "            return math.floor(math.max(0, time() - store.scannedAt) / 3600)" \
+    "a bank read a fortnight ago is described as 336 hours"
+
+mutate "Modules/Travel.lua" \
+    "                runSpeed, runMeasured = session.Speed(false)" \
+    "                runSpeed, runMeasured = session.Speed()" \
+    "running the whole way is quoted at flying speed"
+
+mutate "Routing.lua" \
+    "    if why then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end" \
+    "    if false then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end" \
+    "a waypoint with no map pin is reported as a waypoint with one"
+
+mutate "Routing.lua" \
+    "        CN.Debounce(\"Routing.autoAdvance\", 2, function()
+            CN.AutoAdvance(event)
+        end)" \
+    "        CN.AutoAdvance(event)" \
+    "every minimap vignette rescans the whole candidate list"
+
+mutate "Modules/Follow.lua" \
+    "            .. CN.Count(total, \"stop\") .. \", all done.\")" \
+    "            .. total .. \" stops, all done.\")" \
+    "the route that finished had 1 stops in it"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -66192,7 +66802,17 @@ local function Frame()
             relativeTo, relativePoint, x, y = nil, nil, relativeTo, relativePoint
         end
 
-        f.points[point or "?"] = {
+        local key = point or "?"
+
+        local order = rawget(f, "pointOrder") or {}
+
+        if rawget(f, "points")[key] == nil then
+            table.insert(order, key)
+        end
+
+        rawset(f, "pointOrder", order)
+
+        f.points[key] = {
             point         = point,
             relativeTo    = relativeTo,
             relativePoint = relativePoint,
@@ -66201,7 +66821,25 @@ local function Frame()
         }
     end
 
-    function f:ClearAllPoints() f.points = {} end
+    function f:ClearAllPoints()
+        f.points = {}
+        f.pointOrder = {}
+    end
+
+    -- RECORDED, BECAUSE A BUTTON THAT IS NOT REGISTERED FOR DRAG IS A DEAD
+    -- ZONE. 0.77.0.
+    --
+    -- This fell through to the universal stub, so "does the corner with the x
+    -- in it still drag the frame" was unanswerable by any test -- and the
+    -- drag scripts alone do not answer it: a frame that never registers for
+    -- the button never fires them.
+    function f:RegisterForDrag(...)
+        rawset(f, "dragButtons", { ... })
+    end
+
+    function f:GetRegisteredDragButtons()
+        return rawget(f, "dragButtons")
+    end
 
     function f:GetPointBy(point)
         local held = rawget(f, "points")
@@ -66209,10 +66847,25 @@ local function Frame()
         return held and held[point]
     end
 
-    function f:GetPoint()
-        local held = rawget(f, "points")
+    -- THE FIRST POINT SET, WHATEVER IT IS CALLED. 0.77.0.
+    --
+    -- This looked only at TOPLEFT, CENTER and LEFT, and answered
+    -- `"CENTER", nil, "CENTER", 0, 0` for anything else -- so a frame
+    -- anchored BOTTOMLEFT to TOPRIGHT, which is exactly the shape that
+    -- breaks a save that discards the relative point, could not be
+    -- represented at all. A stub less capable than the client is a stub that
+    -- hides the defect it should catch.
+    function f:GetPoint(index)
+        local held  = rawget(f, "points")
+        local order = rawget(f, "pointOrder") or {}
 
-        local anchor = held and (held.TOPLEFT or held.CENTER or held.LEFT)
+        local key = order[index or 1]
+
+        local anchor = held and key and held[key]
+
+        if not anchor and held then
+            anchor = held.TOPLEFT or held.CENTER or held.LEFT
+        end
 
         if anchor then
             return anchor.point, anchor.relativeTo, anchor.relativePoint,
@@ -88603,7 +89256,7 @@ end)()
     local celebrated = false
 
     for index = flourishBefore + 1, #output do
-        if output[index]:find("stops, everything on it done") then
+        if output[index]:find("Route complete", 1, true) then
             celebrated = true
         end
     end
@@ -95828,10 +96481,13 @@ end)()
     -- and that rule was itself wrong: two walks inside one cold window marked
     -- the whole store retired and cached a list with the zone's own
     -- achievement missing, for the rest of the session.
+    -- IN A CATEGORY THAT ANSWERS. 0.77.0: the walk is per category and the
+    -- prune is now judged per category, so a row filed under one the client
+    -- never populated is not evidence that the game stopped returning it.
     local dead = 993001
 
     records[dead] = {
-        achievementID = dead, categoryID = 1, criteria = 10,
+        achievementID = dead, categoryID = 92, criteria = 10,
         completed = false, progress = {},
     }
 
@@ -95840,6 +96496,27 @@ end)()
     assert(records[dead] == nil,
         "a row the game no longer returns is deleted by a scan that read "
         .. "something")
+
+    -- AND A ROW IN A CATEGORY THAT SAID NOTHING SURVIVES. 0.77.0.
+    --
+    -- 0.76.0 gated the prune on a whole-store counter while the walk is per
+    -- category -- so the ordinary half-warm client, where one expansion
+    -- answers and three do not, deleted every row in the three that stayed
+    -- quiet, taking every character's progress with them.
+    local quiet = 993002
+
+    records[quiet] = {
+        achievementID = quiet, categoryID = 987654, criteria = 10,
+        completed = false, progress = {},
+    }
+
+    lore.Scan()
+
+    assert(records[quiet],
+        "a row whose category the client never populated is not a row the "
+        .. "game stopped returning")
+
+    records[quiet] = nil
 
     -- AND A COLD SCAN DELETES NOTHING.
     records[dead] = {
@@ -96751,6 +97428,541 @@ end)()
         "three achievements learned in one zone is one zone: " .. joined)
 
     print("  forgetting learned zones counts zones")
+end)()
+
+print("\nWhat 0.77.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A FRAME THE PLAYER MOVED COMES BACK WHERE THEY LEFT IT.
+    ------------------------------------------------------------
+    -- `GetPoint` returns `point, relativeTo, relativePoint, x, y`. Three of
+    -- the four movable frames discarded the THIRD return and restored with
+    -- the anchor standing in for the relative point -- so where the two
+    -- differ, the offsets were re-applied against a different corner of the
+    -- screen and the frame came back a screen away, then got pinned to an
+    -- edge. It drags, and it does not stay.
+    local moved = CreateFrame("Frame", nil, UIParent)
+
+    moved:SetPoint("BOTTOMLEFT", UIParent, "TOPRIGHT", 30, -45)
+
+    local saved = CN.SaveFramePosition(moved)
+
+    assert(saved and saved.point == "BOTTOMLEFT",
+        "the anchor is kept: " .. tostring(saved and saved.point))
+
+    assert(saved.relativePoint == "TOPRIGHT",
+        "and so is the corner it is anchored TO: "
+        .. tostring(saved.relativePoint))
+
+    assert(saved.x == 30 and saved.y == -45, "and the offsets")
+
+    local restored = CreateFrame("Frame", nil, UIParent)
+
+    CN.RestoreFramePosition(restored, saved)
+
+    local point, _, relativePoint, x, y = restored:GetPoint()
+
+    assert(point == "BOTTOMLEFT" and relativePoint == "TOPRIGHT"
+        and x == 30 and y == -45,
+        "and all four go back: " .. tostring(point) .. " / "
+        .. tostring(relativePoint) .. " / " .. tostring(x) .. " / "
+        .. tostring(y))
+
+    -- RESTORED TWICE, IT MOVES rather than accumulating anchors.
+    --
+    -- A frame that is already anchored somewhere gains a second point rather
+    -- than replacing the first, and the client then holds it between the two.
+    CN.RestoreFramePosition(restored,
+        { point = "TOPRIGHT", relativePoint = "BOTTOMLEFT", x = 5, y = 6 })
+
+    local secondPoint, _, secondRelative, secondX = restored:GetPoint()
+
+    assert(secondPoint == "TOPRIGHT" and secondRelative == "BOTTOMLEFT"
+        and secondX == 5,
+        "the second restore replaces the first: " .. tostring(secondPoint)
+        .. " / " .. tostring(secondRelative))
+
+    local secondAnchor = restored:GetPointBy("BOTTOMLEFT")
+
+    assert(secondAnchor == nil,
+        "and leaves no anchor from the first restore behind")
+
+    -- NOTHING SAVED YET FALLS BACK, rather than landing at the origin.
+    local fresh = CreateFrame("Frame", nil, UIParent)
+
+    CN.RestoreFramePosition(fresh, nil,
+        { point = "TOP", relativePoint = "TOP", x = 0, y = -220 })
+
+    local freshPoint, _, freshRelative, _, freshY = fresh:GetPoint()
+
+    assert(freshPoint == "TOP" and freshRelative == "TOP" and freshY == -220,
+        "a frame with nothing saved takes its default")
+
+    -- AND EVERY MOVABLE FRAME GOES THROUGH IT, rather than four copies of
+    -- one rule with three of them wrong.
+    for _, file in ipairs({ "UI.lua", "Modules/Hud.lua",
+                            "Modules/Navigation.lua", "Modules/Follow.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(text, file .. " must be readable")
+
+        assert(string.find(text, "CN.SaveFramePosition", 1, true),
+            file .. " saves a moved frame through the one function")
+
+        assert(not string.find(text, "local point, _, _, x, y", 1, true),
+            file .. " no longer throws away the relative point")
+    end
+
+    print("  a frame the player moved comes back where they left it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY FRAME DRAWN OVER THE WORLD CAN BE DISMISSED FROM ITSELF.
+    ------------------------------------------------------------
+    -- The heads-up line got a hover x when a player asked for one in as many
+    -- words. The follow list and the arrow are also mouse-enabled and
+    -- draggable, and neither said so nor offered a way out: the follow frame
+    -- could only be dismissed by knowing `/cn follow`, and the arrow ate
+    -- world clicks in a 56x56 footprint with nothing explaining why.
+    for _, file in ipairs({ "Modules/Hud.lua", "Modules/Follow.lua",
+                            "Modules/Navigation.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(text, file .. " must be readable")
+
+        assert(string.find(text, "CN.AttachCloseControl", 1, true),
+            file .. " gives its frame a way out of itself")
+    end
+
+    -- AND THE CONTROL IS ONE CONTROL, not three copies.
+    local hud = CN_TEST_ReadAddonFile("Modules/Hud.lua")
+
+    assert(not string.find(hud, 'close:SetScript("OnClick"', 1, true),
+        "the heads-up line no longer carries its own copy of the button")
+
+    -- IT WORKS: the x turns the thing off, rather than hiding it so it comes
+    -- back on the next refresh.
+    local dismissable = CreateFrame("Frame", nil, UIParent)
+
+    dismissable:SetPoint("CENTER")
+
+    local turnedOff = false
+
+    local close = CN.AttachCloseControl(dismissable,
+        function() turnedOff = true end,
+        "The whole frame says what it does.",
+        "And the x says what it does.")
+
+    assert(close, "the control is created")
+
+    assert(dismissable.close == close, "and the frame holds it")
+
+    close:GetScript("OnClick")(close)
+
+    assert(turnedOff, "and clicking it runs what it was given")
+
+    -- AND THE CORNER IT SITS IN IS NOT A DEAD ZONE FOR DRAGGING.
+    --
+    -- The button takes the mouse, so without its own drag scripts the
+    -- top-right corner stops responding -- while the tooltip promises the
+    -- whole frame can be dragged.
+    local registered = close:GetRegisteredDragButtons()
+
+    assert(registered and registered[1] == "LeftButton",
+        "the x is registered for the drag button, or its scripts never fire")
+
+    assert(close:GetScript("OnDragStart"),
+        "a drag started on the x still moves the frame")
+
+    local dragged = false
+
+    dismissable.StartMoving = function() dragged = true end
+
+    close:GetScript("OnDragStart")(close)
+
+    assert(dragged, "and actually starts the move")
+
+    print("  every frame drawn over the world can be dismissed from itself")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A HALF-WARM CLIENT DELETES NOTHING IT DID NOT ASK ABOUT.
+    ------------------------------------------------------------
+    local achievements = CN:GetModule("Achievements")
+
+    achievements.Scan()
+
+    local store = achievements.Store()
+
+    local mine = CN.characterKey or CN.GetCharacterKey()
+
+    -- The walk is per CATEGORY and 0.76.0 gated the prune on a whole-store
+    -- counter -- so one expansion answering licensed the deletion of every
+    -- row in the ones that stayed quiet, taking every character's readings
+    -- with them.
+    local quiet = 985001
+
+    store[quiet] = {
+        achievementID = quiet, categoryID = 987654, criteria = 40,
+        progress = { ["Realm-Main"] = 38, [mine] = 2 },
+    }
+
+    achievements.Scan()
+
+    assert(store[quiet],
+        "a row whose category the client never populated survives")
+
+    assert(store[quiet].progress["Realm-Main"] == 38,
+        "with every character's readings intact")
+
+    -- A ROW WITH NO CATEGORY AT ALL has nothing to check against and is never
+    -- deleted.
+    local unfiled = 985002
+
+    store[unfiled] = { achievementID = unfiled, criteria = 10,
+                       progress = { [mine] = 1 } }
+
+    achievements.Scan()
+
+    assert(store[unfiled], "a row with no stored category is never pruned")
+
+    store[quiet], store[unfiled] = nil, nil
+
+    print("  a half-warm scan deletes nothing it did not ask about")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CROSS-TAB SEARCH AND THE TAB'S OWN FILTER ASK ONE QUESTION.
+    ------------------------------------------------------------
+    -- `UI.SearchAll` searched the RAW text -- colour codes, textures and all
+    -- -- while the tab in front of the player searched the stripped text and
+    -- did not look at the value column. So a hex fragment reported a match on
+    -- every row of every tab and none where you were standing, and a term
+    -- that only appeared in the value column was counted by "Also on:" and
+    -- then not found when you clicked through.
+    assert(CN.SortKey("|cffffc74f  12. Kill Ten Rats|r")
+        == "kill ten rats",
+        "colour codes and leading markers are not part of what a row says: "
+        .. CN.SortKey("|cffffc74f  12. Kill Ten Rats|r"))
+
+    assert(CN.SortKey(nil) == "", "and nothing says nothing")
+
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+    local list = CN_TEST_ReadAddonFile("UI/List.lua")
+
+    assert(ui and list, "both files must be readable")
+
+    assert(string.find(ui, "CN.SortKey(entry.text)", 1, true),
+        "the cross-tab search asks through the one function")
+
+    assert(string.find(list, "SortKey(entry.value)", 1, true),
+        "and the tab's own filter searches the value column too, so the "
+        .. "count and the filtered list are the same predicate")
+
+    print("  the cross-tab search and the tab's filter ask one question")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DIAGNOSTIC DIAGNOSES.
+    ------------------------------------------------------------
+    -- `/cn uistatus` threw away the saved window position, recentred the
+    -- window and forced it open whenever it happened to be CLOSED -- which is
+    -- its state most of the time. A command whose help is "diagnose" and
+    -- whose args were none, quietly discarding something the player had
+    -- deliberately set, in the command a player runs BECAUSE something
+    -- already looks wrong.
+    CN.Settings().window = { point = "TOPLEFT", relativePoint = "TOPLEFT",
+                             x = 12, y = -34 }
+
+    CN.HandleSlashCommand("uistatus")
+
+    local held = CN.Settings().window
+
+    assert(held and held.point == "TOPLEFT" and held.x == 12,
+        "running the diagnostic does not move the window: "
+        .. tostring(held and held.point))
+
+    CN.HandleSlashCommand("uistatus reset")
+
+    assert(CN.Settings().window == nil,
+        "and the repair it offers does what it says when asked")
+
+    print("  a diagnostic diagnoses, and repairs only when asked")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- NO COLUMN IS PADDED WITH SPACES.
+    ------------------------------------------------------------
+    -- WoW ships no monospace chat font, so padding to a width produces a
+    -- ragged edge that reads as a bug rather than as a table. `Design.lua`
+    -- and `UI/List.lua` both state the rule; the window was fixed with
+    -- anchored fontstrings and the chat side kept the padding in six places.
+    local offenders = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        if text then
+            -- CODE, NOT COMMENTS. Three files describe this very rule and
+            -- quote the padding they removed; a check that cannot tell a
+            -- format string from a sentence about one fails on its own
+            -- documentation.
+            for line in string.gmatch(text, "[^\n]+") do
+                if not string.find(line, "^%s*%-%-") then
+                    for pad in string.gmatch(line, "%%%-%d+s") do
+                        table.insert(offenders, file .. " uses " .. pad)
+                    end
+                end
+            end
+        end
+    end
+
+    assert(#offenders == 0,
+        "chat output must not pad to a column width: "
+        .. table.concat(offenders, ", "))
+
+    print("  no chat column is padded with spaces")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE REFRESH SUBSCRIPTION IS WIRED ONCE PER EVENT.
+    ------------------------------------------------------------
+    -- `CN.RegisterCandidateProvider` calls this and its sibling, and the
+    -- sibling tracks what it has already wired -- with a comment saying it
+    -- must, because the handler list "would grow without bound if a module
+    -- registered providers in a loop". This one had no such set.
+    local UI = CN.UI
+
+    local first = UI.SubscribeToRefreshEvents()
+
+    local function HandlerCount()
+        local total = 0
+
+        for _, handlers in pairs(CN.eventTable or {}) do
+            total = total + #handlers
+        end
+
+        return total
+    end
+
+    local wiredBefore = HandlerCount()
+
+    for _ = 1, 5 do
+        UI.SubscribeToRefreshEvents()
+    end
+
+    local wiredAfter = HandlerCount()
+
+    assert(first > 0, "the subscription wires something")
+
+    assert(wiredAfter == wiredBefore,
+        "and five more passes wire nothing again: " .. wiredBefore
+        .. " then " .. wiredAfter)
+
+    -- AND THE VIGNETTE FIREHOSE IS THROTTLED.
+    --
+    -- `VIGNETTE_MINIMAP_UPDATED` fires many times a second while moving
+    -- through any zone with rares in it -- which is exactly when auto-
+    -- waypoint is switched on -- and each firing ran a linear scan of the
+    -- whole candidate list and a full re-rank with the recommendation hooks
+    -- live.
+    local advances = 0
+
+    local realAdvance = CN.AutoAdvance
+
+    CN.AutoAdvance = function(...)
+        advances = advances + 1
+
+        return realAdvance(...)
+    end
+
+    CN.ForgetDebounces()
+
+    for _ = 1, 20 do
+        CN.Dispatch("VIGNETTE_MINIMAP_UPDATED")
+    end
+
+    CN.AutoAdvance = realAdvance
+
+    assert(advances > 0, "the first vignette in a burst is answered at once")
+
+    assert(advances < 20,
+        "and twenty in the same window do not each pay for it: " .. advances)
+
+    print("  the refresh subscription is wired once per event")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE EXPLANATION USES THE SCORER'S OWN WEIGHTS.
+    ------------------------------------------------------------
+    -- `ExplainScore`'s own header promises "the same arithmetic
+    -- `ScoreObjective` does; if the two ever disagree, this is wrong" -- and
+    -- it copied the defaults and the profile overrides by hand, in the
+    -- function that exists to prove the two agree.
+    local scoring = CN_TEST_ReadAddonFile("Scoring.lua")
+
+    assert(scoring, "Scoring.lua must be readable")
+
+    local copies = 0
+
+    for _ in string.gmatch(scoring, "for key, value in pairs%(CN%.scoreWeights%)") do
+        copies = copies + 1
+    end
+
+    assert(copies == 1,
+        "the weights are built in one place, not two: " .. copies)
+
+    -- AND THE TWO STILL AGREE about a real objective.
+    local objective = CN.NewObjective({
+        id = 984001, type = CN.objectiveTypes.QUEST, name = "Weighted",
+        completionValue = 3, travelCost = 4,
+    })
+
+    local score = CN.ScoreObjective(objective)
+
+    local explained = CN.ExplainScore(objective)
+
+    assert(type(explained) == "table" and #explained > 0,
+        "the explanation produces terms")
+
+    local total = 0
+
+    for _, term in ipairs(explained) do
+        total = total + (term.value or 0)
+    end
+
+    assert(math.abs(total - score) < 0.01,
+        "and they sum to the score the ranking used: " .. tostring(total)
+        .. " vs " .. tostring(score))
+
+    print("  the explanation uses the scorer's own weights")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A RECIPE IN YOUR BAGS IS FOUND.
+    ------------------------------------------------------------
+    -- `GetItemInfoInstant` returns seven values, and through `pcall` they
+    -- land at positions 2 through 8. This read one short, so the variable
+    -- called `classID` received the ICON -- a file id in the six figures --
+    -- and the test against 9 was never true on any client. The function
+    -- returned an empty list from the day it was written, and `/cn bags`
+    -- never once reported a carried recipe.
+    local inventory = CN_TEST_ReadAddonFile("Modules/Inventory.lua")
+
+    assert(inventory, "Modules/Inventory.lua must be readable")
+
+    assert(string.find(inventory,
+            "local ok, _, _, _, _, _, classID =", 1, true),
+        "the class id is read from the position the client returns it in")
+
+    local module = CN:GetModule("Inventory")
+
+    local recipes = module.Recipes()
+
+    assert(type(recipes) == "table", "and the function answers with a list")
+
+    print("  a recipe in your bags is found")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "RUNNING THE WHOLE WAY" MEANS RUNNING.
+    ------------------------------------------------------------
+    -- `Session.Speed()` with no argument answers for the bucket the player is
+    -- in RIGHT NOW -- and a player reading `/cn travel` is normally mounted,
+    -- so the comparison whose whole purpose is to justify the flight route
+    -- was quoted at roughly three and a half times the true speed.
+    local travel = CN_TEST_ReadAddonFile("Modules/Travel.lua")
+
+    assert(travel, "Modules/Travel.lua must be readable")
+
+    assert(not string.find(travel, "session.Speed()", 1, true),
+        "no caller asks for the speed of whatever the player is doing now")
+
+    assert(string.find(travel, "session.Speed(false)", 1, true),
+        "and the on-foot comparison asks for the on-foot speed")
+
+    print("  'running the whole way' is quoted at running speed")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CAVEAT ATTACHED TO A SUCCESS IS PRINTED.
+    ------------------------------------------------------------
+    -- The native provider answers `true, "the arrow is set; the game does not
+    -- allow a map pin here"` on a dungeon or raid map, and `CN.SetWaypoint`
+    -- read the second return only on FAILURE -- so the player was told
+    -- "Waypoint set" while the world map stayed empty, and the sentence
+    -- written to explain that was discarded.
+    local routing = CN_TEST_ReadAddonFile("Routing.lua")
+
+    assert(routing, "Routing.lua must be readable")
+
+    local placed = string.find(routing, "local placed, why = provider.SetWaypoint",
+        1, true)
+
+    assert(placed, "the second return is taken")
+
+    local success = string.find(routing, "if why then", placed, true)
+
+    assert(success,
+        "and read on success too, not only on failure")
+
+    print("  a caveat attached to a successful waypoint is printed")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A STORED READING'S AGE IS SAID IN WORDS.
+    ------------------------------------------------------------
+    -- Raw hours: a bank read a fortnight ago printed "seen 336h ago".
+    -- `CN.Ago` exists for exactly this and its own header names "97h 12m" as
+    -- the wrong shape for a stored reading.
+    local inventory = CN_TEST_ReadAddonFile("Modules/Inventory.lua")
+
+    assert(inventory, "Modules/Inventory.lua must be readable")
+
+    assert(not string.find(inventory, '"h ago"', 1, true)
+        and not string.find(inventory, '.. "h ago', 1, true),
+        "no age is printed as a raw hour count")
+
+    assert(string.find(inventory, "CN.Ago(store and store.scannedAt)", 1, true),
+        "and the bank ages go through the one formatter")
+
+    print("  a stored reading's age is said in words")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE STOP IS ONE STOP.
+    ------------------------------------------------------------
+    local follow = CN_TEST_ReadAddonFile("Modules/Follow.lua")
+
+    assert(follow, "Modules/Follow.lua must be readable")
+
+    -- "1 stops" in the addon's one celebratory line, and an English literal
+    -- bolted onto a `CN.L` lookup -- so a translated client read a translated
+    -- headline followed by untranslated prose.
+    assert(not string.find(follow, '.. " stops, "', 1, true),
+        "the count is pluralised rather than always plural")
+
+    assert(string.find(follow, 'CN.Count(total, "stop")', 1, true),
+        "through the helper that exists for it")
+
+    assert(CN.Count(1, "stop") == "1 stop"
+        and CN.Count(3, "stop") == "3 stops",
+        "and that helper says what it should: " .. CN.Count(1, "stop"))
+
+    print("  one stop is one stop")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

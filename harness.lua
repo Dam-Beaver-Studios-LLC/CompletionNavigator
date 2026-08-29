@@ -313,7 +313,17 @@ local function Frame()
             relativeTo, relativePoint, x, y = nil, nil, relativeTo, relativePoint
         end
 
-        f.points[point or "?"] = {
+        local key = point or "?"
+
+        local order = rawget(f, "pointOrder") or {}
+
+        if rawget(f, "points")[key] == nil then
+            table.insert(order, key)
+        end
+
+        rawset(f, "pointOrder", order)
+
+        f.points[key] = {
             point         = point,
             relativeTo    = relativeTo,
             relativePoint = relativePoint,
@@ -322,7 +332,25 @@ local function Frame()
         }
     end
 
-    function f:ClearAllPoints() f.points = {} end
+    function f:ClearAllPoints()
+        f.points = {}
+        f.pointOrder = {}
+    end
+
+    -- RECORDED, BECAUSE A BUTTON THAT IS NOT REGISTERED FOR DRAG IS A DEAD
+    -- ZONE. 0.77.0.
+    --
+    -- This fell through to the universal stub, so "does the corner with the x
+    -- in it still drag the frame" was unanswerable by any test -- and the
+    -- drag scripts alone do not answer it: a frame that never registers for
+    -- the button never fires them.
+    function f:RegisterForDrag(...)
+        rawset(f, "dragButtons", { ... })
+    end
+
+    function f:GetRegisteredDragButtons()
+        return rawget(f, "dragButtons")
+    end
 
     function f:GetPointBy(point)
         local held = rawget(f, "points")
@@ -330,10 +358,25 @@ local function Frame()
         return held and held[point]
     end
 
-    function f:GetPoint()
-        local held = rawget(f, "points")
+    -- THE FIRST POINT SET, WHATEVER IT IS CALLED. 0.77.0.
+    --
+    -- This looked only at TOPLEFT, CENTER and LEFT, and answered
+    -- `"CENTER", nil, "CENTER", 0, 0` for anything else -- so a frame
+    -- anchored BOTTOMLEFT to TOPRIGHT, which is exactly the shape that
+    -- breaks a save that discards the relative point, could not be
+    -- represented at all. A stub less capable than the client is a stub that
+    -- hides the defect it should catch.
+    function f:GetPoint(index)
+        local held  = rawget(f, "points")
+        local order = rawget(f, "pointOrder") or {}
 
-        local anchor = held and (held.TOPLEFT or held.CENTER or held.LEFT)
+        local key = order[index or 1]
+
+        local anchor = held and key and held[key]
+
+        if not anchor and held then
+            anchor = held.TOPLEFT or held.CENTER or held.LEFT
+        end
 
         if anchor then
             return anchor.point, anchor.relativeTo, anchor.relativePoint,
@@ -22724,7 +22767,7 @@ end)()
     local celebrated = false
 
     for index = flourishBefore + 1, #output do
-        if output[index]:find("stops, everything on it done") then
+        if output[index]:find("Route complete", 1, true) then
             celebrated = true
         end
     end
@@ -29949,10 +29992,13 @@ end)()
     -- and that rule was itself wrong: two walks inside one cold window marked
     -- the whole store retired and cached a list with the zone's own
     -- achievement missing, for the rest of the session.
+    -- IN A CATEGORY THAT ANSWERS. 0.77.0: the walk is per category and the
+    -- prune is now judged per category, so a row filed under one the client
+    -- never populated is not evidence that the game stopped returning it.
     local dead = 993001
 
     records[dead] = {
-        achievementID = dead, categoryID = 1, criteria = 10,
+        achievementID = dead, categoryID = 92, criteria = 10,
         completed = false, progress = {},
     }
 
@@ -29961,6 +30007,27 @@ end)()
     assert(records[dead] == nil,
         "a row the game no longer returns is deleted by a scan that read "
         .. "something")
+
+    -- AND A ROW IN A CATEGORY THAT SAID NOTHING SURVIVES. 0.77.0.
+    --
+    -- 0.76.0 gated the prune on a whole-store counter while the walk is per
+    -- category -- so the ordinary half-warm client, where one expansion
+    -- answers and three do not, deleted every row in the three that stayed
+    -- quiet, taking every character's progress with them.
+    local quiet = 993002
+
+    records[quiet] = {
+        achievementID = quiet, categoryID = 987654, criteria = 10,
+        completed = false, progress = {},
+    }
+
+    lore.Scan()
+
+    assert(records[quiet],
+        "a row whose category the client never populated is not a row the "
+        .. "game stopped returning")
+
+    records[quiet] = nil
 
     -- AND A COLD SCAN DELETES NOTHING.
     records[dead] = {
@@ -30872,6 +30939,541 @@ end)()
         "three achievements learned in one zone is one zone: " .. joined)
 
     print("  forgetting learned zones counts zones")
+end)()
+
+print("\nWhat 0.77.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A FRAME THE PLAYER MOVED COMES BACK WHERE THEY LEFT IT.
+    ------------------------------------------------------------
+    -- `GetPoint` returns `point, relativeTo, relativePoint, x, y`. Three of
+    -- the four movable frames discarded the THIRD return and restored with
+    -- the anchor standing in for the relative point -- so where the two
+    -- differ, the offsets were re-applied against a different corner of the
+    -- screen and the frame came back a screen away, then got pinned to an
+    -- edge. It drags, and it does not stay.
+    local moved = CreateFrame("Frame", nil, UIParent)
+
+    moved:SetPoint("BOTTOMLEFT", UIParent, "TOPRIGHT", 30, -45)
+
+    local saved = CN.SaveFramePosition(moved)
+
+    assert(saved and saved.point == "BOTTOMLEFT",
+        "the anchor is kept: " .. tostring(saved and saved.point))
+
+    assert(saved.relativePoint == "TOPRIGHT",
+        "and so is the corner it is anchored TO: "
+        .. tostring(saved.relativePoint))
+
+    assert(saved.x == 30 and saved.y == -45, "and the offsets")
+
+    local restored = CreateFrame("Frame", nil, UIParent)
+
+    CN.RestoreFramePosition(restored, saved)
+
+    local point, _, relativePoint, x, y = restored:GetPoint()
+
+    assert(point == "BOTTOMLEFT" and relativePoint == "TOPRIGHT"
+        and x == 30 and y == -45,
+        "and all four go back: " .. tostring(point) .. " / "
+        .. tostring(relativePoint) .. " / " .. tostring(x) .. " / "
+        .. tostring(y))
+
+    -- RESTORED TWICE, IT MOVES rather than accumulating anchors.
+    --
+    -- A frame that is already anchored somewhere gains a second point rather
+    -- than replacing the first, and the client then holds it between the two.
+    CN.RestoreFramePosition(restored,
+        { point = "TOPRIGHT", relativePoint = "BOTTOMLEFT", x = 5, y = 6 })
+
+    local secondPoint, _, secondRelative, secondX = restored:GetPoint()
+
+    assert(secondPoint == "TOPRIGHT" and secondRelative == "BOTTOMLEFT"
+        and secondX == 5,
+        "the second restore replaces the first: " .. tostring(secondPoint)
+        .. " / " .. tostring(secondRelative))
+
+    local secondAnchor = restored:GetPointBy("BOTTOMLEFT")
+
+    assert(secondAnchor == nil,
+        "and leaves no anchor from the first restore behind")
+
+    -- NOTHING SAVED YET FALLS BACK, rather than landing at the origin.
+    local fresh = CreateFrame("Frame", nil, UIParent)
+
+    CN.RestoreFramePosition(fresh, nil,
+        { point = "TOP", relativePoint = "TOP", x = 0, y = -220 })
+
+    local freshPoint, _, freshRelative, _, freshY = fresh:GetPoint()
+
+    assert(freshPoint == "TOP" and freshRelative == "TOP" and freshY == -220,
+        "a frame with nothing saved takes its default")
+
+    -- AND EVERY MOVABLE FRAME GOES THROUGH IT, rather than four copies of
+    -- one rule with three of them wrong.
+    for _, file in ipairs({ "UI.lua", "Modules/Hud.lua",
+                            "Modules/Navigation.lua", "Modules/Follow.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(text, file .. " must be readable")
+
+        assert(string.find(text, "CN.SaveFramePosition", 1, true),
+            file .. " saves a moved frame through the one function")
+
+        assert(not string.find(text, "local point, _, _, x, y", 1, true),
+            file .. " no longer throws away the relative point")
+    end
+
+    print("  a frame the player moved comes back where they left it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY FRAME DRAWN OVER THE WORLD CAN BE DISMISSED FROM ITSELF.
+    ------------------------------------------------------------
+    -- The heads-up line got a hover x when a player asked for one in as many
+    -- words. The follow list and the arrow are also mouse-enabled and
+    -- draggable, and neither said so nor offered a way out: the follow frame
+    -- could only be dismissed by knowing `/cn follow`, and the arrow ate
+    -- world clicks in a 56x56 footprint with nothing explaining why.
+    for _, file in ipairs({ "Modules/Hud.lua", "Modules/Follow.lua",
+                            "Modules/Navigation.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(text, file .. " must be readable")
+
+        assert(string.find(text, "CN.AttachCloseControl", 1, true),
+            file .. " gives its frame a way out of itself")
+    end
+
+    -- AND THE CONTROL IS ONE CONTROL, not three copies.
+    local hud = CN_TEST_ReadAddonFile("Modules/Hud.lua")
+
+    assert(not string.find(hud, 'close:SetScript("OnClick"', 1, true),
+        "the heads-up line no longer carries its own copy of the button")
+
+    -- IT WORKS: the x turns the thing off, rather than hiding it so it comes
+    -- back on the next refresh.
+    local dismissable = CreateFrame("Frame", nil, UIParent)
+
+    dismissable:SetPoint("CENTER")
+
+    local turnedOff = false
+
+    local close = CN.AttachCloseControl(dismissable,
+        function() turnedOff = true end,
+        "The whole frame says what it does.",
+        "And the x says what it does.")
+
+    assert(close, "the control is created")
+
+    assert(dismissable.close == close, "and the frame holds it")
+
+    close:GetScript("OnClick")(close)
+
+    assert(turnedOff, "and clicking it runs what it was given")
+
+    -- AND THE CORNER IT SITS IN IS NOT A DEAD ZONE FOR DRAGGING.
+    --
+    -- The button takes the mouse, so without its own drag scripts the
+    -- top-right corner stops responding -- while the tooltip promises the
+    -- whole frame can be dragged.
+    local registered = close:GetRegisteredDragButtons()
+
+    assert(registered and registered[1] == "LeftButton",
+        "the x is registered for the drag button, or its scripts never fire")
+
+    assert(close:GetScript("OnDragStart"),
+        "a drag started on the x still moves the frame")
+
+    local dragged = false
+
+    dismissable.StartMoving = function() dragged = true end
+
+    close:GetScript("OnDragStart")(close)
+
+    assert(dragged, "and actually starts the move")
+
+    print("  every frame drawn over the world can be dismissed from itself")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A HALF-WARM CLIENT DELETES NOTHING IT DID NOT ASK ABOUT.
+    ------------------------------------------------------------
+    local achievements = CN:GetModule("Achievements")
+
+    achievements.Scan()
+
+    local store = achievements.Store()
+
+    local mine = CN.characterKey or CN.GetCharacterKey()
+
+    -- The walk is per CATEGORY and 0.76.0 gated the prune on a whole-store
+    -- counter -- so one expansion answering licensed the deletion of every
+    -- row in the ones that stayed quiet, taking every character's readings
+    -- with them.
+    local quiet = 985001
+
+    store[quiet] = {
+        achievementID = quiet, categoryID = 987654, criteria = 40,
+        progress = { ["Realm-Main"] = 38, [mine] = 2 },
+    }
+
+    achievements.Scan()
+
+    assert(store[quiet],
+        "a row whose category the client never populated survives")
+
+    assert(store[quiet].progress["Realm-Main"] == 38,
+        "with every character's readings intact")
+
+    -- A ROW WITH NO CATEGORY AT ALL has nothing to check against and is never
+    -- deleted.
+    local unfiled = 985002
+
+    store[unfiled] = { achievementID = unfiled, criteria = 10,
+                       progress = { [mine] = 1 } }
+
+    achievements.Scan()
+
+    assert(store[unfiled], "a row with no stored category is never pruned")
+
+    store[quiet], store[unfiled] = nil, nil
+
+    print("  a half-warm scan deletes nothing it did not ask about")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CROSS-TAB SEARCH AND THE TAB'S OWN FILTER ASK ONE QUESTION.
+    ------------------------------------------------------------
+    -- `UI.SearchAll` searched the RAW text -- colour codes, textures and all
+    -- -- while the tab in front of the player searched the stripped text and
+    -- did not look at the value column. So a hex fragment reported a match on
+    -- every row of every tab and none where you were standing, and a term
+    -- that only appeared in the value column was counted by "Also on:" and
+    -- then not found when you clicked through.
+    assert(CN.SortKey("|cffffc74f  12. Kill Ten Rats|r")
+        == "kill ten rats",
+        "colour codes and leading markers are not part of what a row says: "
+        .. CN.SortKey("|cffffc74f  12. Kill Ten Rats|r"))
+
+    assert(CN.SortKey(nil) == "", "and nothing says nothing")
+
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+    local list = CN_TEST_ReadAddonFile("UI/List.lua")
+
+    assert(ui and list, "both files must be readable")
+
+    assert(string.find(ui, "CN.SortKey(entry.text)", 1, true),
+        "the cross-tab search asks through the one function")
+
+    assert(string.find(list, "SortKey(entry.value)", 1, true),
+        "and the tab's own filter searches the value column too, so the "
+        .. "count and the filtered list are the same predicate")
+
+    print("  the cross-tab search and the tab's filter ask one question")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DIAGNOSTIC DIAGNOSES.
+    ------------------------------------------------------------
+    -- `/cn uistatus` threw away the saved window position, recentred the
+    -- window and forced it open whenever it happened to be CLOSED -- which is
+    -- its state most of the time. A command whose help is "diagnose" and
+    -- whose args were none, quietly discarding something the player had
+    -- deliberately set, in the command a player runs BECAUSE something
+    -- already looks wrong.
+    CN.Settings().window = { point = "TOPLEFT", relativePoint = "TOPLEFT",
+                             x = 12, y = -34 }
+
+    CN.HandleSlashCommand("uistatus")
+
+    local held = CN.Settings().window
+
+    assert(held and held.point == "TOPLEFT" and held.x == 12,
+        "running the diagnostic does not move the window: "
+        .. tostring(held and held.point))
+
+    CN.HandleSlashCommand("uistatus reset")
+
+    assert(CN.Settings().window == nil,
+        "and the repair it offers does what it says when asked")
+
+    print("  a diagnostic diagnoses, and repairs only when asked")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- NO COLUMN IS PADDED WITH SPACES.
+    ------------------------------------------------------------
+    -- WoW ships no monospace chat font, so padding to a width produces a
+    -- ragged edge that reads as a bug rather than as a table. `Design.lua`
+    -- and `UI/List.lua` both state the rule; the window was fixed with
+    -- anchored fontstrings and the chat side kept the padding in six places.
+    local offenders = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        if text then
+            -- CODE, NOT COMMENTS. Three files describe this very rule and
+            -- quote the padding they removed; a check that cannot tell a
+            -- format string from a sentence about one fails on its own
+            -- documentation.
+            for line in string.gmatch(text, "[^\n]+") do
+                if not string.find(line, "^%s*%-%-") then
+                    for pad in string.gmatch(line, "%%%-%d+s") do
+                        table.insert(offenders, file .. " uses " .. pad)
+                    end
+                end
+            end
+        end
+    end
+
+    assert(#offenders == 0,
+        "chat output must not pad to a column width: "
+        .. table.concat(offenders, ", "))
+
+    print("  no chat column is padded with spaces")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE REFRESH SUBSCRIPTION IS WIRED ONCE PER EVENT.
+    ------------------------------------------------------------
+    -- `CN.RegisterCandidateProvider` calls this and its sibling, and the
+    -- sibling tracks what it has already wired -- with a comment saying it
+    -- must, because the handler list "would grow without bound if a module
+    -- registered providers in a loop". This one had no such set.
+    local UI = CN.UI
+
+    local first = UI.SubscribeToRefreshEvents()
+
+    local function HandlerCount()
+        local total = 0
+
+        for _, handlers in pairs(CN.eventTable or {}) do
+            total = total + #handlers
+        end
+
+        return total
+    end
+
+    local wiredBefore = HandlerCount()
+
+    for _ = 1, 5 do
+        UI.SubscribeToRefreshEvents()
+    end
+
+    local wiredAfter = HandlerCount()
+
+    assert(first > 0, "the subscription wires something")
+
+    assert(wiredAfter == wiredBefore,
+        "and five more passes wire nothing again: " .. wiredBefore
+        .. " then " .. wiredAfter)
+
+    -- AND THE VIGNETTE FIREHOSE IS THROTTLED.
+    --
+    -- `VIGNETTE_MINIMAP_UPDATED` fires many times a second while moving
+    -- through any zone with rares in it -- which is exactly when auto-
+    -- waypoint is switched on -- and each firing ran a linear scan of the
+    -- whole candidate list and a full re-rank with the recommendation hooks
+    -- live.
+    local advances = 0
+
+    local realAdvance = CN.AutoAdvance
+
+    CN.AutoAdvance = function(...)
+        advances = advances + 1
+
+        return realAdvance(...)
+    end
+
+    CN.ForgetDebounces()
+
+    for _ = 1, 20 do
+        CN.Dispatch("VIGNETTE_MINIMAP_UPDATED")
+    end
+
+    CN.AutoAdvance = realAdvance
+
+    assert(advances > 0, "the first vignette in a burst is answered at once")
+
+    assert(advances < 20,
+        "and twenty in the same window do not each pay for it: " .. advances)
+
+    print("  the refresh subscription is wired once per event")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE EXPLANATION USES THE SCORER'S OWN WEIGHTS.
+    ------------------------------------------------------------
+    -- `ExplainScore`'s own header promises "the same arithmetic
+    -- `ScoreObjective` does; if the two ever disagree, this is wrong" -- and
+    -- it copied the defaults and the profile overrides by hand, in the
+    -- function that exists to prove the two agree.
+    local scoring = CN_TEST_ReadAddonFile("Scoring.lua")
+
+    assert(scoring, "Scoring.lua must be readable")
+
+    local copies = 0
+
+    for _ in string.gmatch(scoring, "for key, value in pairs%(CN%.scoreWeights%)") do
+        copies = copies + 1
+    end
+
+    assert(copies == 1,
+        "the weights are built in one place, not two: " .. copies)
+
+    -- AND THE TWO STILL AGREE about a real objective.
+    local objective = CN.NewObjective({
+        id = 984001, type = CN.objectiveTypes.QUEST, name = "Weighted",
+        completionValue = 3, travelCost = 4,
+    })
+
+    local score = CN.ScoreObjective(objective)
+
+    local explained = CN.ExplainScore(objective)
+
+    assert(type(explained) == "table" and #explained > 0,
+        "the explanation produces terms")
+
+    local total = 0
+
+    for _, term in ipairs(explained) do
+        total = total + (term.value or 0)
+    end
+
+    assert(math.abs(total - score) < 0.01,
+        "and they sum to the score the ranking used: " .. tostring(total)
+        .. " vs " .. tostring(score))
+
+    print("  the explanation uses the scorer's own weights")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A RECIPE IN YOUR BAGS IS FOUND.
+    ------------------------------------------------------------
+    -- `GetItemInfoInstant` returns seven values, and through `pcall` they
+    -- land at positions 2 through 8. This read one short, so the variable
+    -- called `classID` received the ICON -- a file id in the six figures --
+    -- and the test against 9 was never true on any client. The function
+    -- returned an empty list from the day it was written, and `/cn bags`
+    -- never once reported a carried recipe.
+    local inventory = CN_TEST_ReadAddonFile("Modules/Inventory.lua")
+
+    assert(inventory, "Modules/Inventory.lua must be readable")
+
+    assert(string.find(inventory,
+            "local ok, _, _, _, _, _, classID =", 1, true),
+        "the class id is read from the position the client returns it in")
+
+    local module = CN:GetModule("Inventory")
+
+    local recipes = module.Recipes()
+
+    assert(type(recipes) == "table", "and the function answers with a list")
+
+    print("  a recipe in your bags is found")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "RUNNING THE WHOLE WAY" MEANS RUNNING.
+    ------------------------------------------------------------
+    -- `Session.Speed()` with no argument answers for the bucket the player is
+    -- in RIGHT NOW -- and a player reading `/cn travel` is normally mounted,
+    -- so the comparison whose whole purpose is to justify the flight route
+    -- was quoted at roughly three and a half times the true speed.
+    local travel = CN_TEST_ReadAddonFile("Modules/Travel.lua")
+
+    assert(travel, "Modules/Travel.lua must be readable")
+
+    assert(not string.find(travel, "session.Speed()", 1, true),
+        "no caller asks for the speed of whatever the player is doing now")
+
+    assert(string.find(travel, "session.Speed(false)", 1, true),
+        "and the on-foot comparison asks for the on-foot speed")
+
+    print("  'running the whole way' is quoted at running speed")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CAVEAT ATTACHED TO A SUCCESS IS PRINTED.
+    ------------------------------------------------------------
+    -- The native provider answers `true, "the arrow is set; the game does not
+    -- allow a map pin here"` on a dungeon or raid map, and `CN.SetWaypoint`
+    -- read the second return only on FAILURE -- so the player was told
+    -- "Waypoint set" while the world map stayed empty, and the sentence
+    -- written to explain that was discarded.
+    local routing = CN_TEST_ReadAddonFile("Routing.lua")
+
+    assert(routing, "Routing.lua must be readable")
+
+    local placed = string.find(routing, "local placed, why = provider.SetWaypoint",
+        1, true)
+
+    assert(placed, "the second return is taken")
+
+    local success = string.find(routing, "if why then", placed, true)
+
+    assert(success,
+        "and read on success too, not only on failure")
+
+    print("  a caveat attached to a successful waypoint is printed")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A STORED READING'S AGE IS SAID IN WORDS.
+    ------------------------------------------------------------
+    -- Raw hours: a bank read a fortnight ago printed "seen 336h ago".
+    -- `CN.Ago` exists for exactly this and its own header names "97h 12m" as
+    -- the wrong shape for a stored reading.
+    local inventory = CN_TEST_ReadAddonFile("Modules/Inventory.lua")
+
+    assert(inventory, "Modules/Inventory.lua must be readable")
+
+    assert(not string.find(inventory, '"h ago"', 1, true)
+        and not string.find(inventory, '.. "h ago', 1, true),
+        "no age is printed as a raw hour count")
+
+    assert(string.find(inventory, "CN.Ago(store and store.scannedAt)", 1, true),
+        "and the bank ages go through the one formatter")
+
+    print("  a stored reading's age is said in words")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE STOP IS ONE STOP.
+    ------------------------------------------------------------
+    local follow = CN_TEST_ReadAddonFile("Modules/Follow.lua")
+
+    assert(follow, "Modules/Follow.lua must be readable")
+
+    -- "1 stops" in the addon's one celebratory line, and an English literal
+    -- bolted onto a `CN.L` lookup -- so a translated client read a translated
+    -- headline followed by untranslated prose.
+    assert(not string.find(follow, '.. " stops, "', 1, true),
+        "the count is pluralised rather than always plural")
+
+    assert(string.find(follow, 'CN.Count(total, "stop")', 1, true),
+        "through the helper that exists for it")
+
+    assert(CN.Count(1, "stop") == "1 stop"
+        and CN.Count(3, "stop") == "3 stops",
+        "and that helper says what it should: " .. CN.Count(1, "stop"))
+
+    print("  one stop is one stop")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

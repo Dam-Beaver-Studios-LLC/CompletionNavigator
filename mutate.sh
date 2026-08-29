@@ -27,8 +27,25 @@ trap 'rm -rf "$WORK"' EXIT
 PASSED=0
 SURVIVED=0
 
+# A BACKTICK IN AN ANCHOR IS A COMMAND, NOT A CHARACTER. 0.77.0.
+#
+# The anchors are double-quoted, so the shell runs anything between backticks
+# and substitutes its output -- and this file's own prose style puts Lua names
+# in backticks everywhere. A 0.77.0 anchor copied a comment line verbatim,
+# the shell tried to run `EffectiveWeights`, and the mutation silently became
+# inapplicable rather than failing: it was reported as stale, which reads like
+# a re-anchoring chore rather than a bug in this script.
+#
+# Refuse the whole run rather than quietly testing one thing fewer.
 mutate() {
     local file="$1" from="$2" to="$3" label="$4"
+
+    case "$from$to" in
+        *'`'*)
+            echo "ANCHOR CONTAINS A BACKTICK, which the shell would run: $label"
+            exit 2
+            ;;
+    esac
 
     rm -rf "$WORK/tree"
     cp -r "$TREE" "$WORK/tree"
@@ -505,10 +522,9 @@ mutate "Scoring.lua" \
     "        worth = (worth + cost) * profile.types[objective.type] - cost" \
     "a focus multiplies a total that crosses zero"
 
-mutate "Modules/Travel.lua" \
-    "        runSpeed, runMeasured = session.Speed(false)" \
-    "        runSpeed, runMeasured = session.Speed()" \
-    "running is costed at whatever speed you are moving now"
+# RETIRED IN 0.77.0: a duplicate of "running the whole way is quoted at
+# flying speed", below, which anchors on the same line at its real
+# indentation.
 
 mutate "Modules/Travel.lua" \
     "CN.fallbackZoneCost = 40" \
@@ -1303,9 +1319,9 @@ mutate "Core.lua" \
     "    text = text" \
     "the list sorts on the colour in front of a name instead of the name"
 
-mutate "UI/List.lua" \
-    "        text = text:gsub(\"^[%s%p%d]+\", \"\")" \
-    "        text = text" \
+mutate "Core.lua" \
+    "    text = text:gsub(\"^[%s%p%d]+\", \"\")" \
+    "    text = text" \
     "a route number sorts ahead of the name it belongs to"
 
 mutate "UI.lua" \
@@ -1710,12 +1726,12 @@ mutate "Modules/Hud.lua" \
     "the heads-up line sits below everything and cannot be clicked"
 
 mutate "Modules/Hud.lua" \
-    "        Hud.SetEnabled(false)
+    "            Hud.SetEnabled(false)
 
-        CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
-    "        frame:Hide()
+            CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
+    "            frame:Hide()
 
-        CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
+            CN.Print(\"Heads-up line off. \" .. CN.Aside(CN.Accent(\"/cn hud\")" \
     "the x hides the heads-up line and the next refresh brings it back"
 
 mutate "UI.lua" \
@@ -3087,8 +3103,12 @@ mutate "Modules/Achievements.lua" \
     "the achievement scan writes a figure every other character inherits"
 
 mutate "Modules/Achievements.lua" \
-    "    for achievementID in pairs(store) do
-        if not seen[achievementID] then
+    "    for achievementID, record in pairs(store) do
+        local categoryID = type(record) == \"table\" and record.categoryID
+
+        if not seen[achievementID] and categoryID
+            and answeringCategories[categoryID] then
+
             store[achievementID] = nil
         end
     end" \
@@ -3187,12 +3207,16 @@ mutate "Modules/Goals.lua" \
 # ---- 0.76.0 ----
 
 mutate "Modules/Loremaster.lua" \
-    "    for id in pairs(store) do
-        if not seen[id] then
+    "    for id, record in pairs(store) do
+        local categoryID = type(record) == \"table\" and record.categoryID
+
+        if not seen[id] and categoryID and answeringCategories[categoryID] then
             store[id] = nil
         end
     end" \
-    "    for id in pairs(store) do
+    "    for id, record in pairs(store) do
+        local categoryID = record
+
         if false then
             store[id] = nil
         end
@@ -3237,10 +3261,8 @@ mutate "Modules/Loremaster.lua" \
     "the retry announces the rows it walked past, not the rows it read"
 
 mutate "Modules/Achievements.lua" \
-    "                seen[achievement.achievementID] = true
-
-                if achievement.completed then" \
-    "                if achievement.completed then" \
+    "                answeringCategories[categoryID] = true" \
+    "                local unusedCategory = categoryID" \
     "an alt's scan deletes every achievement row the main had progress on"
 
 mutate "Modules/Achievements.lua" \
@@ -3298,6 +3320,127 @@ mutate "Modules/Loremaster.lua" \
                 zones[achievementID] = true
             end" \
     "forgetting one zone reports having forgotten three"
+
+# ---- 0.77.0 ----
+
+mutate "Modules/Loremaster.lua" \
+    "        if not seen[id] and categoryID and answeringCategories[categoryID] then" \
+    "        if not seen[id] then" \
+    "a half-warm scan deletes every zone row in the categories that stayed quiet"
+
+mutate "Modules/Achievements.lua" \
+    "        if not seen[achievementID] and categoryID
+            and answeringCategories[categoryID] then" \
+    "        if not seen[achievementID] then" \
+    "a half-warm scan deletes every achievement row in the quiet categories"
+
+mutate "Design.lua" \
+    "    local point, _, relativePoint, x, y = frame:GetPoint()" \
+    "    local point, _, _, x, y = frame:GetPoint()
+    local relativePoint = point" \
+    "a frame the player moved comes back a screen away from where they left it"
+
+mutate "Design.lua" \
+    "    frame:ClearAllPoints()
+
+    frame:SetPoint(
+        placement.point or \"CENTER\"," \
+    "    frame:SetPoint(
+        placement.point or \"CENTER\"," \
+    "a frame restored twice accumulates anchors instead of moving"
+
+mutate "Design.lua" \
+    "    close:RegisterForDrag(\"LeftButton\")" \
+    "    local unusedDrag = \"LeftButton\"" \
+    "the corner with the x in it is a dead zone for dragging"
+
+mutate "Design.lua" \
+    "    close:SetScript(\"OnClick\", function()
+        if onClose then
+            onClose()
+        end
+    end)" \
+    "    close:SetScript(\"OnClick\", function()
+    end)" \
+    "the x on a frame drawn over the world does nothing"
+
+mutate "Core.lua" \
+    "function CN.SortKey(text)
+    text = CN.Strip(text)" \
+    "function CN.SortKey(text)
+    text = tostring(text or \"\")" \
+    "a search for a colour code matches every row on every tab"
+
+mutate "UI/List.lua" \
+    "        local haystack = SortKey(entry.text) .. \" \" .. SortKey(entry.value)" \
+    "        local haystack = SortKey(entry.text)" \
+    "a tab counted as matching says nothing here matches"
+
+mutate "UI.lua" \
+    "        local reset = string.lower(CN.Trim(args or \"\")) == \"reset\"
+
+        if frame and reset then" \
+    "        local reset = true
+
+        if frame and reset then" \
+    "running the window diagnostic throws away the saved window position"
+
+mutate "UI.lua" \
+    "        if not UI.subscribedRefreshEvents[event] then
+            UI.subscribedRefreshEvents[event] = true
+
+            CN:RegisterEvent(event, function()
+                UI.RequestRefresh()
+            end)
+        end" \
+    "        CN:RegisterEvent(event, function()
+            UI.RequestRefresh()
+        end)" \
+    "every late provider adds another forty redraw handlers"
+
+mutate "Scoring.lua" \
+    "    -- stopped building this per objective in the first place.
+    local w = EffectiveWeights(mode, profile)" \
+    "    local w = {}" \
+    "the explanation of a score is not the score"
+
+mutate "Modules/Inventory.lua" \
+    "        local ok, _, _, _, _, _, classID =
+            pcall(C_Item.GetItemInfoInstant, item.itemID)" \
+    "        local ok, _, _, _, _, classID =
+            pcall(C_Item.GetItemInfoInstant, item.itemID)" \
+    "a recipe in your bags is never found"
+
+mutate "Modules/Inventory.lua" \
+    "            return CN.Ago(store and store.scannedAt) or \"never\"" \
+    "            return math.floor(math.max(0, time() - store.scannedAt) / 3600)" \
+    "a bank read a fortnight ago is described as 336 hours"
+
+mutate "Modules/Travel.lua" \
+    "                runSpeed, runMeasured = session.Speed(false)" \
+    "                runSpeed, runMeasured = session.Speed()" \
+    "running the whole way is quoted at flying speed"
+
+mutate "Routing.lua" \
+    "    if why then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end" \
+    "    if false then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end" \
+    "a waypoint with no map pin is reported as a waypoint with one"
+
+mutate "Routing.lua" \
+    "        CN.Debounce(\"Routing.autoAdvance\", 2, function()
+            CN.AutoAdvance(event)
+        end)" \
+    "        CN.AutoAdvance(event)" \
+    "every minimap vignette rescans the whole candidate list"
+
+mutate "Modules/Follow.lua" \
+    "            .. CN.Count(total, \"stop\") .. \", all done.\")" \
+    "            .. total .. \" stops, all done.\")" \
+    "the route that finished had 1 stops in it"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

@@ -285,12 +285,15 @@ CN:RegisterCommand{
             local character = CN.db and CN.db.characters
                 and CN.db.characters[row.key]
 
-            CN.PrintLine(string.format("  %s%-18s|r %-4s %-10s |cff8a8f96%s|r",
-                row.isCurrent and "|cff73b873" or "|cfff2f4f6",
-                tostring(row.name),
-                tostring(row.level or "?"),
-                CN.TokenLabel(row.class or ""),
-                Alts.DescribeAge(character)))
+            -- NO COLUMN PADDING. 0.77.0. See the note in `Routing.lua`.
+            -- Three widths in one line, in a proportional font, produced
+            -- three ragged edges rather than three columns.
+            CN.PrintLine("  "
+                .. (row.isCurrent and "|cff73b873" or "|cfff2f4f6")
+                .. tostring(row.name) .. "|r"
+                .. CN.Aside(tostring(row.level or "?") .. " "
+                    .. CN.TokenLabel(row.class or ""))
+                .. " |cff8a8f96" .. Alts.DescribeAge(character) .. "|r")
         end
 
         Print("|cff8a8f96Everything here is what each character recorded the "
