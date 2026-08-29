@@ -111,7 +111,7 @@ function UI.DistanceLine(mapID, x, y)
 
     local cost, costed = CN.TravelCost(mapID, x, y)
 
-    local text, exact = CN.TravelText({
+    local text, exact, ceiling = CN.TravelText({
         mapID        = mapID,
         x            = x,
         y            = y,
@@ -124,8 +124,11 @@ function UI.DistanceLine(mapID, x, y)
     end
 
     if not exact then
-        return "More than " .. string.gsub(text, "^over ", "")
-            .. " away; the addon stops measuring past that."
+        -- THE SAME WORDS `/cn list` USES, plus the reason. Two surfaces
+        -- phrasing one fact two ways is how a player ends up thinking they
+        -- are two facts.
+        return "About " .. (ceiling or text)
+            .. " away at least; the addon stops measuring past that."
     end
 
     return "About " .. text .. " away by the route this addon would take."
@@ -3160,7 +3163,22 @@ UI.RegisterTab{
             local lore = CN:GetModule("Loremaster")
 
             if lore then
-                lore.Scan()
+                -- AND IT SAYS WHETHER IT WORKED. 0.73.0.
+                --
+                -- The button threw both returns away and redrew, so a rescan
+                -- the client refused -- routine in the first seconds after a
+                -- loading screen -- looked exactly like one that worked: the
+                -- same unchanged list, and nothing to tell the player to try
+                -- again. `/cn scanlore` was given this message in 0.72.0 and
+                -- the button beside it was not.
+                local scanned, measured = lore.Scan()
+
+                if measured == 0 then
+                    UI.Answer("The game would not answer about zone progress "
+                        .. "just now. Try again in a few seconds.")
+                else
+                    UI.Answer("Read " .. scanned .. " zone achievements.")
+                end
             end
 
             UI.Refresh()

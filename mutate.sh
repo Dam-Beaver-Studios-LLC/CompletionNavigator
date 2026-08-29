@@ -2516,7 +2516,7 @@ mutate "Modules/Filters.lua" \
     "an id that is not a number is described with the internal enum"
 
 mutate "Modules/Setup.lua" \
-    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\" }," \
+    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\", measured = true }," \
     "" \
     "a new character never scans the one store with a per-character split"
 
@@ -2768,8 +2768,8 @@ mutate "Modules/Loremaster.lua" \
     "the zone match is an unanchored substring again"
 
 mutate "Modules/Loremaster.lua" \
-    "    zone = zone or (GetZoneText and GetZoneText())" \
-    "    zone = Blizzard.GetMapName(CN.GetPlayerPosition())" \
+    "        zone = GetZoneText and GetZoneText()" \
+    "        zone = Blizzard.GetMapName(CN.GetPlayerPosition())" \
     "standing in a city finds no zone at all"
 
 mutate "Modules/Loremaster.lua" \
@@ -2796,7 +2796,7 @@ mutate "Modules/Reputations.lua" \
 # ---- 0.72.0 ----
 
 mutate "Modules/Loremaster.lua" \
-    "    local matches = zoneIndex[zone]
+    "    local matches = zoneIndex[key]
 
     if not matches then" \
     "    local matches = nil
@@ -2805,13 +2805,13 @@ mutate "Modules/Loremaster.lua" \
     "every criteria update walks the whole achievement store again"
 
 mutate "Modules/Loremaster.lua" \
-    "        zoneIndex[zone] = matches" \
-    "        if #matches > 0 then zoneIndex[zone] = matches end" \
+    "        zoneIndex[key] = matches" \
+    "        if #matches > 0 then zoneIndex[key] = matches end" \
     "a zone with no achievement pays the full walk on every event"
 
 mutate "Modules/Loremaster.lua" \
-    "    local fresh = math.min(#untouched, freshShare or math.floor(limit / 4))" \
-    "    local fresh = 0" \
+    "    local rows = Loremaster.Closest(50, 12)" \
+    "    local rows = Loremaster.Closest(50)" \
     "a zone never begun cannot be recommended to a player who has begun many"
 
 mutate "Modules/Loremaster.lua" \
@@ -2826,13 +2826,15 @@ mutate "Modules/Loremaster.lua" \
 
 mutate "Modules/Session.lua" \
     "        travelKnown = cost == nil or cost == 0
-            or not (objective.mapID and objective.x and objective.y)" \
+            or (objective.mapID == nil
+                and objective.x == nil and objective.y == nil)" \
     "        travelKnown = cost == nil or cost == 0" \
     "the planner can never learn how long an instance takes"
 
 mutate "Modules/Session.lua" \
     "        travelKnown = cost == nil or cost == 0
-            or not (objective.mapID and objective.x and objective.y)" \
+            or (objective.mapID == nil
+                and objective.x == nil and objective.y == nil)" \
     "        travelKnown = true" \
     "a journey the model stopped counting is subtracted from a measured span"
 
@@ -2861,6 +2863,111 @@ mutate "Modules/Exploration.lua" \
     "    return before ~= done" \
     "    return true" \
     "every criteria update throws away the exploration provider's cached rows"
+
+# ---- 0.73.0 ----
+
+mutate "Providers/BlizzardWorld.lua" \
+    "        if (info.mapType or 0) == Blizzard.zoneMapType then
+            return current
+        end" \
+    "        if true then
+            return current
+        end" \
+    "the zone a player is in is the room they are standing in again"
+
+mutate "Modules/Loremaster.lua" \
+    "    if heldHere ~= nil and mineHere ~= nil and heldHere ~= mineHere then
+        return mineHere
+    end" \
+    "    if false then
+        return mineHere
+    end" \
+    "standing in one Nagrand shows progress for the other one"
+
+mutate "Modules/Loremaster.lua" \
+    "    if heldHere ~= nil and mineHere ~= nil and heldHere ~= mineHere then
+        return mineHere
+    end" \
+    "    if heldHere ~= mineHere then
+        return mineHere and true or false
+    end" \
+    "a client that will not name a continent decides the zone on a guess"
+
+mutate "Modules/Loremaster.lua" \
+    "        if rows > 0 and named == 0 then" \
+    "        if false then" \
+    "a zone walked while the client was cold is empty for the session"
+
+mutate "Modules/Loremaster.lua" \
+    "    local fresh = math.min(#untouched, freshShare or 0)" \
+    "    local fresh = math.min(#untouched, freshShare or math.floor(limit / 4))" \
+    "a list headed closest to finished holds zones never begun"
+
+mutate "Modules/Loremaster.lua" \
+    "    local before = Loremaster.DoneFor(record) or 0" \
+    "    local before = record.progress and record.progress[key]" \
+    "the first sight of a zone is reported as a change to it"
+
+mutate "Modules/Loremaster.lua" \
+    "        local named = Blizzard.GetMapName(mapID)
+
+        if not named or named == \"\" then
+            return nil
+        end" \
+    "        local named = Blizzard.GetMapName(mapID)" \
+    "asking about an unknown map answers about the zone you are standing in"
+
+mutate "Modules/Session.lua" \
+    "            or (objective.mapID == nil
+                and objective.x == nil and objective.y == nil)" \
+    "            or not (objective.mapID and objective.x and objective.y)" \
+    "a quest whose pin has not resolved teaches the planner a zero journey"
+
+mutate "Database.lua" \
+    "                        record.friendshipStanding = record.standing" \
+    "                        record.friendshipStanding = nil" \
+    "upgrading destroys every alt's friendship rank"
+
+mutate "Modules/Setup.lua" \
+    "    if step.measured and second == 0 then" \
+    "    if false then" \
+    "setup reports a clean bill for scans that recorded nothing"
+
+mutate "Modules/Achievements.lua" \
+    "        if crossed then
+            CN.InvalidateProvider(\"Achievements\")
+        end" \
+    "        if false then
+            CN.InvalidateProvider(\"Achievements\")
+        end" \
+    "an achievement that became nearly done does not reach the ranking"
+
+mutate "Modules/Quests.lua" \
+    "    if questID then
+        local store = Remembered()
+
+        if store[questID] then
+            store[questID] = nil
+            Quests.pinRevision = Quests.pinRevision + 1
+        end
+    end
+end)" \
+    "end)" \
+    "a quest picked up is still shown as one waiting to be picked up"
+
+mutate "Scoring.lua" \
+    "        return text and (\"over \" .. text) or nil, false, text" \
+    "        return text and (\"over \" .. text) or nil, false" \
+    "the tooltip parses the far-away figure back out of its own sentence"
+
+mutate "Modules/Harvest.lua" \
+    "    if not questID then
+        return
+    end
+
+    table.insert(recentTurnIns, 1, { questID = questID, at = time() })" \
+    "    table.insert(recentTurnIns, 1, { questID = questID, at = time() })" \
+    "a turn-in the client did not name throws on the next quest accepted"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

@@ -7,6 +7,76 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.73.0]
+
+**Last release removed the only thing telling the two Nagrands apart.** 0.72.0
+was right that the persisted map stamp was broken â€” it came from the map you
+are standing *on*, which indoors is a building â€” and wrong to conclude that
+the zone name could replace it. Retail ships two zones called Nagrand, two
+called Shadowmoon Valley and two called Dalaran. This release asks the client
+the question it was actually being asked: not "which map am I standing on" but
+"which zone is this", answered by walking up to the first ancestor the client
+itself calls a zone.
+
+### Fixed â€” zone identity, for the fourth and last time
+
+- **Standing in Draenor's Nagrand showed progress for Outland's.** The name
+  match is right and stays; the ordering now prefers the achievement whose
+  category is the continent you are on, and falls through to the previous rule
+  whenever the client will not name one. It never decides on a guess.
+- **A zone walked while the client was cold stayed empty for the session.**
+  Achievement names are asked for, not stored, so in the seconds after a
+  loading screen every row resolves to a placeholder and nothing matches â€”
+  and 0.72.0 cached that empty result deliberately. The Loremaster provider
+  wakes on zone changes, so one badly-timed loading screen silently removed
+  the Journey tab's "Here" row, the "This zone" block, the provider's rows and
+  the turn-in refresh until the next login. A walk the client refused is no
+  longer an answer, and the index is cleared on every loading screen.
+- **A scan that measured nothing left the stale index in place**, because the
+  invalidation sat below the early return â€” on the one scan most likely to
+  have run against a cold client.
+- **`ForZone` for an unknown map answered about the zone you are standing
+  in.** A nil name fell through to the default.
+
+### Fixed â€” what the addon learns and what it shows
+
+- **Upgrading destroyed every alt's friendship rank.** 0.72.0 wrote a
+  paragraph explaining that a friendship's rank is the one standing the client
+  will not re-supply for another character, moved it to its own field, and
+  then had the migration delete every existing copy. It is carried across now.
+  This is a correction to a defect that already shipped: if you upgraded
+  through 0.72.0, your alts' friendship ranks are gone and nothing can bring
+  them back â€” each character restores its own the next time it logs in.
+- **`/cn plan` was being taught that flights are free.** A quest whose map pin
+  has not resolved yet reports a map and no point on it, and 0.72.0's test for
+  "this row has no place in it" was true for that shape â€” so ten minutes of
+  flying plus five of questing was recorded as fifteen minutes of quest work,
+  in the highest-volume type feeding the planner's headline figure. Worse, it
+  stuck: the estimate is only ever revised downward and zero is the floor.
+- **Two lists headed "closest to finished" held rooms for zones never
+  begun** â€” three rows of `0 / 120` with an empty bar, displacing three
+  genuinely nearly-done zones. The reserve was written for `/cn zones` and
+  applied to every caller.
+- **`/cn setup` reported a clean bill for a scan that recorded nothing**, and
+  stamped setup as complete â€” which silences the login reminder. Setup is most
+  often run right after logging in, which is exactly when the game refuses.
+  The Journey tab's "Rescan zones" button now says whether it worked, too.
+- **An achievement that crossed the "nearly done" boundary still did not reach
+  `/cn next`.** 0.72.0 moved that sweep onto the shared throttle so the last
+  update in a burst would count; the trailing run then told the shortlist and
+  not the ranking, and the ranking had already rebuilt five seconds earlier.
+  Both sibling handlers do this correctly.
+- **A quest you picked up stayed on the map as one waiting to be picked up.**
+  0.72.0 removed the full sweep from every turn-in, correctly, and justified
+  it with a login hook that did not exist â€” so rows dead for any reason other
+  than a turn-in sat in the store, and every read filtered them at two client
+  calls each. The login sweep exists now, and accepting a quest drops its pin.
+- **The tooltip recovered the "over 20m" figure by stripping the word "over"
+  off the front of its own sentence.** The number is passed now, and both
+  surfaces phrase the fact the same way.
+- **The first sight of a zone was reported as a change to it,** costing one
+  needless ranking rebuild per zone per character.
+
 ## [0.72.0]
 
 **The zone fix worked, and then cached its answer under the wrong key.**

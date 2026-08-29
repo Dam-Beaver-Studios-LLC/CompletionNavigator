@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.72.0'
+$script:ToolkitVersion = '0.73.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.72.0"
-CN.dbVersion   = 24
+CN.version     = "0.73.0"
+CN.dbVersion   = 25
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -2965,6 +2965,29 @@ CN.migrations = {
 
             for _, record in pairs(store) do
                 if type(record) == "table" then
+                    -- CARRIED, NOT DELETED, FOR THE ONE KIND THAT NEEDS IT.
+                    -- Corrected in 0.73.0, before this shipped a second time.
+                    --
+                    -- 0.72.0 wrote a paragraph saying a friendship's rank is
+                    -- the one standing the client will not re-supply for an
+                    -- alt, moved it to `friendshipStanding`, and then had
+                    -- this loop delete every existing copy of it. No row
+                    -- written before 0.72.0 carries the new field, so every
+                    -- alt's friendship rank would have been destroyed on
+                    -- upgrade -- and shown as a standard 1-8 label, or as
+                    -- nothing, in `/cn rep`, `/cn who rep`, `/cn alts` and
+                    -- the Warband tab.
+                    --
+                    -- The store cannot be rebuilt by logging in: that is the
+                    -- entire reason the field is kept.
+                    if record.kind == "FRIENDSHIP"
+                        and record.friendshipStanding == nil
+                        and type(record.standing) == "string"
+                        and record.standing ~= "" then
+
+                        record.friendshipStanding = record.standing
+                    end
+
                     record.standing = nil
                 end
             end
@@ -6838,9 +6861,17 @@ end
 -- standing in the two places a player actually reads.
 --
 -- One function now, and it answers for the far case instead of going quiet.
--- Returns the phrase, and whether it is an exact figure or a floor. Both
--- callers render the two cases differently and neither should be reading the
--- string to find out which it got.
+-- Returns the phrase, whether it is an exact figure or a floor, and -- for
+-- the floor case -- the bare duration with no wording around it.
+--
+-- THE THIRD RETURN EXISTS BECAUSE THE SECOND CALLER WAS PARSING THE FIRST.
+-- 0.73.0.
+--
+-- `UI.DistanceLine` recovered the number with `string.gsub(text, "^over ",
+-- "")`, which is the rule written twice: reword or localize the phrase and
+-- the strip silently fails, leaving the tooltip reading "More than over 20m
+-- away". The flag was added so neither caller had to read the string; what
+-- was missing was the number itself.
 function CN.TravelText(objective)
     local exact = CN.SecondsNeeded(objective)
 
@@ -6864,7 +6895,7 @@ function CN.TravelText(objective)
         local text = session and session.FormatDuration
             and session.FormatDuration(ceiling)
 
-        return text and ("over " .. text) or nil, false
+        return text and ("over " .. text) or nil, false, text
     end
 
     return nil
@@ -11199,7 +11230,7 @@ function UI.DistanceLine(mapID, x, y)
 
     local cost, costed = CN.TravelCost(mapID, x, y)
 
-    local text, exact = CN.TravelText({
+    local text, exact, ceiling = CN.TravelText({
         mapID        = mapID,
         x            = x,
         y            = y,
@@ -11212,8 +11243,11 @@ function UI.DistanceLine(mapID, x, y)
     end
 
     if not exact then
-        return "More than " .. string.gsub(text, "^over ", "")
-            .. " away; the addon stops measuring past that."
+        -- THE SAME WORDS `/cn list` USES, plus the reason. Two surfaces
+        -- phrasing one fact two ways is how a player ends up thinking they
+        -- are two facts.
+        return "About " .. (ceiling or text)
+            .. " away at least; the addon stops measuring past that."
     end
 
     return "About " .. text .. " away by the route this addon would take."
@@ -14248,7 +14282,22 @@ UI.RegisterTab{
             local lore = CN:GetModule("Loremaster")
 
             if lore then
-                lore.Scan()
+                -- AND IT SAYS WHETHER IT WORKED. 0.73.0.
+                --
+                -- The button threw both returns away and redrew, so a rescan
+                -- the client refused -- routine in the first seconds after a
+                -- loading screen -- looked exactly like one that worked: the
+                -- same unchanged list, and nothing to tell the player to try
+                -- again. `/cn scanlore` was given this message in 0.72.0 and
+                -- the button beside it was not.
+                local scanned, measured = lore.Scan()
+
+                if measured == 0 then
+                    UI.Answer("The game would not answer about zone progress "
+                        .. "just now. Try again in a few seconds.")
+                else
+                    UI.Answer("Read " .. scanned .. " zone achievements.")
+                end
             end
 
             UI.Refresh()
@@ -19065,6 +19114,108 @@ function Blizzard.GetMapInfo(mapID)
     return ok and info or nil
 end
 
+-- WHICH ZONE THE PLAYER IS IN, AS AN ID. 0.73.0.
+--
+-- `GetBestMapForUnit` answers with the most SPECIFIC map containing you: in
+-- Dornogal it says Dornogal, in a cave it says the cave. That is the right
+-- answer for "where exactly am I" and the wrong one for "which zone is this",
+-- and three releases running have used it for the second question:
+--
+--   0.70.0 matched achievements against `GetMapName(GetBestMapForUnit())`,
+--          so nothing matched indoors;
+--   0.71.0 matched on `GetZoneText()` and then CACHED under the same wrong
+--          id, so the cache never converged and wrote a different value on
+--          each side of a doorway;
+--   0.72.0 dropped the id entirely and keyed on the zone NAME, which is
+--          right for the match and cannot separate Outland's Nagrand from
+--          Draenor's -- a distinction `Exploration` documents by name and
+--          which had been held, until then, by the id.
+--
+-- The answer to the actual question is up the parent chain: the first
+-- ancestor the client itself calls a zone. `mapType` 3 is Zone; 4 and above
+-- are dungeon and micro maps, which is where a capital's interior lives. Two
+-- or three hops, no allocation, and unlike a name it cannot be duplicated.
+--
+-- Falls back to the specific map when the walk finds no zone above it, so a
+-- caller always gets the best available identity rather than nothing.
+Blizzard.zoneMapType = 3
+
+function Blizzard.ZoneMapID(mapID)
+    if not mapID then
+        return nil
+    end
+
+    local current = mapID
+    local guard   = 0
+
+    while current and guard < 8 do
+        local info = Blizzard.GetMapInfo(current)
+
+        if not info then
+            return mapID
+        end
+
+        if (info.mapType or 0) == Blizzard.zoneMapType then
+            return current
+        end
+
+        -- Above a zone: a continent or the world. The specific map is the
+        -- closest thing to a zone identity there is.
+        if (info.mapType or 0) < Blizzard.zoneMapType then
+            return mapID
+        end
+
+        local parentID = info.parentMapID
+
+        if not parentID or parentID <= 0 then
+            return mapID
+        end
+
+        current = parentID
+        guard   = guard + 1
+    end
+
+    return mapID
+end
+
+-- The name of the continent the player is on, from the client. Used to break
+-- a tie between two zones that genuinely share a name -- see
+-- `Loremaster.BetterZoneMatch`. Nil rather than a guess when the walk cannot
+-- reach one.
+Blizzard.continentMapType = 2
+
+function Blizzard.ContinentName(mapID)
+    if not mapID then
+        return nil
+    end
+
+    local current = mapID
+    local guard   = 0
+
+    while current and guard < 10 do
+        local info = Blizzard.GetMapInfo(current)
+
+        if not info then
+            return nil
+        end
+
+        if (info.mapType or 0) == Blizzard.continentMapType then
+            return info.name
+        end
+
+        local parentID = info.parentMapID
+
+        if not parentID or parentID <= 0 then
+            return nil
+        end
+
+        current = parentID
+        guard   = guard + 1
+    end
+
+    return nil
+end
+
 function Blizzard.GetMapChildren(mapID)
     if not mapID or not C_Map or not C_Map.GetMapChildrenInfo then
         return {}
@@ -21624,9 +21775,12 @@ end
 -- client calls to remove one entry, at the end of every quest, and four times
 -- over in the bursts at the end of a chain.
 --
--- The one quest that just changed is the argument. The full sweep still runs
--- where it is actually needed: `RememberOffer` calls it when the store
--- crosses its cap, and the login hook covers anything completed elsewhere.
+-- The one quest that just changed is the argument. The full sweep runs where
+-- a sweep belongs: once at login, from `RememberOffer` when the store crosses
+-- its cap, and here when the client does not say which quest it was.
+--
+-- 0.72.0's version of this note claimed a login hook that did not exist. It
+-- does now.
 CN:RegisterEvent("QUEST_TURNED_IN", function(_, questID)
     if not questID then
         -- No id: the client did not say which. Fall back to the sweep rather
@@ -21846,6 +22000,22 @@ end)
 
 CN:RegisterEvent("QUEST_ACCEPTED", function(_, questID)
     Quests.ForgetOffer(questID)
+
+    -- AND THE PIN, WHICH IS THE OTHER HALF OF "COMPLETED OR PICKED UP".
+    -- 0.73.0.
+    --
+    -- `Remembered()` is where a quest WAITS to be picked up. Once it is in
+    -- the log the map pin is stale, and the only thing that removed it was
+    -- the full sweep -- which since 0.72.0 no longer runs on a turn-in. The
+    -- event hands over the id here exactly as it does there.
+    if questID then
+        local store = Remembered()
+
+        if store[questID] then
+            store[questID] = nil
+            Quests.pinRevision = Quests.pinRevision + 1
+        end
+    end
 end)
 
 ------------------------------------------------------------
@@ -22704,6 +22874,28 @@ CN:OnLogin(function()
 
     DebugPrint("Login quest scan: " .. seen .. " active, "
         .. new .. " newly recorded.")
+
+    -- THE LOGIN SWEEP 0.72.0's COMMENT PROMISED AND DID NOT WRITE. 0.73.0.
+    --
+    -- 0.72.0 replaced the full `PruneRemembered` on every turn-in with a
+    -- single-id removal, which was right -- twelve hundred client calls to
+    -- forget one pin -- and justified it by saying "the login hook covers
+    -- anything completed elsewhere". There was no login hook. `OnLogin` here
+    -- called only `DiscoverActive`.
+    --
+    -- What was actually lost is the eviction of rows dead for a reason other
+    -- than a turn-in: a quest ACCEPTED into the log, and a quest completed by
+    -- another character on the account. Those sat until the store happened to
+    -- cross its cap of six hundred, and every read filtered them at two
+    -- client calls a row -- so the cost the change removed from the turn-in
+    -- reappeared on the read path, which runs far more often.
+    --
+    -- Once, at login, is where a sweep of a persisted store belongs.
+    local dropped = Quests.PruneRemembered()
+
+    if dropped > 0 then
+        DebugPrint("Pruned " .. dropped .. " remembered quest location(s).")
+    end
 end)
 
 ------------------------------------------------------------
@@ -24396,6 +24588,23 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
     CN.Debounce("Achievements.criteria",
         Achievements.criteriaSweepSeconds, function()
 
+        -- AND THE RANKING IS TOLD. 0.73.0.
+        --
+        -- The trailing run is the one that matters -- it is the whole reason
+        -- 0.72.0 moved this onto `CN.Debounce` -- and it bumped
+        -- `Achievements.revision`, which busts the SHORTLIST cache and
+        -- nothing else. The provider is marked dirty by its own
+        -- `CRITERIA_UPDATE` subscription, which fires DURING the burst, five
+        -- seconds before this runs. So a row crossing the "nearly done"
+        -- boundary still did not reach `/cn next` until an unrelated criteria
+        -- update happened along -- the exact case 0.72.0's note claims to
+        -- have fixed.
+        --
+        -- `Exploration` and `Loremaster` both invalidate from inside their
+        -- debounced bodies. This was the missed sibling, one release after
+        -- the throttle was copied from them.
+        local crossed = false
+
         -- THE SHORTLIST, NOT THE WHOLE STORE. 0.62.0.
         --
         -- This walked every incomplete tracked achievement and called
@@ -24463,9 +24672,14 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
                     -- shortlist constantly and give back the saving.
                     if wasNear ~= IsNearlyDone(record) then
                         Achievements.revision = Achievements.revision + 1
+                        crossed = true
                     end
                 end
             end
+        end
+
+        if crossed then
+            CN.InvalidateProvider("Achievements")
         end
     end)
 end)
@@ -27302,6 +27516,18 @@ function Harvest.ResetRecent()
 end
 
 function Harvest.NoteTurnIn(questID)
+    -- A TURN-IN WITH NO ID IS NOT A TURN-IN. 0.73.0.
+    --
+    -- The client always names the quest, so this was latent -- but the id is
+    -- used as a TABLE KEY a few lines down, in `observed[entry.questID]`, and
+    -- a nil key throws rather than degrading. A harness dispatch without one
+    -- found it, and the rule here is that a stub must not be more forgiving
+    -- than the client: if the addon can be reached with no id, it must
+    -- survive being reached with no id.
+    if not questID then
+        return
+    end
+
     table.insert(recentTurnIns, 1, { questID = questID, at = time() })
 
     for index = #recentTurnIns, 6, -1 do
@@ -33944,7 +34170,7 @@ Setup.steps = {
     -- character to scan had recorded. Eleven collections were offered on the
     -- setup screen and the twelfth, which is the one with a per-character
     -- dimension, was not.
-    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements" },
+    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true },
     { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
     { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements" },
     { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },
@@ -33960,10 +34186,27 @@ function Setup.RunStep(step)
         return false, "module not loaded"
     end
 
-    local ok, first = pcall(module[step.fn])
+    local ok, first, second = pcall(module[step.fn])
 
     if not ok then
         return false, tostring(first)
+    end
+
+    -- A SCAN THAT MEASURED NOTHING DID NOT SUCCEED. 0.73.0.
+    --
+    -- `Loremaster.Scan` has returned `scanned, measured` since 0.72.0 --
+    -- `scanned` being how many rows the walk REACHED and `measured` how many
+    -- the client actually answered about. `/cn scanlore` was taught to check
+    -- the second; this, the other caller, discarded it.
+    --
+    -- So `/cn setup` printed "Loremaster: 412 quest achievements" over a
+    -- store that had recorded nothing, counted the step as a success, and
+    -- stamped `completedAt` -- which silences the login reminder and makes
+    -- `/cn setup check` report a clean bill. Setup is most often run in the
+    -- first moments after logging in, which is exactly when the criteria API
+    -- refuses.
+    if step.measured and second == 0 then
+        return false, "the game would not answer yet"
     end
 
     return true, first
@@ -37079,6 +37322,15 @@ function Loremaster.Scan()
     --
     -- The 0.69.0 condition it replaced was accidentally repairing this on the
     -- next login; 0.70.0 removed the repair along with its cost.
+    -- INVALIDATED BEFORE THE EARLY RETURN, NOT AFTER IT. 0.73.0.
+    --
+    -- `Scan` writes `store[id]` for every row it reaches whether or not the
+    -- criteria API answered, so the set of records can change on a scan that
+    -- measured nothing -- and the invalidation sat below the early return, so
+    -- the one scan most likely to have run against a cold client was the one
+    -- scan that left a stale index behind.
+    Loremaster.ForgetZoneIndex()
+
     if measured == 0 then
         DebugPrint("Loremaster scan measured nothing; not recording it.")
 
@@ -37109,10 +37361,6 @@ function Loremaster.Scan()
     CN.MarkScanned("loremaster")
 
     DebugPrint("Loremaster scan: " .. scanned .. " quest achievements.")
-
-    -- The zone index is resolved from this store, so a scan that changed it
-    -- invalidates every remembered answer.
-    Loremaster.ForgetZoneIndex()
 
     return scanned, measured
 end
@@ -37269,14 +37517,18 @@ function Loremaster.Closest(limit, freshShare)
     -- ordering above is the entire product of this function.
     limit = limit or 10
 
-    -- A quarter of the room is held for zones not yet begun -- and only as
-    -- much of it as there are fresh zones to fill it with, so a player with
-    -- none loses nothing.
+    -- RESERVED ONLY WHEN THE CALLER ASKS FOR IT. 0.73.0.
     --
-    -- Deliberately zero for a small limit: asked for two, this function is
-    -- being asked "what is closest to done", and the reserve exists for the
-    -- long lists where the started half runs to fifty and buries the rest.
-    local fresh = math.min(#untouched, freshShare or math.floor(limit / 4))
+    -- 0.72.0 applied the reserve to every caller, and two of the three are
+    -- headed "Closest to finished" -- the Journey tab and `/cn loremaster`.
+    -- So a player with plenty of half-done zones read three rows of `0 / 120`
+    -- with an empty bar under that heading, while three genuinely nearly-done
+    -- zones were pushed off the list to make room for them.
+    --
+    -- `NextZones` is the caller the reserve was written for: it is the one
+    -- that scores untouched zones on their own terms and labels them "not
+    -- started, N to do". It asks for the reserve explicitly now.
+    local fresh = math.min(#untouched, freshShare or 0)
 
     local room = math.max(0, limit - fresh)
 
@@ -37352,13 +37604,24 @@ local zoneIndex = {}
 -- Only a change to WHICH RECORDS EXIST invalidates this -- a scan. Earning
 -- an achievement does not, because the winner is chosen fresh on every
 -- lookup; see the note inside `ZoneRecord`.
-function Loremaster.ForgetZoneIndex(zone)
-    if zone then
-        zoneIndex[zone] = nil
-    else
-        zoneIndex = {}
-    end
+function Loremaster.ForgetZoneIndex()
+    zoneIndex = {}
 end
+
+-- AND ONCE PER LOADING SCREEN. 0.73.0.
+--
+-- Two reasons, and the second is the one that matters. A session's index is
+-- bounded by the number of distinct zones visited, which is small -- but a
+-- single entry built while the client was refusing to name achievements would
+-- otherwise be wrong until logout, and a loading screen is both the moment
+-- that refusal happens and the moment it ends.
+--
+-- One walk per loading screen is a cost this file already pays several times
+-- over on `ZONE_CHANGED_NEW_AREA`, and it retires the whole class rather than
+-- guarding one instance of it.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    Loremaster.ForgetZoneIndex()
+end)
 
 -- WHICH OF TWO LEGITIMATE ZONE MATCHES IS THE ZONE'S OWN. 0.71.0.
 --
@@ -37380,6 +37643,33 @@ end
 --
 -- Every step is total and deterministic; there is no path that returns "I
 -- cannot tell", because refusing is what made 0.70.0 do nothing everywhere.
+-- WHICH CONTINENT AN ACHIEVEMENT'S CATEGORY SITS ON, IF THE CLIENT SAYS.
+--
+-- The quest category tree is Quests > expansion > continent, so a zone
+-- achievement's category name IS a continent name -- and both it and
+-- `Blizzard.ContinentName` come from the client, in the same language, which
+-- is why comparing them is a comparison of two client answers and not a
+-- branch on a hardcoded string.
+local function OnCurrentContinent(record)
+    local here = Blizzard.ContinentName
+        and Blizzard.ContinentName(CN.GetPlayerPosition())
+
+    if not here or here == "" then
+        return nil
+    end
+
+    local category = record and record.categoryID
+        and Blizzard.GetCategoryName and Blizzard.GetCategoryName(record.categoryID)
+
+    if not category or category == "" then
+        return nil
+    end
+
+    return string.lower(category) == string.lower(here)
+end
+
+Loremaster.OnCurrentContinent = OnCurrentContinent
+
 function Loremaster.BetterZoneMatch(record, name, id, best, bestName, bestID)
     -- A HELD CANDIDATE WITH NO NAME IS NOT A HELD CANDIDATE. 0.72.0.
     --
@@ -37389,6 +37679,28 @@ function Loremaster.BetterZoneMatch(record, name, id, best, bestName, bestID)
     -- second place, and `#bestName` on a nil throws rather than degrading.
     if not best or not bestName or not bestID then
         return true
+    end
+
+    -- THE CONTINENT YOU ARE STANDING ON, FIRST. 0.73.0.
+    --
+    -- Retail has two zones called Nagrand, two called Shadowmoon Valley and
+    -- two called Dalaran, each with its own achievement, and the zone NAME
+    -- cannot tell them apart -- so 0.72.0, which keyed everything on the name
+    -- after removing the broken map stamp, showed Outland's Nagrand to a
+    -- player standing in Draenor's. `Exploration` documents this hazard by
+    -- name; this file gave up the only thing holding it.
+    --
+    -- The category a quest achievement sits under IS its continent, and the
+    -- client will name the continent the player is on. Both are client
+    -- answers in the reader's own language.
+    --
+    -- Nil when the client will not say, and then this step simply does not
+    -- apply -- it never decides on a guess.
+    local heldHere = OnCurrentContinent(best)
+    local mineHere = OnCurrentContinent(record)
+
+    if heldHere ~= nil and mineHere ~= nil and heldHere ~= mineHere then
+        return mineHere
     end
 
     local heldDone = best.completed and true or false
@@ -37405,12 +37717,24 @@ function Loremaster.BetterZoneMatch(record, name, id, best, bestName, bestID)
     return id < bestID
 end
 
-local function ZoneRecord(zone)
-    zone = zone or (GetZoneText and GetZoneText())
+-- `zone` is the name to match on and `key` is what the answer is filed
+-- under. Both default to the zone the player is standing in. A caller asking
+-- about SOMEWHERE ELSE must supply both, because the player's own zone id is
+-- not an identity for a zone they are not in -- which is how the first draft
+-- of this filed Eversong Woods' answer under Isle of Dorn.
+local function ZoneRecord(zone, key)
+    if not zone then
+        zone = GetZoneText and GetZoneText()
+
+        key = key or (Blizzard.ZoneMapID
+            and Blizzard.ZoneMapID(CN.GetPlayerPosition()))
+    end
 
     if not zone or zone == "" then
         return nil
     end
+
+    key = key or zone
 
     local store = Records()
 
@@ -37429,7 +37753,16 @@ local function ZoneRecord(zone)
     -- the next login. Caching only the candidate list keeps the expensive
     -- half and re-decides the cheap half every time -- a loop over two or
     -- three entries with no client calls in it.
-    local matches = zoneIndex[zone]
+    -- FILED UNDER THE ZONE'S OWN MAP ID WHERE THERE IS ONE. 0.73.0.
+    --
+    -- The name is what the match is MADE on and stays so. It is the wrong
+    -- thing to file the result under: two zones called Nagrand would share
+    -- one entry, and a player walking from one to the other would be handed
+    -- the other one's candidate list. `Blizzard.ZoneMapID` walks up to the
+    -- first ancestor the client itself calls a zone, so it answers with the
+    -- ZONE even when the player is standing in a building inside it -- which
+    -- is the distinction the last three releases kept getting wrong.
+    local matches = zoneIndex[key]
 
     if not matches then
         local needle = string.lower(zone)
@@ -37453,12 +37786,46 @@ local function ZoneRecord(zone)
 
         matches = {}
 
+        -- HOW MANY ROWS THE CLIENT ACTUALLY NAMED. See the guard below.
+        local named, rows = 0, 0
+
         for id, record in pairs(store) do
+            rows = rows + 1
+
+            local live = Blizzard.GetAchievementName
+                and Blizzard.GetAchievementName(id)
+
+            if live and live ~= "" then
+                named = named + 1
+            end
+
             local heldName = Loremaster.NameOf(id, record)
 
             if Names(heldName) then
                 table.insert(matches, { id = id, name = heldName })
             end
+        end
+
+        -- A WALK THE CLIENT REFUSED IS NOT AN ANSWER, AND MUST NOT BE KEPT.
+        -- 0.73.0.
+        --
+        -- Achievement names are not stored -- since 0.64.0 they are asked for
+        -- every time -- so when the client will not answer, which is routine
+        -- for a window after a loading screen and is what every other guard
+        -- in this file exists for, every row resolves to "Achievement 12345"
+        -- and nothing matches. 0.72.0 then cached that empty result
+        -- deliberately, for the session.
+        --
+        -- The Loremaster provider declares `ZONE_CHANGED_NEW_AREA`, so its
+        -- first rebuild after a loading screen runs this walk at exactly that
+        -- cold moment. One badly-timed zone change and the Journey tab's
+        -- "Here" row, the "This zone" block, the provider's rows and the
+        -- turn-in refresh were all silently gone until the next login.
+        if rows > 0 and named == 0 then
+            DebugPrint("Loremaster zone walk: the client named nothing; "
+                .. "not remembering it.")
+
+            return nil
         end
 
         -- Sorted so the list itself does not carry hash order into anything
@@ -37469,7 +37836,7 @@ local function ZoneRecord(zone)
         -- least afford it.
         table.sort(matches, function(a, b) return a.id < b.id end)
 
-        zoneIndex[zone] = matches
+        zoneIndex[key] = matches
     end
 
     local best, bestID, bestName
@@ -37515,7 +37882,20 @@ function Loremaster.ForZone(mapID)
     -- Untested code that gives a different answer from its neighbour, sitting
     -- where the next caller will find it.
     if mapID and mapID ~= CN.GetPlayerPosition() then
-        record, id = ZoneRecord(Blizzard.GetMapName(mapID))
+        -- RESOLVED FIRST, SO A MAP WITH NO NAME IS AN ANSWER OF NONE. 0.73.0.
+        --
+        -- `ZoneRecord` defaults a nil argument to `GetZoneText()`, so passing
+        -- the result of a failed `GetMapName` straight in handed a caller
+        -- asking about zone X the record for the zone the player is standing
+        -- in, with nothing saying so.
+        local named = Blizzard.GetMapName(mapID)
+
+        if not named or named == "" then
+            return nil
+        end
+
+        record, id = ZoneRecord(named,
+            (Blizzard.ZoneMapID and Blizzard.ZoneMapID(mapID)) or mapID)
     else
         record, id = ZoneRecord()
     end
@@ -37553,7 +37933,11 @@ end
 Loremaster.nearlyDoneFraction = 0.6
 
 function Loremaster.NextZones(limit)
-    local rows = Loremaster.Closest(50)
+    -- The one caller that wants room held for zones not yet begun; see the
+    -- note on `Closest`. A quarter of the list, which is the share a player
+    -- sweeping a continent needs and the two "closest to finished" surfaces
+    -- must not have.
+    local rows = Loremaster.Closest(50, 12)
 
     local chased = {}
 
@@ -37971,7 +38355,15 @@ function Loremaster.RefreshCurrentZone()
 
     local key = CN.characterKey or CN.GetCharacterKey()
 
-    local before = record.progress and record.progress[key]
+    -- NORMALIZED, SO "NEVER SEEN" IS NOT "CHANGED". 0.73.0.
+    --
+    -- This read the raw table entry, which is nil for any row this character
+    -- has not scanned -- so `before ~= done` was true even when `done` was 0
+    -- and nothing had moved, costing one spurious
+    -- `CN.InvalidateProvider("Loremaster")` per zone per character.
+    -- `DoneFor` is the function that owns "what has this character done",
+    -- and it answers 0 rather than nil.
+    local before = Loremaster.DoneFor(record) or 0
 
     record.criteria = criteria
 
@@ -39533,8 +39925,27 @@ function Session.NoteOffered(objective)
         -- and needs nothing subtracted. A row WITH coordinates and no
         -- confident cost is still rejected, which is what the paragraph above
         -- is for.
+        -- PLACELESS MEANS NO MAP AT ALL, NOT "NO POINT ON A MAP". 0.73.0.
+        --
+        -- 0.72.0 wrote this as "not (mapID and x and y)", which is true for a
+        -- row that HAS a map and no coordinates -- and `Quests.GetLocation`
+        -- returns exactly that shape whenever a quest's POI has not resolved,
+        -- which is common and temporary. `CN.TravelCost(mapID, nil, nil)`
+        -- answers with the routing constant, so such a row was recorded as a
+        -- KNOWN ZERO journey: ten minutes of flying plus five of questing
+        -- became fifteen minutes of QUEST work, in the highest-volume type
+        -- feeding `/cn plan`'s headline figure.
+        --
+        -- Worse, it sticks: the held estimate is only ever revised DOWNWARD,
+        -- and zero is the floor, so a quest first seen before its POI
+        -- resolved stayed pinned at "known, zero journey" for the rest of its
+        -- life on the list even after it acquired real coordinates.
+        --
+        -- The rows this clause exists for -- instances, the vault, the
+        -- waiting list, sets, orders, inventory -- carry no `mapID` at all.
         travelKnown = cost == nil or cost == 0
-            or not (objective.mapID and objective.x and objective.y)
+            or (objective.mapID == nil
+                and objective.x == nil and objective.y == nil)
     end
 
     local held = offeredAt[key]
@@ -53677,7 +54088,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.72.0
+## Version: 0.73.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -53932,6 +54343,76 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.73.0]
+
+**Last release removed the only thing telling the two Nagrands apart.** 0.72.0
+was right that the persisted map stamp was broken — it came from the map you
+are standing *on*, which indoors is a building — and wrong to conclude that
+the zone name could replace it. Retail ships two zones called Nagrand, two
+called Shadowmoon Valley and two called Dalaran. This release asks the client
+the question it was actually being asked: not "which map am I standing on" but
+"which zone is this", answered by walking up to the first ancestor the client
+itself calls a zone.
+
+### Fixed — zone identity, for the fourth and last time
+
+- **Standing in Draenor's Nagrand showed progress for Outland's.** The name
+  match is right and stays; the ordering now prefers the achievement whose
+  category is the continent you are on, and falls through to the previous rule
+  whenever the client will not name one. It never decides on a guess.
+- **A zone walked while the client was cold stayed empty for the session.**
+  Achievement names are asked for, not stored, so in the seconds after a
+  loading screen every row resolves to a placeholder and nothing matches —
+  and 0.72.0 cached that empty result deliberately. The Loremaster provider
+  wakes on zone changes, so one badly-timed loading screen silently removed
+  the Journey tab's "Here" row, the "This zone" block, the provider's rows and
+  the turn-in refresh until the next login. A walk the client refused is no
+  longer an answer, and the index is cleared on every loading screen.
+- **A scan that measured nothing left the stale index in place**, because the
+  invalidation sat below the early return — on the one scan most likely to
+  have run against a cold client.
+- **`ForZone` for an unknown map answered about the zone you are standing
+  in.** A nil name fell through to the default.
+
+### Fixed — what the addon learns and what it shows
+
+- **Upgrading destroyed every alt's friendship rank.** 0.72.0 wrote a
+  paragraph explaining that a friendship's rank is the one standing the client
+  will not re-supply for another character, moved it to its own field, and
+  then had the migration delete every existing copy. It is carried across now.
+  This is a correction to a defect that already shipped: if you upgraded
+  through 0.72.0, your alts' friendship ranks are gone and nothing can bring
+  them back — each character restores its own the next time it logs in.
+- **`/cn plan` was being taught that flights are free.** A quest whose map pin
+  has not resolved yet reports a map and no point on it, and 0.72.0's test for
+  "this row has no place in it" was true for that shape — so ten minutes of
+  flying plus five of questing was recorded as fifteen minutes of quest work,
+  in the highest-volume type feeding the planner's headline figure. Worse, it
+  stuck: the estimate is only ever revised downward and zero is the floor.
+- **Two lists headed "closest to finished" held rooms for zones never
+  begun** — three rows of `0 / 120` with an empty bar, displacing three
+  genuinely nearly-done zones. The reserve was written for `/cn zones` and
+  applied to every caller.
+- **`/cn setup` reported a clean bill for a scan that recorded nothing**, and
+  stamped setup as complete — which silences the login reminder. Setup is most
+  often run right after logging in, which is exactly when the game refuses.
+  The Journey tab's "Rescan zones" button now says whether it worked, too.
+- **An achievement that crossed the "nearly done" boundary still did not reach
+  `/cn next`.** 0.72.0 moved that sweep onto the shared throttle so the last
+  update in a burst would count; the trailing run then told the shortlist and
+  not the ranking, and the ranking had already rebuilt five seconds earlier.
+  Both sibling handlers do this correctly.
+- **A quest you picked up stayed on the map as one waiting to be picked up.**
+  0.72.0 removed the full sweep from every turn-in, correctly, and justified
+  it with a login hook that did not exist — so rows dead for any reason other
+  than a turn-in sat in the store, and every read filtered them at two client
+  calls each. The login sweep exists now, and accepting a quest drops its pin.
+- **The tooltip recovered the "over 20m" figure by stripping the word "over"
+  off the front of its own sentence.** The number is passed now, and both
+  surfaces phrase the fact the same way.
+- **The first sight of a zone was reported as a change to it,** costing one
+  needless ranking rebuild per zone per character.
 
 ## [0.72.0]
 
@@ -59870,7 +60351,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.72.0
+0.73.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -62885,7 +63366,7 @@ mutate "Modules/Filters.lua" \
     "an id that is not a number is described with the internal enum"
 
 mutate "Modules/Setup.lua" \
-    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\" }," \
+    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\", measured = true }," \
     "" \
     "a new character never scans the one store with a per-character split"
 
@@ -63137,8 +63618,8 @@ mutate "Modules/Loremaster.lua" \
     "the zone match is an unanchored substring again"
 
 mutate "Modules/Loremaster.lua" \
-    "    zone = zone or (GetZoneText and GetZoneText())" \
-    "    zone = Blizzard.GetMapName(CN.GetPlayerPosition())" \
+    "        zone = GetZoneText and GetZoneText()" \
+    "        zone = Blizzard.GetMapName(CN.GetPlayerPosition())" \
     "standing in a city finds no zone at all"
 
 mutate "Modules/Loremaster.lua" \
@@ -63165,7 +63646,7 @@ mutate "Modules/Reputations.lua" \
 # ---- 0.72.0 ----
 
 mutate "Modules/Loremaster.lua" \
-    "    local matches = zoneIndex[zone]
+    "    local matches = zoneIndex[key]
 
     if not matches then" \
     "    local matches = nil
@@ -63174,13 +63655,13 @@ mutate "Modules/Loremaster.lua" \
     "every criteria update walks the whole achievement store again"
 
 mutate "Modules/Loremaster.lua" \
-    "        zoneIndex[zone] = matches" \
-    "        if #matches > 0 then zoneIndex[zone] = matches end" \
+    "        zoneIndex[key] = matches" \
+    "        if #matches > 0 then zoneIndex[key] = matches end" \
     "a zone with no achievement pays the full walk on every event"
 
 mutate "Modules/Loremaster.lua" \
-    "    local fresh = math.min(#untouched, freshShare or math.floor(limit / 4))" \
-    "    local fresh = 0" \
+    "    local rows = Loremaster.Closest(50, 12)" \
+    "    local rows = Loremaster.Closest(50)" \
     "a zone never begun cannot be recommended to a player who has begun many"
 
 mutate "Modules/Loremaster.lua" \
@@ -63195,13 +63676,15 @@ mutate "Modules/Loremaster.lua" \
 
 mutate "Modules/Session.lua" \
     "        travelKnown = cost == nil or cost == 0
-            or not (objective.mapID and objective.x and objective.y)" \
+            or (objective.mapID == nil
+                and objective.x == nil and objective.y == nil)" \
     "        travelKnown = cost == nil or cost == 0" \
     "the planner can never learn how long an instance takes"
 
 mutate "Modules/Session.lua" \
     "        travelKnown = cost == nil or cost == 0
-            or not (objective.mapID and objective.x and objective.y)" \
+            or (objective.mapID == nil
+                and objective.x == nil and objective.y == nil)" \
     "        travelKnown = true" \
     "a journey the model stopped counting is subtracted from a measured span"
 
@@ -63230,6 +63713,111 @@ mutate "Modules/Exploration.lua" \
     "    return before ~= done" \
     "    return true" \
     "every criteria update throws away the exploration provider's cached rows"
+
+# ---- 0.73.0 ----
+
+mutate "Providers/BlizzardWorld.lua" \
+    "        if (info.mapType or 0) == Blizzard.zoneMapType then
+            return current
+        end" \
+    "        if true then
+            return current
+        end" \
+    "the zone a player is in is the room they are standing in again"
+
+mutate "Modules/Loremaster.lua" \
+    "    if heldHere ~= nil and mineHere ~= nil and heldHere ~= mineHere then
+        return mineHere
+    end" \
+    "    if false then
+        return mineHere
+    end" \
+    "standing in one Nagrand shows progress for the other one"
+
+mutate "Modules/Loremaster.lua" \
+    "    if heldHere ~= nil and mineHere ~= nil and heldHere ~= mineHere then
+        return mineHere
+    end" \
+    "    if heldHere ~= mineHere then
+        return mineHere and true or false
+    end" \
+    "a client that will not name a continent decides the zone on a guess"
+
+mutate "Modules/Loremaster.lua" \
+    "        if rows > 0 and named == 0 then" \
+    "        if false then" \
+    "a zone walked while the client was cold is empty for the session"
+
+mutate "Modules/Loremaster.lua" \
+    "    local fresh = math.min(#untouched, freshShare or 0)" \
+    "    local fresh = math.min(#untouched, freshShare or math.floor(limit / 4))" \
+    "a list headed closest to finished holds zones never begun"
+
+mutate "Modules/Loremaster.lua" \
+    "    local before = Loremaster.DoneFor(record) or 0" \
+    "    local before = record.progress and record.progress[key]" \
+    "the first sight of a zone is reported as a change to it"
+
+mutate "Modules/Loremaster.lua" \
+    "        local named = Blizzard.GetMapName(mapID)
+
+        if not named or named == \"\" then
+            return nil
+        end" \
+    "        local named = Blizzard.GetMapName(mapID)" \
+    "asking about an unknown map answers about the zone you are standing in"
+
+mutate "Modules/Session.lua" \
+    "            or (objective.mapID == nil
+                and objective.x == nil and objective.y == nil)" \
+    "            or not (objective.mapID and objective.x and objective.y)" \
+    "a quest whose pin has not resolved teaches the planner a zero journey"
+
+mutate "Database.lua" \
+    "                        record.friendshipStanding = record.standing" \
+    "                        record.friendshipStanding = nil" \
+    "upgrading destroys every alt's friendship rank"
+
+mutate "Modules/Setup.lua" \
+    "    if step.measured and second == 0 then" \
+    "    if false then" \
+    "setup reports a clean bill for scans that recorded nothing"
+
+mutate "Modules/Achievements.lua" \
+    "        if crossed then
+            CN.InvalidateProvider(\"Achievements\")
+        end" \
+    "        if false then
+            CN.InvalidateProvider(\"Achievements\")
+        end" \
+    "an achievement that became nearly done does not reach the ranking"
+
+mutate "Modules/Quests.lua" \
+    "    if questID then
+        local store = Remembered()
+
+        if store[questID] then
+            store[questID] = nil
+            Quests.pinRevision = Quests.pinRevision + 1
+        end
+    end
+end)" \
+    "end)" \
+    "a quest picked up is still shown as one waiting to be picked up"
+
+mutate "Scoring.lua" \
+    "        return text and (\"over \" .. text) or nil, false, text" \
+    "        return text and (\"over \" .. text) or nil, false" \
+    "the tooltip parses the far-away figure back out of its own sentence"
+
+mutate "Modules/Harvest.lua" \
+    "    if not questID then
+        return
+    end
+
+    table.insert(recentTurnIns, 1, { questID = questID, at = time() })" \
+    "    table.insert(recentTurnIns, 1, { questID = questID, at = time() })" \
+    "a turn-in the client did not name throws on the next quest accepted"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -65595,6 +66183,22 @@ local achievementCategories = {
     [97] = { name = "Dragon Isles",    parent = 96 },
     [11] = { name = "Not A Quest Cat", parent = -1 },
 }
+
+-- A test needs to be able to name a category after the continent the fixture
+-- player is standing on -- that comparison is the 0.73.0 tie-break between
+-- two zones with one name.
+function CN_TEST_SetCategoryName(categoryID, name)
+    if not name then
+        achievementCategories[categoryID] = nil
+
+        return
+    end
+
+    achievementCategories[categoryID] =
+        achievementCategories[categoryID] or { parent = 96 }
+
+    achievementCategories[categoryID].name = name
+end
 
 function GetCategoryInfo(categoryID)
     local entry = achievementCategories[categoryID]
@@ -91235,12 +91839,17 @@ end)()
     for index = 1, 60 do
         local id = 998900 + index
 
+        -- CRITERIA WELL ABOVE THE PROGRESS, so all sixty are genuinely
+        -- unfinished: at 40 criteria the later rows were already past their
+        -- own total and were filtered out, leaving fewer started zones than
+        -- the limit -- which is the one shape where the reserve does not
+        -- matter and so cannot be tested.
         records[id] = {
-            achievementID = id, categoryID = 1, criteria = 40,
+            achievementID = id, categoryID = 1, criteria = 120,
             completed = false, progress = { [key] = 10 + index },
         }
 
-        CN_TEST_MakeAchievement(id, "Started " .. index, 40, 10 + index)
+        CN_TEST_MakeAchievement(id, "Started " .. index, 120, 10 + index)
     end
 
     for index = 1, 20 do
@@ -91265,7 +91874,9 @@ end)()
         return realName(...)
     end
 
-    local rows = lore.Closest(12)
+    -- ASKED WITH A RESERVE, which is what `NextZones` does. The two surfaces
+    -- headed "closest to finished" ask without one; see below.
+    local rows = lore.Closest(12, 3)
 
     CN.Blizzard.GetAchievementName = realName
 
@@ -91292,12 +91903,47 @@ end)()
     assert(fresh > 0,
         "a zone not yet begun survives a list full of started ones")
 
+    -- AND ONLY WHEN THE CALLER ASKED FOR IT. 0.73.0.
+    --
+    -- The Journey tab and `/cn loremaster` are both headed "closest to
+    -- finished". 0.72.0 gave them a reserve they never asked for, so a player
+    -- with sixty half-done zones read three rows of `0 / 120` with an empty
+    -- bar under that heading, and three nearly-done zones were pushed off to
+    -- make room.
+    local plain = lore.Closest(12)
+
+    for _, row in ipairs(plain) do
+        assert(row.done > 0,
+            "a list headed 'closest to finished' holds no room for zones "
+            .. "never begun: " .. tostring(row.name))
+    end
+
     for _, row in ipairs(rows) do
         assert(row.name and row.name ~= "",
             "and every row that IS returned carries its name")
         assert(row.record == nil,
             "and does not carry the store record out with it")
     end
+
+    -- AND `/cn zones`, THE ONE CALLER THAT ASKS FOR THE RESERVE, GETS IT.
+    --
+    -- The reserve is passed at the call site now rather than defaulted inside
+    -- `Closest`, so the assertion that matters is on `NextZones`: with sixty
+    -- zones in progress and twenty never begun, the fresh ones must still
+    -- reach the list a player is shown.
+    local suggested = lore.NextZones(50)
+
+    local suggestedFresh = 0
+
+    for _, row in ipairs(suggested or {}) do
+        if (row.done or 0) == 0 then
+            suggestedFresh = suggestedFresh + 1
+        end
+    end
+
+    assert(suggestedFresh > 0,
+        "a zone never begun is still recommended to a player who has begun "
+        .. "sixty of them")
 
     -- A SMALL LIMIT IS STILL "CLOSEST TO DONE" and reserves nothing.
     local two = lore.Closest(2)
@@ -91445,8 +92091,23 @@ end)()
         "and it costs no walk of the store at all: " .. calls .. " calls")
 
     -- A CLIENT THAT DOES NOT SAY WHICH still gets the sweep, rather than
-    -- leaving a stale pin on the map.
+    -- leaving a stale pin on the map -- AND NOTHING DOWNSTREAM THROWS ON IT.
+    --
+    -- `Harvest` filed the turn-in under its quest id and then used that id as
+    -- a table key on the next `QUEST_ACCEPTED`, so a nil one threw there
+    -- rather than here. The dispatcher catches a handler error and records
+    -- it, which is why this asserts on the error ring rather than on the
+    -- dispatch returning.
+    local errors = CN:GetModule("Errors")
+
+    local errorsBefore = errors and errors.Count() or 0
+
     CN.Dispatch("QUEST_TURNED_IN")
+    CN.Dispatch("QUEST_ACCEPTED", 970007)
+
+    assert((errors and errors.Count() or 0) == errorsBefore,
+        "a turn-in the client did not name is survivable, here and in "
+        .. "everything listening downstream of it")
 
     for id in pairs(store) do
         store[id] = nil
@@ -91620,6 +92281,465 @@ end)()
     end
 
     print("  a vendor lookup happens once per item, not once per closure")
+end)()
+
+print("\nWhat 0.73.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- WHICH ZONE THE PLAYER IS IN IS NOT WHICH MAP THEY ARE STANDING ON.
+    ------------------------------------------------------------
+    local Blizzard = CN.Blizzard
+
+    -- Valdrakken is mapType 4 -- a city inside The Waking Shores, which is
+    -- mapType 3. `GetBestMapForUnit` answers with the city; the question
+    -- "which zone is this" is answered by the first ancestor the CLIENT calls
+    -- a zone. Three releases used the first for the second and each produced
+    -- a different defect from it.
+    assert(Blizzard.ZoneMapID(2112) == 2022,
+        "standing in a capital, the zone is the zone around it, got "
+        .. tostring(Blizzard.ZoneMapID(2112)))
+
+    assert(Blizzard.ZoneMapID(2022) == 2022,
+        "and a zone is its own zone")
+
+    assert(Blizzard.ZoneMapID(nil) == nil,
+        "and nowhere is nowhere")
+
+    -- Above a zone there is no zone; the specific map is the best identity
+    -- available rather than nothing.
+    assert(Blizzard.ZoneMapID(1978) == 1978,
+        "a continent answers with itself rather than walking off the top")
+
+    assert(Blizzard.ContinentName(2112) == "Dragon Isles",
+        "and the continent is reachable from inside a building on it: "
+        .. tostring(Blizzard.ContinentName(2112)))
+
+    print("  the zone a player is in is asked for as the zone, not the room")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- TWO ZONES WITH ONE NAME ARE TOLD APART BY THE CONTINENT.
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    lore.Scan()
+    lore.ForgetZoneIndex()
+
+    local records = lore.Records()
+
+    local zone = GetZoneText()
+
+    -- Retail has two Nagrands, two Shadowmoon Valleys and two Dalarans. Both
+    -- of a pair end in the same zone name, so the name -- which is all 0.72.0
+    -- had, after it removed the broken map stamp -- cannot separate them.
+    local here, farAway = 997701, 997702
+
+    local hereCategory, farAwayCategory = 8801, 8802
+
+    CN_TEST_SetCategoryName(hereCategory, CN.Blizzard.ContinentName(
+        CN.GetPlayerPosition()))
+    CN_TEST_SetCategoryName(farAwayCategory, "Another Continent Entirely")
+
+    records[here] = {
+        achievementID = here, categoryID = hereCategory, criteria = 10,
+        completed = false, progress = {},
+    }
+
+    records[farAway] = {
+        achievementID = farAway, categoryID = farAwayCategory,
+        criteria = 10, completed = false, progress = {},
+    }
+
+    -- The one on the OTHER continent is deliberately given the shorter name
+    -- and the lower id, so it wins on every tie-break that is not the
+    -- continent -- which is exactly the shape of the real defect: the lower
+    -- id is always the older, Outland one.
+    CN_TEST_MakeAchievement(farAway, zone, 10, 0)
+    CN_TEST_MakeAchievement(here, "Adventurer of " .. zone, 10, 0)
+
+    lore.ForgetZoneIndex()
+
+    local picked = select(2, lore.ZoneRecord())
+
+    assert(picked == here,
+        "the zone on the continent the player is standing on wins, even "
+        .. "against a shorter name and a lower id: " .. tostring(picked))
+
+    -- AND WHEN THE CLIENT WILL NOT SAY, THE STEP SIMPLY DOES NOT APPLY.
+    -- It never decides on a guess.
+    CN_TEST_SetCategoryName(hereCategory, nil)
+    CN_TEST_SetCategoryName(farAwayCategory, nil)
+
+    lore.ForgetZoneIndex()
+
+    assert(select(2, lore.ZoneRecord()) == farAway,
+        "with no continent to compare, the ordering falls through to the "
+        .. "shortest name as before")
+
+    records[here], records[farAway] = nil, nil
+    lore.ForgetZoneIndex()
+
+    print("  two zones sharing a name are told apart by the continent")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A WALK THE CLIENT REFUSED IS NOT AN ANSWER TO REMEMBER.
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    lore.Scan()
+    lore.ForgetZoneIndex()
+
+    assert(lore.ZoneRecord(), "the zone resolves normally to begin with")
+
+    lore.ForgetZoneIndex()
+
+    -- Achievement names are not stored -- they are asked for every time --
+    -- so a client that will not answer makes every row resolve to
+    -- "Achievement 12345" and nothing matches. 0.72.0 cached that empty
+    -- result for the session, and the Loremaster provider declares
+    -- ZONE_CHANGED_NEW_AREA, so its first rebuild after a loading screen ran
+    -- the walk at exactly that moment.
+    local realName = CN.Blizzard.GetAchievementName
+
+    CN.Blizzard.GetAchievementName = function() return nil end
+
+    assert(lore.ZoneRecord() == nil,
+        "a client that names nothing matches nothing")
+
+    CN.Blizzard.GetAchievementName = realName
+
+    assert(lore.ZoneRecord(),
+        "and the refusal is not remembered: the zone resolves again the "
+        .. "moment the client will answer")
+
+    -- AND A LOADING SCREEN CLEARS IT OUTRIGHT, which retires the class
+    -- rather than guarding one instance of it.
+    CN.Dispatch("PLAYER_ENTERING_WORLD")
+
+    assert(lore.ZoneRecord(), "and it still resolves after a loading screen")
+
+    -- AND THE FIRST SIGHT OF A ZONE IS NOT A CHANGE TO IT.
+    --
+    -- `RefreshCurrentZone` read the raw per-character entry, which is nil for
+    -- any row this character has not scanned -- so "before ~= done" was true
+    -- even when done was 0 and nothing had moved, costing one needless
+    -- ranking rebuild per zone per character.
+    local records = lore.Records()
+
+    local held, heldID = lore.ZoneRecord()
+
+    assert(held and heldID, "the zone resolves")
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function() return 0, 12 end
+
+    held.progress = {}
+
+    local first = lore.RefreshCurrentZone()
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(first == false,
+        "seeing a zone for the first time at zero is not a change to it")
+
+    records[heldID] = held
+
+    print("  a zone walk the client refused is not cached for the session")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MAP WITH NO NAME IS AN ANSWER OF NONE, NOT OF "HERE".
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    -- `ZoneRecord` defaults a nil zone to `GetZoneText()`, so handing it the
+    -- result of a failed `GetMapName` gave a caller asking about zone X the
+    -- record for the zone the player is standing in, with nothing saying so.
+    local realMapName = CN.Blizzard.GetMapName
+
+    CN.Blizzard.GetMapName = function(id)
+        if id == 4242424 then
+            return nil
+        end
+
+        return realMapName(id)
+    end
+
+    local answered = lore.ForZone(4242424)
+
+    CN.Blizzard.GetMapName = realMapName
+
+    assert(answered == nil,
+        "a map the client cannot name answers nothing, rather than "
+        .. "answering about somewhere else: "
+        .. tostring(answered and answered.name))
+
+    print("  a question about an unknown map is not answered about this one")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MAP WITH NO POINT ON IT IS NOT A KNOWN ZERO JOURNEY.
+    ------------------------------------------------------------
+    local session = CN:GetModule("Session")
+
+    session.Durations()[CN.objectiveTypes.QUEST] = nil
+
+    CN_TEST_CLOCK = (CN_TEST_CLOCK or 0) + 1000
+
+    -- `Quests.GetLocation` returns `mapID, nil, nil` whenever a quest's POI
+    -- has not resolved -- common and temporary. 0.72.0's placeless test was
+    -- `not (mapID and x and y)`, which is TRUE for that shape, so ten minutes
+    -- of flying plus five of questing was recorded as fifteen minutes of
+    -- QUEST work: the highest-volume type feeding `/cn plan`'s headline.
+    session.NoteOffered({
+        type       = CN.objectiveTypes.QUEST,
+        id         = 973001,
+        mapID      = 2248,
+        travelCost = 8,
+    })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 900
+
+    assert(session.NoteCompleted(CN.objectiveTypes.QUEST, 973001) == nil,
+        "a quest on a map with no point on it has a journey nobody measured, "
+        .. "so its span teaches nothing")
+
+    -- The rows the clause exists for carry no map at all.
+    session.Durations()[CN.objectiveTypes.INSTANCE] = nil
+
+    session.NoteOffered({
+        type = CN.objectiveTypes.INSTANCE, id = 973002, travelCost = 3,
+    })
+
+    CN_TEST_CLOCK = CN_TEST_CLOCK + 300
+
+    assert(session.NoteCompleted(CN.objectiveTypes.INSTANCE, 973002),
+        "and a genuinely placeless row is still a sample")
+
+    print("  a map with no point on it is not a journey of zero")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ONE STANDING THE CLIENT WILL NOT RE-SUPPLY IS CARRIED, NOT CUT.
+    ------------------------------------------------------------
+    -- 0.72.0 wrote the paragraph explaining that a friendship's rank is free
+    -- text the client answers for the logged-in character only, moved it to
+    -- its own field, and then had the migration delete every existing copy.
+    local aged = {
+        version = 22,
+        account = { reputations = {
+            [2600] = { kind = "FRIENDSHIP", standing = "Best Friend",
+                       reaction = 5 },
+            [2601] = { kind = "RENOWN", standing = "Renown 12",
+                       renownLevel = 12 },
+        } },
+        characters = { ["A-B"] = { reputations = {
+            [2602] = { kind = "FRIENDSHIP", standing = "Trusted",
+                       reaction = 4 },
+        } } },
+    }
+
+    CN.RunMigrations(aged)
+
+    local repStore = aged.account.reputations
+
+    assert(repStore[2600].friendshipStanding == "Best Friend",
+        "a friendship's rank is carried to its new field, not destroyed: "
+        .. tostring(repStore[2600].friendshipStanding))
+
+    assert(repStore[2600].standing == nil,
+        "and the old field is still removed")
+
+    assert(aged.characters["A-B"].reputations[2602].friendshipStanding
+        == "Trusted",
+        "on every character's store, not only the account's")
+
+    assert(repStore[2601].friendshipStanding == nil,
+        "and a renown standing, which IS re-derivable, is not carried")
+
+    print("  a friendship rank survives the migration that removes the rest")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCAN THAT MEASURED NOTHING IS NOT A COMPLETED SETUP STEP.
+    ------------------------------------------------------------
+    local setupModule = CN:GetModule("Setup")
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function() return 0, 0 end
+
+    local ok = setupModule.RunStep({
+        module = "Loremaster", fn = "Scan", measured = true,
+    })
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    -- `/cn setup` printed "Loremaster: 412 quest achievements" over a store
+    -- that recorded nothing, counted the step ok, and stamped `completedAt`
+    -- -- which silences the login reminder and makes `/cn setup check`
+    -- report a clean bill. Setup is most often run right after logging in,
+    -- which is when the criteria API refuses.
+    assert(ok == false,
+        "a scan the client would not answer for is not a completed step")
+
+    assert(setupModule.RunStep({ module = "Loremaster", fn = "Scan",
+        measured = true }),
+        "and one that did measure something is")
+
+    print("  a setup step that measured nothing is not counted as done")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE FAR-AWAY PHRASE IS NOT PARSED BACK OUT OF ITS OWN SENTENCE.
+    ------------------------------------------------------------
+    local travel = CN:GetModule("Travel")
+
+    local text, exact, ceiling = CN.TravelText({
+        mapID = 2248, x = 0.5, y = 0.5,
+        travelCost = travel.maximumCost, travelCosted = true,
+    })
+
+    assert(text and exact == false,
+        "past the clamp the figure is a floor")
+
+    assert(ceiling and not string.find(ceiling, "over", 1, true),
+        "and the bare duration is handed over, so no caller has to strip a "
+        .. "word off the front of a sentence: " .. tostring(ceiling))
+
+    local line = CN.UI.DistanceLine(2248, 0.5, 0.5)
+
+    if line then
+        assert(not string.find(line, "over", 1, true),
+            "and the tooltip composes its own sentence: " .. tostring(line))
+    end
+
+    print("  the far-away figure is passed, not parsed")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A QUEST PICKED UP LEAVES THE MAP, AND A SWEEP RUNS AT LOGIN.
+    ------------------------------------------------------------
+    local quests = CN:GetModule("Quests")
+
+    local store = quests.Remembered()
+
+    for id in pairs(store) do
+        store[id] = nil
+    end
+
+    store[971001] = { mapID = 2248, x = 0.5, y = 0.5 }
+    store[971002] = { mapID = 2248, x = 0.6, y = 0.6 }
+
+    CN.Dispatch("QUEST_ACCEPTED", 971001)
+
+    assert(store[971001] == nil,
+        "a quest now in the log is no longer waiting to be picked up")
+
+    assert(store[971002] ~= nil, "and nothing else is touched")
+
+    -- 0.72.0 replaced the full sweep on every turn-in -- rightly -- and
+    -- justified it with a login hook that did not exist, so rows dead for any
+    -- reason other than a turn-in sat until the store crossed its cap, and
+    -- every read filtered them at two client calls a row.
+    local text = CN_TEST_ReadAddonFile("Modules/Quests.lua")
+
+    assert(text and string.find(text, "Quests.PruneRemembered()", 1, true),
+        "the sweep the comment promises exists")
+
+    for id in pairs(store) do
+        store[id] = nil
+    end
+
+    print("  a quest picked up leaves the map, and the sweep runs at login")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CROSSED BOUNDARY REACHES THE RANKING.
+    ------------------------------------------------------------
+    local text = CN_TEST_ReadAddonFile("Modules/Achievements.lua")
+
+    assert(text, "Modules/Achievements.lua must be readable")
+
+    -- The trailing run is the whole reason 0.72.0 moved this onto
+    -- `CN.Debounce`, and it bumped only the shortlist revision. The provider
+    -- is marked dirty by its own CRITERIA_UPDATE subscription, which fires
+    -- five seconds EARLIER, during the burst -- so the row that crossed the
+    -- boundary still did not reach `/cn next`. Both sibling handlers
+    -- invalidate from inside their debounced bodies.
+    assert(string.find(text, 'CN.InvalidateProvider("Achievements")', 1, true),
+        "the criteria sweep tells the ranking when a row crossed the "
+        .. "boundary it watches")
+
+    -- AND IT IS OBSERVED, not merely present in the source. A guard written
+    -- `if false then` leaves the call sitting there for a text search to
+    -- find, which is the shape this suite has been fooled by before.
+    local achievements = CN:GetModule("Achievements")
+
+    achievements.Scan()
+
+    local watched = (achievements.Shortlist() or {})[1]
+
+    watched = watched and watched.id
+
+    assert(watched, "the fixture has something on the shortlist")
+
+    local store = achievements.Store()
+
+    local record = store[watched]
+
+    assert(record and (record.criteria or 0) > 0, "and it has criteria")
+
+    -- Park it well short of the boundary, then move it across.
+    record.done = 0
+
+    local invalidated = 0
+
+    local realInvalidate = CN.InvalidateProvider
+
+    CN.InvalidateProvider = function(name, ...)
+        if name == "Achievements" then
+            invalidated = invalidated + 1
+        end
+
+        return realInvalidate(name, ...)
+    end
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function(id)
+        if id == watched then
+            -- One short of finished: `IsNearlyDone` requires something to
+            -- still be left, so "all done" is not "nearly done".
+            return record.criteria - 1, record.criteria
+        end
+
+        return realProgress(id)
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+    CN.InvalidateProvider = realInvalidate
+
+    assert(invalidated > 0,
+        "a row that crossed the nearly-done boundary rebuilds the ranking, "
+        .. "rather than only the shortlist the ranking already read")
+
+    print("  a criteria burst that changed the shortlist rebuilds the ranking")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

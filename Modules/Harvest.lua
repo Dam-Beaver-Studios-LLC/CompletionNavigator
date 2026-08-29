@@ -275,6 +275,18 @@ function Harvest.ResetRecent()
 end
 
 function Harvest.NoteTurnIn(questID)
+    -- A TURN-IN WITH NO ID IS NOT A TURN-IN. 0.73.0.
+    --
+    -- The client always names the quest, so this was latent -- but the id is
+    -- used as a TABLE KEY a few lines down, in `observed[entry.questID]`, and
+    -- a nil key throws rather than degrading. A harness dispatch without one
+    -- found it, and the rule here is that a stub must not be more forgiving
+    -- than the client: if the addon can be reached with no id, it must
+    -- survive being reached with no id.
+    if not questID then
+        return
+    end
+
     table.insert(recentTurnIns, 1, { questID = questID, at = time() })
 
     for index = #recentTurnIns, 6, -1 do

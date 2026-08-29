@@ -443,6 +443,23 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
     CN.Debounce("Achievements.criteria",
         Achievements.criteriaSweepSeconds, function()
 
+        -- AND THE RANKING IS TOLD. 0.73.0.
+        --
+        -- The trailing run is the one that matters -- it is the whole reason
+        -- 0.72.0 moved this onto `CN.Debounce` -- and it bumped
+        -- `Achievements.revision`, which busts the SHORTLIST cache and
+        -- nothing else. The provider is marked dirty by its own
+        -- `CRITERIA_UPDATE` subscription, which fires DURING the burst, five
+        -- seconds before this runs. So a row crossing the "nearly done"
+        -- boundary still did not reach `/cn next` until an unrelated criteria
+        -- update happened along -- the exact case 0.72.0's note claims to
+        -- have fixed.
+        --
+        -- `Exploration` and `Loremaster` both invalidate from inside their
+        -- debounced bodies. This was the missed sibling, one release after
+        -- the throttle was copied from them.
+        local crossed = false
+
         -- THE SHORTLIST, NOT THE WHOLE STORE. 0.62.0.
         --
         -- This walked every incomplete tracked achievement and called
@@ -510,9 +527,14 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
                     -- shortlist constantly and give back the saving.
                     if wasNear ~= IsNearlyDone(record) then
                         Achievements.revision = Achievements.revision + 1
+                        crossed = true
                     end
                 end
             end
+        end
+
+        if crossed then
+            CN.InvalidateProvider("Achievements")
         end
     end)
 end)

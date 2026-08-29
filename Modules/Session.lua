@@ -640,8 +640,27 @@ function Session.NoteOffered(objective)
         -- and needs nothing subtracted. A row WITH coordinates and no
         -- confident cost is still rejected, which is what the paragraph above
         -- is for.
+        -- PLACELESS MEANS NO MAP AT ALL, NOT "NO POINT ON A MAP". 0.73.0.
+        --
+        -- 0.72.0 wrote this as "not (mapID and x and y)", which is true for a
+        -- row that HAS a map and no coordinates -- and `Quests.GetLocation`
+        -- returns exactly that shape whenever a quest's POI has not resolved,
+        -- which is common and temporary. `CN.TravelCost(mapID, nil, nil)`
+        -- answers with the routing constant, so such a row was recorded as a
+        -- KNOWN ZERO journey: ten minutes of flying plus five of questing
+        -- became fifteen minutes of QUEST work, in the highest-volume type
+        -- feeding `/cn plan`'s headline figure.
+        --
+        -- Worse, it sticks: the held estimate is only ever revised DOWNWARD,
+        -- and zero is the floor, so a quest first seen before its POI
+        -- resolved stayed pinned at "known, zero journey" for the rest of its
+        -- life on the list even after it acquired real coordinates.
+        --
+        -- The rows this clause exists for -- instances, the vault, the
+        -- waiting list, sets, orders, inventory -- carry no `mapID` at all.
         travelKnown = cost == nil or cost == 0
-            or not (objective.mapID and objective.x and objective.y)
+            or (objective.mapID == nil
+                and objective.x == nil and objective.y == nil)
     end
 
     local held = offeredAt[key]

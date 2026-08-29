@@ -1230,6 +1230,29 @@ CN.migrations = {
 
             for _, record in pairs(store) do
                 if type(record) == "table" then
+                    -- CARRIED, NOT DELETED, FOR THE ONE KIND THAT NEEDS IT.
+                    -- Corrected in 0.73.0, before this shipped a second time.
+                    --
+                    -- 0.72.0 wrote a paragraph saying a friendship's rank is
+                    -- the one standing the client will not re-supply for an
+                    -- alt, moved it to `friendshipStanding`, and then had
+                    -- this loop delete every existing copy of it. No row
+                    -- written before 0.72.0 carries the new field, so every
+                    -- alt's friendship rank would have been destroyed on
+                    -- upgrade -- and shown as a standard 1-8 label, or as
+                    -- nothing, in `/cn rep`, `/cn who rep`, `/cn alts` and
+                    -- the Warband tab.
+                    --
+                    -- The store cannot be rebuilt by logging in: that is the
+                    -- entire reason the field is kept.
+                    if record.kind == "FRIENDSHIP"
+                        and record.friendshipStanding == nil
+                        and type(record.standing) == "string"
+                        and record.standing ~= "" then
+
+                        record.friendshipStanding = record.standing
+                    end
+
                     record.standing = nil
                 end
             end

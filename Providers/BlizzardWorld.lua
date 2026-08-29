@@ -919,6 +919,108 @@ function Blizzard.GetMapInfo(mapID)
     return ok and info or nil
 end
 
+-- WHICH ZONE THE PLAYER IS IN, AS AN ID. 0.73.0.
+--
+-- `GetBestMapForUnit` answers with the most SPECIFIC map containing you: in
+-- Dornogal it says Dornogal, in a cave it says the cave. That is the right
+-- answer for "where exactly am I" and the wrong one for "which zone is this",
+-- and three releases running have used it for the second question:
+--
+--   0.70.0 matched achievements against `GetMapName(GetBestMapForUnit())`,
+--          so nothing matched indoors;
+--   0.71.0 matched on `GetZoneText()` and then CACHED under the same wrong
+--          id, so the cache never converged and wrote a different value on
+--          each side of a doorway;
+--   0.72.0 dropped the id entirely and keyed on the zone NAME, which is
+--          right for the match and cannot separate Outland's Nagrand from
+--          Draenor's -- a distinction `Exploration` documents by name and
+--          which had been held, until then, by the id.
+--
+-- The answer to the actual question is up the parent chain: the first
+-- ancestor the client itself calls a zone. `mapType` 3 is Zone; 4 and above
+-- are dungeon and micro maps, which is where a capital's interior lives. Two
+-- or three hops, no allocation, and unlike a name it cannot be duplicated.
+--
+-- Falls back to the specific map when the walk finds no zone above it, so a
+-- caller always gets the best available identity rather than nothing.
+Blizzard.zoneMapType = 3
+
+function Blizzard.ZoneMapID(mapID)
+    if not mapID then
+        return nil
+    end
+
+    local current = mapID
+    local guard   = 0
+
+    while current and guard < 8 do
+        local info = Blizzard.GetMapInfo(current)
+
+        if not info then
+            return mapID
+        end
+
+        if (info.mapType or 0) == Blizzard.zoneMapType then
+            return current
+        end
+
+        -- Above a zone: a continent or the world. The specific map is the
+        -- closest thing to a zone identity there is.
+        if (info.mapType or 0) < Blizzard.zoneMapType then
+            return mapID
+        end
+
+        local parentID = info.parentMapID
+
+        if not parentID or parentID <= 0 then
+            return mapID
+        end
+
+        current = parentID
+        guard   = guard + 1
+    end
+
+    return mapID
+end
+
+-- The name of the continent the player is on, from the client. Used to break
+-- a tie between two zones that genuinely share a name -- see
+-- `Loremaster.BetterZoneMatch`. Nil rather than a guess when the walk cannot
+-- reach one.
+Blizzard.continentMapType = 2
+
+function Blizzard.ContinentName(mapID)
+    if not mapID then
+        return nil
+    end
+
+    local current = mapID
+    local guard   = 0
+
+    while current and guard < 10 do
+        local info = Blizzard.GetMapInfo(current)
+
+        if not info then
+            return nil
+        end
+
+        if (info.mapType or 0) == Blizzard.continentMapType then
+            return info.name
+        end
+
+        local parentID = info.parentMapID
+
+        if not parentID or parentID <= 0 then
+            return nil
+        end
+
+        current = parentID
+        guard   = guard + 1
+    end
+
+    return nil
+end
+
 function Blizzard.GetMapChildren(mapID)
     if not mapID or not C_Map or not C_Map.GetMapChildrenInfo then
         return {}

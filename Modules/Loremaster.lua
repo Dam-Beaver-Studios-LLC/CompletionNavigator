@@ -281,6 +281,15 @@ function Loremaster.Scan()
     --
     -- The 0.69.0 condition it replaced was accidentally repairing this on the
     -- next login; 0.70.0 removed the repair along with its cost.
+    -- INVALIDATED BEFORE THE EARLY RETURN, NOT AFTER IT. 0.73.0.
+    --
+    -- `Scan` writes `store[id]` for every row it reaches whether or not the
+    -- criteria API answered, so the set of records can change on a scan that
+    -- measured nothing -- and the invalidation sat below the early return, so
+    -- the one scan most likely to have run against a cold client was the one
+    -- scan that left a stale index behind.
+    Loremaster.ForgetZoneIndex()
+
     if measured == 0 then
         DebugPrint("Loremaster scan measured nothing; not recording it.")
 
@@ -311,10 +320,6 @@ function Loremaster.Scan()
     CN.MarkScanned("loremaster")
 
     DebugPrint("Loremaster scan: " .. scanned .. " quest achievements.")
-
-    -- The zone index is resolved from this store, so a scan that changed it
-    -- invalidates every remembered answer.
-    Loremaster.ForgetZoneIndex()
 
     return scanned, measured
 end
@@ -471,14 +476,18 @@ function Loremaster.Closest(limit, freshShare)
     -- ordering above is the entire product of this function.
     limit = limit or 10
 
-    -- A quarter of the room is held for zones not yet begun -- and only as
-    -- much of it as there are fresh zones to fill it with, so a player with
-    -- none loses nothing.
+    -- RESERVED ONLY WHEN THE CALLER ASKS FOR IT. 0.73.0.
     --
-    -- Deliberately zero for a small limit: asked for two, this function is
-    -- being asked "what is closest to done", and the reserve exists for the
-    -- long lists where the started half runs to fifty and buries the rest.
-    local fresh = math.min(#untouched, freshShare or math.floor(limit / 4))
+    -- 0.72.0 applied the reserve to every caller, and two of the three are
+    -- headed "Closest to finished" -- the Journey tab and `/cn loremaster`.
+    -- So a player with plenty of half-done zones read three rows of `0 / 120`
+    -- with an empty bar under that heading, while three genuinely nearly-done
+    -- zones were pushed off the list to make room for them.
+    --
+    -- `NextZones` is the caller the reserve was written for: it is the one
+    -- that scores untouched zones on their own terms and labels them "not
+    -- started, N to do". It asks for the reserve explicitly now.
+    local fresh = math.min(#untouched, freshShare or 0)
 
     local room = math.max(0, limit - fresh)
 
@@ -554,13 +563,24 @@ local zoneIndex = {}
 -- Only a change to WHICH RECORDS EXIST invalidates this -- a scan. Earning
 -- an achievement does not, because the winner is chosen fresh on every
 -- lookup; see the note inside `ZoneRecord`.
-function Loremaster.ForgetZoneIndex(zone)
-    if zone then
-        zoneIndex[zone] = nil
-    else
-        zoneIndex = {}
-    end
+function Loremaster.ForgetZoneIndex()
+    zoneIndex = {}
 end
+
+-- AND ONCE PER LOADING SCREEN. 0.73.0.
+--
+-- Two reasons, and the second is the one that matters. A session's index is
+-- bounded by the number of distinct zones visited, which is small -- but a
+-- single entry built while the client was refusing to name achievements would
+-- otherwise be wrong until logout, and a loading screen is both the moment
+-- that refusal happens and the moment it ends.
+--
+-- One walk per loading screen is a cost this file already pays several times
+-- over on `ZONE_CHANGED_NEW_AREA`, and it retires the whole class rather than
+-- guarding one instance of it.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    Loremaster.ForgetZoneIndex()
+end)
 
 -- WHICH OF TWO LEGITIMATE ZONE MATCHES IS THE ZONE'S OWN. 0.71.0.
 --
@@ -582,6 +602,33 @@ end
 --
 -- Every step is total and deterministic; there is no path that returns "I
 -- cannot tell", because refusing is what made 0.70.0 do nothing everywhere.
+-- WHICH CONTINENT AN ACHIEVEMENT'S CATEGORY SITS ON, IF THE CLIENT SAYS.
+--
+-- The quest category tree is Quests > expansion > continent, so a zone
+-- achievement's category name IS a continent name -- and both it and
+-- `Blizzard.ContinentName` come from the client, in the same language, which
+-- is why comparing them is a comparison of two client answers and not a
+-- branch on a hardcoded string.
+local function OnCurrentContinent(record)
+    local here = Blizzard.ContinentName
+        and Blizzard.ContinentName(CN.GetPlayerPosition())
+
+    if not here or here == "" then
+        return nil
+    end
+
+    local category = record and record.categoryID
+        and Blizzard.GetCategoryName and Blizzard.GetCategoryName(record.categoryID)
+
+    if not category or category == "" then
+        return nil
+    end
+
+    return string.lower(category) == string.lower(here)
+end
+
+Loremaster.OnCurrentContinent = OnCurrentContinent
+
 function Loremaster.BetterZoneMatch(record, name, id, best, bestName, bestID)
     -- A HELD CANDIDATE WITH NO NAME IS NOT A HELD CANDIDATE. 0.72.0.
     --
@@ -591,6 +638,28 @@ function Loremaster.BetterZoneMatch(record, name, id, best, bestName, bestID)
     -- second place, and `#bestName` on a nil throws rather than degrading.
     if not best or not bestName or not bestID then
         return true
+    end
+
+    -- THE CONTINENT YOU ARE STANDING ON, FIRST. 0.73.0.
+    --
+    -- Retail has two zones called Nagrand, two called Shadowmoon Valley and
+    -- two called Dalaran, each with its own achievement, and the zone NAME
+    -- cannot tell them apart -- so 0.72.0, which keyed everything on the name
+    -- after removing the broken map stamp, showed Outland's Nagrand to a
+    -- player standing in Draenor's. `Exploration` documents this hazard by
+    -- name; this file gave up the only thing holding it.
+    --
+    -- The category a quest achievement sits under IS its continent, and the
+    -- client will name the continent the player is on. Both are client
+    -- answers in the reader's own language.
+    --
+    -- Nil when the client will not say, and then this step simply does not
+    -- apply -- it never decides on a guess.
+    local heldHere = OnCurrentContinent(best)
+    local mineHere = OnCurrentContinent(record)
+
+    if heldHere ~= nil and mineHere ~= nil and heldHere ~= mineHere then
+        return mineHere
     end
 
     local heldDone = best.completed and true or false
@@ -607,12 +676,24 @@ function Loremaster.BetterZoneMatch(record, name, id, best, bestName, bestID)
     return id < bestID
 end
 
-local function ZoneRecord(zone)
-    zone = zone or (GetZoneText and GetZoneText())
+-- `zone` is the name to match on and `key` is what the answer is filed
+-- under. Both default to the zone the player is standing in. A caller asking
+-- about SOMEWHERE ELSE must supply both, because the player's own zone id is
+-- not an identity for a zone they are not in -- which is how the first draft
+-- of this filed Eversong Woods' answer under Isle of Dorn.
+local function ZoneRecord(zone, key)
+    if not zone then
+        zone = GetZoneText and GetZoneText()
+
+        key = key or (Blizzard.ZoneMapID
+            and Blizzard.ZoneMapID(CN.GetPlayerPosition()))
+    end
 
     if not zone or zone == "" then
         return nil
     end
+
+    key = key or zone
 
     local store = Records()
 
@@ -631,7 +712,16 @@ local function ZoneRecord(zone)
     -- the next login. Caching only the candidate list keeps the expensive
     -- half and re-decides the cheap half every time -- a loop over two or
     -- three entries with no client calls in it.
-    local matches = zoneIndex[zone]
+    -- FILED UNDER THE ZONE'S OWN MAP ID WHERE THERE IS ONE. 0.73.0.
+    --
+    -- The name is what the match is MADE on and stays so. It is the wrong
+    -- thing to file the result under: two zones called Nagrand would share
+    -- one entry, and a player walking from one to the other would be handed
+    -- the other one's candidate list. `Blizzard.ZoneMapID` walks up to the
+    -- first ancestor the client itself calls a zone, so it answers with the
+    -- ZONE even when the player is standing in a building inside it -- which
+    -- is the distinction the last three releases kept getting wrong.
+    local matches = zoneIndex[key]
 
     if not matches then
         local needle = string.lower(zone)
@@ -655,12 +745,46 @@ local function ZoneRecord(zone)
 
         matches = {}
 
+        -- HOW MANY ROWS THE CLIENT ACTUALLY NAMED. See the guard below.
+        local named, rows = 0, 0
+
         for id, record in pairs(store) do
+            rows = rows + 1
+
+            local live = Blizzard.GetAchievementName
+                and Blizzard.GetAchievementName(id)
+
+            if live and live ~= "" then
+                named = named + 1
+            end
+
             local heldName = Loremaster.NameOf(id, record)
 
             if Names(heldName) then
                 table.insert(matches, { id = id, name = heldName })
             end
+        end
+
+        -- A WALK THE CLIENT REFUSED IS NOT AN ANSWER, AND MUST NOT BE KEPT.
+        -- 0.73.0.
+        --
+        -- Achievement names are not stored -- since 0.64.0 they are asked for
+        -- every time -- so when the client will not answer, which is routine
+        -- for a window after a loading screen and is what every other guard
+        -- in this file exists for, every row resolves to "Achievement 12345"
+        -- and nothing matches. 0.72.0 then cached that empty result
+        -- deliberately, for the session.
+        --
+        -- The Loremaster provider declares `ZONE_CHANGED_NEW_AREA`, so its
+        -- first rebuild after a loading screen runs this walk at exactly that
+        -- cold moment. One badly-timed zone change and the Journey tab's
+        -- "Here" row, the "This zone" block, the provider's rows and the
+        -- turn-in refresh were all silently gone until the next login.
+        if rows > 0 and named == 0 then
+            DebugPrint("Loremaster zone walk: the client named nothing; "
+                .. "not remembering it.")
+
+            return nil
         end
 
         -- Sorted so the list itself does not carry hash order into anything
@@ -671,7 +795,7 @@ local function ZoneRecord(zone)
         -- least afford it.
         table.sort(matches, function(a, b) return a.id < b.id end)
 
-        zoneIndex[zone] = matches
+        zoneIndex[key] = matches
     end
 
     local best, bestID, bestName
@@ -717,7 +841,20 @@ function Loremaster.ForZone(mapID)
     -- Untested code that gives a different answer from its neighbour, sitting
     -- where the next caller will find it.
     if mapID and mapID ~= CN.GetPlayerPosition() then
-        record, id = ZoneRecord(Blizzard.GetMapName(mapID))
+        -- RESOLVED FIRST, SO A MAP WITH NO NAME IS AN ANSWER OF NONE. 0.73.0.
+        --
+        -- `ZoneRecord` defaults a nil argument to `GetZoneText()`, so passing
+        -- the result of a failed `GetMapName` straight in handed a caller
+        -- asking about zone X the record for the zone the player is standing
+        -- in, with nothing saying so.
+        local named = Blizzard.GetMapName(mapID)
+
+        if not named or named == "" then
+            return nil
+        end
+
+        record, id = ZoneRecord(named,
+            (Blizzard.ZoneMapID and Blizzard.ZoneMapID(mapID)) or mapID)
     else
         record, id = ZoneRecord()
     end
@@ -755,7 +892,11 @@ end
 Loremaster.nearlyDoneFraction = 0.6
 
 function Loremaster.NextZones(limit)
-    local rows = Loremaster.Closest(50)
+    -- The one caller that wants room held for zones not yet begun; see the
+    -- note on `Closest`. A quarter of the list, which is the share a player
+    -- sweeping a continent needs and the two "closest to finished" surfaces
+    -- must not have.
+    local rows = Loremaster.Closest(50, 12)
 
     local chased = {}
 
@@ -1173,7 +1314,15 @@ function Loremaster.RefreshCurrentZone()
 
     local key = CN.characterKey or CN.GetCharacterKey()
 
-    local before = record.progress and record.progress[key]
+    -- NORMALIZED, SO "NEVER SEEN" IS NOT "CHANGED". 0.73.0.
+    --
+    -- This read the raw table entry, which is nil for any row this character
+    -- has not scanned -- so `before ~= done` was true even when `done` was 0
+    -- and nothing had moved, costing one spurious
+    -- `CN.InvalidateProvider("Loremaster")` per zone per character.
+    -- `DoneFor` is the function that owns "what has this character done",
+    -- and it answers 0 rather than nil.
+    local before = Loremaster.DoneFor(record) or 0
 
     record.criteria = criteria
 

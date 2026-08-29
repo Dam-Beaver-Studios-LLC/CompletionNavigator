@@ -233,9 +233,17 @@ end
 -- standing in the two places a player actually reads.
 --
 -- One function now, and it answers for the far case instead of going quiet.
--- Returns the phrase, and whether it is an exact figure or a floor. Both
--- callers render the two cases differently and neither should be reading the
--- string to find out which it got.
+-- Returns the phrase, whether it is an exact figure or a floor, and -- for
+-- the floor case -- the bare duration with no wording around it.
+--
+-- THE THIRD RETURN EXISTS BECAUSE THE SECOND CALLER WAS PARSING THE FIRST.
+-- 0.73.0.
+--
+-- `UI.DistanceLine` recovered the number with `string.gsub(text, "^over ",
+-- "")`, which is the rule written twice: reword or localize the phrase and
+-- the strip silently fails, leaving the tooltip reading "More than over 20m
+-- away". The flag was added so neither caller had to read the string; what
+-- was missing was the number itself.
 function CN.TravelText(objective)
     local exact = CN.SecondsNeeded(objective)
 
@@ -259,7 +267,7 @@ function CN.TravelText(objective)
         local text = session and session.FormatDuration
             and session.FormatDuration(ceiling)
 
-        return text and ("over " .. text) or nil, false
+        return text and ("over " .. text) or nil, false, text
     end
 
     return nil

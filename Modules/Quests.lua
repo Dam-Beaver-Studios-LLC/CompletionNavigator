@@ -743,9 +743,12 @@ end
 -- client calls to remove one entry, at the end of every quest, and four times
 -- over in the bursts at the end of a chain.
 --
--- The one quest that just changed is the argument. The full sweep still runs
--- where it is actually needed: `RememberOffer` calls it when the store
--- crosses its cap, and the login hook covers anything completed elsewhere.
+-- The one quest that just changed is the argument. The full sweep runs where
+-- a sweep belongs: once at login, from `RememberOffer` when the store crosses
+-- its cap, and here when the client does not say which quest it was.
+--
+-- 0.72.0's version of this note claimed a login hook that did not exist. It
+-- does now.
 CN:RegisterEvent("QUEST_TURNED_IN", function(_, questID)
     if not questID then
         -- No id: the client did not say which. Fall back to the sweep rather
@@ -965,6 +968,22 @@ end)
 
 CN:RegisterEvent("QUEST_ACCEPTED", function(_, questID)
     Quests.ForgetOffer(questID)
+
+    -- AND THE PIN, WHICH IS THE OTHER HALF OF "COMPLETED OR PICKED UP".
+    -- 0.73.0.
+    --
+    -- `Remembered()` is where a quest WAITS to be picked up. Once it is in
+    -- the log the map pin is stale, and the only thing that removed it was
+    -- the full sweep -- which since 0.72.0 no longer runs on a turn-in. The
+    -- event hands over the id here exactly as it does there.
+    if questID then
+        local store = Remembered()
+
+        if store[questID] then
+            store[questID] = nil
+            Quests.pinRevision = Quests.pinRevision + 1
+        end
+    end
 end)
 
 ------------------------------------------------------------
@@ -1823,6 +1842,28 @@ CN:OnLogin(function()
 
     DebugPrint("Login quest scan: " .. seen .. " active, "
         .. new .. " newly recorded.")
+
+    -- THE LOGIN SWEEP 0.72.0's COMMENT PROMISED AND DID NOT WRITE. 0.73.0.
+    --
+    -- 0.72.0 replaced the full `PruneRemembered` on every turn-in with a
+    -- single-id removal, which was right -- twelve hundred client calls to
+    -- forget one pin -- and justified it by saying "the login hook covers
+    -- anything completed elsewhere". There was no login hook. `OnLogin` here
+    -- called only `DiscoverActive`.
+    --
+    -- What was actually lost is the eviction of rows dead for a reason other
+    -- than a turn-in: a quest ACCEPTED into the log, and a quest completed by
+    -- another character on the account. Those sat until the store happened to
+    -- cross its cap of six hundred, and every read filtered them at two
+    -- client calls a row -- so the cost the change removed from the turn-in
+    -- reappeared on the read path, which runs far more often.
+    --
+    -- Once, at login, is where a sweep of a persisted store belongs.
+    local dropped = Quests.PruneRemembered()
+
+    if dropped > 0 then
+        DebugPrint("Pruned " .. dropped .. " remembered quest location(s).")
+    end
 end)
 
 ------------------------------------------------------------

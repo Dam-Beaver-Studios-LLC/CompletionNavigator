@@ -48,7 +48,7 @@ Setup.steps = {
     -- character to scan had recorded. Eleven collections were offered on the
     -- setup screen and the twelfth, which is the one with a per-character
     -- dimension, was not.
-    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements" },
+    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true },
     { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
     { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements" },
     { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },
@@ -64,10 +64,27 @@ function Setup.RunStep(step)
         return false, "module not loaded"
     end
 
-    local ok, first = pcall(module[step.fn])
+    local ok, first, second = pcall(module[step.fn])
 
     if not ok then
         return false, tostring(first)
+    end
+
+    -- A SCAN THAT MEASURED NOTHING DID NOT SUCCEED. 0.73.0.
+    --
+    -- `Loremaster.Scan` has returned `scanned, measured` since 0.72.0 --
+    -- `scanned` being how many rows the walk REACHED and `measured` how many
+    -- the client actually answered about. `/cn scanlore` was taught to check
+    -- the second; this, the other caller, discarded it.
+    --
+    -- So `/cn setup` printed "Loremaster: 412 quest achievements" over a
+    -- store that had recorded nothing, counted the step as a success, and
+    -- stamped `completedAt` -- which silences the login reminder and makes
+    -- `/cn setup check` report a clean bill. Setup is most often run in the
+    -- first moments after logging in, which is exactly when the criteria API
+    -- refuses.
+    if step.measured and second == 0 then
+        return false, "the game would not answer yet"
     end
 
     return true, first
