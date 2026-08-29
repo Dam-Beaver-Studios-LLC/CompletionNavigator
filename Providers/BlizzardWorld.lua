@@ -945,11 +945,38 @@ end
 -- caller always gets the best available identity rather than nothing.
 Blizzard.zoneMapType = 3
 
+-- MEMOIZED, BECAUSE THE MAP GRAPH DOES NOT MOVE. 0.74.0.
+--
+-- Each walk is up to eight `pcall(C_Map.GetMapInfo)` calls and each of those
+-- ALLOCATES A TABLE in the client. This is called from the zone lookup, which
+-- runs in the `CRITERIA_UPDATE` debounce body, on every candidate-provider
+-- rebuild, and from the Journey tab's two-second refresh -- so the same two
+-- or three maps were being walked over and over for an answer that is fixed
+-- for the life of the client.
+--
+-- Not cleared on anything: a map's parent is a property of the game's data,
+-- not of where the player is standing.
+local zoneOf = {}
+
 function Blizzard.ZoneMapID(mapID)
     if not mapID then
         return nil
     end
 
+    local held = zoneOf[mapID]
+
+    if held ~= nil then
+        return held
+    end
+
+    local answer = Blizzard.ResolveZoneMapID(mapID)
+
+    zoneOf[mapID] = answer
+
+    return answer
+end
+
+function Blizzard.ResolveZoneMapID(mapID)
     local current = mapID
     local guard   = 0
 
@@ -981,44 +1008,6 @@ function Blizzard.ZoneMapID(mapID)
     end
 
     return mapID
-end
-
--- The name of the continent the player is on, from the client. Used to break
--- a tie between two zones that genuinely share a name -- see
--- `Loremaster.BetterZoneMatch`. Nil rather than a guess when the walk cannot
--- reach one.
-Blizzard.continentMapType = 2
-
-function Blizzard.ContinentName(mapID)
-    if not mapID then
-        return nil
-    end
-
-    local current = mapID
-    local guard   = 0
-
-    while current and guard < 10 do
-        local info = Blizzard.GetMapInfo(current)
-
-        if not info then
-            return nil
-        end
-
-        if (info.mapType or 0) == Blizzard.continentMapType then
-            return info.name
-        end
-
-        local parentID = info.parentMapID
-
-        if not parentID or parentID <= 0 then
-            return nil
-        end
-
-        current = parentID
-        guard   = guard + 1
-    end
-
-    return nil
 end
 
 function Blizzard.GetMapChildren(mapID)

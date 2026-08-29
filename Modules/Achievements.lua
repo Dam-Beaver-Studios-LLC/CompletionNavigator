@@ -49,6 +49,60 @@ end
 Achievements.Store  = Store
 Achievements.NameOf = NameOf
 
+-- CRITERIA PROGRESS IS THE CHARACTER'S; THE EARNED FLAG IS THE ACCOUNT'S.
+-- 0.74.0.
+--
+-- The third and last store with this defect. `Loremaster` was split in
+-- 0.61.0 and `Exploration` in 0.64.0, each with a paragraph explaining that a
+-- criterion counted by questing or killing is counted per character while the
+-- achievement itself is earned account-wide. This file was written the same
+-- way and never revisited, so `record.done` held whichever character scanned
+-- last.
+--
+-- What that does to a player: `IsNearlyDone` drives the shortlist, which
+-- drives `/cn next`. An alt at 2 of 40 inherited the main's 38 of 40, was
+-- told it was two criteria from finishing something it had barely started,
+-- and was sent across the world to do it.
+--
+-- Same shape as the two siblings: `progress` keyed by character, with the
+-- flat field kept as the current character's value so an older database still
+-- reads correctly and nothing downstream had to change.
+function Achievements.DoneFor(record, characterKey)
+    if type(record) ~= "table" then
+        return 0
+    end
+
+    characterKey = characterKey or CN.characterKey or CN.GetCharacterKey()
+
+    if record.progress and record.progress[characterKey] ~= nil then
+        return record.progress[characterKey]
+    end
+
+    -- Only the CURRENT character may fall back to the flat field: it holds
+    -- whoever scanned last, which is the defect, and attributing it to a
+    -- named other character would tell the same lie somewhere new.
+    if characterKey == (CN.characterKey or CN.GetCharacterKey()) then
+        return record.done or 0
+    end
+
+    return nil
+end
+
+-- THE ONE WRITER, so the scan and the criteria sweep cannot record progress
+-- differently, and so both file it under the character it belongs to.
+function Achievements.NoteProgress(record, done)
+    if type(record) ~= "table" or done == nil then
+        return
+    end
+
+    local key = CN.characterKey or CN.GetCharacterKey()
+
+    record.progress = record.progress or {}
+    record.progress[key] = done
+
+    record.done = done
+end
+
 -- Bumped whenever the store is rewritten, so the candidate provider knows
 -- when its shortlist is stale. See CN.Shortlist.
 Achievements.revision = 0
@@ -64,7 +118,7 @@ local function IsNearlyDone(record)
         return false
     end
 
-    local remaining = criteria - (record.done or 0)
+    local remaining = criteria - (Achievements.DoneFor(record) or 0)
 
     return remaining > 0 and remaining <= Achievements.nearlyDoneThreshold
 end
@@ -227,7 +281,8 @@ function Achievements.Closest(limit)
     local names = {}
 
     for achievementID, record in pairs(Store()) do
-        if record.criteria and record.criteria > 0 and record.done > 0 then
+        if record.criteria and record.criteria > 0
+            and (Achievements.DoneFor(record) or 0) > 0 then
             names[record] = NameOf(achievementID, record) or ""
 
             table.insert(rows, record)
@@ -349,7 +404,7 @@ CN.RegisterCandidateProvider("Achievements", function()
                 return nil
             end
 
-            local remaining = criteria - (record.done or 0)
+            local remaining = criteria - (Achievements.DoneFor(record) or 0)
 
             -- A zero-progress achievement is a project, not a next action.
             if remaining <= 0 or remaining > Achievements.nearlyDoneThreshold then
@@ -364,7 +419,8 @@ CN.RegisterCandidateProvider("Achievements", function()
             return 3 - remaining
         end,
         function(achievementID, record, value)
-            local remaining = (record.criteria or 0) - (record.done or 0)
+            local remaining = (record.criteria or 0)
+                - (Achievements.DoneFor(record) or 0)
 
             return CN.NewObjective({
                 id              = achievementID,
@@ -516,10 +572,12 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
                 -- never carried to the sibling.
                 local done, criteria = Blizzard.GetAchievementProgress(achievementID)
 
-                if criteria and criteria > 0 and done ~= record.done then
+                if criteria and criteria > 0
+                    and done ~= (Achievements.DoneFor(record) or 0) then
+
                     local wasNear = IsNearlyDone(record)
 
-                    record.done     = done
+                    Achievements.NoteProgress(record, done)
 
                     -- Only a change that crosses the shortlist boundary can
                     -- change what the provider would produce. Bumping the
@@ -586,7 +644,8 @@ CN:RegisterCommand{
         for _, record in ipairs(closest) do
             table.insert(rows, {
                 text  = NameOf(record.achievementID or 0, record),
-                value = record.done .. " / " .. record.criteria,
+                value = (Achievements.DoneFor(record) or 0)
+                    .. " / " .. record.criteria,
             })
         end
 
@@ -628,7 +687,8 @@ CN:RegisterCommand{
 
             table.insert(rows, {
                 text  = NameOf(record.achievementID or 0, record),
-                value = record.done .. " / " .. record.criteria,
+                value = (Achievements.DoneFor(record) or 0)
+                    .. " / " .. record.criteria,
                 note  = points and CN.Count(points, "point") or nil,
             })
         end

@@ -1266,6 +1266,75 @@ CN.migrations = {
             end
         end
     end,
+
+    -- THE EXPLORATION MAP STAMP, WRITTEN FROM THE WRONG CLIENT CALL. 0.74.0.
+    --
+    -- `Exploration.ForCurrentZone` has stamped `record.mapID` from
+    -- `GetBestMapForUnit` since 0.62.0 -- the building or cave map indoors --
+    -- and learned it from an unordered walk that could bind the wrong one of
+    -- two same-named zones. Migration 22 removed the identical field from the
+    -- loremaster store and left this one, because at the time only Loremaster
+    -- had been looked at.
+    --
+    -- Every stamp written before this release is therefore either the wrong
+    -- map or an unjustified guess, and both are re-learnable in a second by
+    -- standing in the zone. Cleared rather than migrated: there is nothing
+    -- here worth keeping and a wrong one is read as fact.
+    [24] = function(db)
+        local account = db.account
+
+        if not account or type(account.exploration) ~= "table" then
+            return
+        end
+
+        for _, record in pairs(account.exploration) do
+            if type(record) == "table" then
+                record.mapID = nil
+            end
+        end
+    end,
+
+    -- WHAT 0.72.0 DESTROYED, SAID OUT LOUD RATHER THAN LEFT SILENT. 0.74.0.
+    --
+    -- 0.72.0's migration 23 deleted `record.standing` from every reputation
+    -- row, including FRIENDSHIP rows, whose rank is free text the client
+    -- supplies for the logged-in character ONLY. 0.73.0 corrected the
+    -- migration to carry it -- but anyone who had already upgraded through
+    -- 0.72.0 was past it, and the addon said nothing.
+    --
+    -- Nothing can bring that back; each character restores its own the next
+    -- time it logs in. What the addon owes the player is to say so, once,
+    -- rather than let them find a blank column and wonder. Prompt, never act.
+    [25] = function(db)
+        local lost = 0
+
+        for _, character in pairs(db.characters or {}) do
+            if type(character) == "table"
+                and type(character.reputations) == "table" then
+
+                for _, record in pairs(character.reputations) do
+                    if type(record) == "table"
+                        and record.kind == "FRIENDSHIP"
+                        and record.friendshipStanding == nil then
+
+                        lost = lost + 1
+                    end
+                end
+            end
+        end
+
+        if lost > 0 then
+            db.account = db.account or {}
+            db.account.notices = db.account.notices or {}
+
+            table.insert(db.account.notices, {
+                at   = time(),
+                text = lost .. " friendship rank(s) on other characters were "
+                    .. "lost by a defect in version 0.72.0. Each character "
+                    .. "restores its own the next time it logs in.",
+            })
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

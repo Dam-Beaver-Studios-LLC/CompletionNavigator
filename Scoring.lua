@@ -267,6 +267,9 @@ function CN.TravelText(objective)
         local text = session and session.FormatDuration
             and session.FormatDuration(ceiling)
 
+        -- The word "away" belongs to the caller: `/cn list` appends it and
+        -- the tooltip builds a whole sentence around it. What this owns is
+        -- the figure and the word "over".
         return text and ("over " .. text) or nil, false, text
     end
 

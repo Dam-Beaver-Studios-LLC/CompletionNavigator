@@ -642,10 +642,27 @@ function Quests.PruneRemembered()
     -- the remembered locations for every other character who still had it to
     -- do -- the same wrong-scope defect as the quest-status store, in the
     -- other direction.
+    -- AND NOT ON THIS CHARACTER'S QUEST LOG. 0.74.0.
+    --
+    -- The paragraph above states the rule -- where a quest is does not depend
+    -- on who is asking -- and the next clause used to break it:
+    -- `IsQuestInLog` answers for the character currently logged in, and this
+    -- deletes from the ACCOUNT store.
+    --
+    -- Under 0.72.0 the sweep ran only when the store crossed its six-hundred
+    -- row cap, so the damage was rare. 0.73.0 wired it to every login, which
+    -- made it routine: log in on a main holding twenty-five quests and
+    -- twenty-five pickup locations vanish for the whole account, so an alt
+    -- that still needs them is no longer offered them and the location is
+    -- unrecoverable until somebody rides past the giver again. Abandoning a
+    -- quest lost its pin the same way.
+    --
+    -- Account completion is the correct test and stays. "In MY log" is a
+    -- per-character question and already belongs to the per-character read
+    -- filters, which have it -- and to `QUEST_ACCEPTED`, which drops the pin
+    -- for the character that picked it up without speaking for the others.
     for questID in pairs(store) do
-        if Quests.IsCompletedOnAccount(questID)
-            or Blizzard.IsQuestInLog(questID) then
-
+        if Quests.IsCompletedOnAccount(questID) then
             store[questID] = nil
             dropped = dropped + 1
         end
@@ -754,6 +771,22 @@ CN:RegisterEvent("QUEST_TURNED_IN", function(_, questID)
         -- No id: the client did not say which. Fall back to the sweep rather
         -- than leaving a stale pin on the map.
         Quests.PruneRemembered()
+        return
+    end
+
+    -- AND ONLY WHEN THE ACCOUNT IS DONE WITH IT. 0.74.0.
+    --
+    -- 0.72.0 replaced the full sweep here with a single-id removal, which was
+    -- right about the cost and wrong about the scope in the same way
+    -- `PruneRemembered` was: one character handing a quest in does not mean
+    -- the account is finished with it, and this store is where the addon
+    -- remembers, for every character, WHERE that quest is picked up. A main
+    -- clearing a zone erased the map for every alt behind it.
+    --
+    -- Asking the account question about the one id that changed keeps the
+    -- whole saving -- one client call instead of twelve hundred -- and gets
+    -- the scope right, which is what the store is for.
+    if not Quests.IsCompletedOnAccount(questID) then
         return
     end
 
@@ -966,24 +999,20 @@ CN:RegisterEvent("QUEST_DETAIL", function()
     Quests.NoteOffered(Blizzard.GetActiveQuestOffer(), GetTitleText and GetTitleText())
 end)
 
+-- AND THE PIN IS DELIBERATELY NOT DROPPED HERE. Reverted in 0.74.0.
+--
+-- 0.73.0 added a pin removal to this handler on the grounds that a quest in
+-- the log is no longer waiting to be picked up. True of THIS character, and
+-- `Remembered()` is an account-wide store of WHERE a quest is -- so a main
+-- accepting a quest deleted the location an alt still needed, and nothing
+-- could recover it short of somebody riding past the giver again.
+--
+-- That is the identical wrong-scope defect this file's own `PruneRemembered`
+-- header describes and warns about, written one release after the warning was
+-- read. "In my log" is a per-character question, and the per-character read
+-- filters already ask it at every read.
 CN:RegisterEvent("QUEST_ACCEPTED", function(_, questID)
     Quests.ForgetOffer(questID)
-
-    -- AND THE PIN, WHICH IS THE OTHER HALF OF "COMPLETED OR PICKED UP".
-    -- 0.73.0.
-    --
-    -- `Remembered()` is where a quest WAITS to be picked up. Once it is in
-    -- the log the map pin is stale, and the only thing that removed it was
-    -- the full sweep -- which since 0.72.0 no longer runs on a turn-in. The
-    -- event hands over the id here exactly as it does there.
-    if questID then
-        local store = Remembered()
-
-        if store[questID] then
-            store[questID] = nil
-            Quests.pinRevision = Quests.pinRevision + 1
-        end
-    end
 end)
 
 ------------------------------------------------------------

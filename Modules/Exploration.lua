@@ -233,8 +233,36 @@ end
 -- So: the map id, recorded when the record is next refreshed, is the key.
 -- The name match survives as the way a record acquires its map id the first
 -- time, and is now exact rather than a substring.
+-- STAMPED WITH THE ZONE, AND ONLY WHEN THE ZONE IS UNAMBIGUOUS. 0.74.0.
+--
+-- The sibling in `Modules/Loremaster.lua` had this defect corrected three
+-- times over, and this file -- the one it was copied FROM -- was never
+-- touched. Two things were wrong here:
+--
+--   1. `CN.GetPlayerPosition()` is `GetBestMapForUnit`, the most SPECIFIC map
+--      containing the player: a building or a cave indoors. So the stamp
+--      recorded the wrong id, the fast path missed as soon as the player
+--      walked outside, the walk re-ran and re-stamped, and a SavedVariable
+--      was written on every threshold crossed. The cache never converged.
+--
+--   2. Worse, and this one loses data: the id was learned from an unordered
+--      `pairs` walk that returned the FIRST name match. With two records both
+--      named "Explore Nagrand", which one came back was hash order -- so
+--      Outland's record could be permanently bound to Draenor's map, and
+--      `RefreshCurrentZone` writes through this lookup. This character's
+--      exploration progress and the account's `completed` flag then went into
+--      the wrong continent's record.
+--
+--      That is the exact failure this function's own header names as the
+--      reason the map key exists, produced by the way the key was learned.
+--
+-- `Blizzard.ZoneMapID` answers with the zone rather than the room, and the
+-- walk now collects every match and refuses to learn anything when there is
+-- more than one. An ambiguous zone keeps answering by the deterministic
+-- ordering and simply never writes a binding it cannot justify.
 function Exploration.ForCurrentZone()
-    local mapID = CN.GetPlayerPosition()
+    local mapID = Blizzard.ZoneMapID
+        and Blizzard.ZoneMapID(CN.GetPlayerPosition())
 
     local store = Store()
 
@@ -295,19 +323,27 @@ function Exploration.ForCurrentZone()
         return string.sub(candidate, -(#needle + 1)) == (" " .. needle)
     end
 
+    local matched, matchedID, count = nil, nil, 0
+
     for achievementID, record in pairs(store) do
         if Names(Exploration.NameOf(achievementID, record)) then
-            -- Learned, so the ambiguity is resolved once rather than every
-            -- time -- and resolved by the map, which cannot be duplicated.
-            if mapID then
-                record.mapID = mapID
-            end
+            count = count + 1
 
-            return record
+            -- Deterministic, so which one is answered with does not depend on
+            -- hash order even before anything is learned: the lower id wins.
+            if not matchedID or achievementID < matchedID then
+                matched, matchedID = record, achievementID
+            end
         end
     end
 
-    return nil
+    if matched and mapID and count == 1 then
+        -- Learned, so the ambiguity is resolved once rather than every time
+        -- -- and only where there was no ambiguity to begin with.
+        matched.mapID = mapID
+    end
+
+    return matched
 end
 
 ------------------------------------------------------------

@@ -7,6 +7,99 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.74.0]
+
+**The 0.73.0 zone fix could not fire.** It broke the tie between two zones
+sharing a name by comparing the achievement's category with the continent you
+are standing on â€” on the premise that a quest category is a continent. On
+retail it is an *expansion*: "Warlords of Draenor" is never equal to
+"Draenor", "Burning Crusade" is never equal to "Outland". Neither side ever
+matched, in any of the cases the release was written for. It was also two
+localized strings deciding a branch, which this addon has a standing rule
+against, in the one place the rule warns about.
+
+### Fixed â€” zone identity, from evidence instead of inference
+
+- **Two zones with one name are now told apart by what actually moved.** When
+  your criteria on exactly one candidate change while you are standing in a
+  zone, that candidate is that zone's achievement â€” nothing else can produce
+  that. The binding is learned, filed under the zone's own map id, and
+  outranks every other rule. Two candidates moving at once teaches nothing,
+  because it is not evidence about either. Until the evidence arrives the
+  ordering is unchanged: deterministic, stable, and occasionally wrong about
+  which Nagrand you meant â€” which is honest, and stops being true the first
+  time you hand a quest in there.
+- **The zone walk asked the client for every name twice.** 0.73.0's
+  "did the client answer" counter asked for the name, then asked again through
+  the naming function â€” doubling the cost of the walk this file calls the
+  whole expense.
+- **A half-awake client's walk was remembered as though it were an answer.**
+  The test was "did the client name *anything*", which waves through the case
+  that actually happens: some rows resolve, the zone's own does not, and a
+  wrong answer is cached. It is now "did the client answer for every row" â€” a
+  partial walk still answers, because a partial list beats a blank tab, but it
+  is not committed to memory. That also removed the loading-screen wipe 0.73.0
+  added to compensate, which paid for a full store walk on every portal,
+  hearth and boat.
+- **Asking about a room inside a zone blanked the zone.** The cache key came
+  from the map and the value from the name, and nothing checked they described
+  the same place.
+- **The map ancestry is walked once per map instead of once per question.**
+  Each walk is up to eight client calls that each allocate a table, and it ran
+  from the two-second tab refresh and every provider rebuild.
+
+### Fixed â€” the sibling that has had this defect since 0.62.0
+
+- **Exploration bound the wrong continent's record and then wrote your
+  progress into it.** It learned its zone key from `GetBestMapForUnit` â€” the
+  building you are standing in â€” and learned it from an unordered walk that
+  returned whichever of two same-named zones came back first. That record then
+  received this character's progress and the account's earned flag. It now
+  learns the *zone*, and refuses to learn anything when more than one
+  achievement matches.
+
+### Fixed â€” scope, which is where three defects were hiding
+
+- **Logging in on your main erased the quest pins your alts still needed.**
+  The account-wide store of *where a quest is* was being pruned on "is it in
+  MY log", and 0.73.0 wired that sweep to every login. Twenty-five quests in
+  your log meant twenty-five locations gone for the whole account. Turning a
+  quest in now clears its pin only when the *account* has finished it, and
+  accepting one no longer clears it at all â€” that was 0.73.0's addition, wrong
+  the same way.
+- **An alt was told it was two criteria from finishing the main's
+  achievements.** Criteria progress is per character and the earned flag is
+  account-wide; the two sibling stores were split in 0.61.0 and 0.64.0 with a
+  paragraph each explaining why, and this third one was never revisited. It
+  drives the shortlist, which drives `/cn next` â€” so an alt at 2 of 40
+  inherited 38 of 40 and was sent across the world to finish it.
+
+### Fixed â€” what the addon tells you
+
+- **A scan the game was not ready for now tries again.** 0.73.0 correctly
+  stopped it recording itself and left nothing behind it: the store was no
+  longer empty, so the "no data yet" path never fired again, and the Journey
+  tab stayed blank until the next login. It retries, a bounded number of
+  times.
+- **`/cn setup` reported a game still loading as a defect** â€” in red, pointing
+  at an empty `/cn errors`, and stamping setup complete, which silences the
+  login reminder. "Not ready" is now its own state that says to try again.
+- **Zones you have never begun no longer fill a list headed "Closest to
+  finished."** They have their own section, on the Journey tab and in
+  `/cn loremaster`.
+- **The addon now says what version 0.72.0 destroyed.** That release's
+  migration deleted every friendship rank belonging to a character that was
+  not logged in. 0.73.0 fixed the migration for anyone who had not upgraded
+  yet and said nothing to those who had. Nothing can bring the data back â€”
+  each character restores its own on its next login â€” but the addon owes you
+  the sentence, and now prints it once and keeps it in `/cn errors`.
+- **The migration ladder had a hole.** 0.73.0 bumped the database version past
+  its last migration, so the bump ran nothing. A build check now fails on a
+  gap.
+- **The tooltip and `/cn list` still described one journey two ways** â€”
+  "over 20m away" against "About 20m away at least", which also contradicts
+  itself. One stem, two renderings.
+
 ## [0.73.0]
 
 **Last release removed the only thing telling the two Nagrands apart.** 0.72.0

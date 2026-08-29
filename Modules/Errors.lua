@@ -38,6 +38,53 @@ local ring = {}
 
 local seen = {}
 
+-- ONE-TIME NOTICES: THINGS THE ADDON OWES THE PLAYER AN EXPLANATION FOR.
+-- 0.74.0.
+--
+-- Distinct from an error, which is a defect caught as it happened. A notice
+-- is a statement about something already done and not undoable -- so far,
+-- exactly one: the friendship ranks that version 0.72.0's migration deleted
+-- from every character that was not logged in at the time.
+--
+-- Shown once, at login, then kept where `/cn errors` can find it, because a
+-- player who logs in during a raid will not read the chat frame and should
+-- still be able to go and look.
+function Errors.Notices()
+    return CN.Account("notices")
+end
+
+function Errors.ShowNotices()
+    local notices = Errors.Notices()
+
+    local unseen = {}
+
+    for _, notice in ipairs(notices) do
+        if type(notice) == "table" and not notice.seen and notice.text then
+            table.insert(unseen, notice)
+        end
+    end
+
+    if #unseen == 0 then
+        return 0
+    end
+
+    local lines = {}
+
+    for _, notice in ipairs(unseen) do
+        notice.seen = true
+
+        table.insert(lines, tostring(notice.text))
+    end
+
+    CN.PrintBlock("Something you should know:", lines)
+
+    return #unseen
+end
+
+CN:OnLogin(function()
+    CN.Guard("Errors.ShowNotices", Errors.ShowNotices)
+end)
+
 function Errors.Record(context, message)
     if not message then
         return false
@@ -248,6 +295,19 @@ CN:RegisterCommand{
         -- state five migrations in this addon exist to clean up. It belongs
         -- here: this is the command whose job is "what went wrong that you
         -- did not see".
+        -- ANYTHING THE ADDON DID TO THE PLAYER'S DATA THAT IT CANNOT UNDO.
+        -- 0.74.0. Printed here whether or not it has been seen, because this
+        -- is the command whose job is "what went wrong that you did not see".
+        local notices = Errors.Notices()
+
+        if #notices > 0 then
+            for _, notice in ipairs(notices) do
+                if type(notice) == "table" and notice.text then
+                    CN.PrintLine(CN.Bad(tostring(notice.text)))
+                end
+            end
+        end
+
         if (CN.memoMutations or 0) > 0 then
             CN.PrintLine(CN.Bad(CN.Count(CN.memoMutations,
                 "cached list was", "cached lists were")

@@ -83,8 +83,17 @@ function Setup.RunStep(step)
     -- `/cn setup check` report a clean bill. Setup is most often run in the
     -- first moments after logging in, which is exactly when the criteria API
     -- refuses.
+    -- REPORTED AS NOT READY, NOT AS BROKEN. 0.74.0.
+    --
+    -- 0.73.0 returned this through the failure path, so `Setup.Report`
+    -- printed it in the "bad" colour and followed it with "A failure is a
+    -- defect, not a missing feature. /cn errors has the detail." Nothing was
+    -- recorded in Errors, so that command was empty -- and this file's own
+    -- note says setup is most often run in the first moments after logging
+    -- in, which is exactly when the criteria API refuses. The common path was
+    -- presented as a bug report the player could not act on.
     if step.measured and second == 0 then
-        return false, "the game would not answer yet"
+        return nil, "the game was not ready yet"
     end
 
     return true, first
@@ -134,15 +143,23 @@ function Setup.Run(onComplete)
                 -- reminder stopped, `Setup.HasRun()` went true forever, and
                 -- `/cn setup check` answered "Everything the addon can read
                 -- on its own is scanned."
-                local failed = 0
+                local failed, notReady = 0, 0
 
                 for _, row in ipairs(results) do
-                    if not row.ok then
+                    if row.ok == nil then
+                        notReady = notReady + 1
+                    elseif not row.ok then
                         failed = failed + 1
                     end
                 end
 
-                if failed < #results then
+                -- AND A RUN THAT WAS NOT READY IS NOT A RUN THAT FINISHED.
+                -- 0.74.0.
+                --
+                -- Stamping this silences the login reminder, so a setup that
+                -- ran while the game was still warming up would have been the
+                -- last one the player was ever prompted for.
+                if failed + notReady < #results and notReady == 0 then
                     CN.Account("setup").completedAt = time()
                 end
 
@@ -199,7 +216,7 @@ end
 -- two more headlines -- so the block read bottom-up and stamped the addon's
 -- name three times in one answer.
 function Setup.Report(results)
-    local scanned, absent, broke = 0, 0, 0
+    local scanned, absent, broke, waiting = 0, 0, 0, 0
 
     local units = {}
 
@@ -226,6 +243,20 @@ function Setup.Report(results)
             end
 
             table.insert(lines, result.label .. ": " .. value)
+        elseif result.ok == nil then
+            -- A THIRD STATE: THE GAME WAS NOT READY. 0.74.0.
+            --
+            -- Neither a success nor a defect. The criteria API refuses for a
+            -- window after logging in, which is when setup is usually run,
+            -- and 0.73.0 rendered that through the failure branch -- red,
+            -- with a pointer to an empty `/cn errors`. What the player needs
+            -- is one sentence saying to try again in a moment.
+            waiting = waiting + 1
+
+            table.insert(lines, result.label .. ": "
+                .. CN.Muted(tostring(result.error) .. CN.DASH
+                    .. "try ") .. CN.Accent("/cn scanlore")
+                .. CN.Muted(" in a moment."))
         elseif result.error == "module not loaded" then
             -- "UNAVAILABLE" AND "IT THREW" ARE DIFFERENT STATEMENTS.
             --
@@ -259,6 +290,7 @@ function Setup.Report(results)
 
     CN.PrintBlock("Setup complete: " .. scanned .. " scanned"
         .. (absent > 0 and (", " .. absent .. " unavailable") or "")
+        .. (waiting > 0 and (", " .. waiting .. " not ready") or "")
         .. (broke > 0 and (", " .. broke .. " failed") or "") .. ".", lines)
 end
 

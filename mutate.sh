@@ -1774,12 +1774,14 @@ mutate "Modules/Exploration.lua" \
     "two zones with the same name overwrite each other's progress"
 
 mutate "Modules/Exploration.lua" \
-    "            if mapID then
-                record.mapID = mapID
-            end" \
-    "            if false then
-                record.mapID = mapID
-            end" \
+    "    if matched and mapID and count == 1 then
+        -- Learned, so the ambiguity is resolved once rather than every time
+        -- -- and only where there was no ambiguity to begin with.
+        matched.mapID = mapID
+    end" \
+    "    if false then
+        matched.mapID = mapID
+    end" \
     "which of two zones with one name you get is a coin toss every time"
 
 mutate "Modules/Exploration.lua" \
@@ -2241,12 +2243,9 @@ mutate "Providers/StaticData.lua" \
     "the block reason has to be parsed back out of English prose"
 
 mutate "Modules/Loremaster.lua" \
-    "            local heldName = Loremaster.NameOf(id, record)
-
-            if Names(heldName) then" \
-    "            local heldName = record.name
-
-            if Names(heldName) then" \
+    "            local heldName = (live and live ~= \"\" and live)
+                or Loremaster.NameOf(id, record)" \
+    "            local heldName = record.name" \
     "the zone achievement is matched against a stored name"
 
 mutate "Core.lua" \
@@ -2493,8 +2492,9 @@ mutate "Modules/Quests.lua" \
     "the off-map cache key walks the whole remembered store"
 
 mutate "Modules/Achievements.lua" \
-    "            if criteria and criteria > 0 and done ~= record.done then" \
-    "            if done ~= record.done then" \
+    "                if criteria and criteria > 0
+                    and done ~= (Achievements.DoneFor(record) or 0) then" \
+    "                if done ~= (Achievements.DoneFor(record) or 0) then" \
     "a refusal from the criteria API is written in as progress"
 
 mutate "Modules/Filters.lua" \
@@ -2636,7 +2636,7 @@ end)" \
 
 mutate "Modules/Loremaster.lua" \
     "    if not criteria or criteria <= 0 then
-        return false
+        return learned
     end
 
     local key = CN.characterKey or CN.GetCharacterKey()" \
@@ -2796,17 +2796,13 @@ mutate "Modules/Reputations.lua" \
 # ---- 0.72.0 ----
 
 mutate "Modules/Loremaster.lua" \
-    "    local matches = zoneIndex[key]
-
-    if not matches then" \
-    "    local matches = nil
-
-    if not matches then" \
+    "    local matches = held and held.zone == needle and held.matches or nil" \
+    "    local matches = nil" \
     "every criteria update walks the whole achievement store again"
 
 mutate "Modules/Loremaster.lua" \
-    "        zoneIndex[key] = matches" \
-    "        if #matches > 0 then zoneIndex[key] = matches end" \
+    "            zoneIndex[key] = { zone = needle, matches = matches }" \
+    "            if #matches > 0 then zoneIndex[key] = { zone = needle, matches = matches } end" \
     "a zone with no achievement pays the full walk on every event"
 
 mutate "Modules/Loremaster.lua" \
@@ -2875,28 +2871,40 @@ mutate "Providers/BlizzardWorld.lua" \
         end" \
     "the zone a player is in is the room they are standing in again"
 
+# RETIRED IN 0.74.0. Both mutated the continent comparison, which was inert:
+# on retail a quest category is an EXPANSION ("Warlords of Draenor"), never a
+# continent ("Draenor"), so neither side ever matched and the branch could not
+# fire in any case it was written for. Its successors are the two evidence
+# mutations below.
+
 mutate "Modules/Loremaster.lua" \
-    "    if heldHere ~= nil and mineHere ~= nil and heldHere ~= mineHere then
-        return mineHere
+    "    if bound then
+        if id == bound then
+            return true
+        end
+
+        if bestID == bound then
+            return false
+        end
     end" \
     "    if false then
-        return mineHere
+        return true
     end" \
     "standing in one Nagrand shows progress for the other one"
 
 mutate "Modules/Loremaster.lua" \
-    "    if heldHere ~= nil and mineHere ~= nil and heldHere ~= mineHere then
-        return mineHere
+    "    if movers ~= 1 then
+        return false
     end" \
-    "    if heldHere ~= mineHere then
-        return mineHere and true or false
+    "    if movers < 1 then
+        return false
     end" \
-    "a client that will not name a continent decides the zone on a guess"
+    "two same-named zones moving at once teaches the addon a guess"
 
 mutate "Modules/Loremaster.lua" \
-    "        if rows > 0 and named == 0 then" \
-    "        if false then" \
-    "a zone walked while the client was cold is empty for the session"
+    "        local decisive = (named == rows)" \
+    "        local decisive = (named > 0)" \
+    "a zone walked while the client was half awake is kept for the session"
 
 mutate "Modules/Loremaster.lua" \
     "    local fresh = math.min(#untouched, freshShare or 0)" \
@@ -2942,18 +2950,11 @@ mutate "Modules/Achievements.lua" \
         end" \
     "an achievement that became nearly done does not reach the ranking"
 
-mutate "Modules/Quests.lua" \
-    "    if questID then
-        local store = Remembered()
-
-        if store[questID] then
-            store[questID] = nil
-            Quests.pinRevision = Quests.pinRevision + 1
-        end
-    end
-end)" \
-    "end)" \
-    "a quest picked up is still shown as one waiting to be picked up"
+# RETIRED IN 0.74.0. This mutated the pin removal 0.73.0 added to
+# QUEST_ACCEPTED, which 0.74.0 reverted: `Remembered()` is account-wide, so
+# one character picking a quest up erased the location every alt still needed.
+# Its successor is "logging in on a main erases the quest pins every alt still
+# needs", below.
 
 mutate "Scoring.lua" \
     "        return text and (\"over \" .. text) or nil, false, text" \
@@ -2968,6 +2969,124 @@ mutate "Modules/Harvest.lua" \
     table.insert(recentTurnIns, 1, { questID = questID, at = time() })" \
     "    table.insert(recentTurnIns, 1, { questID = questID, at = time() })" \
     "a turn-in the client did not name throws on the next quest accepted"
+
+# ---- 0.74.0 ----
+
+mutate "Modules/Loremaster.lua" \
+    "            local heldName = (live and live ~= \"\" and live)
+                or Loremaster.NameOf(id, record)" \
+    "            local heldName = Loremaster.NameOf(id, record)" \
+    "the zone walk asks the client for every name twice"
+
+mutate "Modules/Loremaster.lua" \
+    "    local matches = held and held.zone == needle and held.matches or nil" \
+    "    local matches = held and held.matches or nil" \
+    "a lookup for a room inside a zone blanks the zone"
+
+mutate "Modules/Loremaster.lua" \
+    "        if Loremaster.coldAttempts <= Loremaster.maximumColdAttempts
+            and C_Timer and C_Timer.After then" \
+    "        if false then" \
+    "a scan the game was not ready for leaves the tab empty until logout"
+
+mutate "Modules/Loremaster.lua" \
+    "        if Loremaster.coldAttempts <= Loremaster.maximumColdAttempts
+            and C_Timer and C_Timer.After then" \
+    "        if C_Timer and C_Timer.After then" \
+    "a client that will never answer is asked forever"
+
+mutate "Modules/Loremaster.lua" \
+    "    Loremaster.coldAttempts = 0
+
+    DebugPrint(\"Loremaster scan: \"" \
+    "    DebugPrint(\"Loremaster scan: \"" \
+    "one cold scan at login stops every later retry for the session"
+
+mutate "Modules/Loremaster.lua" \
+    "    for index = 1, math.min(#untouched, fresh, limit - #ordered) do" \
+    "    for index = 1, math.min(#untouched, limit - #ordered) do" \
+    "a list headed closest to finished fills its tail with zones never begun"
+
+mutate "Modules/Quests.lua" \
+    "        if Quests.IsCompletedOnAccount(questID) then" \
+    "        if Quests.IsCompletedOnAccount(questID)
+            or Blizzard.IsQuestInLog(questID) then" \
+    "logging in on a main erases the quest pins every alt still needs"
+
+mutate "Modules/Quests.lua" \
+    "    if not Quests.IsCompletedOnAccount(questID) then
+        return
+    end" \
+    "    if false then
+        return
+    end" \
+    "one character handing a quest in erases where it is for the others"
+
+mutate "Modules/Exploration.lua" \
+    "    if matched and mapID and count == 1 then" \
+    "    if matched and mapID then" \
+    "the wrong Nagrand is bound to this zone and written through"
+
+mutate "Modules/Exploration.lua" \
+    "    local mapID = Blizzard.ZoneMapID
+        and Blizzard.ZoneMapID(CN.GetPlayerPosition())" \
+    "    local mapID = CN.GetPlayerPosition()" \
+    "exploration learns the building it was standing in, not the zone"
+
+mutate "Modules/Exploration.lua" \
+    "            if not matchedID or achievementID < matchedID then" \
+    "            if not matchedID then" \
+    "which zone achievement is answered with depends on hash order"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    local held = zoneOf[mapID]
+
+    if held ~= nil then
+        return held
+    end" \
+    "    local held = nil
+
+    if held ~= nil then
+        return held
+    end" \
+    "the map ancestry is walked again for every question about it"
+
+mutate "Modules/Achievements.lua" \
+    "    local remaining = criteria - (Achievements.DoneFor(record) or 0)
+
+    return remaining > 0" \
+    "    local remaining = criteria - (record.done or 0)
+
+    return remaining > 0" \
+    "an alt is told it is two criteria from the main's progress"
+
+mutate "Modules/Achievements.lua" \
+    "    record.progress = record.progress or {}
+    record.progress[key] = done
+
+    record.done = done" \
+    "    record.done = done" \
+    "whichever character scanned last owns every achievement's progress"
+
+mutate "Modules/Setup.lua" \
+    "        return nil, \"the game was not ready yet\"" \
+    "        return false, \"the game was not ready yet\"" \
+    "a client still loading is reported to the player as a defect"
+
+mutate "Modules/Setup.lua" \
+    "                if failed + notReady < #results and notReady == 0 then" \
+    "                if failed + notReady < #results then" \
+    "a setup run the game was not ready for silences the reminder forever"
+
+mutate "Database.lua" \
+    "        if lost > 0 then" \
+    "        if false then" \
+    "the ranks a defect destroyed are never mentioned to the player"
+
+mutate "Modules/Errors.lua" \
+    "        if type(notice) == \"table\" and not notice.seen and notice.text then" \
+    "        if type(notice) == \"table\" and notice.text then" \
+    "a one-time notice is shown at every single login"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

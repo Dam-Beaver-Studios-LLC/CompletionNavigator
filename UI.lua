@@ -124,11 +124,13 @@ function UI.DistanceLine(mapID, x, y)
     end
 
     if not exact then
-        -- THE SAME WORDS `/cn list` USES, plus the reason. Two surfaces
-        -- phrasing one fact two ways is how a player ends up thinking they
-        -- are two facts.
-        return "About " .. (ceiling or text)
-            .. " away at least; the addon stops measuring past that."
+        -- THE SAME STEM `/cn list` USES, plus the reason. 0.74.0.
+        --
+        -- 0.73.0's comment claimed this already said the same words. It said
+        -- "About 20m away at least" against the list's "over 20m away" --
+        -- different, and "About ... at least" contradicts itself.
+        return "Over " .. (ceiling or text)
+            .. " away; the addon stops measuring past that."
     end
 
     return "About " .. text .. " away by the route this addon would take."
@@ -3177,7 +3179,13 @@ UI.RegisterTab{
                     UI.Answer("The game would not answer about zone progress "
                         .. "just now. Try again in a few seconds.")
                 else
-                    UI.Answer("Read " .. scanned .. " zone achievements.")
+                    -- MEASURED, NOT REACHED. 0.74.0. `scanned` counts the
+                    -- rows the walk went past; a partially cold client that
+                    -- measured forty of four hundred made this button say
+                    -- "Read 412". `/cn scanlore` prints both and this now
+                    -- matches it.
+                    UI.Answer("Read " .. measured .. " of " .. scanned
+                        .. " zone achievements.")
                 end
             end
 
@@ -3312,6 +3320,44 @@ UI.RegisterTab{
                         fraction = entry.fraction,
 
                         tooltip  = tostring(entry.category or ""),
+                    })
+                end
+            end
+
+            -- AND ZONES NOT YET BEGUN, UNDER THEIR OWN HEADING. 0.74.0.
+            --
+            -- These used to fill whatever room the section above had left,
+            -- reading as `0 / 120` with an empty bar under "Closest to
+            -- finished" -- which is the one thing they are not. `Closest`
+            -- reserves nothing for them now, and a fresh account would
+            -- otherwise see an empty tab. So they are shown, and labelled.
+            local fresh = lore.Closest(4, 4)
+
+            local unstarted = {}
+
+            for _, entry in ipairs(fresh) do
+                if (entry.done or 0) == 0 then
+                    table.insert(unstarted, entry)
+                end
+            end
+
+            if #unstarted > 0 then
+                table.insert(entries, { text = " " })
+
+                table.insert(entries, {
+                    section       = "unstarted",
+                    sectionHeader = true,
+                    text          = "|cffffc74fNot started|r",
+                })
+
+                for _, entry in ipairs(unstarted) do
+                    table.insert(entries, {
+                        section = "unstarted",
+
+                        text    = "  |cffffc74f" .. tostring(entry.name) .. "|r",
+                        value   = CN.Muted(entry.criteria .. " to do"),
+
+                        tooltip = tostring(entry.category or ""),
                     })
                 end
             end
