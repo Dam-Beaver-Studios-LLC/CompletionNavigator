@@ -969,9 +969,21 @@ function Blizzard.ZoneMapID(mapID)
         return held
     end
 
-    local answer = Blizzard.ResolveZoneMapID(mapID)
+    -- A FALLBACK IS NOT AN ANSWER, AND MUST NOT BE REMEMBERED AS ONE.
+    -- 0.75.0.
+    --
+    -- `ResolveZoneMapID` returns the input unchanged on four paths, one of
+    -- which is "the client would not answer" -- `GetMapInfo` returns nil
+    -- while `C_Map` is still coming up. 0.74.0 could not tell that apart from
+    -- a real result and cached it, "not cleared on anything", so one failed
+    -- resolve at a cold moment pinned a building's map to itself for the rest
+    -- of the session -- defeating the entire purpose of this function, and
+    -- silently filing that room's candidate list under the room.
+    local answer, resolved = Blizzard.ResolveZoneMapID(mapID)
 
-    zoneOf[mapID] = answer
+    if resolved then
+        zoneOf[mapID] = answer
+    end
 
     return answer
 end
@@ -983,31 +995,34 @@ function Blizzard.ResolveZoneMapID(mapID)
     while current and guard < 8 do
         local info = Blizzard.GetMapInfo(current)
 
+        -- The one path that is a REFUSAL rather than a result: the client
+        -- had nothing to say. Everything else below is a real answer about
+        -- the map graph and is worth keeping.
         if not info then
-            return mapID
+            return mapID, false
         end
 
         if (info.mapType or 0) == Blizzard.zoneMapType then
-            return current
+            return current, true
         end
 
         -- Above a zone: a continent or the world. The specific map is the
         -- closest thing to a zone identity there is.
         if (info.mapType or 0) < Blizzard.zoneMapType then
-            return mapID
+            return mapID, true
         end
 
         local parentID = info.parentMapID
 
         if not parentID or parentID <= 0 then
-            return mapID
+            return mapID, true
         end
 
         current = parentID
         guard   = guard + 1
     end
 
-    return mapID
+    return mapID, true
 end
 
 function Blizzard.GetMapChildren(mapID)

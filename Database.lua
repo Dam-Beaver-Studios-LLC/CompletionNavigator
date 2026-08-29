@@ -1308,8 +1308,19 @@ CN.migrations = {
     [25] = function(db)
         local lost = 0
 
-        for _, character in pairs(db.characters or {}) do
-            if type(character) == "table"
+        -- NOT THIS CHARACTER. Corrected in 0.75.0.
+        --
+        -- Migrations run at `ADDON_LOADED`, before this character's
+        -- reputation scan restores its OWN friendship ranks -- so every one
+        -- of its rows satisfied the test and was counted. The notice then
+        -- told the player that N ranks "on other characters" were lost, with
+        -- an N that included rows about to be restored seconds later on the
+        -- character reading the message. A wrong number in the one message
+        -- whose entire purpose is honesty about data loss.
+        local mine = CN.GetCharacterKey and CN.GetCharacterKey()
+
+        for key, character in pairs(db.characters or {}) do
+            if key ~= mine and type(character) == "table"
                 and type(character.reputations) == "table" then
 
                 for _, record in pairs(character.reputations) do
@@ -1333,6 +1344,32 @@ CN.migrations = {
                     .. "lost by a defect in version 0.72.0. Each character "
                     .. "restores its own the next time it logs in.",
             })
+        end
+    end,
+
+    -- THE FLAT CRITERIA FIELD IN THE ACHIEVEMENT STORE. 0.75.0.
+    --
+    -- `record.done` held whichever character scanned last. 0.74.0 added a
+    -- per-character `progress` table and then never wrote it -- the scan
+    -- built a fresh table literal and the writer kept setting the flat field
+    -- -- so the split existed on paper only. Both halves are fixed, and this
+    -- removes the field so that `DoneFor`'s fallback cannot go on handing one
+    -- character's figure to another.
+    --
+    -- Nothing is lost that a scan does not hand straight back, and an alt
+    -- reading "0 of 40" until it scans is right where reading the main's
+    -- "38 of 40" was wrong.
+    [26] = function(db)
+        local account = db.account
+
+        if not account or type(account.achievements) ~= "table" then
+            return
+        end
+
+        for _, record in pairs(account.achievements) do
+            if type(record) == "table" then
+                record.done = nil
+            end
         end
     end,
 }

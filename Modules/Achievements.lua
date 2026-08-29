@@ -18,14 +18,6 @@ local Print      = CN.Print
 local DebugPrint = CN.DebugPrint
 local Blizzard   = CN.Blizzard
 
--- wipe() is a WoW global; not relying on it keeps this file testable
--- outside the client.
-local function Wipe(tbl)
-    for key in pairs(tbl) do
-        tbl[key] = nil
-    end
-end
-
 -- An achievement's name, from the client, falling back to whatever an older
 -- database still carries.
 --
@@ -100,7 +92,13 @@ function Achievements.NoteProgress(record, done)
     record.progress = record.progress or {}
     record.progress[key] = done
 
-    record.done = done
+    -- `record.done` IS NOT WRITTEN. 0.75.0.
+    --
+    -- 0.74.0 introduced this function to split the store per character and
+    -- then wrote the flat field anyway, which is the field `DoneFor` falls
+    -- back to for a character that has no reading of its own -- so the split
+    -- existed and changed nothing. `Loremaster` stopped writing it in 0.66.0
+    -- and `Exploration` carries a paragraph on why.
 end
 
 -- Bumped whenever the store is rewritten, so the candidate provider knows
@@ -156,7 +154,18 @@ function Achievements.Scan()
 
     local store = Store()
 
-    Wipe(store)
+    -- NOT WIPED ANY MORE. 0.75.0.
+    --
+    -- `Wipe` emptied the ACCOUNT store and refilled it from the character
+    -- running the scan, so every other character's criteria readings were
+    -- destroyed on every `/cn achievescan` -- which is the whole thing the
+    -- per-character split added in 0.74.0 exists to keep. The split was
+    -- inert: the scan never called its writer, and the writer wrote the flat
+    -- field the split was meant to retire.
+    --
+    -- Rows the client no longer returns are dropped explicitly below instead,
+    -- which is what the wipe was actually for.
+    local seen = {}
 
     Achievements.revision = Achievements.revision + 1
 
@@ -190,12 +199,25 @@ function Achievements.Scan()
                     -- Store only what is unfinished, and only if there is
                     -- real progress or it is small enough to be actionable.
                     if criteria == 0 or done > 0 then
-                        store[achievement.achievementID] = {
-                            achievementID = achievement.achievementID,
-                            categoryID    = categoryID,
-                            done          = done,
-                            criteria      = criteria,
-                        }
+                        -- THROUGH THE ONE WRITER, AND ON TOP OF WHAT IS
+                        -- ALREADY THERE. 0.75.0.
+                        --
+                        -- This built a fresh table literal, so it never
+                        -- created a `progress` entry at all -- the split
+                        -- added in 0.74.0 had no writer -- and it discarded
+                        -- every other character's reading in the same
+                        -- statement.
+                        local held = store[achievement.achievementID] or {}
+
+                        held.achievementID = achievement.achievementID
+                        held.categoryID    = categoryID
+                        held.criteria      = criteria
+
+                        Achievements.NoteProgress(held, done)
+
+                        store[achievement.achievementID] = held
+
+                        seen[achievement.achievementID] = true
 
                         -- THROUGH THE ONE RULE. 0.62.0.
                         --
@@ -209,7 +231,7 @@ function Achievements.Scan()
                         -- `/cn achievements` report from the shortlist the
                         -- addon works off, and both counted finished
                         -- achievements as nearly finished.
-                        if IsNearlyDone(store[achievement.achievementID]) then
+                        if IsNearlyDone(held) then
                             nearlyDone = nearlyDone + 1
                         end
                     end
@@ -218,9 +240,34 @@ function Achievements.Scan()
         end
     end
 
+    -- ROWS THE CLIENT NO LONGER RETURNS, dropped explicitly. This is what the
+    -- wipe at the top used to accomplish, without taking every other
+    -- character's readings with it.
+    for achievementID in pairs(store) do
+        if not seen[achievementID] then
+            store[achievementID] = nil
+        end
+    end
+
+    -- AND THE SCAN IS RECORDED PER CHARACTER. 0.75.0.
+    --
+    -- `CN.MarkScanned` is account-wide, and `Setup.HasRun` reads account-wide
+    -- stamps -- so an alt that had never scanned was never prompted to, and
+    -- silently read whatever the main's scan had left. `Loremaster` records
+    -- who scanned, for exactly this reason; this is that.
+    CN.Account("achievementScans")[CN.characterKey or CN.GetCharacterKey()] =
+        time()
+
     CN.MarkScanned("achievements")
 
     return scanned, completed, nearlyDone
+end
+
+-- Whether THIS character has ever read its own criteria progress.
+function Achievements.HasScanned(characterKey)
+    characterKey = characterKey or CN.characterKey or CN.GetCharacterKey()
+
+    return CN.Account("achievementScans")[characterKey] ~= nil
 end
 
 ------------------------------------------------------------
@@ -280,18 +327,30 @@ function Achievements.Closest(limit)
     -- there is.
     local names = {}
 
+    -- AND THE REMAINDER, HOISTED OUT OF THE COMPARATOR. 0.75.0.
+    --
+    -- 0.74.0 routed "every reader of `record.done`" through `DoneFor` and
+    -- missed this one, so the list was ORDERED by whichever character scanned
+    -- last while each row DISPLAYED this character's own figure -- `/cn
+    -- closest` printing "3 / 40" above "38 / 40" under the heading "closest
+    -- to completion". Computed once per row here rather than O(n log n) times
+    -- inside the sort.
+    local left = {}
+
     for achievementID, record in pairs(Store()) do
-        if record.criteria and record.criteria > 0
-            and (Achievements.DoneFor(record) or 0) > 0 then
+        local done = Achievements.DoneFor(record) or 0
+
+        if record.criteria and record.criteria > 0 and done > 0 then
             names[record] = NameOf(achievementID, record) or ""
+            left[record]  = record.criteria - done
 
             table.insert(rows, record)
         end
     end
 
     table.sort(rows, function(a, b)
-        local aLeft = a.criteria - a.done
-        local bLeft = b.criteria - b.done
+        local aLeft = left[a] or 0
+        local bLeft = left[b] or 0
 
         if aLeft == bLeft then
             return (names[a] or "") < (names[b] or "")

@@ -377,7 +377,19 @@ function Goals.Plan(goal)
         local record = CN.Account("achievements")[goal.id]
 
         if record and record.criteria then
-            local remaining = (record.criteria or 0) - (record.done or 0)
+            -- THIS CHARACTER'S FIGURE. 0.75.0.
+            --
+            -- The last of the readers 0.74.0 meant to route through
+            -- `DoneFor` and missed. A player who pinned an achievement on an
+            -- alt was told "2 of 40 criteria left" for something they had
+            -- barely started, because the flat field holds whichever
+            -- character scanned last.
+            local achievements = CN:GetModule("Achievements")
+
+            local done = (achievements and achievements.DoneFor
+                and achievements.DoneFor(record)) or record.done or 0
+
+            local remaining = (record.criteria or 0) - done
 
             step(remaining .. " of " .. record.criteria .. " criteria left.")
 

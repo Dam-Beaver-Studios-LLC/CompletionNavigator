@@ -7,6 +7,98 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.75.0]
+
+**Last release's zone binding had the relation the wrong way round, and the
+per-character split it claimed to add never took effect.** Both were mine, and
+both are corrected here.
+
+### Fixed â€” the zone binding, inverted
+
+0.74.0 stored *zone â†’ achievement* and let a binding **promote** that
+achievement above every other rule. Its guard was "more than one candidate" â€”
+and this addon's own notes say every modern zone has at least two, its story
+achievement and its "Sojourner of <Zone>" companion. So the learning path ran
+everywhere, and the first quest of either kind bound the zone to whichever it
+happened to be. Once a bound Sojourner was earned, the Journey tab's "Here"
+row read green at 24/24 for ever while the zone's Loremaster achievement sat
+unmentioned at 30 of 60, and the zone stopped producing recommendations
+entirely.
+
+- **The relation is now the true one: an achievement belongs to a zone.**
+  Stored that way it *excludes* rather than promotes â€” a candidate known to
+  belong to a different zone is not a candidate here â€” and everything else is
+  left to the ordering that was already correct. A binding learned in an
+  ordinary zone can do no harm at all, by construction rather than by a guard.
+- **What 0.74.0 called evidence was not.** It compared the live figure against
+  a function that answers zero for any row this character has never scanned,
+  and `CRITERIA_UPDATE` fires globally â€” for a pet battle, a raid criterion,
+  anything. A character holding progress in Outland's Nagrand, standing in
+  Draenor's, bound the wrong zone permanently on the next criteria update
+  anywhere. A candidate now counts only when this character has a recorded
+  reading for it and the live figure is *higher*.
+- **`/cn zones forget` exists.** 0.74.0 published a clearing function with a
+  comment saying it was there so `/cn reset` could call it â€” there is no
+  `/cn reset` in this addon and nothing called it, so a wrong binding was
+  permanent. Bindings also re-learn from newer evidence, and a binding to an
+  achievement the game has retired is dropped by the next scan.
+
+### Fixed â€” the per-character achievement split, which was inert
+
+0.74.0 added a `progress` table keyed by character and then never wrote it:
+the scan built a fresh table literal that bypassed the writer, and the writer
+went on setting the flat field the split was meant to retire. So the defect it
+was written to fix â€” an alt reading the main's criteria count, being told it
+was two criteria from finishing, and being sent across the world for it â€” was
+still shipping.
+
+- The scan writes through the one writer, and **no longer wipes the account
+  store**, which destroyed every other character's readings on every
+  `/cn achievescan`.
+- The scan is recorded per character, so an alt is prompted to read its own
+  progress instead of silently inheriting.
+- Two readers 0.74.0 missed: the "closest to completion" sort was ordered by
+  one character's numbers while printing another's, and a pinned achievement
+  goal reported whichever character scanned last.
+
+### Fixed â€” caching, where two guards were set wrong in opposite directions
+
+- **One retired achievement disabled the zone cache for the life of the
+  account.** The scan only ever writes rows, so an achievement retired in a
+  patch keeps its row and the client never names it again â€” which made
+  0.74.0's "every row answered" test permanently false and the index
+  permanently empty. Every lookup then paid the full store walk the cache
+  exists to avoid. Rows the client has never answered for are now excluded
+  from the test, and the walk that *discovers* a refusal is deliberately not
+  trusted, in case the refused row was the one that mattered.
+- **A dungeon evicted the answer for the zone around it.** Most instances
+  parent into their outdoor zone, so the map id says one thing and the zone
+  name another; 0.74.0 filed under the map id and rejected on mismatch, so
+  every lookup inside missed *and* overwrote the outdoor entry, and walking
+  back out missed and re-stamped. The key carries both now.
+- **A map lookup the client refused was cached as an answer**, pinning a
+  building to itself for the rest of the session.
+- **The criteria refresh walked the store twice per burst** â€” once purely to
+  populate two variables â€” inside a two-second debounce while questing.
+
+### Fixed â€” what the addon tells you
+
+- **`/cn errors` contradicted itself two lines apart**, printing a red notice
+  and then "Nothing has gone wrong this session", and the notice could never
+  be cleared. It now reads correctly and `/cn errors clear` removes notices
+  you have already seen.
+- **The one-time notice about data 0.72.0 destroyed was printed into the login
+  chatter and marked as seen on the way past** â€” the one chance to read it was
+  the one moment nobody reads. It is delayed now, the way the setup reminder
+  already was.
+- **That notice's number counted this character too**, whose ranks were about
+  to be restored seconds later. A wrong number in the one message whose entire
+  purpose is honesty about data loss.
+- **The cold-scan retry died silently after three attempts anywhere in a
+  session** â€” trivially reached by following the addon's own advice â€” and said
+  nothing when it succeeded. A scan you asked for is a fresh start now, and a
+  successful retry says so and redraws.
+
 ## [0.74.0]
 
 **The 0.73.0 zone fix could not fire.** It broke the tie between two zones

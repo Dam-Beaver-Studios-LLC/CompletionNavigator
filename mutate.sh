@@ -2801,8 +2801,8 @@ mutate "Modules/Loremaster.lua" \
     "every criteria update walks the whole achievement store again"
 
 mutate "Modules/Loremaster.lua" \
-    "            zoneIndex[key] = { zone = needle, matches = matches }" \
-    "            if #matches > 0 then zoneIndex[key] = { zone = needle, matches = matches } end" \
+    "            zoneIndex[slot] = { zone = needle, matches = matches }" \
+    "            if #matches > 0 then zoneIndex[slot] = { zone = needle, matches = matches } end" \
     "a zone with no achievement pays the full walk on every event"
 
 mutate "Modules/Loremaster.lua" \
@@ -2864,10 +2864,10 @@ mutate "Modules/Exploration.lua" \
 
 mutate "Providers/BlizzardWorld.lua" \
     "        if (info.mapType or 0) == Blizzard.zoneMapType then
-            return current
+            return current, true
         end" \
     "        if true then
-            return current
+            return current, true
         end" \
     "the zone a player is in is the room they are standing in again"
 
@@ -2878,18 +2878,8 @@ mutate "Providers/BlizzardWorld.lua" \
 # mutations below.
 
 mutate "Modules/Loremaster.lua" \
-    "    if bound then
-        if id == bound then
-            return true
-        end
-
-        if bestID == bound then
-            return false
-        end
-    end" \
-    "    if false then
-        return true
-    end" \
+    "        if record and (not belongsTo or belongsTo == here)" \
+    "        if record" \
     "standing in one Nagrand shows progress for the other one"
 
 mutate "Modules/Loremaster.lua" \
@@ -2902,8 +2892,8 @@ mutate "Modules/Loremaster.lua" \
     "two same-named zones moving at once teaches the addon a guess"
 
 mutate "Modules/Loremaster.lua" \
-    "        local decisive = (named == rows)" \
-    "        local decisive = (named > 0)" \
+    "        local decisive = named > 0 and named == rows - retired" \
+    "        local decisive = named > 0" \
     "a zone walked while the client was half awake is kept for the session"
 
 mutate "Modules/Loremaster.lua" \
@@ -2979,8 +2969,8 @@ mutate "Modules/Loremaster.lua" \
     "the zone walk asks the client for every name twice"
 
 mutate "Modules/Loremaster.lua" \
-    "    local matches = held and held.zone == needle and held.matches or nil" \
-    "    local matches = held and held.matches or nil" \
+    "    local slot = tostring(key) .. \"|\" .. needle" \
+    "    local slot = tostring(key)" \
     "a lookup for a room inside a zone blanks the zone"
 
 mutate "Modules/Loremaster.lua" \
@@ -2995,12 +2985,10 @@ mutate "Modules/Loremaster.lua" \
     "        if C_Timer and C_Timer.After then" \
     "a client that will never answer is asked forever"
 
-mutate "Modules/Loremaster.lua" \
-    "    Loremaster.coldAttempts = 0
-
-    DebugPrint(\"Loremaster scan: \"" \
-    "    DebugPrint(\"Loremaster scan: \"" \
-    "one cold scan at login stops every later retry for the session"
+# RETIRED IN 0.75.0. This mutated the counter reset at the END of a
+# successful scan. 0.75.0 resets at the START of any scan the player asked
+# for, which is the property that matters and is mutated by "three cold scans
+# spend the session's retries and the rest are silent", below.
 
 mutate "Modules/Loremaster.lua" \
     "    for index = 1, math.min(#untouched, fresh, limit - #ordered) do" \
@@ -3062,9 +3050,7 @@ mutate "Modules/Achievements.lua" \
 
 mutate "Modules/Achievements.lua" \
     "    record.progress = record.progress or {}
-    record.progress[key] = done
-
-    record.done = done" \
+    record.progress[key] = done" \
     "    record.done = done" \
     "whichever character scanned last owns every achievement's progress"
 
@@ -3087,6 +3073,116 @@ mutate "Modules/Errors.lua" \
     "        if type(notice) == \"table\" and not notice.seen and notice.text then" \
     "        if type(notice) == \"table\" and notice.text then" \
     "a one-time notice is shown at every single login"
+
+# ---- 0.75.0 ----
+
+mutate "Modules/Achievements.lua" \
+    "                        Achievements.NoteProgress(held, done)" \
+    "                        held.done = done" \
+    "the achievement scan writes a figure every other character inherits"
+
+mutate "Modules/Achievements.lua" \
+    "    for achievementID in pairs(store) do
+        if not seen[achievementID] then
+            store[achievementID] = nil
+        end
+    end" \
+    "    for achievementID in pairs(store) do
+        store[achievementID] = nil
+    end" \
+    "one character's achievement scan destroys every other character's"
+
+mutate "Modules/Achievements.lua" \
+    "        local aLeft = left[a] or 0
+        local bLeft = left[b] or 0" \
+    "        local aLeft = a.criteria - (a.done or 0)
+        local bLeft = b.criteria - (b.done or 0)" \
+    "the closest list is ordered by a different character's numbers"
+
+mutate "Modules/Achievements.lua" \
+    "    CN.Account(\"achievementScans\")[CN.characterKey or CN.GetCharacterKey()] =
+        time()" \
+    "    local unused = 0" \
+    "an alt is never prompted to read its own achievement progress"
+
+mutate "Modules/Loremaster.lua" \
+    "        local before = record and record.progress
+            and record.progress[characterKey]
+
+        if before ~= nil then" \
+    "        local before = Loremaster.DoneFor(record) or 0
+
+        if true then" \
+    "a criteria update anywhere binds the wrong one of two same-named zones"
+
+mutate "Modules/Loremaster.lua" \
+    "            if criteria and criteria > 0 and done and done > before then" \
+    "            if criteria and criteria > 0 and done and done ~= before then" \
+    "progress going backwards is taken as evidence about a zone"
+
+mutate "Modules/Loremaster.lua" \
+    "                    everNamed[id] = false
+                end
+            end
+        end" \
+    "                    everNamed[id] = false
+                    retired = retired + 1
+                end
+            end
+        end" \
+    "the walk that discovers a refusal settles on a list the refusal holed"
+
+mutate "Modules/Loremaster.lua" \
+    "    for achievementID in pairs(bindings) do
+        if not store[achievementID] then
+            bindings[achievementID] = nil
+        end
+    end" \
+    "    for achievementID in pairs(bindings) do
+        if false then
+            bindings[achievementID] = nil
+        end
+    end" \
+    "a zone stays bound to an achievement the game has retired"
+
+mutate "Modules/Loremaster.lua" \
+    "    if not fromRetry then
+        Loremaster.coldAttempts = 0
+    end" \
+    "    if false then
+        Loremaster.coldAttempts = 0
+    end" \
+    "three cold scans spend the session's retries and the rest are silent"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    if resolved then
+        zoneOf[mapID] = answer
+    end" \
+    "    zoneOf[mapID] = answer" \
+    "one refused map lookup pins a building to itself for the session"
+
+mutate "Modules/Errors.lua" \
+    "            if rejected > 0 or shown > 0 then" \
+    "            if rejected > 0 then" \
+    "the errors command contradicts itself two lines apart"
+
+mutate "Modules/Errors.lua" \
+    "                if type(notice) == \"table\" and notice.seen then
+                    table.remove(notices, index)" \
+    "                if type(notice) == \"table\" then
+                    table.remove(notices, index)" \
+    "a notice the player has not read yet is discarded by /cn errors clear"
+
+mutate "Database.lua" \
+    "            if key ~= mine and type(character) == \"table\"" \
+    "            if type(character) == \"table\"" \
+    "the loss notice counts rows about to be restored on this character"
+
+mutate "Modules/Goals.lua" \
+    "            local done = (achievements and achievements.DoneFor
+                and achievements.DoneFor(record)) or record.done or 0" \
+    "            local done = record.done or 0" \
+    "a pinned achievement reports another character's criteria"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

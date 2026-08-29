@@ -81,8 +81,26 @@ function Errors.ShowNotices()
     return #unseen
 end
 
+-- DELAYED, so it lands after the login chatter rather than inside it.
+-- 0.75.0.
+--
+-- `OnLogin` handlers run synchronously inside `PLAYER_LOGIN`, immediately
+-- after the version banner and every other addon's. This is a one-time
+-- explanation of data the addon destroyed and cannot restore, and 0.74.0
+-- printed it at the single worst moment and then marked it seen on the way
+-- past -- so the one chance to read it was the one moment nobody reads.
+--
+-- `Setup.RemindIfNeeded` solves exactly this and says so; this is that.
+Errors.noticeDelaySeconds = 12
+
 CN:OnLogin(function()
-    CN.Guard("Errors.ShowNotices", Errors.ShowNotices)
+    if C_Timer and C_Timer.After then
+        C_Timer.After(Errors.noticeDelaySeconds, function()
+            CN.Guard("Errors.ShowNotices", Errors.ShowNotices)
+        end)
+    else
+        CN.Guard("Errors.ShowNotices", Errors.ShowNotices)
+    end
 end)
 
 function Errors.Record(context, message)
@@ -266,10 +284,39 @@ CN:RegisterCommand{
     help    = "Anything that went wrong inside the addon this session.",
     handler = function(args)
         if string.lower(CN.Trim(args or "")) == "clear" then
+            -- AND THE NOTICES THE PLAYER HAS ALREADY READ. 0.75.0.
+            --
+            -- `Errors.Clear` empties the in-memory ring. A notice lives in a
+            -- persisted account store and 0.74.0 gave it no removal path at
+            -- all, so a player who had read and understood it saw it in red
+            -- at the top of this command for the life of the account.
+            --
+            -- Only the ones already shown at login: an unread notice is not
+            -- something a command about ERRORS should be able to discard by
+            -- accident.
+            local notices = Errors.Notices()
+
+            local dropped = 0
+
+            for index = #notices, 1, -1 do
+                local notice = notices[index]
+
+                if type(notice) == "table" and notice.seen then
+                    table.remove(notices, index)
+                    dropped = dropped + 1
+                end
+            end
+
             local cleared = Errors.Clear()
 
             Print("Cleared " .. cleared
                 .. CN.Pluralize(cleared, " recorded error.", " recorded errors."))
+
+            if dropped > 0 then
+                Print("Cleared " .. dropped .. CN.Pluralize(dropped,
+                    " notice.", " notices."))
+            end
+
             return
         end
 
@@ -300,12 +347,20 @@ CN:RegisterCommand{
         -- is the command whose job is "what went wrong that you did not see".
         local notices = Errors.Notices()
 
-        if #notices > 0 then
-            for _, notice in ipairs(notices) do
-                if type(notice) == "table" and notice.text then
-                    CN.PrintLine(CN.Bad(tostring(notice.text)))
-                end
+        local shown = 0
+
+        for _, notice in ipairs(notices) do
+            if type(notice) == "table" and notice.text then
+                CN.PrintLine(CN.Bad(tostring(notice.text)))
+
+                shown = shown + 1
             end
+        end
+
+        if shown > 0 then
+            CN.PrintLine("  " .. CN.Muted("Already read? ")
+                .. CN.Accent("/cn errors clear")
+                .. CN.Muted(" removes it."))
         end
 
         if (CN.memoMutations or 0) > 0 then
@@ -349,7 +404,15 @@ CN:RegisterCommand{
                 return
             end
 
-            if rejected > 0 then
+            -- A NOTICE COUNTS TOWARDS "SOMETHING WAS SAID". 0.75.0.
+            --
+            -- 0.74.0 printed the notice in red at the top of this handler
+            -- and then, if the ring happened to be empty, followed it
+            -- immediately with "Nothing has gone wrong this session." Two
+            -- contradictory statements, adjacent, in the command whose whole
+            -- job is to be trustworthy about failures. The `rejected` branch
+            -- one line up already knew to say "nothing ELSE".
+            if rejected > 0 or shown > 0 then
                 Print("Nothing else has gone wrong this session.")
                 return
             end

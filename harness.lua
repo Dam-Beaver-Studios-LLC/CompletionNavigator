@@ -495,6 +495,14 @@ function CN_TEST_SetMapName(mapID, name)
     F.mapTree[mapID].name = name
 end
 
+-- A test that is about the map GRAPH needs to be able to build one: a room
+-- inside a zone, so `Blizzard.ZoneMapID` has something to walk up.
+function CN_TEST_MapParent(mapID, parentMapID, mapType)
+    F.mapTree[mapID] = F.mapTree[mapID] or { name = "Map" .. tostring(mapID) }
+    F.mapTree[mapID].parentMapID = parentMapID
+    F.mapTree[mapID].mapType     = mapType or 4
+end
+
 F.mapChildren = {
     [2022] = { { mapID = 2112 } },
     [1941] = { { mapID = 94 } },
@@ -3543,8 +3551,17 @@ assert(count(profile.titles) == 2, "only known titles belong on the character")
 -- Completed achievements must NOT be stored; only unfinished ones are.
 assert(db.account.achievements[12] == nil,
     "completed achievements must not be stored")
-assert(db.account.achievements[10] and db.account.achievements[10].done == 4,
-    "in-progress achievement criteria must persist")
+-- PER CHARACTER, NOT FLAT. 0.75.0. `record.done` was the field that held
+-- whichever character scanned last; the split added in 0.74.0 could not take
+-- effect while the scan bypassed its writer and the writer kept writing it.
+assert(db.account.achievements[10]
+    and db.account.achievements[10].progress
+    and db.account.achievements[10].progress[CN.GetCharacterKey()] == 4,
+    "in-progress achievement criteria must persist, under the character that "
+    .. "read them")
+
+assert(db.account.achievements[10].done == nil,
+    "and not in a flat field every other character would inherit")
 assert(db.account.achievements[13] == nil,
     "ACHIEVEMENT_EARNED must drop the row")
 
@@ -11981,7 +11998,7 @@ end)()
 
         goalModule.Add(CN.objectiveTypes.ACHIEVEMENT, watchedID)
 
-        watchedRecord.done = 5
+        achievements.NoteProgress(watchedRecord, 5)
 
         CN_TEST_TIME_OFFSET = CN_TEST_TIME_OFFSET
             + achievements.criteriaSweepSeconds + 1
@@ -11997,9 +12014,10 @@ end)()
 
         CN.Blizzard.GetAchievementProgress = realProgress
 
-        assert(watchedRecord.done == 5,
+        assert(achievements.DoneFor(watchedRecord) == 5,
             "a client that answers nothing does not overwrite real progress "
-            .. "with zero: " .. tostring(watchedRecord.done))
+            .. "with zero: "
+            .. tostring(achievements.DoneFor(watchedRecord)))
 
         -- AND A CLIENT THAT DOES ANSWER STILL MOVES IT, or this passes for
         -- the wrong reason.
@@ -12019,8 +12037,9 @@ end)()
 
         CN.Blizzard.GetAchievementProgress = realProgress
 
-        assert(watchedRecord.done == 7,
-            "real progress is still recorded: " .. tostring(watchedRecord.done))
+        assert(achievements.DoneFor(watchedRecord) == 7,
+            "real progress is still recorded: "
+            .. tostring(achievements.DoneFor(watchedRecord)))
 
         goalModule.Remove(CN.objectiveTypes.ACHIEVEMENT, watchedID)
 
@@ -28377,7 +28396,7 @@ end)()
     -- which is the shape of the real defect, where the lower id is always the
     -- older, Outland one.
     CN_TEST_MakeAchievement(farAway, zone, 10, 0)
-    CN_TEST_MakeAchievement(here, "Adventurer of " .. zone, 10, 0)
+    CN_TEST_MakeAchievement(here, "Of " .. zone, 10, 0)
 
     lore.ForgetZoneIndex()
 
@@ -28385,8 +28404,17 @@ end)()
         "with nothing learned, the deterministic ordering answers -- and is "
         .. "allowed to be wrong about which of two Nagrands you meant")
 
-    -- NOW THE EVIDENCE ARRIVES: this character's criteria move on exactly one
-    -- of them, while standing here. Nothing else can produce that.
+    -- A BASELINE THIS CHARACTER ACTUALLY RECORDED. 0.75.0.
+    --
+    -- 0.74.0 compared the live figure with `DoneFor`, which answers 0 for any
+    -- row this character has never scanned -- and `CRITERIA_UPDATE` is
+    -- global, firing for a pet battle or a raid criterion. So a character
+    -- holding progress on Outland's Nagrand, standing in Draenor's, saw
+    -- "12 ~= 0" on the Outland row for any criteria update anywhere and bound
+    -- the wrong zone permanently. "Different from a number nobody recorded"
+    -- is not movement.
+    local myKey = CN.characterKey or CN.GetCharacterKey()
+
     local realProgress = CN.Blizzard.GetAchievementProgress
 
     CN.Blizzard.GetAchievementProgress = function(id)
@@ -28395,7 +28423,40 @@ end)()
         end
 
         if id == farAway then
-            return 0, 10
+            return 7, 10
+        end
+
+        return realProgress(id)
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    local zoneMap = CN.Blizzard.ZoneMapID(CN.GetPlayerPosition())
+
+    assert(lore.ZoneOfAchievement(here) == nil
+        and lore.ZoneOfAchievement(farAway) == nil,
+        "with no recorded reading for either, nothing is learned -- however "
+        .. "far the live figures are from zero")
+
+    -- AND THE EXACT SHAPE THAT BOUND THE WRONG ZONE. 0.75.0.
+    --
+    -- One candidate has a real reading and has not moved; the OTHER has none
+    -- at all and a live figure well above zero -- a character carrying
+    -- progress in Outland's Nagrand, standing in Draenor's. Comparing
+    -- against a zero that stands in for "never read" makes that look like
+    -- movement, and any criteria update anywhere -- a pet battle, a raid
+    -- criterion -- then bound the wrong zone permanently.
+    records[here].progress    = { [myKey] = 4 }
+    records[farAway].progress = {}
+
+    CN.Blizzard.GetAchievementProgress = function(id)
+        if id == here then
+            return 4, 10
+        end
+
+        if id == farAway then
+            return 9, 10
         end
 
         return realProgress(id)
@@ -28406,16 +28467,73 @@ end)()
 
     CN.Blizzard.GetAchievementProgress = realProgress
 
-    local zoneMap = CN.Blizzard.ZoneMapID(CN.GetPlayerPosition())
+    assert(lore.ZoneOfAchievement(farAway) == nil,
+        "a candidate this character has never read is not a candidate that "
+        .. "moved: " .. tostring(lore.ZoneOfAchievement(farAway)))
 
-    assert(lore.BoundAchievement(zoneMap) == here,
-        "the achievement whose criteria moved while the player stood here IS "
-        .. "this zone: " .. tostring(lore.BoundAchievement(zoneMap)))
+    -- NOW BOTH HAVE A READING, and exactly one goes up.
+    records[here].progress    = { [myKey] = 4 }
+    records[farAway].progress = { [myKey] = 7 }
 
+    CN.Blizzard.GetAchievementProgress = function(id)
+        if id == here then
+            return 6, 10
+        end
+
+        if id == farAway then
+            return 7, 10
+        end
+
+        return realProgress(id)
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    -- INVERTED IN 0.75.0: an achievement belongs to a zone, not the other way
+    -- round, and a binding EXCLUDES a candidate known to belong somewhere
+    -- else rather than promoting one. See the header on `Loremaster.Bindings`.
+    assert(lore.ZoneOfAchievement(here) == zoneMap,
+        "the achievement whose criteria went up while the player stood here "
+        .. "belongs to this zone: " .. tostring(lore.ZoneOfAchievement(here)))
+
+    -- AND THE OTHER ONE IS NOW EXCLUDED HERE, which is the whole mechanism.
     lore.ForgetZoneIndex()
 
+    lore.Bind(farAway, 999888)
+
     assert(select(2, lore.ZoneRecord()) == here,
-        "and from then on it outranks the shorter name and the lower id")
+        "a candidate known to belong to another zone map is not a candidate "
+        .. "in this one, whatever its name or id")
+
+    -- PROGRESS GOING BACKWARDS IS NOT EVIDENCE EITHER.
+    lore.ForgetBindings()
+    lore.ForgetZoneIndex()
+
+    records[here].progress    = { [myKey] = 6 }
+    records[farAway].progress = { [myKey] = 7 }
+
+    CN.Blizzard.GetAchievementProgress = function(id)
+        if id == here then
+            return 2, 10
+        end
+
+        if id == farAway then
+            return 7, 10
+        end
+
+        return realProgress(id)
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(lore.ZoneOfAchievement(here) == nil,
+        "a figure that went DOWN teaches nothing")
 
     -- TWO MOVERS IS NOT EVIDENCE ABOUT EITHER. A character can hold criteria
     -- in two same-named zones at once, and guessing between them is what this
@@ -28423,8 +28541,8 @@ end)()
     lore.ForgetBindings()
     lore.ForgetZoneIndex()
 
-    records[here].progress   = {}
-    records[farAway].progress = {}
+    records[here].progress    = { [myKey] = 1 }
+    records[farAway].progress = { [myKey] = 1 }
 
     CN.Blizzard.GetAchievementProgress = function(id)
         if id == here or id == farAway then
@@ -28439,8 +28557,37 @@ end)()
 
     CN.Blizzard.GetAchievementProgress = realProgress
 
-    assert(lore.BoundAchievement(zoneMap) == nil,
+    assert(lore.ZoneOfAchievement(here) == nil
+        and lore.ZoneOfAchievement(farAway) == nil,
         "two movers teaches nothing, rather than teaching a guess")
+
+    -- AND A BINDING IN AN ORDINARY ZONE CANNOT DO HARM.
+    --
+    -- Every modern zone has a story achievement AND a "Sojourner of <Zone>"
+    -- companion, so 0.74.0's "more than one candidate" guard fired
+    -- everywhere -- and because a binding PROMOTED, the first quest of either
+    -- kind bound the zone to whichever it happened to be. Once a bound
+    -- Sojourner was earned, the "Here" row read green at 24/24 for ever while
+    -- the zone's Loremaster achievement sat unmentioned at 30 of 60.
+    lore.ForgetBindings()
+    lore.ForgetZoneIndex()
+
+    -- Both belong to THIS zone, which is the ordinary case.
+    lore.Bind(farAway, zoneMap)
+
+    records[here].completed = false
+
+    assert(select(2, lore.ZoneRecord()) == farAway,
+        "with both belonging here, the shortest name still decides and the "
+        .. "binding changes nothing")
+
+    records[farAway].completed = true
+
+    lore.ForgetZoneIndex()
+
+    assert(select(2, lore.ZoneRecord()) == here,
+        "and an earned one still loses to an unfinished one, which a "
+        .. "promoting binding overrode")
 
     records[here], records[farAway] = nil, nil
     lore.ForgetZoneIndex()
@@ -28824,7 +28971,7 @@ end)()
     assert(record and (record.criteria or 0) > 0, "and it has criteria")
 
     -- Park it well short of the boundary, then move it across.
-    record.done = 0
+    achievements.NoteProgress(record, 0)
 
     local invalidated = 0
 
@@ -29051,10 +29198,31 @@ end)()
     assert((CN_TEST_PendingTimers and CN_TEST_PendingTimers() or 0) > scheduled,
         "and schedules another, because the condition is known transient")
 
-    -- AND IS NOT ASKED FOREVER.
+    -- AND THE RETRY CHAIN IS NOT ASKED FOREVER.
     lore.coldAttempts = lore.maximumColdAttempts
 
-    local ceiling = CN_TEST_PendingTimers and CN_TEST_PendingTimers() or 0
+    local ceiling = CN_TEST_PendingTimers()
+
+    CN.Blizzard.GetAchievementProgress = function() return 0, 0 end
+
+    lore.Scan(true)
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(CN_TEST_PendingTimers() == ceiling,
+        "a retry chain that has run its course stops")
+
+    -- BUT A SCAN THE PLAYER ASKED FOR IS A FRESH START. 0.75.0.
+    --
+    -- 0.74.0 reset the counter only on a scan that measured something, so
+    -- three cold scans anywhere in a session -- `/cn setup` at login plus two
+    -- presses of "Rescan zones", which is what the addon's own messages tell
+    -- the player to do -- left it spent, and every later cold scan scheduled
+    -- nothing. The retry died silently at the moment the player started
+    -- trying harder.
+    lore.coldAttempts = lore.maximumColdAttempts
+
+    local beforeAsking = CN_TEST_PendingTimers()
 
     CN.Blizzard.GetAchievementProgress = function() return 0, 0 end
 
@@ -29062,8 +29230,9 @@ end)()
 
     CN.Blizzard.GetAchievementProgress = realProgress
 
-    assert((CN_TEST_PendingTimers and CN_TEST_PendingTimers() or 0) == ceiling,
-        "a client that will never answer is not asked forever")
+    assert(CN_TEST_PendingTimers() > beforeAsking,
+        "a scan the player asked for still gets its retry, however many the "
+        .. "session has already spent")
 
     -- A SUCCESSFUL SCAN CLEARS THE COUNT, so a cold login does not spend
     -- the whole session's retries and leave a later one with none.
@@ -29480,6 +29649,460 @@ end)()
     end
 
     print("  one journey is described with one phrase")
+end)()
+
+print("\nWhat 0.75.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE PER-CHARACTER SPLIT IN THE ACHIEVEMENT STORE ACTUALLY TAKES EFFECT.
+    ------------------------------------------------------------
+    local achievements = CN:GetModule("Achievements")
+
+    achievements.Scan()
+
+    local store = achievements.Store()
+
+    local mine = CN.characterKey or CN.GetCharacterKey()
+
+    -- 0.74.0 added `progress` and never wrote it: `Scan` built a fresh table
+    -- literal and `NoteProgress` set the flat field the split was meant to
+    -- retire. Both halves were inert, so an alt still read the main's count.
+    local rows, withProgress, withFlat = 0, 0, 0
+
+    for _, record in pairs(store) do
+        rows = rows + 1
+
+        if record.progress and record.progress[mine] ~= nil then
+            withProgress = withProgress + 1
+        end
+
+        if record.done ~= nil then
+            withFlat = withFlat + 1
+        end
+    end
+
+    assert(rows > 0, "the scan recorded something")
+
+    assert(withProgress == rows,
+        "the scan files every row under the character that read it: "
+        .. withProgress .. " of " .. rows)
+
+    assert(withFlat == 0,
+        "and writes no flat field for another character to inherit: "
+        .. withFlat .. " rows still carry one")
+
+    -- AND ANOTHER CHARACTER'S SCAN DOES NOT DESTROY THIS ONE'S READINGS.
+    --
+    -- `Scan` wiped the whole account store and refilled it from whoever ran
+    -- it, which is the one thing the split exists to prevent.
+    local id = next(store)
+
+    store[id].progress["Realm-SomeoneElse"] = 17
+
+    achievements.Scan()
+
+    assert(store[id] and store[id].progress
+        and store[id].progress["Realm-SomeoneElse"] == 17,
+        "a scan on one character keeps every other character's readings")
+
+    assert(achievements.DoneFor(store[id], "Realm-SomeoneElse") == 17,
+        "and reports them as theirs")
+
+    store[id].progress["Realm-SomeoneElse"] = nil
+
+    -- AND THE SCAN IS RECORDED PER CHARACTER, so an alt is prompted rather
+    -- than silently inheriting.
+    assert(achievements.HasScanned(),
+        "this character's scan is recorded")
+
+    assert(not achievements.HasScanned("Realm-NeverPlayed"),
+        "and a character that never scanned is not claimed to have")
+
+    print("  an achievement's criteria are filed under the character that "
+        .. "read them")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- CLOSEST SORTS ON THE SAME NUMBER IT PRINTS.
+    ------------------------------------------------------------
+    local achievements = CN:GetModule("Achievements")
+
+    local store = achievements.Store()
+
+    local mine = CN.characterKey or CN.GetCharacterKey()
+
+    local low, high = 994001, 994002
+
+    store[low]  = { achievementID = low,  categoryID = 1, criteria = 40,
+                    progress = { [mine] = 38 } }
+    store[high] = { achievementID = high, categoryID = 1, criteria = 40,
+                    progress = { [mine] = 3 } }
+
+    -- NAMED SO ALPHABETICAL ORDER IS THE WRONG ORDER. With the remainder
+    -- read from a field that no longer exists, both rows tie at 40 left and
+    -- the name tie-break decides -- so a fixture whose names happen to agree
+    -- with the right answer would pass against the bug.
+    CN_TEST_MakeAchievement(low, "Zzz Almost There", 40, 38)
+    CN_TEST_MakeAchievement(high, "Aaa Barely Begun", 40, 3)
+
+    local rows = achievements.Closest(20)
+
+    local sawLow, sawHigh
+
+    for index, record in ipairs(rows) do
+        if record.achievementID == low then sawLow = index end
+        if record.achievementID == high then sawHigh = index end
+    end
+
+    -- 0.74.0 routed "every reader of `record.done`" through `DoneFor` and
+    -- missed the comparator, so the list came back ordered by whichever
+    -- character scanned last while each row displayed this character's own
+    -- figure: "3 / 40" above "38 / 40", under "closest to completion".
+    assert(sawLow and sawHigh and sawLow < sawHigh,
+        "the row with two criteria left sorts above the one with 37: "
+        .. tostring(sawLow) .. " vs " .. tostring(sawHigh))
+
+    store[low], store[high] = nil, nil
+
+    -- AND A PINNED ACHIEVEMENT'S PLAN READS THIS CHARACTER'S FIGURE.
+    --
+    -- The last reader 0.74.0 meant to route through `DoneFor` and missed. A
+    -- player who pinned an achievement on an alt was told "2 of 40 criteria
+    -- left" for something they had barely started.
+    local goalModule = CN:GetModule("Goals")
+
+    local pinned = 994003
+
+    store[pinned] = { achievementID = pinned, categoryID = 1, criteria = 40,
+                      done = 38, progress = { [mine] = 3 } }
+
+    CN_TEST_MakeAchievement(pinned, "Pinned Thing", 40, 3)
+
+    local plan = goalModule.Plan({ type = CN.objectiveTypes.ACHIEVEMENT,
+                                   id = pinned })
+
+    local joined = table.concat((plan and plan.steps) or {}, " | ")
+
+    assert(string.find(joined, "37 of 40", 1, true),
+        "a pinned achievement counts from this character's own progress, "
+        .. "not from the flat field another character left: " .. joined)
+
+    store[pinned] = nil
+
+    print("  the closest list is ordered by the number it shows")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A RETIRED ACHIEVEMENT DOES NOT DISABLE THE ZONE CACHE FOR EVER.
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    lore.Scan()
+    lore.ForgetZoneIndex()
+    lore.ForgetBindings()
+
+    local records = lore.Records()
+
+    -- A row the client will never name again: `Loremaster.Scan` only ever
+    -- writes rows, so an achievement retired in a game patch keeps its row
+    -- for the life of the account. 0.74.0's `named == rows` was therefore
+    -- permanently false and the index permanently empty -- every lookup
+    -- paying the full store walk the cache exists to avoid.
+    local dead = 993001
+
+    records[dead] = {
+        achievementID = dead, categoryID = 1, criteria = 10,
+        completed = false, progress = {},
+    }
+
+    local realName = CN.Blizzard.GetAchievementName
+
+    local calls = 0
+
+    CN.Blizzard.GetAchievementName = function(id)
+        calls = calls + 1
+
+        if id == dead then
+            return nil
+        end
+
+        return realName(id)
+    end
+
+    -- The walk that DISCOVERS the refusal is deliberately not decisive: if
+    -- the zone's own achievement were the row that refused, caching here
+    -- would cache its absence.
+    lore.ZoneRecord()
+
+    calls = 0
+
+    lore.ZoneRecord()
+
+    local discovering = calls
+
+    assert(discovering > 1,
+        "the walk that finds a refusal does not settle on it")
+
+    -- The next one counts it as retired and settles.
+    calls = 0
+
+    lore.ZoneRecord()
+
+    CN.Blizzard.GetAchievementName = realName
+
+    assert(calls <= 1,
+        "and the walk after that is remembered, rather than the store being "
+        .. "re-walked for ever because of one dead row: " .. calls)
+
+    records[dead] = nil
+    lore.ForgetZoneIndex()
+
+    print("  one retired achievement does not disable the zone cache")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DUNGEON AND THE ZONE AROUND IT EACH KEEP THEIR OWN ANSWER.
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    lore.ForgetZoneIndex()
+    lore.ForgetBindings()
+
+    local outdoor = lore.ForZone()
+
+    assert(outdoor, "the zone resolves")
+
+    -- Most modern instances parent into their outdoor zone, so `ZoneMapID`
+    -- answers with the ZONE and `GetZoneText` with the instance. 0.74.0 filed
+    -- under the map id and rejected on a needle mismatch, so every lookup
+    -- inside missed AND evicted the outdoor zone's good entry -- and walking
+    -- back out missed and re-stamped. The index never converged, in the
+    -- places `CRITERIA_UPDATE` fires hardest.
+    local realZoneText = GetZoneText
+
+    GetZoneText = function() return "Some Dungeon Inside It" end
+
+    assert(lore.ZoneRecord() == nil, "the dungeon has no achievement")
+    assert(lore.ZoneRecord() == nil, "and says so consistently")
+
+    GetZoneText = realZoneText
+
+    local realName = CN.Blizzard.GetAchievementName
+
+    local calls = 0
+
+    CN.Blizzard.GetAchievementName = function(...)
+        calls = calls + 1
+        return realName(...)
+    end
+
+    local after = lore.ForZone()
+
+    CN.Blizzard.GetAchievementName = realName
+
+    assert(after and after.id == outdoor.id,
+        "the zone still answers with its own achievement after a trip "
+        .. "inside: " .. tostring(after and after.name))
+
+    assert(calls <= 1,
+        "and did not have to re-walk the store to do it: " .. calls)
+
+    lore.ForgetZoneIndex()
+
+    print("  a dungeon does not evict the answer for the zone around it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MAP THE CLIENT WOULD NOT ANSWER ABOUT IS NOT REMEMBERED.
+    ------------------------------------------------------------
+    local Blizzard = CN.Blizzard
+
+    local room = 986001
+
+    CN_TEST_SetMapName(room, "A Room")
+
+    CN_TEST_MapParent(room, 2022, 4)
+
+    local realInfo = C_Map.GetMapInfo
+
+    C_Map.GetMapInfo = function() return nil end
+
+    -- `ResolveZoneMapID` returns the input unchanged on the "client would not
+    -- answer" path as well as on three real ones. 0.74.0 could not tell them
+    -- apart and cached the fallback for ever, so one failed resolve at a cold
+    -- moment pinned a building to itself for the session -- defeating the
+    -- entire purpose of the function.
+    assert(Blizzard.ZoneMapID(room) == room,
+        "a refusal still answers with the best available identity")
+
+    C_Map.GetMapInfo = realInfo
+
+    assert(Blizzard.ZoneMapID(room) == 2022,
+        "and is not remembered, so the real answer arrives the moment the "
+        .. "client will give one: " .. tostring(Blizzard.ZoneMapID(room)))
+
+    CN_TEST_SetMapName(room, nil)
+
+    print("  a map lookup the client refused is not cached as an answer")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LEARNED ZONE CAN BE FORGOTTEN, AND A DEAD ONE IS DROPPED.
+    ------------------------------------------------------------
+    local lore = CN:GetModule("Loremaster")
+
+    lore.ForgetBindings()
+
+    -- 0.74.0 published `ForgetBindings` with a comment saying it existed "so
+    -- `/cn reset` can clear what was learned" -- and there is no `/cn reset`
+    -- in this addon and nothing called it. A persisted store that can be
+    -- wrong, with no way for the player to clear it.
+    lore.Bind(992001, 94)
+    lore.Bind(992002, 94)
+
+    assert(lore.ZoneOfAchievement(992001) == 94, "a binding is held")
+
+    -- CAPTURED AT THE CHAT FRAME, not by replacing `CN.Print`: every module
+    -- takes `local Print = CN.Print` at load, so a later assignment to the
+    -- table field is never seen by any of them.
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(spoken, tostring(message))
+
+        return realAdd(chatFrame, message)
+    end
+
+    CN.HandleSlashCommand("zones forget")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    assert(lore.ZoneOfAchievement(992001) == nil
+        and lore.ZoneOfAchievement(992002) == nil,
+        "and the player can clear them")
+
+    assert(#spoken > 0
+        and string.find(table.concat(spoken, " "), "2", 1, true),
+        "and is told how many: " .. table.concat(spoken, " "))
+
+    -- AND A BINDING TO AN ACHIEVEMENT THAT NO LONGER EXISTS IS DROPPED BY THE
+    -- NEXT SCAN, rather than sitting on disk describing nothing.
+    lore.Bind(992003, 94)
+
+    lore.Scan()
+
+    assert(lore.ZoneOfAchievement(992003) == nil,
+        "a binding to an achievement the store no longer holds is dropped")
+
+    print("  a learned zone can be forgotten, and a dead one drops itself")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ERRORS COMMAND DOES NOT CONTRADICT ITSELF.
+    ------------------------------------------------------------
+    local errors = CN:GetModule("Errors")
+
+    errors.Clear()
+
+    local notices = errors.Notices()
+
+    for index = #notices, 1, -1 do
+        notices[index] = nil
+    end
+
+    table.insert(notices, { at = 1, text = "Something was destroyed.",
+                            seen = true })
+
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(spoken, tostring(message))
+
+        return realAdd(chatFrame, message)
+    end
+
+    CN.HandleSlashCommand("errors")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local joined = table.concat(spoken, " ")
+
+    -- 0.74.0 printed the notice in red and then, with an empty ring,
+    -- immediately followed it with "Nothing has gone wrong this session."
+    -- Two contradictory statements, adjacent, in the command whose whole job
+    -- is to be trustworthy about failures.
+    assert(string.find(joined, "Something was destroyed", 1, true),
+        "the notice is printed")
+
+    assert(not string.find(joined, "Nothing has gone wrong", 1, true),
+        "and is not immediately contradicted: " .. joined)
+
+    -- AND IT CAN BE CLEARED, having been read.
+    CN.HandleSlashCommand("errors clear")
+
+    assert(#errors.Notices() == 0,
+        "a notice already read can be cleared, rather than shown in red for "
+        .. "the life of the account")
+
+    -- AN UNREAD ONE IS NOT DISCARDED BY A COMMAND ABOUT ERRORS.
+    table.insert(errors.Notices(), { at = 2, text = "Not yet read." })
+
+    CN.HandleSlashCommand("errors clear")
+
+    assert(#errors.Notices() == 1,
+        "an unread notice survives")
+
+    for index = #errors.Notices(), 1, -1 do
+        errors.Notices()[index] = nil
+    end
+
+    print("  the errors command does not contradict itself, and can be "
+        .. "cleared")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE LOSS NOTICE COUNTS OTHER CHARACTERS, NOT THIS ONE.
+    ------------------------------------------------------------
+    local aged = {
+        version = 24,
+        account = {},
+        characters = {
+            [CN.GetCharacterKey()] = { reputations = {
+                [2600] = { kind = "FRIENDSHIP", reaction = 5 },
+            } },
+            ["Realm-Alt"] = { reputations = {
+                [2601] = { kind = "FRIENDSHIP", reaction = 4 },
+            } },
+        },
+    }
+
+    CN.RunMigrations(aged)
+
+    -- Migrations run at ADDON_LOADED, before this character's reputation
+    -- scan restores its own ranks -- so every one of its rows satisfied the
+    -- test and was counted. The notice then told the player that N ranks "on
+    -- other characters" were lost, with an N that included rows about to be
+    -- restored seconds later on the character reading the message.
+    local notices = aged.account.notices
+
+    assert(notices and #notices == 1, "one notice")
+
+    assert(string.find(notices[1].text, "^1 ", 1, false),
+        "and it counts the other character only: " .. notices[1].text)
+
+    print("  the loss notice counts the characters it says it counts")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")
