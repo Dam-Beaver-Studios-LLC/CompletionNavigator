@@ -50,7 +50,7 @@ Setup.steps = {
     -- dimension, was not.
     { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true, perCharacter = "HasScanned" },
     { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
-    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements", measured = true, perCharacter = "HasScanned" },
+    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements", measured = true, measuredAt = 4, perCharacter = "HasScanned" },
     { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },
     { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan",     unit = "mounts" },
     { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan",     unit = "species" },
@@ -64,7 +64,7 @@ function Setup.RunStep(step)
         return false, "module not loaded"
     end
 
-    local ok, first, second = pcall(module[step.fn])
+    local ok, first, second, third, fourth = pcall(module[step.fn])
 
     if not ok then
         return false, tostring(first)
@@ -92,7 +92,32 @@ function Setup.RunStep(step)
     -- note says setup is most often run in the first moments after logging
     -- in, which is exactly when the criteria API refuses. The common path was
     -- presented as a bug report the player could not act on.
-    if step.measured and second == 0 then
+    -- WHICH RETURN CARRIES "how many rows the client answered about".
+    -- 0.86.0.
+    --
+    -- The guard above was written for `Loremaster.Scan`, which returns
+    -- `scanned, measured`. 0.73.0 then gave `measured = true` to the
+    -- Achievements step as well -- and `Achievements.Scan` returns
+    -- `scanned, completed, nearlyDone, answered`, so the second value there
+    -- is the COMPLETED count: four figures on any real account, and never
+    -- zero. The not-ready branch could not fire for the one other step that
+    -- asked for it.
+    --
+    -- Same consequence as the defect above, on the other scan: "/cn setup"
+    -- run in the first seconds after login reported success over a store
+    -- that recorded nothing, stamped `completedAt`, and left `/cn setup
+    -- check` answering "Not scanned yet" -- the addon contradicting itself
+    -- on its own onboarding screen, with nothing telling the player to
+    -- try again.
+    local measured = second
+
+    if step.measuredAt == 3 then
+        measured = third
+    elseif step.measuredAt == 4 then
+        measured = fourth
+    end
+
+    if step.measured and measured == 0 then
         return nil, "the game was not ready yet"
     end
 

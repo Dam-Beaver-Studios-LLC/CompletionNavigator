@@ -103,6 +103,13 @@ CN:OnLogin(function()
     end
 end)
 
+-- The whole ring, oldest first. Read by the offline suite, which asserts the
+-- eviction bound this buffer exists to keep, and by nothing in the addon --
+-- `/cn errors` walks the upvalue directly.
+function Errors.All()
+    return ring
+end
+
 function Errors.Record(context, message)
     if not message then
         return false
@@ -143,10 +150,6 @@ function Errors.Record(context, message)
     end
 
     return true
-end
-
-function Errors.All()
-    return ring
 end
 
 function Errors.Count()

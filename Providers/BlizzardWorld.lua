@@ -1419,13 +1419,37 @@ function Blizzard.GetPetSpeciesFromItem(itemID)
         return nil, nil
     end
 
-    local name, icon, petType, companionID, tooltipSource, description,
-          isWild, canBattle, isTradeable, isUnique, obtainable, creatureDisplayID,
-          speciesID = C_PetJournal.GetPetInfoByItemID(itemID)
+    -- ELEVEN RETURNS, AND NONE OF THEM IS A SPECIES ID. 0.86.0.
+    --
+    -- This unpacked thirteen values and read the thirteenth as a species id,
+    -- with the fourth -- the COMPANION id -- as a fallback "in case the
+    -- position moved". `C_PetJournal.GetPetInfoByItemID` returns exactly the
+    -- eleven-field pet-info tail: name, icon, petType, companionID, source,
+    -- description, isWild, canBattle, isTradeable, isUnique, obtainable.
+    -- That is the same tail `Blizzard.GetPetByIndex` unpacks from position 8
+    -- of `GetPetInfoByIndex` -- a call that lists `speciesID` and
+    -- `companionID` as DIFFERENT fields, in this addon's own code.
+    --
+    -- So the species id was nil on every client and the live half of the
+    -- fallback was a companion id, looked up in a store keyed by species.
+    -- Every caged pet in a bag missed: no `/cn bags` row, no candidate, no
+    -- tooltip line -- the headline example in `Inventory.lua`'s own header.
+    --
+    -- The offline stub returned thirteen values with an invented species id
+    -- at the end, so the only path that can run in game had never once been
+    -- executed by a test.
+    --
+    -- The NAME is the one species fact this call really hands back, and the
+    -- module that owns the store already resolves a species from one.
+    local name = C_PetJournal.GetPetInfoByItemID(itemID)
 
-    -- The species ID has moved position in this return list before. Falling
-    -- back to the companion ID keeps the lookup working either way.
-    return speciesID or companionID, name
+    if type(name) ~= "string" or name == "" then
+        return nil, nil
+    end
+
+    local pets = CN:GetModule("Pets")
+
+    return pets and pets.Resolve and pets.Resolve(name) or nil, name
 end
 
 -- Returns true/false only for items that actually have an appearance, and nil

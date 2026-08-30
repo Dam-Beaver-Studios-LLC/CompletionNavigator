@@ -2944,7 +2944,7 @@ mutate "Database.lua" \
     "upgrading destroys every alt's friendship rank"
 
 mutate "Modules/Setup.lua" \
-    "    if step.measured and second == 0 then" \
+    "    if step.measured and measured == 0 then" \
     "    if false then" \
     "setup reports a clean bill for scans that recorded nothing"
 
@@ -3094,12 +3094,12 @@ mutate "Modules/Errors.lua" \
 # ---- 0.75.0 ----
 
 mutate "Modules/Achievements.lua" \
-    "                            Achievements.NoteProgress(held, done)
+    "                            held.criteria = criteria
 
-                            answered = answered + 1" \
-    "                            held.done = done
+                            Achievements.NoteProgress(held, done)" \
+    "                            held.criteria = criteria
 
-                            answered = answered + 1" \
+                            held.done = done" \
     "the achievement scan writes a figure every other character inherits"
 
 mutate "Modules/Achievements.lua" \
@@ -3959,6 +3959,69 @@ mutate "UI.lua" \
     "            panel.keepFilter.Text:SetWidth(COLUMN - CN.SPACE.M - 30)" \
     "            panel.keepFilter.Text:SetWidth(400)" \
     "a settings label is drawn across the column beside it"
+
+# ---- 0.86.0 ----
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    return pets and pets.Resolve and pets.Resolve(name) or nil, name" \
+    "    return select(4, C_PetJournal.GetPetInfoByItemID(itemID)), name" \
+    "a caged pet in your bags is looked up by companion id"
+
+mutate "Modules/Inventory.lua" \
+    "                travelCost       = travel or CN.unknownLocationCost," \
+    "                travelCost       = CN.placelessCost," \
+    "a quest one step from done is priced as if it were in your pocket"
+
+mutate "Modules/Inventory.lua" \
+    "                mapID            = mapID,
+                x                = x,
+                y                = y,
+
+                -- Worth more the closer it is, which is the entire point." \
+    "                -- Worth more the closer it is, which is the entire point." \
+    "the nearly-done row wins the dedup and throws the coordinates away"
+
+mutate "Modules/Setup.lua" \
+    "    if step.measuredAt == 3 then
+        measured = third
+    elseif step.measuredAt == 4 then
+        measured = fourth
+    end" \
+    "" \
+    "a cold achievement scan is reported as a success"
+
+mutate "Modules/Achievements.lua" \
+    "                    if criteria and criteria > 0 then
+                        answered = answered + 1
+                    end" \
+    "" \
+    "a fresh character is nagged to scan for ever"
+
+mutate "Modules/SelfTest.lua" \
+    "            if not SelfTest.optionalApi[path] then" \
+    "            if true then" \
+    "/cn selftest reports FAIL on every client it ships to"
+
+mutate "Modules/SelfTest.lua" \
+    "        table.sort(ids, CN.IdBefore)" \
+    "" \
+    "a diagnostic answers differently on different sessions"
+
+mutate "Modules/Travel.lua" \
+    "    pcall(CN.eventFrame.RegisterUnitEvent, CN.eventFrame,
+        \"UNIT_SPELLCAST_SUCCEEDED\", \"player\")" \
+    "    local unusedNarrowing = CN.eventFrame" \
+    "every cast by every unit in a raid is dispatched through a pcall"
+
+mutate "Modules/Preference.lua" \
+    "Preference.actionWindows = {
+    [CN.objectiveTypes.ACHIEVEMENT] = 3600,
+}" \
+    "Preference.actionWindows = {
+    [CN.objectiveTypes.ACHIEVEMENT] = 3600,
+    [CN.objectiveTypes.INSTANCE]    = 5400,
+}" \
+    "a tuning table holds a number nothing can read"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

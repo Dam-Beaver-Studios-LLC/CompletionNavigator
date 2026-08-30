@@ -126,6 +126,35 @@ local SKIP = SelfTest.results.SKIP
 -- Data/ApiSurface.lua is generated from the source at build time, so this
 -- cannot fall out of step with what the addon actually calls. Reported here
 -- because the player is the one holding a client the author has not seen.
+-- NAMES THE ADDON PROBES FOR AND DOES NOT REQUIRE. 0.86.0.
+--
+-- `Data/ApiSurface.lua` is generated from every client name the source
+-- mentions, which is right for its purpose and cannot tell a name the addon
+-- NEEDS from one it asks about and takes the other branch when it is absent.
+--
+-- `InterfaceOptions_AddCategory` is the pre-10.0 options API -- `Modules/
+-- Hud.lua` says so in a comment right above the guard that probes for it --
+-- and it is gone from every Retail client, which this addon's `.toc` targets.
+-- The other four are the pre-`C_Item`/`C_Spell` globals, each reached only as
+-- an `elseif` after the modern call.
+--
+-- So the FIRST check in `/cn selftest` reported FAIL on 100% of Retail
+-- clients, permanently, under a footer reading "A failure above is a real
+-- defect. Copy this output into a bug report." The diagnostic written to end
+-- support conversations started one -- and, being always red, buried the real
+-- API loss it exists to catch.
+--
+-- The offline suite could not see it: it asserts that FAIL is the correct
+-- answer whenever a name is absent, which it is -- for a name the addon
+-- requires.
+SelfTest.optionalApi = {
+    ["InterfaceOptions_AddCategory"] = true,
+    ["GetItemCooldown"]              = true,
+    ["GetItemCount"]                 = true,
+    ["GetItemInfo"]                  = true,
+    ["GetSpellCooldown"]             = true,
+}
+
 CN.RegisterSelfTest{
     area  = "client",
     order = 0,
@@ -137,26 +166,33 @@ CN.RegisterSelfTest{
 
         local missing = {}
 
+        local checked = 0
+
         for _, path in ipairs(CN.apiSurface) do
-            local namespace, method = string.match(path, "^([^.]+)%.(.+)$")
+            if not SelfTest.optionalApi[path] then
+                checked = checked + 1
 
-            local value
+                local namespace, method = string.match(path, "^([^.]+)%.(.+)$")
 
-            if namespace then
-                local container = _G and _G[namespace]
+                local value
 
-                value = type(container) == "table" and container[method] or nil
-            else
-                value = _G and _G[path]
-            end
+                if namespace then
+                    local container = _G and _G[namespace]
 
-            if value == nil then
-                table.insert(missing, path)
+                    value = type(container) == "table"
+                        and container[method] or nil
+                else
+                    value = _G and _G[path]
+                end
+
+                if value == nil then
+                    table.insert(missing, path)
+                end
             end
         end
 
         if #missing == 0 then
-            return PASS, #CN.apiSurface .. " client functions, all present"
+            return PASS, checked .. " client functions, all present"
         end
 
         -- Named, and bounded: a patch that removes a whole namespace would
@@ -167,7 +203,7 @@ CN.RegisterSelfTest{
             table.insert(named, missing[index])
         end
 
-        return FAIL, #missing .. " of " .. #CN.apiSurface
+        return FAIL, #missing .. " of " .. checked
             .. " are gone from this client: " .. table.concat(named, ", ")
             .. (#missing > 6 and (" and " .. (#missing - 6) .. " more") or "")
     end,
@@ -515,9 +551,29 @@ CN.RegisterSelfTest{
             return SKIP, "achievements module not loaded"
         end
 
-        local sampled, counted = 0, 0
+        -- ORDERED, NOT HASH ORDER. 0.86.0.
+        --
+        -- The sample is the first thirty criteria this loop reaches, and the
+        -- verdict below turns FAIL if none of them carries a counter. Which
+        -- five-or-so achievements those are was `pairs` order -- so the same
+        -- account, unchanged, could report PASS one session and FAIL the
+        -- next, and the FAIL tells the player the addon is dropping the
+        -- client's quantity fields and to file a bug report.
+        --
+        -- A diagnostic that is not reproducible is worse than none. This
+        -- project already has a stable tie-break over mixed id types, added
+        -- for exactly this reason and used by the sorts and the zone lookup.
+        local ids = {}
 
         for achievementID in pairs(achievements.Store()) do
+            ids[#ids + 1] = achievementID
+        end
+
+        table.sort(ids, CN.IdBefore)
+
+        local sampled, counted = 0, 0
+
+        for _, achievementID in ipairs(ids) do
             local criteria = Blizzard.GetAchievementCriteriaList(achievementID, 6)
 
             for _, criterion in ipairs(criteria) do

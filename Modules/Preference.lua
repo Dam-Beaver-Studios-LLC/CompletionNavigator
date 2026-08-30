@@ -73,13 +73,22 @@ Preference.minimumObservations = 25
 -- than dressed up as data.
 Preference.actionWindowSeconds = 1200
 
+-- ONLY THE TYPES THAT CAN BE CREDITED. 0.86.0.
+--
+-- `WindowFor` is reached only after `Preference.IsCreditable` has passed, and
+-- from `NoteCompleted`, whose only caller is the completion-event loop at the
+-- bottom of this file. `Preference.creditableTypes` is QUEST, ACHIEVEMENT,
+-- PET, MOUNT and TOY -- so INSTANCE, REPUTATION, RENOWN, PROFESSION and
+-- APPEARANCE could never reach this table. Five of the six entries added in
+-- 0.46.0 became unreachable when 0.55.0 added the creditability gate, and the
+-- header above still explains at length why a raid needs a longer window than
+-- an appearance.
+--
+-- Nothing on screen changed; what changed is that the next reader will not
+-- retune a number and watch nothing happen. They go back in the same change
+-- that starts crediting one of those types, and not before.
 Preference.actionWindows = {
-    [CN.objectiveTypes.INSTANCE]   = 5400,   -- an evening's raid
-    [CN.objectiveTypes.REPUTATION] = 5400,
-    [CN.objectiveTypes.RENOWN]     = 5400,
     [CN.objectiveTypes.ACHIEVEMENT] = 3600,
-    [CN.objectiveTypes.PROFESSION] = 3600,
-    [CN.objectiveTypes.APPEARANCE] = 2400,
 }
 
 function Preference.WindowFor(objectiveType)

@@ -705,16 +705,45 @@ CN.RegisterCandidateProvider("Inventory", function()
         if not CN.IsIgnored(CN.objectiveTypes.QUEST, row.questID)
             and not CN.IsDeferred(CN.objectiveTypes.QUEST, row.questID) then
 
+            -- WHERE IT IS, AND WHAT REACHING IT COSTS. 0.86.0.
+            --
+            -- This row carried `CN.placelessCost`, which is 0 and means
+            -- "there is not a journey" -- true of an item sitting in a bag,
+            -- and false of a quest objective out in the world. The sibling
+            -- row in `Modules/Quests.lua` charges `CN.unknownLocationCost`
+            -- for exactly this case, with a note saying why.
+            --
+            -- Two things went wrong from it. A zero cost is worth eight to
+            -- twenty-four points on a scale where finishing something tops
+            -- out around eight, so a quest in a zone left an hour ago
+            -- outranked everything in front of the player. And zero also
+            -- makes `CN.IsPlaceless` true -- while this provider registers
+            -- BEFORE Quests, and the aggregate keeps the first row whole. So
+            -- this row won the dedup and replaced the Quests provider's real
+            -- coordinates with none: `/cn go`, the arrow, the map pin and
+            -- the session plan had nothing to point at.
+            local mapID, x, y = Blizzard.GetQuestWaypoint(row.questID)
+
+            local travel, costed
+
+            if mapID and x and y then
+                travel, costed = CN.TravelCost(mapID, x, y)
+            end
+
             table.insert(candidates, CN.NewObjective({
                 id               = row.questID,
                 type             = CN.objectiveTypes.QUEST,
                 name             = tostring(row.title or ("Quest " .. row.questID))
                     .. ": " .. row.remaining .. " more",
                 state            = CN.objectiveStates.AVAILABLE,
+                mapID            = mapID,
+                x                = x,
+                y                = y,
 
                 -- Worth more the closer it is, which is the entire point.
                 completionValue  = 2 + (Inventory.nearlyDoneRemaining - row.remaining),
-                travelCost       = CN.placelessCost,
+                travelCost       = travel or CN.unknownLocationCost,
+                travelCosted     = costed or nil,
                 reasons          = {
                     string.format("%s" .. CN.DASH .. "%d of %d done",
                         tostring(row.text or "objective"), row.done, row.required),
@@ -759,6 +788,12 @@ end, {
         "BAG_UPDATE_DELAYED", "PLAYER_ENTERING_WORLD",
         "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_ACCEPTED",
         "QUEST_LOG_UPDATE",
+
+        -- AND WHERE THE PLAYER IS STANDING. 0.86.0. The nearly-done quest
+        -- row now costs a real journey, which reads the player's position --
+        -- so this provider reads that system too, and the lint below this
+        -- file is right to require it to say so.
+        "ZONE_CHANGED_NEW_AREA",
     },
     cooldown = 5,
 })

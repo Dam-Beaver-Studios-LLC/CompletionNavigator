@@ -186,6 +186,12 @@ function CN.IsPlaceless(objective)
 
     -- An item in your bag is not anywhere either -- it is already with you --
     -- and its provider says so by costing the journey at zero.
+    --
+    -- Reached only when the test above did not fire, so a row the provider
+    -- gave coordinates for never lands here whatever its journey costs.
+    -- 0.86.0 added a second copy of that test here before noticing the first,
+    -- and removed it again; the note stays because the invariant is worth
+    -- stating and the duplicate was not.
     if objective.travelCost == 0 then
         return true
     end

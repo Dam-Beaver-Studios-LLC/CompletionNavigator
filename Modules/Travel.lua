@@ -2103,6 +2103,28 @@ CN:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED", function(_, unit, _, spellID)
     end
 end)
 
+-- NARROWED TO THE PLAYER. 0.86.0.
+--
+-- `CN:RegisterEvent` goes through the client's plain `RegisterEvent`, and a
+-- UNIT event registered that way fires for every unit token the client is
+-- tracking -- party, raid, boss, arena, target, focus, mouseover, nameplates.
+-- The handler above filters correctly, and the filtering happens after the
+-- dispatcher has already built a closure and a pcall for each firing: in a
+-- raid or a busy hub, a hundred of those a second, for a flag that can flip
+-- once per hearthstone.
+--
+-- This is the only unit event in the addon, which is why the rule the rest of
+-- the tree applies to chatty events had never been applied here. The offline
+-- suite fires it twice, once per unit, so it modelled the shape and not the
+-- volume.
+--
+-- `RegisterUnitEvent` replaces the broad registration on the same frame and
+-- the same event, so nothing above needs to change.
+if CN.eventFrame and CN.eventFrame.RegisterUnitEvent then
+    pcall(CN.eventFrame.RegisterUnitEvent, CN.eventFrame,
+        "UNIT_SPELLCAST_SUCCEEDED", "player")
+end
+
 CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
     if not hearthPending then
         return

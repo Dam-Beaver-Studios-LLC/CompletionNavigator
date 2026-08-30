@@ -84,6 +84,35 @@ local function Frame()
             .. " -- if it is real, add it to CN_KNOWN_EVENTS in harness.lua")
 
         events[e] = true
+
+        -- A broad registration replaces a narrow one, as in the client.
+        rawset(f, "unitEvents", rawget(f, "unitEvents") or {})
+
+        f.unitEvents[e] = nil
+    end
+
+    -- A UNIT EVENT REGISTERED BROADLY FIRES FOR EVERY UNIT TOKEN. 0.86.0.
+    --
+    -- This fell through to the universal stub, so "is this event narrowed to
+    -- the player, or is it firing for all forty raid members" was a question
+    -- no test could ask -- and the addon's one unit event was registered
+    -- broadly. Nineteenth entry in this file's list of defects hidden by a
+    -- stub simpler than the client.
+    function f:RegisterUnitEvent(e, ...)
+        assert(CN_KNOWN_EVENTS[e],
+            "the client has no event called " .. tostring(e))
+
+        events[e] = true
+
+        rawset(f, "unitEvents", rawget(f, "unitEvents") or {})
+
+        f.unitEvents[e] = { ... }
+    end
+
+    function f:GetUnitEventUnits(e)
+        local held = rawget(f, "unitEvents")
+
+        return held and held[e]
     end
     function f:UnregisterEvent(e) events[e] = nil end
     function f:SetScript(k, fn) scripts[k] = fn end
@@ -2475,10 +2504,18 @@ end
 
 C_PetJournal.GetPetInfoByItemID = function(itemID)
     if itemID == 801 then
+        -- ELEVEN VALUES, WHICH IS WHAT THE CLIENT RETURNS. 0.86.0.
+        --
+        -- This returned thirteen, with an invented display id and a species
+        -- id appended -- so the addon's `speciesID or companionID` read the
+        -- invented one and the fallback that is the ONLY live path in game
+        -- was never executed. A stub longer than the client is the same
+        -- defect as a stub simpler than it.
+        --
         -- name, icon, petType, companionID, source, description, isWild,
-        -- canBattle, isTradeable, isUnique, obtainable, displayID, speciesID
-        return "Wild Critter", 1, 2, nil, "Vendor", "desc", true, true,
-               true, false, true, 1, 101
+        -- canBattle, isTradeable, isUnique, obtainable
+        return "Wild Critter", 1, 2, 4242, "Vendor", "desc", true, true,
+               true, false, true
     end
     return nil
 end
@@ -17573,7 +17610,7 @@ end)()
     assert(seen[1] and seen[1]:find("Setup complete", 1, true),
         "the headline leads, got " .. tostring(seen[1]))
 
-    print("  setupModule2 says what each of its numbers counted")
+    print("  setup says what each of its numbers counted")
 end)()
 
 ;(function()
@@ -34690,6 +34727,323 @@ end)()
     UI.Hide()
 
     print("  no label is drawn across the column beside it")
+end)()
+
+print("\nWhat 0.86.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A CAGED PET IN A BAG IS FOUND.
+    ------------------------------------------------------------
+    -- `C_PetJournal.GetPetInfoByItemID` returns eleven values -- the same
+    -- pet-info tail `GetPetInfoByIndex` returns from position 8 -- and none
+    -- of them is a species id. The lookup unpacked thirteen, read the
+    -- thirteenth as a species, and fell back to the COMPANION id, which this
+    -- addon's own code lists as a different field in the very call above it.
+    -- So the species was nil on every client and the fallback was looked up
+    -- in a store keyed by species: every caged pet in a bag missed.
+    --
+    -- The fixture returned thirteen values, so the only path that runs in
+    -- game had never once been executed.
+    local pets = CN:GetModule("Pets")
+
+    local speciesID, name = CN.Blizzard.GetPetSpeciesFromItem(801)
+
+    assert(name and name ~= "", "the client answers with a name: "
+        .. tostring(name))
+
+    -- The fixture's item resolves to whatever species the journal holds under
+    -- that name; what must NOT happen is answering with the companion id.
+    assert(speciesID ~= 4242,
+        "a companion id is not a species id: " .. tostring(speciesID))
+
+    if speciesID then
+        assert(pets.Store()[speciesID],
+            "and what comes back is a key the pet store actually has: "
+            .. tostring(speciesID))
+    end
+
+    print("  a caged pet is looked up by species, not by companion")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A QUEST ONE STEP FROM DONE IS STILL SOMEWHERE.
+    ------------------------------------------------------------
+    -- The nearly-done row carried `CN.placelessCost`, which is 0 and means
+    -- "there is no journey" -- true of an item in a bag, false of a quest
+    -- objective in the world. Zero also makes the row PLACELESS, and this
+    -- provider registers before Quests while the aggregate keeps the first
+    -- row whole -- so it won the dedup and replaced real coordinates with
+    -- none, leaving the quest un-navigable.
+    CN.InvalidateCandidates()
+
+    local rows = CN.candidateProviders["Inventory"].fn() or {}
+
+    local checked = 0
+
+    for _, objective in ipairs(rows) do
+        -- The NEARLY-DONE rows only. The other quest row this provider emits
+        -- is a quest STARTER sitting in the player's bags, where a zero
+        -- journey is the honest number and being placeless is correct.
+        if objective.type == CN.objectiveTypes.QUEST
+            and tostring(objective.name):find(" more", 1, true) then
+
+            checked = checked + 1
+
+            -- IT CARRIES WHAT THE CLIENT KNOWS. The row used to have no
+            -- coordinates at all, and because this provider registers before
+            -- Quests and the aggregate keeps the first row whole, it
+            -- REPLACED the quest tracker's real ones with none.
+            local mapID, x, y = CN.Blizzard.GetQuestWaypoint(objective.id)
+
+            if mapID and x and y then
+                assert(objective.mapID == mapID and objective.x == x,
+                    "the row keeps the location the client gave it: "
+                    .. tostring(objective.mapID) .. " vs " .. tostring(mapID))
+
+                -- AND THE JOURNEY IS THE ONE THE ROUTER WOULD COST, not the
+                -- zero that means "there is no journey".
+                assert(objective.travelCost == CN.TravelCost(mapID, x, y),
+                    "and pays the journey the router costs: "
+                    .. tostring(objective.travelCost) .. " vs "
+                    .. tostring(CN.TravelCost(mapID, x, y)))
+            else
+                assert((objective.travelCost or 0) ~= CN.placelessCost,
+                    "a quest with no known location is not free to reach: "
+                    .. tostring(objective.travelCost))
+            end
+
+            assert(not CN.IsPlaceless(objective),
+                "and a quest objective is never treated as being nowhere")
+        end
+    end
+
+    assert(checked > 0,
+        "the fixture produces a nearly-done quest row to check")
+
+    -- AND THE AGGREGATE KEEPS A LOCATION FOR IT.
+    for _, objective in ipairs(CN.CollectCandidates() or {}) do
+        if objective.type == CN.objectiveTypes.QUEST
+            and tostring(objective.name):find(" more", 1, true) then
+
+            assert(objective.mapID or objective.travelCost
+                    ~= CN.placelessCost,
+                "the winning row can still be navigated to")
+        end
+    end
+
+    print("  a quest one step from done is still somewhere")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD SCAN IS NOT REPORTED AS A SUCCESS.
+    ------------------------------------------------------------
+    -- The not-ready guard read the SECOND return for every measured step.
+    -- `Loremaster.Scan` returns `scanned, measured`; `Achievements.Scan`
+    -- returns `scanned, completed, nearlyDone, answered` -- so on the second
+    -- of the two the guard read the completed count, four figures on any
+    -- real account, and could never fire.
+    local setupModule = CN:GetModule("Setup")
+
+    local realCriteria = GetAchievementNumCriteria
+
+    GetAchievementNumCriteria = nil
+
+    local achievementStep
+
+    for _, step in ipairs(setupModule.steps) do
+        if step.key == "achievements" then
+            achievementStep = step
+        end
+    end
+
+    assert(achievementStep, "the achievements step exists")
+
+    local ok, why = setupModule.RunStep(achievementStep)
+
+    GetAchievementNumCriteria = realCriteria
+
+    assert(ok == nil,
+        "a scan the client would not answer for is not a success: "
+        .. tostring(ok) .. " / " .. tostring(why))
+
+    print("  a cold scan is not reported as a success")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CLIENT ANSWERING IS THE CLIENT ANSWERING.
+    ------------------------------------------------------------
+    -- `answered` was counted only for rows that had PROGRESS, so a character
+    -- with none was indistinguishable from a client that refused: the scan
+    -- recorded nothing, never stamped itself, and the login reminder nagged
+    -- for the life of the character with no command that could clear it.
+    local achievements = CN:GetModule("Achievements")
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    -- The API answers for every row, and this character has no progress.
+    CN.Blizzard.GetAchievementProgress = function()
+        return 0, 12
+    end
+
+    local _, _, _, answered = achievements.Scan()
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert((answered or 0) > 0,
+        "a row at 0 of 12 is a row the client answered about: "
+        .. tostring(answered))
+
+    print("  no progress anywhere is not the same as no answer")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn selftest DOES NOT FAIL ON EVERY CLIENT IT SHIPS TO.
+    ------------------------------------------------------------
+    -- The generated API list carries every client name the source mentions,
+    -- and cannot tell a name the addon NEEDS from one it probes for and
+    -- takes the other branch when it is absent. Five are probes -- the
+    -- pre-10.0 options API and the four pre-C_Item/C_Spell globals -- so the
+    -- first check reported FAIL on every Retail client, permanently, under a
+    -- footer promising that a failure is a real defect.
+    local selftest = CN:GetModule("SelfTest")
+
+    assert(selftest.optionalApi
+        and selftest.optionalApi["InterfaceOptions_AddCategory"],
+        "the pre-10.0 options API is known to be optional")
+
+    -- Every name on the exempt list must be one the addon really only
+    -- probes for: reached behind a guard, never called unconditionally.
+    for path in pairs(selftest.optionalApi) do
+        local found = false
+
+        for _, name in ipairs(CN.apiSurface or {}) do
+            if name == path then
+                found = true
+            end
+        end
+
+        assert(found,
+            "an exemption names something the surface actually lists: "
+            .. path)
+    end
+
+    ------------------------------------------------------------
+    -- AND REMOVING ONLY THE PROBES CHANGES NOTHING.
+    ------------------------------------------------------------
+    -- The offline client is missing plenty of real APIs the stub does not
+    -- implement, so this cannot assert PASS. What it can assert is the thing
+    -- that was wrong: taking the five probe-only names away must not change
+    -- the verdict at all. Before this release it added five to the count on
+    -- every Retail client, permanently.
+    local function Verdict()
+        for _, test in ipairs(CN.selfTests or {}) do
+            if test.area == "client" and test.order == 0 then
+                return select(2, test.run())
+            end
+        end
+    end
+
+    local withThem = Verdict()
+
+    local held = {}
+
+    for path in pairs(selftest.optionalApi) do
+        held[path] = _G[path]
+        _G[path] = nil
+    end
+
+    local withoutThem = Verdict()
+
+    for path, value in pairs(held) do
+        _G[path] = value
+    end
+
+    assert(withThem == withoutThem,
+        "a client without the probes reports exactly what one with them "
+        .. "reports:\n  with:    " .. tostring(withThem)
+        .. "\n  without: " .. tostring(withoutThem))
+
+    ------------------------------------------------------------
+    -- AND THE DENOMINATOR IS WHAT WAS ACTUALLY REQUIRED.
+    ------------------------------------------------------------
+    -- The check names only the first six missing functions, so looking for
+    -- an exempt name in the message misses it when five others sort ahead --
+    -- which is why the first version of this assertion did not bite. The
+    -- COUNT cannot hide: it is the size of the surface minus the
+    -- exemptions, and a check that stopped exempting them would report five
+    -- more.
+    local optional = 0
+
+    for _ in pairs(selftest.optionalApi) do
+        optional = optional + 1
+    end
+
+    local reported = tonumber(tostring(withThem):match("of (%d+)"))
+        or tonumber(tostring(withThem):match("^(%d+) client"))
+
+    assert(reported == (#CN.apiSurface - optional),
+        "the check counts what the addon requires, not what it mentions: "
+        .. tostring(reported) .. " vs "
+        .. (#CN.apiSurface - optional) .. " [" .. tostring(withThem) .. "]")
+
+    print("  /cn selftest does not fail on every client it ships to")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DIAGNOSTIC GIVES THE SAME ANSWER TWICE.
+    ------------------------------------------------------------
+    -- The criteria-counter check sampled whichever thirty criteria `pairs`
+    -- reached first and turned FAIL if none carried a counter -- so the same
+    -- account could report PASS one session and FAIL the next, and the FAIL
+    -- told the player to file a bug report.
+    local source = CN_TEST_ReadAddonFile("Modules/SelfTest.lua")
+
+    assert(source and string.find(source, "table.sort(ids, CN.IdBefore)",
+            1, true),
+        "the criteria sample is ordered, not hash order")
+
+    print("  a diagnostic gives the same answer twice")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ONE UNIT EVENT IS NARROWED TO THE PLAYER.
+    ------------------------------------------------------------
+    -- Registered broadly, a unit event fires for every unit token the client
+    -- tracks -- party, raid, boss, nameplates -- and the dispatcher builds a
+    -- closure and a pcall for each. In a raid that is a hundred a second for
+    -- a flag that flips once per hearthstone.
+    local narrowed = CN.eventFrame and CN.eventFrame.GetUnitEventUnits
+        and CN.eventFrame:GetUnitEventUnits("UNIT_SPELLCAST_SUCCEEDED")
+
+    assert(narrowed and narrowed[1] == "player",
+        "UNIT_SPELLCAST_SUCCEEDED is registered for the player only")
+
+    print("  the one unit event is narrowed to the player")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A TUNING TABLE HOLDS ONLY VALUES THAT CAN BE READ.
+    ------------------------------------------------------------
+    -- Five of the six per-type action windows named types that the
+    -- creditability gate added three releases later made unreachable, so a
+    -- reader could retune a number and watch nothing happen.
+    local preference = CN:GetModule("Preference")
+
+    for objectiveType in pairs(preference.actionWindows or {}) do
+        assert(preference.IsCreditable(objectiveType),
+            "an action window names a type that can reach it: "
+            .. tostring(objectiveType))
+    end
+
+    print("  a tuning table holds only values that can be read")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

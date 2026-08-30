@@ -228,6 +228,27 @@ function Achievements.Scan()
                     local done, criteria =
                         Blizzard.GetAchievementProgress(achievement.achievementID)
 
+                    -- THE CLIENT ANSWERING IS THE CLIENT ANSWERING. 0.86.0.
+                    --
+                    -- `answered` is this scan's test for "did the criteria
+                    -- API refuse", and it was incremented only inside the
+                    -- store gate below -- which is reached only when the row
+                    -- has PROGRESS. So a character with no progress on any
+                    -- incomplete achievement was indistinguishable from a
+                    -- client that answered nothing: the scan took the refusal
+                    -- path, recorded nothing, never stamped itself done, and
+                    -- never called `MarkScanned`.
+                    --
+                    -- That character is a fresh alt -- exactly the one the
+                    -- per-character scan record exists for -- and the result
+                    -- was a login reminder that nagged for the life of the
+                    -- character, with no command that could clear it.
+                    --
+                    -- An achievement at 0 of 12 is a real answer.
+                    if criteria and criteria > 0 then
+                        answered = answered + 1
+                    end
+
                     -- Store only what is unfinished, and only if there is
                     -- real progress or it is small enough to be actionable.
                     if criteria == 0 or done > 0 then
@@ -262,8 +283,6 @@ function Achievements.Scan()
                             held.criteria = criteria
 
                             Achievements.NoteProgress(held, done)
-
-                            answered = answered + 1
                         elseif held.criteria == nil then
                             -- Genuinely a criteria-less achievement, and new
                             -- to the store. A stored `criteria > 0` is never

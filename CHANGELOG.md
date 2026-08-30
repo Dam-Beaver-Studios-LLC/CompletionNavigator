@@ -7,6 +7,58 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.86.0]
+
+**`/cn selftest` has been reporting a red FAIL on every Retail client since
+the check was written.** Its first line compares a generated list of every
+client function the addon mentions against what the client actually has â€” and
+that list cannot tell a function the addon *needs* from one it asks about and
+takes the other branch when it is absent. Five are the second kind, including
+the pre-Dragonflight options API that no Retail client has had for two years.
+So the command the bug-report template asks you to run opened with a failure,
+under a footer reading *"A failure above is a real defect."* â€” and, being
+always red, hid the real API loss it exists to catch.
+
+This release audits the addon's core logic, which had not been swept for many
+releases, and four of the six findings were things that had never once worked.
+
+### Fixed
+
+- **`/cn selftest` passes on a healthy client.** The five functions the addon
+  only probes for are named as optional, and the count says how many were
+  actually required.
+- **A caged battle pet in your bags has never been detected.** The lookup that
+  turns a caged pet into a species read past the end of what the client
+  returns, and fell back to a *different* kind of id â€” one the addon's own code
+  lists as a separate field two lines away. So no `/cn bags` row, no
+  recommendation, and no tooltip line, for the single clearest example in that
+  module's own description. The offline fixture returned two values the client
+  does not return, so the only path that runs in the game had never been tested.
+- **A quest one objective from finishing was priced as if it were in your
+  pocket** â€” and, being priced that way, was treated as having no location at
+  all. That row wins against the quest tracker's own, so it also *replaced*
+  the real coordinates with none: a quest three feathers from done outranked
+  everything in front of you and then could not be navigated to.
+- **`/cn setup` reported a cold achievement scan as a success.** The check for
+  "the game was not ready yet" read the wrong number for that step â€” a
+  four-figure count that is never zero â€” so setup run in the first seconds
+  after login said "complete" over a store that had recorded nothing, and
+  `/cn setup check` then said "Not scanned yet". Fixed for the sibling scan
+  three releases ago and not carried across.
+- **A fresh character was nagged to scan for ever.** The achievement scan
+  decided whether the client had answered by counting rows *with progress* â€” so
+  a character with none looked identical to a client that refused. Nothing was
+  stored, the scan never marked itself done, and no command could clear the
+  reminder.
+- **`/cn selftest` could report PASS one session and FAIL the next** on an
+  unchanged account: one check sampled whichever achievements the table
+  happened to yield first.
+- **Every spellcast by every unit around you was being processed.** The addon's
+  one unit event was registered for all units rather than for you â€” in a raid,
+  a hundred dispatches a second for a flag that changes once per hearthstone.
+- Five of six per-type timing values had been unreachable since a gate added
+  three releases later; the table now holds only what can be read.
+
 ## [0.85.0]
 
 **Last release made the window taller, and at the largest text size it no
