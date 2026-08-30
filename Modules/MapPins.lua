@@ -423,12 +423,16 @@ local function ClickPin(frame)
         end
     end
 
-    if pin.x and pin.y and pin.mapID and CN.SetWaypoint then
+    if pin.x and pin.y and pin.mapID and CN.SetWaypointAndSay then
         local first = (pin.objectives or {})[1]
 
-        CN.SetWaypoint(pin.mapID, pin.x, pin.y,
-            first and tostring(first.name or first.id) or
-                ("Stop " .. tostring(pin.order)))
+        local label = first and tostring(first.name or first.id)
+            or ("Stop " .. tostring(pin.order))
+
+        -- SAY SOMETHING. 0.79.0. This clicked a pin on the world map and
+        -- printed nothing, so a refusal and a success looked identical.
+        CN.SetWaypointAndSay(pin.mapID, pin.x, pin.y, label,
+            "Waypoint set: " .. label)
     end
 end
 

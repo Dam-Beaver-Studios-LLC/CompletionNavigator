@@ -7,6 +7,68 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.79.0]
+
+**If `/cn go` has been printing `table: 0x0000...` at you, that is fixed.**
+0.78.0 started showing the note a waypoint provider attaches to a success â€”
+"the arrow is set; the game does not allow a map pin here" â€” and TomTom was
+handing back its internal waypoint handle in that slot instead of a sentence.
+Every player using TomTom saw the handle. The contract now refuses anything
+that is not a sentence, so a provider that gets this wrong in future prints
+nothing rather than gibberish.
+
+### Fixed â€” 0.78.0's own damage
+
+- **`/cn go` printed an internal handle under every waypoint.** See above.
+- **`/cn arrow on` left the arrow frozen where it was.** 0.78.0 stopped the
+  redraw when the arrow was switched off â€” correctly â€” and never started it
+  again when it was switched back on. The arrow appeared, pointed at whatever
+  direction it had last been given, and stayed there.
+- **A rare the client had stopped reporting was still offered.** 0.78.0 gave
+  treasures an eligibility check and left out the liveness test, which removed
+  the fallback that had been catching this. A despawned rare now reads "Not up
+  right now" instead of being routed to.
+- **Riding past the same corpse three times counted as three encounters.**
+  0.78.0 switched the vignette walk to the unfiltered list so the "already
+  dead" flag would survive, and went on recording dead rows as sightings â€”
+  a number `/cn goal` shows you.
+
+### Fixed â€” code untouched for many releases
+
+- **Four of the six places that set a waypoint said nothing at all.** The
+  Goals tab's "Next step" button produced no chat output whatsoever, a world
+  map pin click was silent, and a follow-mode hub advance inside an instance
+  both failed to place the pin and never mentioned it. All six now go through
+  one function, so a headline and its caveat cannot drift apart again. Follow
+  mode still does not narrate â€” it reports a refusal and nothing else.
+- **`/cn alts` told you to switch to a character that had already done it.**
+  For recipes and titles the named character is the one who *holds* it, and a
+  title cannot be earned twice. The list read "already knows it: Bob, Carol"
+  underneath "Bob could do 2 of these". It also listed quests as switchable
+  when nothing in the addon knows which character a quest belongs to.
+- **A ticking deadline made every row a different row.** A countdown was part
+  of what the scorer used to decide whether two recommendations were the same
+  thing, so one second of elapsed time re-listed the whole board. Deadlines
+  now agree if they are within a minute of each other.
+- **Flying across eight zones ran eight full recommendation passes**, and
+  re-pointed the waypoint at zones being flown over. Mass-looting a bag of
+  pets did the same. Neither happens now, and a quest turn-in is still
+  answered the moment it lands.
+- **A cross-tab count could promise more rows than the tab showed.** The
+  search counted matching rows while a tab keeps whole blocks, so "Also on:
+  Goals (2)" opened a tab with eight rows in it. Both numbers come from the
+  same place now.
+- **`/cn currency` dumped every capped currency into chat.** 0.78.0 capped the
+  weekly half of that command at eight rows and left the other half unbounded.
+- **`/cn hidden` named two rows after the addon's internals.** The Great
+  Vault and finished-crafting-order rows use word ids rather than numbers, and
+  the last-resort namer produced "CURRENCY vault". Hiding either one now shows
+  what it is, and the choice survives the rename from the old numeric id.
+- **A currency breakdown row said "N collected" about a cap.** It now says
+  "not at cap", which is what the number counts.
+- **Three providers subscribed to constantly-firing events with no throttle** â€”
+  the same defect fixed for one file in 0.78.0, left standing in three others.
+
 ## [0.78.0]
 
 **Last release's headline fix reached nobody.** The migration that was meant

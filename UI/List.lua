@@ -541,6 +541,32 @@ local function CreateList(parent)
     -- A block survives the filter if ANY row in it matches, and it survives
     -- whole. Matching a chain step and showing it without its goal is an
     -- answer to a question nobody asked.
+    -- HOW MANY ROWS THIS TAB WOULD SHOW FOR A NEEDLE. 0.79.0.
+    --
+    -- The cross-tab search counted MATCHING ENTRIES while this tab keeps
+    -- WHOLE BLOCKS -- a block survives if any row in it matches, and it
+    -- survives entire. So "Also on: Goals (2)" led to a tab showing eight
+    -- rows, on every grouped tab.
+    --
+    -- 0.77.0 and 0.78.0 removed the TEXT mismatch between the two
+    -- predicates and left the COUNTING mismatch, which is the visible half.
+    -- One predicate and one denominator, so the two cannot drift again.
+    function list:CountMatching(needle)
+        if not needle or needle == "" then
+            return 0
+        end
+
+        local held = filterText
+
+        filterText = string.lower(needle)
+
+        local kept = self:Filter(self:Entries())
+
+        filterText = held
+
+        return #kept
+    end
+
     function list:Filter(entries)
         if not filterText then
             return entries

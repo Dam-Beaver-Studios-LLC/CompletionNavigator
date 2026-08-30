@@ -400,7 +400,13 @@ CN.RegisterCandidateProvider("Exploration", function()
     end
 
     return candidates
-end, { events = { "CRITERIA_UPDATE", "ZONE_CHANGED_NEW_AREA" } })
+-- A COOLDOWN ON THE CHATTIEST EVENT THERE IS. 0.79.0.
+--
+-- `Scoring.lua` names `CRITERIA_UPDATE` as the canonical case a cooldown
+-- exists for; `Achievements` and `Loremaster` both give it five seconds and
+-- this, the third handler of the same event, had none. Exploration criteria
+-- do not move faster than the player walks.
+end, { events = { "CRITERIA_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 5 })
 
 ------------------------------------------------------------
 -- EVENTS

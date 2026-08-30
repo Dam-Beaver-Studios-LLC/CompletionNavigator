@@ -447,6 +447,28 @@ function Filters.DescribeObjective(objectiveType, id)
         return "Title " .. numericID
     end
 
+    -- THE SYNTHETIC IDS, BY NAME. 0.79.0.
+    --
+    -- A handful of rows stand for an ACTION rather than for a thing with an
+    -- id -- claiming the vault, collecting a finished crafting order -- and
+    -- carry a string id so the filter stores can key on them. 0.78.0 gave
+    -- those rows working hide-and-defer guards, which made this display path
+    -- reachable for the first time, and it rendered them as "Currency vault"
+    -- and "Recipe claim": the addon's own internals offered to the player as
+    -- the name of the thing they hid.
+    --
+    -- Named here rather than by reaching into the modules, because the whole
+    -- point of this function is that it answers for a store row long after
+    -- the provider that made it has stopped producing one.
+    local synthetic = {
+        vault = "Collect your Great Vault reward",
+        claim = "Collect your finished crafting order",
+    }
+
+    if type(id) == "string" and synthetic[id] then
+        return synthetic[id]
+    end
+
     -- THE BADGE, NOT THE ENUM, FOR EVERYTHING THAT REACHES HERE. 0.67.0.
     --
     -- Every branch above produces a title-cased placeholder, and this last

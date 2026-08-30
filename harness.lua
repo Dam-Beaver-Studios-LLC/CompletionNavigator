@@ -22376,9 +22376,22 @@ end)()
 
     _G.TomTom.AddWaypoint = realAdd
 
-    local placed, uid = tomtom.SetWaypoint(94, 0.3, 0.3, "Real")
+    -- THE SECOND RETURN IS A SENTENCE FOR THE PLAYER, NEVER A HANDLE.
+    -- 0.79.0.
+    --
+    -- This returned the waypoint uid on success -- a table -- while the
+    -- native provider returns a caveat string there, and 0.78.0 began
+    -- PRINTING that position on success. So every `/cn go` for a player who
+    -- had chosen TomTom printed `table: 0x...` under the headline, which
+    -- reads as a crash. The uid is tracked in the provider's own list, which
+    -- is what `ClearAll` walks.
+    local placed, second = tomtom.SetWaypoint(94, 0.3, 0.3, "Real")
 
-    assert(placed == true and uid, "and a real one comes back with its uid")
+    assert(placed == true, "and a real one is placed")
+
+    assert(second == nil or type(second) == "string",
+        "and hands back nothing the caller could print by accident: "
+        .. type(second))
 
     assert(tomtom.ClearAll() == true, "which it then removes")
 
@@ -31767,8 +31780,9 @@ end)()
         start + (string.find(routing, "\nend", start, true) or start) - start
             + 4)
 
-    assert(string.find(body, "return true, why", 1, true),
-        "the caveat is returned to whoever wrote the headline")
+    assert(string.find(body, "return true, type(why) ==", 1, true),
+        "the caveat is returned to whoever wrote the headline, and only "
+        .. "when it is something a player could read")
 
     assert(not string.find(body, "CN.PrintLine(CN.Muted(tostring(why)))",
             1, true),
@@ -31963,19 +31977,42 @@ end)()
 
     -- A type with no registered checker answers UNKNOWN with no reason at
     -- all. A type with one answers about the row.
+    -- A ROW THE CLIENT IS NOT REPORTING IS NOT AVAILABLE. 0.79.0.
+    --
+    -- These two types exist only while the client says so. Before 0.78.0
+    -- `TREASURE` had no checker, so the staleness test fell through to "is
+    -- this still a candidate", which caught a despawned one. Registering a
+    -- checker without a liveness test took that away and left the waypoint
+    -- pointed at something that is not there.
     local state, reason = CN.Explain(CN.objectiveTypes.TREASURE, treasure)
 
-    assert(state == CN.objectiveStates.AVAILABLE,
-        "a treasure the addon has seen is available: " .. tostring(state)
-        .. " / " .. tostring(reason))
+    assert(state == CN.objectiveStates.UNKNOWN,
+        "a treasure the store remembers but the client is not reporting is "
+        .. "not offered as available: " .. tostring(state))
+
+    assert(reason, "and says why: " .. tostring(reason))
+
+    -- ONE THE CLIENT IS REPORTING IS.
+    local realAll = raresModule.GetAll
+
+    raresModule.GetAll = function()
+        return { { vignetteID = treasure, guid = "probe", isDead = false } }
+    end
+
+    local live = CN.Explain(CN.objectiveTypes.TREASURE, treasure)
+
+    assert(live == CN.objectiveStates.AVAILABLE,
+        "and one the client IS reporting is: " .. tostring(live))
 
     raresModule.NoteCleared(treasure)
 
     local cleared = CN.Explain(CN.objectiveTypes.TREASURE, treasure)
 
+    raresModule.GetAll = realAll
+
     assert(cleared == CN.objectiveStates.COMPLETED,
-        "and one this character has cleared is completed: "
-        .. tostring(cleared))
+        "and one this character has cleared is completed, whatever the "
+        .. "client says: " .. tostring(cleared))
 
     store[treasure] = nil
 
@@ -32076,6 +32113,632 @@ end)()
         "the follow header stops before the button starts")
 
     print("  one constant for the close control's footprint")
+end)()
+
+print("\nWhat 0.79.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SECOND RETURN FROM A WAYPOINT IS A SENTENCE, NEVER A HANDLE.
+    ------------------------------------------------------------
+    -- The provider contract overloaded it: the native provider returns a
+    -- caveat string, TomTom returned its waypoint uid -- a TABLE -- and
+    -- 0.78.0 began printing that position on success. So every `/cn go` for
+    -- a player who had chosen TomTom printed `table: 0x...` under the
+    -- headline, which reads as a crash.
+    CN.RegisterWaypointProvider("HarnessHandle", {
+        Name = function() return "HarnessHandle" end,
+        IsAvailable = function() return true end,
+        SetWaypoint = function()
+            return true, { uid = "a table, not a sentence" }
+        end,
+        Clear = function() end,
+    }, 1)
+
+    local placed, why = CN.SetWaypoint(94, 0.4, 0.4, "Handled")
+
+    CN.waypointProviders["HarnessHandle"] = nil
+
+    assert(placed, "the waypoint is placed")
+
+    assert(why == nil,
+        "and nothing that is not a sentence reaches the caller: "
+        .. type(why))
+
+    print("  a waypoint hands back a sentence or nothing at all")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ARROW COMES BACK ALIVE.
+    ------------------------------------------------------------
+    local navigation = CN:GetModule("Navigation")
+
+    local autoSettings = CN.Settings()
+
+    local held = autoSettings.arrow
+
+    autoSettings.arrow = true
+
+    CN.SetWaypoint(94, 0.5, 0.4, "Somewhere")
+
+    navigation.Refresh()
+
+    assert(navigation.IsTicking(), "the ticker runs while the arrow is on")
+
+    -- 0.78.0 added the stop and not the start. `StartTicker` had exactly one
+    -- caller -- inside the waypoint provider -- so `/cn arrow on`, and the
+    -- hover x added to make toggling easy, left the arrow reappearing frozen
+    -- on a stale bearing for the rest of the session.
+    autoSettings.arrow = false
+
+    navigation.Refresh()
+
+    assert(not navigation.IsTicking(),
+        "and stops when the arrow is turned off")
+
+    autoSettings.arrow = true
+
+    navigation.Refresh()
+
+    assert(navigation.IsTicking(),
+        "and starts again when it is turned back on, rather than reappearing "
+        .. "frozen for the rest of the session")
+
+    autoSettings.arrow = held
+
+    print("  the arrow comes back alive, not frozen")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LIVE COUNTDOWN IS NOT AN IDENTITY.
+    ------------------------------------------------------------
+    -- `expiresIn` was in the identity fields, and it is recomputed on every
+    -- provider run -- so two rebuilds of an unchanged row were never equal,
+    -- the reuse shortcut could never fire for any provider carrying one, and
+    -- the aggregate generation was bumped, which forces a full re-score and
+    -- re-sort of everything.
+    --
+    -- Nine providers write one and two are volatile with no cooldown, so a
+    -- player standing still with the window open paid a full re-score every
+    -- five seconds, permanently, for numbers that had not changed.
+    local seconds = 3600
+
+    CN.RegisterCandidateProvider("HarnessCountdown", function()
+        seconds = seconds - 1
+
+        return { CN.NewObjective({
+            id = 979001, type = CN.objectiveTypes.QUEST,
+            name = "Ticking", completionValue = 3,
+            expiresIn = seconds,
+        }) }
+    end, { events = {}, volatile = true })
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates()
+
+    local countedBefore = CN.GetCandidateCacheState().generation
+
+    for _ = 1, 5 do
+        CN.InvalidateProvider("HarnessCountdown")
+        CN.CollectCandidates()
+    end
+
+    local after = CN.GetCandidateCacheState().generation
+
+    assert(after == countedBefore,
+        "five rebuilds of a row whose only change is its countdown do not "
+        .. "force five full re-scores: generation " .. countedBefore .. " -> "
+        .. after)
+
+    -- A DEADLINE THAT REALLY MOVED IS STILL A CHANGE.
+    seconds = 60
+
+    CN.InvalidateProvider("HarnessCountdown")
+    CN.CollectCandidates()
+
+    assert(CN.GetCandidateCacheState().generation > after,
+        "and a deadline that moved by an hour is")
+
+    CN.candidateProviders["HarnessCountdown"] = nil
+
+    CN.InvalidateCandidates()
+
+    print("  a live countdown is not an identity")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A TAXI RIDE IS NOT A SEQUENCE OF SINGLE MOMENTS.
+    ------------------------------------------------------------
+    local advances = 0
+
+    local realAdvance = CN.AutoAdvance
+
+    CN.AutoAdvance = function(...)
+        advances = advances + 1
+
+        return realAdvance(...)
+    end
+
+    local waySettings = CN.Settings()
+
+    local heldAuto = waySettings.autoWaypoint
+
+    waySettings.autoWaypoint = true
+
+    -- 0.78.0's note said the vignette event was the only firehose and "the
+    -- other seven are single moments". `ZONE_CHANGED_NEW_AREA` fires for
+    -- every zone a taxi crosses -- this codebase says so in another file and
+    -- guards its own handler with `UnitOnTaxi` for exactly that.
+    CN.ForgetDebounces()
+
+    advances = 0
+
+    for _ = 1, 8 do
+        CN.Dispatch("ZONE_CHANGED_NEW_AREA")
+    end
+
+    assert(advances > 0, "the first zone change is answered")
+
+    assert(advances < 8,
+        "and eight in one hop do not each run a full recommendation pass: "
+        .. advances)
+
+    -- AND NOT AT ALL WHILE THE GROUND IS MOVING PAST.
+    local realTaxi = UnitOnTaxi
+
+    UnitOnTaxi = function() return true end
+
+    CN.ForgetDebounces()
+
+    advances = 0
+
+    for _ = 1, 8 do
+        CN.Dispatch("ZONE_CHANGED_NEW_AREA")
+    end
+
+    UnitOnTaxi = realTaxi
+
+    assert(advances == 0,
+        "a player mid-flight is not re-pointed at a zone being flown over: "
+        .. advances)
+
+    -- A COMPLETION EVENT IS STILL ANSWERED AT ONCE.
+    CN.ForgetDebounces()
+
+    advances = 0
+
+    CN.Dispatch("QUEST_TURNED_IN", 979002)
+
+    assert(advances > 0, "a turn-in is still a single moment")
+
+    -- AND EVERY ONE OF THEM, NOT THE FIRST OF A BURST.
+    --
+    -- `CN.Debounce` is leading-edge, so routing a single moment through it
+    -- looks correct for one event and swallows the rest: hand in three
+    -- quests in a row and only the first is answered, with the other two
+    -- collapsed into one trailing pass two seconds later. That is the
+    -- difference the throttled/unthrottled split exists to make, and
+    -- nothing tested it -- a mutation deleting the split survived.
+    CN.ForgetDebounces()
+
+    advances = 0
+
+    CN.Dispatch("QUEST_TURNED_IN", 979003)
+    CN.Dispatch("QUEST_TURNED_IN", 979004)
+    CN.Dispatch("QUEST_TURNED_IN", 979005)
+
+    assert(advances == 3,
+        "three turn-ins are three moments, not one burst: " .. advances)
+
+    waySettings.autoWaypoint = heldAuto
+
+    CN.AutoAdvance = realAdvance
+
+    print("  a taxi ride is not a sequence of single moments")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A STALENESS POLL DOES NOT CREDIT THE ROW AS OFFERED.
+    ------------------------------------------------------------
+    -- Every non-quiet `Recommend` fires the hooks, and two of them WRITE: one
+    -- counts the row as shown -- the denominator of a ratio that moves a
+    -- whole type's score -- and one starts a work clock that becomes the
+    -- measured duration for whatever finishes next. Auto-advance is a
+    -- background check, not the player being shown a list.
+    local routing = CN_TEST_ReadAddonFile("Routing.lua")
+
+    assert(routing, "Routing.lua must be readable")
+
+    assert(string.find(routing, "local results = CN.Recommend(1, true)",
+            1, true),
+        "the staleness poll asks quietly")
+
+    print("  a staleness poll does not credit the row as offered")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn alts DOES NOT SUGGEST THE CHARACTER THAT ALREADY DID IT.
+    ------------------------------------------------------------
+    local warband = CN:GetModule("Warband")
+
+    local key = "Holder-Testrealm"
+
+    CN.db.characters[key] = {
+        name = "Holder", realm = "Testrealm", lastSeen = time(),
+        recipes = { [979100] = true },
+        titles  = { [979101] = true },
+    }
+
+    for _, case in ipairs({
+        { CN.objectiveTypes.RECIPE, 979100 },
+        { CN.objectiveTypes.TITLE,  979101 },
+    }) do
+        local best, detail, scope, switchable =
+            warband.WhoShould(case[1], case[2])
+
+        assert(best == key,
+            "the holder is still named, because the score adjuster wants it")
+
+        assert(detail and scope, "with both halves of the answer")
+
+        -- The command whose entire job is "should you be playing somebody
+        -- else" printed "already knows it: Bob, Carol" under "Bob could do 2
+        -- of these". Switching to the character who has already done it
+        -- cannot do it again -- and a title is per-character and
+        -- unrepeatable.
+        assert(switchable == false,
+            "but it is not offered as a reason to switch")
+    end
+
+    -- AND THE SCORE ADJUSTER STILL WORKS, which is the other consumer.
+    local penalty, why = warband.Suitability(CN.objectiveTypes.RECIPE, 979100)
+
+    assert(penalty < 0 and why,
+        "a recipe another character knows still ranks down here: "
+        .. tostring(penalty))
+
+    assert(not string.find(why, "(" .. key .. ")", 1, true),
+        "and the reason is a sentence, not a name repeated in brackets: "
+        .. why)
+
+    CN.db.characters[key] = nil
+
+    -- A TYPE THAT CANNOT PRODUCE A SUGGESTION IS NOT LISTED AS ONE.
+    local alts = CN:GetModule("Alts")
+
+    assert(not alts.switchableTypes[CN.objectiveTypes.QUEST],
+        "a type with no branch in WhoShould is not advertised as switchable")
+
+    print("  /cn alts does not suggest the character that already did it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A HIDDEN ROW IS NAMED, AND A RENAMED ONE IS NOT ORPHANED.
+    ------------------------------------------------------------
+    local filterModule = CN:GetModule("Filters")
+
+    -- 0.78.0 gave the claim rows working hide guards, which made this display
+    -- path reachable for the first time -- and it rendered them as "Currency
+    -- vault" and "Recipe claim": the addon's internals offered to the player
+    -- as the name of what they hid.
+    local named = filterModule.DescribeObjective(CN.objectiveTypes.CURRENCY,
+        "vault")
+
+    assert(named and string.find(named, "Great Vault", 1, true),
+        "a synthetic row is named, not printed as its id: "
+        .. tostring(named))
+
+    local order = filterModule.DescribeObjective(CN.objectiveTypes.RECIPE, "claim")
+
+    assert(order and not string.find(order, "Recipe claim", 1, true),
+        "and so is the crafting order: " .. tostring(order))
+
+    -- AND THE CHOICE SURVIVES THE RENAME. The vault row's id was `0` until
+    -- 0.78.0; the rename orphaned whatever the player had already hidden
+    -- under the old key, so the row came back and a phantom entry stayed in
+    -- `/cn hidden` that nothing could remove.
+    local aged = {
+        version = 30,
+        settings = {},
+        account = {
+            ignoredObjectives  = { CURRENCY = { [0] = { at = 1 } } },
+            deferredObjectives = { CURRENCY = { [0] = { until_ = 2 } } },
+        },
+        characters = {},
+    }
+
+    CN.RunMigrations(aged)
+
+    assert(aged.account.ignoredObjectives.CURRENCY[0] == nil,
+        "the old key is gone")
+
+    assert(aged.account.ignoredObjectives.CURRENCY["vault"],
+        "and the player's choice moved to the new one rather than being "
+        .. "dropped")
+
+    assert(aged.account.deferredObjectives.CURRENCY["vault"],
+        "both stores")
+
+    print("  a hidden row is named, and a renamed one is not orphaned")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CORPSE IS NOT AN ENCOUNTER.
+    ------------------------------------------------------------
+    local rareModule = CN_TEST_ReadAddonFile("Modules/Rares.lua")
+
+    assert(rareModule, "Modules/Rares.lua must be readable")
+
+    -- `Record` bumps a sighting counter that the goal plan shows, and 0.78.0
+    -- switched the walk to the unfiltered list so the dead flag would survive
+    -- -- correctly -- and went on recording every row. Riding past the same
+    -- corpse on three days read as three encounters.
+    -- A PATTERN, NOT A LITERAL SPANNING A NEWLINE. The scaffolded tree
+    -- `cn.ps1 init` writes uses the platform's line ending, so a literal
+    -- containing "\n" matches in the repository and fails in the tree the
+    -- release pipeline actually builds -- which is where this first failed.
+    assert(string.find(rareModule,
+            "if not vignette%.isDead then%s+Rares%.Record%(vignette%)"),
+        "only a live rare counts as a sighting")
+
+    print("  a corpse is not an encounter")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CROSS-TAB COUNT IS THE NUMBER OF ROWS THE TAB WOULD SHOW.
+    ------------------------------------------------------------
+    -- The search counted matching ENTRIES while a tab keeps whole BLOCKS -- a
+    -- block survives if any row in it matches, and it survives entire. So
+    -- "Also on: Goals (2)" led to a tab showing eight rows.
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+    local list = CN_TEST_ReadAddonFile("UI/List.lua")
+
+    assert(ui and list, "both files must be readable")
+
+    assert(string.find(list, "function list:CountMatching", 1, true),
+        "the list answers how many rows it would show")
+
+    assert(string.find(ui, "list:CountMatching(text)", 1, true),
+        "and the cross-tab search asks it, rather than counting differently")
+
+    print("  the cross-tab count is the number of rows the tab would show")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CHATTY EVENT HAS A COOLDOWN.
+    ------------------------------------------------------------
+    -- `CRITERIA_UPDATE` and `QUEST_LOG_UPDATE` both fire constantly, and this
+    -- addon says so in its own comments -- while three providers subscribed
+    -- to one or the other with no throttle at all. The same defect 0.78.0
+    -- fixed for one file, left standing in three others.
+    local chatty = {
+        CRITERIA_UPDATE    = true,
+        QUEST_LOG_UPDATE   = true,
+        CURRENCY_DISPLAY_UPDATE = true,
+        VIGNETTE_MINIMAP_UPDATED = true,
+        BAG_UPDATE_DELAYED = true,
+    }
+
+    local offenders = {}
+
+    for name, provider in pairs(CN.candidateProviders or {}) do
+        local subscribes = false
+
+        for event in pairs(provider.events or {}) do
+            if chatty[event] then
+                subscribes = true
+            end
+        end
+
+        if subscribes and (provider.cooldown or 0) <= 0 then
+            table.insert(offenders, name)
+        end
+    end
+
+    table.sort(offenders)
+
+    assert(#offenders == 0,
+        "every provider on a constantly-firing event is throttled: "
+        .. table.concat(offenders, ", "))
+
+    print("  a chatty event has a cooldown")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COUNT IS LABELLED WITH WHAT IT COUNTS.
+    ------------------------------------------------------------
+    local breakdown = CN:GetModule("Breakdown")
+
+    local rows = breakdown.Report and breakdown.Report() or {}
+
+    local currencyRows
+
+    for _, row in ipairs(rows) do
+        if row.name == "Currencies" then
+            currencyRows = row
+        end
+    end
+
+    if currencyRows then
+        -- Twelve currencies are not "collected"; twelve are the ones NOT at
+        -- cap -- one line above the row's own note saying currencies are not
+        -- a set to complete.
+        assert(currencyRows.collectedLabel == "not at cap",
+            "the currency row says what its number counts: "
+            .. tostring(currencyRows.collectedLabel))
+    end
+
+    print("  a count is labelled with what it counts")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A WAYPOINT THE PLAYER ASKED FOR SAYS SOMETHING.
+    ------------------------------------------------------------
+    -- `CN.SetWaypoint` returns a caveat for its caller to print under a
+    -- headline, and four of the six callers printed no headline -- so the
+    -- Goals tab's "Next step" button produced no chat output at all, and a
+    -- hub advance inside an instance both failed and spokenLines nothing. The rule
+    -- is now one function; nothing outside Routing.lua may call the raw one.
+    local offenders = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        if file ~= "Routing.lua" then
+            local text = CN_TEST_ReadAddonFile(file)
+
+            if text then
+                for line in string.gmatch(text or "", "[^\n]+") do
+                    -- CODE, NOT COMMENTS: this file's own notes name the
+                    -- function they replaced.
+                    if not string.find(line, "^%s*%-%-")
+                        and string.find(line, "CN%.SetWaypoint%s*%(") then
+                        table.insert(offenders, file)
+                    end
+                end
+            end
+        end
+    end
+
+    assert(#offenders == 0,
+        "a player-facing waypoint must go through CN.SetWaypointAndSay: "
+        .. table.concat(offenders, ", "))
+
+    ------------------------------------------------------------
+    -- AND THE HEADLINE COMES BEFORE THE CAVEAT.
+    ------------------------------------------------------------
+    local spokenLines = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spokenLines, tostring(message))
+    end
+
+    local previousOrder    = CN.waypointOrder
+    local previousProvider = CN.waypointProviders
+
+    CN.waypointOrder     = { { name = "harness" } }
+    CN.waypointProviders = {
+        harness = {
+            IsAvailable  = function() return true end,
+            SetWaypoint  = function()
+                return true, "the game does not allow a map pin here"
+            end,
+        },
+    }
+
+    local placed = CN.SetWaypointAndSay(84, 0.5, 0.5, "Somewhere",
+        "Next step: Somewhere")
+
+    CN.waypointOrder     = previousOrder
+    CN.waypointProviders = previousProvider
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    assert(placed, "the harness provider placed it")
+
+    local headlineAt, caveatAt
+
+    for index, line in ipairs(spokenLines) do
+        if string.find(line, "Next step: Somewhere", 1, true) then
+            headlineAt = headlineAt or index
+        end
+
+        if string.find(line, "does not allow a map pin", 1, true) then
+            caveatAt = caveatAt or index
+        end
+    end
+
+    assert(headlineAt, "the caller's headline is printed")
+    assert(caveatAt, "and the provider's caveat with it")
+    assert(headlineAt < caveatAt,
+        "the caveat continues the headline, it does not precede it")
+
+    ------------------------------------------------------------
+    -- AND A CALLER THAT DOES NOT NARRATE STILL REPORTS A REFUSAL.
+    ------------------------------------------------------------
+    -- Follow mode's file header forbids chat narration, and it honoured that
+    -- by discarding the caveat as well -- so a hub advance inside an instance
+    -- placed nothing and spokenLines nothing. `false` suppresses the headline only.
+    local quiet = {}
+
+    realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(quiet, tostring(message))
+    end
+
+    previousOrder    = CN.waypointOrder
+    previousProvider = CN.waypointProviders
+
+    CN.waypointOrder     = { { name = "harness" } }
+    CN.waypointProviders = {
+        harness = {
+            IsAvailable = function() return true end,
+            SetWaypoint = function()
+                return true, "the game does not allow a map pin here"
+            end,
+        },
+    }
+
+    CN.SetWaypointAndSay(84, 0.5, 0.5, "Somewhere", false)
+
+    CN.waypointOrder     = previousOrder
+    CN.waypointProviders = previousProvider
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local toldMe, narrated = false, false
+
+    for _, line in ipairs(quiet) do
+        if string.find(line, "does not allow a map pin", 1, true) then
+            toldMe = true
+        end
+
+        if string.find(line, "Waypoint set", 1, true) then
+            narrated = true
+        end
+    end
+
+    assert(toldMe, "a quiet caller still hears that the pin was refused")
+    assert(not narrated, "and hears nothing else")
+
+    print("  a waypoint the player asked for says so, headline first")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE LAST-RESORT NAME IS A BADGE, NOT AN ENUM.
+    ------------------------------------------------------------
+    -- `Filters.DescribeObjective` names anything the player has hidden or
+    -- deferred. Every branch produces a title-cased placeholder; the tail
+    -- that catches ids which are not numbers concatenated the raw uppercase
+    -- token, so `/cn hidden` listed `RECIPE claim` -- the addon's internals
+    -- offered as the name of the thing the player hid. Both earlier fixes
+    -- for this shape had tests; the tail did not, and a mutation reverting
+    -- it survived.
+    local describer = CN:GetModule("Filters")
+
+    assert(describer and describer.DescribeObjective, "the describer exists")
+
+    local named = describer.DescribeObjective(CN.objectiveTypes.RECIPE,
+        "some-unparsed-id")
+
+    assert(not string.find(named, "RECIPE", 1, true),
+        "the raw enum is never shown to the player: " .. tostring(named))
+
+    assert(string.find(named, "Recipe", 1, true),
+        "the badge is: " .. tostring(named))
+
+    print("  a hidden row with an odd id is named, not enumerated")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

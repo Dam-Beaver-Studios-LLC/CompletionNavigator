@@ -575,12 +575,17 @@ function Chase.NavigateNext(chain)
         end
     end
 
+    -- SAY SOMETHING. 0.79.0. The Goals tab's "Next step" button reached
+    -- these two lines and produced no chat output whatsoever, so a player
+    -- who clicked it had no way to tell whether anything had happened.
     if step and step.mapID and step.x and step.y then
-        return CN.SetWaypoint(step.mapID, step.x, step.y, step.text)
+        return CN.SetWaypointAndSay(step.mapID, step.x, step.y, step.text,
+            "Next step: " .. tostring(step.text or "here"))
     end
 
     if chain and chain.mapID and chain.x and chain.y then
-        return CN.SetWaypoint(chain.mapID, chain.x, chain.y, chain.name)
+        return CN.SetWaypointAndSay(chain.mapID, chain.x, chain.y, chain.name,
+            "Waypoint set: " .. tostring(chain.name or "that goal"))
     end
 
     Print("No location is known for the next step of "

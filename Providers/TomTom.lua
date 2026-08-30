@@ -14,9 +14,17 @@ function provider.IsAvailable()
     return _G.TomTom ~= nil and _G.TomTom.AddWaypoint ~= nil
 end
 
--- Returns true and the uid, or false and why not -- the same contract as the
--- Blizzard provider below, so `CN.SetWaypoint` can tell the player the truth
--- whichever one is in use.
+-- Returns `placed, why` -- and `why` is a SENTENCE FOR THE PLAYER in both
+-- directions, never a handle. 0.79.0.
+--
+-- This used to return the uid on success, and the native provider returns a
+-- caveat ("the arrow is set; the game does not allow a map pin here"). One
+-- position, two meanings -- and 0.78.0 started PRINTING the second return on
+-- success, so every `/cn go` for a TomTom user printed `table: 0x...` under
+-- the headline. It reads as a crash.
+--
+-- The uid is already tracked in `active`, which is what `ClearAll` walks, so
+-- returning it was giving the caller something it had no use for.
 function provider.SetWaypoint(mapID, x, y, title)
     if not provider.IsAvailable() then
         return false, "TomTom is not loaded"
@@ -36,7 +44,7 @@ function provider.SetWaypoint(mapID, x, y, title)
 
     table.insert(active, uid)
 
-    return true, uid
+    return true
 end
 
 function provider.ClearAll()

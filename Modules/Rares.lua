@@ -56,11 +56,14 @@ Rares.CharacterKills = CharacterKills
 -- Vignettes currently visible, classified and located.
 -- EVERY VIGNETTE THE CLIENT REPORTS, DEAD ONES INCLUDED. 0.78.0.
 --
--- `GetActive` filters the dead out AND drops the flag from the rows it
--- builds, so `VignetteWork` -- which reads `vignette.isDead` to record that a
+-- `GetActive` used to filter the dead out AND drop the flag from the rows it
+-- built, so `VignetteWork` -- which reads `vignette.isDead` to record that a
 -- rare was seen already dead -- could never see one. `wasDead` was therefore
 -- false for every row, and the branch in `NoteDisappearances` commented as
 -- "needs no inference at all" was unreachable.
+--
+-- `GetActive` now filters THIS list, so the rows it returns are the same
+-- tables and do carry the flag; what it removes is the dead ones.
 --
 -- So every clear fell through to the "it vanished within 150 yards of me"
 -- guess, and a rare somebody else killed, or one tagged and finished while
@@ -388,6 +391,34 @@ local function Eligibility(vignetteID)
         return states.COMPLETED, "Cleared by this character", record.name
     end
 
+    -- AND A ROW THE CLIENT IS NOT REPORTING RIGHT NOW IS NOT AVAILABLE.
+    -- 0.79.0.
+    --
+    -- These two types are the only ones in the addon whose objectives exist
+    -- only while the client says so: a rare that despawned, or a treasure
+    -- somebody else looted, is gone with no event to say it.
+    --
+    -- Before 0.78.0 `TREASURE` had no checker at all, so the staleness test
+    -- fell through to "is this still a candidate", which caught exactly that.
+    -- Registering a checker without a liveness test took the fallback away
+    -- and left the waypoint pointed at something that is not there -- which
+    -- is the failure `Routing.lua` describes for the seven checker-less types
+    -- and was written to end.
+    --
+    -- `UNKNOWN` is the honest answer: the store remembers this thing, and
+    -- whether it is up right now is a question only the client can answer.
+    local mapID = select(1, CN.GetPlayerPosition())
+
+    if mapID then
+        for _, vignette in ipairs(Rares.GetAll(mapID)) do
+            if vignette.vignetteID == vignetteID and not vignette.isDead then
+                return states.AVAILABLE, nil, nil
+            end
+        end
+
+        return states.UNKNOWN, "Not up right now", record.name
+    end
+
     return states.AVAILABLE, nil, nil
 end
 
@@ -519,7 +550,21 @@ local function VignetteWork()
     for _, vignette in ipairs(active) do
         currentGuids[vignette.guid] = true
 
-        Rares.Record(vignette)
+        -- A CORPSE IS NOT AN ENCOUNTER. 0.79.0.
+        --
+        -- 0.78.0 switched this walk to the unfiltered list so the dead flag
+        -- would survive -- correctly -- and went on recording every row,
+        -- dead ones included. `Record` bumps `sightings` after a ten-minute
+        -- gap, and that counter is shown in the goal plan, so riding past
+        -- the same corpse on three days read as three encounters.
+        --
+        -- The header on that counter says it exists because `/cn goal` once
+        -- told a player who had met a rare twice that they had seen it 1,847
+        -- times. The dead flag is needed for the disappearance inference
+        -- below, not for the count.
+        if not vignette.isDead then
+            Rares.Record(vignette)
+        end
     end
 
     Rares.NoteDisappearances(currentGuids)

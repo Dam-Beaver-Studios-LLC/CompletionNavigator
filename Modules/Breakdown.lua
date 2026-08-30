@@ -651,7 +651,8 @@ Breakdown.Register{
         end
 
         return {
-            collected    = counts.known - counts.capped,
+            collected      = counts.known - counts.capped,
+        collectedLabel = "not at cap",
             total        = nil,
             unknownTotal = "currencies are a state to manage, not a set to complete",
             reasons      = reasons,
@@ -672,8 +673,15 @@ local function PrintRow(row)
             row.name, row.collected, row.total,
             CN.PercentText(percentage / 100, 1)))
     else
-        Print(string.format("|cffffc74f%s|r  %d collected",
-            row.name, row.collected or 0))
+        -- THE LABEL THE ROW ASKED FOR. 0.79.0.
+        --
+        -- "collected" is right for a set you are completing and wrong for a
+        -- state you are managing: the currencies row passes the count of
+        -- currencies NOT at cap, and this rendered it as "Currencies 12
+        -- collected" -- one line above its own note saying currencies are not
+        -- a set to complete.
+        Print(string.format("|cffffc74f%s|r  %d %s",
+            row.name, row.collected or 0, row.collectedLabel or "collected"))
 
         if row.unknownTotal then
             Print("    |cff8a8f96no percentage: " .. row.unknownTotal .. "|r")

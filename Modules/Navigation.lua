@@ -1106,7 +1106,8 @@ local function Refresh()
         Blank()
         arrow:Hide()
 
-        -- AND THE TICKER STOPS WITH IT. 0.78.0.
+        -- AND THE TICKER STOPS WITH IT. 0.78.0, corrected in 0.79.0 -- see
+        -- the restart below, which is the other half this was missing.
         --
         -- `provider.SetWaypoint` starts a ten-per-second ticker and only
         -- `Navigation.Clear` ever stopped it -- so `/cn arrow off`, and the
@@ -1131,6 +1132,21 @@ local function Refresh()
     end
 
     arrow:Show()
+
+    -- AND STARTS AGAIN WHEN THERE IS SOMETHING TO DRAW. 0.79.0.
+    --
+    -- 0.78.0 added the stop and not the start. `StartTicker` had exactly one
+    -- caller -- inside `provider.SetWaypoint` -- so `/cn arrow on`, and the
+    -- hover x that 0.77.0 added to make toggling easy, left the arrow
+    -- reappearing frozen on a stale bearing and a stale distance for the rest
+    -- of the session, until the next waypoint happened to be set.
+    --
+    -- The decision belongs HERE rather than at each toggle: this function
+    -- already owns "is there anything to draw", and a rule written at three
+    -- call sites is a rule that will be missing from a fourth.
+    if not Navigation.IsTicking() then
+        Navigation.StartTicker()
+    end
 
     arrow.label:SetText(target.title or CN.L["Destination"])
 

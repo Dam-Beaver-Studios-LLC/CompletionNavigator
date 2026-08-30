@@ -612,7 +612,17 @@ CN:RegisterCommand{
         if #capped > 0 then
             Print("|cffe2564cAt cap (" .. #capped .. ") - spend these:|r")
 
-            for _, currency in ipairs(capped) do
+            -- CAPPED, AND SAYING SO -- like the list below it. 0.79.0.
+            --
+            -- 0.78.0 added "and N more" to the weekly list and left this one
+            -- unbounded, so a player deep into an expansion had twenty-plus
+            -- rows dumped into chat. The two halves of one command were
+            -- inconsistent in opposite directions.
+            for index, currency in ipairs(capped) do
+                if index > 8 then
+                    break
+                end
+
                 CN.PrintLine("  " .. tostring(currency.name)
                     .. " |cff8a8f96" .. currency.quantity
                     .. " / " .. currency.maximum
@@ -624,6 +634,11 @@ CN:RegisterCommand{
                             .. " held")
                         or "")
                     .. "|r")
+            end
+
+            if #capped > 8 then
+                CN.PrintLine(CN.Muted("  ... and " .. (#capped - 8)
+                    .. " more"))
             end
         end
 

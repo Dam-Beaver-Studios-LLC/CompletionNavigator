@@ -1164,7 +1164,16 @@ function UI.SearchAll(text)
         local list = tab.panel and UI.listPanels and UI.listPanels[tab.panel]
 
         if list and list.Entries then
-            local count, first = 0, nil
+            -- COUNTED THE WAY THE TAB WOULD SHOW IT. 0.79.0.
+            --
+            -- This counted matching ENTRIES while the tab keeps whole
+            -- BLOCKS, so "Also on: Goals (2)" led to a tab showing eight
+            -- rows. `first` still comes from the walk below, because it is
+            -- the name of the row that matched rather than a count.
+            local count = (list.CountMatching and list:CountMatching(text))
+                or 0
+
+            local first = nil
 
             for _, entry in ipairs(list:Entries()) do
                 -- Plain find, for the reason the list's own filter gives:
@@ -1178,10 +1187,8 @@ function UI.SearchAll(text)
                 -- matched none. Two predicates for one question.
                 local haystack = CN.SearchKey(entry.text, entry.value)
 
-                if haystack:find(needle, 1, true) then
-                    count = count + 1
-
-                    first = first or CN.Strip(tostring(entry.text or ""))
+                if not first and haystack:find(needle, 1, true) then
+                    first = CN.Strip(tostring(entry.text or ""))
                 end
             end
 

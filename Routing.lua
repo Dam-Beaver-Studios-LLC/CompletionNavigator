@@ -104,7 +104,55 @@ function CN.SetWaypoint(mapID, x, y, title)
     -- follow mode, inside an instance.
     --
     -- A continuation belongs to whoever wrote the headline it continues.
-    return true, why
+    -- A SENTENCE, NEVER A HANDLE. 0.79.0.
+    --
+    -- The provider contract says the second return is something to show the
+    -- player. TomTom returned its waypoint uid there -- a table -- and 0.78.0
+    -- began printing it, so `/cn go` printed `table: 0x...` for every player
+    -- who had chosen TomTom. TomTom no longer returns it; this refuses
+    -- anything that is not a string regardless, because a contract enforced
+    -- only by every implementer remembering it is not enforced.
+    return true, type(why) == "string" and why or nil
+end
+
+-- SET IT, AND SAY SO. 0.79.0.
+--
+-- `CN.SetWaypoint` returns a caveat for the caller to print under its own
+-- headline. Six callers; four of them printed no headline, so those four
+-- silently swallowed both the success and the caveat -- the Goals tab's
+-- "Next step" button produced no chat output at all, and follow mode's hub
+-- advances inside an instance said nothing while quietly refusing to place
+-- the pin. Every caller that wants a line printed uses this; the pattern
+-- lives once instead of five times, because a rule written twice drifts.
+--
+-- `headline` may be `false`, meaning "this caller has its own surface and
+-- does not narrate" -- follow mode, whose file header states the rule. That
+-- is not the same as saying nothing: a caveat is the addon reporting that it
+-- could not do what it was asked, and a silent refusal is the defect. With
+-- no headline above it the caveat is printed as its own line rather than as
+-- a continuation, because an orphaned continuation is what 0.78.0 shipped.
+function CN.SetWaypointAndSay(mapID, x, y, title, headline)
+    local placed, why = CN.SetWaypoint(mapID, x, y, title)
+
+    if not placed then
+        return false
+    end
+
+    if headline == false then
+        if why then
+            CN.Print(tostring(why))
+        end
+
+        return true
+    end
+
+    CN.Print(headline or ("Waypoint set: " .. tostring(title or "here")))
+
+    if why then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end
+
+    return true
 end
 
 -- The single entry point for "take me there", used by /cn go, the Navigate
@@ -124,21 +172,9 @@ function CN.NavigateToObjective(objective)
     local name = tostring(objective.name or objective.id or "that objective")
 
     if objective.mapID and objective.x and objective.y then
-        local placed, why = CN.SetWaypoint(objective.mapID, objective.x,
-            objective.y, name)
-
-        if placed then
-            CN.Print("Waypoint set: " .. name)
-
-            -- The caveat, UNDER its own headline. See `CN.SetWaypoint`.
-            if why then
-                CN.PrintLine(CN.Muted(tostring(why)))
-            end
-
-            return true
-        end
-
-        return false
+        -- The caveat, UNDER its own headline. See `CN.SetWaypointAndSay`.
+        return CN.SetWaypointAndSay(objective.mapID, objective.x,
+            objective.y, name, "Waypoint set: " .. name)
     end
 
     -- Re-resolve: coordinates often appear once the player is on the right
@@ -152,19 +188,8 @@ function CN.NavigateToObjective(objective)
             if mapID and x and y then
                 objective.mapID, objective.x, objective.y = mapID, x, y
 
-                local placed, why = CN.SetWaypoint(mapID, x, y, name)
-
-                if placed then
-                    CN.Print("Waypoint set: " .. name)
-
-                    if why then
-                        CN.PrintLine(CN.Muted(tostring(why)))
-                    end
-
-                    return true
-                end
-
-                return false
+                return CN.SetWaypointAndSay(mapID, x, y, name,
+                    "Waypoint set: " .. name)
             end
         end
 
@@ -1312,7 +1337,23 @@ function CN.AutoAdvance(reason, force)
         return false
     end
 
-    local results = CN.Recommend(1)
+    -- QUIET. 0.79.0.
+    --
+    -- Every non-quiet `Recommend` fires the recommendation hooks, and two of
+    -- them WRITE: `Preference` counts the row as shown -- the denominator of
+    -- a ratio that moves a whole type's score -- and `Session` starts a work
+    -- clock that becomes the measured duration for whatever finishes next.
+    --
+    -- Auto-advance is not the player being shown a list. It is a background
+    -- staleness check, and with seven events driving it a player who
+    -- abandoned a chain, learned three pets and crossed four zones had
+    -- credited the top row as offered eight times and started eight clocks.
+    -- Both of those are numbers the addon shows and reasons from.
+    --
+    -- `Modules/Alts.lua` passes quiet for the same reason. The offer that
+    -- actually reaches the player is the waypoint, and `NavigateToObjective`
+    -- is where that is announced.
+    local results = CN.Recommend(1, true)
 
     if #results == 0 then
         return false
@@ -1367,14 +1408,40 @@ for _, event in ipairs({
     -- every vignette allocated a closure and scheduled a timer for a player
     -- who has auto-waypoint off -- which is the default, and therefore almost
     -- everyone.
-    local firehose = (event == "VIGNETTE_MINIMAP_UPDATED")
+    -- CLASSIFIED BY SHAPE, NOT BY LIST MEMBERSHIP. 0.79.0.
+    --
+    -- 0.78.0's note said "the vignette event is the only firehose; the other
+    -- seven are single moments". `ZONE_CHANGED_NEW_AREA` is neither a
+    -- completion nor a single moment: `Modules/Quests.lua` says in this same
+    -- codebase that it "fires for every zone a taxi crosses, so a
+    -- cross-continent flight was prompting about zones being flown OVER",
+    -- and guards its own handler with `UnitOnTaxi` for exactly that.
+    --
+    -- Measured: eight zone changes in one taxi hop produced eight full
+    -- recommendation passes, mid-loading-screen, any of which could re-point
+    -- the waypoint at something in a zone being flown over.
+    --
+    -- `NEW_PET_ADDED` gets the same treatment: `Modules/Pets.lua` already
+    -- runs a full journal rescan on it with no throttle, so a mass loot cost
+    -- two full scans and an unthrottled recommendation pass per pet.
+    local throttled = event == "VIGNETTE_MINIMAP_UPDATED"
+        or event == "ZONE_CHANGED_NEW_AREA"
+        or event == "NEW_PET_ADDED"
 
     CN:RegisterEvent(event, function()
         if not CN.IsAutoWaypointEnabled() then
             return
         end
 
-        if not firehose then
+        -- NOT WHILE THE GROUND IS MOVING PAST. The player is not going to act
+        -- on a recommendation from the middle of a flight, and re-pointing
+        -- the waypoint at a zone being flown over is worse than saying
+        -- nothing.
+        if UnitOnTaxi and UnitOnTaxi("player") then
+            return
+        end
+
+        if not throttled then
             CN.AutoAdvance(event)
             return
         end
@@ -1395,7 +1462,10 @@ for _, event in ipairs({
         --
         -- `Navigation.Arrive` still calls `CN.AutoAdvance` directly and
         -- passes `force`: arriving somewhere is a single moment, not a burst.
-        CN.Debounce("Routing.autoAdvance.vignette", 2, function()
+        -- ONE KEY PER EVENT, so a zone change during a vignette burst is
+        -- still answered rather than swallowed by it -- which is the defect
+        -- 0.78.0 split the single shared key to fix.
+        CN.Debounce("Routing.autoAdvance." .. event, 2, function()
             CN.AutoAdvance(event)
         end)
     end)

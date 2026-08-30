@@ -27,7 +27,6 @@ local ADDON_NAME, CN = ...
 local Follow = CN:RegisterModule("Follow")
 
 local Print      = CN.Print
-local DebugPrint = CN.DebugPrint
 
 local function Settings()
     return CN.Settings() or {}
@@ -218,7 +217,15 @@ function Follow.SetStop(hub, objectives)
     if hub and hub.mapID and hub.x and hub.y then
         local label = CN.DescribeHub and CN.DescribeHub(hub) or "Next stop"
 
-        CN.SetWaypoint(hub.mapID, hub.x, hub.y, label)
+        -- SILENT ON SUCCESS, NOT ON REFUSAL. 0.79.0.
+        --
+        -- This file does not narrate -- the frame is the surface, and the
+        -- header says so. But it discarded the provider's caveat too, so a
+        -- hub advance inside an instance placed nothing and reported
+        -- nothing, and the frame went on pointing at a waypoint that was
+        -- never set. `false` keeps the headline off and lets the refusal
+        -- through.
+        CN.SetWaypointAndSay(hub.mapID, hub.x, hub.y, label, false)
     end
 end
 

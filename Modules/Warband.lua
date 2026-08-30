@@ -127,6 +127,29 @@ end
 
 Warband.Freshest = Freshest
 
+-- Returns `bestKey, detail, scope, switchable`.
+--
+-- THE FOURTH RETURN, AND WHY IT HAD TO EXIST. 0.79.0.
+--
+-- Two consumers ask this one question and mean different things by it.
+--
+-- `Warband.Suitability` is a score adjuster: "is this worth doing on THIS
+-- character". A recipe another character already knows is worth less here,
+-- so it wants the holder and the answer is right.
+--
+-- `Alts.Assignments` is `/cn alts`, whose entire job is "should you be
+-- playing somebody else". For a recipe or a title, the holder is the
+-- character who has ALREADY done it -- switching to them cannot do it again,
+-- and titles in particular are per-character and unrepeatable. So that
+-- surface printed, under the header "Bob could do 2 of these":
+--
+--     Flask of Alchemical Chaos   already knows it: Bob, Carol
+--
+-- The addon contradicting itself on one line, in the command written to stop
+-- the player wondering.
+--
+-- `switchable` is false when the named character is the one who has already
+-- done it. Absent means true, so every other branch is unchanged.
 function Warband.WhoShould(objectiveType, id)
     local types = CN.objectiveTypes
 
@@ -161,9 +184,24 @@ function Warband.WhoShould(objectiveType, id)
 
         local holders = module.WhoKnows(id)
 
+        -- SOMEBODY ALREADY HAS IT, SO THERE IS NOBODY TO SWITCH TO. 0.79.0.
+        --
+        -- This returned the holder as the character who SHOULD do it, with
+        -- "already knows it" as the reason -- so `/cn alts`, whose entire job
+        -- is "should you be playing somebody else", printed
+        --
+        --     Flask of Alchemical Chaos   already knows it: Bob, Carol
+        --
+        -- under the header "Bob could do 2 of these". The function answered
+        -- "who has this" to a question that asked "who should do this".
+        --
+        -- A recipe one character knows is not work for another character;
+        -- whether some THIRD character with the profession could also learn
+        -- it is a question this data cannot answer, and inventing an answer
+        -- is worse than saying there is nothing to switch for.
         if #holders > 0 then
             return Freshest(holders), table.concat(holders, ", "),
-                "already knows it"
+                "already known by another character", false
         end
 
         return nil, nil, "no character knows this recipe"
@@ -178,9 +216,12 @@ function Warband.WhoShould(objectiveType, id)
 
         local holders = module.WhoHas(id)
 
+        -- AND A TITLE CANNOT BE EARNED TWICE. 0.79.0. Same correction as the
+        -- recipe branch above: switching to the character who already has it
+        -- cannot earn it again, so there is nothing to switch for.
         if #holders > 0 then
             return Freshest(holders), table.concat(holders, ", "),
-                "already earned it"
+                "already earned by another character", false
         end
 
         return nil, nil, "no character has this title"
@@ -221,7 +262,10 @@ end
 -- somebody else is. Fed into the scoring formula so recommendations stop
 -- pointing at work this character cannot usefully do.
 function Warband.Suitability(objectiveType, id)
-    local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
+    -- The second return -- the list of character names -- is deliberately
+    -- not bound: see the note above this function's return for why it must
+    -- not appear in the sentence. 0.79.0.
+    local bestKey, _, scope = Warband.WhoShould(objectiveType, id)
 
     if scope == CN.scopes.ACCOUNT or not bestKey then
         return 0, nil
@@ -259,7 +303,13 @@ function Warband.Suitability(objectiveType, id)
         end
     end
 
-    return -2, bestKey .. " is better suited (" .. tostring(detail) .. ")"
+    -- THE SCOPE SENTENCE, NOT A LIST OF NAMES. 0.79.0.
+    --
+    -- `detail` is a comma-separated list of characters, and this rendered it
+    -- as though it explained something: "Bob is better suited (Bob, Carol)".
+    -- `scope` is the written reason and is what belongs in a `/cn why` line.
+    return -2, bestKey .. " is better suited"
+        .. (scope and (" -- " .. tostring(scope)) or "")
 end
 
 -- Applied to every candidate before scoring, so no module has to remember
@@ -484,10 +534,23 @@ CN:RegisterCommand{
             return
         end
 
+        -- BOTH FACTS, EACH IN ITS OWN PLACE. 0.79.0.
+        --
+        -- This printed `detail` -- the list of characters -- in the
+        -- parentheses and threw `scope`, the sentence that explains the
+        -- answer, away entirely.
         if bestKey == CN.characterKey then
-            Print("This character is the best one for it (" .. tostring(detail) .. ").")
+            Print("This character is the best one for it.")
         else
-            Print("Best character: " .. bestKey .. " |cff8a8f96(" .. tostring(detail) .. ")|r")
+            Print("Best character: " .. bestKey)
+        end
+
+        if scope then
+            CN.PrintLine(CN.Muted(tostring(scope)))
+        end
+
+        if detail and detail ~= bestKey then
+            CN.PrintLine(CN.Muted("Held by: " .. tostring(detail)))
         end
     end,
 }

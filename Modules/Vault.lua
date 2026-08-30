@@ -317,7 +317,8 @@ CN.RegisterCandidateProvider("Vault", function()
 
     return candidates
 end, { events = { "WEEKLY_REWARDS_UPDATE", "CHALLENGE_MODE_COMPLETED",
-                  "ENCOUNTER_END", "QUEST_TURNED_IN" }, volatile = true })
+                  "ENCOUNTER_END", "QUEST_TURNED_IN" },
+                  volatile = true, cooldown = 30 })
 
 ------------------------------------------------------------
 -- COMMAND

@@ -1818,9 +1818,9 @@ mutate "Database.lua" \
 
 mutate "Modules/Warband.lua" \
     "            return Freshest(holders), table.concat(holders, \", \"),
-                \"already knows it\"" \
+                \"already known by another character\", false" \
     "            return holders[1], table.concat(holders, \", \"),
-                \"already knows it\"" \
+                \"already known by another character\", false" \
     "a deleted alt sorting first hides a character you played yesterday"
 
 mutate "Modules/Hud.lua" \
@@ -3422,16 +3422,22 @@ mutate "Modules/Travel.lua" \
     "running the whole way is quoted at flying speed"
 
 mutate "Routing.lua" \
-    "            if why then
-                CN.PrintLine(CN.Muted(tostring(why)))
-            end" \
-    "            if false then
-                CN.PrintLine(CN.Muted(tostring(why)))
-            end" \
+    "    if why then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end
+
+    return true
+end" \
+    "    if false then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end
+
+    return true
+end" \
     "a waypoint with no map pin is reported as a waypoint with one"
 
 mutate "Routing.lua" \
-    "        CN.Debounce(\"Routing.autoAdvance.vignette\", 2, function()
+    "        CN.Debounce(\"Routing.autoAdvance.\" .. event, 2, function()
             CN.AutoAdvance(event)
         end)" \
     "        CN.AutoAdvance(event)" \
@@ -3471,31 +3477,25 @@ mutate "Modules/Travel.lua" \
     "an estimated walking time is printed as a measured one"
 
 mutate "Routing.lua" \
-    "    return true, why
-end" \
+    "    return true, type(why) == \"string\" and why or nil" \
     "    if why then
         CN.PrintLine(CN.Muted(tostring(why)))
     end
 
-    return true
-end" \
+    return true" \
     "a caveat prints above the headline it belongs under"
 
 mutate "Routing.lua" \
     "        if not CN.IsAutoWaypointEnabled() then
             return
-        end
-
-        if not firehose then" \
+        end" \
     "        if false then
             return
-        end
-
-        if not firehose then" \
+        end" \
     "a player with auto-waypoint off pays for every minimap vignette"
 
 mutate "Routing.lua" \
-    "        if not firehose then
+    "        if not throttled then
             CN.AutoAdvance(event)
             return
         end" \
@@ -3571,6 +3571,53 @@ mutate "Modules/Follow.lua" \
     "    frame.header:SetPoint(\"TOPRIGHT\", -(inset + CN.CLOSE_WIDTH), -CN.SPACE.S)" \
     "    local unusedStop = CN.CLOSE_WIDTH" \
     "the right end of the follow header is a click that stops the route"
+
+# ---- 0.79.0 ----
+
+mutate "Modules/Chase.lua" \
+    "        return CN.SetWaypointAndSay(step.mapID, step.x, step.y, step.text,
+            \"Next step: \" .. tostring(step.text or \"here\"))" \
+    "        return CN.SetWaypoint(step.mapID, step.x, step.y, step.text)" \
+    "the Goals tab's next-step button places a waypoint and says nothing"
+
+mutate "Modules/Follow.lua" \
+    "        CN.SetWaypointAndSay(hub.mapID, hub.x, hub.y, label, false)" \
+    "        CN.SetWaypoint(hub.mapID, hub.x, hub.y, label)" \
+    "a hub advance the client refused reports nothing at all"
+
+mutate "Routing.lua" \
+    "    if headline == false then" \
+    "    if false then" \
+    "a caller that does not narrate is also not told the pin was refused"
+
+mutate "Modules/Filters.lua" \
+    "    return CN.TypeBadge(objectiveType) .. \" \" .. tostring(id)" \
+    "    return tostring(objectiveType) .. \" \" .. tostring(id)" \
+    "an odd id is described with the internal enum"
+
+mutate "Scoring.lua" \
+    "    return math.abs(left - right) <= DEADLINE_TOLERANCE" \
+    "    return left == right" \
+    "a countdown ticking down makes every row a different row"
+
+mutate "Core.lua" \
+    "    return CN.SortKey(text) .. \" \" .. string.lower(CN.Strip(value))" \
+    "    return CN.SortKey(text)" \
+    "the window cannot be filtered by anything in the value column"
+
+mutate "Modules/Navigation.lua" \
+    "    if not Navigation.IsTicking() then
+        Navigation.StartTicker()
+    end" \
+    "    if false then
+        Navigation.StartTicker()
+    end" \
+    "turning the arrow on leaves it frozen where it was"
+
+mutate "Modules/Rares.lua" \
+    "        return states.UNKNOWN, \"Not up right now\", record.name" \
+    "        return states.AVAILABLE, nil, record.name" \
+    "a rare the client is not reporting is offered as one to go and kill"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

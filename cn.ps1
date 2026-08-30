@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.78.0'
+$script:ToolkitVersion = '0.79.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.78.0"
-CN.dbVersion   = 30
+CN.version     = "0.79.0"
+CN.dbVersion   = 31
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -3470,6 +3470,37 @@ CN.migrations = {
             and type(db.account.progress) == "table" then
 
             db.account.progress.total = nil
+        end
+    end,
+
+    -- A CHOICE THE PLAYER MADE, CARRIED THROUGH A RENAME. 0.79.0.
+    --
+    -- The Great Vault claim row's id was `0` until 0.78.0, when it became
+    -- "vault" -- because `CN.ToID` rejects `0`, so `/cn unhide` could never
+    -- name it back. The rename orphaned whatever the player had already
+    -- hidden or deferred under the old key: the row came back, and a phantom
+    -- entry stayed in `/cn hidden` that nothing could remove.
+    --
+    -- Moved rather than dropped. A player who hid something once should not
+    -- have to hide it again because the addon changed its mind about how to
+    -- name it internally.
+    [30] = function(db)
+        local currency = CN.objectiveTypes and CN.objectiveTypes.CURRENCY
+            or "CURRENCY"
+
+        for _, storeName in ipairs({ "ignoredObjectives",
+                                     "deferredObjectives" }) do
+            local store = db.account and db.account[storeName]
+
+            local byType = type(store) == "table" and store[currency]
+
+            if type(byType) == "table" and byType[0] ~= nil then
+                if byType["vault"] == nil then
+                    byType["vault"] = byType[0]
+                end
+
+                byType[0] = nil
+            end
         end
     end,
 }
@@ -8776,10 +8807,41 @@ end
 -- table keeps the decoration that is already on it, which is the whole point.
 local IDENTITY_FIELDS = {
     "type", "id", "name", "phase", "state",
-    "completionValue", "limitedTimeBonus", "expiresIn",
+    "completionValue", "limitedTimeBonus",
     "travelCost", "travelCosted", "mapID", "x", "y",
     "accountWide",
 }
+
+-- `expiresIn` IS NOT AN IDENTITY FIELD. 0.79.0.
+--
+-- It is a live countdown in seconds, recomputed on every provider run -- so
+-- two rebuilds of an unchanged row are never equal, `Identical` can never
+-- return true for any provider that carries one, the reuse shortcut below
+-- never fires, and the aggregate generation is bumped: which this file's own
+-- comment says "forces a full re-score and re-sort of everything".
+--
+-- Nine shipped providers write one, and two of them -- the vault and the
+-- opportunities list -- are volatile with no cooldown, so they self-expire
+-- every five seconds forever. A player standing still with the window open
+-- was paying a full re-score every five seconds, permanently, for numbers
+-- that had not changed. The optimisation's own header says the opposite.
+--
+-- COMPARED WITH A TOLERANCE INSTEAD. A deadline that moved by under a minute
+-- cannot change a ranking a player would notice, and one that moved by more
+-- than that genuinely is different work. `Opportunities` made the same move
+-- from `endsIn` to `endsAt` for the same reason.
+local DEADLINE_TOLERANCE = 60
+
+local function DeadlinesAgree(a, b)
+    local left  = a.expiresIn
+    local right = b.expiresIn
+
+    if left == nil or right == nil then
+        return left == right
+    end
+
+    return math.abs(left - right) <= DEADLINE_TOLERANCE
+end
 
 local function Identical(left, right)
     if #left ~= #right then
@@ -8793,6 +8855,10 @@ local function Identical(left, right)
         -- `CN.CollectCandidates` down with it, and this is not inside a
         -- pcall.
         if type(a) ~= "table" or type(b) ~= "table" then
+            return false
+        end
+
+        if not DeadlinesAgree(a, b) then
             return false
         end
 
@@ -10037,7 +10103,55 @@ function CN.SetWaypoint(mapID, x, y, title)
     -- follow mode, inside an instance.
     --
     -- A continuation belongs to whoever wrote the headline it continues.
-    return true, why
+    -- A SENTENCE, NEVER A HANDLE. 0.79.0.
+    --
+    -- The provider contract says the second return is something to show the
+    -- player. TomTom returned its waypoint uid there -- a table -- and 0.78.0
+    -- began printing it, so `/cn go` printed `table: 0x...` for every player
+    -- who had chosen TomTom. TomTom no longer returns it; this refuses
+    -- anything that is not a string regardless, because a contract enforced
+    -- only by every implementer remembering it is not enforced.
+    return true, type(why) == "string" and why or nil
+end
+
+-- SET IT, AND SAY SO. 0.79.0.
+--
+-- `CN.SetWaypoint` returns a caveat for the caller to print under its own
+-- headline. Six callers; four of them printed no headline, so those four
+-- silently swallowed both the success and the caveat -- the Goals tab's
+-- "Next step" button produced no chat output at all, and follow mode's hub
+-- advances inside an instance said nothing while quietly refusing to place
+-- the pin. Every caller that wants a line printed uses this; the pattern
+-- lives once instead of five times, because a rule written twice drifts.
+--
+-- `headline` may be `false`, meaning "this caller has its own surface and
+-- does not narrate" -- follow mode, whose file header states the rule. That
+-- is not the same as saying nothing: a caveat is the addon reporting that it
+-- could not do what it was asked, and a silent refusal is the defect. With
+-- no headline above it the caveat is printed as its own line rather than as
+-- a continuation, because an orphaned continuation is what 0.78.0 shipped.
+function CN.SetWaypointAndSay(mapID, x, y, title, headline)
+    local placed, why = CN.SetWaypoint(mapID, x, y, title)
+
+    if not placed then
+        return false
+    end
+
+    if headline == false then
+        if why then
+            CN.Print(tostring(why))
+        end
+
+        return true
+    end
+
+    CN.Print(headline or ("Waypoint set: " .. tostring(title or "here")))
+
+    if why then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end
+
+    return true
 end
 
 -- The single entry point for "take me there", used by /cn go, the Navigate
@@ -10057,21 +10171,9 @@ function CN.NavigateToObjective(objective)
     local name = tostring(objective.name or objective.id or "that objective")
 
     if objective.mapID and objective.x and objective.y then
-        local placed, why = CN.SetWaypoint(objective.mapID, objective.x,
-            objective.y, name)
-
-        if placed then
-            CN.Print("Waypoint set: " .. name)
-
-            -- The caveat, UNDER its own headline. See `CN.SetWaypoint`.
-            if why then
-                CN.PrintLine(CN.Muted(tostring(why)))
-            end
-
-            return true
-        end
-
-        return false
+        -- The caveat, UNDER its own headline. See `CN.SetWaypointAndSay`.
+        return CN.SetWaypointAndSay(objective.mapID, objective.x,
+            objective.y, name, "Waypoint set: " .. name)
     end
 
     -- Re-resolve: coordinates often appear once the player is on the right
@@ -10085,19 +10187,8 @@ function CN.NavigateToObjective(objective)
             if mapID and x and y then
                 objective.mapID, objective.x, objective.y = mapID, x, y
 
-                local placed, why = CN.SetWaypoint(mapID, x, y, name)
-
-                if placed then
-                    CN.Print("Waypoint set: " .. name)
-
-                    if why then
-                        CN.PrintLine(CN.Muted(tostring(why)))
-                    end
-
-                    return true
-                end
-
-                return false
+                return CN.SetWaypointAndSay(mapID, x, y, name,
+                    "Waypoint set: " .. name)
             end
         end
 
@@ -11245,7 +11336,23 @@ function CN.AutoAdvance(reason, force)
         return false
     end
 
-    local results = CN.Recommend(1)
+    -- QUIET. 0.79.0.
+    --
+    -- Every non-quiet `Recommend` fires the recommendation hooks, and two of
+    -- them WRITE: `Preference` counts the row as shown -- the denominator of
+    -- a ratio that moves a whole type's score -- and `Session` starts a work
+    -- clock that becomes the measured duration for whatever finishes next.
+    --
+    -- Auto-advance is not the player being shown a list. It is a background
+    -- staleness check, and with seven events driving it a player who
+    -- abandoned a chain, learned three pets and crossed four zones had
+    -- credited the top row as offered eight times and started eight clocks.
+    -- Both of those are numbers the addon shows and reasons from.
+    --
+    -- `Modules/Alts.lua` passes quiet for the same reason. The offer that
+    -- actually reaches the player is the waypoint, and `NavigateToObjective`
+    -- is where that is announced.
+    local results = CN.Recommend(1, true)
 
     if #results == 0 then
         return false
@@ -11300,14 +11407,40 @@ for _, event in ipairs({
     -- every vignette allocated a closure and scheduled a timer for a player
     -- who has auto-waypoint off -- which is the default, and therefore almost
     -- everyone.
-    local firehose = (event == "VIGNETTE_MINIMAP_UPDATED")
+    -- CLASSIFIED BY SHAPE, NOT BY LIST MEMBERSHIP. 0.79.0.
+    --
+    -- 0.78.0's note said "the vignette event is the only firehose; the other
+    -- seven are single moments". `ZONE_CHANGED_NEW_AREA` is neither a
+    -- completion nor a single moment: `Modules/Quests.lua` says in this same
+    -- codebase that it "fires for every zone a taxi crosses, so a
+    -- cross-continent flight was prompting about zones being flown OVER",
+    -- and guards its own handler with `UnitOnTaxi` for exactly that.
+    --
+    -- Measured: eight zone changes in one taxi hop produced eight full
+    -- recommendation passes, mid-loading-screen, any of which could re-point
+    -- the waypoint at something in a zone being flown over.
+    --
+    -- `NEW_PET_ADDED` gets the same treatment: `Modules/Pets.lua` already
+    -- runs a full journal rescan on it with no throttle, so a mass loot cost
+    -- two full scans and an unthrottled recommendation pass per pet.
+    local throttled = event == "VIGNETTE_MINIMAP_UPDATED"
+        or event == "ZONE_CHANGED_NEW_AREA"
+        or event == "NEW_PET_ADDED"
 
     CN:RegisterEvent(event, function()
         if not CN.IsAutoWaypointEnabled() then
             return
         end
 
-        if not firehose then
+        -- NOT WHILE THE GROUND IS MOVING PAST. The player is not going to act
+        -- on a recommendation from the middle of a flight, and re-pointing
+        -- the waypoint at a zone being flown over is worse than saying
+        -- nothing.
+        if UnitOnTaxi and UnitOnTaxi("player") then
+            return
+        end
+
+        if not throttled then
             CN.AutoAdvance(event)
             return
         end
@@ -11328,7 +11461,10 @@ for _, event in ipairs({
         --
         -- `Navigation.Arrive` still calls `CN.AutoAdvance` directly and
         -- passes `force`: arriving somewhere is a single moment, not a burst.
-        CN.Debounce("Routing.autoAdvance.vignette", 2, function()
+        -- ONE KEY PER EVENT, so a zone change during a vignette burst is
+        -- still answered rather than swallowed by it -- which is the defect
+        -- 0.78.0 split the single shared key to fix.
+        CN.Debounce("Routing.autoAdvance." .. event, 2, function()
             CN.AutoAdvance(event)
         end)
     end)
@@ -12899,7 +13035,16 @@ function UI.SearchAll(text)
         local list = tab.panel and UI.listPanels and UI.listPanels[tab.panel]
 
         if list and list.Entries then
-            local count, first = 0, nil
+            -- COUNTED THE WAY THE TAB WOULD SHOW IT. 0.79.0.
+            --
+            -- This counted matching ENTRIES while the tab keeps whole
+            -- BLOCKS, so "Also on: Goals (2)" led to a tab showing eight
+            -- rows. `first` still comes from the walk below, because it is
+            -- the name of the row that matched rather than a count.
+            local count = (list.CountMatching and list:CountMatching(text))
+                or 0
+
+            local first = nil
 
             for _, entry in ipairs(list:Entries()) do
                 -- Plain find, for the reason the list's own filter gives:
@@ -12913,10 +13058,8 @@ function UI.SearchAll(text)
                 -- matched none. Two predicates for one question.
                 local haystack = CN.SearchKey(entry.text, entry.value)
 
-                if haystack:find(needle, 1, true) then
-                    count = count + 1
-
-                    first = first or CN.Strip(tostring(entry.text or ""))
+                if not first and haystack:find(needle, 1, true) then
+                    first = CN.Strip(tostring(entry.text or ""))
                 end
             end
 
@@ -17121,6 +17264,32 @@ local function CreateList(parent)
     -- A block survives the filter if ANY row in it matches, and it survives
     -- whole. Matching a chain step and showing it without its goal is an
     -- answer to a question nobody asked.
+    -- HOW MANY ROWS THIS TAB WOULD SHOW FOR A NEEDLE. 0.79.0.
+    --
+    -- The cross-tab search counted MATCHING ENTRIES while this tab keeps
+    -- WHOLE BLOCKS -- a block survives if any row in it matches, and it
+    -- survives entire. So "Also on: Goals (2)" led to a tab showing eight
+    -- rows, on every grouped tab.
+    --
+    -- 0.77.0 and 0.78.0 removed the TEXT mismatch between the two
+    -- predicates and left the COUNTING mismatch, which is the visible half.
+    -- One predicate and one denominator, so the two cannot drift again.
+    function list:CountMatching(needle)
+        if not needle or needle == "" then
+            return 0
+        end
+
+        local held = filterText
+
+        filterText = string.lower(needle)
+
+        local kept = self:Filter(self:Entries())
+
+        filterText = held
+
+        return #kept
+    end
+
     function list:Filter(entries)
         if not filterText then
             return entries
@@ -20874,9 +21043,17 @@ function provider.IsAvailable()
     return _G.TomTom ~= nil and _G.TomTom.AddWaypoint ~= nil
 end
 
--- Returns true and the uid, or false and why not -- the same contract as the
--- Blizzard provider below, so `CN.SetWaypoint` can tell the player the truth
--- whichever one is in use.
+-- Returns `placed, why` -- and `why` is a SENTENCE FOR THE PLAYER in both
+-- directions, never a handle. 0.79.0.
+--
+-- This used to return the uid on success, and the native provider returns a
+-- caveat ("the arrow is set; the game does not allow a map pin here"). One
+-- position, two meanings -- and 0.78.0 started PRINTING the second return on
+-- success, so every `/cn go` for a TomTom user printed `table: 0x...` under
+-- the headline. It reads as a crash.
+--
+-- The uid is already tracked in `active`, which is what `ClearAll` walks, so
+-- returning it was giving the caller something it had no use for.
 function provider.SetWaypoint(mapID, x, y, title)
     if not provider.IsAvailable() then
         return false, "TomTom is not loaded"
@@ -20896,7 +21073,7 @@ function provider.SetWaypoint(mapID, x, y, title)
 
     table.insert(active, uid)
 
-    return true, uid
+    return true
 end
 
 function provider.ClearAll()
@@ -29561,7 +29738,19 @@ CN.RegisterCandidateProvider("Opportunities", function()
     end
 
     return candidates
-end, { events = { "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" }, volatile = true })
+-- A COOLDOWN, ON EVENTS THAT ARE NOT SINGLE MOMENTS. 0.79.0.
+--
+-- `QUEST_LOG_UPDATE` fires constantly -- `Modules/Quests.lua` throttles its
+-- own handler for that event to ten seconds and says so -- and
+-- `CRITERIA_UPDATE` is the canonical chatty one, which `Achievements` and
+-- `Loremaster` both give a cooldown and this did not.
+--
+-- The same defect 0.78.0 fixed for `Modules/Currencies.lua`, left standing
+-- two files over. Freshness costs nothing here: a world quest window is
+-- hours long and a zone's exploration criteria do not move faster than the
+-- player walks.
+end, { events = { "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" },
+       volatile = true, cooldown = 30 })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -29783,6 +29972,29 @@ end
 
 Warband.Freshest = Freshest
 
+-- Returns `bestKey, detail, scope, switchable`.
+--
+-- THE FOURTH RETURN, AND WHY IT HAD TO EXIST. 0.79.0.
+--
+-- Two consumers ask this one question and mean different things by it.
+--
+-- `Warband.Suitability` is a score adjuster: "is this worth doing on THIS
+-- character". A recipe another character already knows is worth less here,
+-- so it wants the holder and the answer is right.
+--
+-- `Alts.Assignments` is `/cn alts`, whose entire job is "should you be
+-- playing somebody else". For a recipe or a title, the holder is the
+-- character who has ALREADY done it -- switching to them cannot do it again,
+-- and titles in particular are per-character and unrepeatable. So that
+-- surface printed, under the header "Bob could do 2 of these":
+--
+--     Flask of Alchemical Chaos   already knows it: Bob, Carol
+--
+-- The addon contradicting itself on one line, in the command written to stop
+-- the player wondering.
+--
+-- `switchable` is false when the named character is the one who has already
+-- done it. Absent means true, so every other branch is unchanged.
 function Warband.WhoShould(objectiveType, id)
     local types = CN.objectiveTypes
 
@@ -29817,9 +30029,24 @@ function Warband.WhoShould(objectiveType, id)
 
         local holders = module.WhoKnows(id)
 
+        -- SOMEBODY ALREADY HAS IT, SO THERE IS NOBODY TO SWITCH TO. 0.79.0.
+        --
+        -- This returned the holder as the character who SHOULD do it, with
+        -- "already knows it" as the reason -- so `/cn alts`, whose entire job
+        -- is "should you be playing somebody else", printed
+        --
+        --     Flask of Alchemical Chaos   already knows it: Bob, Carol
+        --
+        -- under the header "Bob could do 2 of these". The function answered
+        -- "who has this" to a question that asked "who should do this".
+        --
+        -- A recipe one character knows is not work for another character;
+        -- whether some THIRD character with the profession could also learn
+        -- it is a question this data cannot answer, and inventing an answer
+        -- is worse than saying there is nothing to switch for.
         if #holders > 0 then
             return Freshest(holders), table.concat(holders, ", "),
-                "already knows it"
+                "already known by another character", false
         end
 
         return nil, nil, "no character knows this recipe"
@@ -29834,9 +30061,12 @@ function Warband.WhoShould(objectiveType, id)
 
         local holders = module.WhoHas(id)
 
+        -- AND A TITLE CANNOT BE EARNED TWICE. 0.79.0. Same correction as the
+        -- recipe branch above: switching to the character who already has it
+        -- cannot earn it again, so there is nothing to switch for.
         if #holders > 0 then
             return Freshest(holders), table.concat(holders, ", "),
-                "already earned it"
+                "already earned by another character", false
         end
 
         return nil, nil, "no character has this title"
@@ -29877,7 +30107,10 @@ end
 -- somebody else is. Fed into the scoring formula so recommendations stop
 -- pointing at work this character cannot usefully do.
 function Warband.Suitability(objectiveType, id)
-    local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
+    -- The second return -- the list of character names -- is deliberately
+    -- not bound: see the note above this function's return for why it must
+    -- not appear in the sentence. 0.79.0.
+    local bestKey, _, scope = Warband.WhoShould(objectiveType, id)
 
     if scope == CN.scopes.ACCOUNT or not bestKey then
         return 0, nil
@@ -29915,7 +30148,13 @@ function Warband.Suitability(objectiveType, id)
         end
     end
 
-    return -2, bestKey .. " is better suited (" .. tostring(detail) .. ")"
+    -- THE SCOPE SENTENCE, NOT A LIST OF NAMES. 0.79.0.
+    --
+    -- `detail` is a comma-separated list of characters, and this rendered it
+    -- as though it explained something: "Bob is better suited (Bob, Carol)".
+    -- `scope` is the written reason and is what belongs in a `/cn why` line.
+    return -2, bestKey .. " is better suited"
+        .. (scope and (" -- " .. tostring(scope)) or "")
 end
 
 -- Applied to every candidate before scoring, so no module has to remember
@@ -30140,10 +30379,23 @@ CN:RegisterCommand{
             return
         end
 
+        -- BOTH FACTS, EACH IN ITS OWN PLACE. 0.79.0.
+        --
+        -- This printed `detail` -- the list of characters -- in the
+        -- parentheses and threw `scope`, the sentence that explains the
+        -- answer, away entirely.
         if bestKey == CN.characterKey then
-            Print("This character is the best one for it (" .. tostring(detail) .. ").")
+            Print("This character is the best one for it.")
         else
-            Print("Best character: " .. bestKey .. " |cff8a8f96(" .. tostring(detail) .. ")|r")
+            Print("Best character: " .. bestKey)
+        end
+
+        if scope then
+            CN.PrintLine(CN.Muted(tostring(scope)))
+        end
+
+        if detail and detail ~= bestKey then
+            CN.PrintLine(CN.Muted("Held by: " .. tostring(detail)))
         end
     end,
 }
@@ -30245,11 +30497,14 @@ Rares.CharacterKills = CharacterKills
 -- Vignettes currently visible, classified and located.
 -- EVERY VIGNETTE THE CLIENT REPORTS, DEAD ONES INCLUDED. 0.78.0.
 --
--- `GetActive` filters the dead out AND drops the flag from the rows it
--- builds, so `VignetteWork` -- which reads `vignette.isDead` to record that a
+-- `GetActive` used to filter the dead out AND drop the flag from the rows it
+-- built, so `VignetteWork` -- which reads `vignette.isDead` to record that a
 -- rare was seen already dead -- could never see one. `wasDead` was therefore
 -- false for every row, and the branch in `NoteDisappearances` commented as
 -- "needs no inference at all" was unreachable.
+--
+-- `GetActive` now filters THIS list, so the rows it returns are the same
+-- tables and do carry the flag; what it removes is the dead ones.
 --
 -- So every clear fell through to the "it vanished within 150 yards of me"
 -- guess, and a rare somebody else killed, or one tagged and finished while
@@ -30577,6 +30832,34 @@ local function Eligibility(vignetteID)
         return states.COMPLETED, "Cleared by this character", record.name
     end
 
+    -- AND A ROW THE CLIENT IS NOT REPORTING RIGHT NOW IS NOT AVAILABLE.
+    -- 0.79.0.
+    --
+    -- These two types are the only ones in the addon whose objectives exist
+    -- only while the client says so: a rare that despawned, or a treasure
+    -- somebody else looted, is gone with no event to say it.
+    --
+    -- Before 0.78.0 `TREASURE` had no checker at all, so the staleness test
+    -- fell through to "is this still a candidate", which caught exactly that.
+    -- Registering a checker without a liveness test took the fallback away
+    -- and left the waypoint pointed at something that is not there -- which
+    -- is the failure `Routing.lua` describes for the seven checker-less types
+    -- and was written to end.
+    --
+    -- `UNKNOWN` is the honest answer: the store remembers this thing, and
+    -- whether it is up right now is a question only the client can answer.
+    local mapID = select(1, CN.GetPlayerPosition())
+
+    if mapID then
+        for _, vignette in ipairs(Rares.GetAll(mapID)) do
+            if vignette.vignetteID == vignetteID and not vignette.isDead then
+                return states.AVAILABLE, nil, nil
+            end
+        end
+
+        return states.UNKNOWN, "Not up right now", record.name
+    end
+
     return states.AVAILABLE, nil, nil
 end
 
@@ -30708,7 +30991,21 @@ local function VignetteWork()
     for _, vignette in ipairs(active) do
         currentGuids[vignette.guid] = true
 
-        Rares.Record(vignette)
+        -- A CORPSE IS NOT AN ENCOUNTER. 0.79.0.
+        --
+        -- 0.78.0 switched this walk to the unfiltered list so the dead flag
+        -- would survive -- correctly -- and went on recording every row,
+        -- dead ones included. `Record` bumps `sightings` after a ten-minute
+        -- gap, and that counter is shown in the goal plan, so riding past
+        -- the same corpse on three days read as three encounters.
+        --
+        -- The header on that counter says it exists because `/cn goal` once
+        -- told a player who had met a rare twice that they had seen it 1,847
+        -- times. The dead flag is needed for the disappearance inference
+        -- below, not for the count.
+        if not vignette.isDead then
+            Rares.Record(vignette)
+        end
     end
 
     Rares.NoteDisappearances(currentGuids)
@@ -31488,7 +31785,17 @@ CN:RegisterCommand{
         if #capped > 0 then
             Print("|cffe2564cAt cap (" .. #capped .. ") - spend these:|r")
 
-            for _, currency in ipairs(capped) do
+            -- CAPPED, AND SAYING SO -- like the list below it. 0.79.0.
+            --
+            -- 0.78.0 added "and N more" to the weekly list and left this one
+            -- unbounded, so a player deep into an expansion had twenty-plus
+            -- rows dumped into chat. The two halves of one command were
+            -- inconsistent in opposite directions.
+            for index, currency in ipairs(capped) do
+                if index > 8 then
+                    break
+                end
+
                 CN.PrintLine("  " .. tostring(currency.name)
                     .. " |cff8a8f96" .. currency.quantity
                     .. " / " .. currency.maximum
@@ -31500,6 +31807,11 @@ CN:RegisterCommand{
                             .. " held")
                         or "")
                     .. "|r")
+            end
+
+            if #capped > 8 then
+                CN.PrintLine(CN.Muted("  ... and " .. (#capped - 8)
+                    .. " more"))
             end
         end
 
@@ -32216,7 +32528,8 @@ Breakdown.Register{
         end
 
         return {
-            collected    = counts.known - counts.capped,
+            collected      = counts.known - counts.capped,
+        collectedLabel = "not at cap",
             total        = nil,
             unknownTotal = "currencies are a state to manage, not a set to complete",
             reasons      = reasons,
@@ -32237,8 +32550,15 @@ local function PrintRow(row)
             row.name, row.collected, row.total,
             CN.PercentText(percentage / 100, 1)))
     else
-        Print(string.format("|cffffc74f%s|r  %d collected",
-            row.name, row.collected or 0))
+        -- THE LABEL THE ROW ASKED FOR. 0.79.0.
+        --
+        -- "collected" is right for a set you are completing and wrong for a
+        -- state you are managing: the currencies row passes the count of
+        -- currencies NOT at cap, and this rendered it as "Currencies 12
+        -- collected" -- one line above its own note saying currencies are not
+        -- a set to complete.
+        Print(string.format("|cffffc74f%s|r  %d %s",
+            row.name, row.collected or 0, row.collectedLabel or "collected"))
 
         if row.unknownTotal then
             Print("    |cff8a8f96no percentage: " .. row.unknownTotal .. "|r")
@@ -32766,7 +33086,13 @@ CN.RegisterCandidateProvider("Exploration", function()
     end
 
     return candidates
-end, { events = { "CRITERIA_UPDATE", "ZONE_CHANGED_NEW_AREA" } })
+-- A COOLDOWN ON THE CHATTIEST EVENT THERE IS. 0.79.0.
+--
+-- `Scoring.lua` names `CRITERIA_UPDATE` as the canonical case a cooldown
+-- exists for; `Achievements` and `Loremaster` both give it five seconds and
+-- this, the third handler of the same event, had none. Exploration criteria
+-- do not move faster than the player walks.
+end, { events = { "CRITERIA_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 5 })
 
 ------------------------------------------------------------
 -- EVENTS
@@ -33386,6 +33712,28 @@ function Filters.DescribeObjective(objectiveType, id)
         end
 
         return "Title " .. numericID
+    end
+
+    -- THE SYNTHETIC IDS, BY NAME. 0.79.0.
+    --
+    -- A handful of rows stand for an ACTION rather than for a thing with an
+    -- id -- claiming the vault, collecting a finished crafting order -- and
+    -- carry a string id so the filter stores can key on them. 0.78.0 gave
+    -- those rows working hide-and-defer guards, which made this display path
+    -- reachable for the first time, and it rendered them as "Currency vault"
+    -- and "Recipe claim": the addon's own internals offered to the player as
+    -- the name of the thing they hid.
+    --
+    -- Named here rather than by reaching into the modules, because the whole
+    -- point of this function is that it answers for a store row long after
+    -- the provider that made it has stopped producing one.
+    local synthetic = {
+        vault = "Collect your Great Vault reward",
+        claim = "Collect your finished crafting order",
+    }
+
+    if type(id) == "string" and synthetic[id] then
+        return synthetic[id]
     end
 
     -- THE BADGE, NOT THE ENUM, FOR EVERYTHING THAT REACHES HERE. 0.67.0.
@@ -37268,12 +37616,17 @@ function Chase.NavigateNext(chain)
         end
     end
 
+    -- SAY SOMETHING. 0.79.0. The Goals tab's "Next step" button reached
+    -- these two lines and produced no chat output whatsoever, so a player
+    -- who clicked it had no way to tell whether anything had happened.
     if step and step.mapID and step.x and step.y then
-        return CN.SetWaypoint(step.mapID, step.x, step.y, step.text)
+        return CN.SetWaypointAndSay(step.mapID, step.x, step.y, step.text,
+            "Next step: " .. tostring(step.text or "here"))
     end
 
     if chain and chain.mapID and chain.x and chain.y then
-        return CN.SetWaypoint(chain.mapID, chain.x, chain.y, chain.name)
+        return CN.SetWaypointAndSay(chain.mapID, chain.x, chain.y, chain.name,
+            "Waypoint set: " .. tostring(chain.name or "that goal"))
     end
 
     Print("No location is known for the next step of "
@@ -40166,7 +40519,6 @@ local ADDON_NAME, CN = ...
 local Follow = CN:RegisterModule("Follow")
 
 local Print      = CN.Print
-local DebugPrint = CN.DebugPrint
 
 local function Settings()
     return CN.Settings() or {}
@@ -40357,7 +40709,15 @@ function Follow.SetStop(hub, objectives)
     if hub and hub.mapID and hub.x and hub.y then
         local label = CN.DescribeHub and CN.DescribeHub(hub) or "Next stop"
 
-        CN.SetWaypoint(hub.mapID, hub.x, hub.y, label)
+        -- SILENT ON SUCCESS, NOT ON REFUSAL. 0.79.0.
+        --
+        -- This file does not narrate -- the frame is the surface, and the
+        -- header says so. But it discarded the provider's caveat too, so a
+        -- hub advance inside an instance placed nothing and reported
+        -- nothing, and the frame went on pointing at a waypoint that was
+        -- never set. `false` keeps the headline off and lets the refusal
+        -- through.
+        CN.SetWaypointAndSay(hub.mapID, hub.x, hub.y, label, false)
     end
 end
 
@@ -42509,12 +42869,21 @@ end
 
 -- Only character-specific work can justify a switch. Account-wide progress
 -- is, by definition, indifferent to who does it.
+-- `QUEST` REMOVED. 0.79.0.
+--
+-- `Warband.WhoShould` has no quest branch: it falls through to "not tracked
+-- per character" with a nil key, so this entry could never produce a
+-- suggestion. A configuration line that reads as a supported feature and is
+-- not one -- the shape this project keeps finding as a dead reader, here as a
+-- dead switch.
+--
+-- The addon does not know which character a quest belongs to. Restoring the
+-- entry means giving `WhoShould` a quest branch first.
 Alts.switchableTypes = {
     REPUTATION = true,
     RECIPE     = true,
     PROFESSION = true,
     TITLE      = true,
-    QUEST      = true,
 }
 
 -- One assignment: a character, a reason, and what it is for.
@@ -42560,12 +42929,21 @@ function Alts.Assignments()
     -- work clock on each -- is the defect 0.68.0 added `quiet` for. 0.69.0.
     for _, objective in ipairs(CN.Recommend(Alts.considered, true) or {}) do
         if Alts.switchableTypes[objective.type] then
-            local ok, bestKey, detail, scope =
+            local ok, bestKey, detail, scope, switchable =
                 pcall(warband.WhoShould, objective.type, objective.id)
 
             -- "account-wide" is a real answer meaning the question does not
             -- apply, and must never become a suggestion to switch.
-            if ok and bestKey and scope ~= CN.scopes.ACCOUNT
+            --
+            -- AND NEITHER MUST "that character has already done it". 0.79.0.
+            --
+            -- For a recipe or a title the named character is the HOLDER, and
+            -- switching to them cannot do it again -- a title in particular
+            -- is per-character and unrepeatable. This surface printed
+            -- "already knows it: Bob, Carol" under "Bob could do 2 of
+            -- these". See `Warband.WhoShould`'s fourth return.
+            if ok and bestKey and switchable ~= false
+                and scope ~= CN.scopes.ACCOUNT
                 and bestKey ~= CN.characterKey then
 
                 local character = CN.db and CN.db.characters
@@ -42581,8 +42959,13 @@ function Alts.Assignments()
                         seen[key] = true
 
                         table.insert(assignments,
+                            -- THE SENTENCE, THEN THE NAMES. 0.79.0. This
+                            -- was `scope .. ": " .. detail`, which reads as
+                            -- a label followed by a value when the two are a
+                            -- reason and a list of characters.
                             NewAssignment(bestKey, character, objective,
-                                detail and (scope .. ": " .. detail) or scope))
+                                detail and (scope .. " (" .. detail .. ")")
+                                    or scope))
                     end
                 end
             end
@@ -43055,7 +43438,8 @@ CN.RegisterCandidateProvider("Vault", function()
 
     return candidates
 end, { events = { "WEEKLY_REWARDS_UPDATE", "CHALLENGE_MODE_COMPLETED",
-                  "ENCOUNTER_END", "QUEST_TURNED_IN" }, volatile = true })
+                  "ENCOUNTER_END", "QUEST_TURNED_IN" },
+                  volatile = true, cooldown = 30 })
 
 ------------------------------------------------------------
 -- COMMAND
@@ -44221,7 +44605,8 @@ local function Refresh()
         Blank()
         arrow:Hide()
 
-        -- AND THE TICKER STOPS WITH IT. 0.78.0.
+        -- AND THE TICKER STOPS WITH IT. 0.78.0, corrected in 0.79.0 -- see
+        -- the restart below, which is the other half this was missing.
         --
         -- `provider.SetWaypoint` starts a ten-per-second ticker and only
         -- `Navigation.Clear` ever stopped it -- so `/cn arrow off`, and the
@@ -44246,6 +44631,21 @@ local function Refresh()
     end
 
     arrow:Show()
+
+    -- AND STARTS AGAIN WHEN THERE IS SOMETHING TO DRAW. 0.79.0.
+    --
+    -- 0.78.0 added the stop and not the start. `StartTicker` had exactly one
+    -- caller -- inside `provider.SetWaypoint` -- so `/cn arrow on`, and the
+    -- hover x that 0.77.0 added to make toggling easy, left the arrow
+    -- reappearing frozen on a stale bearing and a stale distance for the rest
+    -- of the session, until the next waypoint happened to be set.
+    --
+    -- The decision belongs HERE rather than at each toggle: this function
+    -- already owns "is there anything to draw", and a rule written at three
+    -- call sites is a rule that will be missing from a fourth.
+    if not Navigation.IsTicking() then
+        Navigation.StartTicker()
+    end
 
     arrow.label:SetText(target.title or CN.L["Destination"])
 
@@ -45356,12 +45756,16 @@ local function ClickPin(frame)
         end
     end
 
-    if pin.x and pin.y and pin.mapID and CN.SetWaypoint then
+    if pin.x and pin.y and pin.mapID and CN.SetWaypointAndSay then
         local first = (pin.objectives or {})[1]
 
-        CN.SetWaypoint(pin.mapID, pin.x, pin.y,
-            first and tostring(first.name or first.id) or
-                ("Stop " .. tostring(pin.order)))
+        local label = first and tostring(first.name or first.id)
+            or ("Stop " .. tostring(pin.order))
+
+        -- SAY SOMETHING. 0.79.0. This clicked a pin on the world map and
+        -- printed nothing, so a refusal and a success looked identical.
+        CN.SetWaypointAndSay(pin.mapID, pin.x, pin.y, label,
+            "Waypoint set: " .. label)
     end
 end
 
@@ -56027,7 +56431,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.78.0
+## Version: 0.79.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -56282,6 +56686,68 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.79.0]
+
+**If `/cn go` has been printing `table: 0x0000...` at you, that is fixed.**
+0.78.0 started showing the note a waypoint provider attaches to a success —
+"the arrow is set; the game does not allow a map pin here" — and TomTom was
+handing back its internal waypoint handle in that slot instead of a sentence.
+Every player using TomTom saw the handle. The contract now refuses anything
+that is not a sentence, so a provider that gets this wrong in future prints
+nothing rather than gibberish.
+
+### Fixed — 0.78.0's own damage
+
+- **`/cn go` printed an internal handle under every waypoint.** See above.
+- **`/cn arrow on` left the arrow frozen where it was.** 0.78.0 stopped the
+  redraw when the arrow was switched off — correctly — and never started it
+  again when it was switched back on. The arrow appeared, pointed at whatever
+  direction it had last been given, and stayed there.
+- **A rare the client had stopped reporting was still offered.** 0.78.0 gave
+  treasures an eligibility check and left out the liveness test, which removed
+  the fallback that had been catching this. A despawned rare now reads "Not up
+  right now" instead of being routed to.
+- **Riding past the same corpse three times counted as three encounters.**
+  0.78.0 switched the vignette walk to the unfiltered list so the "already
+  dead" flag would survive, and went on recording dead rows as sightings —
+  a number `/cn goal` shows you.
+
+### Fixed — code untouched for many releases
+
+- **Four of the six places that set a waypoint said nothing at all.** The
+  Goals tab's "Next step" button produced no chat output whatsoever, a world
+  map pin click was silent, and a follow-mode hub advance inside an instance
+  both failed to place the pin and never mentioned it. All six now go through
+  one function, so a headline and its caveat cannot drift apart again. Follow
+  mode still does not narrate — it reports a refusal and nothing else.
+- **`/cn alts` told you to switch to a character that had already done it.**
+  For recipes and titles the named character is the one who *holds* it, and a
+  title cannot be earned twice. The list read "already knows it: Bob, Carol"
+  underneath "Bob could do 2 of these". It also listed quests as switchable
+  when nothing in the addon knows which character a quest belongs to.
+- **A ticking deadline made every row a different row.** A countdown was part
+  of what the scorer used to decide whether two recommendations were the same
+  thing, so one second of elapsed time re-listed the whole board. Deadlines
+  now agree if they are within a minute of each other.
+- **Flying across eight zones ran eight full recommendation passes**, and
+  re-pointed the waypoint at zones being flown over. Mass-looting a bag of
+  pets did the same. Neither happens now, and a quest turn-in is still
+  answered the moment it lands.
+- **A cross-tab count could promise more rows than the tab showed.** The
+  search counted matching rows while a tab keeps whole blocks, so "Also on:
+  Goals (2)" opened a tab with eight rows in it. Both numbers come from the
+  same place now.
+- **`/cn currency` dumped every capped currency into chat.** 0.78.0 capped the
+  weekly half of that command at eight rows and left the other half unbounded.
+- **`/cn hidden` named two rows after the addon's internals.** The Great
+  Vault and finished-crafting-order rows use word ids rather than numbers, and
+  the last-resort namer produced "CURRENCY vault". Hiding either one now shows
+  what it is, and the choice survives the rename from the old numeric id.
+- **A currency breakdown row said "N collected" about a cap.** It now says
+  "not at cap", which is what the number counts.
+- **Three providers subscribed to constantly-firing events with no throttle** —
+  the same defect fixed for one file in 0.78.0, left standing in three others.
 
 ## [0.78.0]
 
@@ -62715,7 +63181,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.78.0
+0.79.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -65032,9 +65498,9 @@ mutate "Database.lua" \
 
 mutate "Modules/Warband.lua" \
     "            return Freshest(holders), table.concat(holders, \", \"),
-                \"already knows it\"" \
+                \"already known by another character\", false" \
     "            return holders[1], table.concat(holders, \", \"),
-                \"already knows it\"" \
+                \"already known by another character\", false" \
     "a deleted alt sorting first hides a character you played yesterday"
 
 mutate "Modules/Hud.lua" \
@@ -66636,16 +67102,22 @@ mutate "Modules/Travel.lua" \
     "running the whole way is quoted at flying speed"
 
 mutate "Routing.lua" \
-    "            if why then
-                CN.PrintLine(CN.Muted(tostring(why)))
-            end" \
-    "            if false then
-                CN.PrintLine(CN.Muted(tostring(why)))
-            end" \
+    "    if why then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end
+
+    return true
+end" \
+    "    if false then
+        CN.PrintLine(CN.Muted(tostring(why)))
+    end
+
+    return true
+end" \
     "a waypoint with no map pin is reported as a waypoint with one"
 
 mutate "Routing.lua" \
-    "        CN.Debounce(\"Routing.autoAdvance.vignette\", 2, function()
+    "        CN.Debounce(\"Routing.autoAdvance.\" .. event, 2, function()
             CN.AutoAdvance(event)
         end)" \
     "        CN.AutoAdvance(event)" \
@@ -66685,31 +67157,25 @@ mutate "Modules/Travel.lua" \
     "an estimated walking time is printed as a measured one"
 
 mutate "Routing.lua" \
-    "    return true, why
-end" \
+    "    return true, type(why) == \"string\" and why or nil" \
     "    if why then
         CN.PrintLine(CN.Muted(tostring(why)))
     end
 
-    return true
-end" \
+    return true" \
     "a caveat prints above the headline it belongs under"
 
 mutate "Routing.lua" \
     "        if not CN.IsAutoWaypointEnabled() then
             return
-        end
-
-        if not firehose then" \
+        end" \
     "        if false then
             return
-        end
-
-        if not firehose then" \
+        end" \
     "a player with auto-waypoint off pays for every minimap vignette"
 
 mutate "Routing.lua" \
-    "        if not firehose then
+    "        if not throttled then
             CN.AutoAdvance(event)
             return
         end" \
@@ -66785,6 +67251,53 @@ mutate "Modules/Follow.lua" \
     "    frame.header:SetPoint(\"TOPRIGHT\", -(inset + CN.CLOSE_WIDTH), -CN.SPACE.S)" \
     "    local unusedStop = CN.CLOSE_WIDTH" \
     "the right end of the follow header is a click that stops the route"
+
+# ---- 0.79.0 ----
+
+mutate "Modules/Chase.lua" \
+    "        return CN.SetWaypointAndSay(step.mapID, step.x, step.y, step.text,
+            \"Next step: \" .. tostring(step.text or \"here\"))" \
+    "        return CN.SetWaypoint(step.mapID, step.x, step.y, step.text)" \
+    "the Goals tab's next-step button places a waypoint and says nothing"
+
+mutate "Modules/Follow.lua" \
+    "        CN.SetWaypointAndSay(hub.mapID, hub.x, hub.y, label, false)" \
+    "        CN.SetWaypoint(hub.mapID, hub.x, hub.y, label)" \
+    "a hub advance the client refused reports nothing at all"
+
+mutate "Routing.lua" \
+    "    if headline == false then" \
+    "    if false then" \
+    "a caller that does not narrate is also not told the pin was refused"
+
+mutate "Modules/Filters.lua" \
+    "    return CN.TypeBadge(objectiveType) .. \" \" .. tostring(id)" \
+    "    return tostring(objectiveType) .. \" \" .. tostring(id)" \
+    "an odd id is described with the internal enum"
+
+mutate "Scoring.lua" \
+    "    return math.abs(left - right) <= DEADLINE_TOLERANCE" \
+    "    return left == right" \
+    "a countdown ticking down makes every row a different row"
+
+mutate "Core.lua" \
+    "    return CN.SortKey(text) .. \" \" .. string.lower(CN.Strip(value))" \
+    "    return CN.SortKey(text)" \
+    "the window cannot be filtered by anything in the value column"
+
+mutate "Modules/Navigation.lua" \
+    "    if not Navigation.IsTicking() then
+        Navigation.StartTicker()
+    end" \
+    "    if false then
+        Navigation.StartTicker()
+    end" \
+    "turning the arrow on leaves it frozen where it was"
+
+mutate "Modules/Rares.lua" \
+    "        return states.UNKNOWN, \"Not up right now\", record.name" \
+    "        return states.AVAILABLE, nil, record.name" \
+    "a rare the client is not reporting is offered as one to go and kill"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -89391,9 +89904,22 @@ end)()
 
     _G.TomTom.AddWaypoint = realAdd
 
-    local placed, uid = tomtom.SetWaypoint(94, 0.3, 0.3, "Real")
+    -- THE SECOND RETURN IS A SENTENCE FOR THE PLAYER, NEVER A HANDLE.
+    -- 0.79.0.
+    --
+    -- This returned the waypoint uid on success -- a table -- while the
+    -- native provider returns a caveat string there, and 0.78.0 began
+    -- PRINTING that position on success. So every `/cn go` for a player who
+    -- had chosen TomTom printed `table: 0x...` under the headline, which
+    -- reads as a crash. The uid is tracked in the provider's own list, which
+    -- is what `ClearAll` walks.
+    local placed, second = tomtom.SetWaypoint(94, 0.3, 0.3, "Real")
 
-    assert(placed == true and uid, "and a real one comes back with its uid")
+    assert(placed == true, "and a real one is placed")
+
+    assert(second == nil or type(second) == "string",
+        "and hands back nothing the caller could print by accident: "
+        .. type(second))
 
     assert(tomtom.ClearAll() == true, "which it then removes")
 
@@ -98782,8 +99308,9 @@ end)()
         start + (string.find(routing, "\nend", start, true) or start) - start
             + 4)
 
-    assert(string.find(body, "return true, why", 1, true),
-        "the caveat is returned to whoever wrote the headline")
+    assert(string.find(body, "return true, type(why) ==", 1, true),
+        "the caveat is returned to whoever wrote the headline, and only "
+        .. "when it is something a player could read")
 
     assert(not string.find(body, "CN.PrintLine(CN.Muted(tostring(why)))",
             1, true),
@@ -98978,19 +99505,42 @@ end)()
 
     -- A type with no registered checker answers UNKNOWN with no reason at
     -- all. A type with one answers about the row.
+    -- A ROW THE CLIENT IS NOT REPORTING IS NOT AVAILABLE. 0.79.0.
+    --
+    -- These two types exist only while the client says so. Before 0.78.0
+    -- `TREASURE` had no checker, so the staleness test fell through to "is
+    -- this still a candidate", which caught a despawned one. Registering a
+    -- checker without a liveness test took that away and left the waypoint
+    -- pointed at something that is not there.
     local state, reason = CN.Explain(CN.objectiveTypes.TREASURE, treasure)
 
-    assert(state == CN.objectiveStates.AVAILABLE,
-        "a treasure the addon has seen is available: " .. tostring(state)
-        .. " / " .. tostring(reason))
+    assert(state == CN.objectiveStates.UNKNOWN,
+        "a treasure the store remembers but the client is not reporting is "
+        .. "not offered as available: " .. tostring(state))
+
+    assert(reason, "and says why: " .. tostring(reason))
+
+    -- ONE THE CLIENT IS REPORTING IS.
+    local realAll = raresModule.GetAll
+
+    raresModule.GetAll = function()
+        return { { vignetteID = treasure, guid = "probe", isDead = false } }
+    end
+
+    local live = CN.Explain(CN.objectiveTypes.TREASURE, treasure)
+
+    assert(live == CN.objectiveStates.AVAILABLE,
+        "and one the client IS reporting is: " .. tostring(live))
 
     raresModule.NoteCleared(treasure)
 
     local cleared = CN.Explain(CN.objectiveTypes.TREASURE, treasure)
 
+    raresModule.GetAll = realAll
+
     assert(cleared == CN.objectiveStates.COMPLETED,
-        "and one this character has cleared is completed: "
-        .. tostring(cleared))
+        "and one this character has cleared is completed, whatever the "
+        .. "client says: " .. tostring(cleared))
 
     store[treasure] = nil
 
@@ -99091,6 +99641,632 @@ end)()
         "the follow header stops before the button starts")
 
     print("  one constant for the close control's footprint")
+end)()
+
+print("\nWhat 0.79.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SECOND RETURN FROM A WAYPOINT IS A SENTENCE, NEVER A HANDLE.
+    ------------------------------------------------------------
+    -- The provider contract overloaded it: the native provider returns a
+    -- caveat string, TomTom returned its waypoint uid -- a TABLE -- and
+    -- 0.78.0 began printing that position on success. So every `/cn go` for
+    -- a player who had chosen TomTom printed `table: 0x...` under the
+    -- headline, which reads as a crash.
+    CN.RegisterWaypointProvider("HarnessHandle", {
+        Name = function() return "HarnessHandle" end,
+        IsAvailable = function() return true end,
+        SetWaypoint = function()
+            return true, { uid = "a table, not a sentence" }
+        end,
+        Clear = function() end,
+    }, 1)
+
+    local placed, why = CN.SetWaypoint(94, 0.4, 0.4, "Handled")
+
+    CN.waypointProviders["HarnessHandle"] = nil
+
+    assert(placed, "the waypoint is placed")
+
+    assert(why == nil,
+        "and nothing that is not a sentence reaches the caller: "
+        .. type(why))
+
+    print("  a waypoint hands back a sentence or nothing at all")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ARROW COMES BACK ALIVE.
+    ------------------------------------------------------------
+    local navigation = CN:GetModule("Navigation")
+
+    local autoSettings = CN.Settings()
+
+    local held = autoSettings.arrow
+
+    autoSettings.arrow = true
+
+    CN.SetWaypoint(94, 0.5, 0.4, "Somewhere")
+
+    navigation.Refresh()
+
+    assert(navigation.IsTicking(), "the ticker runs while the arrow is on")
+
+    -- 0.78.0 added the stop and not the start. `StartTicker` had exactly one
+    -- caller -- inside the waypoint provider -- so `/cn arrow on`, and the
+    -- hover x added to make toggling easy, left the arrow reappearing frozen
+    -- on a stale bearing for the rest of the session.
+    autoSettings.arrow = false
+
+    navigation.Refresh()
+
+    assert(not navigation.IsTicking(),
+        "and stops when the arrow is turned off")
+
+    autoSettings.arrow = true
+
+    navigation.Refresh()
+
+    assert(navigation.IsTicking(),
+        "and starts again when it is turned back on, rather than reappearing "
+        .. "frozen for the rest of the session")
+
+    autoSettings.arrow = held
+
+    print("  the arrow comes back alive, not frozen")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LIVE COUNTDOWN IS NOT AN IDENTITY.
+    ------------------------------------------------------------
+    -- `expiresIn` was in the identity fields, and it is recomputed on every
+    -- provider run -- so two rebuilds of an unchanged row were never equal,
+    -- the reuse shortcut could never fire for any provider carrying one, and
+    -- the aggregate generation was bumped, which forces a full re-score and
+    -- re-sort of everything.
+    --
+    -- Nine providers write one and two are volatile with no cooldown, so a
+    -- player standing still with the window open paid a full re-score every
+    -- five seconds, permanently, for numbers that had not changed.
+    local seconds = 3600
+
+    CN.RegisterCandidateProvider("HarnessCountdown", function()
+        seconds = seconds - 1
+
+        return { CN.NewObjective({
+            id = 979001, type = CN.objectiveTypes.QUEST,
+            name = "Ticking", completionValue = 3,
+            expiresIn = seconds,
+        }) }
+    end, { events = {}, volatile = true })
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates()
+
+    local countedBefore = CN.GetCandidateCacheState().generation
+
+    for _ = 1, 5 do
+        CN.InvalidateProvider("HarnessCountdown")
+        CN.CollectCandidates()
+    end
+
+    local after = CN.GetCandidateCacheState().generation
+
+    assert(after == countedBefore,
+        "five rebuilds of a row whose only change is its countdown do not "
+        .. "force five full re-scores: generation " .. countedBefore .. " -> "
+        .. after)
+
+    -- A DEADLINE THAT REALLY MOVED IS STILL A CHANGE.
+    seconds = 60
+
+    CN.InvalidateProvider("HarnessCountdown")
+    CN.CollectCandidates()
+
+    assert(CN.GetCandidateCacheState().generation > after,
+        "and a deadline that moved by an hour is")
+
+    CN.candidateProviders["HarnessCountdown"] = nil
+
+    CN.InvalidateCandidates()
+
+    print("  a live countdown is not an identity")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A TAXI RIDE IS NOT A SEQUENCE OF SINGLE MOMENTS.
+    ------------------------------------------------------------
+    local advances = 0
+
+    local realAdvance = CN.AutoAdvance
+
+    CN.AutoAdvance = function(...)
+        advances = advances + 1
+
+        return realAdvance(...)
+    end
+
+    local waySettings = CN.Settings()
+
+    local heldAuto = waySettings.autoWaypoint
+
+    waySettings.autoWaypoint = true
+
+    -- 0.78.0's note said the vignette event was the only firehose and "the
+    -- other seven are single moments". `ZONE_CHANGED_NEW_AREA` fires for
+    -- every zone a taxi crosses -- this codebase says so in another file and
+    -- guards its own handler with `UnitOnTaxi` for exactly that.
+    CN.ForgetDebounces()
+
+    advances = 0
+
+    for _ = 1, 8 do
+        CN.Dispatch("ZONE_CHANGED_NEW_AREA")
+    end
+
+    assert(advances > 0, "the first zone change is answered")
+
+    assert(advances < 8,
+        "and eight in one hop do not each run a full recommendation pass: "
+        .. advances)
+
+    -- AND NOT AT ALL WHILE THE GROUND IS MOVING PAST.
+    local realTaxi = UnitOnTaxi
+
+    UnitOnTaxi = function() return true end
+
+    CN.ForgetDebounces()
+
+    advances = 0
+
+    for _ = 1, 8 do
+        CN.Dispatch("ZONE_CHANGED_NEW_AREA")
+    end
+
+    UnitOnTaxi = realTaxi
+
+    assert(advances == 0,
+        "a player mid-flight is not re-pointed at a zone being flown over: "
+        .. advances)
+
+    -- A COMPLETION EVENT IS STILL ANSWERED AT ONCE.
+    CN.ForgetDebounces()
+
+    advances = 0
+
+    CN.Dispatch("QUEST_TURNED_IN", 979002)
+
+    assert(advances > 0, "a turn-in is still a single moment")
+
+    -- AND EVERY ONE OF THEM, NOT THE FIRST OF A BURST.
+    --
+    -- `CN.Debounce` is leading-edge, so routing a single moment through it
+    -- looks correct for one event and swallows the rest: hand in three
+    -- quests in a row and only the first is answered, with the other two
+    -- collapsed into one trailing pass two seconds later. That is the
+    -- difference the throttled/unthrottled split exists to make, and
+    -- nothing tested it -- a mutation deleting the split survived.
+    CN.ForgetDebounces()
+
+    advances = 0
+
+    CN.Dispatch("QUEST_TURNED_IN", 979003)
+    CN.Dispatch("QUEST_TURNED_IN", 979004)
+    CN.Dispatch("QUEST_TURNED_IN", 979005)
+
+    assert(advances == 3,
+        "three turn-ins are three moments, not one burst: " .. advances)
+
+    waySettings.autoWaypoint = heldAuto
+
+    CN.AutoAdvance = realAdvance
+
+    print("  a taxi ride is not a sequence of single moments")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A STALENESS POLL DOES NOT CREDIT THE ROW AS OFFERED.
+    ------------------------------------------------------------
+    -- Every non-quiet `Recommend` fires the hooks, and two of them WRITE: one
+    -- counts the row as shown -- the denominator of a ratio that moves a
+    -- whole type's score -- and one starts a work clock that becomes the
+    -- measured duration for whatever finishes next. Auto-advance is a
+    -- background check, not the player being shown a list.
+    local routing = CN_TEST_ReadAddonFile("Routing.lua")
+
+    assert(routing, "Routing.lua must be readable")
+
+    assert(string.find(routing, "local results = CN.Recommend(1, true)",
+            1, true),
+        "the staleness poll asks quietly")
+
+    print("  a staleness poll does not credit the row as offered")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn alts DOES NOT SUGGEST THE CHARACTER THAT ALREADY DID IT.
+    ------------------------------------------------------------
+    local warband = CN:GetModule("Warband")
+
+    local key = "Holder-Testrealm"
+
+    CN.db.characters[key] = {
+        name = "Holder", realm = "Testrealm", lastSeen = time(),
+        recipes = { [979100] = true },
+        titles  = { [979101] = true },
+    }
+
+    for _, case in ipairs({
+        { CN.objectiveTypes.RECIPE, 979100 },
+        { CN.objectiveTypes.TITLE,  979101 },
+    }) do
+        local best, detail, scope, switchable =
+            warband.WhoShould(case[1], case[2])
+
+        assert(best == key,
+            "the holder is still named, because the score adjuster wants it")
+
+        assert(detail and scope, "with both halves of the answer")
+
+        -- The command whose entire job is "should you be playing somebody
+        -- else" printed "already knows it: Bob, Carol" under "Bob could do 2
+        -- of these". Switching to the character who has already done it
+        -- cannot do it again -- and a title is per-character and
+        -- unrepeatable.
+        assert(switchable == false,
+            "but it is not offered as a reason to switch")
+    end
+
+    -- AND THE SCORE ADJUSTER STILL WORKS, which is the other consumer.
+    local penalty, why = warband.Suitability(CN.objectiveTypes.RECIPE, 979100)
+
+    assert(penalty < 0 and why,
+        "a recipe another character knows still ranks down here: "
+        .. tostring(penalty))
+
+    assert(not string.find(why, "(" .. key .. ")", 1, true),
+        "and the reason is a sentence, not a name repeated in brackets: "
+        .. why)
+
+    CN.db.characters[key] = nil
+
+    -- A TYPE THAT CANNOT PRODUCE A SUGGESTION IS NOT LISTED AS ONE.
+    local alts = CN:GetModule("Alts")
+
+    assert(not alts.switchableTypes[CN.objectiveTypes.QUEST],
+        "a type with no branch in WhoShould is not advertised as switchable")
+
+    print("  /cn alts does not suggest the character that already did it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A HIDDEN ROW IS NAMED, AND A RENAMED ONE IS NOT ORPHANED.
+    ------------------------------------------------------------
+    local filterModule = CN:GetModule("Filters")
+
+    -- 0.78.0 gave the claim rows working hide guards, which made this display
+    -- path reachable for the first time -- and it rendered them as "Currency
+    -- vault" and "Recipe claim": the addon's internals offered to the player
+    -- as the name of what they hid.
+    local named = filterModule.DescribeObjective(CN.objectiveTypes.CURRENCY,
+        "vault")
+
+    assert(named and string.find(named, "Great Vault", 1, true),
+        "a synthetic row is named, not printed as its id: "
+        .. tostring(named))
+
+    local order = filterModule.DescribeObjective(CN.objectiveTypes.RECIPE, "claim")
+
+    assert(order and not string.find(order, "Recipe claim", 1, true),
+        "and so is the crafting order: " .. tostring(order))
+
+    -- AND THE CHOICE SURVIVES THE RENAME. The vault row's id was `0` until
+    -- 0.78.0; the rename orphaned whatever the player had already hidden
+    -- under the old key, so the row came back and a phantom entry stayed in
+    -- `/cn hidden` that nothing could remove.
+    local aged = {
+        version = 30,
+        settings = {},
+        account = {
+            ignoredObjectives  = { CURRENCY = { [0] = { at = 1 } } },
+            deferredObjectives = { CURRENCY = { [0] = { until_ = 2 } } },
+        },
+        characters = {},
+    }
+
+    CN.RunMigrations(aged)
+
+    assert(aged.account.ignoredObjectives.CURRENCY[0] == nil,
+        "the old key is gone")
+
+    assert(aged.account.ignoredObjectives.CURRENCY["vault"],
+        "and the player's choice moved to the new one rather than being "
+        .. "dropped")
+
+    assert(aged.account.deferredObjectives.CURRENCY["vault"],
+        "both stores")
+
+    print("  a hidden row is named, and a renamed one is not orphaned")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CORPSE IS NOT AN ENCOUNTER.
+    ------------------------------------------------------------
+    local rareModule = CN_TEST_ReadAddonFile("Modules/Rares.lua")
+
+    assert(rareModule, "Modules/Rares.lua must be readable")
+
+    -- `Record` bumps a sighting counter that the goal plan shows, and 0.78.0
+    -- switched the walk to the unfiltered list so the dead flag would survive
+    -- -- correctly -- and went on recording every row. Riding past the same
+    -- corpse on three days read as three encounters.
+    -- A PATTERN, NOT A LITERAL SPANNING A NEWLINE. The scaffolded tree
+    -- `cn.ps1 init` writes uses the platform's line ending, so a literal
+    -- containing "\n" matches in the repository and fails in the tree the
+    -- release pipeline actually builds -- which is where this first failed.
+    assert(string.find(rareModule,
+            "if not vignette%.isDead then%s+Rares%.Record%(vignette%)"),
+        "only a live rare counts as a sighting")
+
+    print("  a corpse is not an encounter")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CROSS-TAB COUNT IS THE NUMBER OF ROWS THE TAB WOULD SHOW.
+    ------------------------------------------------------------
+    -- The search counted matching ENTRIES while a tab keeps whole BLOCKS -- a
+    -- block survives if any row in it matches, and it survives entire. So
+    -- "Also on: Goals (2)" led to a tab showing eight rows.
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+    local list = CN_TEST_ReadAddonFile("UI/List.lua")
+
+    assert(ui and list, "both files must be readable")
+
+    assert(string.find(list, "function list:CountMatching", 1, true),
+        "the list answers how many rows it would show")
+
+    assert(string.find(ui, "list:CountMatching(text)", 1, true),
+        "and the cross-tab search asks it, rather than counting differently")
+
+    print("  the cross-tab count is the number of rows the tab would show")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CHATTY EVENT HAS A COOLDOWN.
+    ------------------------------------------------------------
+    -- `CRITERIA_UPDATE` and `QUEST_LOG_UPDATE` both fire constantly, and this
+    -- addon says so in its own comments -- while three providers subscribed
+    -- to one or the other with no throttle at all. The same defect 0.78.0
+    -- fixed for one file, left standing in three others.
+    local chatty = {
+        CRITERIA_UPDATE    = true,
+        QUEST_LOG_UPDATE   = true,
+        CURRENCY_DISPLAY_UPDATE = true,
+        VIGNETTE_MINIMAP_UPDATED = true,
+        BAG_UPDATE_DELAYED = true,
+    }
+
+    local offenders = {}
+
+    for name, provider in pairs(CN.candidateProviders or {}) do
+        local subscribes = false
+
+        for event in pairs(provider.events or {}) do
+            if chatty[event] then
+                subscribes = true
+            end
+        end
+
+        if subscribes and (provider.cooldown or 0) <= 0 then
+            table.insert(offenders, name)
+        end
+    end
+
+    table.sort(offenders)
+
+    assert(#offenders == 0,
+        "every provider on a constantly-firing event is throttled: "
+        .. table.concat(offenders, ", "))
+
+    print("  a chatty event has a cooldown")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COUNT IS LABELLED WITH WHAT IT COUNTS.
+    ------------------------------------------------------------
+    local breakdown = CN:GetModule("Breakdown")
+
+    local rows = breakdown.Report and breakdown.Report() or {}
+
+    local currencyRows
+
+    for _, row in ipairs(rows) do
+        if row.name == "Currencies" then
+            currencyRows = row
+        end
+    end
+
+    if currencyRows then
+        -- Twelve currencies are not "collected"; twelve are the ones NOT at
+        -- cap -- one line above the row's own note saying currencies are not
+        -- a set to complete.
+        assert(currencyRows.collectedLabel == "not at cap",
+            "the currency row says what its number counts: "
+            .. tostring(currencyRows.collectedLabel))
+    end
+
+    print("  a count is labelled with what it counts")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A WAYPOINT THE PLAYER ASKED FOR SAYS SOMETHING.
+    ------------------------------------------------------------
+    -- `CN.SetWaypoint` returns a caveat for its caller to print under a
+    -- headline, and four of the six callers printed no headline -- so the
+    -- Goals tab's "Next step" button produced no chat output at all, and a
+    -- hub advance inside an instance both failed and spokenLines nothing. The rule
+    -- is now one function; nothing outside Routing.lua may call the raw one.
+    local offenders = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        if file ~= "Routing.lua" then
+            local text = CN_TEST_ReadAddonFile(file)
+
+            if text then
+                for line in string.gmatch(text or "", "[^\n]+") do
+                    -- CODE, NOT COMMENTS: this file's own notes name the
+                    -- function they replaced.
+                    if not string.find(line, "^%s*%-%-")
+                        and string.find(line, "CN%.SetWaypoint%s*%(") then
+                        table.insert(offenders, file)
+                    end
+                end
+            end
+        end
+    end
+
+    assert(#offenders == 0,
+        "a player-facing waypoint must go through CN.SetWaypointAndSay: "
+        .. table.concat(offenders, ", "))
+
+    ------------------------------------------------------------
+    -- AND THE HEADLINE COMES BEFORE THE CAVEAT.
+    ------------------------------------------------------------
+    local spokenLines = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spokenLines, tostring(message))
+    end
+
+    local previousOrder    = CN.waypointOrder
+    local previousProvider = CN.waypointProviders
+
+    CN.waypointOrder     = { { name = "harness" } }
+    CN.waypointProviders = {
+        harness = {
+            IsAvailable  = function() return true end,
+            SetWaypoint  = function()
+                return true, "the game does not allow a map pin here"
+            end,
+        },
+    }
+
+    local placed = CN.SetWaypointAndSay(84, 0.5, 0.5, "Somewhere",
+        "Next step: Somewhere")
+
+    CN.waypointOrder     = previousOrder
+    CN.waypointProviders = previousProvider
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    assert(placed, "the harness provider placed it")
+
+    local headlineAt, caveatAt
+
+    for index, line in ipairs(spokenLines) do
+        if string.find(line, "Next step: Somewhere", 1, true) then
+            headlineAt = headlineAt or index
+        end
+
+        if string.find(line, "does not allow a map pin", 1, true) then
+            caveatAt = caveatAt or index
+        end
+    end
+
+    assert(headlineAt, "the caller's headline is printed")
+    assert(caveatAt, "and the provider's caveat with it")
+    assert(headlineAt < caveatAt,
+        "the caveat continues the headline, it does not precede it")
+
+    ------------------------------------------------------------
+    -- AND A CALLER THAT DOES NOT NARRATE STILL REPORTS A REFUSAL.
+    ------------------------------------------------------------
+    -- Follow mode's file header forbids chat narration, and it honoured that
+    -- by discarding the caveat as well -- so a hub advance inside an instance
+    -- placed nothing and spokenLines nothing. `false` suppresses the headline only.
+    local quiet = {}
+
+    realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(quiet, tostring(message))
+    end
+
+    previousOrder    = CN.waypointOrder
+    previousProvider = CN.waypointProviders
+
+    CN.waypointOrder     = { { name = "harness" } }
+    CN.waypointProviders = {
+        harness = {
+            IsAvailable = function() return true end,
+            SetWaypoint = function()
+                return true, "the game does not allow a map pin here"
+            end,
+        },
+    }
+
+    CN.SetWaypointAndSay(84, 0.5, 0.5, "Somewhere", false)
+
+    CN.waypointOrder     = previousOrder
+    CN.waypointProviders = previousProvider
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local toldMe, narrated = false, false
+
+    for _, line in ipairs(quiet) do
+        if string.find(line, "does not allow a map pin", 1, true) then
+            toldMe = true
+        end
+
+        if string.find(line, "Waypoint set", 1, true) then
+            narrated = true
+        end
+    end
+
+    assert(toldMe, "a quiet caller still hears that the pin was refused")
+    assert(not narrated, "and hears nothing else")
+
+    print("  a waypoint the player asked for says so, headline first")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE LAST-RESORT NAME IS A BADGE, NOT AN ENUM.
+    ------------------------------------------------------------
+    -- `Filters.DescribeObjective` names anything the player has hidden or
+    -- deferred. Every branch produces a title-cased placeholder; the tail
+    -- that catches ids which are not numbers concatenated the raw uppercase
+    -- token, so `/cn hidden` listed `RECIPE claim` -- the addon's internals
+    -- offered as the name of the thing the player hid. Both earlier fixes
+    -- for this shape had tests; the tail did not, and a mutation reverting
+    -- it survived.
+    local describer = CN:GetModule("Filters")
+
+    assert(describer and describer.DescribeObjective, "the describer exists")
+
+    local named = describer.DescribeObjective(CN.objectiveTypes.RECIPE,
+        "some-unparsed-id")
+
+    assert(not string.find(named, "RECIPE", 1, true),
+        "the raw enum is never shown to the player: " .. tostring(named))
+
+    assert(string.find(named, "Recipe", 1, true),
+        "the badge is: " .. tostring(named))
+
+    print("  a hidden row with an odd id is named, not enumerated")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")
@@ -103761,14 +104937,67 @@ function Invoke-CNCheck {
             # is the normal state of a new string, not a mistake.
             $translated = @{}
 
+            # AND THE FORMAT SPECIFIERS HAVE TO MATCH. 0.79.0.
+            #
+            # A translation carrying %s where its key has %d throws inside
+            # string.format at runtime -- in that language only, on the
+            # machine of a player who cannot read the stack trace, and never
+            # on the developer's. The lint checked that keys EXIST and never
+            # that they are usable.
+            #
+            # Three of the keys added in 0.78.0 are format strings, which is
+            # exactly the shape that trips this, and the translator export
+            # invites hand-edited submissions.
+            $specifierPattern = '%[-+ #0]*\d*\.?\d*[diouxXeEfgGqcs]'
+
+            $mismatched = @()
+
             foreach ($localeFile in Get-ChildItem -Path $localeDir -Filter '*.lua') {
                 if ($localeFile.Name -eq 'enUS.lua') { continue }
 
                 $body = Get-Content -Raw -LiteralPath $localeFile.FullName
 
+                foreach ($match in [regex]::Matches($body,
+                        '\["((?:[^"\\]|\\.)*)"\]\s*=\s*"((?:[^"\\]|\\.)*)"')) {
+
+                    $key   = $match.Groups[1].Value
+                    $value = $match.Groups[2].Value
+
+                    $translated[$key] = $true
+
+                    $wanted = @([regex]::Matches($key, $specifierPattern) |
+                        ForEach-Object { $_.Value } | Sort-Object)
+                    $got    = @([regex]::Matches($value, $specifierPattern) |
+                        ForEach-Object { $_.Value } | Sort-Object)
+
+                    if (($wanted -join ',') -ne ($got -join ',')) {
+                        $mismatched += "$($localeFile.Name): `"$key`" has " +
+                            "$($got -join ' ') where the English has " +
+                            "$($wanted -join ' ')"
+                    }
+                }
+
+                # Keys whose value is not a plain string still count as
+                # translated; only the specifier check needs the value.
                 foreach ($match in [regex]::Matches($body, '\["((?:[^"\\]|\\.)*)"\]\s*=')) {
                     $translated[$match.Groups[1].Value] = $true
                 }
+            }
+
+            if ($mismatched.Count -gt 0) {
+                Write-Host "  FAIL  $($mismatched.Count) translation(s) would throw at runtime:" -ForegroundColor Red
+
+                foreach ($line in $mismatched) {
+                    Write-Host "          $line" -ForegroundColor Red
+                }
+
+                Write-Host '        A %s where the English has %d throws inside string.format,' -ForegroundColor DarkGray
+                Write-Host '        in that language only.' -ForegroundColor DarkGray
+
+                $problems++
+            }
+            else {
+                Write-Host '  ok    every translation uses the same format specifiers' -ForegroundColor DarkGray
             }
 
             $untranslated = @()

@@ -1530,6 +1530,37 @@ CN.migrations = {
             db.account.progress.total = nil
         end
     end,
+
+    -- A CHOICE THE PLAYER MADE, CARRIED THROUGH A RENAME. 0.79.0.
+    --
+    -- The Great Vault claim row's id was `0` until 0.78.0, when it became
+    -- "vault" -- because `CN.ToID` rejects `0`, so `/cn unhide` could never
+    -- name it back. The rename orphaned whatever the player had already
+    -- hidden or deferred under the old key: the row came back, and a phantom
+    -- entry stayed in `/cn hidden` that nothing could remove.
+    --
+    -- Moved rather than dropped. A player who hid something once should not
+    -- have to hide it again because the addon changed its mind about how to
+    -- name it internally.
+    [30] = function(db)
+        local currency = CN.objectiveTypes and CN.objectiveTypes.CURRENCY
+            or "CURRENCY"
+
+        for _, storeName in ipairs({ "ignoredObjectives",
+                                     "deferredObjectives" }) do
+            local store = db.account and db.account[storeName]
+
+            local byType = type(store) == "table" and store[currency]
+
+            if type(byType) == "table" and byType[0] ~= nil then
+                if byType["vault"] == nil then
+                    byType["vault"] = byType[0]
+                end
+
+                byType[0] = nil
+            end
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

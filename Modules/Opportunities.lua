@@ -381,7 +381,19 @@ CN.RegisterCandidateProvider("Opportunities", function()
     end
 
     return candidates
-end, { events = { "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" }, volatile = true })
+-- A COOLDOWN, ON EVENTS THAT ARE NOT SINGLE MOMENTS. 0.79.0.
+--
+-- `QUEST_LOG_UPDATE` fires constantly -- `Modules/Quests.lua` throttles its
+-- own handler for that event to ten seconds and says so -- and
+-- `CRITERIA_UPDATE` is the canonical chatty one, which `Achievements` and
+-- `Loremaster` both give a cooldown and this did not.
+--
+-- The same defect 0.78.0 fixed for `Modules/Currencies.lua`, left standing
+-- two files over. Freshness costs nothing here: a world quest window is
+-- hours long and a zone's exploration criteria do not move faster than the
+-- player walks.
+end, { events = { "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" },
+       volatile = true, cooldown = 30 })
 
 ------------------------------------------------------------
 -- EVENTS

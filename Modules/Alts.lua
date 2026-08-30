@@ -78,12 +78,21 @@ end
 
 -- Only character-specific work can justify a switch. Account-wide progress
 -- is, by definition, indifferent to who does it.
+-- `QUEST` REMOVED. 0.79.0.
+--
+-- `Warband.WhoShould` has no quest branch: it falls through to "not tracked
+-- per character" with a nil key, so this entry could never produce a
+-- suggestion. A configuration line that reads as a supported feature and is
+-- not one -- the shape this project keeps finding as a dead reader, here as a
+-- dead switch.
+--
+-- The addon does not know which character a quest belongs to. Restoring the
+-- entry means giving `WhoShould` a quest branch first.
 Alts.switchableTypes = {
     REPUTATION = true,
     RECIPE     = true,
     PROFESSION = true,
     TITLE      = true,
-    QUEST      = true,
 }
 
 -- One assignment: a character, a reason, and what it is for.
@@ -129,12 +138,21 @@ function Alts.Assignments()
     -- work clock on each -- is the defect 0.68.0 added `quiet` for. 0.69.0.
     for _, objective in ipairs(CN.Recommend(Alts.considered, true) or {}) do
         if Alts.switchableTypes[objective.type] then
-            local ok, bestKey, detail, scope =
+            local ok, bestKey, detail, scope, switchable =
                 pcall(warband.WhoShould, objective.type, objective.id)
 
             -- "account-wide" is a real answer meaning the question does not
             -- apply, and must never become a suggestion to switch.
-            if ok and bestKey and scope ~= CN.scopes.ACCOUNT
+            --
+            -- AND NEITHER MUST "that character has already done it". 0.79.0.
+            --
+            -- For a recipe or a title the named character is the HOLDER, and
+            -- switching to them cannot do it again -- a title in particular
+            -- is per-character and unrepeatable. This surface printed
+            -- "already knows it: Bob, Carol" under "Bob could do 2 of
+            -- these". See `Warband.WhoShould`'s fourth return.
+            if ok and bestKey and switchable ~= false
+                and scope ~= CN.scopes.ACCOUNT
                 and bestKey ~= CN.characterKey then
 
                 local character = CN.db and CN.db.characters
@@ -150,8 +168,13 @@ function Alts.Assignments()
                         seen[key] = true
 
                         table.insert(assignments,
+                            -- THE SENTENCE, THEN THE NAMES. 0.79.0. This
+                            -- was `scope .. ": " .. detail`, which reads as
+                            -- a label followed by a value when the two are a
+                            -- reason and a list of characters.
                             NewAssignment(bestKey, character, objective,
-                                detail and (scope .. ": " .. detail) or scope))
+                                detail and (scope .. " (" .. detail .. ")")
+                                    or scope))
                     end
                 end
             end

@@ -1623,10 +1623,41 @@ end
 -- table keeps the decoration that is already on it, which is the whole point.
 local IDENTITY_FIELDS = {
     "type", "id", "name", "phase", "state",
-    "completionValue", "limitedTimeBonus", "expiresIn",
+    "completionValue", "limitedTimeBonus",
     "travelCost", "travelCosted", "mapID", "x", "y",
     "accountWide",
 }
+
+-- `expiresIn` IS NOT AN IDENTITY FIELD. 0.79.0.
+--
+-- It is a live countdown in seconds, recomputed on every provider run -- so
+-- two rebuilds of an unchanged row are never equal, `Identical` can never
+-- return true for any provider that carries one, the reuse shortcut below
+-- never fires, and the aggregate generation is bumped: which this file's own
+-- comment says "forces a full re-score and re-sort of everything".
+--
+-- Nine shipped providers write one, and two of them -- the vault and the
+-- opportunities list -- are volatile with no cooldown, so they self-expire
+-- every five seconds forever. A player standing still with the window open
+-- was paying a full re-score every five seconds, permanently, for numbers
+-- that had not changed. The optimisation's own header says the opposite.
+--
+-- COMPARED WITH A TOLERANCE INSTEAD. A deadline that moved by under a minute
+-- cannot change a ranking a player would notice, and one that moved by more
+-- than that genuinely is different work. `Opportunities` made the same move
+-- from `endsIn` to `endsAt` for the same reason.
+local DEADLINE_TOLERANCE = 60
+
+local function DeadlinesAgree(a, b)
+    local left  = a.expiresIn
+    local right = b.expiresIn
+
+    if left == nil or right == nil then
+        return left == right
+    end
+
+    return math.abs(left - right) <= DEADLINE_TOLERANCE
+end
 
 local function Identical(left, right)
     if #left ~= #right then
@@ -1640,6 +1671,10 @@ local function Identical(left, right)
         -- `CN.CollectCandidates` down with it, and this is not inside a
         -- pcall.
         if type(a) ~= "table" or type(b) ~= "table" then
+            return false
+        end
+
+        if not DeadlinesAgree(a, b) then
             return false
         end
 
