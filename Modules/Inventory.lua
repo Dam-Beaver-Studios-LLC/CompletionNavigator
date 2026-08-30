@@ -722,11 +722,40 @@ CN.RegisterCandidateProvider("Inventory", function()
             -- this row won the dedup and replaced the Quests provider's real
             -- coordinates with none: `/cn go`, the arrow, the map pin and
             -- the session plan had nothing to point at.
-            local mapID, x, y = Blizzard.GetQuestWaypoint(row.questID)
+            -- THROUGH THE MODULE THAT OWNS THE ANSWER. 0.87.0.
+            --
+            -- 0.86.0 asked the raw client call, which is only the FIRST of
+            -- four sources `Quests.GetLocation` layers together: the curated
+            -- turn-in location, the player's own `/cn where` override, and
+            -- the static database. This row wins the dedup and the dedup
+            -- never merges coordinates -- so whatever this did not know was
+            -- thrown away, including a location the player had recorded by
+            -- hand. The same failure the 0.86.0 note above claims to fix,
+            -- moved one source along.
+            local questModule = CN:GetModule("Quests")
+
+            local mapID, x, y
+
+            if questModule and questModule.GetLocation then
+                mapID, x, y = questModule.GetLocation(row.questID)
+            else
+                mapID, x, y = Blizzard.GetQuestWaypoint(row.questID)
+            end
 
             local travel, costed
 
-            if mapID and x and y then
+            -- A MAP WITH NO POINT ON IT IS STILL A JOURNEY. 0.87.0.
+            --
+            -- `GetQuestWaypoint` ends `return zoneMap or playerMap, nil, nil`
+            -- -- a map and no point is a normal answer -- and `CN.TravelCost`
+            -- prices exactly that shape: the routing constant for this map,
+            -- the fallback for another one. Guarding on the point skipped
+            -- that and fell through to the "no location at all" cost, so a
+            -- quest on another continent was charged 8 where the router says
+            -- 40. Thirty-two points, on a scale where finishing something is
+            -- worth four -- which is the symptom the note above says it
+            -- removed.
+            if mapID then
                 travel, costed = CN.TravelCost(mapID, x, y)
             end
 

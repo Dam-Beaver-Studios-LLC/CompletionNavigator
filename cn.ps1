@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.86.0'
+$script:ToolkitVersion = '0.87.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.86.0"
+CN.version     = "0.87.0"
 CN.dbVersion   = 33
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -15794,7 +15794,17 @@ UI.RegisterTab{
                     return
                 end
 
-                local scanned, completed = module.Scan()
+                local scanned, completed, _, answered = module.Scan()
+
+                -- AND IT SAYS WHETHER IT WORKED. 0.87.0. See the note on
+                -- `/cn achievescan`: a scan the client refused recorded
+                -- nothing and this button reported two confident numbers.
+                if (answered or 0) == 0 then
+                    UI.Answer("The game would not answer about achievement "
+                        .. "criteria just now. Try again in a few seconds.")
+
+                    return
+                end
 
                 if CN.NoteSetupStep then
                     CN.NoteSetupStep("Achievements")
@@ -20960,7 +20970,11 @@ function Blizzard.GetPetSpeciesFromItem(itemID)
 
     local pets = CN:GetModule("Pets")
 
-    return pets and pets.Resolve and pets.Resolve(name) or nil, name
+    -- AN EXACT MATCH, NOT A SEARCH. See `Pets.SpeciesByName`: this is called
+    -- from every item tooltip and from the bag sweep, and `Pets.Resolve` is
+    -- a substring scan over the whole journal.
+    return pets and pets.SpeciesByName and pets.SpeciesByName(name) or nil,
+        name
 end
 
 -- Returns true/false only for items that actually have an appearance, and nil
@@ -26381,7 +26395,27 @@ CN:RegisterCommand{
     handler = function()
         Print("Scanning achievements; this takes a moment.")
 
-        local scanned, completed, nearlyDone = Achievements.Scan()
+        local scanned, completed, nearlyDone, answered = Achievements.Scan()
+
+        -- A COUNT IS NOT A RESULT. 0.87.0.
+        --
+        -- `Scan` returns early when the criteria API answered about nothing:
+        -- it does not prune, does not stamp the per-character record, and
+        -- does not call `MarkScanned`. Both callers threw that fourth value
+        -- away and printed three confident numbers over a store that had
+        -- recorded nothing -- so the login reminder went on nagging and the
+        -- player was never told to try again.
+        --
+        -- `/cn scanlore` was given this sentence in 0.72.0 and the "Rescan
+        -- zones" button beside this one in 0.73.0, under a note reading "a
+        -- rescan the client refused looked exactly like one that worked".
+        -- Third caller, same shape.
+        if (answered or 0) == 0 then
+            Print("The game would not answer about achievement criteria just "
+                .. "now. Try again in a few seconds.")
+
+            return
+        end
 
         Print("Scanned " .. scanned .. " achievements.")
         Print("Completed: " .. completed)
@@ -26580,6 +26614,9 @@ function Pets.Scan()
         end
     end)
 
+    -- The name index is now stale. See `Pets.NameIndex`.
+    Pets.nameRevision = (Pets.nameRevision or 0) + 1
+
     CN.MarkScanned("pets")
 
     return seen, owned, missing
@@ -26627,6 +26664,74 @@ end
 ------------------------------------------------------------
 -- LOOKUP
 ------------------------------------------------------------
+
+-- SPECIES BY EXACT NAME, IN ONE LOOKUP. 0.87.0.
+--
+-- `Pets.Resolve` is a substring search over every species the journal has --
+-- roughly eighteen hundred rows, lowercasing each name, allocating a table
+-- per match and sorting the result. That is the right shape for a player
+-- typing `/cn chase pet frost`, and the wrong one for a tooltip.
+--
+-- 0.86.0 correctly stopped reading a species id the client does not return
+-- and started resolving the NAME instead -- and routed the tooltip and the
+-- bag sweep through that search. This addon has removed exactly that from
+-- two other hot paths and left a note each time: "twenty-five hundred
+-- iterations and five thousand string allocations to answer a question about
+-- one item... three per cent of a frame, per mouseover, and a bag sweep
+-- fires dozens a second."
+--
+-- A caged pet's item name IS the species name, so the hot path wants an
+-- exact match and nothing else. Built once per scan, on the counter the
+-- store already bumps, in the same idiom `Professions.NameIndex` uses.
+-- ON THE REVISION THIS STORE BUMPS, NOT THE COLLECTION COUNTER. 0.87.0.
+--
+-- The first version of this index keyed on `CN.collectionGeneration`, on the
+-- reasoning that it is "the counter the store already bumps". It is not:
+-- twelve client events move it -- a quest turn-in, a reputation tick, a
+-- transmog, entering the world -- and none of them writes the pet store.
+-- Each rebuild is one protected client call per species, so on an
+-- eighteen-hundred-species account the index was rebuilt at roughly TWICE
+-- the cost of the single search it exists to replace, in the tooltip path
+-- that fires dozens of times a second.
+--
+-- `Professions.nameRevision` is the idiom this claimed to copy, and it is
+-- bumped only where its store is written. So is this.
+Pets.nameRevision = Pets.nameRevision or 0
+
+function Pets.NameIndex()
+    return CN.Shortlist("PetNames", Pets.nameRevision, function()
+        local index = {}
+
+        for id in pairs(Store()) do
+            -- THE JOURNAL'S OWN NAME, NOT `NameOf`'s PLACEHOLDER. 0.87.0.
+            --
+            -- `NameOf` never returns nil: it falls back to "Pet 1234" for a
+            -- species the client has not named yet. So a gate on "is this a
+            -- non-empty string" cannot tell a cold journal from a loaded
+            -- one, and an index built in the seconds after login -- against
+            -- a store that is already full, because it is persisted -- was
+            -- eighteen hundred placeholders that match no item name.
+            --
+            -- `Inventory.KindOf` refuses to cache exactly this miss one
+            -- layer up; caching it here would have defeated that.
+            local name = CN.Blizzard.GetPetName(id)
+
+            if type(name) == "string" and name ~= "" then
+                index[string.lower(name)] = id
+            end
+        end
+
+        return index
+    end)
+end
+
+function Pets.SpeciesByName(text)
+    if type(text) ~= "string" or text == "" then
+        return nil
+    end
+
+    return Pets.NameIndex()[string.lower(text)]
+end
 
 function Pets.Resolve(text)
     local speciesID = CN.ToID(text)
@@ -36296,9 +36401,9 @@ Setup.steps = {
     -- character to scan had recorded. Eleven collections were offered on the
     -- setup screen and the twelfth, which is the one with a per-character
     -- dimension, was not.
-    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true, perCharacter = "HasScanned" },
+    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true, retry = "scanlore", perCharacter = "HasScanned" },
     { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
-    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements", measured = true, measuredAt = 4, perCharacter = "HasScanned" },
+    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements", measured = true, measuredAt = 4, retry = "achievescan", perCharacter = "HasScanned" },
     { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },
     { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan",     unit = "mounts" },
     { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan",     unit = "species" },
@@ -36493,8 +36598,15 @@ function Setup.Report(results)
 
     local units = {}
 
+    -- AND WHICH COMMAND RETRIES EACH ONE. 0.87.0. The not-ready sentence
+    -- below named `/cn scanlore` for every step, because Loremaster was the
+    -- only one that could reach it -- until 0.86.0 made the achievement scan
+    -- reachable too, and sent the player to a command that cannot fix it.
+    local retry = {}
+
     for _, step in ipairs(Setup.steps) do
         units[step.label] = step.unit
+        retry[step.label] = step.retry
     end
 
     local lines = {}
@@ -36528,7 +36640,8 @@ function Setup.Report(results)
 
             table.insert(lines, result.label .. ": "
                 .. CN.Muted(tostring(result.error) .. CN.DASH
-                    .. "try ") .. CN.Accent("/cn scanlore")
+                    .. "try ") .. CN.Accent("/cn "
+                        .. (retry[result.label] or "setup"))
                 .. CN.Muted(" in a moment."))
         elseif result.error == "module not loaded" then
             -- "UNAVAILABLE" AND "IT THREW" ARE DIFFERENT STATEMENTS.
@@ -48703,11 +48816,40 @@ CN.RegisterCandidateProvider("Inventory", function()
             -- this row won the dedup and replaced the Quests provider's real
             -- coordinates with none: `/cn go`, the arrow, the map pin and
             -- the session plan had nothing to point at.
-            local mapID, x, y = Blizzard.GetQuestWaypoint(row.questID)
+            -- THROUGH THE MODULE THAT OWNS THE ANSWER. 0.87.0.
+            --
+            -- 0.86.0 asked the raw client call, which is only the FIRST of
+            -- four sources `Quests.GetLocation` layers together: the curated
+            -- turn-in location, the player's own `/cn where` override, and
+            -- the static database. This row wins the dedup and the dedup
+            -- never merges coordinates -- so whatever this did not know was
+            -- thrown away, including a location the player had recorded by
+            -- hand. The same failure the 0.86.0 note above claims to fix,
+            -- moved one source along.
+            local questModule = CN:GetModule("Quests")
+
+            local mapID, x, y
+
+            if questModule and questModule.GetLocation then
+                mapID, x, y = questModule.GetLocation(row.questID)
+            else
+                mapID, x, y = Blizzard.GetQuestWaypoint(row.questID)
+            end
 
             local travel, costed
 
-            if mapID and x and y then
+            -- A MAP WITH NO POINT ON IT IS STILL A JOURNEY. 0.87.0.
+            --
+            -- `GetQuestWaypoint` ends `return zoneMap or playerMap, nil, nil`
+            -- -- a map and no point is a normal answer -- and `CN.TravelCost`
+            -- prices exactly that shape: the routing constant for this map,
+            -- the fallback for another one. Guarding on the point skipped
+            -- that and fell through to the "no location at all" cost, so a
+            -- quest on another continent was charged 8 where the router says
+            -- 40. Thirty-two points, on a scale where finishing something is
+            -- worth four -- which is the symptom the note above says it
+            -- removed.
+            if mapID then
                 travel, costed = CN.TravelCost(mapID, x, y)
             end
 
@@ -57758,7 +57900,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.86.0
+## Version: 0.87.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -58013,6 +58155,51 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.87.0]
+
+**Last release fixed how a caged pet in your bags is identified, and paid for
+it with a full search of the pet journal on every item you hover.** That
+lookup runs from the tooltip and from the bag sweep — the two busiest paths in
+the addon — and the search it was routed through walks every species you have
+ever seen, lowercasing each name. This addon has removed exactly that shape
+from two other hot paths and left a note each time. It is an index now, built
+once and only when the pet store actually changes.
+
+Everything in this release is something 0.86.0 broke or left half-done.
+
+### Fixed
+
+- **Hovering an item no longer searches the whole pet journal.**
+- **The first version of that index was worse than the search.** It rebuilt
+  whenever *any* collection counter moved — a quest turn-in, a reputation
+  tick, walking through a portal — none of which touch pets, and each rebuild
+  asked the client about every species. It also could not tell a journal that
+  had not loaded yet from one that had, so an index built in the first seconds
+  after login was made entirely of placeholders and stayed cached: every caged
+  pet invisible again until something unrelated happened. Both were mine, both
+  are fixed, and both are now tested.
+- **A quest one objective from done threw away a location you recorded by
+  hand.** Last release taught that row to carry coordinates, and asked the raw
+  game call — which is only the first of four places the addon looks. The
+  curated turn-in spot, your own `/cn where` override and the shipped database
+  were all discarded, because this row wins against the quest tracker's own
+  and the merge never combines coordinates.
+- **A quest on another continent was priced as if it were in this zone.** The
+  game answers "this map, no exact point" as a normal result, and the router
+  prices that correctly — but the new code only asked when it had an exact
+  point, and fell through to the near cost. Thirty-two points of advantage, on
+  a scale where finishing something is worth four: the exact symptom last
+  release's note claims to have removed.
+- **`/cn achievescan` and the window's achievement button reported a refused
+  scan as a success**, printing confident counts over a store that recorded
+  nothing while the login reminder went on nagging. `/cn scanlore` was given
+  this message three releases ago and the button beside this one two releases
+  ago; this was the third caller.
+- **`/cn setup` told you to retry with the wrong command.** Its "the game was
+  not ready yet" line named the quest-achievement scan for every step, because
+  that was the only step that could reach it — until last release made the
+  achievement scan reachable too.
 
 ## [0.86.0]
 
@@ -64862,7 +65049,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.86.0
+0.87.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -67893,7 +68080,7 @@ mutate "Modules/Filters.lua" \
     "an id that is not a number is described with the internal enum"
 
 mutate "Modules/Setup.lua" \
-    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\", measured = true, perCharacter = \"HasScanned\" }," \
+    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\", measured = true, retry = \"scanlore\", perCharacter = \"HasScanned\" }," \
     "" \
     "a new character never scans the one store with a per-character split"
 
@@ -69324,7 +69511,8 @@ mutate "UI.lua" \
 # ---- 0.86.0 ----
 
 mutate "Providers/BlizzardWorld.lua" \
-    "    return pets and pets.Resolve and pets.Resolve(name) or nil, name" \
+    "    return pets and pets.SpeciesByName and pets.SpeciesByName(name) or nil,
+        name" \
     "    return select(4, C_PetJournal.GetPetInfoByItemID(itemID)), name" \
     "a caged pet in your bags is looked up by companion id"
 
@@ -69383,6 +69571,60 @@ mutate "Modules/Preference.lua" \
     [CN.objectiveTypes.INSTANCE]    = 5400,
 }" \
     "a tuning table holds a number nothing can read"
+
+# ---- 0.87.0 ----
+
+mutate "Modules/Pets.lua" \
+    "    return CN.Shortlist(\"PetNames\", Pets.nameRevision, function()" \
+    "    return CN.Shortlist(\"PetNames\", CN.collectionGeneration, function()" \
+    "the pet name index is rebuilt by every unrelated collection event"
+
+mutate "Modules/Pets.lua" \
+    "            local name = CN.Blizzard.GetPetName(id)" \
+    "            local name = NameOf(id, Store()[id])" \
+    "a cold journal is indexed as eighteen hundred placeholders"
+
+mutate "Modules/Pets.lua" \
+    "    Pets.nameRevision = (Pets.nameRevision or 0) + 1" \
+    "    Pets.nameRevision = (Pets.nameRevision or 0)" \
+    "a pet scan leaves the name index stale"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    return pets and pets.SpeciesByName and pets.SpeciesByName(name) or nil," \
+    "    return pets and pets.Resolve and pets.Resolve(name) or nil," \
+    "every item tooltip searches the whole pet journal"
+
+mutate "Modules/Inventory.lua" \
+    "                mapID, x, y = questModule.GetLocation(row.questID)" \
+    "                mapID, x, y = Blizzard.GetQuestWaypoint(row.questID)" \
+    "the nearly-done row throws away a location you recorded by hand"
+
+mutate "Modules/Inventory.lua" \
+    "            if mapID then
+                travel, costed = CN.TravelCost(mapID, x, y)
+            end" \
+    "            if mapID and x and y then
+                travel, costed = CN.TravelCost(mapID, x, y)
+            end" \
+    "a quest on another continent is charged the near cost"
+
+mutate "Modules/Achievements.lua" \
+    "        if (answered or 0) == 0 then
+            Print(\"The game would not answer about achievement criteria just \"" \
+    "        if false then
+            Print(\"The game would not answer about achievement criteria just \"" \
+    "/cn achievescan reports a refused scan as a success"
+
+mutate "UI.lua" \
+    "                local scanned, completed, _, answered = module.Scan()" \
+    "                local scanned, completed = module.Scan()
+                local answered = 1" \
+    "the achievement button reports a refused scan as a success"
+
+mutate "Modules/Setup.lua" \
+    "                        .. (retry[result.label] or \"setup\")" \
+    "                        .. \"scanlore\"" \
+    "a not-ready achievement scan sends you to the wrong command"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -104370,11 +104612,16 @@ print("\nWhat 0.86.0 changed:")
     assert(speciesID ~= 4242,
         "a companion id is not a species id: " .. tostring(speciesID))
 
-    if speciesID then
-        assert(pets.Store()[speciesID],
-            "and what comes back is a key the pet store actually has: "
-            .. tostring(speciesID))
-    end
+    -- NOT `if speciesID then`. 0.87.0. Every assertion above is satisfied
+    -- by nil -- the name comes from the client stub, and nil is not 4242 --
+    -- so the test named for 0.86.0's headline fix passed in full on exactly
+    -- the defect it was written for.
+    assert(speciesID,
+        "the caged pet resolves to a species: " .. tostring(speciesID))
+
+    assert(pets.Store()[speciesID],
+        "and what comes back is a key the pet store actually has: "
+        .. tostring(speciesID))
 
     print("  a caged pet is looked up by species, not by companion")
 end)()
@@ -104657,6 +104904,263 @@ end)()
     end
 
     print("  a tuning table holds only values that can be read")
+end)()
+
+print("\nWhat 0.87.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A NAME INDEX IS BUILT WHEN ITS OWN STORE CHANGES.
+    ------------------------------------------------------------
+    -- 0.86.0's pet-name index keyed on `CN.collectionGeneration`, which
+    -- twelve client events move -- a quest turn-in, a reputation tick,
+    -- entering the world -- and none of them writes the pet store. Each
+    -- rebuild is one protected client call per species, so on a full account
+    -- it cost roughly twice the single search it replaced, in the tooltip
+    -- path that fires dozens of times a second.
+    local pets = CN:GetModule("Pets")
+
+    assert(pets.NameIndex and pets.SpeciesByName, "the index exists")
+
+    local calls = 0
+
+    local realName = CN.Blizzard.GetPetName
+
+    CN.Blizzard.GetPetName = function(...)
+        calls = calls + 1
+        return realName(...)
+    end
+
+    pets.NameIndex()
+
+    calls = 0
+
+    -- Something unrelated to pets happens, repeatedly.
+    for _ = 1, 5 do
+        CN.NoteCollectionChanged()
+        pets.NameIndex()
+    end
+
+    CN.Blizzard.GetPetName = realName
+
+    assert(calls == 0,
+        "an unrelated collection event does not rebuild the pet name index: "
+        .. calls .. " client call(s)")
+
+    ------------------------------------------------------------
+    -- AND IT IS BUILT AGAIN WHEN THE PET STORE IS.
+    ------------------------------------------------------------
+    local revisionBefore = pets.nameRevision
+
+    pets.Scan()
+
+    assert(pets.nameRevision > revisionBefore,
+        "a pet scan does invalidate it: " .. tostring(revisionBefore)
+        .. " -> " .. tostring(pets.nameRevision))
+
+    ------------------------------------------------------------
+    -- AND THE TOOLTIP PATH DOES NOT WALK THE JOURNAL AT ALL.
+    ------------------------------------------------------------
+    -- Correctness is identical either way -- the search finds the same
+    -- species the index does -- so only the COST tells the two apart, and
+    -- cost is the whole reason this index exists. `Pets.Resolve` lowercases
+    -- and substring-matches every stored species; the index is one lookup.
+    pets.NameIndex()
+
+    local walked = 0
+
+    local realStore = CN.Account
+
+    calls = 0
+
+    local realGetName = CN.Blizzard.GetPetName
+
+    CN.Blizzard.GetPetName = function(...)
+        calls = calls + 1
+        return realGetName(...)
+    end
+
+    for _ = 1, 20 do
+        CN.Blizzard.GetPetSpeciesFromItem(801)
+    end
+
+    CN.Blizzard.GetPetName = realGetName
+
+    assert(calls == 0,
+        "twenty item hovers ask the journal about no species at all: "
+        .. calls .. " client call(s)")
+
+    print("  a name index is rebuilt when its own store changes")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD JOURNAL IS NOT INDEXED AS EIGHTEEN HUNDRED PLACEHOLDERS.
+    ------------------------------------------------------------
+    -- `Pets.NameOf` never returns nil -- it falls back to "Pet 1234" -- so a
+    -- gate on "is this a non-empty string" cannot tell a client that has not
+    -- loaded the journal from one that has. The store is persisted, so at
+    -- login it is already full: the index built in that window was entirely
+    -- placeholders that match no item name, and it stayed cached.
+    local pets = CN:GetModule("Pets")
+
+    local realName = CN.Blizzard.GetPetName
+
+    CN.Blizzard.GetPetName = function() return nil end
+
+    pets.nameRevision = (pets.nameRevision or 0) + 1
+
+    local cold = pets.NameIndex()
+
+    CN.Blizzard.GetPetName = realName
+
+    for key in pairs(cold) do
+        assert(not string.find(key, "^pet %d"),
+            "a species the client has not named is left out, not indexed "
+            .. "under a placeholder: " .. tostring(key))
+    end
+
+    print("  a cold journal is not indexed as placeholders")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A QUEST ROW USES THE ADDON'S OWN LOCATION RESOLVER.
+    ------------------------------------------------------------
+    -- The raw client call is only the first of four sources
+    -- `Quests.GetLocation` layers together -- the curated turn-in spot, the
+    -- player's own `/cn where` override, and the static database. This row
+    -- wins the aggregate dedup, and the dedup never merges coordinates, so
+    -- whatever it did not know was thrown away, including a location the
+    -- player had recorded by hand.
+    local source = CN_TEST_ReadAddonFile("Modules/Inventory.lua")
+
+    assert(source, "Modules/Inventory.lua must be readable")
+
+    assert(string.find(source, "questModule.GetLocation(row.questID)", 1, true),
+        "the nearly-done row asks the module that owns the answer")
+
+    ------------------------------------------------------------
+    -- AND A MAP WITH NO POINT ON IT IS STILL A JOURNEY.
+    ------------------------------------------------------------
+    -- `GetQuestWaypoint` answers with a map and no point as a normal result,
+    -- and `CN.TravelCost` prices exactly that shape. Guarding the call on the
+    -- POINT fell through to the "no location at all" constant, so a quest on
+    -- another continent was charged the near cost.
+    local far  = CN.TravelCost(2022, nil, nil)
+    local here = CN.TravelCost(select(1, CN.GetPlayerPosition()), nil, nil)
+
+    assert(far > here,
+        "another map costs more than this one, even with no point: "
+        .. tostring(far) .. " vs " .. tostring(here))
+
+    for line in string.gmatch(source, "[^\n]+") do
+        if not string.find(line, "^%s*%-%-") then
+            assert(not string.find(line, "if mapID and x and y then", 1, true),
+                "the row prices a map with no point rather than skipping it")
+        end
+    end
+
+    print("  a quest row uses the addon's own location resolver")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCAN THE CLIENT REFUSED SAYS SO, WHEREVER IT IS RUN FROM.
+    ------------------------------------------------------------
+    -- `Achievements.Scan` returns early without pruning, stamping or marking
+    -- when the criteria API answered about nothing -- and both callers threw
+    -- that away and printed three confident numbers over a store that had
+    -- recorded nothing. `/cn scanlore` was given this sentence three
+    -- releases ago and the button beside this one two releases ago.
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    local realCriteria = GetAchievementNumCriteria
+
+    GetAchievementNumCriteria = nil
+
+    CN.HandleSlashCommand("achievescan")
+
+    GetAchievementNumCriteria = realCriteria
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    assert(string.find(text, "would not answer", 1, true),
+        "the command says the client refused:\n" .. text)
+
+    assert(not string.find(text, "Completed:", 1, true),
+        "and does not print a confident count over a store it did not "
+        .. "write:\n" .. text)
+
+    -- The window's button reads the same return.
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+
+    assert(ui and string.find(ui, "local scanned, completed, _, answered",
+            1, true),
+        "and so does the button beside it")
+
+    print("  a refused scan says so wherever it is run from")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AND THE COMMAND IT NAMES CAN ACTUALLY RETRY IT.
+    ------------------------------------------------------------
+    -- The not-ready sentence named `/cn scanlore` for every step, because
+    -- Loremaster was the only one that could reach it. 0.86.0 made the
+    -- achievement step reachable and it kept sending the player to a command
+    -- that cannot fix it.
+    local setupModule = CN:GetModule("Setup")
+
+    local named = 0
+
+    for _, step in ipairs(setupModule.steps) do
+        if step.measured then
+            named = named + 1
+
+            assert(step.retry and CN.commands[step.retry],
+                "a step that can report 'not ready' names a command that "
+                .. "retries it: " .. tostring(step.label) .. " -> "
+                .. tostring(step.retry))
+        end
+    end
+
+    assert(named >= 2, "both measured steps were checked: " .. named)
+
+    ------------------------------------------------------------
+    -- AND THE REPORT PRINTS THAT COMMAND, NOT A FIXED ONE.
+    ------------------------------------------------------------
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    setupModule.Report({
+        { label = "Achievements", ok = nil,
+          error = "the game was not ready yet" },
+    })
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    assert(string.find(text, "/cn achievescan", 1, true),
+        "the achievements step is retried with its own command:\n" .. text)
+
+    assert(not string.find(text, "/cn scanlore", 1, true),
+        "and not with the one that scans something else:\n" .. text)
+
+    print("  a not-ready step names the command that retries it")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

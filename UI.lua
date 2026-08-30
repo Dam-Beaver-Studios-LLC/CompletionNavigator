@@ -3782,7 +3782,17 @@ UI.RegisterTab{
                     return
                 end
 
-                local scanned, completed = module.Scan()
+                local scanned, completed, _, answered = module.Scan()
+
+                -- AND IT SAYS WHETHER IT WORKED. 0.87.0. See the note on
+                -- `/cn achievescan`: a scan the client refused recorded
+                -- nothing and this button reported two confident numbers.
+                if (answered or 0) == 0 then
+                    UI.Answer("The game would not answer about achievement "
+                        .. "criteria just now. Try again in a few seconds.")
+
+                    return
+                end
 
                 if CN.NoteSetupStep then
                     CN.NoteSetupStep("Achievements")

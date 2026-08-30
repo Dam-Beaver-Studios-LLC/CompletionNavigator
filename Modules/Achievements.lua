@@ -763,7 +763,27 @@ CN:RegisterCommand{
     handler = function()
         Print("Scanning achievements; this takes a moment.")
 
-        local scanned, completed, nearlyDone = Achievements.Scan()
+        local scanned, completed, nearlyDone, answered = Achievements.Scan()
+
+        -- A COUNT IS NOT A RESULT. 0.87.0.
+        --
+        -- `Scan` returns early when the criteria API answered about nothing:
+        -- it does not prune, does not stamp the per-character record, and
+        -- does not call `MarkScanned`. Both callers threw that fourth value
+        -- away and printed three confident numbers over a store that had
+        -- recorded nothing -- so the login reminder went on nagging and the
+        -- player was never told to try again.
+        --
+        -- `/cn scanlore` was given this sentence in 0.72.0 and the "Rescan
+        -- zones" button beside this one in 0.73.0, under a note reading "a
+        -- rescan the client refused looked exactly like one that worked".
+        -- Third caller, same shape.
+        if (answered or 0) == 0 then
+            Print("The game would not answer about achievement criteria just "
+                .. "now. Try again in a few seconds.")
+
+            return
+        end
 
         Print("Scanned " .. scanned .. " achievements.")
         Print("Completed: " .. completed)

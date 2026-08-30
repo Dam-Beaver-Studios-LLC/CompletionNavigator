@@ -48,9 +48,9 @@ Setup.steps = {
     -- character to scan had recorded. Eleven collections were offered on the
     -- setup screen and the twelfth, which is the one with a per-character
     -- dimension, was not.
-    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true, perCharacter = "HasScanned" },
+    { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true, retry = "scanlore", perCharacter = "HasScanned" },
     { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
-    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements", measured = true, measuredAt = 4, perCharacter = "HasScanned" },
+    { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements", measured = true, measuredAt = 4, retry = "achievescan", perCharacter = "HasScanned" },
     { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },
     { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan",     unit = "mounts" },
     { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan",     unit = "species" },
@@ -245,8 +245,15 @@ function Setup.Report(results)
 
     local units = {}
 
+    -- AND WHICH COMMAND RETRIES EACH ONE. 0.87.0. The not-ready sentence
+    -- below named `/cn scanlore` for every step, because Loremaster was the
+    -- only one that could reach it -- until 0.86.0 made the achievement scan
+    -- reachable too, and sent the player to a command that cannot fix it.
+    local retry = {}
+
     for _, step in ipairs(Setup.steps) do
         units[step.label] = step.unit
+        retry[step.label] = step.retry
     end
 
     local lines = {}
@@ -280,7 +287,8 @@ function Setup.Report(results)
 
             table.insert(lines, result.label .. ": "
                 .. CN.Muted(tostring(result.error) .. CN.DASH
-                    .. "try ") .. CN.Accent("/cn scanlore")
+                    .. "try ") .. CN.Accent("/cn "
+                        .. (retry[result.label] or "setup"))
                 .. CN.Muted(" in a moment."))
         elseif result.error == "module not loaded" then
             -- "UNAVAILABLE" AND "IT THREW" ARE DIFFERENT STATEMENTS.

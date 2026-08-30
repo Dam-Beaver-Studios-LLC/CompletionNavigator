@@ -34757,11 +34757,16 @@ print("\nWhat 0.86.0 changed:")
     assert(speciesID ~= 4242,
         "a companion id is not a species id: " .. tostring(speciesID))
 
-    if speciesID then
-        assert(pets.Store()[speciesID],
-            "and what comes back is a key the pet store actually has: "
-            .. tostring(speciesID))
-    end
+    -- NOT `if speciesID then`. 0.87.0. Every assertion above is satisfied
+    -- by nil -- the name comes from the client stub, and nil is not 4242 --
+    -- so the test named for 0.86.0's headline fix passed in full on exactly
+    -- the defect it was written for.
+    assert(speciesID,
+        "the caged pet resolves to a species: " .. tostring(speciesID))
+
+    assert(pets.Store()[speciesID],
+        "and what comes back is a key the pet store actually has: "
+        .. tostring(speciesID))
 
     print("  a caged pet is looked up by species, not by companion")
 end)()
@@ -35044,6 +35049,263 @@ end)()
     end
 
     print("  a tuning table holds only values that can be read")
+end)()
+
+print("\nWhat 0.87.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- A NAME INDEX IS BUILT WHEN ITS OWN STORE CHANGES.
+    ------------------------------------------------------------
+    -- 0.86.0's pet-name index keyed on `CN.collectionGeneration`, which
+    -- twelve client events move -- a quest turn-in, a reputation tick,
+    -- entering the world -- and none of them writes the pet store. Each
+    -- rebuild is one protected client call per species, so on a full account
+    -- it cost roughly twice the single search it replaced, in the tooltip
+    -- path that fires dozens of times a second.
+    local pets = CN:GetModule("Pets")
+
+    assert(pets.NameIndex and pets.SpeciesByName, "the index exists")
+
+    local calls = 0
+
+    local realName = CN.Blizzard.GetPetName
+
+    CN.Blizzard.GetPetName = function(...)
+        calls = calls + 1
+        return realName(...)
+    end
+
+    pets.NameIndex()
+
+    calls = 0
+
+    -- Something unrelated to pets happens, repeatedly.
+    for _ = 1, 5 do
+        CN.NoteCollectionChanged()
+        pets.NameIndex()
+    end
+
+    CN.Blizzard.GetPetName = realName
+
+    assert(calls == 0,
+        "an unrelated collection event does not rebuild the pet name index: "
+        .. calls .. " client call(s)")
+
+    ------------------------------------------------------------
+    -- AND IT IS BUILT AGAIN WHEN THE PET STORE IS.
+    ------------------------------------------------------------
+    local revisionBefore = pets.nameRevision
+
+    pets.Scan()
+
+    assert(pets.nameRevision > revisionBefore,
+        "a pet scan does invalidate it: " .. tostring(revisionBefore)
+        .. " -> " .. tostring(pets.nameRevision))
+
+    ------------------------------------------------------------
+    -- AND THE TOOLTIP PATH DOES NOT WALK THE JOURNAL AT ALL.
+    ------------------------------------------------------------
+    -- Correctness is identical either way -- the search finds the same
+    -- species the index does -- so only the COST tells the two apart, and
+    -- cost is the whole reason this index exists. `Pets.Resolve` lowercases
+    -- and substring-matches every stored species; the index is one lookup.
+    pets.NameIndex()
+
+    local walked = 0
+
+    local realStore = CN.Account
+
+    calls = 0
+
+    local realGetName = CN.Blizzard.GetPetName
+
+    CN.Blizzard.GetPetName = function(...)
+        calls = calls + 1
+        return realGetName(...)
+    end
+
+    for _ = 1, 20 do
+        CN.Blizzard.GetPetSpeciesFromItem(801)
+    end
+
+    CN.Blizzard.GetPetName = realGetName
+
+    assert(calls == 0,
+        "twenty item hovers ask the journal about no species at all: "
+        .. calls .. " client call(s)")
+
+    print("  a name index is rebuilt when its own store changes")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD JOURNAL IS NOT INDEXED AS EIGHTEEN HUNDRED PLACEHOLDERS.
+    ------------------------------------------------------------
+    -- `Pets.NameOf` never returns nil -- it falls back to "Pet 1234" -- so a
+    -- gate on "is this a non-empty string" cannot tell a client that has not
+    -- loaded the journal from one that has. The store is persisted, so at
+    -- login it is already full: the index built in that window was entirely
+    -- placeholders that match no item name, and it stayed cached.
+    local pets = CN:GetModule("Pets")
+
+    local realName = CN.Blizzard.GetPetName
+
+    CN.Blizzard.GetPetName = function() return nil end
+
+    pets.nameRevision = (pets.nameRevision or 0) + 1
+
+    local cold = pets.NameIndex()
+
+    CN.Blizzard.GetPetName = realName
+
+    for key in pairs(cold) do
+        assert(not string.find(key, "^pet %d"),
+            "a species the client has not named is left out, not indexed "
+            .. "under a placeholder: " .. tostring(key))
+    end
+
+    print("  a cold journal is not indexed as placeholders")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A QUEST ROW USES THE ADDON'S OWN LOCATION RESOLVER.
+    ------------------------------------------------------------
+    -- The raw client call is only the first of four sources
+    -- `Quests.GetLocation` layers together -- the curated turn-in spot, the
+    -- player's own `/cn where` override, and the static database. This row
+    -- wins the aggregate dedup, and the dedup never merges coordinates, so
+    -- whatever it did not know was thrown away, including a location the
+    -- player had recorded by hand.
+    local source = CN_TEST_ReadAddonFile("Modules/Inventory.lua")
+
+    assert(source, "Modules/Inventory.lua must be readable")
+
+    assert(string.find(source, "questModule.GetLocation(row.questID)", 1, true),
+        "the nearly-done row asks the module that owns the answer")
+
+    ------------------------------------------------------------
+    -- AND A MAP WITH NO POINT ON IT IS STILL A JOURNEY.
+    ------------------------------------------------------------
+    -- `GetQuestWaypoint` answers with a map and no point as a normal result,
+    -- and `CN.TravelCost` prices exactly that shape. Guarding the call on the
+    -- POINT fell through to the "no location at all" constant, so a quest on
+    -- another continent was charged the near cost.
+    local far  = CN.TravelCost(2022, nil, nil)
+    local here = CN.TravelCost(select(1, CN.GetPlayerPosition()), nil, nil)
+
+    assert(far > here,
+        "another map costs more than this one, even with no point: "
+        .. tostring(far) .. " vs " .. tostring(here))
+
+    for line in string.gmatch(source, "[^\n]+") do
+        if not string.find(line, "^%s*%-%-") then
+            assert(not string.find(line, "if mapID and x and y then", 1, true),
+                "the row prices a map with no point rather than skipping it")
+        end
+    end
+
+    print("  a quest row uses the addon's own location resolver")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCAN THE CLIENT REFUSED SAYS SO, WHEREVER IT IS RUN FROM.
+    ------------------------------------------------------------
+    -- `Achievements.Scan` returns early without pruning, stamping or marking
+    -- when the criteria API answered about nothing -- and both callers threw
+    -- that away and printed three confident numbers over a store that had
+    -- recorded nothing. `/cn scanlore` was given this sentence three
+    -- releases ago and the button beside this one two releases ago.
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    local realCriteria = GetAchievementNumCriteria
+
+    GetAchievementNumCriteria = nil
+
+    CN.HandleSlashCommand("achievescan")
+
+    GetAchievementNumCriteria = realCriteria
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    assert(string.find(text, "would not answer", 1, true),
+        "the command says the client refused:\n" .. text)
+
+    assert(not string.find(text, "Completed:", 1, true),
+        "and does not print a confident count over a store it did not "
+        .. "write:\n" .. text)
+
+    -- The window's button reads the same return.
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+
+    assert(ui and string.find(ui, "local scanned, completed, _, answered",
+            1, true),
+        "and so does the button beside it")
+
+    print("  a refused scan says so wherever it is run from")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AND THE COMMAND IT NAMES CAN ACTUALLY RETRY IT.
+    ------------------------------------------------------------
+    -- The not-ready sentence named `/cn scanlore` for every step, because
+    -- Loremaster was the only one that could reach it. 0.86.0 made the
+    -- achievement step reachable and it kept sending the player to a command
+    -- that cannot fix it.
+    local setupModule = CN:GetModule("Setup")
+
+    local named = 0
+
+    for _, step in ipairs(setupModule.steps) do
+        if step.measured then
+            named = named + 1
+
+            assert(step.retry and CN.commands[step.retry],
+                "a step that can report 'not ready' names a command that "
+                .. "retries it: " .. tostring(step.label) .. " -> "
+                .. tostring(step.retry))
+        end
+    end
+
+    assert(named >= 2, "both measured steps were checked: " .. named)
+
+    ------------------------------------------------------------
+    -- AND THE REPORT PRINTS THAT COMMAND, NOT A FIXED ONE.
+    ------------------------------------------------------------
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    setupModule.Report({
+        { label = "Achievements", ok = nil,
+          error = "the game was not ready yet" },
+    })
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    assert(string.find(text, "/cn achievescan", 1, true),
+        "the achievements step is retried with its own command:\n" .. text)
+
+    assert(not string.find(text, "/cn scanlore", 1, true),
+        "and not with the one that scans something else:\n" .. text)
+
+    print("  a not-ready step names the command that retries it")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

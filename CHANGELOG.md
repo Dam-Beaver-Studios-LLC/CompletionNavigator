@@ -7,6 +7,51 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.87.0]
+
+**Last release fixed how a caged pet in your bags is identified, and paid for
+it with a full search of the pet journal on every item you hover.** That
+lookup runs from the tooltip and from the bag sweep â€” the two busiest paths in
+the addon â€” and the search it was routed through walks every species you have
+ever seen, lowercasing each name. This addon has removed exactly that shape
+from two other hot paths and left a note each time. It is an index now, built
+once and only when the pet store actually changes.
+
+Everything in this release is something 0.86.0 broke or left half-done.
+
+### Fixed
+
+- **Hovering an item no longer searches the whole pet journal.**
+- **The first version of that index was worse than the search.** It rebuilt
+  whenever *any* collection counter moved â€” a quest turn-in, a reputation
+  tick, walking through a portal â€” none of which touch pets, and each rebuild
+  asked the client about every species. It also could not tell a journal that
+  had not loaded yet from one that had, so an index built in the first seconds
+  after login was made entirely of placeholders and stayed cached: every caged
+  pet invisible again until something unrelated happened. Both were mine, both
+  are fixed, and both are now tested.
+- **A quest one objective from done threw away a location you recorded by
+  hand.** Last release taught that row to carry coordinates, and asked the raw
+  game call â€” which is only the first of four places the addon looks. The
+  curated turn-in spot, your own `/cn where` override and the shipped database
+  were all discarded, because this row wins against the quest tracker's own
+  and the merge never combines coordinates.
+- **A quest on another continent was priced as if it were in this zone.** The
+  game answers "this map, no exact point" as a normal result, and the router
+  prices that correctly â€” but the new code only asked when it had an exact
+  point, and fell through to the near cost. Thirty-two points of advantage, on
+  a scale where finishing something is worth four: the exact symptom last
+  release's note claims to have removed.
+- **`/cn achievescan` and the window's achievement button reported a refused
+  scan as a success**, printing confident counts over a store that recorded
+  nothing while the login reminder went on nagging. `/cn scanlore` was given
+  this message three releases ago and the button beside this one two releases
+  ago; this was the third caller.
+- **`/cn setup` told you to retry with the wrong command.** Its "the game was
+  not ready yet" line named the quest-achievement scan for every step, because
+  that was the only step that could reach it â€” until last release made the
+  achievement scan reachable too.
+
 ## [0.86.0]
 
 **`/cn selftest` has been reporting a red FAIL on every Retail client since

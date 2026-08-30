@@ -2532,7 +2532,7 @@ mutate "Modules/Filters.lua" \
     "an id that is not a number is described with the internal enum"
 
 mutate "Modules/Setup.lua" \
-    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\", measured = true, perCharacter = \"HasScanned\" }," \
+    "    { key = \"loremaster\",  label = \"Loremaster\",  module = \"Loremaster\",  fn = \"Scan\",     unit = \"quest achievements\", measured = true, retry = \"scanlore\", perCharacter = \"HasScanned\" }," \
     "" \
     "a new character never scans the one store with a per-character split"
 
@@ -3963,7 +3963,8 @@ mutate "UI.lua" \
 # ---- 0.86.0 ----
 
 mutate "Providers/BlizzardWorld.lua" \
-    "    return pets and pets.Resolve and pets.Resolve(name) or nil, name" \
+    "    return pets and pets.SpeciesByName and pets.SpeciesByName(name) or nil,
+        name" \
     "    return select(4, C_PetJournal.GetPetInfoByItemID(itemID)), name" \
     "a caged pet in your bags is looked up by companion id"
 
@@ -4022,6 +4023,60 @@ mutate "Modules/Preference.lua" \
     [CN.objectiveTypes.INSTANCE]    = 5400,
 }" \
     "a tuning table holds a number nothing can read"
+
+# ---- 0.87.0 ----
+
+mutate "Modules/Pets.lua" \
+    "    return CN.Shortlist(\"PetNames\", Pets.nameRevision, function()" \
+    "    return CN.Shortlist(\"PetNames\", CN.collectionGeneration, function()" \
+    "the pet name index is rebuilt by every unrelated collection event"
+
+mutate "Modules/Pets.lua" \
+    "            local name = CN.Blizzard.GetPetName(id)" \
+    "            local name = NameOf(id, Store()[id])" \
+    "a cold journal is indexed as eighteen hundred placeholders"
+
+mutate "Modules/Pets.lua" \
+    "    Pets.nameRevision = (Pets.nameRevision or 0) + 1" \
+    "    Pets.nameRevision = (Pets.nameRevision or 0)" \
+    "a pet scan leaves the name index stale"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    return pets and pets.SpeciesByName and pets.SpeciesByName(name) or nil," \
+    "    return pets and pets.Resolve and pets.Resolve(name) or nil," \
+    "every item tooltip searches the whole pet journal"
+
+mutate "Modules/Inventory.lua" \
+    "                mapID, x, y = questModule.GetLocation(row.questID)" \
+    "                mapID, x, y = Blizzard.GetQuestWaypoint(row.questID)" \
+    "the nearly-done row throws away a location you recorded by hand"
+
+mutate "Modules/Inventory.lua" \
+    "            if mapID then
+                travel, costed = CN.TravelCost(mapID, x, y)
+            end" \
+    "            if mapID and x and y then
+                travel, costed = CN.TravelCost(mapID, x, y)
+            end" \
+    "a quest on another continent is charged the near cost"
+
+mutate "Modules/Achievements.lua" \
+    "        if (answered or 0) == 0 then
+            Print(\"The game would not answer about achievement criteria just \"" \
+    "        if false then
+            Print(\"The game would not answer about achievement criteria just \"" \
+    "/cn achievescan reports a refused scan as a success"
+
+mutate "UI.lua" \
+    "                local scanned, completed, _, answered = module.Scan()" \
+    "                local scanned, completed = module.Scan()
+                local answered = 1" \
+    "the achievement button reports a refused scan as a success"
+
+mutate "Modules/Setup.lua" \
+    "                        .. (retry[result.label] or \"setup\")" \
+    "                        .. \"scanlore\"" \
+    "a not-ready achievement scan sends you to the wrong command"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

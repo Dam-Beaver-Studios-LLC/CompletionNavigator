@@ -1449,7 +1449,11 @@ function Blizzard.GetPetSpeciesFromItem(itemID)
 
     local pets = CN:GetModule("Pets")
 
-    return pets and pets.Resolve and pets.Resolve(name) or nil, name
+    -- AN EXACT MATCH, NOT A SEARCH. See `Pets.SpeciesByName`: this is called
+    -- from every item tooltip and from the bag sweep, and `Pets.Resolve` is
+    -- a substring scan over the whole journal.
+    return pets and pets.SpeciesByName and pets.SpeciesByName(name) or nil,
+        name
 end
 
 -- Returns true/false only for items that actually have an appearance, and nil

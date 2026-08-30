@@ -106,6 +106,9 @@ function Pets.Scan()
         end
     end)
 
+    -- The name index is now stale. See `Pets.NameIndex`.
+    Pets.nameRevision = (Pets.nameRevision or 0) + 1
+
     CN.MarkScanned("pets")
 
     return seen, owned, missing
@@ -153,6 +156,74 @@ end
 ------------------------------------------------------------
 -- LOOKUP
 ------------------------------------------------------------
+
+-- SPECIES BY EXACT NAME, IN ONE LOOKUP. 0.87.0.
+--
+-- `Pets.Resolve` is a substring search over every species the journal has --
+-- roughly eighteen hundred rows, lowercasing each name, allocating a table
+-- per match and sorting the result. That is the right shape for a player
+-- typing `/cn chase pet frost`, and the wrong one for a tooltip.
+--
+-- 0.86.0 correctly stopped reading a species id the client does not return
+-- and started resolving the NAME instead -- and routed the tooltip and the
+-- bag sweep through that search. This addon has removed exactly that from
+-- two other hot paths and left a note each time: "twenty-five hundred
+-- iterations and five thousand string allocations to answer a question about
+-- one item... three per cent of a frame, per mouseover, and a bag sweep
+-- fires dozens a second."
+--
+-- A caged pet's item name IS the species name, so the hot path wants an
+-- exact match and nothing else. Built once per scan, on the counter the
+-- store already bumps, in the same idiom `Professions.NameIndex` uses.
+-- ON THE REVISION THIS STORE BUMPS, NOT THE COLLECTION COUNTER. 0.87.0.
+--
+-- The first version of this index keyed on `CN.collectionGeneration`, on the
+-- reasoning that it is "the counter the store already bumps". It is not:
+-- twelve client events move it -- a quest turn-in, a reputation tick, a
+-- transmog, entering the world -- and none of them writes the pet store.
+-- Each rebuild is one protected client call per species, so on an
+-- eighteen-hundred-species account the index was rebuilt at roughly TWICE
+-- the cost of the single search it exists to replace, in the tooltip path
+-- that fires dozens of times a second.
+--
+-- `Professions.nameRevision` is the idiom this claimed to copy, and it is
+-- bumped only where its store is written. So is this.
+Pets.nameRevision = Pets.nameRevision or 0
+
+function Pets.NameIndex()
+    return CN.Shortlist("PetNames", Pets.nameRevision, function()
+        local index = {}
+
+        for id in pairs(Store()) do
+            -- THE JOURNAL'S OWN NAME, NOT `NameOf`'s PLACEHOLDER. 0.87.0.
+            --
+            -- `NameOf` never returns nil: it falls back to "Pet 1234" for a
+            -- species the client has not named yet. So a gate on "is this a
+            -- non-empty string" cannot tell a cold journal from a loaded
+            -- one, and an index built in the seconds after login -- against
+            -- a store that is already full, because it is persisted -- was
+            -- eighteen hundred placeholders that match no item name.
+            --
+            -- `Inventory.KindOf` refuses to cache exactly this miss one
+            -- layer up; caching it here would have defeated that.
+            local name = CN.Blizzard.GetPetName(id)
+
+            if type(name) == "string" and name ~= "" then
+                index[string.lower(name)] = id
+            end
+        end
+
+        return index
+    end)
+end
+
+function Pets.SpeciesByName(text)
+    if type(text) ~= "string" or text == "" then
+        return nil
+    end
+
+    return Pets.NameIndex()[string.lower(text)]
+end
 
 function Pets.Resolve(text)
     local speciesID = CN.ToID(text)
