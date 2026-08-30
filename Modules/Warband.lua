@@ -34,7 +34,8 @@ function Warband.Roster()
             race     = character.race,
             level    = character.level,
             faction  = character.faction,
-            spec     = character.specName,
+            -- RESOLVED HERE, NOT STORED. 0.82.0. See `Character.lua`.
+            spec     = CN.Blizzard.GetSpecName(character.specID),
             lastSeen = character.lastSeen,
             isCurrent = (key == CN.characterKey),
 
@@ -414,8 +415,15 @@ CN:RegisterCommand{
         for _, row in ipairs(rows) do
             local marker = row.isCurrent and "|cff73b873>|r " or "  "
 
+            -- AND THE SPEC, WHICH WAS COLLECTED AND NEVER SHOWN. 0.82.0.
+            --
+            -- `Roster()` has carried a `spec` field since 0.62.0 and nothing
+            -- read it, so the addon has been writing a specialization to disk
+            -- every login and never telling anybody. "Which of these is my
+            -- tank" is a Warband question, and this is the Warband list.
             CN.PrintLine(marker .. row.key
                 .. " |cff8a8f96" .. tostring(row.level) .. " "
+                .. (row.spec and (row.spec .. " ") or "")
                 .. CN.TokenLabel(row.class or "?")
                 .. (row.faction
                     and (" " .. CN.FactionLabel(row.faction)) or "") .. "|r")

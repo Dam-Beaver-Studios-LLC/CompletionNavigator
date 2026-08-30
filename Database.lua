@@ -1590,6 +1590,47 @@ CN.migrations = {
                 .. " appearance timestamps nothing reads.")
         end
     end,
+
+    -- THE TWO STORES MIGRATIONS 5 AND 31 BOTH MISSED.
+    --
+    -- Migration 5 stripped `firstSeen`/`lastSeen` from four account stores
+    -- because they were written on every scan and read by nothing. Migration
+    -- 31 caught `appearances`. `mounts` -- roughly nine hundred rows, the
+    -- largest of the lot -- and `reputations` were missed by both, and their
+    -- writers were still putting the fields back on every login until 0.82.0.
+    --
+    -- Written as a table of store to fields, so a fifth store found later is
+    -- one line rather than another migration.
+    [32] = function(db)
+        local dead = {
+            mounts      = { "firstSeen", "lastSeen" },
+            reputations = { "lastSeen" },
+        }
+
+        local dropped = 0
+
+        for storeName, fields in pairs(dead) do
+            local store = db.account and db.account[storeName]
+
+            if type(store) == "table" then
+                for _, record in pairs(store) do
+                    if type(record) == "table" then
+                        for _, field in ipairs(fields) do
+                            if record[field] ~= nil then
+                                record[field] = nil
+                                dropped = dropped + 1
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " stored values nothing reads.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

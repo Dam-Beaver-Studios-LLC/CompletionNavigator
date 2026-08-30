@@ -440,8 +440,12 @@ CN.RegisterCandidateProvider("Vendors", function()
                 return nil
             end
 
-            if CN.IsIgnored(CN.objectiveTypes.RECIPE, itemID)
-                or CN.IsDeferred(CN.objectiveTypes.RECIPE, itemID) then
+            -- HIDDEN BY THE ID THE ROW WILL CARRY. 0.82.0. See the note on
+            -- the objective's `id` below: 0.81.0 fixed the join and left the
+            -- identity in the item-id space, so a hide written here could
+            -- not be read by the eligibility checker.
+            if CN.IsIgnored(CN.objectiveTypes.RECIPE, recipeID)
+                or CN.IsDeferred(CN.objectiveTypes.RECIPE, recipeID) then
                 return nil
             end
 
@@ -505,7 +509,26 @@ CN.RegisterCandidateProvider("Vendors", function()
             local travel, costed = CN.TravelCost(seller.mapID, seller.x, seller.y)
 
             return CN.NewObjective({
-                id              = itemID,
+                -- THE ROW IS THE RECIPE, NOT THE ITEM. 0.82.0.
+                --
+                -- 0.81.0 fixed the JOIN in this provider -- a merchant item
+                -- id was being indexed into two trade-skill-keyed tables --
+                -- and stopped one function short: the objective it built
+                -- still carried the ITEM id as its identity.
+                --
+                -- `Professions.lua` registers the RECIPE eligibility checker,
+                -- and it indexes `character.recipes`, written from
+                -- `C_TradeSkillUI.GetAllRecipeIDs`. So `CN.Explain` on one of
+                -- these rows asked a recipe-id table an item-id question --
+                -- the identical collision, one call later. On a number that
+                -- happened to collide it answered COMPLETED and the arrow was
+                -- silently retired from a recipe the player had not bought,
+                -- naming an unrelated one as the reason.
+                --
+                -- The merchant item is kept beside it, because that is what
+                -- the player buys and what the vendor store is keyed by.
+                id              = recipeID,
+                itemID          = itemID,
                 type            = CN.objectiveTypes.RECIPE,
                 name            = recipeName,
                 mapID           = seller.mapID,

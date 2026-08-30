@@ -3753,6 +3753,78 @@ mutate "Providers/BlizzardWorld.lua" \
         end" \
     "an outdoor zone is reported as being inside an instance"
 
+# ---- 0.82.0 ----
+
+mutate "Modules/Waiting.lua" \
+    "    if #expiring > 0
+        and not CN.IsIgnored(CN.objectiveTypes.CURRENCY, \"mail\")
+        and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, \"mail\") then" \
+    "    if #expiring > 0 then" \
+    "the mail row cannot be hidden and says it was"
+
+mutate "Modules/Capture.lua" \
+    "        if not measured then
+            return nil, \"the client would not convert this map\"
+        end" \
+    "        if false then
+            return nil, \"the client would not convert this map\"
+        end" \
+    "a bug report records every map as one yard square"
+
+mutate "Modules/Contribute.lua" \
+    "        local dependency = CN.GetDependency(
+            CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID))" \
+    "        local dependency = nil" \
+    "forgetting an imported chain leaves every edge it created"
+
+mutate "Modules/Harvest.lua" \
+    "            observedRequires = prerequisites,
+            origin           = \"harvested\",
+        })" \
+    "            observedRequires = prerequisites,
+        })" \
+    "your own observation is reported as somebody else's import"
+
+mutate "Providers/BlizzardCollections.lua" \
+    "        name = (name:gsub(\"^%s+\", \"\"):gsub(\"%s+$\", \"\"))" \
+    "        name = name" \
+    "every title is printed with the client's padding"
+
+mutate "Providers/StaticData.lua" \
+    "        return false, CN.FactionLabel(record.faction) .. \" only\", \"FACTION\"" \
+    "        return false, CN.TokenLabel(record.faction) .. \" only\", \"FACTION\"" \
+    "a faction gate is the one untranslated word on the screen"
+
+mutate "Modules/Warband.lua" \
+    "            spec     = CN.Blizzard.GetSpecName(character.specID)," \
+    "            spec     = nil," \
+    "the Warband list drops the specialization it collected"
+
+mutate "Database.lua" \
+    "        local dead = {
+            mounts      = { \"firstSeen\", \"lastSeen\" }," \
+    "        local dead = {
+            mountsNotAStore = { \"firstSeen\", \"lastSeen\" }," \
+    "nine hundred mount timestamps stay on disk for ever"
+
+mutate "Modules/Mounts.lua" \
+    "                collected         = mount.isCollected," \
+    "                collected         = mount.isCollected,
+                lastSeen          = time()," \
+    "every login writes nine hundred timestamps nothing reads"
+
+mutate "Modules/Sets.lua" \
+    "            Print(CN.Count(#rows, \"set\") .. \" read\"" \
+    "            Print(#rows .. \" sets read\"" \
+    "/cn sets says 1 sets"
+
+mutate "Modules/Vendors.lua" \
+    "                id              = recipeID,
+                itemID          = itemID," \
+    "                id              = itemID,
+                itemID          = itemID," \
+    "a vendor recipe is explained by asking a recipe table an item question"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

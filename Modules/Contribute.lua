@@ -188,6 +188,20 @@ function Contribute.Import(text)
     return true, nil, count, added
 end
 
+-- AND THE EDGES GO WITH IT. 0.82.0.
+--
+-- This cleared the account store and left the DEPENDENCY GRAPH, which is
+-- where an imported chain actually does its work: `Import` publishes each one
+-- through `CN.AddDependency`, that function only ever merges, and nothing in
+-- the addon removes an edge. So `/cn contribute forget` printed "Forgot 47
+-- imported chains" and every quest they named stayed LOCKED, still explained
+-- as "from an imported chain, not from your own play", until the player
+-- reloaded. It did not invalidate the candidate cache either, which `Import`
+-- does -- so the list stayed as the import had left it.
+--
+-- Only edges this module published are withdrawn. A quest the player's own
+-- harvest also observed keeps its own edge, which is why both writers now
+-- state their provenance.
 function Contribute.Forget()
     local store = CN.Account("contributed")
 
@@ -195,7 +209,17 @@ function Contribute.Forget()
 
     for questID in pairs(store) do
         store[questID] = nil
+
+        local dependency = CN.GetDependency(
+            CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID))
+
+        if dependency and dependency.origin == "contributed" then
+            dependency.observedRequires = nil
+            dependency.origin           = nil
+        end
     end
+
+    CN.InvalidateCandidates()
 
     return count
 end

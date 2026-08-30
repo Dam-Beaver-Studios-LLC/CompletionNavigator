@@ -33,10 +33,10 @@ read_globals = {
     "GetCursorPosition", "GetItemInfo", "GetMerchantItemInfo",
     "GetMerchantItemLink", "GetMerchantNumItems", "GetNumCompletedAchievements",
     "GetNumTitles", "GetProfessionInfo", "GetProfessions", "GetQuestResetTime",
-    "GetRealmName", "GetSpecialization", "GetSpecializationInfo", "GetTitleName",
+    "GetRealmName", "GetSpecialization", "GetSpecializationInfo", "GetSpecializationInfoByID", "GetTitleName",
     "GetZoneText", "IsTitleKnown", "PlayerHasToy", "UnitClass", "UnitExists",
     "UnitFactionGroup", "UnitGUID", "UnitLevel", "UnitName", "UnitRace",
-    "UnitSex", "PlaySound", "GetTime",
+    "PlaySound", "GetTime",
 
     -- 0.56.0. `UnitIsUnit` tells the shared-quest count that the raid unit it
     -- is asking about is the player themselves; `BankFrame` is the frame the

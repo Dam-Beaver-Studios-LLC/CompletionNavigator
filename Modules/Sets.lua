@@ -310,7 +310,10 @@ CN:RegisterCommand{
         else
             local nearly = Sets.NearlyComplete()
 
-            Print(#rows .. " sets read"
+            -- `CN.Count` EXISTS FOR THIS. 0.82.0. Two headline lines in
+            -- this command said "1 sets" and "1 activities", in a file that
+            -- already uses the helper twenty lines up.
+            Print(CN.Count(#rows, "set") .. " read"
                 .. (examined and examined >= Sets.scanCap
                     and (" |cff8a8f96(capped at " .. Sets.scanCap
                         .. "; there are more)|r") or "") .. ".")
@@ -343,7 +346,8 @@ CN:RegisterCommand{
         local queues, queueReadable = Sets.Queues()
 
         if queueReadable and #queues > 0 then
-            Print(#queues .. " activities you are eligible to queue for.")
+            Print(CN.Count(#queues, "activity", "activities")
+                .. " you are eligible to queue for.")
             Print("|cff8a8f96The addon reads that list. It does not queue you "
                 .. "for anything.|r")
         end

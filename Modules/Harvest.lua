@@ -393,8 +393,19 @@ function Harvest.PublishConfident()
     -- The store is reached through `WriteObservedPrerequisites` below, which
     -- owns the rule about when a stored inference may be rewritten.
     for questID, prerequisites in pairs(Harvest.AllConfident()) do
+        -- SAYING WHOSE OBSERVATION THIS IS. 0.82.0.
+        --
+        -- `CN.AddDependency` merges field by field and clears nothing, and
+        -- `Modules/Contribute.lua` writes `origin = "contributed"` through
+        -- the same door -- earlier in the `.toc`, so its login hook runs
+        -- first. This publisher then overwrote `observedRequires` and left
+        -- that origin standing, so the player's OWN three-character
+        -- observation was reported by `/cn why` as "from an imported chain,
+        -- not from your own play" -- a false provenance claim in the one
+        -- place `Contribute.lua` calls "the whole safety model".
         CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
             observedRequires = prerequisites,
+            origin           = "harvested",
         })
 
         published = published + 1

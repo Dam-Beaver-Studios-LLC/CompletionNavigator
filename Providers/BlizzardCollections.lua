@@ -598,6 +598,38 @@ function Blizzard.GetTitleName(titleID)
 
     local ok, name = pcall(GetTitleName, titleID)
 
+    -- TRIMMED, LIKE ITS SIBLING TWO HUNDRED LINES UP. 0.82.0.
+    --
+    -- The client hands back title fragments padded for concatenation --
+    -- " the Explorer", "Ambassador " -- which is why `Blizzard.GetTitles`
+    -- strips them. This function was added later, for the one path that had
+    -- no live lookup, and did not. `Titles.NameOf` has no store fallback by
+    -- design, so this IS the name: `/cn title` printed a leading space, and
+    -- the addon matched on the trimmed string while displaying the padded
+    -- one. The harness could not see it -- its fixture is already trimmed.
+    if ok and type(name) == "string" then
+        name = (name:gsub("^%s+", ""):gsub("%s+$", ""))
+
+        if name ~= "" then
+            return name
+        end
+    end
+
+    return nil
+end
+
+-- A specialization's name, in the reader's language, from its stable id.
+--
+-- The addon stores the ID per character and resolves the WORD here, rather
+-- than persisting whatever language the alt happened to be levelled in --
+-- the rule six migrations in this project exist to enforce.
+function Blizzard.GetSpecName(specID)
+    if not GetSpecializationInfoByID or not specID then
+        return nil
+    end
+
+    local ok, _, name = pcall(GetSpecializationInfoByID, specID)
+
     if ok and type(name) == "string" and name ~= "" then
         return name
     end

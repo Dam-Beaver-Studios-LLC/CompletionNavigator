@@ -7,6 +7,65 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.82.0]
+
+**The mail reminder could not be dismissed.** It carries the highest fixed
+value of anything in its file, so it sat at the top of `/cn next` â€” and the
+provider that builds it skipped the hide-and-defer checks its two neighbouring
+loops apply. Pressing **Ignore** said *"Ignored: 3 mail expiring"*, wrote the
+entry, listed it in `/cn hidden`, and put the row straight back on the next
+refresh. Defer was equally inert. This is a sweep release: it audits code that
+had not been revised in fifteen to thirty releases.
+
+### Fixed
+
+- **The mail row can be hidden and deferred**, like everything else. The suite
+  now checks every single-row provider rather than the three that were known.
+- **A vendor-sold recipe could retire your waypoint.** 0.81.0 fixed how that
+  provider *finds* a recipe and stopped one function short: the row it built
+  still carried the merchant's item id as its identity, and the code that
+  decides whether something is already done looks that id up in a table keyed
+  by trade-skill recipe ids. On a collision it answered "already known" and
+  the arrow silently gave up on a recipe you had not bought, naming an
+  unrelated one as the reason.
+- **`/cn contribute forget` did not forget.** It cleared the stored chains and
+  left the dependency graph they had been published into â€” so every quest they
+  named stayed locked, still explained as *"from an imported chain, not from
+  your own play"*, until you reloaded.
+- **Your own observations were being credited to somebody else's import.**
+  Both the importer and your own quest-chain harvest write into the same
+  graph, and only the importer stamped where its data came from â€” so a quest
+  seen on three of your own characters was reported as imported. That is the
+  one distinction the import feature calls its whole safety model.
+- **`/cn capture` could manufacture the defect it exists to catch.** The
+  map-span capture ignored the flag saying the client had refused to answer,
+  and recorded the refusal's placeholder â€” "this map is one yard square" â€” as
+  a successful measurement, in the file you paste into a bug report. The
+  refusal happens during a loading screen, which is exactly when someone runs
+  that command.
+- **Titles printed with the client's padding.** The game returns them padded
+  for concatenation â€” `" the Explorer"` â€” and one of the two places that read
+  a title trimmed it while the other, which is the one everything now uses,
+  did not. The addon was matching one string and showing another.
+- **A faction gate was the one untranslated word on the screen.** `/cn why` on
+  a faction-locked quest printed "Alliance only" on a German client, three
+  lines under a correctly translated class list.
+- **`/cn petscan`'s three numbers did not add up** â€” unobtainable species were
+  counted in the total and in neither figure beneath it. `/cn sets` said
+  "1 sets read" and "1 activities".
+
+### Changed
+
+- **`/cn who` shows each character's specialization.** The addon has been
+  recording it since 0.62.0 and never once displaying it. It is stored as the
+  game's own id now rather than as a word, so it reads in your language rather
+  than in whichever language the alt was levelled in.
+- **Roughly nine hundred mount rows, and every reputation row, stopped
+  carrying timestamps nothing reads** â€” written on every login and saved on
+  every logout since the stores were created. Two earlier cleanups removed the
+  same field from five other stores and missed these two. Existing saved data
+  is cleaned up once, on login.
+
 ## [0.81.0]
 
 **Being inside an instance is a fact about the doorway, not about the

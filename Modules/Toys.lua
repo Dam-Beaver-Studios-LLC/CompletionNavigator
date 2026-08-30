@@ -13,14 +13,16 @@ local DebugPrint = CN.DebugPrint
 local Blizzard   = CN.Blizzard
 
 -- A toy's name, from the client, falling back to an older database's copy.
-function Toys.NameOf(itemID, record)
+function Toys.NameOf(itemID)
     local live = CN.Blizzard.GetToyName and CN.Blizzard.GetToyName(itemID)
 
     if live then
         return live
     end
 
-    return (record and record.name) or ("Toy " .. tostring(itemID))
+    -- Migration 16 deleted `name` from every toy row, so the stored
+    -- fallback this used to consult was always nil. 0.82.0.
+    return "Toy " .. tostring(itemID)
 end
 
 local function Store()
@@ -110,7 +112,7 @@ function Toys.Resolve(text)
     local matches = {}
 
     for id, record in pairs(Store()) do
-        local heldName = Toys.NameOf(id, record)
+        local heldName = Toys.NameOf(id)
 
         if heldName and string.find(string.lower(heldName), needle, 1, true) then
             table.insert(matches, { id = id, name = heldName })
@@ -222,7 +224,7 @@ CN.RegisterCandidateProvider("Toys", function()
             return CN.NewObjective({
                 id              = itemID,
                 type            = CN.objectiveTypes.TOY,
-                name            = Toys.NameOf(itemID, record),
+                name            = Toys.NameOf(itemID),
                 mapID           = seller.mapID,
                 x               = seller.x,
                 y               = seller.y,
@@ -266,7 +268,7 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.TOY, function(itemID)
     end
 
     if record.collected then
-        return states.COMPLETED, "Already collected", Toys.NameOf(itemID, record)
+        return states.COMPLETED, "Already collected", Toys.NameOf(itemID)
     end
 
     return states.AVAILABLE, nil, nil
@@ -334,7 +336,7 @@ CN:RegisterCommand{
 
         local record = Store()[itemID]
 
-        Print(Toys.NameOf(itemID, record)
+        Print(Toys.NameOf(itemID)
             .. " |cff8a8f96(" .. itemID .. ")|r")
         Print("Collected: " .. CN.YesNo(record.collected))
     end,

@@ -278,7 +278,7 @@ function Filters.DescribeObjective(objectiveType, id)
         local mounts = CN:GetModule("Mounts")
 
         if mounts and mounts.NameOf then
-            return mounts.NameOf(numericID, CN.Account("mounts")[numericID])
+            return mounts.NameOf(numericID)
         end
 
         return "Mount " .. numericID
@@ -294,7 +294,7 @@ function Filters.DescribeObjective(objectiveType, id)
         local toys = CN:GetModule("Toys")
 
         if toys and toys.NameOf then
-            return toys.NameOf(numericID, CN.Account("toys")[numericID])
+            return toys.NameOf(numericID)
         end
 
         return "Toy " .. numericID

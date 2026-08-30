@@ -614,7 +614,6 @@ function GetRealmName() return "Testrealm" end
 function UnitClass() return "Paladin", "PALADIN" end
 function UnitRace() return "Human", "Human" end
 function UnitLevel() return 80 end
-function UnitSex() return 2 end
 function UnitFactionGroup() return "Alliance" end
 
 -- Mount state, so speed sampling can be bucketed. Settable, because the
@@ -654,6 +653,13 @@ CN_TEST_BIND_LOCATION = "Test Inn"
 function GetBindLocation() return CN_TEST_BIND_LOCATION end
 function GetSpecialization() return 3 end
 function GetSpecializationInfo() return 70, "Retribution" end
+
+-- Resolves the WORD from the stable id, which is how the addon stores it.
+function GetSpecializationInfoByID(specID)
+    local names = { [70] = "Retribution", [66] = "Protection" }
+
+    return specID, names[specID]
+end
 function GetProfessions() return 1, 2, nil, 4, 5 end
 function GetProfessionInfo(i) return "Profession" .. i, nil, 75, 100, nil, nil, 170 + i end
 
@@ -14088,10 +14094,18 @@ end)()
 
     assert(mountModule.SourceValue({ sourceType = 2 }) == 3, "quest mounts too")
 
-    -- A row written before 0.62.0 carries prose and no type.
-    assert(mountModule.SourceValue({ source = "Vendor: Somewhere" }) == 3,
-        "and a database from before this release still ranks until it is "
-        .. "rescanned")
+    -- AND THE PRE-0.62.0 FALLBACK IS GONE, BECAUSE IT COULD NEVER RUN.
+    -- 0.82.0.
+    --
+    -- This asserted that a row carrying prose and no type still ranked --
+    -- the promise the code made to upgrading players. Migration 15 sets
+    -- `record.source = nil` on every row of `db.account.mounts`, and
+    -- migrations run on ADDON_LOADED, strictly before any scan. So the
+    -- branch was unreachable on every client and the test was asserting a
+    -- fixture no database could ever be in. It was also branching on a
+    -- localized string, which this addon forbids.
+    assert(mountModule.SourceValue({ source = "Vendor: Somewhere" }) == 1,
+        "a row with no source TYPE ranks lowest, whatever prose it carries")
 
     assert(mountModule.SourceValue({}) == 1, "nothing known ranks last, not first")
 
@@ -15207,6 +15221,21 @@ end)()
         assert(objective.name == "Flask of Assertion",
             "the row carries the recipe's name, not the item's: "
             .. tostring(objective.name))
+
+        -- AND ITS IDENTITY IS THE RECIPE ID. 0.82.0.
+        --
+        -- The RECIPE eligibility checker indexes `character.recipes`, which
+        -- is keyed by trade-skill recipe id. A row identified by the
+        -- merchant's item id asked that table an item-id question, and on a
+        -- collision answered "already known" -- retiring the waypoint from a
+        -- recipe the player had not bought.
+        assert(objective.id == 770001,
+            "the row is identified by the recipe it teaches: "
+            .. tostring(objective.id))
+
+        assert(objective.itemID == 880001,
+            "and keeps the merchant item beside it, which is what you buy: "
+            .. tostring(objective.itemID))
 
         checked = checked + 1
     end
@@ -25499,8 +25528,17 @@ print("\nThe curated data accessors:")
     local factionOk, factionReason = Static.QuestEligibility(77003,
         { faction = "Horde", level = 60 })
 
-    assert(factionOk == false and factionReason:find("Alliance"),
-        "and a faction gate reports the faction")
+    -- LOCALIZED, LIKE EVERY OTHER FACTION IN THE ADDON. 0.82.0.
+    --
+    -- This asserted the raw English token, which is what the code printed:
+    -- it ran the faction through `CN.TokenLabel`, which resolves CLASS and
+    -- RACE tokens and knows nothing about factions, so it fell through to a
+    -- title-caser. `FACTION_ALLIANCE` is "Allianz" in this fixture -- a
+    -- deliberately non-English global -- so the test and the code agreed on
+    -- the wrong answer.
+    assert(factionOk == false and factionReason:find(FACTION_ALLIANCE, 1, true),
+        "and a faction gate reports the faction in the client's language: "
+        .. tostring(factionReason))
 
     -- A row with no gating fields is eligible, and says so with NIL rather
     -- than an empty claim.
@@ -33375,6 +33413,317 @@ end)()
     end
 
     print("  a vendor's item id is not a recipe id")
+end)()
+
+print("\nWhat 0.82.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY ROW CAN BE HIDDEN, INCLUDING THE SINGLETONS.
+    ------------------------------------------------------------
+    -- Hiding is enforced inside providers -- there is no filter above them --
+    -- so a provider that skips the check produces a row that says "Ignored"
+    -- when you hide it, appears in `/cn hidden`, and comes straight back.
+    -- Two singleton rows were fixed for this in 0.78.0 and the mail row was
+    -- missed by both passes; it carries the highest fixed value in its file,
+    -- so it sat at the top of the list you could not remove it from.
+    --
+    -- Written as a sweep rather than a case, because a fourth singleton
+    -- added later needs to fail here rather than ship.
+    local singletons = {
+        { CN.objectiveTypes.CURRENCY, "mail" },
+        { CN.objectiveTypes.CURRENCY, "vault" },
+        { CN.objectiveTypes.RECIPE,   "claim" },
+    }
+
+    for _, pair in ipairs(singletons) do
+        local objectiveType, id = pair[1], pair[2]
+
+        CN.SetIgnored(objectiveType, id, true)
+        CN.InvalidateCandidates()
+
+        for _, objective in ipairs(CN.CollectCandidates() or {}) do
+            assert(not (objective.type == objectiveType and objective.id == id),
+                "a hidden row stays hidden: " .. tostring(id))
+        end
+
+        CN.SetIgnored(objectiveType, id, false)
+    end
+
+    CN.InvalidateCandidates()
+
+    print("  a row you hid stays hidden, singletons included")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CAPTURE RECORDS AN OBSERVATION OR NOTHING.
+    ------------------------------------------------------------
+    -- `Navigation.MapScale` answers `1, 1, false` when the client refuses --
+    -- which is a loading screen, which is exactly when somebody runs
+    -- `/cn capture` after something went wrong. The capture ignored the third
+    -- return, so the file the player pastes into a bug report recorded "this
+    -- map is one yard square" as a successful measurement. This capture
+    -- exists to catch a map-geometry defect and was able to invent one.
+    local capture
+
+    for _, entry in ipairs(CN.captures or {}) do
+        if entry.name == "mapSpanYards" then
+            capture = entry
+        end
+    end
+
+    assert(capture, "the map-span capture is registered")
+
+    local navigation = CN:GetModule("Navigation")
+
+    local realScale = navigation.MapScale
+
+    navigation.MapScale = function() return 1, 1, false end
+
+    local recorded, why = capture.run()
+
+    navigation.MapScale = realScale
+
+    assert(recorded == nil,
+        "a refusal is not recorded as a square map: " .. tostring(recorded))
+
+    assert(type(why) == "string" and why ~= "", "and it says why")
+
+    print("  a refused measurement is not filed as evidence")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- FORGETTING AN IMPORTED CHAIN FORGETS IT.
+    ------------------------------------------------------------
+    -- `Contribute.Forget` cleared the account store and left the dependency
+    -- graph, which is where an imported chain does its work. It printed
+    -- "Forgot 47 imported chains" and every quest they named stayed LOCKED,
+    -- still explained as "from an imported chain", until a reload.
+    local contribute = CN:GetModule("Contribute")
+
+    assert(contribute and contribute.Forget, "the command's function exists")
+
+    local questID = 820001
+
+    CN.Account("contributed")[questID] = { 820000 }
+
+    CN.AddDependency(CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID), {
+        observedRequires = { 820000 },
+        origin           = "contributed",
+    })
+
+    contribute.Forget()
+
+    local left = CN.GetDependency(
+        CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID))
+
+    assert(not (left and left.observedRequires),
+        "the edge goes with the row")
+
+    ------------------------------------------------------------
+    -- AND THE PLAYER'S OWN OBSERVATION IS NOT LABELLED AS SOMEBODY ELSE'S.
+    ------------------------------------------------------------
+    -- `CN.AddDependency` merges and clears nothing, and Contribute loads
+    -- before Harvest -- so Harvest overwrote the requirements and left the
+    -- contributed origin standing, and `/cn why` reported the player's own
+    -- three-character observation as "not from your own play".
+    local harvestSource = CN_TEST_ReadAddonFile("Modules/Harvest.lua")
+
+    assert(harvestSource
+        and string.find(harvestSource, 'origin           = "harvested"', 1, true),
+        "the harvest publisher states its own provenance")
+
+    print("  forgetting an imported chain forgets it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A TITLE IS NOT PRINTED WITH THE CLIENT'S PADDING.
+    ------------------------------------------------------------
+    -- The client returns title fragments padded for concatenation. One
+    -- lookup in this addon trimmed them and the other, added later for the
+    -- only path with no live source, did not -- so the addon matched on the
+    -- trimmed string and displayed the padded one.
+    local realTitleName = GetTitleName
+
+    GetTitleName = function() return "  the Explorer  " end
+
+    local named = CN.Blizzard.GetTitleName(999820)
+
+    GetTitleName = realTitleName
+
+    assert(named == "the Explorer",
+        "a title is trimmed at the one place that reads it live: ["
+        .. tostring(named) .. "]")
+
+    print("  a title has no leading space")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SPECIALIZATION IS STORED AS AN ID AND SHOWN AS A WORD.
+    ------------------------------------------------------------
+    -- `specName` was a LOCALIZED string persisted per character -- the freeze
+    -- six migrations in this project exist to end -- and nothing read it.
+    -- `character.sex` had no reader at all.
+    local source = CN_TEST_ReadAddonFile("Character.lua")
+
+    for line in string.gmatch(source or "", "[^\n]+") do
+        if not string.find(line, "^%s*%-%-") then
+            assert(not string.find(line, "character.specName", 1, true),
+                "no localized specialization is written to disk")
+
+            assert(not string.find(line, "character.sex", 1, true),
+                "and no field nothing reads")
+        end
+    end
+
+    -- AND THE ROSTER SHOWS IT, which is what it was collected for.
+    local warband = CN:GetModule("Warband")
+
+    local shown = false
+
+    for _, row in ipairs(warband.Roster() or {}) do
+        if row.spec then
+            shown = true
+        end
+    end
+
+    assert(shown, "the roster resolves a spec name from the stored id")
+
+    print("  a spec is stored as a number and read in your language")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- NO STORE WRITES A TIMESTAMP NOTHING READS.
+    ------------------------------------------------------------
+    -- Migration 5 stripped these from four stores; migration 31 caught a
+    -- fifth. `mounts` -- the largest -- and `reputations` were missed by
+    -- both, and their writers kept putting the fields back on every login.
+    local fixtureDb = {
+        version = 32,
+        account = {
+            mounts      = { [1] = { mountID = 1, collected = true,
+                                    firstSeen = 1, lastSeen = 2 } },
+            reputations = { [2] = { factionID = 2, current = 3,
+                                    lastSeen = 4 } },
+        },
+        characters = {},
+        settings   = {},
+    }
+
+    CN.RunMigrations(fixtureDb)
+
+    assert(fixtureDb.account.mounts[1].firstSeen == nil
+        and fixtureDb.account.mounts[1].lastSeen == nil,
+        "the mount timestamps already on disk are cleared")
+
+    assert(fixtureDb.account.reputations[2].lastSeen == nil,
+        "and the reputation one")
+
+    assert(fixtureDb.account.mounts[1].collected == true
+        and fixtureDb.account.reputations[2].current == 3,
+        "without touching what is read")
+
+    -- AND THE WRITERS DO NOT PUT THEM BACK.
+    local mountModule = CN:GetModule("Mounts")
+
+    if mountModule and mountModule.Scan then
+        mountModule.Scan()
+    end
+
+    for _, record in pairs(CN.Account("mounts")) do
+        assert(type(record) ~= "table"
+            or (record.firstSeen == nil and record.lastSeen == nil),
+            "a scan does not write them back")
+    end
+
+    print("  no store keeps a timestamp nothing reads")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A FACTION READS IN THE CLIENT'S LANGUAGE, EVERYWHERE.
+    ------------------------------------------------------------
+    -- `CN.FactionLabel` was added for the Warband roster and extended to the
+    -- mount list under a note saying that file "was not converted". The
+    -- curated-quest gate was the third place and was not converted either.
+    local offenders = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        for line in string.gmatch(text or "", "[^\n]+") do
+            if not string.find(line, "^%s*%-%-")
+                and string.find(line, "TokenLabel", 1, true)
+                and string.find(line, "faction", 1, true) then
+                table.insert(offenders, file)
+            end
+        end
+    end
+
+    assert(#offenders == 0,
+        "a faction token goes through CN.FactionLabel: "
+        .. table.concat(offenders, ", "))
+
+    print("  a faction is named in the client's language everywhere")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THREE NUMBERS THAT ADD UP, AND TWO SENTENCES THAT PARSE.
+    ------------------------------------------------------------
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("petscan")
+    CN.HandleSlashCommand("sets")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    assert(not string.find(text, "1 sets", 1, true),
+        "a headline says '1 set', not '1 sets':\n" .. text)
+
+    assert(not string.find(text, "1 activities", 1, true),
+        "and '1 activity':\n" .. text)
+
+    -- AND AT THE SOURCE, because the fixture happens to hold three sets and
+    -- a headline is only ungrammatical at one. A mutation reverting the
+    -- helper survived on exactly that.
+    local setsSource = CN_TEST_ReadAddonFile("Modules/Sets.lua")
+
+    for line in string.gmatch(setsSource or "", "[^\n]+") do
+        if not string.find(line, "^%s*%-%-") then
+            assert(not string.find(line, '" sets read"', 1, true)
+                and not string.find(line, '" activities you are"', 1, true),
+                "a count the player reads goes through CN.Count: " .. line)
+        end
+    end
+
+    -- `/cn petscan` counted unobtainable species in its total and in neither
+    -- of the two numbers under it, so the three never added up. `/cn pets`,
+    -- run a second later, accounted for all of them.
+    local pets = CN:GetModule("Pets")
+
+    local seen, owned, missing = pets.Scan()
+
+    local counts = pets.Summary()
+
+    assert(owned + missing + (counts.unobtainable or 0) == seen,
+        "the three numbers add up: " .. owned .. " + " .. missing .. " + "
+        .. tostring(counts.unobtainable) .. " ~= " .. seen)
+
+    print("  a count adds up and a headline parses")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

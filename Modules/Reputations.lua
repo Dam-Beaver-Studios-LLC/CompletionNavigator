@@ -66,7 +66,9 @@ local function BuildRecord(data)
         maximum     = (data.nextReactionThreshold or 0) - (data.currentReactionThreshold or 0),
         raw         = data.currentStanding,
         accountWide = Blizzard.IsAccountWideReputation(factionID),
-        lastSeen    = time(),
+
+        -- NO TIMESTAMP. 0.82.0. Nothing reads a reputation record's
+        -- `lastSeen`; same dead field, same reason, as `mounts` above.
     }
 
     local friendship = Blizzard.GetFriendshipReputation(factionID)

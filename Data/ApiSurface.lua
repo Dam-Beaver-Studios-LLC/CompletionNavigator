@@ -191,6 +191,7 @@ CN.apiSurface = {
     "GetSavedInstanceInfo",
     "GetSpecialization",
     "GetSpecializationInfo",
+    "GetSpecializationInfoByID",
     "GetSpellCooldown",
     "GetTime",
     "GetTitleName",
@@ -225,6 +226,5 @@ CN.apiSurface = {
     "UnitName",
     "UnitOnTaxi",
     "UnitRace",
-    "UnitSex",
     "UpdateAddOnMemoryUsage",
 }

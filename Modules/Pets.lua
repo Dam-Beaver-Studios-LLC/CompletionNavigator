@@ -295,8 +295,21 @@ CN:RegisterCommand{
     handler = function()
         local seen, owned, missing = Pets.Scan()
 
-        Print("Scanned " .. seen .. " pet species.")
-        Print("Collected: " .. owned .. "   Missing: " .. missing)
+        -- THE THREE NUMBERS ADD UP. 0.82.0.
+        --
+        -- `missing` counts only species the client calls OBTAINABLE, so an
+        -- unobtainable uncollected species landed in `seen` and in neither
+        -- of the other two: "Scanned 1,842. Collected: 802  Missing: 940",
+        -- which is 1,742. `/cn pets`, run a second later, accounted for all
+        -- of them -- the surviving half of the 0.62.0 defect this file
+        -- documents, where the store-side count was fixed and the printed
+        -- arithmetic was not.
+        local counts = Pets.Summary()
+
+        Print("Scanned " .. CN.Count(seen, "pet species", "pet species") .. ".")
+        Print("Collected: " .. owned .. "   Missing: " .. missing
+            .. ((counts and (counts.unobtainable or 0) > 0)
+                and ("   Unobtainable: " .. counts.unobtainable) or ""))
     end,
 }
 

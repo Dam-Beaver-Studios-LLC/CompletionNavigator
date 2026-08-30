@@ -189,7 +189,28 @@ CN.RegisterCapture{
             return nil, "no map"
         end
 
-        local scaleX, scaleY = nav.MapScale(mapID)
+        -- THE THIRD RETURN, WHICH SAYS WHETHER THE FIRST TWO ARE REAL.
+        -- 0.82.0.
+        --
+        -- `Navigation.MapScale` answers `1, 1, false` on both of its refusal
+        -- paths, and its own header says so: "callers that want a ratio keep
+        -- ignoring the third value. Callers that want yards MUST check it."
+        -- `Routing.lua` checks it, under a comment about `1 > 0` passing
+        -- validation being "a disaster". This capture wants yards and did
+        -- not check.
+        --
+        -- The refusal path is exactly a loading screen -- which is when the
+        -- map API declines and when a player is most likely to be running
+        -- `/cn capture` after something went wrong. So the file the player
+        -- pastes into a bug report recorded "this map is one yard square",
+        -- as a successful observation, and the offline suite then validated
+        -- its stubs against it. This capture exists to catch a map-geometry
+        -- defect; it was capable of manufacturing one.
+        local scaleX, scaleY, measured = nav.MapScale(mapID)
+
+        if not measured then
+            return nil, "the client would not convert this map"
+        end
 
         return {
             mapID  = mapID,

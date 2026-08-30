@@ -317,7 +317,22 @@ CN.RegisterCandidateProvider("Waiting", function()
     -- about to be destroyed.
     local expiring = Waiting.ExpiringMail()
 
-    if #expiring > 0 then
+    -- AND HIDING OR DEFERRING IT WORKS. 0.82.0.
+    --
+    -- The two loops below this one both guard on `IsIgnored` and
+    -- `IsDeferred`, and this singleton row did not -- the exact defect
+    -- `Modules/Orders.lua` and `Modules/Vault.lua` each record for their own
+    -- singleton rows, in the two passes that missed this one.
+    --
+    -- Hiding is enforced INSIDE providers; there is no aggregate filter above
+    -- them. So the row scored highest in the file, sat at the top of
+    -- `/cn next`, printed "Ignored: 3 mail expiring" when the player hid it,
+    -- wrote the entry, and came straight back on the next rebuild -- listed
+    -- in `/cn hidden` and first in the list at the same time.
+    if #expiring > 0
+        and not CN.IsIgnored(CN.objectiveTypes.CURRENCY, "mail")
+        and not CN.IsDeferred(CN.objectiveTypes.CURRENCY, "mail") then
+
         local soonest = expiring[1]
 
         table.insert(candidates, CN.NewObjective({

@@ -136,7 +136,17 @@ function Static.QuestEligibility(questID, character)
     if record.faction and character.faction
         and record.faction ~= character.faction then
 
-        return false, CN.TokenLabel(record.faction) .. " only", "FACTION"
+        -- THE FACTION HELPER, NOT THE CLASS ONE. 0.82.0.
+        --
+        -- `CN.TokenLabel` resolves class and race tokens and knows nothing
+        -- about factions, so it fell through to its title-caser and printed
+        -- the English token. `CN.FactionLabel` is backed by the client's own
+        -- `FACTION_ALLIANCE`/`FACTION_HORDE` globals and was added for the
+        -- Warband roster, then extended to `Modules/Mounts.lua` under a note
+        -- saying that file "was not converted". This is the third place, and
+        -- it was not converted either -- so a German client read "Alliance
+        -- only" three lines under a correctly translated class list.
+        return false, CN.FactionLabel(record.faction) .. " only", "FACTION"
     end
 
     if record.minLevel and character.level

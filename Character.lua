@@ -44,7 +44,6 @@ function CN.InitializeCharacter()
     character.class   = select(2, UnitClass("player"))
     character.race    = select(2, UnitRace("player"))
     character.level   = UnitLevel("player")
-    character.sex     = UnitSex("player")
     character.lastSeen = time()
 
     if UnitFactionGroup then
@@ -55,10 +54,19 @@ function CN.InitializeCharacter()
         local index = GetSpecialization()
 
         if index then
-            local specID, specName = GetSpecializationInfo(index)
-
-            character.specID   = specID
-            character.specName = specName
+            -- THE ID, NOT THE WORD. 0.82.0.
+            --
+            -- `character.sex` had no reader anywhere and is gone. `specName`
+            -- had one -- `Warband.Roster()` -- which nothing then consumed,
+            -- and it is a LOCALIZED STRING persisted per character: the exact
+            -- freeze migrations 4, 5, 14, 15, 16 and 18 were each written to
+            -- end, waiting to show a German main's "Vergeltung" beside an
+            -- alt's "Retribution" on the day something read it.
+            --
+            -- The id is stable, is one number, and the client will translate
+            -- it on demand -- so the roster shows the spec now, in the
+            -- reader's own language, which is what the field was for.
+            character.specID = (GetSpecializationInfo(index))
         end
     end
 
@@ -130,8 +138,7 @@ CN:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED", function(event, unit)
         if index then
             local specID, specName = GetSpecializationInfo(index)
 
-            CN.character.specID   = specID
-            CN.character.specName = specName
+            CN.character.specID = specID
 
             DebugPrint("Specialization updated to " .. tostring(specName))
         end

@@ -40,8 +40,6 @@ function Mounts.Scan()
         local mount = Blizzard.GetMountByID(mountID)
 
         if mount then
-            local existing = store[mountID]
-
             store[mountID] = {
                 mountID           = mountID,
 
@@ -74,8 +72,17 @@ function Mounts.Scan()
                 isFactionSpecific = mount.isFactionSpecific,
                 faction           = mount.faction,
                 collected         = mount.isCollected,
-                firstSeen         = existing and existing.firstSeen or time(),
-                lastSeen          = time(),
+
+                -- NO TIMESTAMPS. 0.82.0.
+                --
+                -- Nothing has ever read a mount record's `firstSeen` or
+                -- `lastSeen`. Migration 5 stripped exactly these two fields
+                -- from `pets` and `toys` for exactly this reason, and
+                -- migration 31 caught `appearances` under a header naming
+                -- itself "THE STORE MIGRATION 5 MISSED". `mounts` is the
+                -- largest of the four and was missed by both -- two fresh
+                -- integers on roughly nine hundred rows, written at every
+                -- login and serialized at every logout.
             }
 
             seen = seen + 1
@@ -148,55 +155,48 @@ function Mounts.SourceValue(record)
         return Mounts.sourceValues[kind] or 1
     end
 
-    -- A ROW WRITTEN BEFORE THE TYPE WAS READ, and nothing else.
+    -- THE PRE-0.62.0 FALLBACK COULD NEVER RUN. 0.82.0.
     --
-    -- Databases from before 0.62.0 carry the sentence and no type, and the
-    -- next scan replaces them. Until it does, the old English match is better
-    -- than nothing FOR THOSE ROWS -- but it is not a fallback the addon
-    -- relies on, and on a non-English client it simply returns 1, which is
-    -- what it did for every row before this release.
-    local source = record and record.source
-
-    if type(source) == "string" and source ~= "" then
-        source = string.lower(source)
-
-        if source:find("vendor", 1, true) or source:find("quest", 1, true) then
-            return 3
-        end
-
-        if source:find("drop", 1, true) then
-            return 2
-        end
-    end
-
+    -- This matched English words in `record.source` and was justified by
+    -- "databases from before 0.62.0 carry the sentence and no type... the old
+    -- English match is better than nothing FOR THOSE ROWS". Migration 15 sets
+    -- `record.source = nil` on every row of `db.account.mounts`, and
+    -- migrations run on ADDON_LOADED -- strictly before any scan or rebuild.
+    -- So the branch was unreachable on every client, always, and the promise
+    -- it made to upgrading players could not be kept by construction.
+    --
+    -- It was also a localized string being BRANCHED on, which this project
+    -- forbids outright.
     return 1
 end
 
--- A mount's name, from the client, falling back to whatever an older
--- database still carries so nothing goes blank between upgrading and the next
--- scan. See the note in `Scan`.
-function Mounts.NameOf(mountID, record)
+-- A mount's name, from the client.
+--
+-- The `record` argument is kept for the call sites that pass one; the stored
+-- fallback it used to consult was deleted from every row by migration 16, so
+-- reading it was reading nil. 0.82.0.
+function Mounts.NameOf(mountID)
     local live = CN.Blizzard.GetMountByID and CN.Blizzard.GetMountByID(mountID)
 
     if live and live.name and live.name ~= "" then
         return live.name
     end
 
-    return (record and record.name) or ("Mount " .. tostring(mountID))
+    return "Mount " .. tostring(mountID)
 end
 
 -- The journal's source sentence, live. See the note in `Scan`.
 --
--- Falls back to whatever an older database still carries, so a player who has
--- not rescanned since upgrading loses nothing in the meantime.
-function Mounts.SourceText(mountID, record)
+-- No stored fallback: migration 15 removed `source` from every row, so the
+-- one this used to read was always nil. 0.82.0.
+function Mounts.SourceText(mountID)
     local live = CN.Blizzard.GetMountByID and CN.Blizzard.GetMountByID(mountID)
 
     if live and live.source and live.source ~= "" then
         return live.source
     end
 
-    return record and record.source
+    return nil
 end
 
 CN.RegisterCandidateProvider("Mounts", function()
@@ -226,7 +226,7 @@ CN.RegisterCandidateProvider("Mounts", function()
             -- that returns a source TYPE and an empty prose line -- which
             -- happens -- had every one of its mounts dropped from the list.
             if (record.sourceType == nil or record.sourceType == 0)
-                and not Mounts.SourceText(mountID, record) then
+                and not Mounts.SourceText(mountID) then
 
                 return nil
             end
