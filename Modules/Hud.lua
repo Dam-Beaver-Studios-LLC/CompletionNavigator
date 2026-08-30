@@ -423,7 +423,38 @@ function Hud.ApplyScale()
         local target = _G and _G[name]
 
         if target and target.SetScale then
-            pcall(target.SetScale, target, scale)
+            -- A FRAME TALLER THAN THE SCREEN CANNOT BE CLAMPED ONTO IT.
+            -- 0.85.0.
+            --
+            -- The window sets `SetClampedToScreen(true)`, which pins one edge
+            -- and lets the opposite one overhang -- it cannot help with a
+            -- frame that is simply bigger than the screen. UIParent is 768
+            -- units tall, and 0.84.0 grew the window from 480 to 560: at the
+            -- Size button's top step, 560 x 1.5 is 840. Forty-eight pixels of
+            -- window off one end, applied at BUILD time rather than only when
+            -- the button is pressed.
+            --
+            -- Which end depends on how the clamp resolves, and both are bad:
+            -- the footer and the answer line, or the title bar, the close
+            -- button and the filter box -- in which case the window can no
+            -- longer be dragged or closed with the mouse. And the placement
+            -- persists, because the position is saved.
+            --
+            -- 480 x 1.5 was 720 and fitted, which is why this has never come
+            -- up before. The size the player asked for is honoured as far as
+            -- the screen allows and no further.
+            local applied = scale
+
+            local room = (UIParent and UIParent.GetHeight
+                and UIParent:GetHeight()) or 768
+
+            local height = (target.GetHeight and target:GetHeight()) or 0
+
+            if height > 0 and room > 0 and (height * applied) > room then
+                applied = room / height
+            end
+
+            pcall(target.SetScale, target, applied)
         end
     end
 

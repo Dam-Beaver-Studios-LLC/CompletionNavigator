@@ -3920,13 +3920,45 @@ mutate "Modules/MapPins.lua" \
     "the map drops stops past forty and reports the total as forty"
 
 mutate "UI/List.lua" \
-    "    function list:SetEmpty(text)
-        local held = self.emptyText
-
-        self.emptyText = text" \
-    "    function list:SetEmpty(text)
-        local held = self.emptyText" \
+    "        self:SetEntries({}, text)" \
+    "        self:SetEntries({})" \
     "a tab whose module is missing tells you to pin a goal"
+
+# ---- 0.85.0 ----
+
+mutate "UI.lua" \
+    "        if chase and selectedChain then" \
+    "        if selectedChain then" \
+    "the Goals tab throws when the Chase module is missing"
+
+mutate "Modules/Hud.lua" \
+    "            if height > 0 and room > 0 and (height * applied) > room then
+                applied = room / height
+            end" \
+    "            if false then
+                applied = room / height
+            end" \
+    "the largest text size puts the window off the screen"
+
+mutate "UI/List.lua" \
+    "            local message = emptyOverride or self.emptyText" \
+    "            local message = self.emptyText" \
+    "one keystroke restores the empty sentence that cannot help"
+
+mutate "UI/List.lua" \
+    "        emptyOverride = override or nil" \
+    "        emptyOverride = emptyOverride or nil" \
+    "an empty sentence for one situation is stuck on the list for ever"
+
+mutate "Modules/MapPins.lua" \
+    "    return placed, dropped or 0" \
+    "    return placed" \
+    "/cn pins refresh reports the capped count as the total"
+
+mutate "UI.lua" \
+    "            panel.keepFilter.Text:SetWidth(COLUMN - CN.SPACE.M - 30)" \
+    "            panel.keepFilter.Text:SetWidth(400)" \
+    "a settings label is drawn across the column beside it"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

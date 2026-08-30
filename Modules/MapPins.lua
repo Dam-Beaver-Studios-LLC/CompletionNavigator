@@ -573,14 +573,17 @@ function MapPins.Refresh(force)
         return 0
     end
 
-    local pins = MapPins.Layout(hubs)
+    -- AND CARRY THE SHORTFALL OUT. 0.85.0. `Layout` reports how many stops
+    -- did not fit; this function discarded it, so the one caller that prints
+    -- a number still printed the capped one as the total.
+    local pins, dropped = MapPins.Layout(hubs)
 
     local placed = MapPins.Place(pins, canvas)
 
     DebugPrint(string.format("Map pins: %d stop(s) on map %s.",
         placed, tostring(mapID)))
 
-    return placed
+    return placed, dropped or 0
 end
 
 ------------------------------------------------------------
@@ -667,9 +670,18 @@ CN:RegisterCommand{
         if args == "refresh" then
             MapPins.InvalidateCache()
 
-            local placed = MapPins.Refresh(true)
+            -- THE OTHER BRANCH OF THIS HANDLER. 0.85.0. 0.84.0 fixed the
+            -- listing twenty-five lines below to say how many stops it did
+            -- not draw, and left the branch above it reporting the capped
+            -- count as a fact -- "Redrew 40 stops." for a route of
+            -- sixty-three. The sibling nobody swept, in the same function as
+            -- the fix.
+            local placed, dropped = MapPins.Refresh(true)
 
-            Print("Redrew " .. placed .. CN.Pluralize(placed, " stop.", " stops."))
+            Print("Redrew " .. CN.Count(placed, "stop") .. "."
+                .. ((dropped or 0) > 0
+                    and CN.Aside(dropped .. " more not drawn; the map caps at "
+                        .. MapPins.maxPins) or ""))
             return
         end
 

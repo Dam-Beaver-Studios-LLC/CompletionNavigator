@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.84.0'
+$script:ToolkitVersion = '0.85.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.84.0"
+CN.version     = "0.85.0"
 CN.dbVersion   = 33
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -15231,7 +15231,20 @@ UI.RegisterTab{
 
         panel.list:SetEntries(entries)
 
-        if selectedChain then
+        -- `chase and`, WHICH THE REWRITE DROPPED. 0.85.0.
+        --
+        -- The line this replaced was `local selectedChain = chase and
+        -- chase.Chain(panel.selected)`, so a nil module made `selectedChain`
+        -- nil and this `if` was the guard. 0.84.0 moved the assignment into
+        -- the loop, where it comes from `chase and chase.Chain(goal) or
+        -- { steps = {} }` -- a truthy table even with no module -- so the
+        -- guard stopped guarding and this became the one bare `chase.` index
+        -- in the function. Every other use here is still guarded.
+        --
+        -- With `Modules/Chase.lua` absent the tab threw on every refresh and
+        -- printed the error to chat each time, which is the failure the rest
+        -- of 0.84.0 was written to prevent.
+        if chase and selectedChain then
             panel.note:SetText("|cff8a8f96" .. chase.Summarize(selectedChain) .. "|r")
         else
             panel.note:SetText("")
@@ -16393,6 +16406,23 @@ UI.RegisterTab{
         -- ranking learns" than under a text-size button.
         Under(panel.keepFilter, panel.learn, CN.SPACE.M)
 
+        -- AND INSIDE THE COLUMN IT WAS MOVED INTO. 0.85.0.
+        --
+        -- The move above reasoned only vertically. The horizontal rule is
+        -- written three hundred lines up, where "Clear focus" ended forty-two
+        -- pixels into the right column and was drawn on top of the "Minimap
+        -- button" checkbox: the left column is `COLUMN` wide, and a label is
+        -- the one thing here that grows with the text-size setting.
+        --
+        -- "Keep the filter box across tabs" is the longest label in this
+        -- column and sits level with the auto-waypoint and rare-alert
+        -- checkboxes in the other one. Bounded, so it wraps or truncates
+        -- rather than reaching across -- and so does its hover target, which
+        -- is sized from the label.
+        if panel.keepFilter.Text and panel.keepFilter.Text.SetWidth then
+            panel.keepFilter.Text:SetWidth(COLUMN - CN.SPACE.M - 30)
+        end
+
         ------------------------------------------------------------
         -- THE REST
         ------------------------------------------------------------
@@ -16438,8 +16468,17 @@ UI.RegisterTab{
         -- colourblind checkbox landing here instead.
         --
         -- The bottom-left row has two buttons and room for a checkbox beside
-        -- them, and nothing is anchored to it, so nothing can grow into it.
-        panel.debug:SetPoint("BOTTOMLEFT", 200, CN.SPACE.M)
+        -- them.
+        --
+        -- ONE ROW UP, THOUGH. 0.85.0. The note above said "nothing is
+        -- anchored to it, so nothing can grow into it" -- and `panel.about`
+        -- is anchored to exactly that row, bottom-right, with no width. This
+        -- file records that shape as unbounded growth: a font string anchored
+        -- on one edge only reaches about 290 pixels at normal size and 435 at
+        -- Text 150%, so the version and studio line ran left underneath this
+        -- checkbox and the Reset button. Both are frames and draw on top of
+        -- it, so the bottom of the tab was overlapping text.
+        panel.debug:SetPoint("BOTTOMLEFT", 200, CN.SPACE.M + 26)
 
         panel.about = CN.Label(panel, "ARTWORK", "SMALL")
         panel.about:SetTextColor(CN.Rgb("MUTED"))
@@ -17280,6 +17319,10 @@ local function CreateList(parent)
     -- happen before anything had set entries. It hung the suite outright.
     local lastEntries = nil
 
+    -- The sentence to draw INSTEAD of `emptyText`, for one situation that is
+    -- not this tab's usual empty one. See `list:SetEmpty`.
+    local emptyOverride = nil
+
     -- Readable, because a filter nobody can read is a filter nobody can test,
     -- and the one defect this widget has shipped was a filter that was set
     -- and never applied.
@@ -17301,7 +17344,7 @@ local function CreateList(parent)
         filterText = (text ~= "") and string.lower(text) or nil
 
         if lastEntries then
-            self:SetEntries(lastEntries)
+            self:SetEntries(lastEntries, emptyOverride)
         end
     end
 
@@ -17340,7 +17383,7 @@ local function CreateList(parent)
         self.sortIndex = (self.sortIndex % #self.sortModes) + 1
 
         if lastEntries then
-            self:SetEntries(lastEntries)
+            self:SetEntries(lastEntries, emptyOverride)
         end
 
         if list.sortCaption then
@@ -17651,18 +17694,36 @@ local function CreateList(parent)
     -- The Zone tab solved this by swapping `emptyText` around the call. Four
     -- copies of that swap is a rule written five times, so it lives here.
     function list:SetEmpty(text)
-        local held = self.emptyText
-
-        self.emptyText = text
-
-        self:SetEntries({})
-
-        self.emptyText = held
+        -- STICKY UNTIL THE NEXT REAL `SetEntries`. 0.85.0.
+        --
+        -- 0.84.0 swapped `emptyText`, drew, and swapped it back -- and
+        -- `SetEntries` records `lastEntries`, which `SetFilter` and
+        -- `CycleSort` both re-render from. Both run AFTER the swap has been
+        -- undone, and `SetFilter` is wired to the search box's
+        -- `OnTextChanged`. So one keystroke put the tab's normal sentence --
+        -- "log in on another character and this fills itself" -- straight
+        -- back under a header saying the module had not loaded, which is the
+        -- exact defect that fix was written for.
+        --
+        -- Carried in an upvalue beside `filterText` and `lastEntries`, so a
+        -- re-render from the same entries renders the same sentence.
+        self:SetEntries({}, text)
     end
 
     -- entries = { { text = , onClick = , tooltip = }, ... }
-    function list:SetEntries(entries)
+    function list:SetEntries(entries, override)
         lastEntries = entries
+
+        -- Cleared by any call that does not pass one, which is every call
+        -- that has real rows: an override belongs to one drawing of one
+        -- situation, not to the list for ever.
+        --
+        -- A LOCAL, NOT A FRAME FIELD. Every frame in the offline suite has a
+        -- catch-all `__index` that answers with a stub table, so an unset
+        -- field reads back as a TABLE rather than as nil -- which this file
+        -- already records for `f.width`, and which turned "no override" into
+        -- a truthy table printed as the empty message.
+        emptyOverride = override or nil
 
         entries = self:Filter(entries)
         entries = self:ApplySort(entries)
@@ -17689,7 +17750,8 @@ local function CreateList(parent)
             -- collections." -- so a player who typed a name with a typo was
             -- told to run a scan that freezes the client for several seconds,
             -- and the list was still empty afterwards.
-            local message = self.emptyText or "Nothing to show here."
+            local message = emptyOverride or self.emptyText
+                or "Nothing to show here."
 
             if filterText and #(lastEntries or {}) > 0 then
                 message = "Nothing here matches \"" .. filterText .. "\"."
@@ -46557,14 +46619,17 @@ function MapPins.Refresh(force)
         return 0
     end
 
-    local pins = MapPins.Layout(hubs)
+    -- AND CARRY THE SHORTFALL OUT. 0.85.0. `Layout` reports how many stops
+    -- did not fit; this function discarded it, so the one caller that prints
+    -- a number still printed the capped one as the total.
+    local pins, dropped = MapPins.Layout(hubs)
 
     local placed = MapPins.Place(pins, canvas)
 
     DebugPrint(string.format("Map pins: %d stop(s) on map %s.",
         placed, tostring(mapID)))
 
-    return placed
+    return placed, dropped or 0
 end
 
 ------------------------------------------------------------
@@ -46651,9 +46716,18 @@ CN:RegisterCommand{
         if args == "refresh" then
             MapPins.InvalidateCache()
 
-            local placed = MapPins.Refresh(true)
+            -- THE OTHER BRANCH OF THIS HANDLER. 0.85.0. 0.84.0 fixed the
+            -- listing twenty-five lines below to say how many stops it did
+            -- not draw, and left the branch above it reporting the capped
+            -- count as a fact -- "Redrew 40 stops." for a route of
+            -- sixty-three. The sibling nobody swept, in the same function as
+            -- the fix.
+            local placed, dropped = MapPins.Refresh(true)
 
-            Print("Redrew " .. placed .. CN.Pluralize(placed, " stop.", " stops."))
+            Print("Redrew " .. CN.Count(placed, "stop") .. "."
+                .. ((dropped or 0) > 0
+                    and CN.Aside(dropped .. " more not drawn; the map caps at "
+                        .. MapPins.maxPins) or ""))
             return
         end
 
@@ -56626,7 +56700,38 @@ function Hud.ApplyScale()
         local target = _G and _G[name]
 
         if target and target.SetScale then
-            pcall(target.SetScale, target, scale)
+            -- A FRAME TALLER THAN THE SCREEN CANNOT BE CLAMPED ONTO IT.
+            -- 0.85.0.
+            --
+            -- The window sets `SetClampedToScreen(true)`, which pins one edge
+            -- and lets the opposite one overhang -- it cannot help with a
+            -- frame that is simply bigger than the screen. UIParent is 768
+            -- units tall, and 0.84.0 grew the window from 480 to 560: at the
+            -- Size button's top step, 560 x 1.5 is 840. Forty-eight pixels of
+            -- window off one end, applied at BUILD time rather than only when
+            -- the button is pressed.
+            --
+            -- Which end depends on how the clamp resolves, and both are bad:
+            -- the footer and the answer line, or the title bar, the close
+            -- button and the filter box -- in which case the window can no
+            -- longer be dragged or closed with the mouse. And the placement
+            -- persists, because the position is saved.
+            --
+            -- 480 x 1.5 was 720 and fitted, which is why this has never come
+            -- up before. The size the player asked for is honoured as far as
+            -- the screen allows and no further.
+            local applied = scale
+
+            local room = (UIParent and UIParent.GetHeight
+                and UIParent:GetHeight()) or 768
+
+            local height = (target.GetHeight and target:GetHeight()) or 0
+
+            if height > 0 and room > 0 and (height * applied) > room then
+                applied = room / height
+            end
+
+            pcall(target.SetScale, target, applied)
         end
     end
 
@@ -57454,7 +57559,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.84.0
+## Version: 0.85.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -57709,6 +57814,48 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.85.0]
+
+**Last release made the window taller, and at the largest text size it no
+longer fitted on the screen.** 560 pixels at Size 1.50 is 840 units against a
+768-unit screen, and the "keep me on screen" flag cannot help with a frame
+bigger than the screen — it pins one edge and lets the other hang off. So
+either the footer and the answer line, or the title bar and its close button,
+went past the edge and could not be reached; and because the window remembers
+where it was, so did that. At the old height the same sum came to 720 and
+fitted, which is why it had never happened before. The size you ask for is now
+honoured as far as the screen allows and no further.
+
+Everything in this release is something 0.84.0 broke or left half-done.
+
+### Fixed
+
+- **The window fits the screen at every size it offers.** See above.
+- **The Goals tab threw an error on every refresh if one module was missing.**
+  Last release's rewrite of that tab replaced a line that was doing double
+  duty as a guard, and the `if` beneath it stopped guarding anything — so an
+  addon that loaded without its chase module printed a Lua error to chat each
+  time the window refreshed, instead of degrading quietly. The suite now
+  sweeps every tab against every module being absent, because the next rewrite
+  will drop a different guard.
+- **One keystroke undid last release's "a broken tab does not offer a remedy
+  that cannot work" fix.** The replacement sentence was swapped in, drawn, and
+  swapped straight back out — and typing in the search box redraws from the
+  same rows, after the swap has been undone. So "This part of the addon did
+  not load" went back to sitting over "Log in on another character and this
+  fills itself" as soon as you typed anything.
+- **`/cn pins refresh` still reported the capped number as the total** —
+  "Redrew 40 stops." for a route with sixty-three in it. Last release fixed
+  the branch twenty-five lines below it in the same command and not this one.
+- **The version and studio line ran underneath the Debug checkbox and the
+  Reset button.** Last release moved that checkbox onto a row it described as
+  empty; the line along the bottom of the tab is anchored to exactly that row
+  and grows leftward without limit, further at every text size above 100%.
+- **"Keep the filter box across tabs" was drawn across the checkboxes in the
+  next column** at any text size above 100%. The layout check added last
+  release measures the settings column downward and has no sideways
+  dimension; it does now.
 
 ## [0.84.0]
 
@@ -64464,7 +64611,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.84.0
+0.85.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -68883,13 +69030,45 @@ mutate "Modules/MapPins.lua" \
     "the map drops stops past forty and reports the total as forty"
 
 mutate "UI/List.lua" \
-    "    function list:SetEmpty(text)
-        local held = self.emptyText
-
-        self.emptyText = text" \
-    "    function list:SetEmpty(text)
-        local held = self.emptyText" \
+    "        self:SetEntries({}, text)" \
+    "        self:SetEntries({})" \
     "a tab whose module is missing tells you to pin a goal"
+
+# ---- 0.85.0 ----
+
+mutate "UI.lua" \
+    "        if chase and selectedChain then" \
+    "        if selectedChain then" \
+    "the Goals tab throws when the Chase module is missing"
+
+mutate "Modules/Hud.lua" \
+    "            if height > 0 and room > 0 and (height * applied) > room then
+                applied = room / height
+            end" \
+    "            if false then
+                applied = room / height
+            end" \
+    "the largest text size puts the window off the screen"
+
+mutate "UI/List.lua" \
+    "            local message = emptyOverride or self.emptyText" \
+    "            local message = self.emptyText" \
+    "one keystroke restores the empty sentence that cannot help"
+
+mutate "UI/List.lua" \
+    "        emptyOverride = override or nil" \
+    "        emptyOverride = emptyOverride or nil" \
+    "an empty sentence for one situation is stuck on the list for ever"
+
+mutate "Modules/MapPins.lua" \
+    "    return placed, dropped or 0" \
+    "    return placed" \
+    "/cn pins refresh reports the capped count as the total"
+
+mutate "UI.lua" \
+    "            panel.keepFilter.Text:SetWidth(COLUMN - CN.SPACE.M - 30)" \
+    "            panel.keepFilter.Text:SetWidth(400)" \
+    "a settings label is drawn across the column beside it"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -69408,6 +69587,18 @@ local function Frame()
     -- table, which the addon then did arithmetic on.
     function f:GetWidth() return rawget(f, "width") or 400 end
     function f:GetHeight() return rawget(f, "height") or 300 end
+
+    -- SCALE IS STATE, AND THE ONE PIECE OF IT THAT CAN PUT A WINDOW OFF THE
+    -- SCREEN. 0.85.0. This fell through to the universal stub, so "does the
+    -- window still fit at the largest size the addon offers" was
+    -- unanswerable by any test -- and the answer had just become no.
+    function f:SetScale(value)
+        if type(value) == "number" then
+            rawset(f, "scale", value)
+        end
+    end
+
+    function f:GetScale() return rawget(f, "scale") or 1 end
     function f:GetTextWidth() return 60 end
     function f:GetTextHeight() return 12 end
     function f:GetEffectiveScale() return 1 end
@@ -69526,6 +69717,16 @@ DEFAULT_CHAT_FRAME = {
 }
 
 UIParent     = Frame()
+
+-- THE SCREEN IS 768 UI UNITS TALL, NOT 300. 0.85.0.
+--
+-- The stub answered its generic default for the one frame whose height is a
+-- hard limit on every other frame in the addon -- so "does the window fit on
+-- the screen at the largest size the player can choose" was a question no
+-- test could ask honestly. 768 is the height UIParent reports on every
+-- resolution: the client scales the UI to it.
+UIParent:SetHeight(768)
+UIParent:SetWidth(1024)
 SlashCmdList = {}
 
 -- THE CLIENT'S FONT TEMPLATES, AND THE FUNCTION THAT DERIVES FROM THEM.
@@ -69720,6 +69921,22 @@ local createdFrames = {}
 function CreateFrame(frameType, name, parent, template)
     local f = Frame()
     table.insert(createdFrames, f)
+
+    -- A CHECK BUTTON HAS A LABEL, AND IT IS THE THING THAT OVERFLOWS. 0.85.0.
+    --
+    -- `UICheckButtonTemplate` gives every checkbox a `.Text` font string, and
+    -- the addon sizes its hover target from that label's width. Here `.Text`
+    -- fell through to the universal stub, so it answered a TABLE for
+    -- `GetStringWidth` -- and a layout check that asked how wide a label is
+    -- silently measured nothing at all, on every checkbox in the window.
+    -- Eighteenth entry in this file's list of defects hidden by a stub
+    -- simpler than the client.
+    if frameType == "CheckButton"
+        or (type(template) == "string"
+            and template:find("CheckButton", 1, true)) then
+        f.Text = f:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    end
+
     -- The client publishes named frames as globals; the harness must too, or
     -- nothing can reach the minimap button to test it.
     if name then _G[name] = f end
@@ -103482,6 +103699,296 @@ end)()
     assert(none == 0, "nothing dropped is nothing to report: " .. tostring(none))
 
     print("  the map says when it stopped drawing")
+end)()
+
+print("\nWhat 0.85.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- NO TAB THROWS WHEN ONE OF THE ADDON'S OWN MODULES IS MISSING.
+    ------------------------------------------------------------
+    -- Every tab guards the modules it reaches, because an addon that loads
+    -- without one of its own parts must degrade rather than throw. 0.84.0's
+    -- "build the chain once" rewrite removed the guard that made that true
+    -- for the Goals tab: the old line was `chase and chase.Chain(...)`, so a
+    -- nil module gave a nil chain, and the new one comes from an expression
+    -- that falls back to a TABLE -- so the `if` below it stopped guarding
+    -- and the tab threw on every refresh, printing to chat each time.
+    --
+    -- Swept across every tab and every module rather than fixed for the one,
+    -- because the next rewrite will drop a different guard.
+    local UI = CN.UI
+
+    UI.Show()
+
+    local realGet = CN.GetModule
+
+    -- A PINNED GOAL, so the Goals tab reaches the branch that selects one.
+    -- Without a selection there is no chain to summarise and the line that
+    -- threw is never executed -- which is why a mutation reverting its guard
+    -- survived the first version of this sweep.
+    local goalModule = CN:GetModule("Goals")
+
+    local plantedGoal = false
+
+    if goalModule and goalModule.Add and #(goalModule.List() or {}) == 0 then
+        plantedGoal = goalModule.Add("mount", 850001) and true or false
+    end
+
+    local throwers = {}
+
+    local modules = {}
+
+    for name in pairs(CN.modules or {}) do
+        table.insert(modules, name)
+    end
+
+    table.sort(modules)
+
+    for _, missing in ipairs(modules) do
+        CN.GetModule = function(self, name)
+            if name == missing then
+                return nil
+            end
+
+            return realGet(self, name)
+        end
+
+        for index, tab in ipairs(UI.tabs or {}) do
+            UI.SelectTab(index)
+
+            if tab.panel and tab.refresh then
+                local ok, err = pcall(tab.refresh, tab.panel)
+
+                if not ok then
+                    table.insert(throwers,
+                        missing .. " -> " .. tostring(tab.name) .. ": "
+                        .. tostring(err))
+                end
+            end
+        end
+    end
+
+    CN.GetModule = realGet
+
+    if plantedGoal and goalModule.Remove then
+        goalModule.Remove("mount", 850001)
+    end
+
+    assert(#throwers == 0,
+        "a missing module degrades, it does not throw:\n  "
+        .. table.concat(throwers, "\n  "))
+
+    UI.Hide()
+
+    print("  a missing module degrades rather than throwing")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE WINDOW FITS ON THE SCREEN AT EVERY SIZE IT OFFERS.
+    ------------------------------------------------------------
+    -- `SetClampedToScreen` pins one edge and lets the other overhang; it
+    -- cannot help with a frame bigger than the screen. 0.84.0 grew the window
+    -- from 480 to 560, and at the Size button's top step 560 x 1.5 is 840
+    -- against a 768-unit screen -- so either the footer and the answer line,
+    -- or the title bar and its close button, went off the end. 480 x 1.5 was
+    -- 720 and fitted, which is why it had never come up.
+    local hud = CN:GetModule("Hud")
+
+    local held = hud.Scale()
+
+    local screen = (UIParent and UIParent:GetHeight()) or 768
+
+    for _, step in ipairs({ 0.9, 1.0, 1.1, 1.25, 1.5, 2.0 }) do
+        hud.SetScale(step)
+        hud.ApplyScale()
+
+        local mainWindow = _G["CompletionNavigatorFrame"]
+
+        if mainWindow and mainWindow.GetScale then
+            local occupied = CN.UI.WINDOW_HEIGHT * mainWindow:GetScale()
+
+            assert(occupied <= screen + 0.5,
+                "the window fits the screen at size " .. step .. ": "
+                .. string.format("%.0f", occupied) .. " of " .. screen)
+        end
+    end
+
+    hud.SetScale(held)
+    hud.ApplyScale()
+
+    print("  the window fits the screen at every size it offers")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A ONE-OFF EMPTY SENTENCE SURVIVES A KEYSTROKE.
+    ------------------------------------------------------------
+    -- `SetEmpty` swapped the tab's normal sentence out, drew, and swapped it
+    -- back -- and `SetFilter` and `CycleSort` both re-render from the entries
+    -- it just recorded, AFTER the swap is undone. `SetFilter` is wired to the
+    -- search box's OnTextChanged, so one character put "log in on another
+    -- character and this fills itself" straight back under a header saying
+    -- the module had not loaded.
+    local list = CN.UI.CreateList(UIParent)
+
+    list.emptyText = "The tab's usual empty sentence."
+
+    list:SetEmpty("This module did not load.")
+
+    local function Shown()
+        return list.rows and list.rows[1] and list.rows[1].label
+            and list.rows[1].label:GetText()
+    end
+
+    assert(Shown() and Shown():find("did not load", 1, true),
+        "the one-off sentence is drawn: " .. tostring(Shown()))
+
+    list:SetFilter("a")
+
+    assert(Shown() and Shown():find("did not load", 1, true),
+        "and survives a keystroke in the filter box: " .. tostring(Shown()))
+
+    list:SetFilter("")
+
+    assert(Shown() and Shown():find("did not load", 1, true),
+        "and survives clearing it: " .. tostring(Shown()))
+
+    list:CycleSort()
+
+    assert(Shown() and Shown():find("did not load", 1, true),
+        "and a sort: " .. tostring(Shown()))
+
+    -- AND IT IS NOT STICKY FOR EVER: real rows, then empty again, and the
+    -- tab's own sentence is back.
+    list:SetEntries({ { text = "A row" } })
+    list:SetEntries({})
+
+    assert(Shown() and Shown():find("usual empty sentence", 1, true),
+        "an override belongs to one drawing, not to the list: "
+        .. tostring(Shown()))
+
+    print("  a one-off empty sentence survives a keystroke")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- BOTH BRANCHES OF /cn pins SAY WHEN THEY STOPPED.
+    ------------------------------------------------------------
+    -- 0.84.0 fixed the listing branch to report what it did not draw and
+    -- left the redraw branch, in the same handler, printing the capped count
+    -- as a fact: "Redrew 40 stops." for a route of sixty-three.
+    local source = CN_TEST_ReadAddonFile("Modules/MapPins.lua")
+
+    assert(source, "Modules/MapPins.lua must be readable")
+
+    for line in string.gmatch(source, "[^\n]+") do
+        if not string.find(line, "^%s*%-%-") then
+            assert(not string.find(line, 'Print("Redrew " .. placed ..',
+                    1, true),
+                "the redraw branch reports what it did not draw")
+        end
+    end
+
+    -- And `Refresh` carries the number out for the command to report.
+    local pins = CN:GetModule("MapPins")
+
+    assert(select(2, pins.Layout({})) == 0,
+        "Layout still answers with a shortfall")
+
+    local returned = select("#", pins.Refresh(true))
+
+    assert(returned >= 2,
+        "Refresh hands the shortfall to its caller: " .. returned
+        .. " return value(s)")
+
+    print("  both branches of /cn pins say when they stopped")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- NO LABEL IS DRAWN ACROSS THE COLUMN BESIDE IT.
+    ------------------------------------------------------------
+    -- The layout guard added in 0.84.0 walks the Settings column vertically
+    -- and has no horizontal dimension -- so a label long enough to reach into
+    -- the other column passes it. This file records that exact defect for
+    -- "Clear focus", which ended forty-two pixels into the right column and
+    -- was drawn on top of the "Minimap button" checkbox.
+    local UI = CN.UI
+
+    UI.Show()
+
+    local panel
+
+    for index, tab in ipairs(UI.tabs or {}) do
+        if tab.name == "Settings" then
+            UI.SelectTab(index)
+            panel = tab.panel
+        end
+    end
+
+    assert(panel, "the Settings tab is built")
+
+    -- The left column is 268 wide; the right one starts there.
+    local COLUMN = 268
+
+    local offenders = {}
+
+    local checked = 0
+
+    for _, name in ipairs({ "focusButton", "focusClear", "focusNote",
+                            "modeButton", "learn", "keepFilter" }) do
+        local widget = panel[name]
+
+        if type(widget) == "table" then
+            local label = widget.Text or widget
+
+            local width = label.GetStringWidth and label:GetStringWidth()
+
+            local point = widget.GetPointBy
+                and (widget:GetPointBy("TOPLEFT") or widget:GetPointBy("LEFT"))
+
+            -- A bounded label cannot reach: `SetWidth` is the fix. Read
+            -- with `rawget`, because the stub answers a default width for
+            -- anything that never had one set -- which would look like a
+            -- bound on every label in the panel.
+            local bounded = rawget(label, "width")
+
+            if type(width) == "number" and point
+                and (tonumber(point.x) or 12) < COLUMN then
+
+                local reach = (tonumber(point.x) or 12) + 26 + width
+
+                -- A SET WIDTH IS THE WIDTH, whatever it is. Believing it
+                -- only when it looked reasonable let a mutation widening the
+                -- bound to 400 pass: the check fell back to measuring the
+                -- string, which is shorter.
+                if type(bounded) == "number" and bounded > 0 then
+                    reach = (tonumber(point.x) or 12) + 26 + bounded
+                end
+
+                checked = checked + 1
+
+                if reach > COLUMN then
+                    table.insert(offenders,
+                        name .. " reaches " .. math.floor(reach))
+                end
+            end
+        end
+    end
+
+    assert(#offenders == 0,
+        "no left-column label reaches into the right column: "
+        .. table.concat(offenders, ", "))
+
+    assert(checked >= 2,
+        "and the check actually measured something: " .. checked
+        .. " labels")
+
+    UI.Hide()
+
+    print("  no label is drawn across the column beside it")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

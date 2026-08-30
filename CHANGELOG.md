@@ -7,6 +7,48 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.85.0]
+
+**Last release made the window taller, and at the largest text size it no
+longer fitted on the screen.** 560 pixels at Size 1.50 is 840 units against a
+768-unit screen, and the "keep me on screen" flag cannot help with a frame
+bigger than the screen â€” it pins one edge and lets the other hang off. So
+either the footer and the answer line, or the title bar and its close button,
+went past the edge and could not be reached; and because the window remembers
+where it was, so did that. At the old height the same sum came to 720 and
+fitted, which is why it had never happened before. The size you ask for is now
+honoured as far as the screen allows and no further.
+
+Everything in this release is something 0.84.0 broke or left half-done.
+
+### Fixed
+
+- **The window fits the screen at every size it offers.** See above.
+- **The Goals tab threw an error on every refresh if one module was missing.**
+  Last release's rewrite of that tab replaced a line that was doing double
+  duty as a guard, and the `if` beneath it stopped guarding anything â€” so an
+  addon that loaded without its chase module printed a Lua error to chat each
+  time the window refreshed, instead of degrading quietly. The suite now
+  sweeps every tab against every module being absent, because the next rewrite
+  will drop a different guard.
+- **One keystroke undid last release's "a broken tab does not offer a remedy
+  that cannot work" fix.** The replacement sentence was swapped in, drawn, and
+  swapped straight back out â€” and typing in the search box redraws from the
+  same rows, after the swap has been undone. So "This part of the addon did
+  not load" went back to sitting over "Log in on another character and this
+  fills itself" as soon as you typed anything.
+- **`/cn pins refresh` still reported the capped number as the total** â€”
+  "Redrew 40 stops." for a route with sixty-three in it. Last release fixed
+  the branch twenty-five lines below it in the same command and not this one.
+- **The version and studio line ran underneath the Debug checkbox and the
+  Reset button.** Last release moved that checkbox onto a row it described as
+  empty; the line along the bottom of the tab is anchored to exactly that row
+  and grows leftward without limit, further at every text size above 100%.
+- **"Keep the filter box across tabs" was drawn across the checkboxes in the
+  next column** at any text size above 100%. The layout check added last
+  release measures the settings column downward and has no sideways
+  dimension; it does now.
+
 ## [0.84.0]
 
 **The "Debug output" checkbox could not be clicked.** The Settings tab's right

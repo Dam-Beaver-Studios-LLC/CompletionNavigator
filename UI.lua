@@ -3225,7 +3225,20 @@ UI.RegisterTab{
 
         panel.list:SetEntries(entries)
 
-        if selectedChain then
+        -- `chase and`, WHICH THE REWRITE DROPPED. 0.85.0.
+        --
+        -- The line this replaced was `local selectedChain = chase and
+        -- chase.Chain(panel.selected)`, so a nil module made `selectedChain`
+        -- nil and this `if` was the guard. 0.84.0 moved the assignment into
+        -- the loop, where it comes from `chase and chase.Chain(goal) or
+        -- { steps = {} }` -- a truthy table even with no module -- so the
+        -- guard stopped guarding and this became the one bare `chase.` index
+        -- in the function. Every other use here is still guarded.
+        --
+        -- With `Modules/Chase.lua` absent the tab threw on every refresh and
+        -- printed the error to chat each time, which is the failure the rest
+        -- of 0.84.0 was written to prevent.
+        if chase and selectedChain then
             panel.note:SetText("|cff8a8f96" .. chase.Summarize(selectedChain) .. "|r")
         else
             panel.note:SetText("")
@@ -4387,6 +4400,23 @@ UI.RegisterTab{
         -- ranking learns" than under a text-size button.
         Under(panel.keepFilter, panel.learn, CN.SPACE.M)
 
+        -- AND INSIDE THE COLUMN IT WAS MOVED INTO. 0.85.0.
+        --
+        -- The move above reasoned only vertically. The horizontal rule is
+        -- written three hundred lines up, where "Clear focus" ended forty-two
+        -- pixels into the right column and was drawn on top of the "Minimap
+        -- button" checkbox: the left column is `COLUMN` wide, and a label is
+        -- the one thing here that grows with the text-size setting.
+        --
+        -- "Keep the filter box across tabs" is the longest label in this
+        -- column and sits level with the auto-waypoint and rare-alert
+        -- checkboxes in the other one. Bounded, so it wraps or truncates
+        -- rather than reaching across -- and so does its hover target, which
+        -- is sized from the label.
+        if panel.keepFilter.Text and panel.keepFilter.Text.SetWidth then
+            panel.keepFilter.Text:SetWidth(COLUMN - CN.SPACE.M - 30)
+        end
+
         ------------------------------------------------------------
         -- THE REST
         ------------------------------------------------------------
@@ -4432,8 +4462,17 @@ UI.RegisterTab{
         -- colourblind checkbox landing here instead.
         --
         -- The bottom-left row has two buttons and room for a checkbox beside
-        -- them, and nothing is anchored to it, so nothing can grow into it.
-        panel.debug:SetPoint("BOTTOMLEFT", 200, CN.SPACE.M)
+        -- them.
+        --
+        -- ONE ROW UP, THOUGH. 0.85.0. The note above said "nothing is
+        -- anchored to it, so nothing can grow into it" -- and `panel.about`
+        -- is anchored to exactly that row, bottom-right, with no width. This
+        -- file records that shape as unbounded growth: a font string anchored
+        -- on one edge only reaches about 290 pixels at normal size and 435 at
+        -- Text 150%, so the version and studio line ran left underneath this
+        -- checkbox and the Reset button. Both are frames and draw on top of
+        -- it, so the bottom of the tab was overlapping text.
+        panel.debug:SetPoint("BOTTOMLEFT", 200, CN.SPACE.M + 26)
 
         panel.about = CN.Label(panel, "ARTWORK", "SMALL")
         panel.about:SetTextColor(CN.Rgb("MUTED"))

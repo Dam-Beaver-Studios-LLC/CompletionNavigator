@@ -244,6 +244,10 @@ local function CreateList(parent)
     -- happen before anything had set entries. It hung the suite outright.
     local lastEntries = nil
 
+    -- The sentence to draw INSTEAD of `emptyText`, for one situation that is
+    -- not this tab's usual empty one. See `list:SetEmpty`.
+    local emptyOverride = nil
+
     -- Readable, because a filter nobody can read is a filter nobody can test,
     -- and the one defect this widget has shipped was a filter that was set
     -- and never applied.
@@ -265,7 +269,7 @@ local function CreateList(parent)
         filterText = (text ~= "") and string.lower(text) or nil
 
         if lastEntries then
-            self:SetEntries(lastEntries)
+            self:SetEntries(lastEntries, emptyOverride)
         end
     end
 
@@ -304,7 +308,7 @@ local function CreateList(parent)
         self.sortIndex = (self.sortIndex % #self.sortModes) + 1
 
         if lastEntries then
-            self:SetEntries(lastEntries)
+            self:SetEntries(lastEntries, emptyOverride)
         end
 
         if list.sortCaption then
@@ -615,18 +619,36 @@ local function CreateList(parent)
     -- The Zone tab solved this by swapping `emptyText` around the call. Four
     -- copies of that swap is a rule written five times, so it lives here.
     function list:SetEmpty(text)
-        local held = self.emptyText
-
-        self.emptyText = text
-
-        self:SetEntries({})
-
-        self.emptyText = held
+        -- STICKY UNTIL THE NEXT REAL `SetEntries`. 0.85.0.
+        --
+        -- 0.84.0 swapped `emptyText`, drew, and swapped it back -- and
+        -- `SetEntries` records `lastEntries`, which `SetFilter` and
+        -- `CycleSort` both re-render from. Both run AFTER the swap has been
+        -- undone, and `SetFilter` is wired to the search box's
+        -- `OnTextChanged`. So one keystroke put the tab's normal sentence --
+        -- "log in on another character and this fills itself" -- straight
+        -- back under a header saying the module had not loaded, which is the
+        -- exact defect that fix was written for.
+        --
+        -- Carried in an upvalue beside `filterText` and `lastEntries`, so a
+        -- re-render from the same entries renders the same sentence.
+        self:SetEntries({}, text)
     end
 
     -- entries = { { text = , onClick = , tooltip = }, ... }
-    function list:SetEntries(entries)
+    function list:SetEntries(entries, override)
         lastEntries = entries
+
+        -- Cleared by any call that does not pass one, which is every call
+        -- that has real rows: an override belongs to one drawing of one
+        -- situation, not to the list for ever.
+        --
+        -- A LOCAL, NOT A FRAME FIELD. Every frame in the offline suite has a
+        -- catch-all `__index` that answers with a stub table, so an unset
+        -- field reads back as a TABLE rather than as nil -- which this file
+        -- already records for `f.width`, and which turned "no override" into
+        -- a truthy table printed as the empty message.
+        emptyOverride = override or nil
 
         entries = self:Filter(entries)
         entries = self:ApplySort(entries)
@@ -653,7 +675,8 @@ local function CreateList(parent)
             -- collections." -- so a player who typed a name with a typo was
             -- told to run a scan that freezes the client for several seconds,
             -- and the list was still empty afterwards.
-            local message = self.emptyText or "Nothing to show here."
+            local message = emptyOverride or self.emptyText
+                or "Nothing to show here."
 
             if filterText and #(lastEntries or {}) > 0 then
                 message = "Nothing here matches \"" .. filterText .. "\"."
