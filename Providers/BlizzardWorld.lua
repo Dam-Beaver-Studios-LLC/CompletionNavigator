@@ -988,6 +988,66 @@ function Blizzard.ZoneMapID(mapID)
     return answer
 end
 
+-- THE INSTANCE ABOVE A MAP, WHICH IS NOT ITS ZONE. 0.81.0.
+--
+-- `ZoneMapID` walks UP to the first ancestor the client calls a zone, and in
+-- a dungeon or raid whose map parents into its outdoor zone -- most modern
+-- ones, as `Loremaster.lua` records -- that answer is the zone OUTSIDE the
+-- instance. Anything comparing "am I in the same place as that" at zone level
+-- therefore says yes to the world quest on the other side of the door.
+--
+-- This walks the same chain and keeps the LOWEST map the client calls a
+-- dungeon or finer (`mapType` above Zone), which is the instance's own
+-- identity. Nil when the map is not inside an instance at all, so an outdoor
+-- objective can never compare equal to one that is.
+--
+-- Memoised in the same table shape and for the same reason as `ZoneMapID`:
+-- the map graph is game data and does not move.
+local instanceOf = {}
+
+function Blizzard.InstanceMapID(mapID)
+    if not mapID then
+        return nil
+    end
+
+    local held = instanceOf[mapID]
+
+    if held ~= nil then
+        return held or nil
+    end
+
+    local current, found, guard = mapID, nil, 0
+
+    while current and guard < 8 do
+        local info = Blizzard.GetMapInfo(current)
+
+        -- A REFUSAL IS NOT AN ANSWER, AND IS NOT REMEMBERED AS ONE -- the
+        -- same cold-client trap `ZoneMapID` documents above.
+        if not info then
+            return nil
+        end
+
+        if (info.mapType or 0) > Blizzard.zoneMapType then
+            found = current
+        else
+            break
+        end
+
+        local parentID = info.parentMapID
+
+        if not parentID or parentID <= 0 then
+            break
+        end
+
+        current = parentID
+        guard   = guard + 1
+    end
+
+    instanceOf[mapID] = found or false
+
+    return found
+end
+
 function Blizzard.ResolveZoneMapID(mapID)
     local current = mapID
     local guard   = 0

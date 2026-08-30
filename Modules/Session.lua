@@ -1060,7 +1060,17 @@ function Session.Plan(minutes)
 
     local situation = group and group.Situation()
 
-    if situation == "dead" or situation == "instanced" then
+    -- INSIDE IS INSIDE, ALONE OR NOT. 0.81.0.
+    --
+    -- This asked `Situation() == "instanced"`, which 0.80.0 correctly
+    -- narrowed to mean "in an instance WITH A GROUP" -- and in doing so
+    -- opened this hole: a player soloing an old raid was handed a walking
+    -- route through the open world, which is still a plan they cannot start
+    -- without a loading screen. The planner's question is about the doorway,
+    -- not about the company.
+    local inside = group and group.InsideInstance and group.InsideInstance()
+
+    if situation == "dead" or inside then
         return {
             minutes   = math.floor(((requested
                 or Session.TypicalSessionMinutes()) or 0) + 0.5),
@@ -1068,7 +1078,10 @@ function Session.Plan(minutes)
             seconds   = 0,
             confident = true,
             skipped   = 0,
-            blocked   = situation,
+            -- The WORD is what blocked the plan, not the social state:
+            -- a solo player inside an instance is "solo", and reporting
+            -- that as the reason would read as a bug.
+            blocked   = (situation == "dead") and "dead" or "instanced",
             notice    = group and group.Notice(),
         }
     end

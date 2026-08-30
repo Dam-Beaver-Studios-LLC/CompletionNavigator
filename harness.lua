@@ -538,6 +538,22 @@ function CN_TEST_SetMapName(mapID, name)
     F.mapTree[mapID].name = name
 end
 
+-- Stand the player somewhere. nil restores the default zone; `false` makes
+-- the client refuse to answer at all, which is what a loading screen looks
+-- like from inside this addon.
+function CN_TEST_SetPlayerMap(mapID)
+    if mapID == nil then
+        CN_TEST_PLAYER_MAP  = nil
+        CN_TEST_REFUSE_MAP  = true
+
+        return
+    end
+
+    CN_TEST_PLAYER_MAP  = mapID
+    CN_TEST_REFUSE_MAP  = nil
+    CN_TEST_PLAYER_MAPS[mapID] = true
+end
+
 -- A test that is about the map GRAPH needs to be able to build one: a room
 -- inside a zone, so `Blizzard.ZoneMapID` has something to walk up.
 function CN_TEST_MapParent(mapID, parentMapID, mapType)
@@ -742,12 +758,18 @@ C_Map = {
     -- `PLAYER_ENTERING_WORLD` fires. The stub always answered, so the whole
     -- "not ready yet" branch was unreachable offline. Fourteenth entry in the
     -- list of defects hidden by a stub more forgiving than the client.
+    -- A MOVABLE player, again. 0.81.0.
+    --
+    -- The map the player is STANDING ON was a constant, so no test could
+    -- stand inside an instance -- which is how a whole release's worth of
+    -- instance-aware ranking had nowhere to be exercised. `CN_TEST_PLAYER_MAP`
+    -- moves them; nil keeps the historical default.
     GetBestMapForUnit    = function()
         if CN_TEST_REFUSE_MAP then
             return nil
         end
 
-        return 94
+        return CN_TEST_PLAYER_MAP or 94
     end,
     -- A MOVABLE player.
     --
@@ -2436,6 +2458,13 @@ C_Item = {
             [800] = "Reins of the Horde Wolf",
             [801] = "Wild Critter Cage",
             [900] = "Tabard of Testing",
+
+            -- TWO ID SPACES, TWO NUMBERS. 0.81.0. The vendor-recipe fixture
+            -- used to sell item 880001 and register recipe NAME 880001, so
+            -- the only row it could ever produce was the collision itself --
+            -- which is why the provider's id-space defect passed every test
+            -- for twenty releases.
+            [880001] = "Recipe: Flask of Assertion",
         }
         return names[itemID]
     end,
@@ -15135,7 +15164,8 @@ end)()
     -- always empty asserts nothing. Its two conditions are a located seller
     -- who sells the item, and a recipe name for it that this character does
     -- not know. Both are set up here, explicitly.
-    local merchantModule = CN:GetModule("Vendors")
+    local merchantModule   = CN:GetModule("Vendors")
+    local professionModule = CN:GetModule("Professions")
 
     local vendorStore = CN.Account("vendors")
 
@@ -15148,7 +15178,11 @@ end)()
         items = { [880001] = 25000 },
     }
 
-    CN.Account("recipeNames")[880001] = "Recipe: Flask of Assertion"
+    -- The RECIPE id is not the ITEM id. The vendor sells item 880001, whose
+    -- name teaches recipe 770001. The provider must join those by name.
+    CN.Account("recipeNames")[770001] = "Flask of Assertion"
+
+    professionModule.nameRevision = (professionModule.nameRevision or 0) + 1
 
     merchantModule.ForgetItemIndex()
 
@@ -15165,6 +15199,15 @@ end)()
             "and the name must not be a table address: "
             .. tostring(objective.name))
 
+        -- AND IT IS THE RECIPE'S NAME, REACHED BY NAME. 0.81.0. The store
+        -- this comes from is keyed by trade-skill recipe id; the id the row
+        -- is built from is a merchant item id. If those are joined by number
+        -- again, this fixture produces no rows at all and the count below
+        -- fails.
+        assert(objective.name == "Flask of Assertion",
+            "the row carries the recipe's name, not the item's: "
+            .. tostring(objective.name))
+
         checked = checked + 1
     end
 
@@ -15172,7 +15215,7 @@ end)()
         "the fixture must produce at least one recipe candidate to check")
 
     vendorStore[912345] = nil
-    CN.Account("recipeNames")[880001] = nil
+    CN.Account("recipeNames")[770001] = nil
 
     merchantModule.ForgetItemIndex()
 
@@ -32774,8 +32817,16 @@ print("\nWhat 0.80.0 changed:")
     assert(group.Situation() == "solo",
         "alone in a raid is solo, got " .. tostring(group.Situation()))
 
-    assert(group.Notice() == nil,
-        "and nothing is announced about a group that is not there")
+    local alone = group.Notice()
+
+    -- 0.81.0: it says something, and what it says is about the DOORWAY, not
+    -- about a group that is not there.
+    assert(alone and not string.find(alone, "people", 1, true),
+        "nothing is announced about a group that is not there: "
+        .. tostring(alone))
+
+    assert(string.find(alone, "on your own", 1, true),
+        "and being inside alone is still being inside: " .. tostring(alone))
 
     -- THE PENALTY GOES WITH IT.
     local mount = CN.NewObjective({
@@ -32923,8 +32974,12 @@ end)()
 
     CN.Blizzard.SearchEncounterJournal = realSearch
 
-    assert(searches == 1,
-        "twenty hovers of a non-drop run one journal search, not twenty: "
+    -- TWO, not one and not twenty. 0.81.0: the FIRST zero from the client's
+    -- asynchronous search is "not yet" and must not be remembered as
+    -- "nothing" -- that was the defect 0.80.0's miss cache reintroduced. The
+    -- second zero is the miss, and the eighteen calls after it are free.
+    assert(searches == 2,
+        "twenty hovers of a non-drop run two journal searches, not twenty: "
         .. searches)
 
     -- A ZERO IS STILL "NOT YET" -- the miss expires.
@@ -32959,6 +33014,36 @@ end)()
 
     assert(searches == 1,
         "entering a new world asks the journal again: " .. searches)
+
+    ------------------------------------------------------------
+    -- AND A REFUSAL IS NOT REMEMBERED AT ALL.
+    ------------------------------------------------------------
+    -- `WithJournal` refuses outright while the player has the Adventure
+    -- Guide open, and the tooltip calls in with no such guard -- so every
+    -- name hovered while it was open answered "nothing" for a minute after
+    -- it was closed.
+    instances.ForgetDrops()
+
+    local realOpen = CN.Blizzard.IsEncounterJournalOpen
+
+    CN.Blizzard.IsEncounterJournalOpen = function() return true end
+
+    searches = 0
+
+    CN.Blizzard.SearchEncounterJournal = function()
+        searches = searches + 1
+        return {}
+    end
+
+    instances.WhereDoesItDrop("A Thing The Journal Would Not Answer About")
+    instances.WhereDoesItDrop("A Thing The Journal Would Not Answer About")
+
+    CN.Blizzard.IsEncounterJournalOpen = realOpen
+    CN.Blizzard.SearchEncounterJournal = realSearch
+
+    assert(searches == 2,
+        "a refusal is asked again rather than cached as an answer: "
+        .. searches)
 
     print("  a search that found nothing is not run twenty times")
 end)()
@@ -33073,6 +33158,223 @@ end)()
         "without touching the count beside it")
 
     print("  a timestamp nothing reads is not kept")
+end)()
+
+print("\nWhat 0.81.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- INSIDE IS A FACT ABOUT THE DOORWAY, NOT ABOUT THE COMPANY.
+    ------------------------------------------------------------
+    -- 0.80.0 correctly stopped calling a solo instance run "in an instance
+    -- with a group", and left the other half unasked: standing inside
+    -- anything, alone or not, a herb in Durotar is something you can do after
+    -- a loading screen, not now. A solo player in Firelands could be handed
+    -- an outdoor world quest as the best next thing.
+    local groupModule = CN:GetModule("Group")
+
+    local savedSize     = CN_TEST_GROUP_SIZE
+    local savedInstance = CN_TEST_INSTANCE
+    local savedMap      = CN_TEST_PLAYER_MAP
+    local savedRefuse   = CN_TEST_REFUSE_MAP
+
+    -- A raid whose map parents into its outdoor zone, which is what most
+    -- modern ones do -- and the shape 0.81.0's first attempt got wrong.
+    CN_TEST_MapParent(940001, 94, 4)
+
+    CN_TEST_INSTANCE   = "raid"
+    CN_TEST_GROUP_SIZE = 1
+
+    CN_TEST_SetPlayerMap(940001)
+
+    assert(groupModule.InsideInstance(),
+        "alone in a raid is still inside a raid")
+
+    -- THE BOSS IN FRONT OF YOU IS NOT OUTSIDE.
+    local here = CN.NewObjective({
+        id = 810001, type = CN.objectiveTypes.TREASURE,
+        name = "A chest in this raid", mapID = 940001,
+    })
+
+    assert(not groupModule.Outside(here),
+        "what is in here with you is not ranked down")
+
+    -- AND THE WORLD QUEST ON THE OTHER SIDE OF THE DOOR IS.
+    --
+    -- This is the case zone-level comparison got backwards: `ZoneMapID`
+    -- walks up to the first ancestor the client calls a ZONE, and this
+    -- raid's map parents into Eversong Woods -- so the outdoor objective
+    -- compared EQUAL and nothing outside was ranked down at all.
+    local away = CN.NewObjective({
+        id = 810002, type = CN.objectiveTypes.QUEST,
+        name = "A world quest outside", mapID = 94,
+    })
+
+    assert(groupModule.Outside(away),
+        "what is outside the door is ranked down")
+
+    -- A SECOND FLOOR IS THE SAME INSTANCE.
+    CN_TEST_MapParent(940002, 940001, 4)
+
+    local upstairs = CN.NewObjective({
+        id = 810003, type = CN.objectiveTypes.TREASURE,
+        name = "A chest upstairs", mapID = 940002,
+    })
+
+    assert(not groupModule.Outside(upstairs),
+        "walking downstairs does not demote the treasure upstairs")
+
+    -- AND SOMETHING WITH NO MAP IS NOT LOCATION-BOUND AT ALL.
+    local mount = CN.NewObjective({
+        id = 810004, type = CN.objectiveTypes.MOUNT,
+        name = "The mount off the last boss",
+    })
+
+    assert(not groupModule.Outside(mount),
+        "a collection with no map is left where it was")
+
+    -- UNKNOWN IS NOT OUTSIDE.
+    --
+    -- `GetPlayerPosition` answers nil during a loading screen, and
+    -- PLAYER_ENTERING_WORLD invalidates the ranking -- so a re-score is
+    -- scheduled at exactly that moment. Reading nil as "outside" would halve
+    -- every located row and stamp a sentence saying so.
+    CN_TEST_SetPlayerMap(nil)
+
+    assert(not groupModule.Outside(away),
+        "a loading screen does not demote everything the addon knows")
+
+    CN_TEST_SetPlayerMap(940001)
+
+    ------------------------------------------------------------
+    -- AND THE SENTENCE IS WITHDRAWN ON THE BRANCH'S OWN TERMS.
+    ------------------------------------------------------------
+    local adjuster = CN.scoreAdjusters and CN.scoreAdjusters["Group"]
+
+    assert(adjuster, "the Group adjuster is registered")
+
+    assert(adjuster(away, 100) == 100 * groupModule.outsidePenalty,
+        "an outdoor row is ranked down while you are inside")
+
+    local stamped = CN.Reasons and CN.Reasons(away) or {}
+
+    local sawOutside = false
+
+    for _, reason in ipairs(stamped) do
+        if string.find(tostring(reason), "have to leave", 1, true) then
+            sawOutside = true
+        end
+    end
+
+    assert(sawOutside, "and it says why")
+
+    -- Now the same objective, still inside, but the addon no longer knows
+    -- where the player is. The multiplier goes back to 1, so the sentence
+    -- must go with it -- 0.81.0's first attempt withdrew it only on LEAVING
+    -- the instance, so it outlived its own multiplier for the whole run.
+    CN_TEST_SetPlayerMap(nil)
+
+    assert(adjuster(away, 100) == 100,
+        "and is not ranked down when the addon cannot tell")
+
+    for _, reason in ipairs(CN.Reasons and CN.Reasons(away) or {}) do
+        assert(not string.find(tostring(reason), "have to leave", 1, true),
+            "the explanation and the multiplier always agree: "
+            .. tostring(reason))
+    end
+
+    CN_TEST_PLAYER_MAP = savedMap
+    CN_TEST_REFUSE_MAP = savedRefuse
+    CN_TEST_GROUP_SIZE = savedSize
+    CN_TEST_INSTANCE   = savedInstance
+
+    print("  inside is about the doorway, not the company")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AND THE PLANNER ASKS THE SAME QUESTION.
+    ------------------------------------------------------------
+    -- `Session.Plan` asked `Situation() == "instanced"`, which 0.80.0
+    -- narrowed to mean "with a group" -- so a player soloing an old raid was
+    -- handed a walking route through the open world.
+    local sessionModule = CN:GetModule("Session")
+
+    local savedSize     = CN_TEST_GROUP_SIZE
+    local savedInstance = CN_TEST_INSTANCE
+
+    CN_TEST_INSTANCE   = "raid"
+    CN_TEST_GROUP_SIZE = 1
+
+    local plan = sessionModule.Plan(30)
+
+    assert(plan and plan.blocked == "instanced",
+        "a plan is not offered to somebody who cannot start it: "
+        .. tostring(plan and plan.blocked))
+
+    assert(plan.notice and string.find(plan.notice, "on your own", 1, true),
+        "and the refusal says why: " .. tostring(plan and plan.notice))
+
+    CN_TEST_INSTANCE   = nil
+    CN_TEST_GROUP_SIZE = savedSize
+
+    local outside = sessionModule.Plan(30)
+
+    assert(outside and not outside.blocked,
+        "and stepping outside unblocks it")
+
+    CN_TEST_INSTANCE = savedInstance
+
+    print("  a plan you cannot start is not offered")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE INSTANCE ABOVE A MAP IS NOT ITS ZONE.
+    ------------------------------------------------------------
+    local Blizzard = CN.Blizzard
+
+    assert(Blizzard.InstanceMapID, "the walk exists")
+
+    CN_TEST_MapParent(940010, 2022, 4)
+
+    assert(Blizzard.InstanceMapID(940010) == 940010,
+        "a dungeon map is its own instance")
+
+    assert(Blizzard.InstanceMapID(2022) == nil,
+        "and an outdoor zone is in no instance at all")
+
+    -- The two answers differ, which is the whole point: `ZoneMapID` of a
+    -- dungeon that parents into a zone IS that zone.
+    assert(Blizzard.ZoneMapID(940010) == 2022,
+        "zone level answers with the zone outside")
+
+    print("  an instance is not the zone it opens onto")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A VENDOR SELLS AN ITEM; A PROFESSION KNOWS A RECIPE.
+    ------------------------------------------------------------
+    -- The recipe provider indexed two trade-skill-keyed tables with a
+    -- merchant item id, so it produced a row only where the two numbers
+    -- happened to collide. 0.80.0 removed exactly this collision from
+    -- `Professions.RecipeForItem` and did not sweep its siblings.
+    local source = CN_TEST_ReadAddonFile("Modules/Vendors.lua")
+
+    assert(source, "Modules/Vendors.lua must be readable")
+
+    for line in string.gmatch(source, "[^\n]+") do
+        if not string.find(line, "^%s*%-%-") then
+            assert(not string.find(line, "names[itemID]", 1, true),
+                "the recipe name is not looked up by merchant item id")
+
+            assert(not string.find(line, "known[itemID]", 1, true),
+                "and neither is whether this character knows it")
+        end
+    end
+
+    print("  a vendor's item id is not a recipe id")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

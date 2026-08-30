@@ -216,10 +216,38 @@ function Instances.WhereDoesItDrop(name)
     --
     -- Both facts are now true at once: an answer is kept, and a miss is kept
     -- just long enough to absorb the storm.
+    -- A REFUSAL IS NOT AN ANSWER, AND THE FIRST ZERO IS NOT ONE EITHER.
+    -- 0.81.0.
+    --
+    -- 0.80.0 began recording misses to stop a mouseover storm re-running the
+    -- search, which was right, and recorded THREE different things as one:
+    --
+    --   * the Adventure Guide is not on this client, or is OPEN -- in which
+    --     case the search never ran. `WithJournal` refuses outright while the
+    --     player has it open, and the tooltip and `/cn chase` both call in
+    --     with no such guard.
+    --   * `EJ_SetSearch` has not finished. The client's search is
+    --     asynchronous and the FIRST query for a name reliably returns
+    --     nothing -- which is the defect the comment above was written for.
+    --   * the name genuinely drops from nothing.
+    --
+    -- So `/cn drops <name>` typed twice in a row answered "nothing in the
+    -- Adventure Guide matches" for a full minute, and a raid mount's chase
+    -- silently lost its "kill this boss" step.
+    --
+    -- Only the third is remembered. A refusal is not written at all; a first
+    -- zero is recorded as HAVING BEEN ASKED, which the read path above treats
+    -- as no answer, so the next call searches again and it is the second zero
+    -- that becomes a miss.
     if #results > 0 then
         dropCache[name] = { results = results }
-    else
+    elseif not Blizzard.HasEncounterJournal()
+        or Blizzard.IsEncounterJournalOpen() then
+        dropCache[name] = nil
+    elseif cached and cached.asked then
         dropCache[name] = { at = time() }
+    else
+        dropCache[name] = { asked = true }
     end
 
     return results

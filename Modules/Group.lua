@@ -147,6 +147,97 @@ end
 -- and the addon does not un-ask that -- just pushed down.
 Group.instancedPenalty = 0.35
 
+-- INSIDE, WHETHER OR NOT ANYBODY IS WITH YOU. 0.81.0.
+--
+-- Two different facts were being answered by one word. `Situation()` answers
+-- a SOCIAL question -- are other people waiting on you -- and 0.80.0 fixed it
+-- to require a group, correctly: soloing an old raid for its mount is not
+-- "four people waiting at a boss".
+--
+-- But it left the OTHER fact unasked. Standing inside any instance, alone or
+-- not, a herb in Durotar is not something you can go and do; it is something
+-- you can do after a loading screen. Nothing in the ranking knew that, so a
+-- solo player in Firelands could be handed an outdoor world quest as the best
+-- next thing.
+--
+-- These are answered separately now, because they are separate questions.
+Group.outsidePenalty = 0.5
+
+function Group.InsideInstance()
+    local inside, kind = Group.Instance()
+
+    return inside
+        and (kind == "party" or kind == "raid" or kind == "scenario")
+        or false
+end
+
+-- Is this objective somewhere the player would have to leave to reach?
+--
+-- Answers FALSE for everything when the addon does not know where the player
+-- is standing, which is the honest reading of a nil map. `GetPlayerPosition`
+-- returns nothing during a loading screen -- and `PLAYER_ENTERING_WORLD`
+-- invalidates the ranking, so a re-score is scheduled at exactly that moment.
+-- Treating "I do not know yet" as "outside" would halve the score of the boss
+-- in the room the player had just loaded into and stamp a sentence saying so.
+--
+-- UNKNOWN IS NOT OUTSIDE. The same reading applies one level down: the
+-- instance-identity walk refuses rather than guessing while `C_Map` is still
+-- coming up, and a refusal here means no penalty.
+function Group.Outside(objective)
+    if type(objective) ~= "table" or not objective.mapID then
+        return false
+    end
+
+    -- NOT MEMOISED, DELIBERATELY -- AND THIS IS THE SECOND ATTEMPT.
+    --
+    -- The first stamped the answer with `GetTime()`, on the reasoning that
+    -- the player cannot move between two candidates in the same frame. True
+    -- in the client and false everywhere else: the offline suite drives many
+    -- scenarios inside one frame, so the memo answered the FIRST scenario's
+    -- question for all of them and the whole branch silently did nothing.
+    --
+    -- The cost this was avoiding is one `pcall(IsInInstance)`; the position
+    -- read underneath already carries its own single-frame memo. That is not
+    -- worth a cache whose correctness depends on the clock advancing.
+    if not Group.InsideInstance() then
+        return false
+    end
+
+    local here = select(1, CN.GetPlayerPosition())
+
+    if not here then
+        return false
+    end
+
+    if objective.mapID == here then
+        return false
+    end
+
+    -- AT INSTANCE LEVEL, NOT ZONE LEVEL. 0.81.0's first attempt compared
+    -- `ZoneMapID`, which walks up to the first ancestor the client calls a
+    -- ZONE -- and most modern instance maps parent into the outdoor zone
+    -- around them. So the world quest on the other side of the door compared
+    -- EQUAL to the boss in front of the player, and nothing outside was
+    -- ranked down at all: the exact opposite of what this branch is for.
+    -- `Loremaster.lua` records the same trap for the same function.
+    local walk = CN.Blizzard and CN.Blizzard.InstanceMapID
+
+    if not walk then
+        return false
+    end
+
+    local hereInstance = walk(here)
+
+    if not hereInstance then
+        return false
+    end
+
+    -- A multi-floor dungeon is several maps and one instance, so two floors
+    -- of the same instance compare equal and walking downstairs does not
+    -- demote the treasure upstairs.
+    return walk(objective.mapID) ~= hereInstance
+end
+
 Group.instancedTypes = {
     [CN.objectiveTypes.PET]         = true,
     [CN.objectiveTypes.TOY]         = true,
@@ -364,6 +455,24 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
         CN.ClearAdjusterReason(objective, "groupInstanced")
     end
 
+    -- THE LOCATION SENTENCE IS WITHDRAWN ON THE BRANCH'S OWN TERMS.
+    --
+    -- Withdrawing it only on LEAVING the instance was the same one-way
+    -- stamping this function's own doctrine forbids sixty lines above: the
+    -- branch below can decline for reasons other than the doorway -- the
+    -- player's map has not resolved yet, the objective turns out to be in
+    -- here -- and in every one of those the sentence outlived its multiplier
+    -- for the rest of the run.
+    --
+    -- Computed first, cleared first, applied last. `Outside` is nil-safe on
+    -- a nil objective, which is how this function is called by the reason
+    -- sweep.
+    local outside = Group.Outside(objective)
+
+    if not outside then
+        CN.ClearAdjusterReason(objective, "groupOutside")
+    end
+
     if situation == "dead" then
         -- EXCEPT THE BODY.
         --
@@ -393,6 +502,27 @@ CN.RegisterScoreAdjuster("Group", function(objective, score)
             "outside work, and you are in an instance with a group")
 
         return score * Group.instancedPenalty
+    end
+
+    -- BY WHERE IT IS, NOT BY WHAT IT IS. 0.81.0.
+    --
+    -- The branch above works from a list of TYPES, which is a proxy for
+    -- "outdoors" and a bad one in both directions: it demotes the mount that
+    -- drops from the boss you are standing next to, and it says nothing
+    -- about the world quest three zones away, because QUEST is not on the
+    -- list.
+    --
+    -- The addon already knows where things are. Inside an instance, anything
+    -- with a KNOWN map that is not this instance's map needs a loading screen
+    -- first, and that is true of every type equally. Anything with no map --
+    -- a collection, a currency, the mount off this raid's last boss -- is not
+    -- location-bound and is left exactly where it was, which is the case the
+    -- type list got wrong.
+    if outside then
+        CN.AddAdjusterReason(objective, "groupOutside",
+            "outside" .. CN.DASH .. "you would have to leave first")
+
+        return score * Group.outsidePenalty
     end
 
     return score
@@ -512,14 +642,29 @@ function Group.Notice()
         return "You are dead. Release or accept a resurrection first."
     end
 
-    if situation == "instanced" then
-        local _, kind = Group.Instance()
+    local _, kind = Group.Instance()
 
+    local where = (kind == "raid" and "a raid" or "an instance")
+
+    if situation == "instanced" then
         -- "a instance". 0.80.0. Two words, one article, and it had been in
         -- every `/cn situation` since 0.44.0.
-        return "You are in " .. (kind == "raid" and "a raid" or "an instance")
+        return "You are in " .. where
             .. " with " .. Group.Size() .. " people; outside work is ranked "
             .. "down until you leave."
+    end
+
+    -- AND ALONE INSIDE IS STILL INSIDE. 0.81.0.
+    --
+    -- 0.80.0 stopped calling a solo instance run "instanced", which was
+    -- right, and left this function with nothing to say about it -- so
+    -- `/cn situation` reported "solo", and `/cn plan` refused with the
+    -- generic "not while you are in the middle of that". The doorway is a
+    -- fact about the player whether or not anybody came with them.
+    if Group.InsideInstance() then
+        return "You are in " .. where .. " on your own; what is out in the "
+            .. "world is ranked down until you leave, and what is in here "
+            .. "with you is not."
     end
 
     return nil

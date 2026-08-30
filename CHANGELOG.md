@@ -7,6 +7,51 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.81.0]
+
+**Being inside an instance is a fact about the doorway, not about the
+company.** 0.80.0 correctly stopped calling a solo raid clear "an instance
+with a group" â€” and in doing so left the other half of the question unasked.
+Standing inside anything, alone or not, a herb in Durotar is not something you
+can go and do; it is something you can do after a loading screen. So a player
+soloing Firelands could be handed an outdoor world quest as the best next
+thing, and `/cn plan` would lay out a walking route they could not start.
+
+The addon now ranks by **where a thing is**, not by what type it is. Inside an
+instance, anything with a known location that is not in here with you is ranked
+down and says so. Anything that is in here â€” or that has no location at all,
+like the mount off the last boss â€” is left exactly where it was. That is a
+better rule than the old list of types in both directions: the old one buried
+the mount you came for and said nothing about the quest three zones away.
+
+### Fixed
+
+- **A solo instance run no longer recommends outdoor work**, and `/cn plan`
+  refuses with the reason rather than a generic shrug. `/cn situation` now has
+  something to say about being inside on your own.
+- **Vendor-sold recipes have never been found.** That provider matched a
+  merchant's item id against a table keyed by trade-skill recipe ids â€” two
+  unrelated number spaces â€” so it produced a row only where the two numbers
+  happened to collide by accident. Every real vendor-sold recipe was invisible,
+  and each coincidence was a ranked row named after an unrelated recipe with
+  directions to a vendor selling something else. This is the same collision
+  0.80.0 removed from the tooltip; it had a sibling and nobody looked.
+- **`/cn drops` could answer "nothing" for a minute at a time.** 0.80.0 began
+  remembering searches that found nothing, to stop tooltips hammering the
+  Adventure Guide â€” and recorded three different things as one: a search that
+  found nothing, a search that had not finished yet (the client's is
+  asynchronous, so the first one never has), and a search that never ran
+  because the Adventure Guide was open. Only the first is remembered now.
+- **0.81.0's own first attempt compared the wrong maps.** It asked whether two
+  things were in the same *zone*, and most modern instance maps sit inside
+  their outdoor zone â€” so the world quest on the other side of the door
+  compared equal and nothing outside was ranked down at all. It compares
+  instance identity now, which also means two floors of one dungeon are one
+  place.
+- **A loading screen no longer ranks down everything the addon can locate.**
+  The client reports no map for a moment on every zone change, which is exactly
+  when the ranking is rebuilt. "I don't know yet" is not "outside".
+
 ## [0.80.0]
 
 **If you solo old raids for mounts, this release is for you.** The addon has

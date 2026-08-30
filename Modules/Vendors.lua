@@ -392,9 +392,51 @@ CN.RegisterCandidateProvider("Vendors", function()
         return held or nil
     end
 
+    -- THE JOIN IS BY NAME, BECAUSE THE TWO SIDES ARE DIFFERENT ID SPACES.
+    -- 0.81.0.
+    --
+    -- This provider indexed `known` and `names` -- both keyed by TRADE-SKILL
+    -- RECIPE ID, written by `Professions.CaptureOpenProfession` from
+    -- `C_TradeSkillUI.GetAllRecipeIDs` -- with a MERCHANT ITEM ID from the
+    -- vendor store. Two unrelated number spaces, one lookup.
+    --
+    -- 0.80.0 removed exactly this collision from `Professions.RecipeForItem`
+    -- and did not come looking for its siblings, which is rule 30 in this
+    -- project's backlog and the shape it keeps finding. `Filters.lua` names
+    -- both spaces in the same sentence, three files over.
+    --
+    -- The consequence was worse than a wrong name: the provider produced a
+    -- row ONLY when a vendor's item id happened to equal a captured recipe
+    -- id. Every genuine vendor-sold recipe was invisible -- the whole point
+    -- of this provider -- and each accidental collision was a ranked row
+    -- named after an unrelated recipe, with `/cn go` coordinates to a vendor
+    -- selling something else.
+    --
+    -- Memoised for the same reason `SellerFor` is: `evaluate` and `build`
+    -- both ask, for every item a known vendor sells.
+    local recipeOf = {}
+
+    local function RecipeFor(itemID)
+        local held = recipeOf[itemID]
+
+        if held == nil then
+            held = professions.RecipeForItem(
+                CN.Blizzard.GetItemName and CN.Blizzard.GetItemName(itemID))
+                or false
+
+            recipeOf[itemID] = held
+        end
+
+        return held or nil
+    end
+
     local candidates, considered, dropped = CN.CollectBounded(sellable, nil,
         function(itemID)
-            if known[itemID] or not names[itemID] then
+            local recipeID = RecipeFor(itemID)
+
+            -- The recipe must exist, must have a name, and must not already
+            -- be known by this character.
+            if not recipeID or known[recipeID] or not names[recipeID] then
                 return nil
             end
 
@@ -433,7 +475,13 @@ CN.RegisterCandidateProvider("Vendors", function()
                 return nil
             end
 
-            local recipeName = names[itemID]
+            local recipeID = RecipeFor(itemID)
+
+            if not recipeID then
+                return nil
+            end
+
+            local recipeName = names[recipeID]
 
             local reasons = { "sold by " .. tostring(seller.name) }
 

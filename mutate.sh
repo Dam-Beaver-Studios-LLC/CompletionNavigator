@@ -171,7 +171,7 @@ mutate "Modules/Group.lua" \
     "outside work is not ranked down inside an instance"
 
 mutate "Modules/Session.lua" \
-    "    if situation == \"dead\" or situation == \"instanced\" then" \
+    "    if situation == \"dead\" or inside then" \
     "    if false then" \
     "the planner lays out a route you cannot start"
 
@@ -2010,7 +2010,7 @@ mutate "Modules/Breakdown.lua" \
 # The five defects the 0.61.0 review found in 0.61.0's own changes.
 
 mutate "Modules/Vendors.lua" \
-    "            local recipeName = names[itemID]" \
+    "            local recipeName = names[recipeID]" \
     "            local recipeName = sellable[itemID]" \
     "a recipe row is named after the table of vendors that sell it"
 
@@ -3629,8 +3629,8 @@ mutate "Modules/Group.lua" \
     "soloing an old raid buries the mount you went in for"
 
 mutate "Modules/Group.lua" \
-    "        return \"You are in \" .. (kind == \"raid\" and \"a raid\" or \"an instance\")" \
-    "        return \"You are in a \" .. (kind == \"raid\" and \"raid\" or \"instance\")" \
+    "    local where = (kind == \"raid\" and \"a raid\" or \"an instance\")" \
+    "    local where = (kind == \"raid\" and \"raid\" or \"instance\")" \
     "/cn situation says you are in a instance"
 
 mutate "Modules/Professions.lua" \
@@ -3677,6 +3677,81 @@ mutate "Database.lua" \
     "            if false then
                 record.lastSeen = nil" \
     "the appearance timestamps already on disk stay there"
+
+# ---- 0.81.0 ----
+
+mutate "Modules/Group.lua" \
+    "    if not Group.InsideInstance() then
+        return false
+    end
+
+    local here = select(1, CN.GetPlayerPosition())" \
+    "    if true then
+        return false
+    end
+
+    local here = select(1, CN.GetPlayerPosition())" \
+    "a solo instance run offers you a world quest outside"
+
+mutate "Modules/Group.lua" \
+    "    local walk = CN.Blizzard and CN.Blizzard.InstanceMapID" \
+    "    local walk = CN.Blizzard and CN.Blizzard.ZoneMapID" \
+    "the world quest outside the door counts as being in here with you"
+
+mutate "Modules/Group.lua" \
+    "    local here = select(1, CN.GetPlayerPosition())
+
+    if not here then
+        return false
+    end" \
+    "    local here = select(1, CN.GetPlayerPosition())
+
+    if not here then
+        return true
+    end" \
+    "a loading screen ranks down everything the addon knows where to find"
+
+mutate "Modules/Group.lua" \
+    "    if not outside then
+        CN.ClearAdjusterReason(objective, \"groupOutside\")
+    end" \
+    "    if not Group.InsideInstance() then
+        CN.ClearAdjusterReason(objective, \"groupOutside\")
+    end" \
+    "the outside sentence outlives the multiplier that put it there"
+
+mutate "Modules/Session.lua" \
+    "    if situation == \"dead\" or inside then" \
+    "    if situation == \"dead\" or situation == \"instanced\" then" \
+    "a solo raid clear is handed a walking route through the open world"
+
+mutate "Modules/Vendors.lua" \
+    "            if not recipeID or known[recipeID] or not names[recipeID] then" \
+    "            if known[itemID] or not names[itemID] then" \
+    "a vendor-sold recipe is found only where two id spaces collide"
+
+mutate "Modules/Instances.lua" \
+    "    elseif not Blizzard.HasEncounterJournal()
+        or Blizzard.IsEncounterJournalOpen() then
+        dropCache[name] = nil
+    elseif cached and cached.asked then" \
+    "    elseif false then
+        dropCache[name] = nil
+    elseif true then" \
+    "a search the journal refused is remembered as an answer"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "        if (info.mapType or 0) > Blizzard.zoneMapType then
+            found = current
+        else
+            break
+        end" \
+    "        if (info.mapType or 0) >= Blizzard.zoneMapType then
+            found = current
+        else
+            break
+        end" \
+    "an outdoor zone is reported as being inside an instance"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
