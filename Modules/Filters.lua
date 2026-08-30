@@ -460,13 +460,42 @@ function Filters.DescribeObjective(objectiveType, id)
     -- Named here rather than by reaching into the modules, because the whole
     -- point of this function is that it answers for a store row long after
     -- the provider that made it has stopped producing one.
+    -- ALL OF THEM, NOT THE TWO THAT WERE KNOWN. 0.83.0.
+    --
+    -- 0.79.0 added this table for the two singleton rows that existed then
+    -- and 0.82.0 made a third hideable without adding it, so `/cn hidden`
+    -- read "Currency mail [Currency mail]" -- naming the row twice, in the
+    -- addon's internal vocabulary, in the one list a player consults to
+    -- decide what to restore. Two more were open the whole time: the
+    -- keystone row, and the Great Vault's five per-row ids.
+    --
+    -- Every string id any provider emits belongs here. A test now sweeps
+    -- the live candidate list for one that does not.
     local synthetic = {
-        vault = "Collect your Great Vault reward",
-        claim = "Collect your finished crafting order",
+        mail     = "Expiring mail",
+        vault    = "Collect your Great Vault reward",
+        claim    = "Collect your finished crafting order",
+        keystone = "Your Mythic+ keystone",
+        RAID     = "Great Vault: raid progress",
+        DUNGEON  = "Great Vault: dungeon progress",
+        WORLD    = "Great Vault: world progress",
+        PVP      = "Great Vault: PvP progress",
+        UNKNOWN  = "Great Vault progress",
     }
 
     if type(id) == "string" and synthetic[id] then
         return synthetic[id]
+    end
+
+    -- A PREFIXED ID IS STILL A ROW WITH A NAME. 0.83.0. `Modules/Orders.lua`
+    -- keys a crafting order as "order:<n>" so it cannot be mistaken for a
+    -- recipe id; without this the hidden list would read "Recipe order:412".
+    if type(id) == "string" then
+        local orderID = id:match("^order:(%d+)$")
+
+        if orderID then
+            return "Crafting order " .. orderID
+        end
     end
 
     -- THE BADGE, NOT THE ENUM, FOR EVERYTHING THAT REACHES HERE. 0.67.0.

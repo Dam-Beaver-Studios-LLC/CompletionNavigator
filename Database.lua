@@ -1609,20 +1609,41 @@ CN.migrations = {
 
         local dropped = 0
 
-        for storeName, fields in pairs(dead) do
-            local store = db.account and db.account[storeName]
+        local function strip(store, fields)
+            if type(store) ~= "table" then
+                return
+            end
 
-            if type(store) == "table" then
-                for _, record in pairs(store) do
-                    if type(record) == "table" then
-                        for _, field in ipairs(fields) do
-                            if record[field] ~= nil then
-                                record[field] = nil
-                                dropped = dropped + 1
-                            end
+            for _, record in pairs(store) do
+                if type(record) == "table" then
+                    for _, field in ipairs(fields) do
+                        if record[field] ~= nil then
+                            record[field] = nil
+                            dropped = dropped + 1
                         end
                     end
                 end
+            end
+        end
+
+        for storeName, fields in pairs(dead) do
+            strip(db.account and db.account[storeName], fields)
+        end
+
+        -- AND THE CHARACTER HALF OF THE REPUTATION STORE. 0.83.0.
+        --
+        -- `Reputations.Scan` writes the record into the ACCOUNT store only
+        -- when the faction is account-wide, and into `character.reputations`
+        -- otherwise -- which is most factions, so the character copy holds
+        -- the larger half of the rows.
+        --
+        -- Every store the four earlier cleanups touched was account-only, so
+        -- "walk `db.account[name]`" was the whole job and this one inherited
+        -- the shape without inheriting the question. The test could not see
+        -- it either: its fixture had no characters in it.
+        for _, character in pairs(db.characters or {}) do
+            if type(character) == "table" then
+                strip(character.reputations, dead.reputations)
             end
         end
 

@@ -7,6 +7,49 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.83.0]
+
+**Last release made the mail reminder hideable, and `/cn hidden` then called
+it "Currency mail".** That list names each row through a lookup whose every
+branch starts by converting the id to a number â€” so a row identified by a word
+falls past all of them to a last-resort line that prints the addon's own
+internals. A table of names exists for exactly this and had two entries in it;
+0.82.0 added a third such row without adding it there, and two more had been
+missing the whole time. The list now reads:
+
+> Expiring mail Â· Your Mythic+ keystone Â· Great Vault: raid progress
+
+and a sweep over every row the addon can produce fails the build if a new one
+arrives without a name.
+
+### Fixed
+
+- **Five rows were named after the addon's internals in `/cn hidden`** â€” the
+  mail reminder, the keystone row, and the Great Vault's four progress rows.
+- **A crafting order could be mistaken for a recipe you already know.**
+  "Recipe" covers three unrelated kinds of number: a merchant's item id, a
+  trade-skill recipe id, and a crafting order id. 0.82.0 moved the vendor rows
+  out of the collision and left the crafting orders in it, so an order whose
+  number happened to match a recipe you know was reported as already done and
+  the waypoint was silently dropped â€” from an order about to expire, which is
+  the only reason that row exists. Orders now carry their own id space.
+- **Importing a quest chain could delete an observation you made yourself.**
+  Both the importer and your own quest-chain harvest write into the same
+  graph, and the importer wrote last â€” so an import made mid-session took over
+  a chain you had observed on three of your own characters, and
+  `/cn contribute forget` then removed it as though it had been imported. A
+  quest the addon had correctly held as locked became available, and `/cn go`
+  would route you to a quest giver who would not talk to you. Your own
+  observations are republished after a forget.
+- **Last release's cleanup reached the smaller half of the reputation store.**
+  Most factions are not account-wide, so most reputation rows live on the
+  character rather than on the account, and the migration only walked the
+  account half. Every earlier cleanup of this kind was for an account-only
+  store, and this one inherited the shape without inheriting the question. Its
+  own test could not see it: the fixture had no characters in it.
+- **The 0.82.0 notes named the wrong command.** The specialization line is in
+  `/cn warband`, not `/cn who`.
+
 ## [0.82.0]
 
 **The mail reminder could not be dismissed.** It carries the highest fixed
@@ -56,7 +99,7 @@ had not been revised in fifteen to thirty releases.
 
 ### Changed
 
-- **`/cn who` shows each character's specialization.** The addon has been
+- **`/cn warband` shows each character's specialization.** The addon has been
   recording it since 0.62.0 and never once displaying it. It is stored as the
   game's own id now rather than as a word, so it reads in your language rather
   than in whichever language the alt was levelled in.

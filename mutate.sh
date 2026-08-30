@@ -3825,6 +3825,47 @@ mutate "Modules/Vendors.lua" \
                 itemID          = itemID," \
     "a vendor recipe is explained by asking a recipe table an item question"
 
+# ---- 0.83.0 ----
+
+mutate "Modules/Filters.lua" \
+    "        mail     = \"Expiring mail\"," \
+    "" \
+    "/cn hidden names the mail row Currency mail"
+
+mutate "Modules/Filters.lua" \
+    "        keystone = \"Your Mythic+ keystone\"," \
+    "" \
+    "/cn hidden names the keystone row Dungeon keystone"
+
+mutate "Modules/Filters.lua" \
+    "        RAID     = \"Great Vault: raid progress\"," \
+    "" \
+    "/cn hidden names a vault row Currency RAID"
+
+mutate "Modules/Filters.lua" \
+    "        local orderID = id:match(\"^order:(%d+)\$\")" \
+    "        local orderID = nil" \
+    "/cn hidden names a crafting order Recipe order:412"
+
+mutate "Modules/Orders.lua" \
+    "        local rowID = \"order:\" .. tostring(order.orderID)" \
+    "        local rowID = order.orderID" \
+    "a crafting order is retired because a recipe shares its number"
+
+mutate "Modules/Contribute.lua" \
+    "    if harvest and harvest.PublishConfident then
+        pcall(harvest.PublishConfident)
+    end" \
+    "    if false then
+        pcall(harvest.PublishConfident)
+    end" \
+    "forgetting an import deletes what you observed yourself"
+
+mutate "Database.lua" \
+    "                strip(character.reputations, dead.reputations)" \
+    "                strip(nil, dead.reputations)" \
+    "the larger half of the reputation store keeps its dead field"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

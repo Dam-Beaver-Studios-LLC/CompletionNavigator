@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.82.0'
+$script:ToolkitVersion = '0.83.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.82.0"
+CN.version     = "0.83.0"
 CN.dbVersion   = 33
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -3551,20 +3551,41 @@ CN.migrations = {
 
         local dropped = 0
 
-        for storeName, fields in pairs(dead) do
-            local store = db.account and db.account[storeName]
+        local function strip(store, fields)
+            if type(store) ~= "table" then
+                return
+            end
 
-            if type(store) == "table" then
-                for _, record in pairs(store) do
-                    if type(record) == "table" then
-                        for _, field in ipairs(fields) do
-                            if record[field] ~= nil then
-                                record[field] = nil
-                                dropped = dropped + 1
-                            end
+            for _, record in pairs(store) do
+                if type(record) == "table" then
+                    for _, field in ipairs(fields) do
+                        if record[field] ~= nil then
+                            record[field] = nil
+                            dropped = dropped + 1
                         end
                     end
                 end
+            end
+        end
+
+        for storeName, fields in pairs(dead) do
+            strip(db.account and db.account[storeName], fields)
+        end
+
+        -- AND THE CHARACTER HALF OF THE REPUTATION STORE. 0.83.0.
+        --
+        -- `Reputations.Scan` writes the record into the ACCOUNT store only
+        -- when the faction is account-wide, and into `character.reputations`
+        -- otherwise -- which is most factions, so the character copy holds
+        -- the larger half of the rows.
+        --
+        -- Every store the four earlier cleanups touched was account-only, so
+        -- "walk `db.account[name]`" was the whole job and this one inherited
+        -- the shape without inheriting the question. The test could not see
+        -- it either: its fixture had no characters in it.
+        for _, character in pairs(db.characters or {}) do
+            if type(character) == "table" then
+                strip(character.reputations, dead.reputations)
             end
         end
 
@@ -33984,13 +34005,42 @@ function Filters.DescribeObjective(objectiveType, id)
     -- Named here rather than by reaching into the modules, because the whole
     -- point of this function is that it answers for a store row long after
     -- the provider that made it has stopped producing one.
+    -- ALL OF THEM, NOT THE TWO THAT WERE KNOWN. 0.83.0.
+    --
+    -- 0.79.0 added this table for the two singleton rows that existed then
+    -- and 0.82.0 made a third hideable without adding it, so `/cn hidden`
+    -- read "Currency mail [Currency mail]" -- naming the row twice, in the
+    -- addon's internal vocabulary, in the one list a player consults to
+    -- decide what to restore. Two more were open the whole time: the
+    -- keystone row, and the Great Vault's five per-row ids.
+    --
+    -- Every string id any provider emits belongs here. A test now sweeps
+    -- the live candidate list for one that does not.
     local synthetic = {
-        vault = "Collect your Great Vault reward",
-        claim = "Collect your finished crafting order",
+        mail     = "Expiring mail",
+        vault    = "Collect your Great Vault reward",
+        claim    = "Collect your finished crafting order",
+        keystone = "Your Mythic+ keystone",
+        RAID     = "Great Vault: raid progress",
+        DUNGEON  = "Great Vault: dungeon progress",
+        WORLD    = "Great Vault: world progress",
+        PVP      = "Great Vault: PvP progress",
+        UNKNOWN  = "Great Vault progress",
     }
 
     if type(id) == "string" and synthetic[id] then
         return synthetic[id]
+    end
+
+    -- A PREFIXED ID IS STILL A ROW WITH A NAME. 0.83.0. `Modules/Orders.lua`
+    -- keys a crafting order as "order:<n>" so it cannot be mistaken for a
+    -- recipe id; without this the hidden list would read "Recipe order:412".
+    if type(id) == "string" then
+        local orderID = id:match("^order:(%d+)$")
+
+        if orderID then
+            return "Crafting order " .. orderID
+        end
     end
 
     -- THE BADGE, NOT THE ENUM, FOR EVERYTHING THAT REACHES HERE. 0.67.0.
@@ -54814,14 +54864,36 @@ CN.RegisterCandidateProvider("Orders", function()
     end
 
     for _, order in ipairs(mine) do
+        -- THE THIRD ID SPACE THIS TYPE CARRIES. 0.83.0.
+        --
+        -- `Modules/Filters.lua` names all three: a merchant itemID from
+        -- Vendors, a trade-skill recipe id from Professions, and a crafting
+        -- orderID from here. 0.82.0 converted the Vendors rows to the recipe
+        -- space because the RECIPE eligibility checker indexes
+        -- `character.recipes` -- written from `C_TradeSkillUI.GetAllRecipeIDs`
+        -- -- and left this provider exactly as it was.
+        --
+        -- Same consequence: an orderID that happened to collide with a recipe
+        -- this character knows was answered "already known by this
+        -- character", named after an unrelated recipe, and the waypoint was
+        -- silently retired from an order about to expire -- which is the one
+        -- deadline this provider exists for.
+        --
+        -- Prefixed rather than renumbered, because an order id IS the right
+        -- identity for this row; it just must not be mistaken for a recipe.
+        -- A string can never collide with one, and the row's own number is
+        -- kept beside it.
+        local rowID = "order:" .. tostring(order.orderID)
+
         if order.expiresIn and order.expiresIn <= Orders.expiryHorizonSeconds
-            and not CN.IsIgnored(CN.objectiveTypes.RECIPE, order.orderID)
-            and not CN.IsDeferred(CN.objectiveTypes.RECIPE, order.orderID) then
+            and not CN.IsIgnored(CN.objectiveTypes.RECIPE, rowID)
+            and not CN.IsDeferred(CN.objectiveTypes.RECIPE, rowID) then
 
             local session = CN:GetModule("Session")
 
             table.insert(candidates, CN.NewObjective({
-                id               = order.orderID,
+                id               = rowID,
+                orderID          = order.orderID,
                 type             = CN.objectiveTypes.RECIPE,
                 name             = "Crafting order: "
                     .. tostring(order.itemName or order.itemID or "?"),
@@ -55202,6 +55274,31 @@ function Contribute.Forget()
             dependency.observedRequires = nil
             dependency.origin           = nil
         end
+    end
+
+    -- AND THE PLAYER'S OWN EDGES COME BACK. 0.83.0.
+    --
+    -- 0.82.0's guard -- withdraw only edges stamped "contributed" -- is
+    -- correct at login, where load order makes the harvest publisher run
+    -- last and win. It is wrong for an import made DURING a session:
+    -- `CN.AddDependency` merges field by field, so the import overwrites
+    -- both the requirements and the origin of a quest the player had also
+    -- harvested, and `Harvest.PublishConfident` is called from its login
+    -- hook and nowhere else -- so nothing puts it back until a reload.
+    --
+    -- Two things went wrong from that. Between the import and the reload,
+    -- `/cn why` reported the player's own three-character observation as
+    -- "not from your own play". And after this function ran, the harvested
+    -- edge was gone entirely: a quest the addon had correctly held LOCKED
+    -- became AVAILABLE, offered by `/cn next` and routed to a quest giver
+    -- who would not talk to the player.
+    --
+    -- Republishing costs one walk of the harvest store and is the only
+    -- thing that can restore an edge this function cannot tell apart.
+    local harvest = CN:GetModule("Harvest")
+
+    if harvest and harvest.PublishConfident then
+        pcall(harvest.PublishConfident)
     end
 
     CN.InvalidateCandidates()
@@ -57095,7 +57192,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.82.0
+## Version: 0.83.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -57351,6 +57448,49 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.83.0]
+
+**Last release made the mail reminder hideable, and `/cn hidden` then called
+it "Currency mail".** That list names each row through a lookup whose every
+branch starts by converting the id to a number — so a row identified by a word
+falls past all of them to a last-resort line that prints the addon's own
+internals. A table of names exists for exactly this and had two entries in it;
+0.82.0 added a third such row without adding it there, and two more had been
+missing the whole time. The list now reads:
+
+> Expiring mail · Your Mythic+ keystone · Great Vault: raid progress
+
+and a sweep over every row the addon can produce fails the build if a new one
+arrives without a name.
+
+### Fixed
+
+- **Five rows were named after the addon's internals in `/cn hidden`** — the
+  mail reminder, the keystone row, and the Great Vault's four progress rows.
+- **A crafting order could be mistaken for a recipe you already know.**
+  "Recipe" covers three unrelated kinds of number: a merchant's item id, a
+  trade-skill recipe id, and a crafting order id. 0.82.0 moved the vendor rows
+  out of the collision and left the crafting orders in it, so an order whose
+  number happened to match a recipe you know was reported as already done and
+  the waypoint was silently dropped — from an order about to expire, which is
+  the only reason that row exists. Orders now carry their own id space.
+- **Importing a quest chain could delete an observation you made yourself.**
+  Both the importer and your own quest-chain harvest write into the same
+  graph, and the importer wrote last — so an import made mid-session took over
+  a chain you had observed on three of your own characters, and
+  `/cn contribute forget` then removed it as though it had been imported. A
+  quest the addon had correctly held as locked became available, and `/cn go`
+  would route you to a quest giver who would not talk to you. Your own
+  observations are republished after a forget.
+- **Last release's cleanup reached the smaller half of the reputation store.**
+  Most factions are not account-wide, so most reputation rows live on the
+  character rather than on the account, and the migration only walked the
+  account half. Every earlier cleanup of this kind was for an account-only
+  store, and this one inherited the shape without inheriting the question. Its
+  own test could not see it: the fixture had no characters in it.
+- **The 0.82.0 notes named the wrong command.** The specialization line is in
+  `/cn warband`, not `/cn who`.
+
 ## [0.82.0]
 
 **The mail reminder could not be dismissed.** It carries the highest fixed
@@ -57400,7 +57540,7 @@ had not been revised in fifteen to thirty releases.
 
 ### Changed
 
-- **`/cn who` shows each character's specialization.** The addon has been
+- **`/cn warband` shows each character's specialization.** The addon has been
   recording it since 0.62.0 and never once displaying it. It is stored as the
   game's own id now rather than as a word, so it reads in your language rather
   than in whichever language the alt was levelled in.
@@ -64008,7 +64148,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.82.0
+0.83.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -68331,6 +68471,47 @@ mutate "Modules/Vendors.lua" \
     "                id              = itemID,
                 itemID          = itemID," \
     "a vendor recipe is explained by asking a recipe table an item question"
+
+# ---- 0.83.0 ----
+
+mutate "Modules/Filters.lua" \
+    "        mail     = \"Expiring mail\"," \
+    "" \
+    "/cn hidden names the mail row Currency mail"
+
+mutate "Modules/Filters.lua" \
+    "        keystone = \"Your Mythic+ keystone\"," \
+    "" \
+    "/cn hidden names the keystone row Dungeon keystone"
+
+mutate "Modules/Filters.lua" \
+    "        RAID     = \"Great Vault: raid progress\"," \
+    "" \
+    "/cn hidden names a vault row Currency RAID"
+
+mutate "Modules/Filters.lua" \
+    "        local orderID = id:match(\"^order:(%d+)\$\")" \
+    "        local orderID = nil" \
+    "/cn hidden names a crafting order Recipe order:412"
+
+mutate "Modules/Orders.lua" \
+    "        local rowID = \"order:\" .. tostring(order.orderID)" \
+    "        local rowID = order.orderID" \
+    "a crafting order is retired because a recipe shares its number"
+
+mutate "Modules/Contribute.lua" \
+    "    if harvest and harvest.PublishConfident then
+        pcall(harvest.PublishConfident)
+    end" \
+    "    if false then
+        pcall(harvest.PublishConfident)
+    end" \
+    "forgetting an import deletes what you observed yourself"
+
+mutate "Database.lua" \
+    "                strip(character.reputations, dead.reputations)" \
+    "                strip(nil, dead.reputations)" \
+    "the larger half of the reputation store keeps its dead field"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -94289,7 +94470,17 @@ print("\nCrafting orders, and a decision that could go stale:")
 
     assert(#orderCandidates == 1,
         "an order ten days out is not urgent, got " .. #orderCandidates)
-    assert(orderCandidates[1].id == 1, "and it is the one expiring within a day")
+    -- PREFIXED. 0.83.0. A crafting orderID shares the RECIPE type with a
+    -- trade-skill recipe id, and the eligibility checker indexes a table
+    -- keyed by the latter -- so a bare number here was answered "already
+    -- known by this character" on any collision, and the waypoint was
+    -- retired from an order about to expire.
+    assert(orderCandidates[1].id == "order:1",
+        "and it is the one expiring within a day, in its own id space: "
+        .. tostring(orderCandidates[1].id))
+
+    assert(orderCandidates[1].orderID == 1,
+        "with the order's own number kept beside it")
 
     C_CraftingOrders.GetClaimedOrder = function() return { orderID = 9 } end
 
@@ -102172,11 +102363,29 @@ end)()
             reputations = { [2] = { factionID = 2, current = 3,
                                     lastSeen = 4 } },
         },
-        characters = {},
+
+        -- WITH A CHARACTER IN IT. 0.83.0.
+        --
+        -- `Reputations.Scan` writes to `character.reputations` for every
+        -- faction that is NOT account-wide -- most of them -- and this
+        -- fixture had `characters = {}`, so the migration's own test could
+        -- not see that it only cleaned the smaller half of the store.
+        characters = {
+            ["Fixture-Realm"] = {
+                reputations = { [7] = { factionID = 7, current = 5,
+                                        lastSeen = 6 } },
+            },
+        },
         settings   = {},
     }
 
     CN.RunMigrations(fixtureDb)
+
+    assert(fixtureDb.characters["Fixture-Realm"].reputations[7].lastSeen == nil,
+        "the character half of the reputation store is cleaned too")
+
+    assert(fixtureDb.characters["Fixture-Realm"].reputations[7].current == 5,
+        "without touching what is read there either")
 
     assert(fixtureDb.account.mounts[1].firstSeen == nil
         and fixtureDb.account.mounts[1].lastSeen == nil,
@@ -102285,6 +102494,185 @@ end)()
         .. tostring(counts.unobtainable) .. " ~= " .. seen)
 
     print("  a count adds up and a headline parses")
+end)()
+
+print("\nWhat 0.83.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY ROW THE PLAYER CAN HIDE HAS A NAME THEY CAN READ.
+    ------------------------------------------------------------
+    -- `/cn hidden` names each row through `Filters.DescribeObjective`, whose
+    -- typed branches all begin `tonumber(id)`. A provider that emits a STRING
+    -- id therefore falls past every one of them to the badge tail, and the
+    -- list reads "Currency mail [Currency mail]" -- the addon's internals,
+    -- twice, in the one place a player looks to decide what to restore.
+    --
+    -- 0.79.0 added a lookup for the two string ids that existed then; 0.82.0
+    -- made a third hideable without adding it, and two more had been open the
+    -- whole time. Swept rather than listed, so the next one fails here.
+    local filterModule = CN:GetModule("Filters")
+
+    CN.InvalidateCandidates()
+
+    local unnamed = {}
+
+    for _, objective in ipairs(CN.CollectCandidates() or {}) do
+        if type(objective.id) == "string" then
+            local named = filterModule.DescribeObjective(
+                objective.type, objective.id)
+
+            local badge = CN.TypeBadge(objective.type)
+
+            -- The tail produces exactly "<Badge> <id>". Anything else is a
+            -- real name.
+            if named == (badge .. " " .. objective.id) then
+                table.insert(unnamed,
+                    tostring(objective.type) .. ":" .. objective.id)
+            end
+        end
+    end
+
+    table.sort(unnamed)
+
+    assert(#unnamed == 0,
+        "a row with a string id is named, not enumerated: "
+        .. table.concat(unnamed, ", "))
+
+    -- AND THE FIVE THAT WERE OPEN.
+    for _, pair in ipairs({
+        { CN.objectiveTypes.CURRENCY, "mail" },
+        { CN.objectiveTypes.INSTANCE, "keystone" },
+        { CN.objectiveTypes.CURRENCY, "RAID" },
+        { CN.objectiveTypes.RECIPE,   "order:412" },
+    }) do
+        local named = filterModule.DescribeObjective(pair[1], pair[2])
+
+        assert(named ~= (CN.TypeBadge(pair[1]) .. " " .. pair[2]),
+            "the row's name is not its badge and id: " .. tostring(named))
+    end
+
+    print("  every hideable row has a name a player can read")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CRAFTING ORDER IS NOT A RECIPE ID.
+    ------------------------------------------------------------
+    -- RECIPE carries three id spaces. 0.82.0 moved the vendor rows out of the
+    -- item-id space because the eligibility checker indexes a table keyed by
+    -- trade-skill recipe ids, and left the crafting orders where they were --
+    -- so an orderID colliding with a known recipe was answered "already known
+    -- by this character" and the waypoint was retired from an order about to
+    -- expire.
+    local professions = CN:GetModule("Professions")
+
+    local mine = professions.CharacterRecipes() or {}
+
+    local collide = next(mine)
+
+    if collide then
+        local state = CN.Explain(CN.objectiveTypes.RECIPE,
+            "order:" .. tostring(collide))
+
+        assert(state ~= CN.objectiveStates.COMPLETED,
+            "an order is not finished because a recipe shares its number: "
+            .. tostring(state))
+    end
+
+    -- AND NO PROVIDER EMITS A BARE NUMBER UNDER THIS TYPE THAT IS NOT A
+    -- RECIPE ID. Vendors and Orders are the two that used to.
+    local source = CN_TEST_ReadAddonFile("Modules/Orders.lua")
+
+    for line in string.gmatch(source or "", "[^\n]+") do
+        if not string.find(line, "^%s*%-%-") then
+            assert(not string.find(line, "id               = order.orderID",
+                    1, true),
+                "a crafting order carries its own id space")
+        end
+    end
+
+    print("  a crafting order is not mistaken for a recipe")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN IMPORT DOES NOT STEAL, OR DESTROY, YOUR OWN OBSERVATION.
+    ------------------------------------------------------------
+    -- `CN.AddDependency` merges field by field, and `PublishConfident` is
+    -- called from a login hook and nowhere else. So an import made DURING a
+    -- session overwrote a harvested edge -- requirements and origin both --
+    -- and `forget` then deleted it, because it could no longer tell whose it
+    -- was. A quest the addon had correctly held LOCKED became AVAILABLE and
+    -- was routed to a quest giver who would not talk to the player.
+    local contribute    = CN:GetModule("Contribute")
+    local chainHarvest = CN:GetModule("Harvest")
+
+    if contribute and chainHarvest and chainHarvest.PublishConfident then
+        local questID = 830001
+
+        local key = CN.ObjectiveKey(CN.objectiveTypes.QUEST, questID)
+
+        -- A real harvested observation: the same prerequisite seen on
+        -- `confidenceThreshold` separate characters, which is what the
+        -- module calls confident.
+        local characters = {}
+
+        for index = 1, chainHarvest.confidenceThreshold do
+            characters["Alt" .. index .. "-Realm"] = true
+        end
+
+        chainHarvest.Store()[questID] = {
+            observed = { [830000] = { characters = characters } },
+        }
+
+        chainHarvest.PublishConfident()
+
+        assert(CN.GetDependency(key)
+            and CN.GetDependency(key).origin == "harvested",
+            "the player's own observation is published as their own")
+
+        -- Now an import lands on the same quest, mid-session, the way a
+        -- `/cn contribute import` does.
+        CN.Account("contributed")[questID] = { 830000 }
+
+        CN.AddDependency(key, {
+            observedRequires = { 830000 },
+            origin           = "contributed",
+        })
+
+        contribute.Forget()
+
+        local left = CN.GetDependency(key)
+
+        assert(left and left.observedRequires
+            and #left.observedRequires > 0,
+            "forgetting an import does not delete what you observed yourself")
+
+        assert(left.origin == "harvested",
+            "and it is credited to you again: " .. tostring(left.origin))
+
+        chainHarvest.Store()[questID] = nil
+    end
+
+    print("  an import does not destroy what you observed yourself")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A STORE WITH TWO HALVES IS CLEANED IN BOTH.
+    ------------------------------------------------------------
+    -- Every store the four earlier cleanups touched was account-only, so
+    -- "walk `db.account[name]`" was the whole job. `reputations` is the first
+    -- with a per-character copy -- which holds the LARGER half, since most
+    -- factions are not account-wide -- and it inherited the shape without
+    -- inheriting the question.
+    local source = CN_TEST_ReadAddonFile("Database.lua")
+
+    assert(source and string.find(source, "strip(character.reputations", 1, true),
+        "the character half is cleaned too")
+
+    print("  a store with two halves is cleaned in both")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

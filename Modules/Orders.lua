@@ -112,14 +112,36 @@ CN.RegisterCandidateProvider("Orders", function()
     end
 
     for _, order in ipairs(mine) do
+        -- THE THIRD ID SPACE THIS TYPE CARRIES. 0.83.0.
+        --
+        -- `Modules/Filters.lua` names all three: a merchant itemID from
+        -- Vendors, a trade-skill recipe id from Professions, and a crafting
+        -- orderID from here. 0.82.0 converted the Vendors rows to the recipe
+        -- space because the RECIPE eligibility checker indexes
+        -- `character.recipes` -- written from `C_TradeSkillUI.GetAllRecipeIDs`
+        -- -- and left this provider exactly as it was.
+        --
+        -- Same consequence: an orderID that happened to collide with a recipe
+        -- this character knows was answered "already known by this
+        -- character", named after an unrelated recipe, and the waypoint was
+        -- silently retired from an order about to expire -- which is the one
+        -- deadline this provider exists for.
+        --
+        -- Prefixed rather than renumbered, because an order id IS the right
+        -- identity for this row; it just must not be mistaken for a recipe.
+        -- A string can never collide with one, and the row's own number is
+        -- kept beside it.
+        local rowID = "order:" .. tostring(order.orderID)
+
         if order.expiresIn and order.expiresIn <= Orders.expiryHorizonSeconds
-            and not CN.IsIgnored(CN.objectiveTypes.RECIPE, order.orderID)
-            and not CN.IsDeferred(CN.objectiveTypes.RECIPE, order.orderID) then
+            and not CN.IsIgnored(CN.objectiveTypes.RECIPE, rowID)
+            and not CN.IsDeferred(CN.objectiveTypes.RECIPE, rowID) then
 
             local session = CN:GetModule("Session")
 
             table.insert(candidates, CN.NewObjective({
-                id               = order.orderID,
+                id               = rowID,
+                orderID          = order.orderID,
                 type             = CN.objectiveTypes.RECIPE,
                 name             = "Crafting order: "
                     .. tostring(order.itemName or order.itemID or "?"),

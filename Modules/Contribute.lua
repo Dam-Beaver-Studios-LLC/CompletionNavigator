@@ -219,6 +219,31 @@ function Contribute.Forget()
         end
     end
 
+    -- AND THE PLAYER'S OWN EDGES COME BACK. 0.83.0.
+    --
+    -- 0.82.0's guard -- withdraw only edges stamped "contributed" -- is
+    -- correct at login, where load order makes the harvest publisher run
+    -- last and win. It is wrong for an import made DURING a session:
+    -- `CN.AddDependency` merges field by field, so the import overwrites
+    -- both the requirements and the origin of a quest the player had also
+    -- harvested, and `Harvest.PublishConfident` is called from its login
+    -- hook and nowhere else -- so nothing puts it back until a reload.
+    --
+    -- Two things went wrong from that. Between the import and the reload,
+    -- `/cn why` reported the player's own three-character observation as
+    -- "not from your own play". And after this function ran, the harvested
+    -- edge was gone entirely: a quest the addon had correctly held LOCKED
+    -- became AVAILABLE, offered by `/cn next` and routed to a quest giver
+    -- who would not talk to the player.
+    --
+    -- Republishing costs one walk of the harvest store and is the only
+    -- thing that can restore an edge this function cannot tell apart.
+    local harvest = CN:GetModule("Harvest")
+
+    if harvest and harvest.PublishConfident then
+        pcall(harvest.PublishConfident)
+    end
+
     CN.InvalidateCandidates()
 
     return count
