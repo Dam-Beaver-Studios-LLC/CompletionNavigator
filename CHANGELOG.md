@@ -7,6 +7,60 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.84.0]
+
+**The "Debug output" checkbox could not be clicked.** The Settings tab's right
+column is one chain of anchored controls, and two settings added a while back
+pushed it past the bottom of the panel: "Text 100%" was drawn on top of the
+Debug checkbox â€” and a button takes the mouse, so the one control this addon
+tells you to turn on when reporting a bug was unreachable. "Keep the filter box
+across tabs" was drawn below the window entirely, over the game world. The file
+records fixing this same overflow twice before; three times is a rule, so the
+build now walks the column arithmetically and fails if it does not fit.
+
+This release audits the parts of the addon you actually look at â€” the window,
+the map pins and the goal plan â€” which had not been swept in five releases.
+
+### Fixed
+
+- **The Settings tab's right column fits inside the panel**, and the two size
+  controls sit side by side, which is where they belonged anyway.
+- **Reopening the window greeted you with an old answer.** Press "Scan
+  everything", read "Read 6 collections.", close the window, come back twenty
+  minutes later â€” and that sentence was still under the tab strip describing
+  something that had not just happened. The code that clears it was written
+  into a function nothing in the addon calls; every real way of opening the
+  window took a different path.
+- **The Goals tab told you to switch to the character who already has it.**
+  For a recipe or a title the named character is the *holder* â€” a title cannot
+  be earned twice â€” and the plan drew "Best character: Bob" under a goal Bob
+  had finished. `/cn goals` printed the reason beside it and contradicted
+  itself in one line. `/cn alts` was fixed for this five releases ago; this
+  was its sibling.
+- **Scanning quests could never clear its own "stale" mark.** The Scans tab
+  caches its rows against a counter that every other scan moves, and this one
+  deliberately does not use that path â€” so clicking the row froze the client,
+  did the work, and changed nothing on screen. The Collections tab, reading
+  the same timestamp uncached, said "just now" at the same moment.
+- **`/cn find` wrote to your saved data.** Searching refreshes every tab with
+  the window hidden so there are rows to match, and one of those tabs walked
+  the quest pins on your map and filed each one â€” pins you never saw,
+  evicting real observations at the store's cap.
+- **The map dropped stops past forty and said nothing**, and `/cn pins`
+  reported the truncated number as the total. It now says how many it did not
+  draw â€” the rule this addon applies to every other truncated list.
+- **A tab whose module failed to load offered a remedy that cannot work** â€”
+  "This part of the addon did not load" over "Nothing pinned yet; pin
+  something." Four tabs did this; the Zone tab had been fixed for it alone.
+- **Unticking "Move the waypoint on as I finish things" left its timer
+  running** for the rest of the session, and ticking it did nothing visible
+  until the next event â€” while `/cn auto`, which writes the same setting, did
+  both properly.
+- **"Rescan currencies" froze the client and said nothing.** Every other scan
+  button in the window reports what it read; this one threw all three numbers
+  away, so a scan the client refused looked exactly like one that worked.
+- **The Scans tab's own note was printed across the bottom row of its list.**
+
 ## [0.83.0]
 
 **Last release made the mail reminder hideable, and `/cn hidden` then called

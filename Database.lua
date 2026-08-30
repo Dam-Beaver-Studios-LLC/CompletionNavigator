@@ -1868,6 +1868,21 @@ function CN.MarkScanned(key)
     -- own scans, which are what actually POPULATE the stores those summaries
     -- read.
     --
+    -- THROUGH `CN.NoteCollectionChanged`, WHICH ALREADY EXISTS. 0.84.0.
+    --
+    -- `Scoring.lua` declares that function and calls itself "the one writer",
+    -- and this file bumped the same counter inline -- two writers of one
+    -- number, which is how they drift. Resolved at call time, and Scoring
+    -- loads after this file, so the one writer is the one that runs.
+    --
+    -- The comment below says "every scan in the addon routes through here...
+    -- no scan can be added later that forgets to do it". One already had:
+    -- `Quests.ScanKnown` deliberately does NOT call `MarkScanned` -- it
+    -- scans nothing collectible -- so the Scans tab, which memoises its rows
+    -- against this counter, could never clear the stale mark on the "Quests
+    -- known" row. Clicking it froze the client, did real work, and changed
+    -- nothing on screen; the Collections tab beside it said "just now" for
+    -- the same fact. That scan calls the one writer directly now.
     -- The result was the addon contradicting itself on its own onboarding
     -- screen: a player presses "Scan everything", the stores fill, the "last
     -- read" stamp beside each row updates to "just now" -- because that reads
@@ -1877,7 +1892,7 @@ function CN.MarkScanned(key)
     -- Every scan in the addon routes through here, which is exactly why this
     -- is the right place: one line, and no scan can be added later that
     -- forgets to do it.
-    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1
+    CN.NoteCollectionChanged()
 
     -- Every scan in the addon already routes through here, so this is where
     -- the setup record learns that a step is done -- rather than only the

@@ -602,6 +602,28 @@ local function CreateList(parent)
         return lastEntries or {}
     end
 
+    -- A DIFFERENT SITUATION NEEDS A DIFFERENT SENTENCE. 0.84.0.
+    --
+    -- Drawing an empty list falls through to `emptyText`, which is the tab's
+    -- NORMAL empty message -- "Nothing pinned. /cn goal pins something", "Log
+    -- in on another character and this fills itself". Four tabs printed one
+    -- of those directly underneath a header saying the module had not loaded,
+    -- so a player whose addon was broken was told, in the same twenty pixels,
+    -- both that it was broken and that the remedy was to pin a goal or run a
+    -- scan -- neither of which can work.
+    --
+    -- The Zone tab solved this by swapping `emptyText` around the call. Four
+    -- copies of that swap is a rule written five times, so it lives here.
+    function list:SetEmpty(text)
+        local held = self.emptyText
+
+        self.emptyText = text
+
+        self:SetEntries({})
+
+        self.emptyText = held
+    end
+
     -- entries = { { text = , onClick = , tooltip = }, ... }
     function list:SetEntries(entries)
         lastEntries = entries

@@ -2014,7 +2014,7 @@ mutate "Modules/Vendors.lua" \
     "            local recipeName = sellable[itemID]" \
     "a recipe row is named after the table of vendors that sell it"
 
-mutate "Database.lua" \
+mutate "Scoring.lua" \
     "    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1" \
     "    CN.collectionGeneration = (CN.collectionGeneration or 0)" \
     "the Scans tab says not scanned after you scan"
@@ -3865,6 +3865,68 @@ mutate "Database.lua" \
     "                strip(character.reputations, dead.reputations)" \
     "                strip(nil, dead.reputations)" \
     "the larger half of the reputation store keeps its dead field"
+
+# ---- 0.84.0 ----
+
+# RETIRED IN 0.84.0: three mutations that each moved one Settings control
+# back where it overflowed. All three were killed only by the panel being too
+# short for its column; making the window forty pixels taller removed the
+# whole class, so reverting any single control no longer produces a
+# collision. The invariant that matters is below -- the column must fit the
+# panel -- and shrinking the window is the mutation that breaks it.
+
+mutate "UI.lua" \
+    "UI.WINDOW_HEIGHT = 560" \
+    "UI.WINDOW_HEIGHT = 480" \
+    "the settings column is taller than the panel it is drawn in"
+
+mutate "UI.lua" \
+    "    if window.answer then
+        window.answer:SetText(\"\")
+    end
+
+    FadeIn(window)" \
+    "    FadeIn(window)" \
+    "reopening the window greets you with an answer from an hour ago"
+
+mutate "Modules/Goals.lua" \
+    "        if ok and best and switchable ~= false then" \
+    "        if ok and best then" \
+    "the goal plan sends you to the character who already has it"
+
+mutate "Database.lua" \
+    "    CN.NoteCollectionChanged()" \
+    "    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1" \
+    "the collection counter has two writers again"
+
+mutate "Modules/Quests.lua" \
+    "    if CN.NoteCollectionChanged then
+        CN.NoteCollectionChanged()
+    end" \
+    "    if false then
+        CN.NoteCollectionChanged()
+    end" \
+    "scanning quests can never clear its own stale mark"
+
+mutate "UI.lua" \
+    "        local available = quests.AvailableCount(nil,
+            not (window and window:IsShown()))" \
+    "        local available = quests.AvailableCount()" \
+    "a search with the window shut writes quest pins to disk"
+
+mutate "Modules/MapPins.lua" \
+    "    return pins, math.max(0, total - #pins)" \
+    "    return pins" \
+    "the map drops stops past forty and reports the total as forty"
+
+mutate "UI/List.lua" \
+    "    function list:SetEmpty(text)
+        local held = self.emptyText
+
+        self.emptyText = text" \
+    "    function list:SetEmpty(text)
+        local held = self.emptyText" \
+    "a tab whose module is missing tells you to pin a goal"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

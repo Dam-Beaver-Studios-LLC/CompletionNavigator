@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.83.0'
+$script:ToolkitVersion = '0.84.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.83.0"
+CN.version     = "0.84.0"
 CN.dbVersion   = 33
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -3810,6 +3810,21 @@ function CN.MarkScanned(key)
     -- own scans, which are what actually POPULATE the stores those summaries
     -- read.
     --
+    -- THROUGH `CN.NoteCollectionChanged`, WHICH ALREADY EXISTS. 0.84.0.
+    --
+    -- `Scoring.lua` declares that function and calls itself "the one writer",
+    -- and this file bumped the same counter inline -- two writers of one
+    -- number, which is how they drift. Resolved at call time, and Scoring
+    -- loads after this file, so the one writer is the one that runs.
+    --
+    -- The comment below says "every scan in the addon routes through here...
+    -- no scan can be added later that forgets to do it". One already had:
+    -- `Quests.ScanKnown` deliberately does NOT call `MarkScanned` -- it
+    -- scans nothing collectible -- so the Scans tab, which memoises its rows
+    -- against this counter, could never clear the stale mark on the "Quests
+    -- known" row. Clicking it froze the client, did real work, and changed
+    -- nothing on screen; the Collections tab beside it said "just now" for
+    -- the same fact. That scan calls the one writer directly now.
     -- The result was the addon contradicting itself on its own onboarding
     -- screen: a player presses "Scan everything", the stores fill, the "last
     -- read" stamp beside each row updates to "just now" -- because that reads
@@ -3819,7 +3834,7 @@ function CN.MarkScanned(key)
     -- Every scan in the addon routes through here, which is exactly why this
     -- is the right place: one line, and no scan can be added later that
     -- forgets to do it.
-    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1
+    CN.NoteCollectionChanged()
 
     -- Every scan in the addon already routes through here, so this is where
     -- the setup record learns that a step is done -- rather than only the
@@ -12017,6 +12032,29 @@ CN.UI = UI
 -- Published for UI/List.lua, which draws the rows inside this chrome and has
 -- to know how wide they get and how tall they are.
 UI.WINDOW_WIDTH = 560
+
+-- Published beside the width, so a layout test can compute what fits in a
+-- panel the way the client does rather than hard-coding a number that goes
+-- stale the next time the tab strip wraps to another row. 0.84.0.
+-- TALLER, BECAUSE THE SETTINGS COLUMN DID NOT FIT AND NEITHER DID THE
+-- LISTS. 0.84.0.
+--
+-- Eleven tabs wrap the strip to two rows, which pushes the body down to 314
+-- pixels -- and the Settings tab's right column is a chain of nine
+-- checkboxes, two headings and a button, about 335 deep. That is why it kept
+-- overflowing: the column was never going to fit, and each fix moved the
+-- collision to a different pair of controls rather than removing it.
+--
+-- Forty more pixels of window is also forty more of every list in it -- two
+-- more rows on a tab whose whole job is showing rows -- so this is the fix
+-- that makes the window better rather than merely legal.
+UI.WINDOW_HEIGHT = 560
+
+-- The tab strip's geometry, published for the same reason: the body's height
+-- depends on how many rows the strip wraps to, and a layout test that
+-- hard-codes the answer goes stale the next time a tab is added. 0.84.0.
+UI.TAB_STRIP_TOP  = -54
+UI.TAB_ROW_HEIGHT = 26
 UI.ROW_HEIGHT   = 20
 
 -- How wide the right-aligned value column is on the rows that use one. Wide
@@ -12036,8 +12074,15 @@ UI.VALUE_WIDTH  = 210
 
 local Print = CN.Print
 
-local WINDOW_WIDTH  = 560
-local WINDOW_HEIGHT = 480
+-- READ BACK FROM THE PUBLISHED VALUE, NOT DECLARED TWICE. 0.84.0.
+--
+-- These were a second copy of `UI.WINDOW_WIDTH`/`UI.WINDOW_HEIGHT` twenty
+-- lines above, and the copy is the one the frame is actually sized from -- so
+-- changing the published value moved every test that reads it and left the
+-- window exactly where it was. Two declarations of one number is one of them
+-- being wrong later, which is a rule this project has written down twice.
+local WINDOW_WIDTH  = UI.WINDOW_WIDTH
+local WINDOW_HEIGHT = UI.WINDOW_HEIGHT
 
 -- THE TAB STRIP AND THE FILTER BOX WERE DRAWN ON TOP OF EACH OTHER.
 --
@@ -12054,8 +12099,8 @@ local WINDOW_HEIGHT = 480
 -- The search row owns the top; the tabs start below it; the window grows by
 -- the forty pixels that costs so the lists keep their depth.
 local SEARCH_TOP     = -26
-local TAB_STRIP_TOP  = -54
-local TAB_ROW_HEIGHT = 26
+local TAB_STRIP_TOP  = UI.TAB_STRIP_TOP
+local TAB_ROW_HEIGHT = UI.TAB_ROW_HEIGHT
 local TAB_MARGIN     = 24
 
 local window, minimapButton
@@ -12406,7 +12451,6 @@ local function AddCheckbox(parent, text, getter, setter, tooltip)
 
     check:SetSize(24, 24)
 
-    check.cnTooltip = tooltip
 
     if check.Text then
         check.Text:SetText(text)
@@ -13396,6 +13440,22 @@ function UI.Toggle()
     end
 
     UI.RestorePosition()
+
+    -- AN ANSWER BELONGS TO THE CLICK THAT PRODUCED IT. 0.84.0.
+    --
+    -- This was written into `UI.Show`, which nothing in the addon calls --
+    -- the minimap button, the key binding, the data broker, the game-options
+    -- button and `/cn ui` all come through here, and only the harness uses
+    -- the other one. So the fix ran in every test and in no game.
+    --
+    -- What that looked like: press "Scan everything", read "Read 6
+    -- collections.", close the window, open it twenty minutes later from the
+    -- minimap -- and that sentence is still sitting under the tab strip,
+    -- describing something that did not just happen.
+    if window.answer then
+        window.answer:SetText("")
+    end
+
     FadeIn(window)
     UI.Refresh()
 
@@ -13959,7 +14019,15 @@ UI.RegisterTab{
         panel.list.emptyText = "No sources are readable on this client."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
+        -- DEEPER THAN THE OTHER TABS' 38. 0.84.0.
+        --
+        -- This tab has a button row AND a note row under it, which is the
+        -- arrangement the Goals tab reserves 64 for, with a comment saying
+        -- why. This one kept the shallow 38, so the note -- "A source read
+        -- more than a day ago is marked. Click any row to read it again." --
+        -- was printed across the bottom source row and its value, on the
+        -- tab whose whole subject is where each number comes from.
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 64)
 
         -- ONE BUTTON, AND IT NAMES WHAT IT WILL DO.
         --
@@ -14176,7 +14244,18 @@ function UI.Sources(which)
             "Asked of the client every time it is needed. Never stored, "
             .. "because the client always has it.")
 
-        local available = quests.AvailableCount()
+        -- READ-ONLY WHEN NOBODY IS LOOKING, like the Journey tab. 0.84.0.
+        --
+        -- `/cn find` refreshes EVERY tab with the window hidden so the search
+        -- has rows to match, and this call reaches `Quests.AvailableOnMap`,
+        -- which files every quest pin it walks past into a SavedVariable.
+        -- The Journey tab documents that hazard and guards against it; this
+        -- tab reached the same code through a function that could not even
+        -- forward the flag. So a search typed with the window shut wrote
+        -- pins the player never saw into their saved data, evicting real
+        -- observations at the 600-entry cap.
+        local available = quests.AvailableCount(nil,
+            not (window and window:IsShown()))
 
         Live("Quest givers on this map", tostring(available),
             "Counted from the map you are standing on. Changes as you move.")
@@ -14365,9 +14444,27 @@ UI.RegisterTab{
         panel.scanCurrency = AddButton(panel, "Rescan currencies", 150, function()
             local module = CN:GetModule("Currencies")
 
-            if module then
-                module.Scan()
+            if not module then
+                UI.Answer("The Currencies module did not load. "
+                    .. "/cn selftest says what is missing.")
+                return
             end
+
+            -- SAY WHAT IT READ. 0.84.0.
+            --
+            -- `Currencies.Scan` returns three numbers and `/cn currencyscan`
+            -- prints two lines from them; this button threw all three away.
+            -- The Now tab only draws currency rows that are AT CAP or have
+            -- weekly earning left, so for most players a successful rescan
+            -- also changed nothing on screen -- and a scan the client
+            -- refused looked exactly like one that worked. That is the case
+            -- `UI.Answer` exists for, and every other scan button in this
+            -- window uses it.
+            local seen, atCap, weekly = module.Scan()
+
+            UI.Answer("Read " .. CN.Count(seen, "currency", "currencies")
+                .. CN.Aside(atCap .. " at cap, " .. weekly
+                    .. " with weekly earning left"))
 
             UI.Refresh()
         end,
@@ -14667,7 +14764,13 @@ UI.RegisterTab{
 
         if not module then
             panel.header:SetText("This part of the addon did not load. /cn selftest says what is missing.")
-            panel.list:SetEntries({})
+
+            -- NOT THE TAB'S NORMAL EMPTY SENTENCE. 0.84.0. See
+            -- `list:SetEmpty`: this used to print "nothing pinned yet, pin
+            -- something" under a header saying the addon was broken.
+            panel.list:SetEmpty("This tab's module did not load, so there is "
+                .. "nothing to draw. /cn selftest names what is missing.")
+
             return
         end
 
@@ -14780,7 +14883,12 @@ UI.RegisterTab{
 
         if not vault or not vault.IsAvailable() then
             panel.header:SetText("The Great Vault is not available on this client.")
-            panel.list:SetEntries({})
+
+            -- NOT "nothing to report on this character YET". 0.84.0. That
+            -- sentence promises something this client will never have.
+            panel.list:SetEmpty("This client has no Great Vault, so there is "
+                .. "nothing for this tab to read.")
+
             panel.note:SetText("")
             return
         end
@@ -14928,7 +15036,13 @@ UI.RegisterTab{
 
         if not goals then
             panel.header:SetText("This part of the addon did not load. /cn selftest says what is missing.")
-            panel.list:SetEntries({})
+
+            -- NOT THE TAB'S NORMAL EMPTY SENTENCE. 0.84.0. See
+            -- `list:SetEmpty`: this used to print "nothing pinned yet, pin
+            -- something" under a header saying the addon was broken.
+            panel.list:SetEmpty("This tab's module did not load, so there is "
+                .. "nothing to draw. /cn selftest names what is missing.")
+
             return
         end
 
@@ -14975,6 +15089,24 @@ UI.RegisterTab{
 
         local entries = {}
 
+        -- BUILT ONCE, NOT TWICE. 0.84.0.
+        --
+        -- The note under the buttons asked `Chase.Chain(panel.selected)`
+        -- again, for a chain this loop had already built. That call is not
+        -- cheap or side-effect-free: it runs `Goals.Plan`, which reaches the
+        -- client for achievement criteria, walks the vendor store, asks
+        -- `Warband.WhoShould` -- a pass over every character's recipes,
+        -- titles and professions -- and reads instance lockouts. This tab
+        -- redraws every two seconds while it is open, so ten pinned goals
+        -- meant eleven full builds every two seconds.
+        --
+        -- And because the two calls happened at different instants, the
+        -- row's tooltip and the note beneath it were built from two
+        -- different chains and could name two different next steps for the
+        -- same goal. Both neighbouring tabs memoise their equivalents for
+        -- the first reason; this one had the second reason as well.
+        local selectedChain
+
         -- Step colours by state, asked of Chase, which owns the states.
         --
         -- This table and a second one in Chase.lua declared the same five
@@ -14988,6 +15120,10 @@ UI.RegisterTab{
             local isSelected = panel.selected
                 and panel.selected.type == goal.type
                 and panel.selected.id == goal.id
+
+            if isSelected then
+                selectedChain = chain
+            end
 
             local fraction = chase and chase.Fraction(chain)
 
@@ -15094,8 +15230,6 @@ UI.RegisterTab{
         end
 
         panel.list:SetEntries(entries)
-
-        local selectedChain = chase and chase.Chain(panel.selected)
 
         if selectedChain then
             panel.note:SetText("|cff8a8f96" .. chase.Summarize(selectedChain) .. "|r")
@@ -15423,7 +15557,13 @@ UI.RegisterTab{
 
         if not module then
             panel.header:SetText("This part of the addon did not load. /cn selftest says what is missing.")
-            panel.list:SetEntries({})
+
+            -- NOT THE TAB'S NORMAL EMPTY SENTENCE. 0.84.0. See
+            -- `list:SetEmpty`: this used to print "nothing pinned yet, pin
+            -- something" under a header saying the addon was broken.
+            panel.list:SetEmpty("This tab's module did not load, so there is "
+                .. "nothing to draw. /cn selftest names what is missing.")
+
             return
         end
 
@@ -16092,8 +16232,26 @@ UI.RegisterTab{
             function(value)
                 CN.Settings().autoWaypoint = value and true or false
 
-                if value and CN.StartAutoWaypointTicker then
-                    CN.StartAutoWaypointTicker()
+                -- BOTH HALVES, LIKE `/cn auto`. 0.84.0.
+                --
+                -- Two writers of one setting, and this one did half the
+                -- work: it started a 60-second ticker and never stopped it,
+                -- so unticking the box left it waking for the rest of the
+                -- session to check a flag and do nothing -- the shape
+                -- `Navigation.StopTicker` was added for in 0.78.0. It also
+                -- skipped the immediate advance `/cn auto` performs, so the
+                -- box looked inert next to the command that writes the same
+                -- setting.
+                if value then
+                    if CN.StartAutoWaypointTicker then
+                        CN.StartAutoWaypointTicker()
+                    end
+
+                    if CN.AutoAdvance then
+                        CN.AutoAdvance("enabled", true)
+                    end
+                elseif CN.StopAutoWaypointTicker then
+                    CN.StopAutoWaypointTicker()
                 end
             end,
             "Off by default. Taking over the waypoint uninvited is the most "
@@ -16195,7 +16353,24 @@ UI.RegisterTab{
         end, "How large the text in this window is, without changing the size "
             .. "of the window. Click to cycle.")
 
-        Under(panel.textSize, panel.colourblind, CN.SPACE.XS)
+        -- BESIDE THE SIZE BUTTON, NOT UNDER IT. 0.84.0.
+        --
+        -- THE THIRD TIME THIS COLUMN HAS OVERFLOWED. The two notes above
+        -- record it for "Clear focus" and for `accessHead`; 0.66.0 then
+        -- inserted `textSize` and `keepFilter` into a column that was already
+        -- full, and the chain ran past the bottom of a 340-pixel panel.
+        --
+        -- What that cost: "Text 100%" was drawn ON TOP of the "Debug output"
+        -- checkbox at the panel's bottom, and a Button takes the mouse -- so
+        -- the one control the addon tells players to use when filing a bug
+        -- report could not be clicked at all. "Keep the filter box across
+        -- tabs" was drawn below the panel's bottom edge entirely, over the
+        -- footer and, at Text 150%, over the game world.
+        --
+        -- The two size controls belong side by side anyway: they are the
+        -- same question asked about two different things.
+        panel.textSize:ClearAllPoints()
+        panel.textSize:SetPoint("LEFT", panel.scale, "RIGHT", CN.SPACE.S, 0)
 
         panel.keepFilter = AddCheckbox(panel, "Keep the filter box across tabs",
             function() return CN.Settings().keepFilter and true or false end,
@@ -16209,7 +16384,14 @@ UI.RegisterTab{
             "Off is safer: a filter that persists invisibly is how a list "
             .. "looks empty when it is not.")
 
-        Under(panel.keepFilter, panel.textSize, CN.SPACE.XS)
+        -- AND THE FILTER BOX IS NOT AN ACCESSIBILITY SETTING. 0.84.0.
+        --
+        -- It was anchored under one because that was the last thing in the
+        -- column, which is how a column overflows. The left column ends at
+        -- `learn` with two hundred pixels spare, and "what the window
+        -- remembers between tabs" sits more naturally beside "what the
+        -- ranking learns" than under a text-size button.
+        Under(panel.keepFilter, panel.learn, CN.SPACE.M)
 
         ------------------------------------------------------------
         -- THE REST
@@ -16246,7 +16428,18 @@ UI.RegisterTab{
             function(value) CN.Settings().debug = value end,
             "Prints what the addon is doing internally. For bug reports.")
 
-        panel.debug:SetPoint("BOTTOMLEFT", COLUMN, CN.SPACE.M)
+        -- OUT OF THE RIGHT COLUMN ALTOGETHER. 0.84.0.
+        --
+        -- The right column's anchored chain is nine checkboxes, two headings
+        -- and a button deep, and it ends within a few pixels of the panel's
+        -- floor -- so anything anchored to that floor in the SAME column is
+        -- something the chain will eventually be drawn on top of. Moving the
+        -- two size controls side by side bought one row back and left the
+        -- colourblind checkbox landing here instead.
+        --
+        -- The bottom-left row has two buttons and room for a checkbox beside
+        -- them, and nothing is anchored to it, so nothing can grow into it.
+        panel.debug:SetPoint("BOTTOMLEFT", 200, CN.SPACE.M)
 
         panel.about = CN.Label(panel, "ARTWORK", "SMALL")
         panel.about:SetTextColor(CN.Rgb("MUTED"))
@@ -17443,6 +17636,28 @@ local function CreateList(parent)
     -- the question.
     function list:Entries()
         return lastEntries or {}
+    end
+
+    -- A DIFFERENT SITUATION NEEDS A DIFFERENT SENTENCE. 0.84.0.
+    --
+    -- Drawing an empty list falls through to `emptyText`, which is the tab's
+    -- NORMAL empty message -- "Nothing pinned. /cn goal pins something", "Log
+    -- in on another character and this fills itself". Four tabs printed one
+    -- of those directly underneath a header saying the module had not loaded,
+    -- so a player whose addon was broken was told, in the same twenty pixels,
+    -- both that it was broken and that the remedy was to pin a goal or run a
+    -- scan -- neither of which can work.
+    --
+    -- The Zone tab solved this by swapping `emptyText` around the call. Four
+    -- copies of that swap is a rule written five times, so it lives here.
+    function list:SetEmpty(text)
+        local held = self.emptyText
+
+        self.emptyText = text
+
+        self:SetEntries({})
+
+        self.emptyText = held
     end
 
     -- entries = { { text = , onClick = , tooltip = }, ... }
@@ -23231,8 +23446,14 @@ end
 --
 -- A number shown to a player has to be about the player's world. If it is
 -- about the addon's bookkeeping it belongs in debug output.
-function Quests.AvailableCount(mapID)
-    return #Quests.AvailableOnMap(mapID)
+-- THE QUIET FLAG GOES THROUGH. 0.84.0.
+--
+-- This could not forward it, so every caller wanting a count also filed
+-- every quest pin it walked past into a SavedVariable. `Quests.AvailableOnMap`
+-- takes `quiet` for exactly that reason and the Journey tab passes it; the
+-- Scans tab called this instead and had no way to.
+function Quests.AvailableCount(mapID, quiet)
+    return #Quests.AvailableOnMap(mapID, quiet)
 end
 
 ------------------------------------------------------------
@@ -23460,6 +23681,18 @@ function Quests.ScanKnown()
     -- it ran, or the login reminder asks for it forever.
     if CN.NoteSetupStep then
         CN.NoteSetupStep("quests")
+    end
+
+    -- AND THE COUNTER THE SCANS TAB MEMOISES ITS ROWS AGAINST. 0.84.0.
+    --
+    -- `CN.MarkScanned` bumps it for every other setup step, and this is the
+    -- one step that deliberately does not go through it -- so the row the
+    -- Scans tab draws for this scan stayed marked stale, with its old age,
+    -- however many times the player clicked it. The Collections tab reads
+    -- the same timestamp uncached and immediately said "just now", so two
+    -- tabs of one window reported different ages for the same fact.
+    if CN.NoteCollectionChanged then
+        CN.NoteCollectionChanged()
     end
 
     return scanned, byCharacter, onAccount
@@ -36947,9 +37180,21 @@ function Goals.Plan(goal)
     local warband = CN:GetModule("Warband")
 
     if warband then
-        local ok, best, _, why = pcall(warband.WhoShould, goal.type, goal.id)
+        -- THE FOURTH RETURN. 0.84.0.
+        --
+        -- 0.79.0 added `switchable` to `Warband.WhoShould` and taught
+        -- `Alts.Assignments` to honour it; this sibling was not swept. For a
+        -- recipe or a title the named character is the HOLDER -- switching to
+        -- them cannot earn it again, and a title cannot be earned twice at
+        -- all -- so the Goals tab drew "Best character: Bob" under a goal Bob
+        -- had already finished, and `/cn goals` printed "Best character: Bob
+        -- (already known by another character)", contradicting itself inside
+        -- one line. That is the exact sentence 0.79.0 removed from
+        -- `/cn alts`, still being printed by the tab beside it.
+        local ok, best, _, why, switchable =
+            pcall(warband.WhoShould, goal.type, goal.id)
 
-        if ok and best then
+        if ok and best and switchable ~= false then
             plan.character = best
 
             step("Best character: " .. tostring(best)
@@ -45889,7 +46134,19 @@ function MapPins.Layout(hubs)
         end
     end
 
-    return pins
+    -- HOW MANY DID NOT FIT. 0.84.0.
+    --
+    -- The loop above stops at `maxPins` and this function threw the shortfall
+    -- away, while thirty lines up the note above `PinSize` states the
+    -- opposite rule for the same overflow: "A busy zone gets smaller pins
+    -- rather than fewer of them. Dropping stops silently would misrepresent
+    -- the route; shrinking them does not." Past forty stops it does drop
+    -- them, and said nothing.
+    --
+    -- `total` is already counted for the sizing; reporting it costs nothing
+    -- and lets the caller apply the house rule -- a truncated list that looks
+    -- complete is worse than a long one.
+    return pins, math.max(0, total - #pins)
 end
 
 -- The tooltip body for one pin: what you do when you get there, in the order
@@ -46413,15 +46670,20 @@ CN:RegisterCommand{
         end
 
         local hubs = MapPins.HubsForMap(mapID)
-        local pins = MapPins.Layout(hubs or {})
+        local pins, dropped = MapPins.Layout(hubs or {})
 
         if #pins == 0 then
             Print("Nothing to route on this map.")
             return
         end
 
-        Print(#pins .. (#pins == 1 and " stop on this map:"
-            or " stops on this map:"))
+        -- AND SAY WHEN IT STOPPED. 0.84.0. This printed the TRUNCATED count
+        -- as the total, so in a busy zone a player read "40 stops on this
+        -- map:" as a statement of fact about the whole route.
+        Print(CN.Count(#pins, "stop") .. " on this map"
+            .. ((dropped or 0) > 0
+                and CN.Aside(dropped .. " more not drawn; the map caps at "
+                    .. MapPins.maxPins) or "") .. ":")
 
         for _, pin in ipairs(pins) do
             CN.PrintLine(string.format("  %d. %s (%d)",
@@ -57192,7 +57454,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.83.0
+## Version: 0.84.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -57447,6 +57709,60 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.84.0]
+
+**The "Debug output" checkbox could not be clicked.** The Settings tab's right
+column is one chain of anchored controls, and two settings added a while back
+pushed it past the bottom of the panel: "Text 100%" was drawn on top of the
+Debug checkbox — and a button takes the mouse, so the one control this addon
+tells you to turn on when reporting a bug was unreachable. "Keep the filter box
+across tabs" was drawn below the window entirely, over the game world. The file
+records fixing this same overflow twice before; three times is a rule, so the
+build now walks the column arithmetically and fails if it does not fit.
+
+This release audits the parts of the addon you actually look at — the window,
+the map pins and the goal plan — which had not been swept in five releases.
+
+### Fixed
+
+- **The Settings tab's right column fits inside the panel**, and the two size
+  controls sit side by side, which is where they belonged anyway.
+- **Reopening the window greeted you with an old answer.** Press "Scan
+  everything", read "Read 6 collections.", close the window, come back twenty
+  minutes later — and that sentence was still under the tab strip describing
+  something that had not just happened. The code that clears it was written
+  into a function nothing in the addon calls; every real way of opening the
+  window took a different path.
+- **The Goals tab told you to switch to the character who already has it.**
+  For a recipe or a title the named character is the *holder* — a title cannot
+  be earned twice — and the plan drew "Best character: Bob" under a goal Bob
+  had finished. `/cn goals` printed the reason beside it and contradicted
+  itself in one line. `/cn alts` was fixed for this five releases ago; this
+  was its sibling.
+- **Scanning quests could never clear its own "stale" mark.** The Scans tab
+  caches its rows against a counter that every other scan moves, and this one
+  deliberately does not use that path — so clicking the row froze the client,
+  did the work, and changed nothing on screen. The Collections tab, reading
+  the same timestamp uncached, said "just now" at the same moment.
+- **`/cn find` wrote to your saved data.** Searching refreshes every tab with
+  the window hidden so there are rows to match, and one of those tabs walked
+  the quest pins on your map and filed each one — pins you never saw,
+  evicting real observations at the store's cap.
+- **The map dropped stops past forty and said nothing**, and `/cn pins`
+  reported the truncated number as the total. It now says how many it did not
+  draw — the rule this addon applies to every other truncated list.
+- **A tab whose module failed to load offered a remedy that cannot work** —
+  "This part of the addon did not load" over "Nothing pinned yet; pin
+  something." Four tabs did this; the Zone tab had been fixed for it alone.
+- **Unticking "Move the waypoint on as I finish things" left its timer
+  running** for the rest of the session, and ticking it did nothing visible
+  until the next event — while `/cn auto`, which writes the same setting, did
+  both properly.
+- **"Rescan currencies" froze the client and said nothing.** Every other scan
+  button in the window reports what it read; this one threw all three numbers
+  away, so a scan the client refused looked exactly like one that worked.
+- **The Scans tab's own note was printed across the bottom row of its list.**
 
 ## [0.83.0]
 
@@ -64148,7 +64464,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.83.0
+0.84.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -66661,7 +66977,7 @@ mutate "Modules/Vendors.lua" \
     "            local recipeName = sellable[itemID]" \
     "a recipe row is named after the table of vendors that sell it"
 
-mutate "Database.lua" \
+mutate "Scoring.lua" \
     "    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1" \
     "    CN.collectionGeneration = (CN.collectionGeneration or 0)" \
     "the Scans tab says not scanned after you scan"
@@ -68512,6 +68828,68 @@ mutate "Database.lua" \
     "                strip(character.reputations, dead.reputations)" \
     "                strip(nil, dead.reputations)" \
     "the larger half of the reputation store keeps its dead field"
+
+# ---- 0.84.0 ----
+
+# RETIRED IN 0.84.0: three mutations that each moved one Settings control
+# back where it overflowed. All three were killed only by the panel being too
+# short for its column; making the window forty pixels taller removed the
+# whole class, so reverting any single control no longer produces a
+# collision. The invariant that matters is below -- the column must fit the
+# panel -- and shrinking the window is the mutation that breaks it.
+
+mutate "UI.lua" \
+    "UI.WINDOW_HEIGHT = 560" \
+    "UI.WINDOW_HEIGHT = 480" \
+    "the settings column is taller than the panel it is drawn in"
+
+mutate "UI.lua" \
+    "    if window.answer then
+        window.answer:SetText(\"\")
+    end
+
+    FadeIn(window)" \
+    "    FadeIn(window)" \
+    "reopening the window greets you with an answer from an hour ago"
+
+mutate "Modules/Goals.lua" \
+    "        if ok and best and switchable ~= false then" \
+    "        if ok and best then" \
+    "the goal plan sends you to the character who already has it"
+
+mutate "Database.lua" \
+    "    CN.NoteCollectionChanged()" \
+    "    CN.collectionGeneration = (CN.collectionGeneration or 0) + 1" \
+    "the collection counter has two writers again"
+
+mutate "Modules/Quests.lua" \
+    "    if CN.NoteCollectionChanged then
+        CN.NoteCollectionChanged()
+    end" \
+    "    if false then
+        CN.NoteCollectionChanged()
+    end" \
+    "scanning quests can never clear its own stale mark"
+
+mutate "UI.lua" \
+    "        local available = quests.AvailableCount(nil,
+            not (window and window:IsShown()))" \
+    "        local available = quests.AvailableCount()" \
+    "a search with the window shut writes quest pins to disk"
+
+mutate "Modules/MapPins.lua" \
+    "    return pins, math.max(0, total - #pins)" \
+    "    return pins" \
+    "the map drops stops past forty and reports the total as forty"
+
+mutate "UI/List.lua" \
+    "    function list:SetEmpty(text)
+        local held = self.emptyText
+
+        self.emptyText = text" \
+    "    function list:SetEmpty(text)
+        local held = self.emptyText" \
+    "a tab whose module is missing tells you to pin a goal"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -102673,6 +103051,437 @@ end)()
         "the character half is cleaned too")
 
     print("  a store with two halves is cleaned in both")
+end)()
+
+print("\nWhat 0.84.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- NO SETTINGS CONTROL IS DRAWN OFF THE BOTTOM OF ITS PANEL.
+    ------------------------------------------------------------
+    -- The right column of the Settings tab is one anchored chain, and this
+    -- file records fixing it overflowing TWICE -- for "Clear focus" and for
+    -- the accessibility heading. 0.66.0 then inserted two more controls into
+    -- a column that was already full, and the chain ran past the bottom of a
+    -- 340-pixel panel: "Text 100%" was drawn on depth of the "Debug output"
+    -- checkbox and, being a Button, took the mouse -- so the one control the
+    -- addon tells players to use when filing a bug report could not be
+    -- clicked. "Keep the filter box" was drawn below the panel entirely.
+    --
+    -- The stub records anchors, so the chain can be walked arithmetically.
+    -- Three times is a rule, not an accident.
+    local UI = CN.UI
+
+    UI.Show()
+
+    local panel
+
+    for index, tab in ipairs(CN.UI.tabs or {}) do
+        if tab.name == "Settings" then
+            -- Panels are built on a tab's first visit, so it has to be
+            -- selected before there is anything to measure.
+            UI.SelectTab(index)
+
+            panel = tab.panel
+        end
+    end
+
+    assert(panel, "the Settings tab is built")
+
+    -- COMPUTED THE WAY THE CLIENT WOULD. The stub does not lay frames out,
+    -- so the panel's height comes from the window's height and the body's
+    -- own two anchors -- which is exactly the arithmetic the client does.
+    -- THE SMALLEST BODY THE WINDOW CAN PRODUCE, which is the one the player
+    -- gets: eleven tabs wrap the strip to two rows, and the body is pushed
+    -- down by each row. Computed from the addon's own constants rather than
+    -- read back from the stub, which does not lay frames out and therefore
+    -- reports the pre-layout anchor -- a body 48 pixels taller than any real
+    -- window, which is exactly enough to hide this defect.
+    local rows = 2
+
+    local height = CN.UI.WINDOW_HEIGHT
+        - math.abs(CN.UI.TAB_STRIP_TOP
+            - CN.UI.TAB_ROW_HEIGHT - (rows * CN.UI.TAB_ROW_HEIGHT))
+        - 34
+
+    ------------------------------------------------------------
+    -- REAL HEIGHTS WHERE THE CODE SETS ONE.
+    ------------------------------------------------------------
+    -- The stub answers 300 for anything that never had a height set, which
+    -- would swamp the arithmetic. A checkbox is 24 and a button sets its
+    -- own; a heading is a font string, which the client measures at its
+    -- font's line height.
+    local function Own(widget)
+        local own = (widget.GetHeight and widget:GetHeight()) or 24
+
+        if own >= 300 then
+            return widget.SetText and 16 or 24
+        end
+
+        return own
+    end
+
+    -- Resolve a control's TOP and BOTTOM as offsets from the panel's depth,
+    -- following the anchor chain. Positive numbers are depths below the depth.
+    local function Depth(widget, guard)
+        if type(widget) ~= "table" or (guard or 0) > 16 then
+            return nil
+        end
+
+        local point = widget.GetPointBy and (widget:GetPointBy("TOPLEFT")
+            or widget:GetPointBy("LEFT"))
+
+        if not point then
+            return nil
+        end
+
+        local y = tonumber(point.y) or 0
+
+        -- Anchored to the panel itself, or to nothing: the offset is from
+        -- the panel's depth edge.
+        if not point.relativeTo or point.relativeTo == panel then
+            return -y
+        end
+
+        local parent = Depth(point.relativeTo, (guard or 0) + 1)
+
+        if not parent then
+            return nil
+        end
+
+        -- BOTTOMLEFT of the anchor means "below it", so its own height
+        -- counts; LEFT/TOPLEFT means "level with it".
+        local anchorHeight = 0
+
+        if point.relativePoint == "BOTTOMLEFT"
+            or point.relativePoint == "BOTTOM" then
+            anchorHeight = Own(point.relativeTo)
+        end
+
+        return parent + anchorHeight - y
+    end
+
+    local names = { "focusHead", "focusButton", "focusClear", "focusNote",
+                    "weightHead", "modeButton", "learn", "keepFilter",
+                    "screenHead", "minimap", "arrow", "pins", "tooltips",
+                    "hud", "cues", "autoWaypoint", "rares",
+                    "accessHead", "scale", "colourblind", "textSize" }
+
+    local deepest, worst = 0, nil
+
+    for _, name in ipairs(names) do
+        local widget = panel[name]
+
+        if type(widget) == "table" and widget.GetPointBy then
+            local depth = Depth(widget)
+
+            if depth then
+                local own = Own(widget)
+
+                if (depth + own) > deepest then
+                    deepest, worst = depth + own, name
+                end
+            end
+        end
+    end
+
+    assert(deepest > 0, "the chain resolved to something")
+
+    ------------------------------------------------------------
+    -- AND NOTHING ANCHORED TO THE PANEL'S FLOOR IS IN THE WAY.
+    ------------------------------------------------------------
+    -- The chain grows downward and these grow upward from the bottom edge,
+    -- so a control anchored to the floor in the SAME COLUMN is something the
+    -- chain will eventually be drawn on depth of. That is the defect exactly:
+    -- a Button drawn over the Debug checkbox took the mouse, and the one
+    -- control this addon tells players to enable when filing a bug report
+    -- could not be clicked.
+    local floorTop = height
+
+    for _, name in ipairs({ "debug", "setup", "reset" }) do
+        local widget = panel[name]
+
+        local point = widget and widget.GetPointBy
+            and widget:GetPointBy("BOTTOMLEFT")
+
+        -- Only the ones sharing the chain's column can collide with it.
+        -- Only what shares the chain's column can collide with it. The
+        -- chain starts at x = 268; the bottom-left row is at x = 12.
+        if point and (tonumber(point.x) or 0) >= 240 then
+            local depth = height - (tonumber(point.y) or 0) - Own(widget)
+
+            if depth < floorTop then
+                floorTop = depth
+            end
+        end
+    end
+
+    -- THE INVARIANT IS THAT THE COLUMN FITS THE PANEL.
+    assert(deepest <= height,
+        "the Settings column fits inside its panel: '" .. tostring(worst)
+        .. "' reaches " .. deepest .. " of " .. height)
+
+    assert(deepest <= floorTop,
+        "and above what is anchored to the panel's floor: '"
+        .. tostring(worst) .. "' reaches " .. deepest
+        .. ", the floor row starts at " .. floorTop)
+
+    UI.Hide()
+
+    print("  no settings control is drawn off the bottom of the panel")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ANSWER BELONGS TO THE CLICK THAT PRODUCED IT.
+    ------------------------------------------------------------
+    -- The clear was written into `UI.Show`, which nothing in the addon
+    -- calls: every real way of opening the window goes through `UI.Toggle`.
+    -- So the fix ran in every test and in no game, and a sentence from
+    -- twenty minutes ago greeted the player under the tab strip.
+    local UI = CN.UI
+
+    UI.Hide()
+
+    UI.Toggle()
+
+    UI.Answer("Read 6 collections.")
+
+    UI.Toggle()
+
+    assert(not UI.Frame():IsShown(), "the window closed")
+
+    UI.Toggle()
+
+    local window = UI.Frame()
+
+    assert(window.answer and window.answer:GetText() == "",
+        "opening the window does not greet you with an old answer: ["
+        .. tostring(window.answer and window.answer:GetText()) .. "]")
+
+    UI.Hide()
+
+    print("  an old answer does not greet you when you reopen the window")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE GOALS TAB DOES NOT SUGGEST THE CHARACTER WHO HAS IT.
+    ------------------------------------------------------------
+    -- 0.79.0 taught `/cn alts` to read `WhoShould`'s fourth return; this
+    -- sibling was not swept, so the Goals tab drew "Best character: Bob"
+    -- under a recipe or title Bob already holds -- and `/cn goals` printed
+    -- "(already known by another character)" beside it, contradicting
+    -- itself in one line.
+    local source = CN_TEST_ReadAddonFile("Modules/Goals.lua")
+
+    assert(source, "Modules/Goals.lua must be readable")
+
+    local wired = false
+
+    for line in string.gmatch(source, "[^\n]+") do
+        if not string.find(line, "^%s*%-%-")
+            and string.find(line, "switchable ~= false", 1, true) then
+            wired = true
+        end
+    end
+
+    assert(wired,
+        "the Goals plan honours WhoShould's fourth return")
+
+    print("  the goal plan does not send you to the character who has it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCAN THE PLAYER RAN CLEARS THE MARK THAT SAYS IT IS STALE.
+    ------------------------------------------------------------
+    -- The Scans tab memoises its rows against `CN.collectionGeneration`,
+    -- which `CN.MarkScanned` bumps -- and `Quests.ScanKnown` deliberately
+    -- does not go through `MarkScanned`, so its row could never lose the
+    -- stale mark however many times it was clicked. The Collections tab,
+    -- which reads the same timestamp uncached, said "just now" at the same
+    -- moment.
+    local quests = CN:GetModule("Quests")
+
+    local pinsBefore = CN.collectionGeneration or 0
+
+    quests.ScanKnown()
+
+    assert((CN.collectionGeneration or 0) > pinsBefore,
+        "scanning quests moves the counter the Scans tab memoises against")
+
+    ------------------------------------------------------------
+    -- AND THERE IS STILL ONLY ONE WRITER OF IT.
+    ------------------------------------------------------------
+    -- `Scoring.lua` declares `CN.NoteCollectionChanged` and calls itself
+    -- "the one writer", and `Database.lua` bumped the same counter inline.
+    -- Two writers of one number is one of them drifting later -- and it hid
+    -- a mutation: deleting either bump left the other still moving it.
+    local writers = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        for line in string.gmatch(text or "", "[^\n]+") do
+            if not string.find(line, "^%s*%-%-")
+                and string.find(line, "CN%.collectionGeneration%s*=") then
+                table.insert(writers, file)
+            end
+        end
+    end
+
+    assert(#writers == 2,
+        "one writer of the collection counter, plus its initialiser: "
+        .. table.concat(writers, ", "))
+
+    print("  a scan you ran clears the mark that says it is stale")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SEARCH DOES NOT WRITE TO DISK.
+    ------------------------------------------------------------
+    -- `/cn find` refreshes every tab with the window hidden so the search
+    -- has rows, and the Scans tab reached `Quests.AvailableOnMap` through a
+    -- counting helper that could not forward the quiet flag -- so a search
+    -- typed with the window shut filed quest pins the player never saw into
+    -- their saved data. The Journey tab documents this hazard and guards it.
+    local UI = CN.UI
+
+    UI.Hide()
+
+    local store = CN.Account("questPins")
+
+    local quests = CN:GetModule("Quests")
+
+    local function Clear()
+        for questID in pairs(store) do
+            store[questID] = nil
+        end
+    end
+
+    -- THE COUNTING WRAPPER FORWARDS THE FLAG. It could not, so the tab that
+    -- used it had no way to ask for a read-only walk.
+    Clear()
+
+    quests.AvailableCount(94, true)
+
+    assert(CN.CountKeys(store) == 0,
+        "a quiet count writes nothing to disk: "
+        .. CN.CountKeys(store) .. " pins filed")
+
+    -- AND THE UNQUIET ONE STILL RECORDS, so the assertion above has teeth.
+    Clear()
+
+    quests.AvailableCount(94)
+
+    assert(CN.CountKeys(store) > 0,
+        "an unquiet count still records what the player is being shown")
+
+    Clear()
+
+    -- AND THE TAB ASKS FOR THE QUIET ONE. `/cn find` refreshes every tab
+    -- with the window hidden, which is the only time this tab is drawn
+    -- while nobody is looking at it.
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+
+    assert(ui and string.find(ui, "quests.AvailableCount(nil,", 1, true),
+        "the Scans tab asks for a walk that does not write")
+
+    print("  a search does not write to your saved data")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A BROKEN TAB DOES NOT OFFER A REMEDY THAT CANNOT WORK.
+    ------------------------------------------------------------
+    -- Drawing an empty list falls through to the tab's NORMAL empty
+    -- sentence, so four tabs printed "nothing pinned yet, pin something"
+    -- directly under a header saying the module had not loaded.
+    local list = CN_TEST_ReadAddonFile("UI/List.lua")
+
+    assert(list and string.find(list, "function list:SetEmpty", 1, true),
+        "the list can be drawn empty with its own sentence")
+
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+
+    local offenders = 0
+
+    for block in string.gmatch(ui or "",
+        "did not load[^\n]*\n(.-)\n%s*return") do
+        if string.find(block, "SetEntries({})", 1, true) then
+            offenders = offenders + 1
+        end
+    end
+
+    assert(offenders == 0,
+        "a tab whose module is missing says so in its empty state too")
+
+    ------------------------------------------------------------
+    -- AND THE SWAP ACTUALLY SWAPS.
+    ------------------------------------------------------------
+    local probe = CN.UI.CreateList and CN.UI.CreateList(UIParent)
+
+    if probe and probe.SetEmpty then
+        probe.emptyText = "The tab's usual empty sentence."
+
+        local drawn
+
+        local realMuted = CN.Muted
+
+        CN.Muted = function(text)
+            drawn = text
+            return realMuted(text)
+        end
+
+        probe:SetEmpty("This module did not load.")
+
+        CN.Muted = realMuted
+
+        assert(drawn == "This module did not load.",
+            "the one-off sentence is the one drawn: " .. tostring(drawn))
+
+        assert(probe.emptyText == "The tab's usual empty sentence.",
+            "and the tab's own sentence is put back afterwards")
+    end
+
+    print("  a broken tab does not offer a remedy that cannot work")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE MAP SAYS WHEN IT STOPPED DRAWING.
+    ------------------------------------------------------------
+    -- `MapPins.Layout` caps at forty and threw the shortfall away, while the
+    -- note above `PinSize` states the opposite rule for the same overflow --
+    -- and `/cn pins` printed the truncated number as the total.
+    local pins = CN:GetModule("MapPins")
+
+    local hubs = {}
+
+    for index = 1, pins.maxPins + 7 do
+        table.insert(hubs, {
+            mapID = 94, x = 0.5, y = 0.5,
+            objectives = { { name = "Thing " .. index } },
+        })
+    end
+
+    local drawn, dropped = pins.Layout(hubs)
+
+    assert(#drawn == pins.maxPins,
+        "the map still caps at " .. pins.maxPins .. ": " .. #drawn)
+
+    assert(dropped == 7,
+        "and says how many it did not draw: " .. tostring(dropped))
+
+    local none = select(2, pins.Layout({
+        { mapID = 94, x = 0.1, y = 0.1, objectives = {} },
+    }))
+
+    assert(none == 0, "nothing dropped is nothing to report: " .. tostring(none))
+
+    print("  the map says when it stopped drawing")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

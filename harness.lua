@@ -33933,4 +33933,435 @@ end)()
     print("  a store with two halves is cleaned in both")
 end)()
 
+print("\nWhat 0.84.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- NO SETTINGS CONTROL IS DRAWN OFF THE BOTTOM OF ITS PANEL.
+    ------------------------------------------------------------
+    -- The right column of the Settings tab is one anchored chain, and this
+    -- file records fixing it overflowing TWICE -- for "Clear focus" and for
+    -- the accessibility heading. 0.66.0 then inserted two more controls into
+    -- a column that was already full, and the chain ran past the bottom of a
+    -- 340-pixel panel: "Text 100%" was drawn on depth of the "Debug output"
+    -- checkbox and, being a Button, took the mouse -- so the one control the
+    -- addon tells players to use when filing a bug report could not be
+    -- clicked. "Keep the filter box" was drawn below the panel entirely.
+    --
+    -- The stub records anchors, so the chain can be walked arithmetically.
+    -- Three times is a rule, not an accident.
+    local UI = CN.UI
+
+    UI.Show()
+
+    local panel
+
+    for index, tab in ipairs(CN.UI.tabs or {}) do
+        if tab.name == "Settings" then
+            -- Panels are built on a tab's first visit, so it has to be
+            -- selected before there is anything to measure.
+            UI.SelectTab(index)
+
+            panel = tab.panel
+        end
+    end
+
+    assert(panel, "the Settings tab is built")
+
+    -- COMPUTED THE WAY THE CLIENT WOULD. The stub does not lay frames out,
+    -- so the panel's height comes from the window's height and the body's
+    -- own two anchors -- which is exactly the arithmetic the client does.
+    -- THE SMALLEST BODY THE WINDOW CAN PRODUCE, which is the one the player
+    -- gets: eleven tabs wrap the strip to two rows, and the body is pushed
+    -- down by each row. Computed from the addon's own constants rather than
+    -- read back from the stub, which does not lay frames out and therefore
+    -- reports the pre-layout anchor -- a body 48 pixels taller than any real
+    -- window, which is exactly enough to hide this defect.
+    local rows = 2
+
+    local height = CN.UI.WINDOW_HEIGHT
+        - math.abs(CN.UI.TAB_STRIP_TOP
+            - CN.UI.TAB_ROW_HEIGHT - (rows * CN.UI.TAB_ROW_HEIGHT))
+        - 34
+
+    ------------------------------------------------------------
+    -- REAL HEIGHTS WHERE THE CODE SETS ONE.
+    ------------------------------------------------------------
+    -- The stub answers 300 for anything that never had a height set, which
+    -- would swamp the arithmetic. A checkbox is 24 and a button sets its
+    -- own; a heading is a font string, which the client measures at its
+    -- font's line height.
+    local function Own(widget)
+        local own = (widget.GetHeight and widget:GetHeight()) or 24
+
+        if own >= 300 then
+            return widget.SetText and 16 or 24
+        end
+
+        return own
+    end
+
+    -- Resolve a control's TOP and BOTTOM as offsets from the panel's depth,
+    -- following the anchor chain. Positive numbers are depths below the depth.
+    local function Depth(widget, guard)
+        if type(widget) ~= "table" or (guard or 0) > 16 then
+            return nil
+        end
+
+        local point = widget.GetPointBy and (widget:GetPointBy("TOPLEFT")
+            or widget:GetPointBy("LEFT"))
+
+        if not point then
+            return nil
+        end
+
+        local y = tonumber(point.y) or 0
+
+        -- Anchored to the panel itself, or to nothing: the offset is from
+        -- the panel's depth edge.
+        if not point.relativeTo or point.relativeTo == panel then
+            return -y
+        end
+
+        local parent = Depth(point.relativeTo, (guard or 0) + 1)
+
+        if not parent then
+            return nil
+        end
+
+        -- BOTTOMLEFT of the anchor means "below it", so its own height
+        -- counts; LEFT/TOPLEFT means "level with it".
+        local anchorHeight = 0
+
+        if point.relativePoint == "BOTTOMLEFT"
+            or point.relativePoint == "BOTTOM" then
+            anchorHeight = Own(point.relativeTo)
+        end
+
+        return parent + anchorHeight - y
+    end
+
+    local names = { "focusHead", "focusButton", "focusClear", "focusNote",
+                    "weightHead", "modeButton", "learn", "keepFilter",
+                    "screenHead", "minimap", "arrow", "pins", "tooltips",
+                    "hud", "cues", "autoWaypoint", "rares",
+                    "accessHead", "scale", "colourblind", "textSize" }
+
+    local deepest, worst = 0, nil
+
+    for _, name in ipairs(names) do
+        local widget = panel[name]
+
+        if type(widget) == "table" and widget.GetPointBy then
+            local depth = Depth(widget)
+
+            if depth then
+                local own = Own(widget)
+
+                if (depth + own) > deepest then
+                    deepest, worst = depth + own, name
+                end
+            end
+        end
+    end
+
+    assert(deepest > 0, "the chain resolved to something")
+
+    ------------------------------------------------------------
+    -- AND NOTHING ANCHORED TO THE PANEL'S FLOOR IS IN THE WAY.
+    ------------------------------------------------------------
+    -- The chain grows downward and these grow upward from the bottom edge,
+    -- so a control anchored to the floor in the SAME COLUMN is something the
+    -- chain will eventually be drawn on depth of. That is the defect exactly:
+    -- a Button drawn over the Debug checkbox took the mouse, and the one
+    -- control this addon tells players to enable when filing a bug report
+    -- could not be clicked.
+    local floorTop = height
+
+    for _, name in ipairs({ "debug", "setup", "reset" }) do
+        local widget = panel[name]
+
+        local point = widget and widget.GetPointBy
+            and widget:GetPointBy("BOTTOMLEFT")
+
+        -- Only the ones sharing the chain's column can collide with it.
+        -- Only what shares the chain's column can collide with it. The
+        -- chain starts at x = 268; the bottom-left row is at x = 12.
+        if point and (tonumber(point.x) or 0) >= 240 then
+            local depth = height - (tonumber(point.y) or 0) - Own(widget)
+
+            if depth < floorTop then
+                floorTop = depth
+            end
+        end
+    end
+
+    -- THE INVARIANT IS THAT THE COLUMN FITS THE PANEL.
+    assert(deepest <= height,
+        "the Settings column fits inside its panel: '" .. tostring(worst)
+        .. "' reaches " .. deepest .. " of " .. height)
+
+    assert(deepest <= floorTop,
+        "and above what is anchored to the panel's floor: '"
+        .. tostring(worst) .. "' reaches " .. deepest
+        .. ", the floor row starts at " .. floorTop)
+
+    UI.Hide()
+
+    print("  no settings control is drawn off the bottom of the panel")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ANSWER BELONGS TO THE CLICK THAT PRODUCED IT.
+    ------------------------------------------------------------
+    -- The clear was written into `UI.Show`, which nothing in the addon
+    -- calls: every real way of opening the window goes through `UI.Toggle`.
+    -- So the fix ran in every test and in no game, and a sentence from
+    -- twenty minutes ago greeted the player under the tab strip.
+    local UI = CN.UI
+
+    UI.Hide()
+
+    UI.Toggle()
+
+    UI.Answer("Read 6 collections.")
+
+    UI.Toggle()
+
+    assert(not UI.Frame():IsShown(), "the window closed")
+
+    UI.Toggle()
+
+    local window = UI.Frame()
+
+    assert(window.answer and window.answer:GetText() == "",
+        "opening the window does not greet you with an old answer: ["
+        .. tostring(window.answer and window.answer:GetText()) .. "]")
+
+    UI.Hide()
+
+    print("  an old answer does not greet you when you reopen the window")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE GOALS TAB DOES NOT SUGGEST THE CHARACTER WHO HAS IT.
+    ------------------------------------------------------------
+    -- 0.79.0 taught `/cn alts` to read `WhoShould`'s fourth return; this
+    -- sibling was not swept, so the Goals tab drew "Best character: Bob"
+    -- under a recipe or title Bob already holds -- and `/cn goals` printed
+    -- "(already known by another character)" beside it, contradicting
+    -- itself in one line.
+    local source = CN_TEST_ReadAddonFile("Modules/Goals.lua")
+
+    assert(source, "Modules/Goals.lua must be readable")
+
+    local wired = false
+
+    for line in string.gmatch(source, "[^\n]+") do
+        if not string.find(line, "^%s*%-%-")
+            and string.find(line, "switchable ~= false", 1, true) then
+            wired = true
+        end
+    end
+
+    assert(wired,
+        "the Goals plan honours WhoShould's fourth return")
+
+    print("  the goal plan does not send you to the character who has it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SCAN THE PLAYER RAN CLEARS THE MARK THAT SAYS IT IS STALE.
+    ------------------------------------------------------------
+    -- The Scans tab memoises its rows against `CN.collectionGeneration`,
+    -- which `CN.MarkScanned` bumps -- and `Quests.ScanKnown` deliberately
+    -- does not go through `MarkScanned`, so its row could never lose the
+    -- stale mark however many times it was clicked. The Collections tab,
+    -- which reads the same timestamp uncached, said "just now" at the same
+    -- moment.
+    local quests = CN:GetModule("Quests")
+
+    local pinsBefore = CN.collectionGeneration or 0
+
+    quests.ScanKnown()
+
+    assert((CN.collectionGeneration or 0) > pinsBefore,
+        "scanning quests moves the counter the Scans tab memoises against")
+
+    ------------------------------------------------------------
+    -- AND THERE IS STILL ONLY ONE WRITER OF IT.
+    ------------------------------------------------------------
+    -- `Scoring.lua` declares `CN.NoteCollectionChanged` and calls itself
+    -- "the one writer", and `Database.lua` bumped the same counter inline.
+    -- Two writers of one number is one of them drifting later -- and it hid
+    -- a mutation: deleting either bump left the other still moving it.
+    local writers = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        for line in string.gmatch(text or "", "[^\n]+") do
+            if not string.find(line, "^%s*%-%-")
+                and string.find(line, "CN%.collectionGeneration%s*=") then
+                table.insert(writers, file)
+            end
+        end
+    end
+
+    assert(#writers == 2,
+        "one writer of the collection counter, plus its initialiser: "
+        .. table.concat(writers, ", "))
+
+    print("  a scan you ran clears the mark that says it is stale")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SEARCH DOES NOT WRITE TO DISK.
+    ------------------------------------------------------------
+    -- `/cn find` refreshes every tab with the window hidden so the search
+    -- has rows, and the Scans tab reached `Quests.AvailableOnMap` through a
+    -- counting helper that could not forward the quiet flag -- so a search
+    -- typed with the window shut filed quest pins the player never saw into
+    -- their saved data. The Journey tab documents this hazard and guards it.
+    local UI = CN.UI
+
+    UI.Hide()
+
+    local store = CN.Account("questPins")
+
+    local quests = CN:GetModule("Quests")
+
+    local function Clear()
+        for questID in pairs(store) do
+            store[questID] = nil
+        end
+    end
+
+    -- THE COUNTING WRAPPER FORWARDS THE FLAG. It could not, so the tab that
+    -- used it had no way to ask for a read-only walk.
+    Clear()
+
+    quests.AvailableCount(94, true)
+
+    assert(CN.CountKeys(store) == 0,
+        "a quiet count writes nothing to disk: "
+        .. CN.CountKeys(store) .. " pins filed")
+
+    -- AND THE UNQUIET ONE STILL RECORDS, so the assertion above has teeth.
+    Clear()
+
+    quests.AvailableCount(94)
+
+    assert(CN.CountKeys(store) > 0,
+        "an unquiet count still records what the player is being shown")
+
+    Clear()
+
+    -- AND THE TAB ASKS FOR THE QUIET ONE. `/cn find` refreshes every tab
+    -- with the window hidden, which is the only time this tab is drawn
+    -- while nobody is looking at it.
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+
+    assert(ui and string.find(ui, "quests.AvailableCount(nil,", 1, true),
+        "the Scans tab asks for a walk that does not write")
+
+    print("  a search does not write to your saved data")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A BROKEN TAB DOES NOT OFFER A REMEDY THAT CANNOT WORK.
+    ------------------------------------------------------------
+    -- Drawing an empty list falls through to the tab's NORMAL empty
+    -- sentence, so four tabs printed "nothing pinned yet, pin something"
+    -- directly under a header saying the module had not loaded.
+    local list = CN_TEST_ReadAddonFile("UI/List.lua")
+
+    assert(list and string.find(list, "function list:SetEmpty", 1, true),
+        "the list can be drawn empty with its own sentence")
+
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+
+    local offenders = 0
+
+    for block in string.gmatch(ui or "",
+        "did not load[^\n]*\n(.-)\n%s*return") do
+        if string.find(block, "SetEntries({})", 1, true) then
+            offenders = offenders + 1
+        end
+    end
+
+    assert(offenders == 0,
+        "a tab whose module is missing says so in its empty state too")
+
+    ------------------------------------------------------------
+    -- AND THE SWAP ACTUALLY SWAPS.
+    ------------------------------------------------------------
+    local probe = CN.UI.CreateList and CN.UI.CreateList(UIParent)
+
+    if probe and probe.SetEmpty then
+        probe.emptyText = "The tab's usual empty sentence."
+
+        local drawn
+
+        local realMuted = CN.Muted
+
+        CN.Muted = function(text)
+            drawn = text
+            return realMuted(text)
+        end
+
+        probe:SetEmpty("This module did not load.")
+
+        CN.Muted = realMuted
+
+        assert(drawn == "This module did not load.",
+            "the one-off sentence is the one drawn: " .. tostring(drawn))
+
+        assert(probe.emptyText == "The tab's usual empty sentence.",
+            "and the tab's own sentence is put back afterwards")
+    end
+
+    print("  a broken tab does not offer a remedy that cannot work")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE MAP SAYS WHEN IT STOPPED DRAWING.
+    ------------------------------------------------------------
+    -- `MapPins.Layout` caps at forty and threw the shortfall away, while the
+    -- note above `PinSize` states the opposite rule for the same overflow --
+    -- and `/cn pins` printed the truncated number as the total.
+    local pins = CN:GetModule("MapPins")
+
+    local hubs = {}
+
+    for index = 1, pins.maxPins + 7 do
+        table.insert(hubs, {
+            mapID = 94, x = 0.5, y = 0.5,
+            objectives = { { name = "Thing " .. index } },
+        })
+    end
+
+    local drawn, dropped = pins.Layout(hubs)
+
+    assert(#drawn == pins.maxPins,
+        "the map still caps at " .. pins.maxPins .. ": " .. #drawn)
+
+    assert(dropped == 7,
+        "and says how many it did not draw: " .. tostring(dropped))
+
+    local none = select(2, pins.Layout({
+        { mapID = 94, x = 0.1, y = 0.1, objectives = {} },
+    }))
+
+    assert(none == 0, "nothing dropped is nothing to report: " .. tostring(none))
+
+    print("  the map says when it stopped drawing")
+end)()
+
 print("\nALL HARNESS CHECKS PASSED")

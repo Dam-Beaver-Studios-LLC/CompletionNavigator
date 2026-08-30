@@ -430,9 +430,21 @@ function Goals.Plan(goal)
     local warband = CN:GetModule("Warband")
 
     if warband then
-        local ok, best, _, why = pcall(warband.WhoShould, goal.type, goal.id)
+        -- THE FOURTH RETURN. 0.84.0.
+        --
+        -- 0.79.0 added `switchable` to `Warband.WhoShould` and taught
+        -- `Alts.Assignments` to honour it; this sibling was not swept. For a
+        -- recipe or a title the named character is the HOLDER -- switching to
+        -- them cannot earn it again, and a title cannot be earned twice at
+        -- all -- so the Goals tab drew "Best character: Bob" under a goal Bob
+        -- had already finished, and `/cn goals` printed "Best character: Bob
+        -- (already known by another character)", contradicting itself inside
+        -- one line. That is the exact sentence 0.79.0 removed from
+        -- `/cn alts`, still being printed by the tab beside it.
+        local ok, best, _, why, switchable =
+            pcall(warband.WhoShould, goal.type, goal.id)
 
-        if ok and best then
+        if ok and best and switchable ~= false then
             plan.character = best
 
             step("Best character: " .. tostring(best)

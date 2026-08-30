@@ -1084,8 +1084,14 @@ end
 --
 -- A number shown to a player has to be about the player's world. If it is
 -- about the addon's bookkeeping it belongs in debug output.
-function Quests.AvailableCount(mapID)
-    return #Quests.AvailableOnMap(mapID)
+-- THE QUIET FLAG GOES THROUGH. 0.84.0.
+--
+-- This could not forward it, so every caller wanting a count also filed
+-- every quest pin it walked past into a SavedVariable. `Quests.AvailableOnMap`
+-- takes `quiet` for exactly that reason and the Journey tab passes it; the
+-- Scans tab called this instead and had no way to.
+function Quests.AvailableCount(mapID, quiet)
+    return #Quests.AvailableOnMap(mapID, quiet)
 end
 
 ------------------------------------------------------------
@@ -1313,6 +1319,18 @@ function Quests.ScanKnown()
     -- it ran, or the login reminder asks for it forever.
     if CN.NoteSetupStep then
         CN.NoteSetupStep("quests")
+    end
+
+    -- AND THE COUNTER THE SCANS TAB MEMOISES ITS ROWS AGAINST. 0.84.0.
+    --
+    -- `CN.MarkScanned` bumps it for every other setup step, and this is the
+    -- one step that deliberately does not go through it -- so the row the
+    -- Scans tab draws for this scan stayed marked stale, with its old age,
+    -- however many times the player clicked it. The Collections tab reads
+    -- the same timestamp uncached and immediately said "just now", so two
+    -- tabs of one window reported different ages for the same fact.
+    if CN.NoteCollectionChanged then
+        CN.NoteCollectionChanged()
     end
 
     return scanned, byCharacter, onAccount

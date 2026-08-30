@@ -26,6 +26,29 @@ CN.UI = UI
 -- Published for UI/List.lua, which draws the rows inside this chrome and has
 -- to know how wide they get and how tall they are.
 UI.WINDOW_WIDTH = 560
+
+-- Published beside the width, so a layout test can compute what fits in a
+-- panel the way the client does rather than hard-coding a number that goes
+-- stale the next time the tab strip wraps to another row. 0.84.0.
+-- TALLER, BECAUSE THE SETTINGS COLUMN DID NOT FIT AND NEITHER DID THE
+-- LISTS. 0.84.0.
+--
+-- Eleven tabs wrap the strip to two rows, which pushes the body down to 314
+-- pixels -- and the Settings tab's right column is a chain of nine
+-- checkboxes, two headings and a button, about 335 deep. That is why it kept
+-- overflowing: the column was never going to fit, and each fix moved the
+-- collision to a different pair of controls rather than removing it.
+--
+-- Forty more pixels of window is also forty more of every list in it -- two
+-- more rows on a tab whose whole job is showing rows -- so this is the fix
+-- that makes the window better rather than merely legal.
+UI.WINDOW_HEIGHT = 560
+
+-- The tab strip's geometry, published for the same reason: the body's height
+-- depends on how many rows the strip wraps to, and a layout test that
+-- hard-codes the answer goes stale the next time a tab is added. 0.84.0.
+UI.TAB_STRIP_TOP  = -54
+UI.TAB_ROW_HEIGHT = 26
 UI.ROW_HEIGHT   = 20
 
 -- How wide the right-aligned value column is on the rows that use one. Wide
@@ -45,8 +68,15 @@ UI.VALUE_WIDTH  = 210
 
 local Print = CN.Print
 
-local WINDOW_WIDTH  = 560
-local WINDOW_HEIGHT = 480
+-- READ BACK FROM THE PUBLISHED VALUE, NOT DECLARED TWICE. 0.84.0.
+--
+-- These were a second copy of `UI.WINDOW_WIDTH`/`UI.WINDOW_HEIGHT` twenty
+-- lines above, and the copy is the one the frame is actually sized from -- so
+-- changing the published value moved every test that reads it and left the
+-- window exactly where it was. Two declarations of one number is one of them
+-- being wrong later, which is a rule this project has written down twice.
+local WINDOW_WIDTH  = UI.WINDOW_WIDTH
+local WINDOW_HEIGHT = UI.WINDOW_HEIGHT
 
 -- THE TAB STRIP AND THE FILTER BOX WERE DRAWN ON TOP OF EACH OTHER.
 --
@@ -63,8 +93,8 @@ local WINDOW_HEIGHT = 480
 -- The search row owns the top; the tabs start below it; the window grows by
 -- the forty pixels that costs so the lists keep their depth.
 local SEARCH_TOP     = -26
-local TAB_STRIP_TOP  = -54
-local TAB_ROW_HEIGHT = 26
+local TAB_STRIP_TOP  = UI.TAB_STRIP_TOP
+local TAB_ROW_HEIGHT = UI.TAB_ROW_HEIGHT
 local TAB_MARGIN     = 24
 
 local window, minimapButton
@@ -415,7 +445,6 @@ local function AddCheckbox(parent, text, getter, setter, tooltip)
 
     check:SetSize(24, 24)
 
-    check.cnTooltip = tooltip
 
     if check.Text then
         check.Text:SetText(text)
@@ -1405,6 +1434,22 @@ function UI.Toggle()
     end
 
     UI.RestorePosition()
+
+    -- AN ANSWER BELONGS TO THE CLICK THAT PRODUCED IT. 0.84.0.
+    --
+    -- This was written into `UI.Show`, which nothing in the addon calls --
+    -- the minimap button, the key binding, the data broker, the game-options
+    -- button and `/cn ui` all come through here, and only the harness uses
+    -- the other one. So the fix ran in every test and in no game.
+    --
+    -- What that looked like: press "Scan everything", read "Read 6
+    -- collections.", close the window, open it twenty minutes later from the
+    -- minimap -- and that sentence is still sitting under the tab strip,
+    -- describing something that did not just happen.
+    if window.answer then
+        window.answer:SetText("")
+    end
+
     FadeIn(window)
     UI.Refresh()
 
@@ -1968,7 +2013,15 @@ UI.RegisterTab{
         panel.list.emptyText = "No sources are readable on this client."
         panel.list:ClearAllPoints()
         panel.list:SetPoint("TOPLEFT", CN.SPACE.S, -32)
-        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 38)
+        -- DEEPER THAN THE OTHER TABS' 38. 0.84.0.
+        --
+        -- This tab has a button row AND a note row under it, which is the
+        -- arrangement the Goals tab reserves 64 for, with a comment saying
+        -- why. This one kept the shallow 38, so the note -- "A source read
+        -- more than a day ago is marked. Click any row to read it again." --
+        -- was printed across the bottom source row and its value, on the
+        -- tab whose whole subject is where each number comes from.
+        panel.list:SetPoint("BOTTOMRIGHT", -CN.SPACE.S, 64)
 
         -- ONE BUTTON, AND IT NAMES WHAT IT WILL DO.
         --
@@ -2185,7 +2238,18 @@ function UI.Sources(which)
             "Asked of the client every time it is needed. Never stored, "
             .. "because the client always has it.")
 
-        local available = quests.AvailableCount()
+        -- READ-ONLY WHEN NOBODY IS LOOKING, like the Journey tab. 0.84.0.
+        --
+        -- `/cn find` refreshes EVERY tab with the window hidden so the search
+        -- has rows to match, and this call reaches `Quests.AvailableOnMap`,
+        -- which files every quest pin it walks past into a SavedVariable.
+        -- The Journey tab documents that hazard and guards against it; this
+        -- tab reached the same code through a function that could not even
+        -- forward the flag. So a search typed with the window shut wrote
+        -- pins the player never saw into their saved data, evicting real
+        -- observations at the 600-entry cap.
+        local available = quests.AvailableCount(nil,
+            not (window and window:IsShown()))
 
         Live("Quest givers on this map", tostring(available),
             "Counted from the map you are standing on. Changes as you move.")
@@ -2374,9 +2438,27 @@ UI.RegisterTab{
         panel.scanCurrency = AddButton(panel, "Rescan currencies", 150, function()
             local module = CN:GetModule("Currencies")
 
-            if module then
-                module.Scan()
+            if not module then
+                UI.Answer("The Currencies module did not load. "
+                    .. "/cn selftest says what is missing.")
+                return
             end
+
+            -- SAY WHAT IT READ. 0.84.0.
+            --
+            -- `Currencies.Scan` returns three numbers and `/cn currencyscan`
+            -- prints two lines from them; this button threw all three away.
+            -- The Now tab only draws currency rows that are AT CAP or have
+            -- weekly earning left, so for most players a successful rescan
+            -- also changed nothing on screen -- and a scan the client
+            -- refused looked exactly like one that worked. That is the case
+            -- `UI.Answer` exists for, and every other scan button in this
+            -- window uses it.
+            local seen, atCap, weekly = module.Scan()
+
+            UI.Answer("Read " .. CN.Count(seen, "currency", "currencies")
+                .. CN.Aside(atCap .. " at cap, " .. weekly
+                    .. " with weekly earning left"))
 
             UI.Refresh()
         end,
@@ -2676,7 +2758,13 @@ UI.RegisterTab{
 
         if not module then
             panel.header:SetText("This part of the addon did not load. /cn selftest says what is missing.")
-            panel.list:SetEntries({})
+
+            -- NOT THE TAB'S NORMAL EMPTY SENTENCE. 0.84.0. See
+            -- `list:SetEmpty`: this used to print "nothing pinned yet, pin
+            -- something" under a header saying the addon was broken.
+            panel.list:SetEmpty("This tab's module did not load, so there is "
+                .. "nothing to draw. /cn selftest names what is missing.")
+
             return
         end
 
@@ -2789,7 +2877,12 @@ UI.RegisterTab{
 
         if not vault or not vault.IsAvailable() then
             panel.header:SetText("The Great Vault is not available on this client.")
-            panel.list:SetEntries({})
+
+            -- NOT "nothing to report on this character YET". 0.84.0. That
+            -- sentence promises something this client will never have.
+            panel.list:SetEmpty("This client has no Great Vault, so there is "
+                .. "nothing for this tab to read.")
+
             panel.note:SetText("")
             return
         end
@@ -2937,7 +3030,13 @@ UI.RegisterTab{
 
         if not goals then
             panel.header:SetText("This part of the addon did not load. /cn selftest says what is missing.")
-            panel.list:SetEntries({})
+
+            -- NOT THE TAB'S NORMAL EMPTY SENTENCE. 0.84.0. See
+            -- `list:SetEmpty`: this used to print "nothing pinned yet, pin
+            -- something" under a header saying the addon was broken.
+            panel.list:SetEmpty("This tab's module did not load, so there is "
+                .. "nothing to draw. /cn selftest names what is missing.")
+
             return
         end
 
@@ -2984,6 +3083,24 @@ UI.RegisterTab{
 
         local entries = {}
 
+        -- BUILT ONCE, NOT TWICE. 0.84.0.
+        --
+        -- The note under the buttons asked `Chase.Chain(panel.selected)`
+        -- again, for a chain this loop had already built. That call is not
+        -- cheap or side-effect-free: it runs `Goals.Plan`, which reaches the
+        -- client for achievement criteria, walks the vendor store, asks
+        -- `Warband.WhoShould` -- a pass over every character's recipes,
+        -- titles and professions -- and reads instance lockouts. This tab
+        -- redraws every two seconds while it is open, so ten pinned goals
+        -- meant eleven full builds every two seconds.
+        --
+        -- And because the two calls happened at different instants, the
+        -- row's tooltip and the note beneath it were built from two
+        -- different chains and could name two different next steps for the
+        -- same goal. Both neighbouring tabs memoise their equivalents for
+        -- the first reason; this one had the second reason as well.
+        local selectedChain
+
         -- Step colours by state, asked of Chase, which owns the states.
         --
         -- This table and a second one in Chase.lua declared the same five
@@ -2997,6 +3114,10 @@ UI.RegisterTab{
             local isSelected = panel.selected
                 and panel.selected.type == goal.type
                 and panel.selected.id == goal.id
+
+            if isSelected then
+                selectedChain = chain
+            end
 
             local fraction = chase and chase.Fraction(chain)
 
@@ -3103,8 +3224,6 @@ UI.RegisterTab{
         end
 
         panel.list:SetEntries(entries)
-
-        local selectedChain = chase and chase.Chain(panel.selected)
 
         if selectedChain then
             panel.note:SetText("|cff8a8f96" .. chase.Summarize(selectedChain) .. "|r")
@@ -3432,7 +3551,13 @@ UI.RegisterTab{
 
         if not module then
             panel.header:SetText("This part of the addon did not load. /cn selftest says what is missing.")
-            panel.list:SetEntries({})
+
+            -- NOT THE TAB'S NORMAL EMPTY SENTENCE. 0.84.0. See
+            -- `list:SetEmpty`: this used to print "nothing pinned yet, pin
+            -- something" under a header saying the addon was broken.
+            panel.list:SetEmpty("This tab's module did not load, so there is "
+                .. "nothing to draw. /cn selftest names what is missing.")
+
             return
         end
 
@@ -4101,8 +4226,26 @@ UI.RegisterTab{
             function(value)
                 CN.Settings().autoWaypoint = value and true or false
 
-                if value and CN.StartAutoWaypointTicker then
-                    CN.StartAutoWaypointTicker()
+                -- BOTH HALVES, LIKE `/cn auto`. 0.84.0.
+                --
+                -- Two writers of one setting, and this one did half the
+                -- work: it started a 60-second ticker and never stopped it,
+                -- so unticking the box left it waking for the rest of the
+                -- session to check a flag and do nothing -- the shape
+                -- `Navigation.StopTicker` was added for in 0.78.0. It also
+                -- skipped the immediate advance `/cn auto` performs, so the
+                -- box looked inert next to the command that writes the same
+                -- setting.
+                if value then
+                    if CN.StartAutoWaypointTicker then
+                        CN.StartAutoWaypointTicker()
+                    end
+
+                    if CN.AutoAdvance then
+                        CN.AutoAdvance("enabled", true)
+                    end
+                elseif CN.StopAutoWaypointTicker then
+                    CN.StopAutoWaypointTicker()
                 end
             end,
             "Off by default. Taking over the waypoint uninvited is the most "
@@ -4204,7 +4347,24 @@ UI.RegisterTab{
         end, "How large the text in this window is, without changing the size "
             .. "of the window. Click to cycle.")
 
-        Under(panel.textSize, panel.colourblind, CN.SPACE.XS)
+        -- BESIDE THE SIZE BUTTON, NOT UNDER IT. 0.84.0.
+        --
+        -- THE THIRD TIME THIS COLUMN HAS OVERFLOWED. The two notes above
+        -- record it for "Clear focus" and for `accessHead`; 0.66.0 then
+        -- inserted `textSize` and `keepFilter` into a column that was already
+        -- full, and the chain ran past the bottom of a 340-pixel panel.
+        --
+        -- What that cost: "Text 100%" was drawn ON TOP of the "Debug output"
+        -- checkbox at the panel's bottom, and a Button takes the mouse -- so
+        -- the one control the addon tells players to use when filing a bug
+        -- report could not be clicked at all. "Keep the filter box across
+        -- tabs" was drawn below the panel's bottom edge entirely, over the
+        -- footer and, at Text 150%, over the game world.
+        --
+        -- The two size controls belong side by side anyway: they are the
+        -- same question asked about two different things.
+        panel.textSize:ClearAllPoints()
+        panel.textSize:SetPoint("LEFT", panel.scale, "RIGHT", CN.SPACE.S, 0)
 
         panel.keepFilter = AddCheckbox(panel, "Keep the filter box across tabs",
             function() return CN.Settings().keepFilter and true or false end,
@@ -4218,7 +4378,14 @@ UI.RegisterTab{
             "Off is safer: a filter that persists invisibly is how a list "
             .. "looks empty when it is not.")
 
-        Under(panel.keepFilter, panel.textSize, CN.SPACE.XS)
+        -- AND THE FILTER BOX IS NOT AN ACCESSIBILITY SETTING. 0.84.0.
+        --
+        -- It was anchored under one because that was the last thing in the
+        -- column, which is how a column overflows. The left column ends at
+        -- `learn` with two hundred pixels spare, and "what the window
+        -- remembers between tabs" sits more naturally beside "what the
+        -- ranking learns" than under a text-size button.
+        Under(panel.keepFilter, panel.learn, CN.SPACE.M)
 
         ------------------------------------------------------------
         -- THE REST
@@ -4255,7 +4422,18 @@ UI.RegisterTab{
             function(value) CN.Settings().debug = value end,
             "Prints what the addon is doing internally. For bug reports.")
 
-        panel.debug:SetPoint("BOTTOMLEFT", COLUMN, CN.SPACE.M)
+        -- OUT OF THE RIGHT COLUMN ALTOGETHER. 0.84.0.
+        --
+        -- The right column's anchored chain is nine checkboxes, two headings
+        -- and a button deep, and it ends within a few pixels of the panel's
+        -- floor -- so anything anchored to that floor in the SAME column is
+        -- something the chain will eventually be drawn on top of. Moving the
+        -- two size controls side by side bought one row back and left the
+        -- colourblind checkbox landing here instead.
+        --
+        -- The bottom-left row has two buttons and room for a checkbox beside
+        -- them, and nothing is anchored to it, so nothing can grow into it.
+        panel.debug:SetPoint("BOTTOMLEFT", 200, CN.SPACE.M)
 
         panel.about = CN.Label(panel, "ARTWORK", "SMALL")
         panel.about:SetTextColor(CN.Rgb("MUTED"))

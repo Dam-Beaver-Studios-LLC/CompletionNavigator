@@ -150,7 +150,19 @@ function MapPins.Layout(hubs)
         end
     end
 
-    return pins
+    -- HOW MANY DID NOT FIT. 0.84.0.
+    --
+    -- The loop above stops at `maxPins` and this function threw the shortfall
+    -- away, while thirty lines up the note above `PinSize` states the
+    -- opposite rule for the same overflow: "A busy zone gets smaller pins
+    -- rather than fewer of them. Dropping stops silently would misrepresent
+    -- the route; shrinking them does not." Past forty stops it does drop
+    -- them, and said nothing.
+    --
+    -- `total` is already counted for the sizing; reporting it costs nothing
+    -- and lets the caller apply the house rule -- a truncated list that looks
+    -- complete is worse than a long one.
+    return pins, math.max(0, total - #pins)
 end
 
 -- The tooltip body for one pin: what you do when you get there, in the order
@@ -674,15 +686,20 @@ CN:RegisterCommand{
         end
 
         local hubs = MapPins.HubsForMap(mapID)
-        local pins = MapPins.Layout(hubs or {})
+        local pins, dropped = MapPins.Layout(hubs or {})
 
         if #pins == 0 then
             Print("Nothing to route on this map.")
             return
         end
 
-        Print(#pins .. (#pins == 1 and " stop on this map:"
-            or " stops on this map:"))
+        -- AND SAY WHEN IT STOPPED. 0.84.0. This printed the TRUNCATED count
+        -- as the total, so in a busy zone a player read "40 stops on this
+        -- map:" as a statement of fact about the whole route.
+        Print(CN.Count(#pins, "stop") .. " on this map"
+            .. ((dropped or 0) > 0
+                and CN.Aside(dropped .. " more not drawn; the map caps at "
+                    .. MapPins.maxPins) or "") .. ":")
 
         for _, pin in ipairs(pins) do
             CN.PrintLine(string.format("  %d. %s (%d)",
