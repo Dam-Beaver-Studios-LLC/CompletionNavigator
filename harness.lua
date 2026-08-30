@@ -8108,31 +8108,38 @@ print("\nTooltips answer without scanning:")
         return
     end
 
-    -- THE THREE WAYS AN ITEM CAN BE A RECIPE.
+    -- THE TWO WAYS AN ITEM CAN BE A RECIPE -- BOTH BY NAME.
     --
-    -- The item is the recipe itself.
-    assert(professions.RecipeForItem(knownID) == knownID,
-        "an item that IS a recipe resolves to itself")
-
+    -- There used to be a third, asserted right here: "an item that IS a
+    -- recipe resolves to itself", which indexed the recipe-name store with
+    -- an ITEM id. Two unrelated number spaces. The test and the code were
+    -- wrong together, which is why it survived nineteen releases -- the
+    -- shape backlog rule 49 was written for.
+    --
     -- The item's name is exactly the recipe's name.
-    assert(professions.RecipeForItem(999999, knownName) == knownID,
+    assert(professions.RecipeForItem(knownName) == knownID,
         "an exact name match resolves, got "
-        .. tostring(professions.RecipeForItem(999999, knownName)))
+        .. tostring(professions.RecipeForItem(knownName)))
 
     -- The item teaches it: "Recipe: <name>".
-    assert(professions.RecipeForItem(999999, "Recipe: " .. knownName) == knownID,
+    assert(professions.RecipeForItem("Recipe: " .. knownName) == knownID,
         "a teaching item resolves to what it teaches")
 
-    assert(professions.RecipeForItem(999999, "PATTERN: " .. knownName) == knownID,
+    assert(professions.RecipeForItem("PATTERN: " .. knownName) == knownID,
         "and the match is case-insensitive")
 
     -- Something unrelated must NOT match. The old scan used a substring
     -- search, which could match far more loosely than intended.
-    assert(professions.RecipeForItem(999999, "A Completely Unrelated Sword") == nil,
+    assert(professions.RecipeForItem("A Completely Unrelated Sword") == nil,
         "an unrelated item is not a recipe")
 
-    assert(professions.RecipeForItem(nil, nil) == nil,
+    assert(professions.RecipeForItem(nil) == nil,
         "nothing in, nothing out")
+
+    -- AND A NUMBER IS NOT A NAME. The resolver must refuse an id outright
+    -- rather than treating it as a lookup key of any kind.
+    assert(professions.RecipeForItem(knownID) == nil,
+        "a recipe id is not an item name")
 
     -- THE INDEX MUST NOT GO STALE.
     local firstIndex = professions.NameIndex()
@@ -32739,6 +32746,333 @@ end)()
         "the badge is: " .. tostring(named))
 
     print("  a hidden row with an odd id is named, not enumerated")
+end)()
+
+print("\nWhat 0.80.0 changed:")
+
+;(function()
+    ------------------------------------------------------------
+    -- ALONE IN AN INSTANCE IS NOT "IN AN INSTANCE WITH A GROUP".
+    ------------------------------------------------------------
+    -- `Group.Situation` returned "instanced" from the instance test alone,
+    -- with no group check -- and `Group.instancedTypes` demotes MOUNT, PET,
+    -- TOY, APPEARANCE, RARE, TREASURE, VENDOR, PROFESSION and RECIPE by 65%.
+    -- Soloing an old raid is how every one of those is farmed. The addon
+    -- buried the mount you walked in for and explained it with "you are in an
+    -- instance with a group", to a player with nobody else there.
+    --
+    -- The fixture is why it survived: every group test set the instance and a
+    -- party of five together, so the two were never separable.
+    local group = CN:GetModule("Group")
+
+    local savedSize     = CN_TEST_GROUP_SIZE
+    local savedInstance = CN_TEST_INSTANCE
+
+    CN_TEST_INSTANCE   = "raid"
+    CN_TEST_GROUP_SIZE = 1
+
+    assert(group.Situation() == "solo",
+        "alone in a raid is solo, got " .. tostring(group.Situation()))
+
+    assert(group.Notice() == nil,
+        "and nothing is announced about a group that is not there")
+
+    -- THE PENALTY GOES WITH IT.
+    local mount = CN.NewObjective({
+        id   = 900801,
+        type = CN.objectiveTypes.MOUNT,
+        name = "A mount from an old raid",
+    })
+
+    local adjuster = CN.scoreAdjusters and CN.scoreAdjusters["Group"]
+
+    assert(adjuster, "the Group adjuster is registered")
+
+    assert(adjuster(mount, 100) == 100,
+        "a solo raid clear does not demote the mount it is for: "
+        .. tostring(adjuster(mount, 100)))
+
+    -- AND A REAL GROUP STILL COUNTS.
+    CN_TEST_GROUP_SIZE = 5
+
+    assert(group.Situation() == "instanced",
+        "five people in a raid is still instanced")
+
+    local notice = group.Notice()
+
+    assert(notice and string.find(notice, "in a raid", 1, true),
+        "and it says so: " .. tostring(notice))
+
+    -- "a instance", printed since 0.44.0.
+    CN_TEST_INSTANCE = "party"
+
+    local partyNotice = group.Notice()
+
+    assert(partyNotice and not string.find(partyNotice, "a instance", 1, true),
+        "and it says 'an instance', not 'a instance': "
+        .. tostring(partyNotice))
+
+    CN_TEST_GROUP_SIZE = savedSize
+    CN_TEST_INSTANCE   = savedInstance
+
+    print("  alone in an instance is not a group")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ITEM ID IS NOT A RECIPE ID.
+    ------------------------------------------------------------
+    -- `RecipeForItem` began by indexing `recipeNames` -- keyed by trade-skill
+    -- recipe ids -- with an ITEM id, and returned `false` for "matched by
+    -- name", which told the tooltip the guess was an exact id match and
+    -- suppressed the caveat. `Filters.lua` documents this exact collision
+    -- three files over.
+    local professions = CN:GetModule("Professions")
+
+    local names = professions.RecipeNames()
+
+    local knownID
+
+    for id, name in pairs(names) do
+        if type(name) == "string" and name ~= "" then
+            knownID = id
+            break
+        end
+    end
+
+    if knownID then
+        assert(professions.RecipeForItem(knownID) == nil,
+            "a number is not an item name")
+    end
+
+    -- The resolver takes one argument now, so nothing can pass an id into it
+    -- by position ever again.
+    local source = CN_TEST_ReadAddonFile("Modules/Professions.lua")
+
+    assert(source and string.find(source,
+            "function Professions.RecipeForItem(itemName)", 1, true),
+        "the resolver takes a name and nothing else")
+
+    print("  a stack of ore is not a recipe")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN APPEARANCE IS NOT ADDRESSABLE BY ITEM ID.
+    ------------------------------------------------------------
+    -- The tooltip asked `FindCandidate(APPEARANCE, <itemID>)`. Every
+    -- APPEARANCE row in this addon is keyed by a categoryID or by the string
+    -- "set:<id>", so it could never match -- and `Goals.types` has no
+    -- appearance entry, so `IsGoal(APPEARANCE, ...)` could never be true
+    -- either. The cost was a full candidate walk per gear mouseover.
+    local goalModule = CN:GetModule("Goals")
+
+    assert(goalModule and goalModule.types and goalModule.types.appearance == nil,
+        "there is no way to make an APPEARANCE goal")
+
+    for _, objective in ipairs(CN.CollectCandidates() or {}) do
+        if objective.type == CN.objectiveTypes.APPEARANCE then
+            local id = objective.id
+
+            assert(type(id) == "string"
+                or (type(id) == "number" and id < 1000),
+                "an APPEARANCE id is a slot or a set key, never an item id: "
+                .. tostring(id))
+        end
+    end
+
+    local source = CN_TEST_ReadAddonFile("Modules/Tooltips.lua")
+
+    for line in string.gmatch(source or "", "[^\n]+") do
+        if not string.find(line, "^%s*%-%-") then
+            assert(not string.find(line, "isAppearance", 1, true),
+                "the tooltip does not look an appearance up by item id")
+        end
+    end
+
+    print("  an appearance is not looked up by item id")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MISS IS REMEMBERED LONG ENOUGH TO ABSORB A MOUSEOVER STORM.
+    ------------------------------------------------------------
+    -- `WhereDoesItDrop` cached only non-empty answers, justified by "the cost
+    -- of asking again is one search the player triggered themselves". The
+    -- tooltip then became a caller and is not triggered by the player -- and
+    -- most collectibles are not boss drops, so the common case was the
+    -- uncached one, re-running a whole `EJ_SetSearch` cycle per hover.
+    local instances = CN:GetModule("Instances")
+
+    assert(instances.ForgetDrops, "the cache can be cleared")
+
+    instances.ForgetDrops()
+
+    local searches = 0
+
+    local realSearch = CN.Blizzard.SearchEncounterJournal
+
+    CN.Blizzard.SearchEncounterJournal = function(...)
+        searches = searches + 1
+        return realSearch(...)
+    end
+
+    for _ = 1, 20 do
+        instances.WhereDoesItDrop("A Thing That Drops From Nothing")
+    end
+
+    CN.Blizzard.SearchEncounterJournal = realSearch
+
+    assert(searches == 1,
+        "twenty hovers of a non-drop run one journal search, not twenty: "
+        .. searches)
+
+    -- A ZERO IS STILL "NOT YET" -- the miss expires.
+    assert((instances.dropMissSeconds or 0) > 0
+        and instances.dropMissSeconds <= 300,
+        "and the miss is short-lived, not permanent: "
+        .. tostring(instances.dropMissSeconds))
+
+    ------------------------------------------------------------
+    -- AND THE RESETTER IS WIRED TO SOMETHING.
+    ------------------------------------------------------------
+    -- `ForgetDrops` was defined with the cache and called from nowhere -- a
+    -- dead resetter, while every sibling is wired to the event that
+    -- invalidates it.
+    -- Behaviourally, not by grepping for the name: `function
+    -- Instances.ForgetDrops()` contains the string "Instances.ForgetDrops()",
+    -- so a text search for the CALL matches the DEFINITION and passes even
+    -- with every caller deleted. A mutation removing the handler survived on
+    -- exactly that.
+    searches = 0
+
+    CN.Blizzard.SearchEncounterJournal = function(...)
+        searches = searches + 1
+        return realSearch(...)
+    end
+
+    CN.Dispatch("PLAYER_ENTERING_WORLD")
+
+    instances.WhereDoesItDrop("A Thing That Drops From Nothing")
+
+    CN.Blizzard.SearchEncounterJournal = realSearch
+
+    assert(searches == 1,
+        "entering a new world asks the journal again: " .. searches)
+
+    print("  a search that found nothing is not run twenty times")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ALERT PATH IS THROTTLED TOO.
+    ------------------------------------------------------------
+    -- `Rares.lua` debounces this pair of events and says in its own comment
+    -- that "the alert path that announces one is a separate event handler
+    -- that is not throttled by this at all" -- naming Broker.lua, which then
+    -- stayed unthrottled for nineteen releases.
+    local brokerModule = CN:GetModule("Broker")
+
+    local checks = 0
+
+    local realCheck = brokerModule.CheckAlerts
+
+    brokerModule.CheckAlerts = function(...)
+        checks = checks + 1
+        return realCheck(...)
+    end
+
+    CN.ForgetDebounces()
+
+    for _ = 1, 12 do
+        CN.Dispatch("VIGNETTE_MINIMAP_UPDATED")
+    end
+
+    brokerModule.CheckAlerts = realCheck
+
+    assert(checks > 0, "the first vignette in a burst is still answered")
+
+    assert(checks < 12,
+        "twelve vignettes in a burst do not run twelve alert sweeps: "
+        .. checks)
+
+    print("  the rare-alert sweep has a cooldown")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ENGLISH CLIENT IS NOT ASKED TO TRANSLATE ENGLISH.
+    ------------------------------------------------------------
+    -- `Locales/enUS.lua` registers an EMPTY table, so every `CN.L[key]`
+    -- lookup on an English client records a miss. `/cn locale` said "the
+    -- addon is written in English, so there is nothing to translate here"
+    -- and then, four lines later, that N strings had fallen back and that
+    -- the list "is exactly what a translator needs".
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("locale")
+    CN.HandleSlashCommand("locale missing")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    assert(string.find(text, "nothing to translate", 1, true),
+        "the English client is told there is nothing to translate")
+
+    assert(not string.find(text, "fell back to English", 1, true),
+        "and is not then handed a list of English strings to translate:\n"
+        .. text)
+
+    print("  an English client is not nagged to translate English")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A TIMESTAMP NOTHING READS IS NOT WRITTEN, OR KEPT.
+    ------------------------------------------------------------
+    -- Migration 5 stripped `lastSeen` from four account stores because it was
+    -- written on every scan and read by nothing. `appearances` was the store
+    -- it missed, and its writer was never changed either.
+    local appearanceModule = CN:GetModule("Appearances")
+
+    if appearanceModule and appearanceModule.Scan then
+        appearanceModule.Scan()
+    end
+
+    for _, record in pairs(CN.Account("appearances")) do
+        assert(type(record) ~= "table" or record.lastSeen == nil,
+            "a scan does not write a timestamp nothing reads")
+    end
+
+    -- AND THE ROWS ALREADY ON DISK ARE CLEARED.
+    local fixtureDb = {
+        version = 30,
+        account = {
+            appearances = {
+                [1] = { categoryID = 1, collected = 4, total = 9,
+                        lastSeen = 12345 },
+            },
+        },
+        characters = {},
+        settings   = {},
+    }
+
+    CN.RunMigrations(fixtureDb)
+
+    assert(fixtureDb.account.appearances[1].lastSeen == nil,
+        "and the migration clears what nineteen releases of logins wrote")
+
+    assert(fixtureDb.account.appearances[1].collected == 4,
+        "without touching the count beside it")
+
+    print("  a timestamp nothing reads is not kept")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

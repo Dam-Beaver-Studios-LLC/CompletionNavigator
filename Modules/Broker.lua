@@ -260,13 +260,28 @@ end
 -- EVENTS
 ------------------------------------------------------------
 
+-- THE ALERT PATH IS THROTTLED TOO. 0.80.0.
+--
+-- `Rares.lua` debounces this exact pair of events and says in its own comment
+-- that "the alert path that announces one is a separate event handler that is
+-- not throttled by this at all" -- naming this file, which then stayed
+-- unthrottled for nineteen releases. `VIGNETTE_MINIMAP_UPDATED` fires several
+-- times a second while moving, and each firing ran `CheckAlerts` ->
+-- `Rares.GetActive` -> `Rares.GetAll` -> `Blizzard.GetVignettes`, which is
+-- two client calls and two table allocations PER VIGNETTE, plus a position
+-- read, a sort, and a hidden/cleared test per row.
+--
+-- Same debounce, same one-second window, as the sweep beside it: leading edge
+-- so the first rare in a burst is still announced at once.
 for _, event in ipairs({ "VIGNETTE_MINIMAP_UPDATED", "VIGNETTES_UPDATED" }) do
     CN:RegisterEvent(event, function()
-        local ok, err = pcall(Broker.CheckAlerts)
+        CN.Debounce("Broker.alerts", 1, function()
+            local ok, err = pcall(Broker.CheckAlerts)
 
-        if not ok then
-            DebugPrint("Rare alert check failed: " .. tostring(err))
-        end
+            if not ok then
+                DebugPrint("Rare alert check failed: " .. tostring(err))
+            end
+        end)
     end)
 end
 

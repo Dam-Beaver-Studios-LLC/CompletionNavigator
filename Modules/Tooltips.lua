@@ -160,11 +160,11 @@ local function AppearanceLines(lines, itemID)
 end
 
 -- Recipes are the messy case. The trade skill API keys recipes by recipe ID
--- while a vendor sells an item ID, and the two are not the same number. The
--- ID lookup is tried first because it is exact; the name match is the fallback
--- that actually fires most of the time, and it is reported as a match on name
--- rather than dressed up as certainty.
-local function RecipeLines(lines, itemID, itemName)
+-- while a vendor sells an item ID, and the two are not the same number --
+-- which is exactly why the resolver takes a NAME and nothing else. There is
+-- no exact id path, because there is no id the two spaces share; the answer
+-- is a name match and is labelled as one rather than dressed up as certainty.
+local function RecipeLines(lines, itemName)
     local professions = CN:GetModule("Professions")
 
     if not professions then
@@ -181,8 +181,11 @@ local function RecipeLines(lines, itemID, itemName)
     -- allocations to answer a question about one item, measured at 0.54ms:
     -- three per cent of a frame, per mouseover, and a bag sweep fires dozens
     -- a second.
-    local recipeID, matchedOnName =
-        professions.RecipeForItem(itemID, itemName)
+    -- BY NAME, WHICH IS THE ONLY WAY. 0.80.0. The id branch this used to
+    -- take first indexed a recipe-id table with an item id; see the note in
+    -- `Professions.RecipeForItem`. Every match is a name match now, so the
+    -- caveat below is unconditional rather than a flag the resolver returns.
+    local recipeID = professions.RecipeForItem(itemName)
 
     if not recipeID then
         return false
@@ -200,9 +203,7 @@ local function RecipeLines(lines, itemID, itemName)
         end
     end
 
-    if matchedOnName then
-        Add(lines, "matched by name", GREY)
-    end
+    Add(lines, "matched by name", GREY)
 
     return true
 end
@@ -258,7 +259,7 @@ function Tooltips.ItemLines(itemID, itemName)
     collectible = ToyLines(lines, itemID)         or collectible
     collectible = MountLines(lines, itemID)       or collectible
     collectible = PetLines(lines, itemID)         or collectible
-    collectible = RecipeLines(lines, itemID, itemName) or collectible
+    collectible = RecipeLines(lines, itemName)    or collectible
 
     -- Appearance state is noise on something that is not gear, so it is only
     -- consulted when nothing else claimed the item.
@@ -283,22 +284,36 @@ function Tooltips.ItemLines(itemID, itemName)
         local mountID = Blizzard.GetMountFromItem(itemID)
         local speciesID = Blizzard.GetPetSpeciesFromItem(itemID)
 
-        -- TOYS AND APPEARANCES TOO, which hovered silently.
+        -- TOYS TOO, which hovered silently.
         --
         -- The "why you should care" line fired only for mounts and pets,
         -- because those are the two the client will resolve from an item id
         -- into a collection id. A toy IS its item id -- that is the key the
-        -- addon's own store uses -- and so is an appearance source, so both
-        -- were one branch away the whole time.
+        -- addon's own store uses -- so it was one branch away the whole time.
         local isToy = CN.Account("toys")[itemID] ~= nil
 
-        local isAppearance = (not isToy)
-            and Blizzard.HasTransmogByItem(itemID) ~= nil
-
+        -- AN APPEARANCE IS NOT ADDRESSABLE BY ITEM ID. 0.80.0.
+        --
+        -- This branch was added beside the toy one on the assumption that an
+        -- appearance "IS its item id" the same way. It is not, and nothing in
+        -- this addon has ever keyed one that way: `Appearances.lua` emits
+        -- APPEARANCE rows keyed by `categoryID` -- a slot, roughly 0 to 30 --
+        -- and `Sets.lua` emits them keyed by the STRING "set:<id>", prefixed
+        -- deliberately in 0.61.0 to keep those two id spaces apart.
+        --
+        -- So `CN.FindCandidate(APPEARANCE, itemID)` could never match, and
+        -- `Goals.IsGoal(APPEARANCE, ...)` could never be true either --
+        -- `Goals.types` has no appearance entry at all, so an APPEARANCE goal
+        -- cannot be created by any command. The line has never once appeared
+        -- for an appearance, and the cost was a full candidate walk on every
+        -- gear mouseover to arrive at nil.
+        --
+        -- Restoring it means giving an appearance an id a tooltip can build.
+        -- The appearance lines ABOVE this block, which read the client
+        -- directly, are unaffected and still work.
         local goalType = (mountID and CN.objectiveTypes.MOUNT)
             or (speciesID and CN.objectiveTypes.PET)
             or (isToy and CN.objectiveTypes.TOY)
-            or (isAppearance and CN.objectiveTypes.APPEARANCE)
             or nil
 
         local goalID = mountID or speciesID or itemID

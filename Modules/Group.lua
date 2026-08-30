@@ -111,7 +111,23 @@ function Group.Situation()
 
     local inside, kind = Group.Instance()
 
-    if inside and (kind == "party" or kind == "raid" or kind == "scenario") then
+    -- WITH A GROUP. 0.80.0.
+    --
+    -- The header of this file states the premise: "Somebody in an instance
+    -- WITH A GROUP is not about to go and pick a herb in Durotar." This test
+    -- never asked about the group, so it returned "instanced" for a player
+    -- standing alone in an old raid -- which is the single most common way
+    -- mounts, pets, toys and appearances are farmed in this game, and every
+    -- one of those types is in `Group.instancedTypes`. The addon buried the
+    -- mount you walked in for by 65%, and explained it with "you are in an
+    -- instance with a group", to a player with nobody else there. `/cn
+    -- situation` said so out loud: "in a instance with 0 people".
+    --
+    -- The harness never caught it because its fixture sets the instance and
+    -- a party of five together, so the two conditions were never separable.
+    if inside and Group.InGroup()
+        and (kind == "party" or kind == "raid" or kind == "scenario") then
+
         return "instanced"
     end
 
@@ -499,7 +515,9 @@ function Group.Notice()
     if situation == "instanced" then
         local _, kind = Group.Instance()
 
-        return "You are in a " .. (kind == "raid" and "raid" or "instance")
+        -- "a instance". 0.80.0. Two words, one article, and it had been in
+        -- every `/cn situation` since 0.44.0.
+        return "You are in " .. (kind == "raid" and "a raid" or "an instance")
             .. " with " .. Group.Size() .. " people; outside work is ranked "
             .. "down until you leave."
     end

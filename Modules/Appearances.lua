@@ -53,12 +53,21 @@ function Appearances.Scan()
             collected = held.collected
         end
 
+        -- NO `lastSeen`. 0.80.0.
+        --
+        -- Nothing has ever read an appearance record's `lastSeen`. Migration
+        -- 5 stripped exactly this field from `achievements`, `pets`, `toys`
+        -- and `achievementTotals` -- under a header about values "being
+        -- written to disk on every logout and parsed again on every login" --
+        -- and this store was the one it missed. Stripping alone would not
+        -- have held anyway, because the writer here was never changed: the
+        -- login scan and the ten-minute rescan would have put it straight
+        -- back.
         store[category.categoryID] = {
             categoryID = category.categoryID,
             name       = category.name,
             collected  = collected,
             total      = category.total,
-            lastSeen   = time(),
         }
     end
 

@@ -179,7 +179,19 @@ CN:RegisterCommand{
 
         Print("Client language: |cffffc74f" .. stats.locale .. "|r")
 
-        if stats.locale == "enUS" or stats.locale == "enGB" then
+        -- ENGLISH, ASKED ONCE. 0.80.0. The branch below already knew this and
+        -- the fallback tally two screens down did not, so an English player
+        -- was told there was nothing to translate and then, four lines later,
+        -- that N strings had "fallen back to English" and that the list "is
+        -- exactly what a translator needs". Both from the same command.
+        --
+        -- Every English lookup is a recorded miss BY CONSTRUCTION:
+        -- `Locales/enUS.lua` registers an empty table, so `CN.L[key]` never
+        -- finds a translation and stamps `localeMisses` on the way past. The
+        -- number was real; it just did not mean what the sentence said.
+        local english = (stats.locale == "enUS" or stats.locale == "enGB")
+
+        if english then
             -- English is the source language, not an untranslated one. Saying
             -- "no translation available" to an English player would describe
             -- a problem that does not exist.
@@ -214,6 +226,16 @@ CN:RegisterCommand{
             .. "this count.|r")
 
         if args == "missing" then
+            -- AND THE LIST ITSELF. 0.80.0. On an English client every key is
+            -- a "miss", so this printed the addon's entire locale table as
+            -- though it were untranslated work waiting for somebody.
+            if english then
+                Print("|cff8a8f96Every string here is already in the client's "
+                    .. "language. |cffffc74f/cn locale export|r produces the "
+                    .. "starting file for another one.|r")
+                return
+            end
+
             if stats.missing == 0 then
                 Print("Nothing has fallen back to English yet this session.")
                 return
@@ -234,7 +256,7 @@ CN:RegisterCommand{
             return
         end
 
-        if stats.missing > 0 then
+        if stats.missing > 0 and not english then
             Print("|cff8a8f96" .. stats.missing .. " strings fell back to "
                 .. "English this session. |cffffc74f/cn locale missing|r "
                 .. "lists them" .. CN.DASH .. "that list is exactly what a translator "

@@ -1561,6 +1561,35 @@ CN.migrations = {
             end
         end
     end,
+
+    -- THE STORE MIGRATION 5 MISSED.
+    --
+    -- Migration 5 stripped `lastSeen` from four account stores because the
+    -- field was written on every scan and read by nothing -- the whole point
+    -- of that migration. `appearances` has the same dead field, written by
+    -- the same kind of scan, and was not in the list. Its writer is fixed in
+    -- 0.80.0; this clears what nineteen releases of logins wrote to disk.
+    [31] = function(db)
+        local store = db.account and db.account.appearances
+
+        if type(store) ~= "table" then
+            return
+        end
+
+        local dropped = 0
+
+        for _, record in pairs(store) do
+            if type(record) == "table" and record.lastSeen ~= nil then
+                record.lastSeen = nil
+                dropped = dropped + 1
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " appearance timestamps nothing reads.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

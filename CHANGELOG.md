@@ -7,6 +7,65 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.80.0]
+
+**If you solo old raids for mounts, this release is for you.** The addon has
+been quietly demoting mounts, pets, toys, appearances, rares, treasures,
+vendors and recipes by 65% whenever you were inside an instance â€” including
+when you were in there completely alone. Soloing old content is how almost all
+of those are farmed, so the addon was burying the exact thing you had walked in
+for, and explaining it with "you are in an instance with a group" to a player
+with nobody else there. `/cn situation` said so out loud: *"You are in a
+instance with 0 people."* The group check the design always described is now
+actually made.
+
+This release audits code that had not been touched in fifteen to thirty
+releases, rather than the code the last one changed.
+
+### Fixed
+
+- **Soloing an instance no longer demotes what you went in for.** See above.
+  A real group still does. `/cn situation` also says "an instance" rather than
+  "a instance", which it had been printing since 0.44.0.
+- **Tooltips claimed ordinary items were recipes.** The recipe lookup indexed
+  a table keyed by trade-skill recipe ids using an *item* id â€” two unrelated
+  number spaces â€” so any item whose id happened to collide with a captured
+  recipe got "Recipe: not known by this character" and a list of which of your
+  alts know it. On a stack of ore. It also reported the collision as an *exact*
+  match, which suppressed the "matched by name" caveat that would have warned
+  you.
+- **The tooltip's appearance line has never once worked.** It looked
+  appearances up by item id; every appearance this addon tracks is keyed by
+  gear slot or by a set id. The lookup could not match, and cost a full
+  recommendation walk on every gear mouseover to arrive at nothing. The
+  appearance *collected / not collected* line, which reads the client directly,
+  was never affected and still works.
+- **Hovering a bag of collectibles hammered the Adventure Guide.** The
+  "Drops from" lookup remembered answers and never remembered *misses*, on the
+  reasoning that a repeat search only costs something when a player asks for
+  one. That stopped being true when tooltips became a caller: most items are
+  not boss drops, so the common case was the uncached one, and sweeping a loot
+  window or auction-house page re-ran a full journal search â€” with a save and
+  restore of the Adventure Guide's own selection â€” dozens of times a second.
+- **Rare alerts ran a full sweep on every minimap update.** `Rares.lua` has a
+  comment naming this exact handler as the one it could not throttle from
+  where it sat. Nineteen releases later, it is throttled. With alerts on,
+  flying across a zone with rares up was running a client call and two table
+  allocations per rare, several times a second.
+- **`/cn locale` contradicted itself on English clients.** It said the addon
+  is written in English so there is nothing to translate, and then reported
+  that N strings had "fallen back to English this session" and that the list
+  "is exactly what a translator needs". `/cn locale missing` then printed the
+  addon's entire vocabulary as untranslated work.
+- **Appearance rows carried a timestamp nothing reads.** An earlier release
+  stripped exactly this field from four other stores for exactly this reason
+  and missed this one; its writer was never changed either, so a strip alone
+  would not have held. Both ends are fixed, and existing saved data is cleaned
+  up on login.
+- **Nothing ever cleared the cached drop answers.** The function to do it was
+  written with the cache and called from nowhere. It runs on a world change
+  now, which is when the journal's own context changes underneath it.
+
 ## [0.79.0]
 
 **If `/cn go` has been printing `table: 0x0000...` at you, that is fixed.**

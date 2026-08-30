@@ -3619,6 +3619,65 @@ mutate "Modules/Rares.lua" \
     "        return states.AVAILABLE, nil, record.name" \
     "a rare the client is not reporting is offered as one to go and kill"
 
+# ---- 0.80.0 ----
+
+mutate "Modules/Group.lua" \
+    "    if inside and Group.InGroup()
+        and (kind == \"party\" or kind == \"raid\" or kind == \"scenario\") then" \
+    "    if inside
+        and (kind == \"party\" or kind == \"raid\" or kind == \"scenario\") then" \
+    "soloing an old raid buries the mount you went in for"
+
+mutate "Modules/Group.lua" \
+    "        return \"You are in \" .. (kind == \"raid\" and \"a raid\" or \"an instance\")" \
+    "        return \"You are in a \" .. (kind == \"raid\" and \"raid\" or \"instance\")" \
+    "/cn situation says you are in a instance"
+
+mutate "Modules/Professions.lua" \
+    "function Professions.RecipeForItem(itemName)" \
+    "function Professions.RecipeForItem(itemName)
+    if RecipeNames()[itemName] then
+        return itemName
+    end" \
+    "an item id is looked up in a table of recipe ids"
+
+mutate "Modules/Instances.lua" \
+    "        dropCache[name] = { at = time() }" \
+    "        dropCache[name] = nil" \
+    "a mouseover of a non-drop re-searches the whole journal"
+
+mutate "Modules/Instances.lua" \
+    "CN:RegisterEvent(\"PLAYER_ENTERING_WORLD\", function()
+    Instances.ForgetDrops()
+end)" \
+    "" \
+    "nothing ever clears a cached journal answer"
+
+mutate "Modules/Broker.lua" \
+    "        CN.Debounce(\"Broker.alerts\", 1, function()" \
+    "        do" \
+    "every minimap vignette runs a full rare-alert sweep"
+
+mutate "Locale.lua" \
+    "        if stats.missing > 0 and not english then" \
+    "        if stats.missing > 0 then" \
+    "an English client is told to translate English"
+
+mutate "Modules/Appearances.lua" \
+    "            total      = category.total,
+        }" \
+    "            total      = category.total,
+            lastSeen   = time(),
+        }" \
+    "every appearance scan writes a timestamp nothing reads"
+
+mutate "Database.lua" \
+    "            if type(record) == \"table\" and record.lastSeen ~= nil then
+                record.lastSeen = nil" \
+    "            if false then
+                record.lastSeen = nil" \
+    "the appearance timestamps already on disk stay there"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

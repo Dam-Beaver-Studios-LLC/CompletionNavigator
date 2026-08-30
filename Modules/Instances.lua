@@ -172,6 +172,12 @@ function Instances.ForgetDrops()
     dropCache = {}
 end
 
+-- How long a "nothing found" is trusted before the journal is asked again.
+-- Short, because a zero is usually "the async search has not landed yet";
+-- non-zero, because most items are not boss drops and a mouseover storm must
+-- not re-run the whole search for each of them.
+Instances.dropMissSeconds = 60
+
 function Instances.WhereDoesItDrop(name)
     if type(name) ~= "string" or name == "" then
         return {}
@@ -180,26 +186,58 @@ function Instances.WhereDoesItDrop(name)
     local cached = dropCache[name]
 
     if cached then
-        return cached
+        if cached.results then
+            return cached.results
+        end
+
+        if (time() - (cached.at or 0)) < Instances.dropMissSeconds then
+            return {}
+        end
     end
 
     local results = Blizzard.SearchEncounterJournal(name, 6)
 
-    -- A ZERO IS "NOT YET", NOT "NOTHING".
+    -- A ZERO IS "NOT YET", NOT "NOTHING" -- BUT IT IS NOT FREE EITHER. 0.80.0.
     --
     -- The journal's search is asynchronous, so the first query for a name
     -- reliably returns nothing. Caching that made the emptiness permanent for
     -- the session: every later ask returned the memoised zero and the search
-    -- that had by then completed was never read.
+    -- that had by then completed was never read. So misses were not recorded
+    -- at all, justified in this comment by "the cost of asking again is one
+    -- search the player triggered themselves".
     --
-    -- Only an answer is remembered. The cost of asking again is one search
-    -- the player triggered themselves.
+    -- That stopped being true when the tooltip became a caller. A tooltip is
+    -- not triggered by the player asking a question; it fires on every
+    -- tooltip built, and MOST COLLECTIBLES ARE NOT BOSS DROPS -- so the
+    -- common case was the uncached one. Sweeping a bag, a loot window or an
+    -- auction-house page of mounts ran a full `EJ_SetSearch` cycle, with a
+    -- save and restore of the Adventure Guide's own selection, dozens of
+    -- times a second.
+    --
+    -- Both facts are now true at once: an answer is kept, and a miss is kept
+    -- just long enough to absorb the storm.
     if #results > 0 then
-        dropCache[name] = results
+        dropCache[name] = { results = results }
+    else
+        dropCache[name] = { at = time() }
     end
 
     return results
 end
+
+-- ENTERING A NEW WORLD IS A NEW JOURNAL CONTEXT. 0.80.0.
+--
+-- `Instances.ForgetDrops` was written with the cache and then never called
+-- from anywhere -- the dead-writer shape this project keeps finding, here as
+-- a dead resetter, while every sibling (`Sets.Forget`, `Group.ForgetShared`,
+-- `CN.ClearShortlist`) is wired to the event that invalidates it.
+--
+-- The search reads and restores the Adventure Guide's current instance and
+-- difficulty, so a zone or instance change is the moment its answers -- and
+-- especially its cached misses -- are worth asking again.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    Instances.ForgetDrops()
+end)
 
 -- The one-line version, for a tooltip or a chase step.
 function Instances.DescribeSource(name)

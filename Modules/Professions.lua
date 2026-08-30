@@ -551,15 +551,26 @@ Professions.teachingPrefixes = {
 Professions.teachingSeparators = { ": ", " : ", "\239\188\154" }
 
 -- The recipe an item teaches, or nil. O(1) rather than O(every recipe).
-function Professions.RecipeForItem(itemID, itemName)
-    local names = RecipeNames()
-
-    -- The item IS the recipe, which is the cheapest case and worth checking
-    -- before building anything.
-    if itemID and names[itemID] then
-        return itemID, false
-    end
-
+function Professions.RecipeForItem(itemName)
+    -- AN ITEM ID IS NOT A RECIPE ID. 0.80.0.
+    --
+    -- This began "the item IS the recipe, which is the cheapest case", and
+    -- indexed `recipeNames` -- whose only writer is `CaptureOpenProfession`,
+    -- writing `names[recipeID]` from `C_TradeSkillUI.GetAllRecipeIDs` -- with
+    -- an ITEM id. Two unrelated number spaces, one table.
+    --
+    -- `Filters.lua` describes this exact collision three files over: "a
+    -- trade-skill recipe id from Professions -- which is what `recipeNames`
+    -- is keyed by", and warns that such a number, "where it happens to
+    -- collide with a real item", names something wholly unrelated. This was
+    -- the same collision run backwards, and it did more damage than a wrong
+    -- name: the second return is the "matched by name" flag, and returning
+    -- `false` told the tooltip the guess was an EXACT id match, so the
+    -- caveat that would have warned the player was suppressed.
+    --
+    -- The consequence was a "Recipe: not known by this character" block, and
+    -- a roster of which alts know it, on a stack of ore. The name lookup
+    -- below is the only correct answer and was always there.
     if type(itemName) ~= "string" or itemName == "" then
         return nil
     end
@@ -571,7 +582,7 @@ function Professions.RecipeForItem(itemID, itemName)
     local direct = index[needle]
 
     if direct then
-        return direct, true
+        return direct
     end
 
     -- Strip a teaching prefix and try again. This replaces a scan over every
@@ -581,7 +592,7 @@ function Professions.RecipeForItem(itemID, itemName)
             local taught = index[string.sub(needle, #prefix + 1)]
 
             if taught then
-                return taught, true
+                return taught
             end
         end
     end
@@ -606,7 +617,7 @@ function Professions.RecipeForItem(itemID, itemName)
             local taught = index[CN.Trim(string.sub(needle, at + #separator))]
 
             if taught then
-                return taught, true
+                return taught
             end
         end
     end
