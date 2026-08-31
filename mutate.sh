@@ -1358,17 +1358,13 @@ mutate "UI.lua" \
 # 0.59.0
 ############################################################
 
+# RE-ANCHORED IN 0.88.0: the freshener now also decides whether the row stays
+# in the list at all, so the block it guards has one more statement in it.
 mutate "Modules/Opportunities.lua" \
     "            if event.endsAt then
-                local left = event.endsAt - now
-
-                event.endsIn = (left > 0) and left or nil
-            end" \
+                local left = event.endsAt - now" \
     "            if false then
-                local left = event.endsAt - now
-
-                event.endsIn = (left > 0) and left or nil
-            end" \
+                local left = event.endsAt - now" \
     "a world event's deadline is frozen for half an hour at a time"
 
 mutate "Modules/Opportunities.lua" \
@@ -2315,10 +2311,13 @@ mutate "Modules/Titles.lua" \
     "        local name = CN.Account(\"titleNames\")[title.titleID]" \
     "a title cannot be found by name after a language change"
 
+# RE-ANCHORED IN 0.88.0: the throttle is stamped AFTER the refusal guard, so
+# that a sweep the client would not answer is retried rather than waited out.
 mutate "Modules/Currencies.lua" \
-    "function Currencies.Scan()
-    lastScan = time()" \
-    "function Currencies.Scan()" \
+    "    lastScan = time()
+
+    local serial = NextSerial()" \
+    "    local serial = NextSerial()" \
     "a manual scan arms a second sweep a second later"
 
 mutate "UI.lua" \
@@ -4077,6 +4076,117 @@ mutate "Modules/Setup.lua" \
     "                        .. (retry[result.label] or \"setup\")" \
     "                        .. \"scanlore\"" \
     "a not-ready achievement scan sends you to the wrong command"
+
+mutate "Modules/Currencies.lua" \
+    "    if #list == 0 then
+        DebugPrint(\"Currency sweep answered for nothing; not recording it.\")
+
+        return 0, 0, 0
+    end" \
+    "    if false then
+        DebugPrint(\"Currency sweep answered for nothing; not recording it.\")
+
+        return 0, 0, 0
+    end" \
+    "a refused currency sweep retires every stored currency"
+
+mutate "Modules/Currencies.lua" \
+    "    local list = Blizzard.GetCurrencyList()" \
+    "    lastScan = time()
+    local list = Blizzard.GetCurrencyList()" \
+    "a refused currency sweep stamps the throttle it never earned"
+
+mutate "Modules/Currencies.lua" \
+    "    if time() - lastScan < Currencies.rescanSeconds then" \
+    "    if false then" \
+    "the currency throttle does not throttle"
+
+mutate "Modules/Vault.lua" \
+    "            limitedTimeBonus = Urgency(row.remaining)," \
+    "            limitedTimeBonus = Urgency(row.remaining, resetsIn)," \
+    "the vault charges the weekly reset through two curves"
+
+mutate "Modules/Instances.lua" \
+    "                limitedTimeBonus = Urgency(lockout.remaining, nil,
+                    lockout.defeated)," \
+    "                limitedTimeBonus = Urgency(lockout.remaining, lockout.resetsIn,
+                    lockout.defeated)," \
+    "a lockout charges the weekly reset through two curves"
+
+mutate "Modules/Warband.lua" \
+    "    if scope == CN.scopes.ACCOUNT or not bestKey or switchable == false then" \
+    "    if scope == CN.scopes.ACCOUNT or not bestKey then" \
+    "the only character who can still learn a recipe is ranked down for it"
+
+mutate "Modules/Opportunities.lua" \
+    "                keep = left > 0" \
+    "                keep = true" \
+    "an event that has ended outranks every event still running"
+
+mutate "Modules/Opportunities.lua" \
+    "    return Freshen(active)" \
+    "    return active" \
+    "a freshly read event list is never dated"
+
+mutate "Modules/Filters.lua" \
+    "            if duration.computed == \"weeklyReset\" then
+                return CN.Blizzard.GetSecondsUntilWeeklyReset() or DAY
+            end" \
+    "            if duration.computed == \"weeklyReset\" then
+                return nil
+            end" \
+    "until reset defers for nothing at all"
+
+mutate "Modules/Filters.lua" \
+    "    return HOUR
+end
+
+-- The labels, for a command" \
+    "    return nil
+end
+
+-- The labels, for a command" \
+    "an unknown duration defers forever"
+
+mutate "Modules/Filters.lua" \
+    "    if seconds == math.huge then
+        return \"indefinitely\"
+    end" \
+    "    if seconds == -1 then
+        return \"indefinitely\"
+    end" \
+    "the duration that never runs out prints as infd"
+
+mutate "Modules/Filters.lua" \
+    "        local seconds = Filters.DurationSeconds(key)" \
+    "        local seconds = 3600" \
+    "/cn defer ignores the duration it was given"
+
+mutate "Modules/Vendors.lua" \
+    "    CN.Debounce(\"Vendors.merchant\", Vendors.recaptureSeconds,
+        Vendors.CaptureOpenMerchant)" \
+    "    Vendors.CaptureOpenMerchant()" \
+    "every item sold to a vendor re-reads the whole merchant"
+
+mutate "Modules/Opportunities.lua" \
+    "                and CN.Aside(Opportunities.FormatTimeLeft(event.endsIn))" \
+    "                and CN.Aside(tostring(event.sequenceType))" \
+    "/cn events prints the client token instead of when it ends"
+
+mutate "Modules/Hud.lua" \
+    "    args    = \"<100 to 200>\"," \
+    "    args    = \"<100 to 150>\"," \
+    "/cn help understates the largest text the addon allows"
+
+mutate "Modules/Vault.lua" \
+    "        return text .. \" |cff73b873\" .. CN.DASH .. \" all \"" \
+    "        return text .. \" |cff73b873\" .. CN.DASH .. \"all \"" \
+    "the vault line puts a space on one side of the dash only"
+
+mutate "UI.lua" \
+    "                (filters and filters.DurationSeconds(\"hour\")) or 3600)" \
+    "                3600)" \
+    "the defer button writes its own copy of what an hour is"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.87.0'
+$script:ToolkitVersion = '0.88.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.87.0"
+CN.version     = "0.88.0"
 CN.dbVersion   = 33
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -5796,7 +5796,8 @@ CN.helpEssentials = {
 CN.helpGroups = {
     { title = "Deciding what to do",
       names = { "next", "why", "whyzero", "order", "urgency", "plan", "mode",
-                "types", "hidden", "unhide", "learned", "situation", "goal",
+                "types", "hidden", "unhide", "defer", "learned", "situation",
+                "goal",
                 "goals", "ungoal", "gogoal", "chase", "closest", "now",
                 "list" } },
 
@@ -13569,7 +13570,14 @@ UI.RegisterTab{
                 return
             end
 
-            CN.SetDeferred(objective.type, objective.id, 3600)
+            -- ONE TABLE DEFINES WHAT AN HOUR IS. 0.88.0. `Filters.durations`
+            -- gained its first reader this release; a literal here is the
+            -- fourth place the same number was written, and the button's own
+            -- label is the fifth.
+            local filters = CN:GetModule("Filters")
+
+            CN.SetDeferred(objective.type, objective.id,
+                (filters and filters.DurationSeconds("hour")) or 3600)
             -- SAY HOW LONG, AND SAY THE WAY BACK. The button says "1 hour"
             -- and the message did not; nothing named the undo.
             UI.Answer("Deferred for an hour: " .. tostring(objective.name)
@@ -30101,47 +30109,19 @@ local DAY  = 86400
 -- URGENCY
 ------------------------------------------------------------
 
--- Converts "seconds remaining" into the bonus the scorer multiplies by 3.0.
--- Deliberately steep: something with an hour left should dominate, something
--- with three days left should barely register.
--- ONE DEADLINE, ONE CURVE. 0.63.0.
+-- URGENCY IS THE SCORER'S, AND ONLY THE SCORER'S. 0.88.0.
 --
--- A world quest set BOTH `limitedTimeBonus = Opportunities.Urgency(left)` --
--- this four-step cliff, weighted 3.0 -- and `expiresIn = left`, which the
--- scorer feeds to the continuous `CN.UrgencyBonus`, weighted separately. The
--- same number was charged twice through two curves tuned independently, and
--- the step at the one-hour boundary was a jump of 3.0 in the total that
--- nothing explained.
+-- `Opportunities.Urgency` lived here, with a header saying it was "now only
+-- for callers that have no `expiresIn` to give -- world EVENTS, below". The
+-- world-event branch reads `event.endsIn and 0 or 1`, a literal, and has done
+-- since 0.63.0: the named caller did not call it, and nothing else in the
+-- addon did either.
 --
--- Worse for the player: `/cn urgency` announces "how much a deadline is worth,
--- at every distance from it" and plots only `CN.UrgencyBonus`. So the chart
--- the addon offers as its own explanation omitted the larger of the two
--- contributions, and the ordering it described was not the ordering it used.
---
--- `expiresIn` is the field every other deadline in the addon uses and the one
--- the chart plots, so it is the one that stays. This function is now only for
--- callers that have no `expiresIn` to give -- world EVENTS, below, which are
--- ranked as a whole rather than per objective.
---
--- Kept rather than deleted because that caller is real; renamed in spirit by
--- this comment: it is "how urgent is a window", not "the bonus to add".
-function Opportunities.Urgency(secondsLeft)
-    if not secondsLeft or secondsLeft <= 0 then
-        return 0
-    end
+-- Removed rather than kept, because a comment asserting a live contract that
+-- does not hold is how the next reader rebuilds a wrong model of the scoring.
+-- One deadline, one curve: `expiresIn` and `CN.UrgencyBonus`, which is what
+-- `/cn urgency` plots.
 
-    if secondsLeft <= HOUR then
-        return 3
-    elseif secondsLeft <= 6 * HOUR then
-        return 2
-    elseif secondsLeft <= DAY then
-        return 1.25
-    elseif secondsLeft <= 3 * DAY then
-        return 0.5
-    end
-
-    return 0.25
-end
 
 -- THE BARE FIGURE, WITH NO CLAUSE ATTACHED.
 --
@@ -30310,18 +30290,39 @@ function Opportunities.GetActiveEvents(force)
     -- provider take the reuse shortcut and nothing corrected it.
     --
     -- `endsAt` is an absolute stamp and cannot go stale.
+    -- ENDED IS NOT "NO KNOWN END". 0.88.0.
+    --
+    -- This correctly nils `endsIn` once the stamp has passed, and left the
+    -- row in a cache that lives for thirty minutes. The provider reads a nil
+    -- `endsIn` as "an event the client will not date" and awards the flat
+    -- bonus for it -- which is worth three points, where a live event three
+    -- hours out earns about one and a third. So one nil field ranked a
+    -- FINISHED holiday above every event still running, and `/cn now` went
+    -- on listing it as active, for up to half an hour.
+    --
+    -- An event that has ended leaves the list.
     local function Freshen(events)
         local now = time()
 
+        local live = {}
+
         for _, event in ipairs(events) do
+            local keep = true
+
             if event.endsAt then
                 local left = event.endsAt - now
 
                 event.endsIn = (left > 0) and left or nil
+
+                keep = left > 0
+            end
+
+            if keep then
+                table.insert(live, event)
             end
         end
 
-        return events
+        return live
     end
 
     if not force and eventCache and (time() - eventCachedAt) < 1800 then
@@ -30336,12 +30337,10 @@ function Opportunities.GetActiveEvents(force)
         end
     end
 
-    Freshen(active)
-
     eventCache    = active
     eventCachedAt = time()
 
-    return active
+    return Freshen(active)
 end
 
 ------------------------------------------------------------
@@ -30551,9 +30550,22 @@ CN:RegisterCommand{
             return
         end
 
+        -- WHEN IT ENDS, NOT THE CLIENT'S OWN TOKEN. 0.88.0.
+        --
+        -- This printed `sequenceType` -- the raw enum string the provider
+        -- branches on, "ONGOING" for every row in a list already filtered to
+        -- ongoing events. The addon's internals, in brackets, saying nothing
+        -- the header did not; the shape `Modules/Filters.lua` records fixing
+        -- three separate times.
+        --
+        -- Meanwhile the one fact worth having -- how long is left, which the
+        -- provider two hundred lines up already computes and RANKS on -- was
+        -- dropped.
         for _, event in ipairs(events) do
             CN.PrintLine("  " .. event.title
-                .. " |cff8a8f96(" .. tostring(event.sequenceType) .. ")|r")
+                .. (event.endsIn
+                    and CN.Aside(Opportunities.FormatTimeLeft(event.endsIn))
+                    or ""))
         end
     end,
 }
@@ -30830,9 +30842,21 @@ function Warband.Suitability(objectiveType, id)
     -- The second return -- the list of character names -- is deliberately
     -- not bound: see the note above this function's return for why it must
     -- not appear in the sentence. 0.79.0.
-    local bestKey, _, scope = Warband.WhoShould(objectiveType, id)
+    -- THE FOURTH RETURN, HERE TOO. 0.88.0.
+    --
+    -- For a recipe or a title the named character is the HOLDER: switching
+    -- to them cannot do it again, and a title cannot be earned twice at all.
+    -- `WhoShould` returns `switchable = false` to say so, `Alts` honoured it
+    -- in 0.79.0 and `Goals` in 0.84.0 -- and this, the third caller, went on
+    -- stamping "Bob is better suited -- already known by another character"
+    -- onto the objective through `Warband.Decorate`, which puts it in
+    -- `/cn next`, `/cn why`, the Next tab, the map pin and the heads-up line.
+    --
+    -- It also applied a two-point penalty, ranking DOWN the one character who
+    -- can still learn the recipe.
+    local bestKey, _, scope, switchable = Warband.WhoShould(objectiveType, id)
 
-    if scope == CN.scopes.ACCOUNT or not bestKey then
+    if scope == CN.scopes.ACCOUNT or not bestKey or switchable == false then
         return 0, nil
     end
 
@@ -30874,7 +30898,7 @@ function Warband.Suitability(objectiveType, id)
     -- as though it explained something: "Bob is better suited (Bob, Carol)".
     -- `scope` is the written reason and is what belongs in a `/cn why` line.
     return -2, bestKey .. " is better suited"
-        .. (scope and (" -- " .. tostring(scope)) or "")
+        .. (scope and (" " .. CN.DASH .. " " .. tostring(scope)) or "")
 end
 
 -- Applied to every candidate before scoring, so no module has to remember
@@ -32051,19 +32075,48 @@ local lastScan = 0
 -- the login scan and the manual one both left the timestamp alone, so the
 -- next coin picked up ran a second full sweep. 0.65.0.
 function Currencies.Scan()
-    lastScan = time()
-
     local mine = CharacterStore()
 
     if not mine then
+        lastScan = time()
+
         return 0, 0, 0
     end
+
+    local list = Blizzard.GetCurrencyList()
+
+    -- A REFUSAL IS NOT AN EMPTY CURRENCY LIST. 0.88.0.
+    --
+    -- THE SERIAL *IS* THE PRUNE: `IsCurrent` compares a row's serial against
+    -- the current one, and `Capped`, `WeeklyUnfilled` and `CurrentCount` all
+    -- gate on it. Bumping it with nothing to stamp therefore retires every
+    -- stored currency at once -- while the rows sit intact on disk.
+    --
+    -- `Blizzard.GetCurrencyList` answers with an empty table on four ordinary
+    -- refusal paths, one of which is a size of zero -- which is what the
+    -- client returns while currency data is still streaming at login, which
+    -- is exactly when `CN:OnLogin` runs this.
+    --
+    -- `Achievements` has carried this guard since 0.76.0, `Exploration` since
+    -- 0.61.0 and `Loremaster` since 0.71.0, and the note on the first of them
+    -- says why: "a cold scan that read nothing would otherwise delete every
+    -- row it could not confirm". Fourth writer of the same idea, no guard.
+    --
+    -- The throttle is not stamped either, so the next coin picked up retries
+    -- rather than waiting out a minute on an answer that was never given.
+    if #list == 0 then
+        DebugPrint("Currency sweep answered for nothing; not recording it.")
+
+        return 0, 0, 0
+    end
+
+    lastScan = time()
 
     local serial = NextSerial()
 
     local seen, atCap, weeklyRemaining = 0, 0, 0
 
-    for _, currency in ipairs(Blizzard.GetCurrencyList()) do
+    for _, currency in ipairs(list) do
         if currency.currencyID then
             -- `currencyNames` IS NOT WRITTEN ANY MORE. 0.65.0.
             --
@@ -34018,15 +34071,57 @@ local DAY  = 86400
 -- DURATIONS
 ------------------------------------------------------------
 
--- Ordered, because they are offered as a list in the UI.
+-- Ordered, because they are offered as a list.
+--
+-- REACHABLE AT LAST. 0.88.0.
+--
+-- This table had no reader anywhere in the addon: every deferral in the tree
+-- was a hardcoded 3600, and there was no command that took a duration -- so
+-- the only thing a player could ever do was put something off for an hour.
+-- The file header says why the table was written: "Defer also only offered
+-- one hour... 'until the weekly reset' is the one that actually matches how
+-- the game works."
+--
+-- Two of the rows could not have worked as written either. `seconds = nil` in
+-- a table constructor stores nothing at all, so "until reset" was
+-- indistinguishable from a malformed row; and `math.huge` renders through
+-- `FormatRemaining` as "infd", which is what `/cn hidden` would have printed
+-- the day somebody wired it up. Both are resolved rather than stored now.
 Filters.durations = {
     { key = "hour",    label = "1 hour",        seconds = HOUR },
     { key = "day",     label = "Today",         seconds = DAY },
     { key = "tomorrow",label = "Tomorrow",      seconds = 2 * DAY },
     { key = "week",    label = "This week",     seconds = 7 * DAY },
-    { key = "reset",   label = "Until reset",   seconds = nil },  -- computed
+    { key = "reset",   label = "Until reset",   computed = "weeklyReset" },
     { key = "forever", label = "Until I undo it", seconds = math.huge },
 }
+
+-- Seconds for a named duration, resolving the one that depends on the clock.
+-- Falls back to an hour, which is what every caller used to hardcode.
+function Filters.DurationSeconds(key)
+    for _, duration in ipairs(Filters.durations) do
+        if duration.key == key then
+            if duration.computed == "weeklyReset" then
+                return CN.Blizzard.GetSecondsUntilWeeklyReset() or DAY
+            end
+
+            return duration.seconds
+        end
+    end
+
+    return HOUR
+end
+
+-- The labels, for a command's help and for anything that offers the choice.
+function Filters.DurationKeys()
+    local keys = {}
+
+    for _, duration in ipairs(Filters.durations) do
+        table.insert(keys, duration.key)
+    end
+
+    return keys
+end
 
 ------------------------------------------------------------
 -- TYPE FILTERING
@@ -34712,6 +34807,13 @@ local function FormatRemaining(seconds)
         return "indefinitely"
     end
 
+    -- AND SO IS THE SENTINEL FOR IT. 0.88.0. `math.huge` divided by an hour
+    -- is still infinite, so this printed "infd" for the one duration whose
+    -- whole meaning is that it does not run out.
+    if seconds == math.huge then
+        return "indefinitely"
+    end
+
     if seconds <= 0 then
         return "expired"
     end
@@ -34776,6 +34878,67 @@ CN:RegisterCommand{
 
         Print("|cffffc74f/cn unhide <id>|r to restore one, "
             .. "|cffffc74f/cn unhide all|r for everything.")
+    end,
+}
+
+-- PUTTING SOMETHING OFF FOR LONGER THAN AN HOUR. 0.88.0.
+--
+-- The duration table above has existed for many releases with no reader:
+-- every deferral in the addon was a hardcoded hour, and there was no command
+-- that took a duration. "Until reset" -- the one the file header calls the
+-- duration that actually matches how the game works -- had never been
+-- available to anybody.
+--
+-- Defers the CURRENT recommendation by default, because that is the thing a
+-- player has just been told to do and is deciding not to.
+CN:RegisterCommand{
+    name    = "defer",
+    aliases = { "later", "snooze" },
+    args    = "[hour|day|tomorrow|week|reset|forever]",
+    order   = 22,
+    help    = "Put the current recommendation off for longer than an hour.",
+    handler = function(args)
+        local objective = CN.currentRecommendation
+
+        if not objective or not objective.type or not objective.id then
+            Print("Nothing is being recommended right now. "
+                .. "Run |cffffc74f/cn next|r first.")
+            return
+        end
+
+        local key = string.lower(CN.Trim(args or ""))
+
+        if key == "" then
+            key = "hour"
+        end
+
+        local matched
+
+        for _, duration in ipairs(Filters.durations) do
+            if duration.key == key then
+                matched = duration
+            end
+        end
+
+        if not matched then
+            Print("Durations: |cffffc74f"
+                .. table.concat(Filters.DurationKeys(), "|r, |cffffc74f")
+                .. "|r.")
+            return
+        end
+
+        local seconds = Filters.DurationSeconds(key)
+
+        CN.SetDeferred(objective.type, objective.id, seconds)
+
+        CN.InvalidateCandidates()
+
+        Print("Deferred: " .. tostring(objective.name or objective.id)
+            .. CN.Aside(matched.label .. CN.DOT .. " "
+                .. FormatRemaining(seconds)))
+
+        Print("|cff8a8f96|cffffc74f/cn unhide " .. tostring(objective.id)
+            .. "|r brings it back sooner.|r")
     end,
 }
 
@@ -35678,8 +35841,24 @@ CN:RegisterEvent("MERCHANT_SHOW", function()
     end
 end)
 
+-- DEBOUNCED, BECAUSE THIS FIRES ON EVERY PURCHASE. 0.88.0.
+--
+-- `MERCHANT_UPDATE` fires again whenever a merchant's stock changes -- every
+-- buy of a limited-quantity item, and repeatedly while the frame is open --
+-- and each capture re-reads EVERY item on the merchant at two or three
+-- client calls apiece, rebuilds the row, discards the reverse index over the
+-- whole account vendor store, and calls `CN.MarkScanned`, which invalidates
+-- this provider and bumps the counter guarding three tabs' memoised
+-- summaries. Twenty purchases from a big vendor was twenty of all that.
+--
+-- Every other chatty handler in the addon is throttled and says so:
+-- currencies at sixty seconds, rares at one, the breakdown at five,
+-- exploration at two. This was the one that was not swept.
+Vendors.recaptureSeconds = 2
+
 CN:RegisterEvent("MERCHANT_UPDATE", function()
-    Vendors.CaptureOpenMerchant()
+    CN.Debounce("Vendors.merchant", Vendors.recaptureSeconds,
+        Vendors.CaptureOpenMerchant)
 end)
 
 ------------------------------------------------------------
@@ -38407,7 +38586,7 @@ function Chase.Summarize(chain)
         table.insert(parts, "next: " .. tostring(nextStep.text))
     elseif #parts == 0 then
         return tostring(chain.name)
-            .. " " .. CN.DASH .. "the game does not say how this is obtained."
+            .. CN.DASH .. "the game does not say how this is obtained."
     end
 
     return tostring(chain.name) .. " " .. CN.DASH .. " " .. table.concat(parts, ", ")
@@ -44211,7 +44390,9 @@ function Vault.DescribeRow(row)
         -- "Dungeons: 8 all 3 unlocked" -- two numbers jammed together with no
         -- word between them, and the reader has to guess which is which.
         -- 0.61.0.
-        return text .. " |cff73b873" .. CN.DASH .. "all "
+        -- A SPACE ON BOTH SIDES. 0.88.0. Every other dash in the addon has
+        -- one, and this printed "World: 8 —all 3 rewards unlocked".
+        return text .. " |cff73b873" .. CN.DASH .. " all "
             .. CN.Count(row.unlocked, "reward") .. " unlocked|r"
     end
 
@@ -44326,7 +44507,25 @@ CN.RegisterCandidateProvider("Vault", function()
                 name             = "Great Vault: " .. row.label,
                 accountWide      = false,
                 completionValue  = 4,
-                limitedTimeBonus = Urgency(row.remaining, resetsIn),
+                -- ONE DEADLINE, ONE CURVE. 0.88.0.
+                --
+                -- `Urgency` adds up to three points from `resetsIn` alone,
+                -- and `expiresIn` below hands the SAME number to the
+                -- scorer's own urgency term -- two independently tuned
+                -- curves charging one deadline, with unexplained cliffs at
+                -- the four-, two- and one-day boundaries.
+                --
+                -- Worse for the player: `/cn urgency` announces "how much a
+                -- deadline is worth, at every distance from it" and plots
+                -- only the scorer's curve, so `/cn why` under-reported the
+                -- reset's contribution by an order of magnitude. This is the
+                -- defect `Modules/Opportunities.lua` records fixing in
+                -- 0.63.0; the sweep reached that file and not this one.
+                --
+                -- This term now carries only "how close is the row to its
+                -- next threshold", which is not a deadline and is charged
+                -- nowhere else.
+                limitedTimeBonus = Urgency(row.remaining),
                 -- Instanced content has no map coordinate, but it is not
                 -- "location unknown" either: the group finder is one click.
                 travelCost       = 3,
@@ -52320,7 +52519,7 @@ CN:RegisterCommand{
                     -- only one of them was visible.
                     if not teleport.learnedMap then
                         line = line .. CN.Muted(" (not costed yet"
-                            .. CN.DASH .. " hearth once and it will be)")
+                            .. CN.DASH .. "hearth once and it will be)")
                     end
                 end
 
@@ -52856,7 +53055,12 @@ CN.RegisterCandidateProvider("Instances", function()
                     .. (lockout.difficulty and (" (" .. lockout.difficulty .. ")") or ""),
                 accountWide      = false,
                 completionValue  = lockout.raid and 6 or 4,
-                limitedTimeBonus = Urgency(lockout.remaining, lockout.resetsIn, lockout.defeated),
+                -- ONE DEADLINE, ONE CURVE. 0.88.0. See the note on the
+                -- vault row: `expiresIn` below hands the same reset to the
+                -- scorer's own urgency term, and `/cn urgency` plots only
+                -- that one. The sibling this file shares the defect with.
+                limitedTimeBonus = Urgency(lockout.remaining, nil,
+                    lockout.defeated),
                 -- No map coordinate, but not "location unknown" either: the
                 -- group finder is one click. Same figure the Vault uses.
                 travelCost       = 3,
@@ -55225,7 +55429,7 @@ CN.RegisterSelfTest{
 
         if resolved == 0 then
             return FAIL, "the pet journal named none of "
-                .. checked .. " " .. CN.DASH .. "the interface will show numbers"
+                .. checked .. CN.DASH .. "the interface will show numbers"
         end
 
         return PASS, resolved .. " of " .. checked .. " named by the client"
@@ -57148,7 +57352,7 @@ function Hud.RegisterOptionsPanel()
     body:SetPoint("TOPLEFT", 16, -48)
     body:SetPoint("TOPRIGHT", -16, -48)
     body:SetJustifyH("LEFT")
-    body:SetText("Answers \"what should I do next?\" " .. CN.DASH .. "ranks what is worth "
+    body:SetText("Answers \"what should I do next?\" " .. CN.DASH .. " ranks what is worth "
         .. "doing now, costs the journey the way you would really make it, "
         .. "and shows its working when you ask why.\n\n"
         .. "1.  Scan once, so it knows what you have.\n"
@@ -57276,7 +57480,14 @@ CN:RegisterCommand{
 CN:RegisterCommand{
     name    = "textsize",
     aliases = { "text" },
-    args    = "<100 to 150>",
+
+    -- WHAT THE SETTER ACTUALLY ACCEPTS. 0.88.0. Three constants described
+    -- one ceiling and disagreed: this said 150, the rejection message below
+    -- says 200, and `CN.SetTextScale` accepts up to 200. So `/cn help` told
+    -- the players who most need larger text that 150 was the limit -- on the
+    -- accessibility control the surrounding notes say was rebuilt precisely
+    -- because those players are least likely to go hunting for a command.
+    args    = "<100 to 200>",
     order   = 40.5,
     help    = "Size of the text in the window, without resizing it.",
     handler = function(args)
@@ -57900,7 +58111,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.87.0
+## Version: 0.88.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -58155,6 +58366,78 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.88.0]
+
+**Six of this release's ten fixes are the same shape: a number the addon
+computes correctly and then uses twice, or a table it defines and never
+reads.** None of them throws an error, which is why they lasted. All of them
+change what the addon tells you to do next.
+
+The largest is a currency store that emptied itself. `Currencies.Scan` bumps
+a serial and stamps every currency it finds with it; everything downstream —
+what is capped, what has weekly earning left, how many currencies you have at
+all — asks whether a row carries the current serial. The scan bumped the
+serial *before* it knew the game had answered. The game answers with nothing
+on four ordinary paths, one of which is the first seconds after login, which
+is exactly when the addon runs this. So one login could retire every currency
+you own while the rows sat intact on disk. Three other scans in this addon
+have carried the guard for that since 0.61.0, 0.71.0 and 0.76.0.
+
+### Fixed
+
+- **A currency sweep the game refused no longer retires every currency you
+  own.** It also stops stamping its own throttle on a refusal, so the next
+  coin you pick up retries rather than waiting out a minute on an answer that
+  was never given.
+- **The Great Vault and your raid lockouts charged the weekly reset twice.**
+  Both fed the reset into `limitedTimeBonus` *and* into `expiresIn`, through
+  two curves tuned separately — and `/cn urgency`, which the addon offers as
+  its own explanation of the ordering, plots only one of them. On a Sunday
+  evening the vault outranked things it should not have, and the chart said it
+  should not have.
+- **The one character who can still learn a recipe was ranked *down* for
+  it.** `Warband.Suitability` asks which character is best placed for
+  something and drops the answer's fourth value, which says whether switching
+  would actually help. For a recipe or a title, the character named is the one
+  who *already has it* — there is nothing to switch for — so the penalty
+  landed on the only character it could still be done on, with the holder's
+  name printed as the reason. Third caller of a fix made in 0.79.0 and again
+  in 0.84.0.
+- **A holiday that had finished outranked every event still running.** The
+  event list is held for thirty minutes and re-dated on each read; a finished
+  event correctly lost its countdown and then stayed in the list, and a
+  missing countdown is how the addon marks "an event the game will not date",
+  which is worth three points. A live event three hours out earns about one
+  and a third.
+- **`/cn defer` — put something off for longer than an hour.** The addon has
+  had a table of durations since it had a filter tab, with `Until reset`
+  described in its own header as the one that matches how the game actually
+  works. Nothing read the table: every deferral in the tree was a hardcoded
+  hour. Two of its rows could not have worked anyway. Now: `hour`, `day`,
+  `tomorrow`, `week`, `reset`, `forever`.
+- **Selling a stack of greys no longer re-reads the vendor sixty times.**
+  `MERCHANT_UPDATE` fires on every stock change; the whole merchant window was
+  re-scanned and re-stored each time. It is throttled to once every two
+  seconds, with the last change still read.
+- **`/cn events` says when an event ends.** It printed an internal token that
+  reads `ONGOING` for every row in a list already filtered to ongoing events,
+  and dropped the one fact the provider two hundred lines above already
+  computes and ranks on.
+- **`/cn help` said the largest text size was 150%.** It is 200%. Three
+  constants described one ceiling and the one shown to the players who most
+  need larger text was the wrong one.
+- **Four lines put a space on one side of an em dash and not the other.**
+  Found by a new check rather than by eye; chat has no monospace font to hide
+  it behind.
+- **A dead scoring curve was deleted.** It was kept "for the one caller that
+  has no deadline"; that caller reads a literal and always has.
+
+### Added
+
+- **`/cn defer [hour|day|tomorrow|week|reset|forever]`**, aliases `later` and
+  `snooze`. Defers whatever is currently being recommended. `/cn unhide <id>`
+  brings it back sooner.
 
 ## [0.87.0]
 
@@ -65049,7 +65332,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.87.0
+0.88.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -66906,17 +67189,13 @@ mutate "UI.lua" \
 # 0.59.0
 ############################################################
 
+# RE-ANCHORED IN 0.88.0: the freshener now also decides whether the row stays
+# in the list at all, so the block it guards has one more statement in it.
 mutate "Modules/Opportunities.lua" \
     "            if event.endsAt then
-                local left = event.endsAt - now
-
-                event.endsIn = (left > 0) and left or nil
-            end" \
+                local left = event.endsAt - now" \
     "            if false then
-                local left = event.endsAt - now
-
-                event.endsIn = (left > 0) and left or nil
-            end" \
+                local left = event.endsAt - now" \
     "a world event's deadline is frozen for half an hour at a time"
 
 mutate "Modules/Opportunities.lua" \
@@ -67863,10 +68142,13 @@ mutate "Modules/Titles.lua" \
     "        local name = CN.Account(\"titleNames\")[title.titleID]" \
     "a title cannot be found by name after a language change"
 
+# RE-ANCHORED IN 0.88.0: the throttle is stamped AFTER the refusal guard, so
+# that a sweep the client would not answer is retried rather than waited out.
 mutate "Modules/Currencies.lua" \
-    "function Currencies.Scan()
-    lastScan = time()" \
-    "function Currencies.Scan()" \
+    "    lastScan = time()
+
+    local serial = NextSerial()" \
+    "    local serial = NextSerial()" \
     "a manual scan arms a second sweep a second later"
 
 mutate "UI.lua" \
@@ -69625,6 +69907,117 @@ mutate "Modules/Setup.lua" \
     "                        .. (retry[result.label] or \"setup\")" \
     "                        .. \"scanlore\"" \
     "a not-ready achievement scan sends you to the wrong command"
+
+mutate "Modules/Currencies.lua" \
+    "    if #list == 0 then
+        DebugPrint(\"Currency sweep answered for nothing; not recording it.\")
+
+        return 0, 0, 0
+    end" \
+    "    if false then
+        DebugPrint(\"Currency sweep answered for nothing; not recording it.\")
+
+        return 0, 0, 0
+    end" \
+    "a refused currency sweep retires every stored currency"
+
+mutate "Modules/Currencies.lua" \
+    "    local list = Blizzard.GetCurrencyList()" \
+    "    lastScan = time()
+    local list = Blizzard.GetCurrencyList()" \
+    "a refused currency sweep stamps the throttle it never earned"
+
+mutate "Modules/Currencies.lua" \
+    "    if time() - lastScan < Currencies.rescanSeconds then" \
+    "    if false then" \
+    "the currency throttle does not throttle"
+
+mutate "Modules/Vault.lua" \
+    "            limitedTimeBonus = Urgency(row.remaining)," \
+    "            limitedTimeBonus = Urgency(row.remaining, resetsIn)," \
+    "the vault charges the weekly reset through two curves"
+
+mutate "Modules/Instances.lua" \
+    "                limitedTimeBonus = Urgency(lockout.remaining, nil,
+                    lockout.defeated)," \
+    "                limitedTimeBonus = Urgency(lockout.remaining, lockout.resetsIn,
+                    lockout.defeated)," \
+    "a lockout charges the weekly reset through two curves"
+
+mutate "Modules/Warband.lua" \
+    "    if scope == CN.scopes.ACCOUNT or not bestKey or switchable == false then" \
+    "    if scope == CN.scopes.ACCOUNT or not bestKey then" \
+    "the only character who can still learn a recipe is ranked down for it"
+
+mutate "Modules/Opportunities.lua" \
+    "                keep = left > 0" \
+    "                keep = true" \
+    "an event that has ended outranks every event still running"
+
+mutate "Modules/Opportunities.lua" \
+    "    return Freshen(active)" \
+    "    return active" \
+    "a freshly read event list is never dated"
+
+mutate "Modules/Filters.lua" \
+    "            if duration.computed == \"weeklyReset\" then
+                return CN.Blizzard.GetSecondsUntilWeeklyReset() or DAY
+            end" \
+    "            if duration.computed == \"weeklyReset\" then
+                return nil
+            end" \
+    "until reset defers for nothing at all"
+
+mutate "Modules/Filters.lua" \
+    "    return HOUR
+end
+
+-- The labels, for a command" \
+    "    return nil
+end
+
+-- The labels, for a command" \
+    "an unknown duration defers forever"
+
+mutate "Modules/Filters.lua" \
+    "    if seconds == math.huge then
+        return \"indefinitely\"
+    end" \
+    "    if seconds == -1 then
+        return \"indefinitely\"
+    end" \
+    "the duration that never runs out prints as infd"
+
+mutate "Modules/Filters.lua" \
+    "        local seconds = Filters.DurationSeconds(key)" \
+    "        local seconds = 3600" \
+    "/cn defer ignores the duration it was given"
+
+mutate "Modules/Vendors.lua" \
+    "    CN.Debounce(\"Vendors.merchant\", Vendors.recaptureSeconds,
+        Vendors.CaptureOpenMerchant)" \
+    "    Vendors.CaptureOpenMerchant()" \
+    "every item sold to a vendor re-reads the whole merchant"
+
+mutate "Modules/Opportunities.lua" \
+    "                and CN.Aside(Opportunities.FormatTimeLeft(event.endsIn))" \
+    "                and CN.Aside(tostring(event.sequenceType))" \
+    "/cn events prints the client token instead of when it ends"
+
+mutate "Modules/Hud.lua" \
+    "    args    = \"<100 to 200>\"," \
+    "    args    = \"<100 to 150>\"," \
+    "/cn help understates the largest text the addon allows"
+
+mutate "Modules/Vault.lua" \
+    "        return text .. \" |cff73b873\" .. CN.DASH .. \" all \"" \
+    "        return text .. \" |cff73b873\" .. CN.DASH .. \"all \"" \
+    "the vault line puts a space on one side of the dash only"
+
+mutate "UI.lua" \
+    "                (filters and filters.DurationSeconds(\"hour\")) or 3600)" \
+    "                3600)" \
+    "the defer button writes its own copy of what an hour is"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -83680,9 +84073,112 @@ end)()
     assert(checked > 0,
         "the fixture must produce at least one objective with a deadline")
 
-    -- The window curve stays, for the one caller that has no `expiresIn`.
-    assert(opportunities.Urgency(60) > opportunities.Urgency(86400),
-        "and a window closing sooner is still more urgent")
+    -- AND THE CURVE IT REPLACED IS GONE. 0.88.0.
+    --
+    -- 0.63.0 kept `Opportunities.Urgency` "for the one caller that has no
+    -- `expiresIn`" -- the world-event branch -- and that branch reads a
+    -- literal and always has. A helper with no caller, under a header
+    -- asserting a live contract, is how the next reader rebuilds a wrong
+    -- model of the scoring.
+    assert(opportunities.Urgency == nil,
+        "the second curve has no caller and is not kept as though it had")
+
+    ------------------------------------------------------------
+    -- AND THE SAME RULE HOLDS FOR THE VAULT AND FOR LOCKOUTS.
+    ------------------------------------------------------------
+    -- Their `limitedTimeBonus` legitimately carries a NON-deadline term --
+    -- how close the row is to its next threshold -- so it need not be zero.
+    -- What it must not do is move when the DEADLINE moves, because
+    -- `expiresIn` already charges that through the curve `/cn urgency`
+    -- plots. Both files added the reset to both terms.
+    local realReset = CN.Blizzard.GetSecondsUntilWeeklyReset
+
+    local function BonusesAt(seconds, name)
+        CN.Blizzard.GetSecondsUntilWeeklyReset = function() return seconds end
+
+        local bonuses = {}
+
+        for _, objective in ipairs(CN.candidateProviders[name].fn() or {}) do
+            bonuses[tostring(objective.id)] = objective.limitedTimeBonus or 0
+        end
+
+        return bonuses
+    end
+
+    for _, name in ipairs({ "Vault", "Instances" }) do
+        local far  = BonusesAt(6 * 86400, name)
+        local near = BonusesAt(1800, name)
+
+        for id, value in pairs(far) do
+            assert(near[id] == value,
+                name .. " charges its deadline once: row " .. id
+                .. " moved from " .. tostring(value) .. " to "
+                .. tostring(near[id]) .. " on the reset alone")
+        end
+    end
+
+    CN.Blizzard.GetSecondsUntilWeeklyReset = realReset
+
+    ------------------------------------------------------------
+    -- AND A LOCKOUT'S DEADLINE IS ITS OWN, NOT THE WEEK'S.
+    ------------------------------------------------------------
+    -- A saved instance carries its own reset from the client, so the check
+    -- above -- which moves the WEEKLY reset -- cannot reach it. Move the
+    -- lockout's own.
+    local function LockoutBonusesAt(resetsIn)
+        CN_TEST_SetLockouts({
+            { name = "Nerub-ar Palace", difficulty = "Normal",
+              encounters = 8, defeated = 2, remaining = 6, complete = false,
+              resetsIn = resetsIn },
+        })
+
+        CN.InvalidateCandidates()
+
+        local bonuses = {}
+
+        for _, objective in
+                ipairs(CN.candidateProviders["Instances"].fn() or {}) do
+            bonuses[tostring(objective.id)] = objective.limitedTimeBonus or 0
+        end
+
+        return bonuses
+    end
+
+    local lateWeek  = LockoutBonusesAt(6 * 86400)
+    local resetSoon = LockoutBonusesAt(1800)
+
+    local compared = 0
+
+    for id, value in pairs(lateWeek) do
+        assert(resetSoon[id] == value,
+            "a lockout charges its reset once: row " .. id .. " moved from "
+            .. tostring(value) .. " to " .. tostring(resetSoon[id])
+            .. " on the reset alone")
+
+        compared = compared + 1
+    end
+
+    assert(compared > 0, "the lockout fixture must produce a row")
+
+    CN_TEST_SetLockouts(nil)
+    CN.InvalidateCandidates()
+
+    ------------------------------------------------------------
+    -- AND BOTH RETURNS OF THE EVENT LIST GO THROUGH THE FRESHENER.
+    ------------------------------------------------------------
+    -- The cache and the cold path are two returns of the same function, and
+    -- a fix that lands at one call site is not finished. The cold path is
+    -- unobservable at the instant it runs -- the provider refuses to date an
+    -- event that has already finished -- so the contract is checked where it
+    -- is written.
+    local opportunitySource =
+        CN_TEST_ReadAddonFile("Modules/Opportunities.lua")
+
+    assert(opportunitySource
+        and opportunitySource:find("return Freshen(eventCache)", 1, true)
+        and opportunitySource:find("return Freshen(active)", 1, true),
+        "the cached list and the freshly read one are dated by the same "
+        .. "function")
 
     print("  one deadline is charged once, through the curve /cn urgency plots")
 end)()
@@ -85834,19 +86330,28 @@ end)()
     -- how a test passes for the wrong reason.
     local key = "Probealt-Testrealm"
 
-    -- `Professions.WhoKnows` reads `character.recipes`, which is the shape
-    -- the scan actually writes.
+    -- A PROFESSION, NOT A RECIPE. 0.88.0.
+    --
+    -- This used RECIPE, and for a recipe the character `WhoShould` names is
+    -- the one who ALREADY KNOWS IT -- so there is nothing to switch for, and
+    -- 0.88.0 stopped `Suitability` naming them. A profession is the case
+    -- where switching genuinely helps: the alt with the higher skill can
+    -- make the thing and this one cannot.
+    --
+    -- `Professions.BestCharacterFor` reads `character.professions`, which is
+    -- the shape the scan actually writes.
     CN.db.characters[key] = {
-        name     = "Probealt",
-        realm    = "Testrealm",
-        lastSeen = time(),
-        recipes  = { [700] = true },
+        name        = "Probealt",
+        realm       = "Testrealm",
+        lastSeen    = time(),
+        professions = { [164] = { skillLineID = 164, rank = 100 } },
     }
 
-    local fresh, freshReason = warband.Suitability(CN.objectiveTypes.RECIPE, 700)
+    local fresh, freshReason =
+        warband.Suitability(CN.objectiveTypes.PROFESSION, 164)
 
     assert(fresh < 0 and freshReason,
-        "a character who knows the recipe and logged in today must be "
+        "a character with the higher skill and a login today must be "
         .. "preferred, got " .. tostring(fresh))
 
     assert(freshReason:find("Probealt", 1, true),
@@ -85855,7 +86360,11 @@ end)()
     -- The same character, last seen before the staleness line.
     CN.db.characters[key].lastSeen = time() - ((alts.staleDays + 5) * 86400)
 
-    local score, reason = warband.Suitability(CN.objectiveTypes.RECIPE, 700)
+    -- THE SAME TYPE THE FRESH CASE USED. 0.88.0: this asked about a RECIPE,
+    -- which `Suitability` now declines to answer for whoever the character's
+    -- staleness -- so the assertion held with the staleness guard removed.
+    local score, reason =
+        warband.Suitability(CN.objectiveTypes.PROFESSION, 164)
 
     assert(score == 0 and reason == nil,
         "a character last seen " .. (alts.staleDays + 5) .. " days ago must "
@@ -86446,11 +86955,33 @@ end)()
         recipes  = { [7001] = true },
     }
 
-    local score, reason = warband.Suitability(CN.objectiveTypes.RECIPE, 7001)
+    -- ASKED OF `WhoShould`, NOT OF `Suitability`. 0.88.0.
+    --
+    -- The subject here is WHICH holder is named, and `Suitability` stopped
+    -- naming one at all for a recipe in 0.88.0 -- correctly, because the
+    -- holder is the character who cannot learn it again. `WhoShould` still
+    -- names them, for `/cn why` and the hidden list, and choosing the
+    -- freshest is still the thing this test was written for.
+    local best, detail, scope, switchable =
+        warband.WhoShould(CN.objectiveTypes.RECIPE, 7001)
 
-    assert(score < 0 and reason and reason:find("Zeddicus", 1, true),
-        "the character you played yesterday is the one who is better "
-        .. "suited, got " .. tostring(score) .. " / " .. tostring(reason))
+    assert(best == fresh,
+        "the character you played yesterday is the one named, got "
+        .. tostring(best))
+
+    assert(detail and detail:find("Zeddicus", 1, true),
+        "and is listed among the holders: " .. tostring(detail))
+
+    assert(switchable == false,
+        "while still saying there is nothing to switch for: "
+        .. tostring(scope))
+
+    -- AND THE SCORER DOES NOT PENALISE THE ONE CHARACTER WHO CAN LEARN IT.
+    local score = warband.Suitability(CN.objectiveTypes.RECIPE, 7001)
+
+    assert(score == 0,
+        "a recipe somebody else already knows is not a reason to rank this "
+        .. "character down: " .. tostring(score))
 
     CN.db.characters[stale] = nil
     CN.db.characters[fresh] = nil
@@ -102423,16 +102954,27 @@ end)()
             "but it is not offered as a reason to switch")
     end
 
-    -- AND THE SCORE ADJUSTER STILL WORKS, which is the other consumer.
+    -- AND THE SCORE ADJUSTER READS IT TOO. 0.88.0.
+    --
+    -- 0.79.0 asserted the opposite here -- "the score adjuster still works,
+    -- which is the other consumer" -- and that was wrong in the same way the
+    -- sentence above it describes. If another character already knows the
+    -- recipe, THIS character is the only one who can still learn it: ranking
+    -- it down, and printing "Bob is better suited" as the reason, names as
+    -- better the one character who cannot do it. Two of the three consumers
+    -- were fixed in 0.79.0 and 0.84.0 and this one kept a test defending the
+    -- defect.
     local penalty, why = warband.Suitability(CN.objectiveTypes.RECIPE, 979100)
 
-    assert(penalty < 0 and why,
-        "a recipe another character knows still ranks down here: "
-        .. tostring(penalty))
+    assert(penalty == 0 and why == nil,
+        "a recipe another character already knows is not a reason to rank "
+        .. "this character down: " .. tostring(penalty) .. " / "
+        .. tostring(why))
 
-    assert(not string.find(why, "(" .. key .. ")", 1, true),
-        "and the reason is a sentence, not a name repeated in brackets: "
-        .. why)
+    -- The types where switching genuinely helps still rank.
+    local shift = warband.Suitability(CN.objectiveTypes.PROFESSION, 164)
+
+    assert(shift <= 0, "and a profession is still answered: " .. tostring(shift))
 
     CN.db.characters[key] = nil
 
@@ -105161,6 +105703,443 @@ end)()
         "and not with the one that scans something else:\n" .. text)
 
     print("  a not-ready step names the command that retries it")
+end)()
+
+
+;(function()
+    ------------------------------------------------------------
+    -- A REFUSED CURRENCY SWEEP DOES NOT RETIRE EVERY CURRENCY.
+    ------------------------------------------------------------
+    -- `Currencies.Scan` bumped the prune serial before it knew whether the
+    -- client had answered. The serial IS the prune -- `IsCurrent` compares a
+    -- row's serial against it, and `Capped`, `WeeklyUnfilled` and
+    -- `CurrentCount` all gate on that -- so one refusal retired every stored
+    -- currency at once while the rows sat intact on disk. Login is exactly
+    -- when the client answers with nothing, and login is when this runs.
+    local currencyModule = CN:GetModule("Currencies")
+
+    currencyModule.Scan()
+
+    local held = currencyModule.CurrentCount()
+
+    assert(held > 0,
+        "the fixture must have currencies to lose: " .. tostring(held))
+
+    local realList = CN.Blizzard.GetCurrencyList
+
+    CN.Blizzard.GetCurrencyList = function() return {} end
+
+    local seen, capped, weekly = currencyModule.Scan()
+
+    CN.Blizzard.GetCurrencyList = realList
+
+    assert(seen == 0 and capped == 0 and weekly == 0,
+        "a refusal reports nothing rather than a confident zero over a store "
+        .. "it did not write: " .. tostring(seen))
+
+    assert(currencyModule.CurrentCount() == held,
+        "and leaves every stored currency current: "
+        .. tostring(currencyModule.CurrentCount()) .. " of " .. tostring(held))
+
+    -- AND DOES NOT STAMP THE THROTTLE, so the next coin picked up retries
+    -- rather than waiting out a minute on an answer never given.
+    --
+    -- Stamped from an hour ago, so the throttle is demonstrably open before
+    -- the refusal and the only thing that can close it is the refusal.
+    local realTime = time
+
+    time = function() return realTime() - 3600 end
+
+    currencyModule.Scan()
+
+    time = realTime
+
+    CN.Blizzard.GetCurrencyList = function() return {} end
+
+    currencyModule.Scan()
+
+    CN.Blizzard.GetCurrencyList = realList
+
+    assert(currencyModule.SweepIfDue(),
+        "a refusal leaves the throttle open, so the next currency event "
+        .. "retries rather than waiting out a minute")
+
+    print("  a refused currency sweep does not retire every currency")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN EVENT THAT HAS ENDED LEAVES THE LIST.
+    ------------------------------------------------------------
+    -- The freshener correctly nilled `endsIn` once the stamp had passed and
+    -- left the row in a cache that lives for thirty minutes. The provider
+    -- reads a nil `endsIn` as "an event the client will not date" and awards
+    -- the flat bonus -- three points, where a live event three hours out
+    -- earns about one and a third. So one nil field ranked a FINISHED holiday
+    -- above every event still running, for up to half an hour.
+    local opportunities = CN:GetModule("Opportunities")
+
+    local live = opportunities.GetActiveEvents(true)
+
+    local subject
+
+    for _, event in ipairs(live) do
+        if event.endsAt then
+            subject = event
+        end
+    end
+
+    assert(subject, "the fixture must produce a dated event")
+
+    -- The rows the freshener hands back ARE the cached rows, which is how
+    -- the stale one got out in the first place.
+    subject.endsAt = time() - 60
+
+    local after = opportunities.GetActiveEvents()
+
+    for _, event in ipairs(after) do
+        assert(event.title ~= subject.title,
+            "an event whose end has passed is not still active: "
+            .. tostring(event.title))
+    end
+
+    -- AND NOTHING IN THE LIST IS DATELESS-BY-EXPIRY, which is the shape the
+    -- provider pays the flat bonus for.
+    for _, event in ipairs(after) do
+        assert(not (event.endsAt and not event.endsIn),
+            "a row with a known end always carries how long is left: "
+            .. tostring(event.title))
+    end
+
+    -- AND A FRESHLY READ LIST IS DATED TOO, not only a cached one. The cache
+    -- and the cold path are two returns, and 0.63.0's version of this bug was
+    -- that only one of them was corrected.
+    local realEndsIn = CN_TEST_EVENT_ENDS_IN
+
+    CN_TEST_EVENT_ENDS_IN = -600
+
+    local cold = opportunities.GetActiveEvents(true)
+
+    for _, event in ipairs(cold) do
+        assert(not event.endsAt or event.endsAt > time(),
+            "a cold read drops an event that finished ten minutes ago: "
+            .. tostring(event.title))
+    end
+
+    CN_TEST_EVENT_ENDS_IN = realEndsIn
+
+    opportunities.GetActiveEvents(true)
+
+    print("  an event that has ended leaves the list")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY DURATION THE ADDON OFFERS CAN ACTUALLY BE USED.
+    ------------------------------------------------------------
+    -- `Filters.durations` had no reader anywhere: every deferral in the tree
+    -- was a hardcoded 3600, so the only thing a player could do was put
+    -- something off for an hour. Two of its rows could not have worked
+    -- either -- `seconds = nil` stores nothing at all in a table
+    -- constructor, and `math.huge` rendered as "infd".
+    local filterModule = CN:GetModule("Filters")
+
+    assert(filterModule.DurationSeconds and filterModule.DurationKeys,
+        "the table has a reader")
+
+    assert(#filterModule.DurationKeys() == #filterModule.durations,
+        "every row is offered")
+
+    for _, duration in ipairs(filterModule.durations) do
+        local seconds = filterModule.DurationSeconds(duration.key)
+
+        assert(type(seconds) == "number" and seconds > 0,
+            "the duration named " .. tostring(duration.key)
+            .. " resolves to seconds: " .. tostring(seconds))
+
+        local rendered = filterModule.FormatRemaining(seconds)
+
+        assert(type(rendered) == "string" and rendered ~= ""
+            and not rendered:find("inf", 1, true)
+            and not rendered:find("nan", 1, true),
+            "and renders as something a player can read: "
+            .. tostring(duration.key) .. " -> " .. tostring(rendered))
+    end
+
+    assert(filterModule.DurationSeconds("week") == 7 * 86400,
+        "a week is a week: " .. tostring(filterModule.DurationSeconds("week")))
+
+    assert(filterModule.FormatRemaining(math.huge) == "indefinitely",
+        "and the one that does not run out says so: "
+        .. tostring(filterModule.FormatRemaining(math.huge)))
+
+    -- THE RESET ROW READS THE CLOCK, which is the whole reason it is
+    -- computed rather than stored.
+    local realReset = CN.Blizzard.GetSecondsUntilWeeklyReset
+
+    CN.Blizzard.GetSecondsUntilWeeklyReset = function() return 12345 end
+
+    assert(filterModule.DurationSeconds("reset") == 12345,
+        "until reset means until the reset: "
+        .. tostring(filterModule.DurationSeconds("reset")))
+
+    CN.Blizzard.GetSecondsUntilWeeklyReset = realReset
+
+    -- An unknown key falls back to the hour every caller used to hardcode
+    -- rather than to nil, which `CN.SetDeferred` would store as forever.
+    assert(filterModule.DurationSeconds("nonsense") == 3600,
+        "an unknown duration is an hour, not nothing")
+
+    print("  every duration the addon offers can actually be used")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AND A PLAYER CAN REACH THEM.
+    ------------------------------------------------------------
+    local filterModule = CN:GetModule("Filters")
+
+    local objective = { type = CN.objectiveTypes.QUEST, id = 970988,
+                        name = "Deferrable Thing" }
+
+    local realCurrent = CN.currentRecommendation
+
+    CN.currentRecommendation = objective
+
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("defer week")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    assert(CN.IsDeferred(objective.type, objective.id),
+        "the current recommendation is deferred:\n" .. text)
+
+    local deferStore = CN.Account("deferredObjectives")
+
+    local entry = deferStore[objective.type]
+        and deferStore[objective.type][objective.id]
+
+    assert(entry and entry.until_,
+        "and the deferral is stored where the reader looks for it")
+
+    assert(entry.until_ - time() > 6 * 86400,
+        "for the week that was asked for, not the hardcoded hour: "
+        .. tostring(entry.until_ - time()))
+
+    assert(text:find("7d", 1, true),
+        "and says how long for, in the same units as /cn hidden:\n" .. text)
+
+    -- AN UNKNOWN DURATION LISTS THE REAL ONES rather than guessing.
+    spoken = {}
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("defer fortnight")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local durationHelp = table.concat(spoken, "\n")
+
+    for _, key in ipairs(filterModule.DurationKeys()) do
+        assert(durationHelp:find(key, 1, true),
+            "the refusal names " .. key .. ":\n" .. durationHelp)
+    end
+
+    CN.SetDeferred(objective.type, objective.id, nil)
+    CN.currentRecommendation = realCurrent
+
+    -- AND THE BUTTON BESIDE IT READS THE SAME TABLE. A fix that lands at one
+    -- call site is not finished: the window's "Defer 1 hour" button held the
+    -- fourth written copy of what an hour is.
+    local ui = CN_TEST_ReadAddonFile("UI.lua")
+
+    assert(ui and ui:find('DurationSeconds("hour")', 1, true),
+        "the window's defer button asks the durations table")
+
+    assert(not ui:find("objective.id, 3600)", 1, true),
+        "and does not keep its own copy of the number")
+
+    print("  /cn defer takes the durations the addon defines")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MERCHANT WHOSE STOCK CHANGES IS NOT RE-READ EVERY TIME.
+    ------------------------------------------------------------
+    -- `MERCHANT_UPDATE` fires again whenever a merchant's stock changes --
+    -- every buy, every sell, every limited-stock tick -- and each one re-read
+    -- the whole merchant window and rewrote the store. A vendor with sixty
+    -- items and a player emptying their bags into it ran that scan once per
+    -- item.
+    local vendorModule = CN:GetModule("Vendors")
+
+    assert(type(vendorModule.recaptureSeconds) == "number"
+        and vendorModule.recaptureSeconds > 0,
+        "the window is a named constant, not a literal in the handler")
+
+    CN.ForgetDebounces()
+
+    local runs = 0
+
+    local realCapture = vendorModule.CaptureOpenMerchant
+
+    vendorModule.CaptureOpenMerchant = function()
+        runs = runs + 1
+        return true, 0
+    end
+
+    for _ = 1, 8 do
+        CN.FireEvent("MERCHANT_UPDATE")
+    end
+
+    vendorModule.CaptureOpenMerchant = realCapture
+
+    assert(runs == 1,
+        "eight stock changes read the merchant once: " .. tostring(runs))
+
+    -- AND ONE TRAILING RUN IS STILL SCHEDULED, so the last change is not
+    -- the one that gets dropped.
+    assert(CN_TEST_PendingTimers() > 0,
+        "the last change still gets read once the window closes")
+
+    CN.ForgetDebounces()
+
+    print("  a merchant whose stock changes is read once per window")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN EVENT LINE SAYS WHEN IT ENDS, NOT WHAT THE CLIENT CALLS IT.
+    ------------------------------------------------------------
+    -- `/cn events` printed `sequenceType` -- the raw enum the provider
+    -- branches on, "ONGOING" for every row in a list already filtered to
+    -- ongoing events -- and dropped the one fact worth having, which the
+    -- provider two hundred lines up already computes and RANKS on.
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("events")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    assert(text:find("Darkmoon Faire", 1, true),
+        "the active event is listed:\n" .. text)
+
+    assert(not text:find("ONGOING", 1, true)
+        and not text:find("sequenceType", 1, true),
+        "and is not labelled with the addon's own branch token:\n" .. text)
+
+    assert(text:find("left", 1, true),
+        "it says how long is left instead:\n" .. text)
+
+    print("  an event line says when it ends")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ADVERTISED RANGE IS THE RANGE THE SETTER ACCEPTS.
+    ------------------------------------------------------------
+    -- `/cn textsize` advertised "<100 to 150>" in `/cn help` while its own
+    -- rejection message said 200 and `CN.SetTextScale` accepted 200. Three
+    -- constants describing one ceiling, and the one the players who need
+    -- larger text actually read was the wrong one.
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        if text then
+            local at = 1
+
+            while true do
+                local from, to, low, high =
+                    string.find(text, 'args%s*=%s*"<(%d+) to (%d+)>"', at)
+
+                if not from then break end
+
+                at = to + 1
+
+                -- The handler follows within the same command table.
+                local body = string.sub(text, to, to + 4000)
+
+                body = string.match(body, "^.-\n    %}") or body
+
+                for _, bound in ipairs({ low, high }) do
+                    assert(string.find(body, bound, 1, true),
+                        file .. " advertises " .. bound .. " in a range its "
+                        .. "own handler never mentions")
+                end
+            end
+        end
+    end
+
+    print("  an advertised range is the range the setter accepts")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN EM DASH IS SPACED ON BOTH SIDES OR ON NEITHER.
+    ------------------------------------------------------------
+    -- `Design.lua` gives `CN.DASH` two jobs: unspaced, it joins a clause to
+    -- the one that qualifies it; spaced, it separates a fact from its aside.
+    -- One space and not the other is neither, and `/cn vault` printed
+    -- "World: 8 -- all 3 rewards unlocked" with the gap on the left only.
+    -- Chat has no monospace font to hide it behind.
+    local offenders = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        if text and file ~= "Design.lua" then
+            local at = 1
+
+            while true do
+                local from, to, lead, trail = string.find(text,
+                    '"([^"\n]*)"%s*%.%.%s*CN%.DASH%s*%.%.%s*"([^"\n]*)"', at)
+
+                if not from then break end
+
+                at = to
+
+                -- Colour codes are not text; a dash after "|cff8a8f96" is a
+                -- dash after whatever preceded the colour.
+                local left  = lead:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+                local right = trail:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+
+                if left ~= "" and right ~= "" then
+                    local spacedLeft  = left:sub(-1) == " "
+                    local spacedRight = right:sub(1, 1) == " "
+
+                    if spacedLeft ~= spacedRight then
+                        table.insert(offenders, file .. ': "' .. lead
+                            .. '" .. DASH .. "' .. trail .. '"')
+                    end
+                end
+            end
+        end
+    end
+
+    assert(#offenders == 0,
+        "an em dash is spaced on both sides or on neither:\n"
+        .. table.concat(offenders, "\n"))
+
+    print("  an em dash is spaced on both sides or on neither")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

@@ -1557,7 +1557,14 @@ UI.RegisterTab{
                 return
             end
 
-            CN.SetDeferred(objective.type, objective.id, 3600)
+            -- ONE TABLE DEFINES WHAT AN HOUR IS. 0.88.0. `Filters.durations`
+            -- gained its first reader this release; a literal here is the
+            -- fourth place the same number was written, and the button's own
+            -- label is the fifth.
+            local filters = CN:GetModule("Filters")
+
+            CN.SetDeferred(objective.type, objective.id,
+                (filters and filters.DurationSeconds("hour")) or 3600)
             -- SAY HOW LONG, AND SAY THE WAY BACK. The button says "1 hour"
             -- and the message did not; nothing named the undo.
             UI.Answer("Deferred for an hour: " .. tostring(objective.name)

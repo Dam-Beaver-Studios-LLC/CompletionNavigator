@@ -63,7 +63,8 @@ CN.helpEssentials = {
 CN.helpGroups = {
     { title = "Deciding what to do",
       names = { "next", "why", "whyzero", "order", "urgency", "plan", "mode",
-                "types", "hidden", "unhide", "learned", "situation", "goal",
+                "types", "hidden", "unhide", "defer", "learned", "situation",
+                "goal",
                 "goals", "ungoal", "gogoal", "chase", "closest", "now",
                 "list" } },
 

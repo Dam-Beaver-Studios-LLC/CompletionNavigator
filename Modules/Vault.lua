@@ -190,7 +190,9 @@ function Vault.DescribeRow(row)
         -- "Dungeons: 8 all 3 unlocked" -- two numbers jammed together with no
         -- word between them, and the reader has to guess which is which.
         -- 0.61.0.
-        return text .. " |cff73b873" .. CN.DASH .. "all "
+        -- A SPACE ON BOTH SIDES. 0.88.0. Every other dash in the addon has
+        -- one, and this printed "World: 8 â€”all 3 rewards unlocked".
+        return text .. " |cff73b873" .. CN.DASH .. " all "
             .. CN.Count(row.unlocked, "reward") .. " unlocked|r"
     end
 
@@ -305,7 +307,25 @@ CN.RegisterCandidateProvider("Vault", function()
                 name             = "Great Vault: " .. row.label,
                 accountWide      = false,
                 completionValue  = 4,
-                limitedTimeBonus = Urgency(row.remaining, resetsIn),
+                -- ONE DEADLINE, ONE CURVE. 0.88.0.
+                --
+                -- `Urgency` adds up to three points from `resetsIn` alone,
+                -- and `expiresIn` below hands the SAME number to the
+                -- scorer's own urgency term -- two independently tuned
+                -- curves charging one deadline, with unexplained cliffs at
+                -- the four-, two- and one-day boundaries.
+                --
+                -- Worse for the player: `/cn urgency` announces "how much a
+                -- deadline is worth, at every distance from it" and plots
+                -- only the scorer's curve, so `/cn why` under-reported the
+                -- reset's contribution by an order of magnitude. This is the
+                -- defect `Modules/Opportunities.lua` records fixing in
+                -- 0.63.0; the sweep reached that file and not this one.
+                --
+                -- This term now carries only "how close is the row to its
+                -- next threshold", which is not a deadline and is charged
+                -- nowhere else.
+                limitedTimeBonus = Urgency(row.remaining),
                 -- Instanced content has no map coordinate, but it is not
                 -- "location unknown" either: the group finder is one click.
                 travelCost       = 3,

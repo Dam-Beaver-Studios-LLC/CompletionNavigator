@@ -513,7 +513,12 @@ CN.RegisterCandidateProvider("Instances", function()
                     .. (lockout.difficulty and (" (" .. lockout.difficulty .. ")") or ""),
                 accountWide      = false,
                 completionValue  = lockout.raid and 6 or 4,
-                limitedTimeBonus = Urgency(lockout.remaining, lockout.resetsIn, lockout.defeated),
+                -- ONE DEADLINE, ONE CURVE. 0.88.0. See the note on the
+                -- vault row: `expiresIn` below hands the same reset to the
+                -- scorer's own urgency term, and `/cn urgency` plots only
+                -- that one. The sibling this file shares the defect with.
+                limitedTimeBonus = Urgency(lockout.remaining, nil,
+                    lockout.defeated),
                 -- No map coordinate, but not "location unknown" either: the
                 -- group finder is one click. Same figure the Vault uses.
                 travelCost       = 3,

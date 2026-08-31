@@ -565,8 +565,24 @@ CN:RegisterEvent("MERCHANT_SHOW", function()
     end
 end)
 
+-- DEBOUNCED, BECAUSE THIS FIRES ON EVERY PURCHASE. 0.88.0.
+--
+-- `MERCHANT_UPDATE` fires again whenever a merchant's stock changes -- every
+-- buy of a limited-quantity item, and repeatedly while the frame is open --
+-- and each capture re-reads EVERY item on the merchant at two or three
+-- client calls apiece, rebuilds the row, discards the reverse index over the
+-- whole account vendor store, and calls `CN.MarkScanned`, which invalidates
+-- this provider and bumps the counter guarding three tabs' memoised
+-- summaries. Twenty purchases from a big vendor was twenty of all that.
+--
+-- Every other chatty handler in the addon is throttled and says so:
+-- currencies at sixty seconds, rares at one, the breakdown at five,
+-- exploration at two. This was the one that was not swept.
+Vendors.recaptureSeconds = 2
+
 CN:RegisterEvent("MERCHANT_UPDATE", function()
-    Vendors.CaptureOpenMerchant()
+    CN.Debounce("Vendors.merchant", Vendors.recaptureSeconds,
+        Vendors.CaptureOpenMerchant)
 end)
 
 ------------------------------------------------------------

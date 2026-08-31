@@ -266,9 +266,21 @@ function Warband.Suitability(objectiveType, id)
     -- The second return -- the list of character names -- is deliberately
     -- not bound: see the note above this function's return for why it must
     -- not appear in the sentence. 0.79.0.
-    local bestKey, _, scope = Warband.WhoShould(objectiveType, id)
+    -- THE FOURTH RETURN, HERE TOO. 0.88.0.
+    --
+    -- For a recipe or a title the named character is the HOLDER: switching
+    -- to them cannot do it again, and a title cannot be earned twice at all.
+    -- `WhoShould` returns `switchable = false` to say so, `Alts` honoured it
+    -- in 0.79.0 and `Goals` in 0.84.0 -- and this, the third caller, went on
+    -- stamping "Bob is better suited -- already known by another character"
+    -- onto the objective through `Warband.Decorate`, which puts it in
+    -- `/cn next`, `/cn why`, the Next tab, the map pin and the heads-up line.
+    --
+    -- It also applied a two-point penalty, ranking DOWN the one character who
+    -- can still learn the recipe.
+    local bestKey, _, scope, switchable = Warband.WhoShould(objectiveType, id)
 
-    if scope == CN.scopes.ACCOUNT or not bestKey then
+    if scope == CN.scopes.ACCOUNT or not bestKey or switchable == false then
         return 0, nil
     end
 
@@ -310,7 +322,7 @@ function Warband.Suitability(objectiveType, id)
     -- as though it explained something: "Bob is better suited (Bob, Carol)".
     -- `scope` is the written reason and is what belongs in a `/cn why` line.
     return -2, bestKey .. " is better suited"
-        .. (scope and (" -- " .. tostring(scope)) or "")
+        .. (scope and (" " .. CN.DASH .. " " .. tostring(scope)) or "")
 end
 
 -- Applied to every candidate before scoring, so no module has to remember

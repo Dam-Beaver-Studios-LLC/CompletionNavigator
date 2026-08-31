@@ -151,19 +151,48 @@ local lastScan = 0
 -- the login scan and the manual one both left the timestamp alone, so the
 -- next coin picked up ran a second full sweep. 0.65.0.
 function Currencies.Scan()
-    lastScan = time()
-
     local mine = CharacterStore()
 
     if not mine then
+        lastScan = time()
+
         return 0, 0, 0
     end
+
+    local list = Blizzard.GetCurrencyList()
+
+    -- A REFUSAL IS NOT AN EMPTY CURRENCY LIST. 0.88.0.
+    --
+    -- THE SERIAL *IS* THE PRUNE: `IsCurrent` compares a row's serial against
+    -- the current one, and `Capped`, `WeeklyUnfilled` and `CurrentCount` all
+    -- gate on it. Bumping it with nothing to stamp therefore retires every
+    -- stored currency at once -- while the rows sit intact on disk.
+    --
+    -- `Blizzard.GetCurrencyList` answers with an empty table on four ordinary
+    -- refusal paths, one of which is a size of zero -- which is what the
+    -- client returns while currency data is still streaming at login, which
+    -- is exactly when `CN:OnLogin` runs this.
+    --
+    -- `Achievements` has carried this guard since 0.76.0, `Exploration` since
+    -- 0.61.0 and `Loremaster` since 0.71.0, and the note on the first of them
+    -- says why: "a cold scan that read nothing would otherwise delete every
+    -- row it could not confirm". Fourth writer of the same idea, no guard.
+    --
+    -- The throttle is not stamped either, so the next coin picked up retries
+    -- rather than waiting out a minute on an answer that was never given.
+    if #list == 0 then
+        DebugPrint("Currency sweep answered for nothing; not recording it.")
+
+        return 0, 0, 0
+    end
+
+    lastScan = time()
 
     local serial = NextSerial()
 
     local seen, atCap, weeklyRemaining = 0, 0, 0
 
-    for _, currency in ipairs(Blizzard.GetCurrencyList()) do
+    for _, currency in ipairs(list) do
         if currency.currencyID then
             -- `currencyNames` IS NOT WRITTEN ANY MORE. 0.65.0.
             --

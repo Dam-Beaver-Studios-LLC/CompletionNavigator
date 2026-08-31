@@ -24,15 +24,57 @@ local DAY  = 86400
 -- DURATIONS
 ------------------------------------------------------------
 
--- Ordered, because they are offered as a list in the UI.
+-- Ordered, because they are offered as a list.
+--
+-- REACHABLE AT LAST. 0.88.0.
+--
+-- This table had no reader anywhere in the addon: every deferral in the tree
+-- was a hardcoded 3600, and there was no command that took a duration -- so
+-- the only thing a player could ever do was put something off for an hour.
+-- The file header says why the table was written: "Defer also only offered
+-- one hour... 'until the weekly reset' is the one that actually matches how
+-- the game works."
+--
+-- Two of the rows could not have worked as written either. `seconds = nil` in
+-- a table constructor stores nothing at all, so "until reset" was
+-- indistinguishable from a malformed row; and `math.huge` renders through
+-- `FormatRemaining` as "infd", which is what `/cn hidden` would have printed
+-- the day somebody wired it up. Both are resolved rather than stored now.
 Filters.durations = {
     { key = "hour",    label = "1 hour",        seconds = HOUR },
     { key = "day",     label = "Today",         seconds = DAY },
     { key = "tomorrow",label = "Tomorrow",      seconds = 2 * DAY },
     { key = "week",    label = "This week",     seconds = 7 * DAY },
-    { key = "reset",   label = "Until reset",   seconds = nil },  -- computed
+    { key = "reset",   label = "Until reset",   computed = "weeklyReset" },
     { key = "forever", label = "Until I undo it", seconds = math.huge },
 }
+
+-- Seconds for a named duration, resolving the one that depends on the clock.
+-- Falls back to an hour, which is what every caller used to hardcode.
+function Filters.DurationSeconds(key)
+    for _, duration in ipairs(Filters.durations) do
+        if duration.key == key then
+            if duration.computed == "weeklyReset" then
+                return CN.Blizzard.GetSecondsUntilWeeklyReset() or DAY
+            end
+
+            return duration.seconds
+        end
+    end
+
+    return HOUR
+end
+
+-- The labels, for a command's help and for anything that offers the choice.
+function Filters.DurationKeys()
+    local keys = {}
+
+    for _, duration in ipairs(Filters.durations) do
+        table.insert(keys, duration.key)
+    end
+
+    return keys
+end
 
 ------------------------------------------------------------
 -- TYPE FILTERING
@@ -718,6 +760,13 @@ local function FormatRemaining(seconds)
         return "indefinitely"
     end
 
+    -- AND SO IS THE SENTINEL FOR IT. 0.88.0. `math.huge` divided by an hour
+    -- is still infinite, so this printed "infd" for the one duration whose
+    -- whole meaning is that it does not run out.
+    if seconds == math.huge then
+        return "indefinitely"
+    end
+
     if seconds <= 0 then
         return "expired"
     end
@@ -782,6 +831,67 @@ CN:RegisterCommand{
 
         Print("|cffffc74f/cn unhide <id>|r to restore one, "
             .. "|cffffc74f/cn unhide all|r for everything.")
+    end,
+}
+
+-- PUTTING SOMETHING OFF FOR LONGER THAN AN HOUR. 0.88.0.
+--
+-- The duration table above has existed for many releases with no reader:
+-- every deferral in the addon was a hardcoded hour, and there was no command
+-- that took a duration. "Until reset" -- the one the file header calls the
+-- duration that actually matches how the game works -- had never been
+-- available to anybody.
+--
+-- Defers the CURRENT recommendation by default, because that is the thing a
+-- player has just been told to do and is deciding not to.
+CN:RegisterCommand{
+    name    = "defer",
+    aliases = { "later", "snooze" },
+    args    = "[hour|day|tomorrow|week|reset|forever]",
+    order   = 22,
+    help    = "Put the current recommendation off for longer than an hour.",
+    handler = function(args)
+        local objective = CN.currentRecommendation
+
+        if not objective or not objective.type or not objective.id then
+            Print("Nothing is being recommended right now. "
+                .. "Run |cffffc74f/cn next|r first.")
+            return
+        end
+
+        local key = string.lower(CN.Trim(args or ""))
+
+        if key == "" then
+            key = "hour"
+        end
+
+        local matched
+
+        for _, duration in ipairs(Filters.durations) do
+            if duration.key == key then
+                matched = duration
+            end
+        end
+
+        if not matched then
+            Print("Durations: |cffffc74f"
+                .. table.concat(Filters.DurationKeys(), "|r, |cffffc74f")
+                .. "|r.")
+            return
+        end
+
+        local seconds = Filters.DurationSeconds(key)
+
+        CN.SetDeferred(objective.type, objective.id, seconds)
+
+        CN.InvalidateCandidates()
+
+        Print("Deferred: " .. tostring(objective.name or objective.id)
+            .. CN.Aside(matched.label .. CN.DOT .. " "
+                .. FormatRemaining(seconds)))
+
+        Print("|cff8a8f96|cffffc74f/cn unhide " .. tostring(objective.id)
+            .. "|r brings it back sooner.|r")
     end,
 }
 

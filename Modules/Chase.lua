@@ -479,7 +479,7 @@ function Chase.Summarize(chain)
         table.insert(parts, "next: " .. tostring(nextStep.text))
     elseif #parts == 0 then
         return tostring(chain.name)
-            .. " " .. CN.DASH .. "the game does not say how this is obtained."
+            .. CN.DASH .. "the game does not say how this is obtained."
     end
 
     return tostring(chain.name) .. " " .. CN.DASH .. " " .. table.concat(parts, ", ")

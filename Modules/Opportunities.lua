@@ -25,47 +25,19 @@ local DAY  = 86400
 -- URGENCY
 ------------------------------------------------------------
 
--- Converts "seconds remaining" into the bonus the scorer multiplies by 3.0.
--- Deliberately steep: something with an hour left should dominate, something
--- with three days left should barely register.
--- ONE DEADLINE, ONE CURVE. 0.63.0.
+-- URGENCY IS THE SCORER'S, AND ONLY THE SCORER'S. 0.88.0.
 --
--- A world quest set BOTH `limitedTimeBonus = Opportunities.Urgency(left)` --
--- this four-step cliff, weighted 3.0 -- and `expiresIn = left`, which the
--- scorer feeds to the continuous `CN.UrgencyBonus`, weighted separately. The
--- same number was charged twice through two curves tuned independently, and
--- the step at the one-hour boundary was a jump of 3.0 in the total that
--- nothing explained.
+-- `Opportunities.Urgency` lived here, with a header saying it was "now only
+-- for callers that have no `expiresIn` to give -- world EVENTS, below". The
+-- world-event branch reads `event.endsIn and 0 or 1`, a literal, and has done
+-- since 0.63.0: the named caller did not call it, and nothing else in the
+-- addon did either.
 --
--- Worse for the player: `/cn urgency` announces "how much a deadline is worth,
--- at every distance from it" and plots only `CN.UrgencyBonus`. So the chart
--- the addon offers as its own explanation omitted the larger of the two
--- contributions, and the ordering it described was not the ordering it used.
---
--- `expiresIn` is the field every other deadline in the addon uses and the one
--- the chart plots, so it is the one that stays. This function is now only for
--- callers that have no `expiresIn` to give -- world EVENTS, below, which are
--- ranked as a whole rather than per objective.
---
--- Kept rather than deleted because that caller is real; renamed in spirit by
--- this comment: it is "how urgent is a window", not "the bonus to add".
-function Opportunities.Urgency(secondsLeft)
-    if not secondsLeft or secondsLeft <= 0 then
-        return 0
-    end
+-- Removed rather than kept, because a comment asserting a live contract that
+-- does not hold is how the next reader rebuilds a wrong model of the scoring.
+-- One deadline, one curve: `expiresIn` and `CN.UrgencyBonus`, which is what
+-- `/cn urgency` plots.
 
-    if secondsLeft <= HOUR then
-        return 3
-    elseif secondsLeft <= 6 * HOUR then
-        return 2
-    elseif secondsLeft <= DAY then
-        return 1.25
-    elseif secondsLeft <= 3 * DAY then
-        return 0.5
-    end
-
-    return 0.25
-end
 
 -- THE BARE FIGURE, WITH NO CLAUSE ATTACHED.
 --
@@ -234,18 +206,39 @@ function Opportunities.GetActiveEvents(force)
     -- provider take the reuse shortcut and nothing corrected it.
     --
     -- `endsAt` is an absolute stamp and cannot go stale.
+    -- ENDED IS NOT "NO KNOWN END". 0.88.0.
+    --
+    -- This correctly nils `endsIn` once the stamp has passed, and left the
+    -- row in a cache that lives for thirty minutes. The provider reads a nil
+    -- `endsIn` as "an event the client will not date" and awards the flat
+    -- bonus for it -- which is worth three points, where a live event three
+    -- hours out earns about one and a third. So one nil field ranked a
+    -- FINISHED holiday above every event still running, and `/cn now` went
+    -- on listing it as active, for up to half an hour.
+    --
+    -- An event that has ended leaves the list.
     local function Freshen(events)
         local now = time()
 
+        local live = {}
+
         for _, event in ipairs(events) do
+            local keep = true
+
             if event.endsAt then
                 local left = event.endsAt - now
 
                 event.endsIn = (left > 0) and left or nil
+
+                keep = left > 0
+            end
+
+            if keep then
+                table.insert(live, event)
             end
         end
 
-        return events
+        return live
     end
 
     if not force and eventCache and (time() - eventCachedAt) < 1800 then
@@ -260,12 +253,10 @@ function Opportunities.GetActiveEvents(force)
         end
     end
 
-    Freshen(active)
-
     eventCache    = active
     eventCachedAt = time()
 
-    return active
+    return Freshen(active)
 end
 
 ------------------------------------------------------------
@@ -475,9 +466,22 @@ CN:RegisterCommand{
             return
         end
 
+        -- WHEN IT ENDS, NOT THE CLIENT'S OWN TOKEN. 0.88.0.
+        --
+        -- This printed `sequenceType` -- the raw enum string the provider
+        -- branches on, "ONGOING" for every row in a list already filtered to
+        -- ongoing events. The addon's internals, in brackets, saying nothing
+        -- the header did not; the shape `Modules/Filters.lua` records fixing
+        -- three separate times.
+        --
+        -- Meanwhile the one fact worth having -- how long is left, which the
+        -- provider two hundred lines up already computes and RANKS on -- was
+        -- dropped.
         for _, event in ipairs(events) do
             CN.PrintLine("  " .. event.title
-                .. " |cff8a8f96(" .. tostring(event.sequenceType) .. ")|r")
+                .. (event.endsIn
+                    and CN.Aside(Opportunities.FormatTimeLeft(event.endsIn))
+                    or ""))
         end
     end,
 }

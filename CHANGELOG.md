@@ -7,6 +7,78 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.88.0]
+
+**Six of this release's ten fixes are the same shape: a number the addon
+computes correctly and then uses twice, or a table it defines and never
+reads.** None of them throws an error, which is why they lasted. All of them
+change what the addon tells you to do next.
+
+The largest is a currency store that emptied itself. `Currencies.Scan` bumps
+a serial and stamps every currency it finds with it; everything downstream â€”
+what is capped, what has weekly earning left, how many currencies you have at
+all â€” asks whether a row carries the current serial. The scan bumped the
+serial *before* it knew the game had answered. The game answers with nothing
+on four ordinary paths, one of which is the first seconds after login, which
+is exactly when the addon runs this. So one login could retire every currency
+you own while the rows sat intact on disk. Three other scans in this addon
+have carried the guard for that since 0.61.0, 0.71.0 and 0.76.0.
+
+### Fixed
+
+- **A currency sweep the game refused no longer retires every currency you
+  own.** It also stops stamping its own throttle on a refusal, so the next
+  coin you pick up retries rather than waiting out a minute on an answer that
+  was never given.
+- **The Great Vault and your raid lockouts charged the weekly reset twice.**
+  Both fed the reset into `limitedTimeBonus` *and* into `expiresIn`, through
+  two curves tuned separately â€” and `/cn urgency`, which the addon offers as
+  its own explanation of the ordering, plots only one of them. On a Sunday
+  evening the vault outranked things it should not have, and the chart said it
+  should not have.
+- **The one character who can still learn a recipe was ranked *down* for
+  it.** `Warband.Suitability` asks which character is best placed for
+  something and drops the answer's fourth value, which says whether switching
+  would actually help. For a recipe or a title, the character named is the one
+  who *already has it* â€” there is nothing to switch for â€” so the penalty
+  landed on the only character it could still be done on, with the holder's
+  name printed as the reason. Third caller of a fix made in 0.79.0 and again
+  in 0.84.0.
+- **A holiday that had finished outranked every event still running.** The
+  event list is held for thirty minutes and re-dated on each read; a finished
+  event correctly lost its countdown and then stayed in the list, and a
+  missing countdown is how the addon marks "an event the game will not date",
+  which is worth three points. A live event three hours out earns about one
+  and a third.
+- **`/cn defer` â€” put something off for longer than an hour.** The addon has
+  had a table of durations since it had a filter tab, with `Until reset`
+  described in its own header as the one that matches how the game actually
+  works. Nothing read the table: every deferral in the tree was a hardcoded
+  hour. Two of its rows could not have worked anyway. Now: `hour`, `day`,
+  `tomorrow`, `week`, `reset`, `forever`.
+- **Selling a stack of greys no longer re-reads the vendor sixty times.**
+  `MERCHANT_UPDATE` fires on every stock change; the whole merchant window was
+  re-scanned and re-stored each time. It is throttled to once every two
+  seconds, with the last change still read.
+- **`/cn events` says when an event ends.** It printed an internal token that
+  reads `ONGOING` for every row in a list already filtered to ongoing events,
+  and dropped the one fact the provider two hundred lines above already
+  computes and ranks on.
+- **`/cn help` said the largest text size was 150%.** It is 200%. Three
+  constants described one ceiling and the one shown to the players who most
+  need larger text was the wrong one.
+- **Four lines put a space on one side of an em dash and not the other.**
+  Found by a new check rather than by eye; chat has no monospace font to hide
+  it behind.
+- **A dead scoring curve was deleted.** It was kept "for the one caller that
+  has no deadline"; that caller reads a literal and always has.
+
+### Added
+
+- **`/cn defer [hour|day|tomorrow|week|reset|forever]`**, aliases `later` and
+  `snooze`. Defers whatever is currently being recommended. `/cn unhide <id>`
+  brings it back sooner.
+
 ## [0.87.0]
 
 **Last release fixed how a caged pet in your bags is identified, and paid for

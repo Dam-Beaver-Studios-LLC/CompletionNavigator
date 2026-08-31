@@ -2425,7 +2425,7 @@ CN:RegisterCommand{
                     -- only one of them was visible.
                     if not teleport.learnedMap then
                         line = line .. CN.Muted(" (not costed yet"
-                            .. CN.DASH .. " hearth once and it will be)")
+                            .. CN.DASH .. "hearth once and it will be)")
                     end
                 end
 

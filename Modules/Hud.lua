@@ -533,7 +533,7 @@ function Hud.RegisterOptionsPanel()
     body:SetPoint("TOPLEFT", 16, -48)
     body:SetPoint("TOPRIGHT", -16, -48)
     body:SetJustifyH("LEFT")
-    body:SetText("Answers \"what should I do next?\" " .. CN.DASH .. "ranks what is worth "
+    body:SetText("Answers \"what should I do next?\" " .. CN.DASH .. " ranks what is worth "
         .. "doing now, costs the journey the way you would really make it, "
         .. "and shows its working when you ask why.\n\n"
         .. "1.  Scan once, so it knows what you have.\n"
@@ -661,7 +661,14 @@ CN:RegisterCommand{
 CN:RegisterCommand{
     name    = "textsize",
     aliases = { "text" },
-    args    = "<100 to 150>",
+
+    -- WHAT THE SETTER ACTUALLY ACCEPTS. 0.88.0. Three constants described
+    -- one ceiling and disagreed: this said 150, the rejection message below
+    -- says 200, and `CN.SetTextScale` accepts up to 200. So `/cn help` told
+    -- the players who most need larger text that 150 was the limit -- on the
+    -- accessibility control the surrounding notes say was rebuilt precisely
+    -- because those players are least likely to go hunting for a command.
+    args    = "<100 to 200>",
     order   = 40.5,
     help    = "Size of the text in the window, without resizing it.",
     handler = function(args)
