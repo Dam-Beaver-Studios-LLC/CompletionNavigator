@@ -246,7 +246,16 @@ function Currencies.Scan()
                 usesTotalEarned   = currency.useTotalEarnedForMaxQty or nil,
                 accountWide       = currency.accountWide or nil,
                 weeklyRemaining   = weeklyLeft,
-                lastSeen          = time(),
+                -- `lastSeen` IS NOT STORED. 0.91.0.
+            --
+            -- The note at the top of this file already says it: "`lastSeen`
+            -- was already being written and was read by nothing anywhere in
+            -- the tree". The serial replaced it and the write survived.
+            -- Migration 5 stripped this field from four stores, 31 from
+            -- appearances, 32 from mounts and reputations, 33 from
+            -- exploration; `currencies` was in none of the four sweeps and
+            -- its writer was live, so this was one integer per currency per
+            -- character rewritten at every logout, forever.
 
                 -- Which sweep last saw it. See the header above `Scan`.
                 serial            = serial,

@@ -187,12 +187,13 @@ function Harvest.Capture(questID, reason)
     -- Read back through Harvest.Zone below, so nothing that wants it has to
     -- know where it comes from.
 
-    -- The level the character was when the quest became available is a
-    -- usable lower bound on the quest's own level requirement.
-    if record.observedLevel == nil then
-        record.observedLevel = UnitLevel("player")
-        changed = true
-    end
+    -- `observedLevel` IS NOT STORED. 0.91.0.
+    --
+    -- Its own comment called it "a usable lower bound on the quest's own
+    -- level requirement", and nothing used it as one: zero readers in the
+    -- tree, and `Harvest.BuildExport` does not emit it -- so it was not even
+    -- reaching the curation pipeline it was collected for. One integer per
+    -- row on a store capped at two thousand.
 
     if CN.character and record.faction == nil then
         record.faction = CN.character.faction
@@ -216,18 +217,23 @@ function Harvest.Capture(questID, reason)
 
                 Harvest.NoteUnlocksChanged()
 
-                -- `requiresFrom`: which addons answered. It was written as
-                -- `requiredBy`, a name meaning the opposite -- the quests
-                -- this one unlocks -- and read by nothing, so the misnomer
-                -- had no effect beyond misleading the next reader.
-                record.requiresFrom = external.providers
+                -- `requiresFrom` IS NOT STORED. 0.91.0. Which addons
+                -- answered, read by nothing. 0.7x renamed it from a misnomer
+                -- rather than removing it, and its own comment said so:
+                -- "read by nothing, so the misnomer had no effect beyond
+                -- misleading the next reader." An array per row, on a store
+                -- capped at two thousand.
                 changed = true
             end
         end
     end
 
     record.lastSeen = time()
-    record.reason   = record.reason or reason
+
+    -- `reason` IS NOT STORED. 0.91.0. Why the row was first captured --
+    -- "login", "manual", an event name -- written once per row and read
+    -- nowhere. The argument is still taken, because it is what the debug
+    -- line below prints.
 
     store[questID] = record
 

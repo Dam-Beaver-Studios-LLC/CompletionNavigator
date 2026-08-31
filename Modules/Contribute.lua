@@ -348,13 +348,40 @@ CN:RegisterCommand{
 
         local rows = Contribute.Provenance()
 
-        local curated = 0
+        -- ONLY WHAT WAS ACTUALLY CHECKED BY HAND. 0.91.0.
+        --
+        -- This counted every row in the curated table, and the table has been
+        -- writable by any addon since it was published. The one command in
+        -- this addon whose whole job is to expose unchecked claims would have
+        -- mislabelled a companion addon's rows as hand-checked the moment one
+        -- existed. Rows now carry their supplier, and a supplier that is not
+        -- this addon gets its own line.
+        local total, curated = 0, 0
 
-        for _ in pairs((CN.Static and CN.Static.quests) or {}) do
-            curated = curated + 1
+        if CN.Static and CN.Static.Count then
+            total, curated = CN.Static.Count()
         end
 
         Print("Curated rows, each one checked by hand: " .. curated)
+
+        if total > curated then
+            for origin, count in pairs(CN.Static.Origins()) do
+                if origin ~= "curated" then
+                    CN.PrintLine("  " .. CN.Count(count, "row")
+                        .. " supplied by " .. CN.Accent(tostring(origin))
+                        .. CN.Aside("not checked by this addon"))
+                end
+            end
+        end
+
+        -- AND TWO SUPPLIERS CLAIMING ONE QUEST IS WORTH SAYING.
+        local collisions = (CN.Static and CN.Static.collisions) or {}
+
+        if #collisions > 0 then
+            Print(CN.Count(#collisions, "quest")
+                .. " claimed by more than one source"
+                .. CN.Aside("the first registration is the one in use"))
+        end
 
         Print("Rows believed on evidence rather than on a reading: "
             .. #rows .. " |cff8a8f96("

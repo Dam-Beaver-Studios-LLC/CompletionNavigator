@@ -438,29 +438,53 @@ CN.RegisterCapture{
             return nil, "no generated surface in this build"
         end
 
-        local missing, present = {}, 0
+        -- THE SAME EXEMPTIONS THE SELF-TEST USES. 0.91.0.
+        --
+        -- `SelfTest.optionalApi` names five APIs this addon PROBES for and
+        -- falls back from, and it exists because their absence made the first
+        -- check in `/cn selftest` report FAIL on every Retail client,
+        -- permanently. That fix landed in the self-test and nowhere else.
+        --
+        -- This is the sibling call site over the same list, and it did not
+        -- consult it -- so every capture on the only client this addon
+        -- targets recorded five names as gone from the client, and the
+        -- offline suite asserts that a real recording has no missing names.
+        -- The first genuine contribution would have hard-failed the build.
+        --
+        -- Ninth time a fix has landed at one call site in this project.
+        local selftest = CN.modules and CN:GetModule("SelfTest")
+
+        local optional = (selftest and selftest.optionalApi) or {}
+
+        local missing, present, examined = {}, 0, 0
 
         for _, path in ipairs(CN.apiSurface) do
-            local namespace, method = string.match(path, "^([^.]+)%.(.+)$")
+            if not optional[path] then
+                examined = examined + 1
 
-            local value
+                local namespace, method =
+                    string.match(path, "^([^.]+)%.(.+)$")
 
-            if namespace then
-                local container = _G and _G[namespace]
+                local value
 
-                value = type(container) == "table" and container[method] or nil
-            else
-                value = _G and _G[path]
-            end
+                if namespace then
+                    local container = _G and _G[namespace]
 
-            if value ~= nil then
-                present = present + 1
-            else
-                table.insert(missing, path)
+                    value = type(container) == "table" and container[method]
+                        or nil
+                else
+                    value = _G and _G[path]
+                end
+
+                if value ~= nil then
+                    present = present + 1
+                else
+                    table.insert(missing, path)
+                end
             end
         end
 
-        return { examined = #CN.apiSurface, present = present, missing = missing }
+        return { examined = examined, present = present, missing = missing }
     end,
 }
 

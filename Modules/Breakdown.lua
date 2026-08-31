@@ -621,7 +621,28 @@ Breakdown.Register{
                 .. "only quests this addon has seen can be counted",
             reasons      = {
                 discovered .. " quests discovered so far",
-                CN.CountKeys(CN.Account("questHarvest")) .. " harvested with location data",
+                -- THE NUMBER THAT WAS MEASURED. 0.91.0.
+                --
+                -- `CountKeys` on the harvest store is EVERY harvested row,
+                -- and coordinates are written only when the client resolved
+                -- a waypoint -- which for a turned-in or off-map quest it
+                -- does not. `Harvest.Summary` already returns the real
+                -- figure as `located`. This is the report whose own header
+                -- says it exists so the addon never invents an
+                -- authoritative-looking number.
+                (function()
+                    local harvest = CN.modules and CN:GetModule("Harvest")
+
+                    local counts = harvest and harvest.Summary
+                        and harvest.Summary()
+
+                    if counts and counts.located then
+                        return counts.located .. " harvested with a location"
+                    end
+
+                    return CN.CountKeys(CN.Account("questHarvest"))
+                        .. " harvested"
+                end)(),
             },
             action = "/cn harvest",
         }

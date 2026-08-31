@@ -412,6 +412,12 @@ end
 -- store.
 Quests.pinRevision = 0
 
+-- Moves when this character's completed set changes, so a shortlist built by
+-- filtering on "not completed" can tell it is stale. Added in 0.91.0 with the
+-- curated shortlist; completion itself is read live from the client, so
+-- there was nothing to key on before.
+Quests.completionRevision = 0
+
 Quests.Remembered = Remembered
 
 function Quests.RememberOffer(poi)
@@ -1311,9 +1317,28 @@ end
 -- Migration 7 drops the store. The name is kept because callers want the pair
 -- of answers, and asking through one function keeps the two questions
 -- together.
+-- THE ONE PLACE THE COMPLETED SET IS RE-READ, so the one place the revision
+-- moves. 0.91.0.
+--
+-- Seven call sites reach this, and putting the bump at the three that happen
+-- to fire on a turn-in is the shape this project has recorded fixing eight
+-- times: a rule applied at one call site and not its siblings.
+local completed = {}
+
 function Quests.RecordStatus(questID)
-    return Quests.IsCompletedByCharacter(questID),
-        Quests.IsCompletedOnAccount(questID)
+    local byCharacter = Quests.IsCompletedByCharacter(questID)
+    local onAccount   = Quests.IsCompletedOnAccount(questID)
+
+    -- Only on a CHANGE. An idempotent write that moves a revision destroys
+    -- the cache the revision exists to preserve, at the worst moment --
+    -- `Quests.ScanKnown` walks every discovered quest through here.
+    if completed[questID] ~= byCharacter then
+        completed[questID] = byCharacter
+
+        Quests.completionRevision = (Quests.completionRevision or 0) + 1
+    end
+
+    return byCharacter, onAccount
 end
 
 function Quests.ScanKnown()
@@ -1365,7 +1390,19 @@ end
 function Quests.GetRecord(questID)
     local static = CN.Static.GetQuest(questID)
 
-    if static and (static.requires or static.obsolete or static.requiresLevel) then
+    -- IN EITHER VOCABULARY. 0.91.0.
+    --
+    -- `Data/Quests.lua`'s header documents `minLevel` and `faction`; this
+    -- tested `requiresLevel`, which is what `/cn export` emits. So a row
+    -- written to the addon's OWN documented schema, gated on `minLevel`, was
+    -- not treated as authoritative and could lose to an external addon's
+    -- answer -- directly contradicting the sentence three lines above, which
+    -- says static wins because it is the source this addon controls.
+    if static and (static.requires or static.obsolete
+        or static.requiresLevel or static.minLevel
+        or static.faction or static.requiresFaction
+        or static.breadcrumb) then
+
         return static, "static"
     end
 
@@ -1409,6 +1446,37 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
         end
 
 
+
+        -- A BREADCRUMB YOU HAVE WALKED PAST IS GONE. 0.91.0.
+        --
+        -- `Data/Quests.lua` has documented `breadcrumb` -- "skippable and
+        -- permanently missable" -- since 0.43.0, and `CN.blockReasons` has
+        -- carried `BREADCRUMB_SKIPPED` just as long. Neither had a producer:
+        -- the field had zero references in the whole tree, so a curator
+        -- following the addon's own schema wrote something that reached
+        -- nothing.
+        --
+        -- A breadcrumb is a quest that only points at another quest, and the
+        -- game removes it once you have started the thing it points at. So a
+        -- breadcrumb whose target is already begun or finished is not
+        -- available and never will be, and telling a completionist to go and
+        -- find it is the worst kind of wrong answer this addon can give: it
+        -- sends them somewhere for something that is not there.
+        --
+        -- Only when the target is KNOWN. A breadcrumb with no `unlocks` is
+        -- left alone rather than guessed at.
+        if static.breadcrumb and type(static.unlocks) == "table" then
+            for _, targetID in ipairs(static.unlocks) do
+                if Quests.IsCompletedByCharacter(targetID)
+                    or Blizzard.IsQuestInLog(targetID) then
+
+                    return states.UNOBTAINABLE,
+                           CN.blockReasons.BREADCRUMB_SKIPPED,
+                           Quests.GetName(targetID)
+                               or ("quest " .. tostring(targetID))
+                end
+            end
+        end
 
         if static.requiresLevel and UnitLevel("player") < static.requiresLevel then
             return states.LOCKED, CN.blockReasons.LEVEL_TOO_LOW, tostring(static.requiresLevel)
@@ -1807,17 +1875,55 @@ CN.RegisterCandidateProvider("Quests", function()
     end
 
     -- Curated quests that are not in the log and not yet completed.
-    for questID, record in pairs(CN.Static.quests) do
-        if not record.obsolete and not Quests.IsCompletedByCharacter(questID) then
-            local state = CN.Explain(CN.objectiveTypes.QUEST, questID)
+    --
+    -- A SHORTLIST, NOT A SWEEP OF THE WHOLE DATABASE. 0.91.0.
+    --
+    -- This walked every curated row and called `CN.Explain` on each, and
+    -- `Explain` reaches `Quests.GetRecord`, which for a row without gating
+    -- fields falls through to `CN.QueryQuestDataProviders` -- a pcall of
+    -- `IsAvailable` AND `GetQuestData` on every registered external addon.
+    -- This provider declares `QUEST_LOG_UPDATE` at a two-second cooldown.
+    --
+    -- With the one row this addon has shipped so far that cost nothing. With
+    -- a few thousand curated rows and AllTheThings or BtWQuests installed it
+    -- is a full eligibility sweep plus thousands of cross-addon lookups every
+    -- two seconds while questing -- which is exactly the shape a companion
+    -- data addon is about to create.
+    --
+    -- The completed set is the cheap filter and it is what actually moves, so
+    -- the shortlist is keyed on it. `CN.Shortlist` is the same mechanism five
+    -- other providers already use.
+    local pending = CN.Shortlist("Quests.Curated",
+        tostring(Quests.completionRevision or 0) .. ":"
+            .. tostring(CN.Static.revision or 0),
+        function()
+            local rows = {}
 
-            if state == CN.objectiveStates.AVAILABLE then
-                add(questID, record.name, false)
+            for questID, record in pairs(CN.Static.quests) do
+                if not record.obsolete
+                    and not Quests.IsCompletedByCharacter(questID) then
+
+                    table.insert(rows, { questID = questID,
+                                         name = record.name })
+                end
             end
+
+            return rows
+        end)
+
+    for _, row in ipairs(pending) do
+        local state = CN.Explain(CN.objectiveTypes.QUEST, row.questID)
+
+        if state == CN.objectiveStates.AVAILABLE then
+            add(row.questID, row.name, false)
         end
     end
 
-    return candidates
+    -- AND THE PROVIDER HONOURS ITS OWN CAP, like Pets, Mounts, Toys,
+    -- Achievements and Vendors. `CN.providerCandidateCap` is self-applied by
+    -- convention and `RunProvider` does not enforce it, so a provider that
+    -- does not call this can push an unbounded list into the score-and-sort.
+    return CN.CapCandidates and CN.CapCandidates(candidates) or candidates
 end, { events = { "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 2 })
 
 ------------------------------------------------------------

@@ -306,7 +306,13 @@ function Blizzard.GetWorldQuestsOnMap(uiMapID)
                 mapID   = task.mapID or uiMapID,
                 x       = task.x,
                 y       = task.y,
-                inArea  = task.inProgress,
+                -- `inArea` IS NOT CARRIED. 0.91.0. This renamed the client's
+                -- `inProgress` to a word that means something else, and no
+                -- consumer read either -- `Modules/Opportunities.lua`, the
+                -- only caller, builds its row from the id, the map and the
+                -- point. A misnamed field in the one file whose header
+                -- promises the client surface is kept together so a patch
+                -- break is contained is a trap for the next reader.
             })
         end
     end

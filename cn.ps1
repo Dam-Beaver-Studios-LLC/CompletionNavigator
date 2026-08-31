@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.90.0'
+$script:ToolkitVersion = '0.91.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.90.0"
-CN.dbVersion   = 35
+CN.version     = "0.91.0"
+CN.dbVersion   = 36
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -3688,6 +3688,65 @@ CN.migrations = {
         if dropped > 0 then
             CN.DebugPrint("Dropped " .. dropped
                 .. " harvest sighting counters nothing reads.")
+        end
+    end,
+
+    -- SIX MORE FIELDS NOTHING READS. 0.91.0.
+    --
+    -- `currencies.lastSeen` is the seventh store to carry this field with no
+    -- reader; `Modules/Currencies.lua`'s own header said so and the write
+    -- survived four separate sweeps. `progress.previousDayKey` and
+    -- `progress.bestDay` sat beside `progress.total`, which migration 29
+    -- removed. The three harvest fields are on a store capped at two thousand
+    -- rows: an integer, a string and an array each.
+    [35] = function(db)
+        local dropped = 0
+
+        local function strip(store, fields)
+            if type(store) ~= "table" then
+                return
+            end
+
+            for _, record in pairs(store) do
+                if type(record) == "table" then
+                    for _, field in ipairs(fields) do
+                        if record[field] ~= nil then
+                            record[field] = nil
+
+                            dropped = dropped + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        strip(db.account and db.account.currencies, { "lastSeen" })
+
+        strip(db.account and db.account.questHarvest,
+            { "observedLevel", "requiresFrom", "reason" })
+
+        -- AND THE CHARACTER HALVES. The currency store's larger half lives on
+        -- the character, and `progress` is character-only -- which is the
+        -- exact shape migration 32 records missing the first time.
+        for _, character in pairs(db.characters or {}) do
+            if type(character) == "table" then
+                strip(character.currencies, { "lastSeen" })
+
+                if type(character.progress) == "table" then
+                    for _, field in ipairs({ "previousDayKey", "bestDay" }) do
+                        if character.progress[field] ~= nil then
+                            character.progress[field] = nil
+
+                            dropped = dropped + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " stored values nothing reads.")
         end
     end,
 }
@@ -7715,6 +7774,20 @@ CN.priorityProfiles = {
     balanced     = {},
     fastest      = { weights = { travelCost = -2.5, estimatedTime = -1.5 } },
     zone         = { weights = { travelCost = -3.0, nearbyBonus = 2.0 } },
+    -- NO TRAVEL WEIGHTING, AND THE MODE NO LONGER CLAIMS ONE. 0.91.0.
+    --
+    -- `/cn mode leveling`'s note read "Quests and exploration only, weighted
+    -- toward fast travel" while this profile had a `types` table and no
+    -- `weights` table at all -- so `EffectiveWeights` returned the default
+    -- `travelCost = -1.0` unchanged and the mode did half of what it said,
+    -- in the copy a levelling player reads to decide whether it did anything.
+    --
+    -- The sentence is what changed, not the number. Giving this profile
+    -- `travelCost = -2.0` takes a PLACELESS objective at completionValue 10
+    -- below zero, which the suite catches -- so the weighting the note
+    -- promised has a consequence nobody has measured, and this addon is not
+    -- played by the person building it. `fastest` already exists and is
+    -- tuned; a levelling player who wants travel weighted has it.
     quests       = { types = { QUEST = 2.0 } },
     achievements = { types = { ACHIEVEMENT = 2.0 } },
     reputation   = { types = { REPUTATION = 2.0, RENOWN = 2.0 } },
@@ -7738,7 +7811,10 @@ CN.modes = {
         label   = "Levelling",
         profile = "quests",
         show    = { "QUEST", "EXPLORATION" },
-        note    = "Quests and exploration only, weighted toward fast travel.",
+        -- WHAT IT DOES, NOT WHAT WOULD BE NICE. 0.91.0. See the note on the
+        -- `quests` profile: this claimed a travel weighting the profile does
+        -- not carry. `/cn mode fastest` is the one that weights travel.
+        note    = "Quests and exploration only, with quests weighted up.",
     },
 
     collecting = {
@@ -8131,13 +8207,27 @@ local function EffectiveWeights(mode, profile)
     return w
 end
 
-function CN.ScoreObjective(objective)
+-- `mode` IS OPTIONAL AND THE CALLER USUALLY HAS IT. 0.91.0.
+--
+-- `CN.Settings()` goes through the database's `__index` metamethod, which
+-- resolves the override table and the account settings on every read -- and
+-- this ran once per candidate per re-rank while `Ranked()` one frame up had
+-- already computed the identical value and thrown it away.
+--
+-- Same shape as the `EffectiveWeights` memo directly below, whose own note
+-- records it was 28% of the entire scoring pass. Smaller than that one, and
+-- free: the parameter is optional and every existing caller still works.
+function CN.ScoreObjective(objective, mode)
     if type(objective) ~= "table" then
         return 0
     end
 
-    local settings = CN.Settings()
-    local mode     = (settings and settings.priorityMode) or "balanced"
+    if not mode then
+        local settings = CN.Settings()
+
+        mode = (settings and settings.priorityMode) or "balanced"
+    end
+
     local profile  = CN.priorityProfiles[mode] or {}
 
     -- MEMOISED ON THE MODE, BECAUSE THAT IS ALL IT DEPENDS ON.
@@ -9474,7 +9564,7 @@ local function Ranked()
     for index = 1, #candidates do
         local objective = candidates[index]
 
-        CN.ScoreObjective(objective)
+        CN.ScoreObjective(objective, mode)
 
         -- A DISPLAY PREFERENCE CANNOT HIDE YOUR OWN BODY.
         --
@@ -18153,11 +18243,17 @@ $Embedded['Data\Quests.lua'] = @'
 --   name       (string)  quest title
 --   mapID      (number)  UiMapID the quest is picked up or completed in
 --   x, y       (number)  0-1 normalized map coordinates
---   expansion  (string)  short expansion tag
 --   requires   (table)   array of prerequisite quest IDs
 --   unlocks    (table)   array of quest IDs this one opens
---   breadcrumb (boolean) skippable and permanently missable
+--   breadcrumb (boolean) skippable and permanently missable; a breadcrumb
+--                        whose `unlocks` target is started or finished is
+--                        reported as permanently gone rather than available
 --   obsolete   (boolean) no longer obtainable
+--
+-- `expansion` WAS DOCUMENTED HERE AND READ NOWHERE, and is gone. 0.91.0.
+-- Every field in this list now reaches something; a field a curator fills in
+-- that the addon discards is worse than one that was never offered, because
+-- the curator paid for it.
 --
 -- Added in 0.43.0, all optional, all for saying WHY something is not
 -- available rather than leaving the player to work it out:
@@ -18166,6 +18262,12 @@ $Embedded['Data\Quests.lua'] = @'
 --   races      (table)   race file names, e.g. { "NIGHTELF" }
 --   faction    (string)  "Alliance" or "Horde"
 --   minLevel   (number)  character level required
+--
+-- `requiresFaction` and `requiresLevel` are accepted as synonyms of the two
+-- above, because `/cn export` has always emitted them. 0.91.0 made the two
+-- vocabularies gate identically; before that a row written to THIS header's
+-- schema was not treated as authoritative and could lose to an external
+-- addon's answer.
 --   turnInMapID(number)  where it is handed IN, when that differs from where
 --   turnInX,               it is picked up -- the client's own waypoint moves
 --   turnInY                as you progress, so it cannot answer this
@@ -20057,7 +20159,13 @@ function Blizzard.GetWorldQuestsOnMap(uiMapID)
                 mapID   = task.mapID or uiMapID,
                 x       = task.x,
                 y       = task.y,
-                inArea  = task.inProgress,
+                -- `inArea` IS NOT CARRIED. 0.91.0. This renamed the client's
+                -- `inProgress` to a word that means something else, and no
+                -- consumer read either -- `Modules/Opportunities.lua`, the
+                -- only caller, builds its row from the id, the map and the
+                -- point. A misnamed field in the one file whose header
+                -- promises the client surface is kept together so a patch
+                -- break is contained is a trap for the next reader.
             })
         end
     end
@@ -21575,44 +21683,178 @@ local Static = {}
 CN.Static = Static
 
 Static.quests    = {}
-Static.recipes   = {}
-Static.vendors   = {}
-Static.rares     = {}
-Static.treasures = {}
+
+-- FOUR REGISTRARS THAT WROTE INTO NOTHING ARE GONE. 0.91.0.
+--
+-- `Static.recipes`, `Static.vendors`, `Static.rares` and `Static.treasures`
+-- were declared here, written by four published registrars, and read by
+-- nothing anywhere in the tree -- `Modules/Vendors.lua` and `Modules/Rares.lua`
+-- each keep their own account store and never look here. `Static.Count()`
+-- returned all five sizes and had no caller at all, while the harness's own
+-- note called it "the number /cn dbsize prints", which `/cn dbsize` does not.
+--
+-- That was harmless while this file was only read by files shipped inside the
+-- addon. It stops being harmless the moment an external data addon reads this
+-- surface as documentation: a supplier who curated rare and treasure
+-- locations would get a successful call, a non-zero count, and no change to
+-- anything a player ever sees.
+--
+-- A published surface either works or is not published. When those four have
+-- real readers they come back, with tests.
 
 ------------------------------------------------------------
--- REGISTRATION
+-- THE DATA CONTRACT
 ------------------------------------------------------------
 
--- record = { name =, mapID =, x =, y =, expansion =, requires = {}, unlocks = {} }
-function Static.RegisterQuest(questID, record)
-    if not questID or type(record) ~= "table" then
-        return
+-- WHAT AN EXTERNAL SUPPLIER IS PROMISED. 0.91.0.
+--
+-- `Data/*.lua` inside this addon and any companion addon reach this surface
+-- the same way, through `_G.CompletionNavigator.Static`. Before 0.91.0 the
+-- two registrars below took anything, told the caller nothing, threw on a nil
+-- argument where the sibling registrar returned zero, and stamped no origin
+-- -- so `/cn provenance` counted every row in the table under the headline
+-- "each one checked by hand", including rows that arrived from somewhere
+-- else entirely.
+--
+-- The curated/observed distinction is the whole safety model of this data
+-- pipeline; `Data/Community.lua` says so and says there is no getting it back
+-- afterwards. A row that cannot say where it came from cannot preserve it.
+Static.schemaVersion = 1
+
+-- Rows that lost a collision, so `/cn selftest` can say two suppliers
+-- disagree rather than the later one silently winning.
+Static.collisions = {}
+
+-- Moves whenever a curated row is added, so anything holding a shortlist
+-- built from this table can tell that it is stale. A companion addon that
+-- registers late -- on demand, per expansion, after a settings toggle -- is
+-- the case this exists for.
+Static.revision = 0
+
+local VALID_FIELDS = {
+    name = true, mapID = true, x = true, y = true,
+    requires = true, unlocks = true, breadcrumb = true, obsolete = true,
+    classes = true, races = true, faction = true, minLevel = true,
+    turnInMapID = true, turnInX = true, turnInY = true,
+    -- Accepted as synonyms of `minLevel` and `faction`, because
+    -- `/cn export` has always emitted them and the eligibility checker has
+    -- always read them. See `Static.QuestEligibility`.
+    requiresLevel = true, requiresFaction = true,
+    -- Written by this file, not by the supplier.
+    origin = true,
+}
+
+Static.validFields = VALID_FIELDS
+
+-- Registers one curated quest row.
+--
+-- Returns true on success; false and a reason otherwise. `origin` names the
+-- supplier and defaults to "curated", which is what the rows shipped inside
+-- this addon are. Anything else is reported as its own provenance by
+-- `/cn provenance` rather than being counted as hand-checked.
+function Static.RegisterQuest(questID, record, origin)
+    -- A NUMBER, NOT A NUMERIC STRING. Every reader indexes this table with a
+    -- number from `CN.ToID` or from a client event, so a row filed under
+    -- "8237" is stored and never matched -- total silence for a supplier
+    -- generating its data file from JSON.
+    if type(questID) ~= "number" then
+        return false, "a quest id is a number, not "
+            .. type(questID) .. ": " .. tostring(questID)
     end
+
+    if type(record) ~= "table" then
+        return false, "a quest row is a table, not " .. type(record)
+    end
+
+    for field in pairs(record) do
+        if not VALID_FIELDS[field] then
+            return false, "quest " .. questID
+                .. " carries a field this addon does not read: "
+                .. tostring(field)
+        end
+    end
+
+    local existing = Static.quests[questID]
+
+    if existing then
+        table.insert(Static.collisions, {
+            questID = questID,
+            kept    = existing.origin or "curated",
+            lost    = origin or "curated",
+        })
+    end
+
+    record.origin = origin or record.origin or "curated"
 
     Static.quests[questID] = record
+
+    return true
 end
 
-function Static.RegisterQuests(records)
-    for questID, record in pairs(records) do
-        Static.RegisterQuest(questID, record)
+-- Registers a table of curated rows. Returns how many landed and how many
+-- were refused, with the refusals recorded to `/cn errors` rather than
+-- thrown, so one bad row in a supplier's file does not cost the rest.
+--
+-- `schemaVersion` is optional and checked when given: a supplier built for a
+-- schema this addon does not know is told so once, rather than contributing
+-- fields that are silently discarded.
+function Static.RegisterQuests(records, origin, schemaVersion)
+    if type(records) ~= "table" then
+        return 0, 0
     end
-end
 
-function Static.RegisterRecipe(itemID, record)
-    Static.recipes[itemID] = record
-end
+    if schemaVersion and schemaVersion ~= Static.schemaVersion then
+        local errors = CN.modules and CN:GetModule("Errors")
 
-function Static.RegisterVendor(npcID, record)
-    Static.vendors[npcID] = record
-end
+        if errors and errors.Record then
+            errors.Record("quest data built for another schema",
+                tostring(origin or "unknown") .. " supplied schema "
+                .. tostring(schemaVersion) .. "; this addon reads "
+                .. tostring(Static.schemaVersion))
+        end
+    end
 
-function Static.RegisterRare(npcID, record)
-    Static.rares[npcID] = record
-end
+    local added, refused = 0, 0
 
-function Static.RegisterTreasure(id, record)
-    Static.treasures[id] = record
+    for questID, record in pairs(records) do
+        local ok, why = Static.RegisterQuest(questID, record, origin)
+
+        if ok then
+            added = added + 1
+        else
+            refused = refused + 1
+
+            local errors = CN.modules and CN:GetModule("Errors")
+
+            if errors and errors.Record then
+                errors.Record("a curated quest row was refused",
+                    tostring(origin or "unknown") .. ": " .. tostring(why))
+            end
+        end
+    end
+
+    -- AND THE ANSWER CHANGES, so a supplier that registers late is not
+    -- ignored until something unrelated moves. The rows shipped inside this
+    -- addon register at file-load time and never needed this; a companion
+    -- addon registering on demand, per expansion, or after a settings toggle
+    -- would otherwise leave the aggregate candidate cache, the ranked list
+    -- and the unlock index holding the pre-registration answer for the whole
+    -- session. `Contribute.Import` calls exactly this, for exactly this.
+    if added > 0 then
+        Static.revision = Static.revision + 1
+
+        if CN.InvalidateCandidates then
+            CN.InvalidateCandidates()
+        end
+
+        local harvest = CN.modules and CN:GetModule("Harvest")
+
+        if harvest and harvest.NoteUnlocksChanged then
+            harvest.NoteUnlocksChanged()
+        end
+    end
+
+    return added, refused
 end
 
 ------------------------------------------------------------
@@ -21696,8 +21938,19 @@ function Static.QuestEligibility(questID, character)
     -- quest as class-gated, and `/cn alts` would name the wrong alt.
     --
     -- Third return: a stable token. The sentence is unchanged.
-    if record.faction and character.faction
-        and record.faction ~= character.faction then
+    -- ONE GATE, TWO SPELLINGS. 0.91.0.
+    --
+    -- `Data/Quests.lua`'s header documents `faction` and `minLevel`; the
+    -- eligibility checker in `Modules/Quests.lua` has always read
+    -- `requiresFaction` and `requiresLevel`, and `/cn export` has always
+    -- EMITTED those -- so harvested rows and hand-curated rows in the same
+    -- file gated through different code. Both names are accepted here and
+    -- both are documented; a supplier can use either.
+    local faction  = record.faction or record.requiresFaction
+    local minLevel = record.minLevel or record.requiresLevel
+
+    if faction and character.faction
+        and faction ~= character.faction then
 
         -- THE FACTION HELPER, NOT THE CLASS ONE. 0.82.0.
         --
@@ -21709,13 +21962,13 @@ function Static.QuestEligibility(questID, character)
         -- saying that file "was not converted". This is the third place, and
         -- it was not converted either -- so a German client read "Alliance
         -- only" three lines under a correctly translated class list.
-        return false, CN.FactionLabel(record.faction) .. " only", "FACTION"
+        return false, CN.FactionLabel(faction) .. " only", "FACTION"
     end
 
-    if record.minLevel and character.level
-        and character.level < record.minLevel then
+    if minLevel and character.level
+        and character.level < minLevel then
 
-        return false, "level " .. record.minLevel .. " required", "LEVEL"
+        return false, "level " .. minLevel .. " required", "LEVEL"
     end
 
     local function allowed(list, value, label)
@@ -21790,12 +22043,34 @@ function Static.GetQuestLocation(questID)
     return record.mapID, record.x, record.y
 end
 
+-- How many curated rows are held, and how many of them came from this addon
+-- rather than from a supplier. 0.91.0: this returned five numbers, four of
+-- them counting tables nothing read.
 function Static.Count()
-    return CN.CountKeys(Static.quests),
-           CN.CountKeys(Static.recipes),
-           CN.CountKeys(Static.vendors),
-           CN.CountKeys(Static.rares),
-           CN.CountKeys(Static.treasures)
+    local total, mine = 0, 0
+
+    for _, record in pairs(Static.quests) do
+        total = total + 1
+
+        if (record.origin or "curated") == "curated" then
+            mine = mine + 1
+        end
+    end
+
+    return total, mine
+end
+
+-- Curated rows grouped by who supplied them, for `/cn provenance`.
+function Static.Origins()
+    local counts = {}
+
+    for _, record in pairs(Static.quests) do
+        local origin = record.origin or "curated"
+
+        counts[origin] = (counts[origin] or 0) + 1
+    end
+
+    return counts
 end
 '@
 
@@ -23110,6 +23385,12 @@ end
 -- store.
 Quests.pinRevision = 0
 
+-- Moves when this character's completed set changes, so a shortlist built by
+-- filtering on "not completed" can tell it is stale. Added in 0.91.0 with the
+-- curated shortlist; completion itself is read live from the client, so
+-- there was nothing to key on before.
+Quests.completionRevision = 0
+
 Quests.Remembered = Remembered
 
 function Quests.RememberOffer(poi)
@@ -24009,9 +24290,28 @@ end
 -- Migration 7 drops the store. The name is kept because callers want the pair
 -- of answers, and asking through one function keeps the two questions
 -- together.
+-- THE ONE PLACE THE COMPLETED SET IS RE-READ, so the one place the revision
+-- moves. 0.91.0.
+--
+-- Seven call sites reach this, and putting the bump at the three that happen
+-- to fire on a turn-in is the shape this project has recorded fixing eight
+-- times: a rule applied at one call site and not its siblings.
+local completed = {}
+
 function Quests.RecordStatus(questID)
-    return Quests.IsCompletedByCharacter(questID),
-        Quests.IsCompletedOnAccount(questID)
+    local byCharacter = Quests.IsCompletedByCharacter(questID)
+    local onAccount   = Quests.IsCompletedOnAccount(questID)
+
+    -- Only on a CHANGE. An idempotent write that moves a revision destroys
+    -- the cache the revision exists to preserve, at the worst moment --
+    -- `Quests.ScanKnown` walks every discovered quest through here.
+    if completed[questID] ~= byCharacter then
+        completed[questID] = byCharacter
+
+        Quests.completionRevision = (Quests.completionRevision or 0) + 1
+    end
+
+    return byCharacter, onAccount
 end
 
 function Quests.ScanKnown()
@@ -24063,7 +24363,19 @@ end
 function Quests.GetRecord(questID)
     local static = CN.Static.GetQuest(questID)
 
-    if static and (static.requires or static.obsolete or static.requiresLevel) then
+    -- IN EITHER VOCABULARY. 0.91.0.
+    --
+    -- `Data/Quests.lua`'s header documents `minLevel` and `faction`; this
+    -- tested `requiresLevel`, which is what `/cn export` emits. So a row
+    -- written to the addon's OWN documented schema, gated on `minLevel`, was
+    -- not treated as authoritative and could lose to an external addon's
+    -- answer -- directly contradicting the sentence three lines above, which
+    -- says static wins because it is the source this addon controls.
+    if static and (static.requires or static.obsolete
+        or static.requiresLevel or static.minLevel
+        or static.faction or static.requiresFaction
+        or static.breadcrumb) then
+
         return static, "static"
     end
 
@@ -24107,6 +24419,37 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.QUEST, function(questID)
         end
 
 
+
+        -- A BREADCRUMB YOU HAVE WALKED PAST IS GONE. 0.91.0.
+        --
+        -- `Data/Quests.lua` has documented `breadcrumb` -- "skippable and
+        -- permanently missable" -- since 0.43.0, and `CN.blockReasons` has
+        -- carried `BREADCRUMB_SKIPPED` just as long. Neither had a producer:
+        -- the field had zero references in the whole tree, so a curator
+        -- following the addon's own schema wrote something that reached
+        -- nothing.
+        --
+        -- A breadcrumb is a quest that only points at another quest, and the
+        -- game removes it once you have started the thing it points at. So a
+        -- breadcrumb whose target is already begun or finished is not
+        -- available and never will be, and telling a completionist to go and
+        -- find it is the worst kind of wrong answer this addon can give: it
+        -- sends them somewhere for something that is not there.
+        --
+        -- Only when the target is KNOWN. A breadcrumb with no `unlocks` is
+        -- left alone rather than guessed at.
+        if static.breadcrumb and type(static.unlocks) == "table" then
+            for _, targetID in ipairs(static.unlocks) do
+                if Quests.IsCompletedByCharacter(targetID)
+                    or Blizzard.IsQuestInLog(targetID) then
+
+                    return states.UNOBTAINABLE,
+                           CN.blockReasons.BREADCRUMB_SKIPPED,
+                           Quests.GetName(targetID)
+                               or ("quest " .. tostring(targetID))
+                end
+            end
+        end
 
         if static.requiresLevel and UnitLevel("player") < static.requiresLevel then
             return states.LOCKED, CN.blockReasons.LEVEL_TOO_LOW, tostring(static.requiresLevel)
@@ -24505,17 +24848,55 @@ CN.RegisterCandidateProvider("Quests", function()
     end
 
     -- Curated quests that are not in the log and not yet completed.
-    for questID, record in pairs(CN.Static.quests) do
-        if not record.obsolete and not Quests.IsCompletedByCharacter(questID) then
-            local state = CN.Explain(CN.objectiveTypes.QUEST, questID)
+    --
+    -- A SHORTLIST, NOT A SWEEP OF THE WHOLE DATABASE. 0.91.0.
+    --
+    -- This walked every curated row and called `CN.Explain` on each, and
+    -- `Explain` reaches `Quests.GetRecord`, which for a row without gating
+    -- fields falls through to `CN.QueryQuestDataProviders` -- a pcall of
+    -- `IsAvailable` AND `GetQuestData` on every registered external addon.
+    -- This provider declares `QUEST_LOG_UPDATE` at a two-second cooldown.
+    --
+    -- With the one row this addon has shipped so far that cost nothing. With
+    -- a few thousand curated rows and AllTheThings or BtWQuests installed it
+    -- is a full eligibility sweep plus thousands of cross-addon lookups every
+    -- two seconds while questing -- which is exactly the shape a companion
+    -- data addon is about to create.
+    --
+    -- The completed set is the cheap filter and it is what actually moves, so
+    -- the shortlist is keyed on it. `CN.Shortlist` is the same mechanism five
+    -- other providers already use.
+    local pending = CN.Shortlist("Quests.Curated",
+        tostring(Quests.completionRevision or 0) .. ":"
+            .. tostring(CN.Static.revision or 0),
+        function()
+            local rows = {}
 
-            if state == CN.objectiveStates.AVAILABLE then
-                add(questID, record.name, false)
+            for questID, record in pairs(CN.Static.quests) do
+                if not record.obsolete
+                    and not Quests.IsCompletedByCharacter(questID) then
+
+                    table.insert(rows, { questID = questID,
+                                         name = record.name })
+                end
             end
+
+            return rows
+        end)
+
+    for _, row in ipairs(pending) do
+        local state = CN.Explain(CN.objectiveTypes.QUEST, row.questID)
+
+        if state == CN.objectiveStates.AVAILABLE then
+            add(row.questID, row.name, false)
         end
     end
 
-    return candidates
+    -- AND THE PROVIDER HONOURS ITS OWN CAP, like Pets, Mounts, Toys,
+    -- Achievements and Vendors. `CN.providerCandidateCap` is self-applied by
+    -- convention and `RunProvider` does not enforce it, so a provider that
+    -- does not call this can push an unbounded list into the score-and-sort.
+    return CN.CapCandidates and CN.CapCandidates(candidates) or candidates
 end, { events = { "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 2 })
 
 ------------------------------------------------------------
@@ -29593,12 +29974,13 @@ function Harvest.Capture(questID, reason)
     -- Read back through Harvest.Zone below, so nothing that wants it has to
     -- know where it comes from.
 
-    -- The level the character was when the quest became available is a
-    -- usable lower bound on the quest's own level requirement.
-    if record.observedLevel == nil then
-        record.observedLevel = UnitLevel("player")
-        changed = true
-    end
+    -- `observedLevel` IS NOT STORED. 0.91.0.
+    --
+    -- Its own comment called it "a usable lower bound on the quest's own
+    -- level requirement", and nothing used it as one: zero readers in the
+    -- tree, and `Harvest.BuildExport` does not emit it -- so it was not even
+    -- reaching the curation pipeline it was collected for. One integer per
+    -- row on a store capped at two thousand.
 
     if CN.character and record.faction == nil then
         record.faction = CN.character.faction
@@ -29622,18 +30004,23 @@ function Harvest.Capture(questID, reason)
 
                 Harvest.NoteUnlocksChanged()
 
-                -- `requiresFrom`: which addons answered. It was written as
-                -- `requiredBy`, a name meaning the opposite -- the quests
-                -- this one unlocks -- and read by nothing, so the misnomer
-                -- had no effect beyond misleading the next reader.
-                record.requiresFrom = external.providers
+                -- `requiresFrom` IS NOT STORED. 0.91.0. Which addons
+                -- answered, read by nothing. 0.7x renamed it from a misnomer
+                -- rather than removing it, and its own comment said so:
+                -- "read by nothing, so the misnomer had no effect beyond
+                -- misleading the next reader." An array per row, on a store
+                -- capped at two thousand.
                 changed = true
             end
         end
     end
 
     record.lastSeen = time()
-    record.reason   = record.reason or reason
+
+    -- `reason` IS NOT STORED. 0.91.0. Why the row was first captured --
+    -- "login", "manual", an event name -- written once per row and read
+    -- nowhere. The argument is still taken, because it is what the debug
+    -- line below prints.
 
     store[questID] = record
 
@@ -32524,7 +32911,16 @@ function Currencies.Scan()
                 usesTotalEarned   = currency.useTotalEarnedForMaxQty or nil,
                 accountWide       = currency.accountWide or nil,
                 weeklyRemaining   = weeklyLeft,
-                lastSeen          = time(),
+                -- `lastSeen` IS NOT STORED. 0.91.0.
+            --
+            -- The note at the top of this file already says it: "`lastSeen`
+            -- was already being written and was read by nothing anywhere in
+            -- the tree". The serial replaced it and the write survived.
+            -- Migration 5 stripped this field from four stores, 31 from
+            -- appearances, 32 from mounts and reputations, 33 from
+            -- exploration; `currencies` was in none of the four sweeps and
+            -- its writer was live, so this was one integer per currency per
+            -- character rewritten at every logout, forever.
 
                 -- Which sweep last saw it. See the header above `Scan`.
                 serial            = serial,
@@ -33638,7 +34034,28 @@ Breakdown.Register{
                 .. "only quests this addon has seen can be counted",
             reasons      = {
                 discovered .. " quests discovered so far",
-                CN.CountKeys(CN.Account("questHarvest")) .. " harvested with location data",
+                -- THE NUMBER THAT WAS MEASURED. 0.91.0.
+                --
+                -- `CountKeys` on the harvest store is EVERY harvested row,
+                -- and coordinates are written only when the client resolved
+                -- a waypoint -- which for a turned-in or off-map quest it
+                -- does not. `Harvest.Summary` already returns the real
+                -- figure as `located`. This is the report whose own header
+                -- says it exists so the addon never invents an
+                -- authoritative-looking number.
+                (function()
+                    local harvest = CN.modules and CN:GetModule("Harvest")
+
+                    local counts = harvest and harvest.Summary
+                        and harvest.Summary()
+
+                    if counts and counts.located then
+                        return counts.located .. " harvested with a location"
+                    end
+
+                    return CN.CountKeys(CN.Account("questHarvest"))
+                        .. " harvested"
+                end)(),
             },
             action = "/cn harvest",
         }
@@ -39738,8 +40155,12 @@ function Progress.RollDay(store)
     if store.dayKey ~= today then
         -- A new day. Keep yesterday so "yesterday you did 84" is possible
         -- later, but do not accumulate an unbounded history.
+        -- `previousDayKey` IS NOT STORED. 0.91.0. It was written here and
+        -- read nowhere -- `Progress.Summary` returns `store.previousDay`,
+        -- which is the line above. Same shape as `store.total`, removed
+        -- beside it in 0.78.0 with migration 29; the field next to it
+        -- survived that sweep.
         store.previousDay    = store.today or 0
-        store.previousDayKey = store.dayKey
         store.today          = 0
         store.dayKey         = today
     end
@@ -39759,7 +40180,9 @@ function Progress.NoteCompleted(questID)
         return
     end
 
-    local today = Progress.RollDay(store)
+    -- The return is the day key, which nothing here needs any more now that
+    -- `bestDay` is gone. The call is still what rolls the day over.
+    Progress.RollDay(store)
 
     store.today   = (store.today or 0) + 1
     store.session = (store.session or 0) + 1
@@ -39776,8 +40199,10 @@ function Progress.NoteCompleted(questID)
     -- field were the others -- and migration 29 removes it.
 
     if (store.best or 0) < store.today then
-        store.best    = store.today
-        store.bestDay = today
+        -- `bestDay` IS NOT STORED. 0.91.0. See the note on `previousDayKey`
+        -- above: `Summary` returns `store.best`, and the date it fell on has
+        -- never had a reader.
+        store.best = store.today
     end
 
     DebugPrint("Quest " .. tostring(questID) .. " completed; "
@@ -55184,29 +55609,53 @@ CN.RegisterCapture{
             return nil, "no generated surface in this build"
         end
 
-        local missing, present = {}, 0
+        -- THE SAME EXEMPTIONS THE SELF-TEST USES. 0.91.0.
+        --
+        -- `SelfTest.optionalApi` names five APIs this addon PROBES for and
+        -- falls back from, and it exists because their absence made the first
+        -- check in `/cn selftest` report FAIL on every Retail client,
+        -- permanently. That fix landed in the self-test and nowhere else.
+        --
+        -- This is the sibling call site over the same list, and it did not
+        -- consult it -- so every capture on the only client this addon
+        -- targets recorded five names as gone from the client, and the
+        -- offline suite asserts that a real recording has no missing names.
+        -- The first genuine contribution would have hard-failed the build.
+        --
+        -- Ninth time a fix has landed at one call site in this project.
+        local selftest = CN.modules and CN:GetModule("SelfTest")
+
+        local optional = (selftest and selftest.optionalApi) or {}
+
+        local missing, present, examined = {}, 0, 0
 
         for _, path in ipairs(CN.apiSurface) do
-            local namespace, method = string.match(path, "^([^.]+)%.(.+)$")
+            if not optional[path] then
+                examined = examined + 1
 
-            local value
+                local namespace, method =
+                    string.match(path, "^([^.]+)%.(.+)$")
 
-            if namespace then
-                local container = _G and _G[namespace]
+                local value
 
-                value = type(container) == "table" and container[method] or nil
-            else
-                value = _G and _G[path]
-            end
+                if namespace then
+                    local container = _G and _G[namespace]
 
-            if value ~= nil then
-                present = present + 1
-            else
-                table.insert(missing, path)
+                    value = type(container) == "table" and container[method]
+                        or nil
+                else
+                    value = _G and _G[path]
+                end
+
+                if value ~= nil then
+                    present = present + 1
+                else
+                    table.insert(missing, path)
+                end
             end
         end
 
-        return { examined = #CN.apiSurface, present = present, missing = missing }
+        return { examined = examined, present = present, missing = missing }
     end,
 }
 
@@ -56835,13 +57284,40 @@ CN:RegisterCommand{
 
         local rows = Contribute.Provenance()
 
-        local curated = 0
+        -- ONLY WHAT WAS ACTUALLY CHECKED BY HAND. 0.91.0.
+        --
+        -- This counted every row in the curated table, and the table has been
+        -- writable by any addon since it was published. The one command in
+        -- this addon whose whole job is to expose unchecked claims would have
+        -- mislabelled a companion addon's rows as hand-checked the moment one
+        -- existed. Rows now carry their supplier, and a supplier that is not
+        -- this addon gets its own line.
+        local total, curated = 0, 0
 
-        for _ in pairs((CN.Static and CN.Static.quests) or {}) do
-            curated = curated + 1
+        if CN.Static and CN.Static.Count then
+            total, curated = CN.Static.Count()
         end
 
         Print("Curated rows, each one checked by hand: " .. curated)
+
+        if total > curated then
+            for origin, count in pairs(CN.Static.Origins()) do
+                if origin ~= "curated" then
+                    CN.PrintLine("  " .. CN.Count(count, "row")
+                        .. " supplied by " .. CN.Accent(tostring(origin))
+                        .. CN.Aside("not checked by this addon"))
+                end
+            end
+        end
+
+        -- AND TWO SUPPLIERS CLAIMING ONE QUEST IS WORTH SAYING.
+        local collisions = (CN.Static and CN.Static.collisions) or {}
+
+        if #collisions > 0 then
+            Print(CN.Count(#collisions, "quest")
+                .. " claimed by more than one source"
+                .. CN.Aside("the first registration is the one in use"))
+        end
 
         Print("Rows believed on evidence rather than on a reading: "
             .. #rows .. " |cff8a8f96("
@@ -58673,7 +59149,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.90.0
+## Version: 0.91.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -58928,6 +59404,93 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.91.0]
+
+**This release makes the addon's data contract real, because something is
+about to use it.** Completion Navigator has published a way for other addons
+to contribute curated quest data since 0.43.0. Audited properly for the first
+time, that surface turned out to accept anything, tell the caller nothing,
+throw on a nil argument where the registrar beside it returned zero, stamp no
+record of who supplied a row — and then report every row in the table under
+the heading "each one checked by hand". Four of its five registration
+functions wrote into tables nothing anywhere read.
+
+None of that mattered while the only thing reading the contract was this
+addon. All of it matters now.
+
+### Fixed
+
+- **`/cn capture` recorded five APIs as missing from your client that this
+  addon only probes for.** `/cn selftest` has had an exemption list for those
+  five since the day their absence made it report a failure on every Retail
+  client. The list landed in the self-test and nowhere else; this is the
+  sibling call site over the same list, and the first genuine contributed
+  recording would have failed the build. Ninth time a fix has landed at one
+  call site in this project.
+- **`/cn breakdown` claimed a location count it never computed.** It reported
+  every harvested quest as "harvested with location data", where coordinates
+  are only recorded when the client resolved a waypoint — which for a
+  turned-in or off-map quest it does not. The real figure was already being
+  calculated one function away. This is the report whose own header says it
+  exists so the addon never invents an authoritative-looking number.
+- **A breadcrumb quest you have walked past is now reported as gone.** The
+  data schema has documented `breadcrumb` — "skippable and permanently
+  missable" — since 0.43.0, and the addon has carried a block reason for it
+  just as long. Neither had a producer, so a curator following the addon's own
+  schema wrote something that reached nothing. A breadcrumb whose target you
+  have started or finished is removed by the game; telling a completionist to
+  go and find it sends them somewhere for something that is not there.
+- **A curated row written to the addon's own documented schema could lose to
+  another addon's answer.** The data file's header documents `minLevel` and
+  `faction`; the code read `requiresLevel` and `requiresFaction`, which is
+  what `/cn export` emits. So hand-curated rows and harvested rows in the same
+  file gated through different code paths, and one of the two was not treated
+  as authoritative — contradicting the comment three lines above it. Both
+  spellings work now, and both are documented.
+- **`/cn mode leveling` advertised a travel weighting it does not apply.**
+  Its note has always read "weighted toward fast travel" while the profile
+  behind it had no travel weight at all. The sentence is what changed, not the
+  number: giving the profile the weighting it claimed takes a placeless
+  objective below zero, which the suite catches — so the promise had a
+  consequence nobody has measured. `/cn mode fastest` is the one that weights
+  travel, and it is tuned.
+- **`/cn alts`, `/cn provenance` and six stored fields.** The curated count
+  now reports only rows this addon checked itself; the currency store, the
+  progress record and the harvest store between them stop persisting six
+  fields nothing has ever read, and migration 35 removes them from databases
+  that have them.
+
+### Changed
+
+- **Contributing curated quest data is now a real contract.** Rows are
+  validated on arrival — a numeric-string key, a field the addon does not
+  read, a missing record are each refused with a reason rather than stored
+  and silently ignored. Registration reports how many rows landed and how
+  many did not. Every row carries its supplier, so `/cn provenance` reports
+  another addon's rows separately from hand-checked ones rather than counting
+  them as the same thing. Two suppliers claiming one quest is recorded rather
+  than resolved in favour of whoever loaded last. There is a schema version,
+  and a supplier built for a different one is told. Rows registered after
+  login now invalidate the caches they need to.
+- **The curated quest sweep is a shortlist rather than a walk of the whole
+  database.** It walked every curated row and asked the eligibility engine
+  about each — which, for a row without gating fields, means a call into every
+  other quest addon you have installed. With one shipped row that was free.
+  With a few thousand it is thousands of cross-addon lookups every two seconds
+  while questing. It is also capped now, like the five providers beside it.
+- **Four registration functions that wrote into nothing are gone.** Recipes,
+  vendors, rares and treasures each had a published registrar, a table, and no
+  reader anywhere in the addon. A supplier using them would have got a
+  successful call and no change to anything a player sees. A published
+  surface either works or is not published.
+- **The offline suite's quest log now contains zone headers, and its daily
+  reset counts down.** The client's log includes header rows and the addon
+  filters them out — a filter that had never once been exercised. The reset
+  API returns a countdown; the test double returned a fixed number whatever
+  the clock said, so the one invariant the reset logic rests on was
+  unobservable. Twenty-first and twenty-second entries in this project's list
+  of defects hidden by a test double simpler than the client.
 
 ## [0.90.0]
 
@@ -66043,7 +66606,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.90.0
+0.91.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -70348,9 +70911,10 @@ mutate "Providers/BlizzardCollections.lua" \
     "        name = name" \
     "every title is printed with the client's padding"
 
+# RE-ANCHORED IN 0.91.0: the gate reads either vocabulary now, through a local.
 mutate "Providers/StaticData.lua" \
-    "        return false, CN.FactionLabel(record.faction) .. \" only\", \"FACTION\"" \
-    "        return false, CN.TokenLabel(record.faction) .. \" only\", \"FACTION\"" \
+    "        return false, CN.FactionLabel(faction) .. \" only\", \"FACTION\"" \
+    "        return false, CN.TokenLabel(faction) .. \" only\", \"FACTION\"" \
     "a faction gate is the one untranslated word on the screen"
 
 mutate "Modules/Warband.lua" \
@@ -70990,6 +71554,139 @@ mutate "Modules/Mounts.lua" \
     "    return token and CN.FactionLabel(token) or nil" \
     "    return token" \
     "the mount tooltip names a faction in English beside translated text"
+
+mutate "Modules/Capture.lua" \
+    "            if not optional[path] then" \
+    "            if true then" \
+    "/cn capture records five probed APIs as gone from the client"
+
+mutate "Modules/Breakdown.lua" \
+    "                    if counts and counts.located then
+                        return counts.located .. \" harvested with a location\"
+                    end" \
+    "                    if false then
+                        return counts.located .. \" harvested with a location\"
+                    end" \
+    "/cn breakdown claims a location count it never computed"
+
+mutate "Modules/Quests.lua" \
+    "        if static.breadcrumb and type(static.unlocks) == \"table\" then" \
+    "        if false and type(static.unlocks) == \"table\" then" \
+    "a breadcrumb you can no longer take is offered as available"
+
+mutate "Modules/Quests.lua" \
+    "                if Quests.IsCompletedByCharacter(targetID)
+                    or Blizzard.IsQuestInLog(targetID) then" \
+    "                if false then" \
+    "a breadcrumb whose target is finished is still offered"
+
+mutate "Modules/Quests.lua" \
+    "        or static.requiresLevel or static.minLevel
+        or static.faction or static.requiresFaction
+        or static.breadcrumb) then" \
+    "        or static.requiresLevel) then" \
+    "a curated row written to the documented schema loses to an external addon"
+
+mutate "Modules/Quests.lua" \
+    "    local pending = CN.Shortlist(\"Quests.Curated\"," \
+    "    local pending = CN.NotAShortlist(\"Quests.Curated\"," \
+    "the whole curated database is walked on every quest log update"
+
+mutate "Modules/Quests.lua" \
+    "    if completed[questID] ~= byCharacter then" \
+    "    if true then" \
+    "re-reading an unchanged quest destroys the curated shortlist"
+
+mutate "Modules/Quests.lua" \
+    "        completed[questID] = byCharacter
+
+        Quests.completionRevision = (Quests.completionRevision or 0) + 1" \
+    "        completed[questID] = byCharacter" \
+    "handing a quest in leaves it in the curated shortlist"
+
+mutate "Providers/StaticData.lua" \
+    "    if type(questID) ~= \"number\" then" \
+    "    if false then" \
+    "a quest row filed under a string key is stored and never matched"
+
+mutate "Providers/StaticData.lua" \
+    "        if not VALID_FIELDS[field] then" \
+    "        if false then" \
+    "a field this addon does not read is accepted and silently discarded"
+
+mutate "Providers/StaticData.lua" \
+    "    record.origin = origin or record.origin or \"curated\"" \
+    "    record.origin = \"curated\"" \
+    "a supplier's rows are recorded as checked by hand"
+
+mutate "Providers/StaticData.lua" \
+    "        table.insert(Static.collisions, {" \
+    "        table.insert({}, {" \
+    "two suppliers claiming one quest is resolved silently"
+
+mutate "Providers/StaticData.lua" \
+    "        Static.revision = Static.revision + 1" \
+    "" \
+    "a row registered late is ignored for the rest of the session"
+
+mutate "Providers/StaticData.lua" \
+    "        if CN.InvalidateCandidates then
+            CN.InvalidateCandidates()
+        end" \
+    "        if false then
+            CN.InvalidateCandidates()
+        end" \
+    "a late registration leaves the ranked list holding the old answer"
+
+mutate "Providers/StaticData.lua" \
+    "    if schemaVersion and schemaVersion ~= Static.schemaVersion then" \
+    "    if false then" \
+    "a supplier built for another schema is never told"
+
+mutate "Providers/StaticData.lua" \
+    "    local faction  = record.faction or record.requiresFaction
+    local minLevel = record.minLevel or record.requiresLevel" \
+    "    local faction  = record.faction
+    local minLevel = record.minLevel" \
+    "a row written in the vocabulary /cn export emits gates through nothing"
+
+mutate "Modules/Contribute.lua" \
+    "        if CN.Static and CN.Static.Count then
+            total, curated = CN.Static.Count()
+        end" \
+    "        if CN.Static and CN.Static.Count then
+            total = CN.Static.Count()
+            curated = total
+        end" \
+    "/cn provenance counts a supplier's rows as checked by hand"
+
+mutate "Modules/Currencies.lua" \
+    "            serial            = serial," \
+    "            serial            = serial,
+            lastSeen          = time()," \
+    "a currency stores a timestamp nothing reads"
+
+mutate "Modules/Progress.lua" \
+    "        store.previousDay    = store.today or 0" \
+    "        store.previousDay    = store.today or 0
+        store.previousDayKey = store.dayKey" \
+    "progress stores a day key nothing reads"
+
+mutate "Modules/Harvest.lua" \
+    "    record.lastSeen = time()" \
+    "    record.lastSeen = time()
+    record.reason = reason" \
+    "a harvest row stores a capture reason nothing reads"
+
+# NOT A MUTATION: `CN.ScoreObjective(objective)` resolves the identical value
+# through the database metamethod, so no fixture can tell the two apart -- the
+# difference is cost, not behaviour. The contract is asserted in the harness
+# where it is written instead.
+
+mutate "Scoring.lua" \
+    "        note    = \"Quests and exploration only, with quests weighted up.\"," \
+    "        note    = \"Quests and exploration only, weighted toward fast travel.\"," \
+    "/cn mode leveling advertises a weighting its profile does not carry"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -72793,9 +73490,20 @@ C_SuperTrack = {
 -- Overrides for the completion answer, set by CN_TEST_TurnInQuest.
 CN_TEST_COMPLETED = {}
 
+-- THE CLIENT'S LOG HAS ZONE HEADERS IN IT. 0.91.0.
+--
+-- `C_QuestLog.GetNumQuestLogEntries` counts header rows as well as quests and
+-- `GetInfo` returns `isHeader = true, questID = 0` for them.
+-- `Blizzard.GetQuestLogEntries` filters on exactly that -- and with a fixture
+-- containing no headers, the filter had never been exercised once.
+--
+-- Twenty-first entry in this project's list of defects a stub simpler than
+-- the client made invisible.
 local questLog = {
+    { questID = 0,    title = "Khaz Algar",             isHeader = true },
     { questID = 8237, title = "Vanquish the Invaders!", isHeader = false },
     { questID = 9001, title = "Test Quest Alpha",       isHeader = false },
+    { questID = 0,    title = "Dungeon",                isHeader = true },
     { questID = 9002, title = "Test Quest Beta",        isHeader = false },
 }
 
@@ -74292,15 +75000,41 @@ worldQuests = {   -- global on purpose: C_TaskQuest above closes over it
 -- This returned a constant, so `Progress.CurrentDayKey`'s no-answer branch --
 -- which flipped the day key, moved today's count into yesterday, and
 -- restarted today at one -- was unreachable from the suite.
+-- AND IT COUNTS DOWN. 0.91.0.
+--
+-- This handed back a fixed number of seconds whatever the clock said, so
+-- `Progress.CurrentDayKey`'s `knownResetAt = now + seconds` drifted forward
+-- with `time()` instead of standing still -- and standing still is the exact
+-- invariant the 0.61.0 fix rests on: "the reset instant is an ABSOLUTE time
+-- and it does not move". The roll-forward loop beside it was unreachable
+-- while the client was answering, and a genuine reset crossing could not be
+-- expressed by any test.
+--
+-- Setting `CN_TEST_DAILY_RESET_IN` re-anchors, so every existing test that
+-- assigns it reads the same first answer it always did.
+CN_TEST_DAILY_RESET_AT = nil
+
 function GetQuestResetTime()
     if CN_TEST_DAILY_RESET_IN == nil then
         return nil
     end
 
-    return CN_TEST_DAILY_RESET_IN
+    if CN_TEST_DAILY_RESET_AT == nil then
+        CN_TEST_DAILY_RESET_AT = time() + CN_TEST_DAILY_RESET_IN
+    end
+
+    return CN_TEST_DAILY_RESET_AT - time()
 end
 
-CN_TEST_DAILY_RESET_IN = 5 * 3600
+-- Re-anchors the absolute instant whenever a test sets the countdown, which
+-- is how every existing caller expresses "the reset is N seconds away".
+function CN_TEST_SetDailyReset(seconds)
+    CN_TEST_DAILY_RESET_IN = seconds
+
+    CN_TEST_DAILY_RESET_AT = seconds and (time() + seconds) or nil
+end
+
+CN_TEST_SetDailyReset(5 * 3600)
 
 C_DateAndTime = {
     GetSecondsUntilWeeklyReset = function() return 3 * 86400 end,
@@ -86350,7 +87084,7 @@ end)()
     progress.knownResetAt    = nil
     progress.resetIsEstimate = nil
 
-    CN_TEST_DAILY_RESET_IN = 3600 * 20
+    CN_TEST_SetDailyReset(3600 * 20)
 
     local known = progress.CurrentDayKey()
 
@@ -86362,7 +87096,7 @@ end)()
     assert(instant, "the client's answer is remembered as an instant")
 
     -- The loading screen: the client answers nothing.
-    CN_TEST_DAILY_RESET_IN = nil
+    CN_TEST_SetDailyReset(nil)
 
     for _ = 1, 10 do
         assert(progress.CurrentDayKey() == known,
@@ -86375,7 +87109,7 @@ end)()
     end
 
     -- And it comes back the same when the client speaks again.
-    CN_TEST_DAILY_RESET_IN = 3600 * 20
+    CN_TEST_SetDailyReset(3600 * 20)
 
     assert(progress.CurrentDayKey() == known,
         "and the day is unchanged when the client answers again")
@@ -86391,7 +87125,7 @@ end)()
     progress.knownResetAt    = nil
     progress.resetIsEstimate = nil
 
-    CN_TEST_DAILY_RESET_IN = nil
+    CN_TEST_SetDailyReset(nil)
 
     local store = progress.Store()
 
@@ -86424,7 +87158,7 @@ end)()
     local now      = time()
     local estimate = math.floor((now + 43200) / 86400)
 
-    CN_TEST_DAILY_RESET_IN = ((estimate + 1) * 86400) - now + 60
+    CN_TEST_SetDailyReset(((estimate + 1) * 86400) - now + 60)
 
     assert(math.floor((now + CN_TEST_DAILY_RESET_IN) / 86400) ~= estimate,
         "the fixture must actually move the day key")
@@ -86461,7 +87195,7 @@ end)()
     -- (A NEGATIVE value would not do it -- the provider requires seconds > 0
     -- and treats anything else as no answer, which is the carry-forward path,
     -- not a rollover.)
-    CN_TEST_DAILY_RESET_IN = CN_TEST_DAILY_RESET_IN + 86400
+    CN_TEST_SetDailyReset(CN_TEST_DAILY_RESET_IN + 86400)
 
     progress.NoteCompleted(9003)
 
@@ -86481,7 +87215,7 @@ end)()
 
     local staleKey = store.dayKey
 
-    CN_TEST_DAILY_RESET_IN = CN_TEST_DAILY_RESET_IN + 86400
+    CN_TEST_SetDailyReset(CN_TEST_DAILY_RESET_IN + 86400)
 
     progress.NoteCompleted(9004)
 
@@ -97142,33 +97876,166 @@ print("\nThe curated data accessors:")
         "and a row without one says nothing rather than guessing")
 
     ------------------------------------------------------------
-    -- AND THE OTHER FOUR CURATED TABLES, PLUS THE COMMUNITY ONE.
-    --
-    -- Recipes, vendors, rares and treasures each have a registration function
-    -- and a shipped-data file that is currently empty, so the registrars were
-    -- never called and `Static.Count()` -- the number `/cn dbsize` prints --
-    -- had never been computed. A registrar nothing has run is a registrar
-    -- that will be wrong the day somebody fills the table in.
+    -- A PUBLISHED SURFACE EITHER WORKS OR IS NOT PUBLISHED. 0.91.0.
     ------------------------------------------------------------
-    Static.RegisterRecipe(88001, { itemID = 88001, profession = "Alchemy" })
-    Static.RegisterVendor(88002, { name = "Test Vendor", mapID = 2112 })
-    Static.RegisterRare(88003, { name = "Test Rare", mapID = 2112 })
-    Static.RegisterTreasure(88004, { name = "Test Treasure", mapID = 2112 })
+    -- `Static.recipes`, `Static.vendors`, `Static.rares` and
+    -- `Static.treasures` were declared here, written by four published
+    -- registrars, and read by nothing anywhere in the tree -- Vendors and
+    -- Rares each keep their own account store. `Static.Count()` returned all
+    -- five sizes and had no caller at all, while this test's own note called
+    -- it "the number /cn dbsize prints", which `/cn dbsize` does not.
+    --
+    -- Harmless while only this addon read the surface. Not harmless now that
+    -- a companion addon reads it as documentation: a supplier curating rare
+    -- and treasure locations would get a successful call, a non-zero count,
+    -- and no change to anything a player ever sees.
+    for _, name in ipairs({ "RegisterRecipe", "RegisterVendor",
+                            "RegisterRare", "RegisterTreasure" }) do
+        assert(Static[name] == nil,
+            "no registrar is published for a table nothing reads: " .. name)
+    end
 
-    local quests, recipes, staticVendors, staticRares, treasures = Static.Count()
+    for _, name in ipairs({ "recipes", "vendors", "rares", "treasures" }) do
+        assert(Static[name] == nil,
+            "nor the table itself: " .. name)
+    end
+
+    local quests, mine = Static.Count()
 
     assert(quests > 0, "the quest rows registered above are counted")
-    assert(recipes >= 1 and staticVendors >= 1 and staticRares >= 1 and treasures >= 1,
-        "and so is every other table: " .. recipes .. ", " .. staticVendors
-        .. ", " .. staticRares .. ", " .. treasures)
 
-    -- Registration refuses what it cannot use, rather than storing a shape
-    -- that will fail at read time.
-    Static.RegisterQuest(nil, { name = "No id" })
-    Static.RegisterQuest(88005, nil)
+    assert(mine >= 0 and mine <= quests,
+        "and how many of them this addon shipped itself: " .. tostring(mine))
 
-    assert(Static.GetQuest(88005) == nil,
+    ------------------------------------------------------------
+    -- REGISTRATION REFUSES WHAT IT CANNOT USE, AND SAYS SO.
+    ------------------------------------------------------------
+    -- Before 0.91.0 this checked only that the id was truthy and the record
+    -- was a table, told the caller nothing, and threw on a nil argument where
+    -- the sibling registrar returned zero. A supplier generating its file
+    -- from JSON -- where every key is a string -- got total silence.
+    local okNil, whyNil = Static.RegisterQuest(nil, { name = "No id" })
+
+    assert(okNil == false and whyNil, "a row with no id is refused, with a "
+        .. "reason: " .. tostring(whyNil))
+
+    assert(Static.RegisterQuest("88005", { name = "String key" }) == false,
+        "a numeric STRING is not a quest id; every reader indexes with a "
+        .. "number, so such a row would be stored and never matched")
+
+    assert(Static.GetQuest("88005") == nil and Static.GetQuest(88005) == nil,
+        "and it is not stored under either spelling")
+
+    assert(Static.RegisterQuest(88005, nil) == false,
         "a row with no record is not a row")
+
+    local okField = Static.RegisterQuest(88006,
+        { name = "Typo", mapId = 94 })
+
+    assert(okField == false,
+        "a field this addon does not read is refused rather than discarded "
+        .. "silently, so a supplier finds out at build time")
+
+    ------------------------------------------------------------
+    -- AND A BULK REGISTRATION REPORTS WHAT LANDED.
+    ------------------------------------------------------------
+    local landed, rejected = Static.RegisterQuests({
+        [88007] = { name = "Good row" },
+        ["bad"] = { name = "String key" },
+        [88008] = { name = "Also good", nonsense = true },
+    }, "TestSupplier")
+
+    assert(landed == 1 and rejected == 2,
+        "the caller is told how many rows landed and how many did not: "
+        .. tostring(landed) .. " / " .. tostring(rejected))
+
+    assert(Static.RegisterQuests(nil) == 0,
+        "and a nil argument returns zero rather than throwing, which is what "
+        .. "the community registrar beside it has always done")
+
+    ------------------------------------------------------------
+    -- PROVENANCE SURVIVES REGISTRATION.
+    ------------------------------------------------------------
+    -- The curated/observed distinction is the whole safety model of this
+    -- pipeline, and `Data/Community.lua` says there is no getting it back
+    -- afterwards. A row that cannot say where it came from cannot preserve
+    -- it -- and `/cn provenance` counted the whole table under the headline
+    -- "each one checked by hand".
+    assert(Static.GetQuest(88007).origin == "TestSupplier",
+        "a row remembers who supplied it: "
+        .. tostring(Static.GetQuest(88007).origin))
+
+    assert(Static.GetQuest(77001).origin == "curated",
+        "and a row with no named supplier is this addon's own")
+
+    local origins = Static.Origins()
+
+    assert(origins.TestSupplier == 1 and (origins.curated or 0) > 0,
+        "and the counts are readable per supplier")
+
+    -- A COLLISION IS RECORDED, not silently resolved in favour of whoever
+    -- loaded last. `CN:RegisterCommand` has modelled this since it was
+    -- written.
+    local clashes = #Static.collisions
+
+    Static.RegisterQuest(88007, { name = "Second claim" }, "OtherSupplier")
+
+    assert(#Static.collisions == clashes + 1,
+        "two suppliers claiming one quest is recorded rather than hidden")
+
+    assert(Static.collisions[#Static.collisions].questID == 88007,
+        "with the quest that was claimed twice")
+
+    ------------------------------------------------------------
+    -- AND A SCHEMA A SUPPLIER WAS NOT BUILT FOR IS REPORTED.
+    ------------------------------------------------------------
+    assert(type(Static.schemaVersion) == "number",
+        "the data schema has a version an external supplier can test")
+
+    local errorModule = CN:GetModule("Errors")
+
+    local noticesBefore = #(errorModule.All and errorModule.All() or {})
+
+    Static.RegisterQuests({ [88009] = { name = "From the future" } },
+        "FutureSupplier", Static.schemaVersion + 1)
+
+    assert(#(errorModule.All and errorModule.All() or {}) > noticesBefore,
+        "a supplier built for another schema is told once, rather than "
+        .. "contributing fields that are silently discarded")
+
+    ------------------------------------------------------------
+    -- BOTH SPELLINGS OF ONE GATE.
+    ------------------------------------------------------------
+    -- The data file's header documents `faction` and `minLevel`; the
+    -- eligibility checker has always read `requiresFaction` and
+    -- `requiresLevel`, and `/cn export` has always EMITTED those -- so
+    -- harvested rows and hand-curated rows in the same file gated through
+    -- different code.
+    Static.RegisterQuests({
+        [88020] = { name = "Exported gate", requiresLevel = 70,
+                    requiresFaction = "Alliance" },
+    }, "TestSupplier")
+
+    local exportedOk, exportedWhy =
+        Static.QuestEligibility(88020, { faction = "Alliance", level = 60 })
+
+    assert(exportedOk == false and exportedWhy and exportedWhy:find("70", 1, true),
+        "a row written in the vocabulary /cn export emits gates the same way "
+        .. "as one written in the documented vocabulary: "
+        .. tostring(exportedWhy))
+
+    ------------------------------------------------------------
+    -- AND THE TABLE IS LEFT AS IT WAS FOUND.
+    ------------------------------------------------------------
+    -- `bench.lua` runs this whole file before it measures anything, and the
+    -- Quests provider walks the curated table on every collect. A test row
+    -- left behind is a row the benchmark prices, on every release, forever --
+    -- which is how a suite starts reporting a regression that belongs to
+    -- itself.
+    for _, id in ipairs({ 77001, 77002, 77003, 77004, 88005, 88006, 88007,
+                          88008, 88009, 88020 }) do
+        Static.quests[id] = nil
+    end
 
     ------------------------------------------------------------
     -- THE COMMUNITY TABLE, which is the weakest of the three prerequisite
@@ -108417,6 +109284,677 @@ end)()
         .. table.concat(offenders, "\n"))
 
     print("  no window list pads a number with spaces")
+end)()
+
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn capture DOES NOT RECORD FIVE APIS AS GONE FROM THE CLIENT.
+    ------------------------------------------------------------
+    -- `SelfTest.optionalApi` names five APIs this addon PROBES for and falls
+    -- back from, and it exists because their absence made the first check in
+    -- `/cn selftest` report FAIL on every Retail client, permanently. The fix
+    -- landed in the self-test and nowhere else. This is the sibling call site
+    -- over the same list.
+    --
+    -- The offline suite asserts that a real recording has no missing names,
+    -- so the first genuine contribution would have hard-failed the build --
+    -- and printed five "the client has no GetItemInfo" lines on the way.
+    local capture = CN:GetModule("Capture")
+
+    local selftest = CN:GetModule("SelfTest")
+
+    assert(selftest and selftest.optionalApi,
+        "the exemption list exists")
+
+    local collect
+
+    for _, definition in ipairs(CN.captures or {}) do
+        if definition.name == "apiSurface" then
+            collect = definition.run
+        end
+    end
+
+    assert(collect, "the api surface capture is registered")
+
+    local result = collect()
+
+    assert(type(result) == "table",
+        "the api surface capture answers")
+
+    for path in pairs(selftest.optionalApi) do
+        for _, missing in ipairs(result.missing or {}) do
+            assert(missing ~= path,
+                "an API this addon only probes for is not recorded as gone "
+                .. "from the client: " .. path)
+        end
+    end
+
+    assert(result.examined < #CN.apiSurface,
+        "and the count reported is what was actually checked: "
+        .. tostring(result.examined) .. " of " .. tostring(#CN.apiSurface))
+
+    -- The two call sites read one list, so a sixth exemption cannot land in
+    -- one and not the other.
+    local source = CN_TEST_ReadAddonFile("Modules/Capture.lua")
+
+    assert(source and source:find("selftest.optionalApi", 1, true),
+        "the capture asks the self-test rather than keeping its own copy")
+
+    print("  /cn capture honours the same API exemptions the self-test does")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn breakdown DOES NOT CLAIM A COUNT IT NEVER COMPUTED.
+    ------------------------------------------------------------
+    -- The quests row said "N harvested with location data" where N was EVERY
+    -- harvested row. Coordinates are written only when the client resolved a
+    -- waypoint, which for a turned-in or off-map quest it does not --
+    -- `Harvest.BuildExport`'s default mode exists because most rows have
+    -- none. `Harvest.Summary` already returns the real figure.
+    -- A ROW WITH NO COORDINATES, so the two numbers are demonstrably
+    -- different. If every row in the fixture happened to be located, the
+    -- assertion below would hold of the defect it exists for -- backlog rule
+    -- 87, in the other direction.
+    CN.Account("questHarvest")[970991] = { requires = { 1 } }
+
+    local located = CN:GetModule("Harvest").Summary()
+
+    assert(located and located.located ~= nil,
+        "the harvester reports how many rows carry a location")
+
+    local total = CN.CountKeys(CN.Account("questHarvest"))
+
+    assert(located.located < total,
+        "the fixture holds a harvested row with no coordinates: "
+        .. tostring(located.located) .. " of " .. tostring(total))
+
+    local breakdown = CN:GetModule("Breakdown")
+
+    local sentence
+
+    for _, category in ipairs(breakdown.categories or {}) do
+        local ok, row = pcall(category.report)
+
+        if ok and type(row) == "table" then
+            for _, reason in ipairs(row.reasons or {}) do
+                if reason:find("harvested", 1, true) then
+                    sentence = reason
+                end
+            end
+        end
+    end
+
+    assert(sentence, "the quests row still says something about harvesting")
+
+    if located.located ~= total then
+        assert(not sentence:find(tostring(total) .. " harvested with", 1, true),
+            "and does not report the whole store as located: " .. sentence)
+    end
+
+    assert(sentence:find(tostring(located.located), 1, true),
+        "it reports the number that was measured: " .. sentence)
+
+    assert(not sentence:find(tostring(total), 1, true),
+        "and not the size of the whole store: " .. sentence)
+
+    CN.Account("questHarvest")[970991] = nil
+
+    print("  /cn breakdown does not claim a count it never computed")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A BREADCRUMB YOU HAVE WALKED PAST IS GONE.
+    ------------------------------------------------------------
+    -- `Data/Quests.lua` has documented `breadcrumb` -- "skippable and
+    -- permanently missable" -- since 0.43.0, and `CN.blockReasons` has
+    -- carried `BREADCRUMB_SKIPPED` just as long. Neither had a producer: the
+    -- field had zero references in the tree, so a curator following the
+    -- addon's own schema wrote something that reached nothing.
+    --
+    -- Sending a completionist to find a quest that is not there is the worst
+    -- kind of wrong answer this addon can give.
+    local Static = CN.Static
+
+    Static.RegisterQuests({
+        [88030] = { name = "Go and see the captain",
+                    breadcrumb = true, unlocks = { 88031 } },
+        [88031] = { name = "The captain's business" },
+        [88032] = { name = "Untargeted breadcrumb", breadcrumb = true },
+    }, "TestSupplier")
+
+    local states = CN.objectiveStates
+
+    -- The target is untouched: the breadcrumb is still there to take.
+    local state = CN.Explain(CN.objectiveTypes.QUEST, 88030)
+
+    assert(state ~= states.UNOBTAINABLE,
+        "a breadcrumb whose target you have not started is available: "
+        .. tostring(state))
+
+    -- The target is in the log: the game has already removed the breadcrumb.
+    -- The target is finished: the game removed the breadcrumb long ago.
+    CN_TEST_COMPLETED[88031] = true
+
+    local skipped, reason = CN.Explain(CN.objectiveTypes.QUEST, 88030)
+
+    assert(skipped == states.UNOBTAINABLE,
+        "a breadcrumb whose target you have started is gone, not available: "
+        .. tostring(skipped))
+
+    assert(reason == CN.blockReasons.BREADCRUMB_SKIPPED,
+        "and says why in the token that has existed for it since 0.43.0: "
+        .. tostring(reason))
+
+    CN_TEST_COMPLETED[88031] = nil
+
+    -- A breadcrumb with no known target is left alone rather than guessed at.
+    assert(CN.Explain(CN.objectiveTypes.QUEST, 88032) ~= states.UNOBTAINABLE,
+        "a breadcrumb with no `unlocks` is not assumed gone")
+
+    -- AND EVERY FIELD THE DATA FILE DOCUMENTS REACHES SOMETHING.
+    local header = CN_TEST_ReadAddonFile("Data/Quests.lua")
+
+    local documented = {}
+
+    for field in string.gmatch(header, "\n%-%-   (%w+)") do
+        documented[field] = true
+    end
+
+    documented["x"] = nil
+    documented["turnInX"] = nil
+    documented["turnInY"] = nil
+
+    for field in pairs(documented) do
+        assert(CN.Static.validFields[field],
+            "a field the data file's own header documents is one the addon "
+            .. "reads: " .. field)
+    end
+
+    assert(documented.breadcrumb, "including the one this test is about")
+
+    assert(documented.expansion == nil,
+        "and `expansion`, which had no reader anywhere, is no longer offered "
+        .. "to curators")
+
+    -- A TEST THAT LEAVES THE WORLD CHANGED breaks a later one for a reason
+    -- nobody can see from either of them -- and `bench.lua` runs this whole
+    -- file before it measures anything, so a row left in the curated table
+    -- is a row the benchmark walks on every collect.
+    for _, id in ipairs({ 88030, 88031, 88032 }) do
+        CN.Static.quests[id] = nil
+    end
+
+    print("  a breadcrumb you have walked past is gone")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CURATED SWEEP IS A SHORTLIST, NOT A WALK OF THE DATABASE.
+    ------------------------------------------------------------
+    -- The Quests provider walked every curated row and called `CN.Explain` on
+    -- each; `Explain` reaches `Quests.GetRecord`, which for a row without
+    -- gating fields pcalls `IsAvailable` AND `GetQuestData` on every
+    -- registered external addon. The provider declares `QUEST_LOG_UPDATE` at
+    -- a two-second cooldown.
+    --
+    -- With one shipped row that cost nothing. With a few thousand curated
+    -- rows and AllTheThings installed it is thousands of cross-addon lookups
+    -- every two seconds while questing -- which is exactly what a companion
+    -- data addon creates.
+    local Static = CN.Static
+
+    local builds = 0
+
+    local realCompleted = CN.Blizzard.IsQuestCompletedByCharacter
+
+    for id = 88100, 88140 do
+        Static.RegisterQuest(id, { name = "Bulk " .. id }, "TestSupplier")
+    end
+
+    CN.ClearShortlist("Quests.Curated")
+
+    CN.InvalidateCandidates()
+
+    CN.candidateProviders["Quests"].fn()
+
+    local _, revision = CN.ShortlistState("Quests.Curated")
+
+    assert(revision, "the curated rows are held as a shortlist")
+
+    CN.candidateProviders["Quests"].fn()
+
+    local _, again = CN.ShortlistState("Quests.Curated")
+
+    assert(again == revision,
+        "which is not rebuilt when nothing has changed: "
+        .. tostring(revision) .. " -> " .. tostring(again))
+
+    -- REGISTERING A ROW LATE MOVES IT. A companion addon that registers on
+    -- demand would otherwise leave the shortlist, the aggregate cache and the
+    -- ranked list holding the pre-registration answer for the session.
+    Static.RegisterQuests({ [88141] = { name = "Late arrival" } },
+        "TestSupplier")
+
+    CN.candidateProviders["Quests"].fn()
+
+    local _, moved = CN.ShortlistState("Quests.Curated")
+
+    assert(moved ~= revision,
+        "a row registered after the list was built invalidates it: "
+        .. tostring(revision) .. " -> " .. tostring(moved))
+
+    -- AND THE RANKED LIST TOO, not only the shortlist. A companion addon
+    -- registering on demand would otherwise leave the aggregate candidate
+    -- cache and the ranked list holding the pre-registration answer for the
+    -- whole session -- which is what `Contribute.Import` calls this for.
+    local invalidated = 0
+
+    local realInvalidate = CN.InvalidateCandidates
+
+    -- The unlock index also invalidates, so it is silenced for the count --
+    -- otherwise this assertion holds on a registrar that invalidates nothing
+    -- itself, which is the defect it exists for.
+    local unlockIndex = CN:GetModule("Harvest")
+
+    local realUnlocks = unlockIndex.NoteUnlocksChanged
+
+    unlockIndex.NoteUnlocksChanged = function() end
+
+    CN.InvalidateCandidates = function(...)
+        invalidated = invalidated + 1
+
+        return realInvalidate(...)
+    end
+
+    Static.RegisterQuests({ [88142] = { name = "Later still" } },
+        "TestSupplier")
+
+    CN.InvalidateCandidates = realInvalidate
+    unlockIndex.NoteUnlocksChanged = realUnlocks
+
+    assert(invalidated > 0,
+        "registering a row invalidates the aggregate rather than leaving the "
+        .. "pre-registration answer in place for the session -- which is what "
+        .. "`Contribute.Import` calls this for")
+
+    -- AND NOT WHEN NOTHING LANDED, because a refused batch has changed no
+    -- answer and throwing the caches away would be pure cost.
+    invalidated = 0
+
+    unlockIndex.NoteUnlocksChanged = function() end
+
+    CN.InvalidateCandidates = function(...)
+        invalidated = invalidated + 1
+
+        return realInvalidate(...)
+    end
+
+    Static.RegisterQuests({ ["bad"] = { name = "Refused" } }, "TestSupplier")
+
+    CN.InvalidateCandidates = realInvalidate
+    unlockIndex.NoteUnlocksChanged = realUnlocks
+
+    assert(invalidated == 0,
+        "and a batch where nothing landed invalidates nothing")
+
+    -- AND SO DOES FINISHING ONE, through the one function that re-reads the
+    -- completed set rather than at three of its seven call sites.
+    local wasAt = CN:GetModule("Quests").completionRevision
+
+    CN_TEST_COMPLETED[88100] = true
+
+    CN:GetModule("Quests").RecordStatus(88100)
+
+    assert(CN:GetModule("Quests").completionRevision > wasAt,
+        "handing a quest in moves the revision the shortlist is keyed on")
+
+    -- BUT AN IDEMPOTENT RE-READ DOES NOT. `Quests.ScanKnown` walks every
+    -- discovered quest through the same function; a bump per read would
+    -- destroy the cache at the worst possible moment.
+    local settled = CN:GetModule("Quests").completionRevision
+
+    CN:GetModule("Quests").RecordStatus(88100)
+    CN:GetModule("Quests").RecordStatus(88100)
+
+    assert(CN:GetModule("Quests").completionRevision == settled,
+        "re-reading an unchanged quest does not: " .. tostring(settled)
+        .. " -> " .. tostring(CN:GetModule("Quests").completionRevision))
+
+    CN_TEST_COMPLETED[88100] = nil
+
+    for id = 88100, 88142 do
+        Static.quests[id] = nil
+    end
+
+    CN.ClearShortlist("Quests.Curated")
+    CN.InvalidateCandidates()
+
+    ------------------------------------------------------------
+    -- AND /cn provenance SAYS WHOSE ROWS THEY ARE.
+    ------------------------------------------------------------
+    -- This counted every row in the curated table under the headline "each
+    -- one checked by hand", and the table has been writable by any addon
+    -- since it was published. The one command whose whole job is to expose
+    -- unchecked claims would have mislabelled a companion addon's rows as
+    -- hand-checked the moment one existed.
+    Static.RegisterQuests({
+        [88150] = { name = "Supplied row one" },
+        [88151] = { name = "Supplied row two" },
+    }, "TestSupplier")
+
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("provenance")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    local total, curated = Static.Count()
+
+    assert(total > curated,
+        "the fixture holds rows from a supplier as well as this addon's own")
+
+    assert(text:find("checked by hand: " .. curated, 1, true),
+        "the hand-checked count is this addon's own rows, not the size of "
+        .. "the table:\n" .. text)
+
+    assert(not text:find("checked by hand: " .. total, 1, true),
+        "and never the whole table:\n" .. text)
+
+    assert(text:find("TestSupplier", 1, true),
+        "and the supplier is named, under its own heading:\n" .. text)
+
+    for id = 88150, 88151 do
+        Static.quests[id] = nil
+    end
+
+    ------------------------------------------------------------
+    -- AND A ROW IN THE DOCUMENTED VOCABULARY WINS, LIKE ONE IN THE OTHER.
+    ------------------------------------------------------------
+    -- `Quests.GetRecord` returns static data first "because it is the only
+    -- source this addon controls and ships" -- and it tested `requiresLevel`,
+    -- which is what `/cn export` emits, not `minLevel`, which is what the
+    -- data file's header documents. So a row written to the addon's OWN
+    -- schema was not treated as authoritative and could lose to an external
+    -- addon's answer.
+    Static.RegisterQuests({
+        [88160] = { name = "Documented gate", minLevel = 70 },
+        [88161] = { name = "Exported gate",   requiresLevel = 70 },
+    }, "TestSupplier")
+
+    local questModule = CN:GetModule("Quests")
+
+    -- AN EXTERNAL ADDON THAT ANSWERS, because without one the fallthrough at
+    -- the bottom of `GetRecord` returns the static row regardless and the
+    -- assertion holds of the defect it exists for.
+    CN.RegisterQuestDataProvider("TestExternal", {
+        IsAvailable  = function() return true end,
+        GetQuestData = function(questID)
+            if questID == 88160 or questID == 88161 then
+                return { name = "From an external addon",
+                         requires = { 99999 } }
+            end
+
+            return nil
+        end,
+    })
+
+    for _, questID in ipairs({ 88160, 88161 }) do
+        local record, source = questModule.GetRecord(questID)
+
+        assert(record and source == "static",
+            "a curated row beats an external addon's answer whichever of the "
+            .. "two documented spellings it gates on: " .. questID .. " -> "
+            .. tostring(source))
+
+        assert(record.name ~= "From an external addon",
+            "and it is the curated row that comes back: "
+            .. tostring(record.name))
+    end
+
+    CN.questDataProviders["TestExternal"] = nil
+
+    Static.quests[88160] = nil
+    Static.quests[88161] = nil
+
+    print("  the curated sweep is a shortlist, not a walk of the database")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- SIX MORE FIELDS NOTHING READS ARE NOT STORED.
+    ------------------------------------------------------------
+    -- `currencies.lastSeen` is the seventh store to carry this field with no
+    -- reader, and `Modules/Currencies.lua`'s own header said so while the
+    -- write survived four separate sweeps. `progress.previousDayKey` and
+    -- `bestDay` sat beside `progress.total`, which migration 29 removed. The
+    -- three harvest fields are on a store capped at two thousand rows.
+    CN:GetModule("Currencies").Scan()
+
+    for id, record in pairs(CN.Account("currencies") or {}) do
+        assert(type(record) ~= "table" or record.lastSeen == nil,
+            "account currency " .. tostring(id) .. " stores no timestamp")
+    end
+
+    for id, record in pairs((CN.character and CN.character.currencies) or {}) do
+        assert(type(record) ~= "table" or record.lastSeen == nil,
+            "character currency " .. tostring(id) .. " stores no timestamp")
+    end
+
+    for questID, record in pairs(CN.Account("questHarvest")) do
+        if type(record) == "table" then
+            for _, field in ipairs({ "observedLevel", "requiresFrom",
+                                     "reason" }) do
+                assert(record[field] == nil,
+                    "harvest row " .. tostring(questID)
+                    .. " stores no " .. field)
+            end
+        end
+    end
+
+    -- FORCE THE ROLLOVER, which is the branch that wrote the day key. A
+    -- fixture that never crosses a day boundary asserts about a line that
+    -- never ran.
+    local progressModule = CN:GetModule("Progress")
+
+    local held = CN.character.progress or {}
+
+    CN.character.progress = held
+
+    held.dayKey = "not-today"
+    held.today  = 7
+
+    progressModule.RollDay(held)
+
+    assert(held.dayKey ~= "not-today",
+        "the rollover branch ran: " .. tostring(held.dayKey))
+
+    assert(held.previousDay == 7,
+        "and moved yesterday's count where the reader looks for it: "
+        .. tostring(held.previousDay))
+
+    for _, field in ipairs({ "previousDayKey", "bestDay" }) do
+        assert(held[field] == nil,
+            "progress stores no " .. field .. ": " .. tostring(held[field]))
+    end
+
+    -- AND THE MIGRATION REMOVES THEM FROM A DATABASE THAT HAS THEM.
+    local aged = {
+        version = 35,
+        account = {
+            currencies   = { [3001] = { quantity = 5, lastSeen = 1 } },
+            questHarvest = { [4242] = { requires = { 1 }, observedLevel = 60,
+                                        requiresFrom = { "ATT" },
+                                        reason = "login" } },
+        },
+        characters = {
+            ["Someone-Realm"] = {
+                currencies = { [3002] = { quantity = 7, lastSeen = 1 } },
+                progress   = { today = 3, previousDayKey = "x",
+                               bestDay = "y", best = 9 },
+            },
+        },
+    }
+
+    CN.RunMigrations(aged)
+
+    assert(aged.account.currencies[3001].lastSeen == nil
+        and aged.account.currencies[3001].quantity == 5,
+        "the account currency loses the field and keeps the balance")
+
+    assert(aged.characters["Someone-Realm"].currencies[3002].lastSeen == nil,
+        "and so does the character half, which holds the larger share")
+
+    local harvested = aged.account.questHarvest[4242]
+
+    assert(harvested.observedLevel == nil and harvested.requiresFrom == nil
+        and harvested.reason == nil and harvested.requires,
+        "the harvest row loses three fields and keeps its evidence")
+
+    local progress = aged.characters["Someone-Realm"].progress
+
+    assert(progress.previousDayKey == nil and progress.bestDay == nil
+        and progress.best == 9,
+        "and progress loses two and keeps the number it prints")
+
+    print("  six more fields nothing reads are not stored")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MODE'S NOTE DESCRIBES THE PROFILE IT SELECTS.
+    ------------------------------------------------------------
+    -- `/cn mode leveling` read "weighted toward fast travel" while its
+    -- profile had a `types` table and no `weights` table at all, so
+    -- `EffectiveWeights` returned the default travel cost unchanged. The note
+    -- is printed by `/cn mode leveling`, by bare `/cn mode` and by
+    -- `/cn status`.
+    for name, mode in pairs(CN.modes) do
+        local note = mode.note or ""
+
+        if note:lower():find("travel", 1, true) then
+            local selected = CN.priorityProfiles[mode.profile] or {}
+
+            local weights = selected.weights or {}
+
+            assert(weights.travelCost or weights.estimatedTime,
+                "the mode named " .. name .. " claims a travel weighting its "
+                .. "profile does not carry: " .. note)
+        end
+    end
+
+    -- The two that DO weight travel still say so somewhere reachable.
+    assert(CN.priorityProfiles.fastest.weights.travelCost < -1.0,
+        "and the profile that does weight travel still does")
+
+    -- AND THE RANKING RESOLVES THE MODE ONCE, NOT ONCE PER CANDIDATE.
+    --
+    -- `CN.Settings()` goes through the database's `__index`, which resolves
+    -- the override table and the account settings on every read. The value is
+    -- identical either way, so no fixture can tell the difference -- which is
+    -- exactly why the contract is asserted where it is written.
+    local scoring = CN_TEST_ReadAddonFile("Scoring.lua")
+
+    assert(scoring and scoring:find("CN.ScoreObjective(objective, mode)", 1,
+            true),
+        "the rank loop passes the mode it has already computed")
+
+    assert(scoring:find("function CN.ScoreObjective(objective, mode)", 1, true),
+        "and the scorer takes it")
+
+    -- Still correct when nobody passes one, which is every other caller.
+    local alone = CN.ScoreObjective({ type = CN.objectiveTypes.QUEST,
+        id = 970993, completionValue = 6 })
+
+    assert(type(alone) == "number",
+        "a caller that does not know the mode still gets a score: "
+        .. tostring(alone))
+
+    print("  a mode's note describes the profile it selects")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE QUEST LOG HAS HEADERS IN IT, AND THEY ARE NOT QUESTS.
+    ------------------------------------------------------------
+    -- `C_QuestLog.GetNumQuestLogEntries` counts zone-header rows as well as
+    -- quests, and `GetInfo` returns `isHeader = true, questID = 0` for them.
+    -- `Blizzard.GetQuestLogEntries` filters on exactly that -- and with a
+    -- fixture containing no headers the filter had never been exercised once.
+    local entries = CN.Blizzard.GetQuestLogEntries()
+
+    assert(#entries > 0, "the log answers")
+
+    for _, entry in ipairs(entries) do
+        assert(entry.questID and entry.questID ~= 0,
+            "a zone header is not a quest: " .. tostring(entry.title))
+
+        assert(entry.isHeader ~= true,
+            "and is filtered out rather than carried: "
+            .. tostring(entry.title))
+    end
+
+    local headers = 0
+
+    for index = 1, C_QuestLog.GetNumQuestLogEntries() do
+        local info = C_QuestLog.GetInfo(index)
+
+        if info and info.isHeader then
+            headers = headers + 1
+        end
+    end
+
+    assert(headers >= 2,
+        "the fixture contains headers for the filter to remove: "
+        .. tostring(headers))
+
+    print("  the quest log has headers in it, and they are not quests")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE DAILY RESET IS AN INSTANT, AND IT DOES NOT MOVE.
+    ------------------------------------------------------------
+    -- The client returns a COUNTDOWN. The stub returned a fixed number of
+    -- seconds whatever the clock said, so `Progress.CurrentDayKey`'s
+    -- `knownResetAt = now + seconds` drifted forward with `time()` instead of
+    -- standing still -- and standing still is the invariant the 0.61.0 fix
+    -- rests on: "the reset instant is an ABSOLUTE time and it does not move".
+    -- An earlier block leaves the client refusing, deliberately, so this one
+    -- re-anchors rather than depending on whatever ran before it.
+    CN_TEST_SetDailyReset(5 * 3600)
+
+    local first = GetQuestResetTime()
+
+    assert(type(first) == "number" and first > 0,
+        "the client answers with seconds remaining: " .. tostring(first))
+
+    local realTime = time
+
+    time = function() return realTime() + 60 end
+
+    local later = GetQuestResetTime()
+
+    time = realTime
+
+    assert(later < first,
+        "and a minute later there is less of it left: " .. tostring(first)
+        .. " -> " .. tostring(later))
+
+    assert(math.abs((first - later) - 60) <= 1,
+        "by exactly the minute that passed: " .. tostring(first - later))
+
+    print("  the daily reset is an instant, and it does not move")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

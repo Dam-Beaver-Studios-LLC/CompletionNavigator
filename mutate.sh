@@ -3806,9 +3806,10 @@ mutate "Providers/BlizzardCollections.lua" \
     "        name = name" \
     "every title is printed with the client's padding"
 
+# RE-ANCHORED IN 0.91.0: the gate reads either vocabulary now, through a local.
 mutate "Providers/StaticData.lua" \
-    "        return false, CN.FactionLabel(record.faction) .. \" only\", \"FACTION\"" \
-    "        return false, CN.TokenLabel(record.faction) .. \" only\", \"FACTION\"" \
+    "        return false, CN.FactionLabel(faction) .. \" only\", \"FACTION\"" \
+    "        return false, CN.TokenLabel(faction) .. \" only\", \"FACTION\"" \
     "a faction gate is the one untranslated word on the screen"
 
 mutate "Modules/Warband.lua" \
@@ -4448,6 +4449,139 @@ mutate "Modules/Mounts.lua" \
     "    return token and CN.FactionLabel(token) or nil" \
     "    return token" \
     "the mount tooltip names a faction in English beside translated text"
+
+mutate "Modules/Capture.lua" \
+    "            if not optional[path] then" \
+    "            if true then" \
+    "/cn capture records five probed APIs as gone from the client"
+
+mutate "Modules/Breakdown.lua" \
+    "                    if counts and counts.located then
+                        return counts.located .. \" harvested with a location\"
+                    end" \
+    "                    if false then
+                        return counts.located .. \" harvested with a location\"
+                    end" \
+    "/cn breakdown claims a location count it never computed"
+
+mutate "Modules/Quests.lua" \
+    "        if static.breadcrumb and type(static.unlocks) == \"table\" then" \
+    "        if false and type(static.unlocks) == \"table\" then" \
+    "a breadcrumb you can no longer take is offered as available"
+
+mutate "Modules/Quests.lua" \
+    "                if Quests.IsCompletedByCharacter(targetID)
+                    or Blizzard.IsQuestInLog(targetID) then" \
+    "                if false then" \
+    "a breadcrumb whose target is finished is still offered"
+
+mutate "Modules/Quests.lua" \
+    "        or static.requiresLevel or static.minLevel
+        or static.faction or static.requiresFaction
+        or static.breadcrumb) then" \
+    "        or static.requiresLevel) then" \
+    "a curated row written to the documented schema loses to an external addon"
+
+mutate "Modules/Quests.lua" \
+    "    local pending = CN.Shortlist(\"Quests.Curated\"," \
+    "    local pending = CN.NotAShortlist(\"Quests.Curated\"," \
+    "the whole curated database is walked on every quest log update"
+
+mutate "Modules/Quests.lua" \
+    "    if completed[questID] ~= byCharacter then" \
+    "    if true then" \
+    "re-reading an unchanged quest destroys the curated shortlist"
+
+mutate "Modules/Quests.lua" \
+    "        completed[questID] = byCharacter
+
+        Quests.completionRevision = (Quests.completionRevision or 0) + 1" \
+    "        completed[questID] = byCharacter" \
+    "handing a quest in leaves it in the curated shortlist"
+
+mutate "Providers/StaticData.lua" \
+    "    if type(questID) ~= \"number\" then" \
+    "    if false then" \
+    "a quest row filed under a string key is stored and never matched"
+
+mutate "Providers/StaticData.lua" \
+    "        if not VALID_FIELDS[field] then" \
+    "        if false then" \
+    "a field this addon does not read is accepted and silently discarded"
+
+mutate "Providers/StaticData.lua" \
+    "    record.origin = origin or record.origin or \"curated\"" \
+    "    record.origin = \"curated\"" \
+    "a supplier's rows are recorded as checked by hand"
+
+mutate "Providers/StaticData.lua" \
+    "        table.insert(Static.collisions, {" \
+    "        table.insert({}, {" \
+    "two suppliers claiming one quest is resolved silently"
+
+mutate "Providers/StaticData.lua" \
+    "        Static.revision = Static.revision + 1" \
+    "" \
+    "a row registered late is ignored for the rest of the session"
+
+mutate "Providers/StaticData.lua" \
+    "        if CN.InvalidateCandidates then
+            CN.InvalidateCandidates()
+        end" \
+    "        if false then
+            CN.InvalidateCandidates()
+        end" \
+    "a late registration leaves the ranked list holding the old answer"
+
+mutate "Providers/StaticData.lua" \
+    "    if schemaVersion and schemaVersion ~= Static.schemaVersion then" \
+    "    if false then" \
+    "a supplier built for another schema is never told"
+
+mutate "Providers/StaticData.lua" \
+    "    local faction  = record.faction or record.requiresFaction
+    local minLevel = record.minLevel or record.requiresLevel" \
+    "    local faction  = record.faction
+    local minLevel = record.minLevel" \
+    "a row written in the vocabulary /cn export emits gates through nothing"
+
+mutate "Modules/Contribute.lua" \
+    "        if CN.Static and CN.Static.Count then
+            total, curated = CN.Static.Count()
+        end" \
+    "        if CN.Static and CN.Static.Count then
+            total = CN.Static.Count()
+            curated = total
+        end" \
+    "/cn provenance counts a supplier's rows as checked by hand"
+
+mutate "Modules/Currencies.lua" \
+    "            serial            = serial," \
+    "            serial            = serial,
+            lastSeen          = time()," \
+    "a currency stores a timestamp nothing reads"
+
+mutate "Modules/Progress.lua" \
+    "        store.previousDay    = store.today or 0" \
+    "        store.previousDay    = store.today or 0
+        store.previousDayKey = store.dayKey" \
+    "progress stores a day key nothing reads"
+
+mutate "Modules/Harvest.lua" \
+    "    record.lastSeen = time()" \
+    "    record.lastSeen = time()
+    record.reason = reason" \
+    "a harvest row stores a capture reason nothing reads"
+
+# NOT A MUTATION: `CN.ScoreObjective(objective)` resolves the identical value
+# through the database metamethod, so no fixture can tell the two apart -- the
+# difference is cost, not behaviour. The contract is asserted in the harness
+# where it is written instead.
+
+mutate "Scoring.lua" \
+    "        note    = \"Quests and exploration only, with quests weighted up.\"," \
+    "        note    = \"Quests and exploration only, weighted toward fast travel.\"," \
+    "/cn mode leveling advertises a weighting its profile does not carry"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

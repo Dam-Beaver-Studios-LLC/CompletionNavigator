@@ -288,8 +288,12 @@ function Progress.RollDay(store)
     if store.dayKey ~= today then
         -- A new day. Keep yesterday so "yesterday you did 84" is possible
         -- later, but do not accumulate an unbounded history.
+        -- `previousDayKey` IS NOT STORED. 0.91.0. It was written here and
+        -- read nowhere -- `Progress.Summary` returns `store.previousDay`,
+        -- which is the line above. Same shape as `store.total`, removed
+        -- beside it in 0.78.0 with migration 29; the field next to it
+        -- survived that sweep.
         store.previousDay    = store.today or 0
-        store.previousDayKey = store.dayKey
         store.today          = 0
         store.dayKey         = today
     end
@@ -309,7 +313,9 @@ function Progress.NoteCompleted(questID)
         return
     end
 
-    local today = Progress.RollDay(store)
+    -- The return is the day key, which nothing here needs any more now that
+    -- `bestDay` is gone. The call is still what rolls the day over.
+    Progress.RollDay(store)
 
     store.today   = (store.today or 0) + 1
     store.session = (store.session or 0) + 1
@@ -326,8 +332,10 @@ function Progress.NoteCompleted(questID)
     -- field were the others -- and migration 29 removes it.
 
     if (store.best or 0) < store.today then
-        store.best    = store.today
-        store.bestDay = today
+        -- `bestDay` IS NOT STORED. 0.91.0. See the note on `previousDayKey`
+        -- above: `Summary` returns `store.best`, and the date it fell on has
+        -- never had a reader.
+        store.best = store.today
     end
 
     DebugPrint("Quest " .. tostring(questID) .. " completed; "

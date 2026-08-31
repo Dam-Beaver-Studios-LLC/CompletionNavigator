@@ -1724,6 +1724,65 @@ CN.migrations = {
                 .. " harvest sighting counters nothing reads.")
         end
     end,
+
+    -- SIX MORE FIELDS NOTHING READS. 0.91.0.
+    --
+    -- `currencies.lastSeen` is the seventh store to carry this field with no
+    -- reader; `Modules/Currencies.lua`'s own header said so and the write
+    -- survived four separate sweeps. `progress.previousDayKey` and
+    -- `progress.bestDay` sat beside `progress.total`, which migration 29
+    -- removed. The three harvest fields are on a store capped at two thousand
+    -- rows: an integer, a string and an array each.
+    [35] = function(db)
+        local dropped = 0
+
+        local function strip(store, fields)
+            if type(store) ~= "table" then
+                return
+            end
+
+            for _, record in pairs(store) do
+                if type(record) == "table" then
+                    for _, field in ipairs(fields) do
+                        if record[field] ~= nil then
+                            record[field] = nil
+
+                            dropped = dropped + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        strip(db.account and db.account.currencies, { "lastSeen" })
+
+        strip(db.account and db.account.questHarvest,
+            { "observedLevel", "requiresFrom", "reason" })
+
+        -- AND THE CHARACTER HALVES. The currency store's larger half lives on
+        -- the character, and `progress` is character-only -- which is the
+        -- exact shape migration 32 records missing the first time.
+        for _, character in pairs(db.characters or {}) do
+            if type(character) == "table" then
+                strip(character.currencies, { "lastSeen" })
+
+                if type(character.progress) == "table" then
+                    for _, field in ipairs({ "previousDayKey", "bestDay" }) do
+                        if character.progress[field] ~= nil then
+                            character.progress[field] = nil
+
+                            dropped = dropped + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " stored values nothing reads.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

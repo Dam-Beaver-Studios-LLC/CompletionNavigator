@@ -293,6 +293,20 @@ CN.priorityProfiles = {
     balanced     = {},
     fastest      = { weights = { travelCost = -2.5, estimatedTime = -1.5 } },
     zone         = { weights = { travelCost = -3.0, nearbyBonus = 2.0 } },
+    -- NO TRAVEL WEIGHTING, AND THE MODE NO LONGER CLAIMS ONE. 0.91.0.
+    --
+    -- `/cn mode leveling`'s note read "Quests and exploration only, weighted
+    -- toward fast travel" while this profile had a `types` table and no
+    -- `weights` table at all -- so `EffectiveWeights` returned the default
+    -- `travelCost = -1.0` unchanged and the mode did half of what it said,
+    -- in the copy a levelling player reads to decide whether it did anything.
+    --
+    -- The sentence is what changed, not the number. Giving this profile
+    -- `travelCost = -2.0` takes a PLACELESS objective at completionValue 10
+    -- below zero, which the suite catches -- so the weighting the note
+    -- promised has a consequence nobody has measured, and this addon is not
+    -- played by the person building it. `fastest` already exists and is
+    -- tuned; a levelling player who wants travel weighted has it.
     quests       = { types = { QUEST = 2.0 } },
     achievements = { types = { ACHIEVEMENT = 2.0 } },
     reputation   = { types = { REPUTATION = 2.0, RENOWN = 2.0 } },
@@ -316,7 +330,10 @@ CN.modes = {
         label   = "Levelling",
         profile = "quests",
         show    = { "QUEST", "EXPLORATION" },
-        note    = "Quests and exploration only, weighted toward fast travel.",
+        -- WHAT IT DOES, NOT WHAT WOULD BE NICE. 0.91.0. See the note on the
+        -- `quests` profile: this claimed a travel weighting the profile does
+        -- not carry. `/cn mode fastest` is the one that weights travel.
+        note    = "Quests and exploration only, with quests weighted up.",
     },
 
     collecting = {
@@ -709,13 +726,27 @@ local function EffectiveWeights(mode, profile)
     return w
 end
 
-function CN.ScoreObjective(objective)
+-- `mode` IS OPTIONAL AND THE CALLER USUALLY HAS IT. 0.91.0.
+--
+-- `CN.Settings()` goes through the database's `__index` metamethod, which
+-- resolves the override table and the account settings on every read -- and
+-- this ran once per candidate per re-rank while `Ranked()` one frame up had
+-- already computed the identical value and thrown it away.
+--
+-- Same shape as the `EffectiveWeights` memo directly below, whose own note
+-- records it was 28% of the entire scoring pass. Smaller than that one, and
+-- free: the parameter is optional and every existing caller still works.
+function CN.ScoreObjective(objective, mode)
     if type(objective) ~= "table" then
         return 0
     end
 
-    local settings = CN.Settings()
-    local mode     = (settings and settings.priorityMode) or "balanced"
+    if not mode then
+        local settings = CN.Settings()
+
+        mode = (settings and settings.priorityMode) or "balanced"
+    end
+
     local profile  = CN.priorityProfiles[mode] or {}
 
     -- MEMOISED ON THE MODE, BECAUSE THAT IS ALL IT DEPENDS ON.
@@ -2052,7 +2083,7 @@ local function Ranked()
     for index = 1, #candidates do
         local objective = candidates[index]
 
-        CN.ScoreObjective(objective)
+        CN.ScoreObjective(objective, mode)
 
         -- A DISPLAY PREFERENCE CANNOT HIDE YOUR OWN BODY.
         --

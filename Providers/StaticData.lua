@@ -12,44 +12,178 @@ local Static = {}
 CN.Static = Static
 
 Static.quests    = {}
-Static.recipes   = {}
-Static.vendors   = {}
-Static.rares     = {}
-Static.treasures = {}
+
+-- FOUR REGISTRARS THAT WROTE INTO NOTHING ARE GONE. 0.91.0.
+--
+-- `Static.recipes`, `Static.vendors`, `Static.rares` and `Static.treasures`
+-- were declared here, written by four published registrars, and read by
+-- nothing anywhere in the tree -- `Modules/Vendors.lua` and `Modules/Rares.lua`
+-- each keep their own account store and never look here. `Static.Count()`
+-- returned all five sizes and had no caller at all, while the harness's own
+-- note called it "the number /cn dbsize prints", which `/cn dbsize` does not.
+--
+-- That was harmless while this file was only read by files shipped inside the
+-- addon. It stops being harmless the moment an external data addon reads this
+-- surface as documentation: a supplier who curated rare and treasure
+-- locations would get a successful call, a non-zero count, and no change to
+-- anything a player ever sees.
+--
+-- A published surface either works or is not published. When those four have
+-- real readers they come back, with tests.
 
 ------------------------------------------------------------
--- REGISTRATION
+-- THE DATA CONTRACT
 ------------------------------------------------------------
 
--- record = { name =, mapID =, x =, y =, expansion =, requires = {}, unlocks = {} }
-function Static.RegisterQuest(questID, record)
-    if not questID or type(record) ~= "table" then
-        return
+-- WHAT AN EXTERNAL SUPPLIER IS PROMISED. 0.91.0.
+--
+-- `Data/*.lua` inside this addon and any companion addon reach this surface
+-- the same way, through `_G.CompletionNavigator.Static`. Before 0.91.0 the
+-- two registrars below took anything, told the caller nothing, threw on a nil
+-- argument where the sibling registrar returned zero, and stamped no origin
+-- -- so `/cn provenance` counted every row in the table under the headline
+-- "each one checked by hand", including rows that arrived from somewhere
+-- else entirely.
+--
+-- The curated/observed distinction is the whole safety model of this data
+-- pipeline; `Data/Community.lua` says so and says there is no getting it back
+-- afterwards. A row that cannot say where it came from cannot preserve it.
+Static.schemaVersion = 1
+
+-- Rows that lost a collision, so `/cn selftest` can say two suppliers
+-- disagree rather than the later one silently winning.
+Static.collisions = {}
+
+-- Moves whenever a curated row is added, so anything holding a shortlist
+-- built from this table can tell that it is stale. A companion addon that
+-- registers late -- on demand, per expansion, after a settings toggle -- is
+-- the case this exists for.
+Static.revision = 0
+
+local VALID_FIELDS = {
+    name = true, mapID = true, x = true, y = true,
+    requires = true, unlocks = true, breadcrumb = true, obsolete = true,
+    classes = true, races = true, faction = true, minLevel = true,
+    turnInMapID = true, turnInX = true, turnInY = true,
+    -- Accepted as synonyms of `minLevel` and `faction`, because
+    -- `/cn export` has always emitted them and the eligibility checker has
+    -- always read them. See `Static.QuestEligibility`.
+    requiresLevel = true, requiresFaction = true,
+    -- Written by this file, not by the supplier.
+    origin = true,
+}
+
+Static.validFields = VALID_FIELDS
+
+-- Registers one curated quest row.
+--
+-- Returns true on success; false and a reason otherwise. `origin` names the
+-- supplier and defaults to "curated", which is what the rows shipped inside
+-- this addon are. Anything else is reported as its own provenance by
+-- `/cn provenance` rather than being counted as hand-checked.
+function Static.RegisterQuest(questID, record, origin)
+    -- A NUMBER, NOT A NUMERIC STRING. Every reader indexes this table with a
+    -- number from `CN.ToID` or from a client event, so a row filed under
+    -- "8237" is stored and never matched -- total silence for a supplier
+    -- generating its data file from JSON.
+    if type(questID) ~= "number" then
+        return false, "a quest id is a number, not "
+            .. type(questID) .. ": " .. tostring(questID)
     end
+
+    if type(record) ~= "table" then
+        return false, "a quest row is a table, not " .. type(record)
+    end
+
+    for field in pairs(record) do
+        if not VALID_FIELDS[field] then
+            return false, "quest " .. questID
+                .. " carries a field this addon does not read: "
+                .. tostring(field)
+        end
+    end
+
+    local existing = Static.quests[questID]
+
+    if existing then
+        table.insert(Static.collisions, {
+            questID = questID,
+            kept    = existing.origin or "curated",
+            lost    = origin or "curated",
+        })
+    end
+
+    record.origin = origin or record.origin or "curated"
 
     Static.quests[questID] = record
+
+    return true
 end
 
-function Static.RegisterQuests(records)
-    for questID, record in pairs(records) do
-        Static.RegisterQuest(questID, record)
+-- Registers a table of curated rows. Returns how many landed and how many
+-- were refused, with the refusals recorded to `/cn errors` rather than
+-- thrown, so one bad row in a supplier's file does not cost the rest.
+--
+-- `schemaVersion` is optional and checked when given: a supplier built for a
+-- schema this addon does not know is told so once, rather than contributing
+-- fields that are silently discarded.
+function Static.RegisterQuests(records, origin, schemaVersion)
+    if type(records) ~= "table" then
+        return 0, 0
     end
-end
 
-function Static.RegisterRecipe(itemID, record)
-    Static.recipes[itemID] = record
-end
+    if schemaVersion and schemaVersion ~= Static.schemaVersion then
+        local errors = CN.modules and CN:GetModule("Errors")
 
-function Static.RegisterVendor(npcID, record)
-    Static.vendors[npcID] = record
-end
+        if errors and errors.Record then
+            errors.Record("quest data built for another schema",
+                tostring(origin or "unknown") .. " supplied schema "
+                .. tostring(schemaVersion) .. "; this addon reads "
+                .. tostring(Static.schemaVersion))
+        end
+    end
 
-function Static.RegisterRare(npcID, record)
-    Static.rares[npcID] = record
-end
+    local added, refused = 0, 0
 
-function Static.RegisterTreasure(id, record)
-    Static.treasures[id] = record
+    for questID, record in pairs(records) do
+        local ok, why = Static.RegisterQuest(questID, record, origin)
+
+        if ok then
+            added = added + 1
+        else
+            refused = refused + 1
+
+            local errors = CN.modules and CN:GetModule("Errors")
+
+            if errors and errors.Record then
+                errors.Record("a curated quest row was refused",
+                    tostring(origin or "unknown") .. ": " .. tostring(why))
+            end
+        end
+    end
+
+    -- AND THE ANSWER CHANGES, so a supplier that registers late is not
+    -- ignored until something unrelated moves. The rows shipped inside this
+    -- addon register at file-load time and never needed this; a companion
+    -- addon registering on demand, per expansion, or after a settings toggle
+    -- would otherwise leave the aggregate candidate cache, the ranked list
+    -- and the unlock index holding the pre-registration answer for the whole
+    -- session. `Contribute.Import` calls exactly this, for exactly this.
+    if added > 0 then
+        Static.revision = Static.revision + 1
+
+        if CN.InvalidateCandidates then
+            CN.InvalidateCandidates()
+        end
+
+        local harvest = CN.modules and CN:GetModule("Harvest")
+
+        if harvest and harvest.NoteUnlocksChanged then
+            harvest.NoteUnlocksChanged()
+        end
+    end
+
+    return added, refused
 end
 
 ------------------------------------------------------------
@@ -133,8 +267,19 @@ function Static.QuestEligibility(questID, character)
     -- quest as class-gated, and `/cn alts` would name the wrong alt.
     --
     -- Third return: a stable token. The sentence is unchanged.
-    if record.faction and character.faction
-        and record.faction ~= character.faction then
+    -- ONE GATE, TWO SPELLINGS. 0.91.0.
+    --
+    -- `Data/Quests.lua`'s header documents `faction` and `minLevel`; the
+    -- eligibility checker in `Modules/Quests.lua` has always read
+    -- `requiresFaction` and `requiresLevel`, and `/cn export` has always
+    -- EMITTED those -- so harvested rows and hand-curated rows in the same
+    -- file gated through different code. Both names are accepted here and
+    -- both are documented; a supplier can use either.
+    local faction  = record.faction or record.requiresFaction
+    local minLevel = record.minLevel or record.requiresLevel
+
+    if faction and character.faction
+        and faction ~= character.faction then
 
         -- THE FACTION HELPER, NOT THE CLASS ONE. 0.82.0.
         --
@@ -146,13 +291,13 @@ function Static.QuestEligibility(questID, character)
         -- saying that file "was not converted". This is the third place, and
         -- it was not converted either -- so a German client read "Alliance
         -- only" three lines under a correctly translated class list.
-        return false, CN.FactionLabel(record.faction) .. " only", "FACTION"
+        return false, CN.FactionLabel(faction) .. " only", "FACTION"
     end
 
-    if record.minLevel and character.level
-        and character.level < record.minLevel then
+    if minLevel and character.level
+        and character.level < minLevel then
 
-        return false, "level " .. record.minLevel .. " required", "LEVEL"
+        return false, "level " .. minLevel .. " required", "LEVEL"
     end
 
     local function allowed(list, value, label)
@@ -227,10 +372,32 @@ function Static.GetQuestLocation(questID)
     return record.mapID, record.x, record.y
 end
 
+-- How many curated rows are held, and how many of them came from this addon
+-- rather than from a supplier. 0.91.0: this returned five numbers, four of
+-- them counting tables nothing read.
 function Static.Count()
-    return CN.CountKeys(Static.quests),
-           CN.CountKeys(Static.recipes),
-           CN.CountKeys(Static.vendors),
-           CN.CountKeys(Static.rares),
-           CN.CountKeys(Static.treasures)
+    local total, mine = 0, 0
+
+    for _, record in pairs(Static.quests) do
+        total = total + 1
+
+        if (record.origin or "curated") == "curated" then
+            mine = mine + 1
+        end
+    end
+
+    return total, mine
+end
+
+-- Curated rows grouped by who supplied them, for `/cn provenance`.
+function Static.Origins()
+    local counts = {}
+
+    for _, record in pairs(Static.quests) do
+        local origin = record.origin or "curated"
+
+        counts[origin] = (counts[origin] or 0) + 1
+    end
+
+    return counts
 end

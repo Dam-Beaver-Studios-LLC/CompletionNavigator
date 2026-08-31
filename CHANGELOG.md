@@ -7,6 +7,93 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.91.0]
+
+**This release makes the addon's data contract real, because something is
+about to use it.** Completion Navigator has published a way for other addons
+to contribute curated quest data since 0.43.0. Audited properly for the first
+time, that surface turned out to accept anything, tell the caller nothing,
+throw on a nil argument where the registrar beside it returned zero, stamp no
+record of who supplied a row â€” and then report every row in the table under
+the heading "each one checked by hand". Four of its five registration
+functions wrote into tables nothing anywhere read.
+
+None of that mattered while the only thing reading the contract was this
+addon. All of it matters now.
+
+### Fixed
+
+- **`/cn capture` recorded five APIs as missing from your client that this
+  addon only probes for.** `/cn selftest` has had an exemption list for those
+  five since the day their absence made it report a failure on every Retail
+  client. The list landed in the self-test and nowhere else; this is the
+  sibling call site over the same list, and the first genuine contributed
+  recording would have failed the build. Ninth time a fix has landed at one
+  call site in this project.
+- **`/cn breakdown` claimed a location count it never computed.** It reported
+  every harvested quest as "harvested with location data", where coordinates
+  are only recorded when the client resolved a waypoint â€” which for a
+  turned-in or off-map quest it does not. The real figure was already being
+  calculated one function away. This is the report whose own header says it
+  exists so the addon never invents an authoritative-looking number.
+- **A breadcrumb quest you have walked past is now reported as gone.** The
+  data schema has documented `breadcrumb` â€” "skippable and permanently
+  missable" â€” since 0.43.0, and the addon has carried a block reason for it
+  just as long. Neither had a producer, so a curator following the addon's own
+  schema wrote something that reached nothing. A breadcrumb whose target you
+  have started or finished is removed by the game; telling a completionist to
+  go and find it sends them somewhere for something that is not there.
+- **A curated row written to the addon's own documented schema could lose to
+  another addon's answer.** The data file's header documents `minLevel` and
+  `faction`; the code read `requiresLevel` and `requiresFaction`, which is
+  what `/cn export` emits. So hand-curated rows and harvested rows in the same
+  file gated through different code paths, and one of the two was not treated
+  as authoritative â€” contradicting the comment three lines above it. Both
+  spellings work now, and both are documented.
+- **`/cn mode leveling` advertised a travel weighting it does not apply.**
+  Its note has always read "weighted toward fast travel" while the profile
+  behind it had no travel weight at all. The sentence is what changed, not the
+  number: giving the profile the weighting it claimed takes a placeless
+  objective below zero, which the suite catches â€” so the promise had a
+  consequence nobody has measured. `/cn mode fastest` is the one that weights
+  travel, and it is tuned.
+- **`/cn alts`, `/cn provenance` and six stored fields.** The curated count
+  now reports only rows this addon checked itself; the currency store, the
+  progress record and the harvest store between them stop persisting six
+  fields nothing has ever read, and migration 35 removes them from databases
+  that have them.
+
+### Changed
+
+- **Contributing curated quest data is now a real contract.** Rows are
+  validated on arrival â€” a numeric-string key, a field the addon does not
+  read, a missing record are each refused with a reason rather than stored
+  and silently ignored. Registration reports how many rows landed and how
+  many did not. Every row carries its supplier, so `/cn provenance` reports
+  another addon's rows separately from hand-checked ones rather than counting
+  them as the same thing. Two suppliers claiming one quest is recorded rather
+  than resolved in favour of whoever loaded last. There is a schema version,
+  and a supplier built for a different one is told. Rows registered after
+  login now invalidate the caches they need to.
+- **The curated quest sweep is a shortlist rather than a walk of the whole
+  database.** It walked every curated row and asked the eligibility engine
+  about each â€” which, for a row without gating fields, means a call into every
+  other quest addon you have installed. With one shipped row that was free.
+  With a few thousand it is thousands of cross-addon lookups every two seconds
+  while questing. It is also capped now, like the five providers beside it.
+- **Four registration functions that wrote into nothing are gone.** Recipes,
+  vendors, rares and treasures each had a published registrar, a table, and no
+  reader anywhere in the addon. A supplier using them would have got a
+  successful call and no change to anything a player sees. A published
+  surface either works or is not published.
+- **The offline suite's quest log now contains zone headers, and its daily
+  reset counts down.** The client's log includes header rows and the addon
+  filters them out â€” a filter that had never once been exercised. The reset
+  API returns a countdown; the test double returned a fixed number whatever
+  the clock said, so the one invariant the reset logic rests on was
+  unobservable. Twenty-first and twenty-second entries in this project's list
+  of defects hidden by a test double simpler than the client.
+
 ## [0.90.0]
 
 **This release is mostly about the window, and it starts with a stub that had
