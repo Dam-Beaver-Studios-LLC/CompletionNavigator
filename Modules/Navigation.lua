@@ -413,6 +413,29 @@ local function BuildArrow()
 
     arrow:Hide()
 
+    -- THE SAVED SCALE REACHES THIS FRAME TOO. 0.90.0.
+    --
+    -- `Hud.ApplyScale` is the only thing that scales the addon's five named
+    -- frames, and it runs at login, from `/cn scale`, and from
+    -- `UI.BuildWindow`. Three of the five are built LAZILY -- this one among
+    -- them -- so at login `_G[name]` is nil for all three and the saved scale
+    -- never reached them. `Hud.Build` and `UI.BuildWindow` each end by
+    -- applying it, the second under a comment stating exactly this reasoning;
+    -- the fix landed on two of five frames.
+    --
+    -- A player who sets `/cn scale 1.5` got the window and the heads-up line
+    -- at 1.5 and the ARROW at 1.0 -- the frame the setting most obviously
+    -- exists for, and the one drawn over the world at a distance.
+    --
+    -- Through `ApplyScale` rather than `SetScale`, so the screen-height clamp
+    -- 0.85.0 added is not a fourth hand-written copy.
+
+    local hudModule = CN:GetModule("Hud")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
     return arrow
 end
 
@@ -1362,9 +1385,23 @@ function Navigation.Diagnose()
         or string.format("%d movement samples, %s",
             motionState.samples, tostring(motionState.verdict)))
 
-    local scaleX, scaleY = Navigation.MapScale(state.mapID or bestMap)
+    -- AND THE THIRD RETURN, WHICH THIS FILE'S OWN HEADER DEMANDS. 0.90.0.
+    --
+    -- `MapScale` returns `1, 1, false` on both refusal paths, and its header
+    -- says in as many words: "callers that want yards must check it".
+    -- `Routing.lua` checks it, `Modules/Capture.lua` checks it and quotes the
+    -- header while doing so, and the command written BECAUSE "prose is a bad
+    -- instrument; this is a better one" did not -- so during a loading
+    -- screen, in an instance, or on a map with no world position, which is
+    -- exactly when somebody runs a diagnostic, `/cn navdiag` reported
+    -- "map scale  1 x 1 yards across" as an observation, into a bug report.
+    local scaleX, scaleY, scaleMeasured =
+        Navigation.MapScale(state.mapID or bestMap)
 
-    add("map scale", string.format("%.0f x %.0f yards across", scaleX, scaleY))
+    add("map scale", scaleMeasured
+        and string.format("%.0f x %.0f yards across", scaleX, scaleY)
+        or "the client would not convert this map"
+            .. CN.DASH .. "distances here are estimates")
 
     add("relative bearing", state.relative
         and string.format("%.1f deg", math.deg(state.relative))

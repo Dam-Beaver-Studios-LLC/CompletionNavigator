@@ -323,7 +323,29 @@ function MapPins.HubsForMap(mapID, force)
         return nil
     end
 
+    local startX, startY = MapPins.RouteStart(mapID)
+
+    -- AND WHERE THE ROUTE STARTS IS PART OF THE ROUTE. 0.90.0.
+    --
+    -- The key was the candidate generation and the type filter, and neither
+    -- moves when the player walks -- nor does anything else invalidate on
+    -- movement, since the only invalidators are the zone change and the quest
+    -- log. So: open the map at one end of a zone, run to the other end, open
+    -- it again, and the numbered stops are still ordered from where you were
+    -- standing the first time, for the rest of the session. Route ORDER is
+    -- the entire content of this feature; the header above calls it "the
+    -- SHAPE of the work".
+    --
+    -- `CN.BuildZoneRoute` already keys its own cache on the start point, so
+    -- the fresher answer existed and this layer declined to ask for it, and
+    -- `Travel.CostFor` solves the same problem with `costCacheYards`.
+    --
+    -- Coarsened to `CN.routeCacheStep`, the same grid the router uses, so a
+    -- map pan and a few yards of walking still hit the cache: this is the
+    -- work that must not happen on every frame the map is open.
     local generation = RouteGeneration()
+        .. ":" .. tostring(math.floor((startX or 0.5) / CN.routeCacheStep))
+        .. ":" .. tostring(math.floor((startY or 0.5) / CN.routeCacheStep))
 
     if not force
         and cache.mapID == mapID
@@ -332,8 +354,6 @@ function MapPins.HubsForMap(mapID, force)
 
         return cache.hubs
     end
-
-    local startX, startY = MapPins.RouteStart(mapID)
 
     local ok, _, _, hubs = pcall(CN.BuildZoneRoute, mapID, startX, startY)
 

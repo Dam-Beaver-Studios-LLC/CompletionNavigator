@@ -291,8 +291,22 @@ CN:RegisterCommand{
         if best then
             Print("|cffffc74f" .. tostring(best.name) .. "|r"
                 .. (best.level and (" (" .. best.level .. ")") or "")
+                -- THE REAL RECORD, NOT A REBUILT ONE. 0.90.0.
+                --
+                -- `Alts.AgeDays` returns nil when a character has no
+                -- `lastSeen`, and `DescribeAge` renders that as "never seen".
+                -- This rebuilt a record out of `ageDays`, and `or 0` turned
+                -- "unknown" into `time()` -- "today". The path is reachable:
+                -- `Alts.Assignments` admits a character on
+                -- `not age or age <= staleDays`, so a record with no
+                -- timestamp is exactly what arrives here.
+                --
+                -- The roster loop twenty lines below passes the real
+                -- character and gets the right answer. Same file, same
+                -- command, two spellings of one rule.
                 .. " |cff8a8f96last played "
-                .. Alts.DescribeAge({ lastSeen = time() - ((best.ageDays or 0) * 86400) })
+                .. Alts.DescribeAge(CN.db and CN.db.characters
+                    and CN.db.characters[best.key])
                 .. "|r")
 
             for _, item in ipairs(best.items) do

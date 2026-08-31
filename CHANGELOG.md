@@ -7,6 +7,79 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.90.0]
+
+**This release is mostly about the window, and it starts with a stub that had
+been lying since the window was written.** The offline test suite's fake
+`GetTextWidth` returned 60 for every caption at every text size, where the
+game returns the rendered width. The tab strip sizes its eleven buttons from
+exactly that call â€” so "does a caption still fit its button at 150% text?" was
+a question no test could ask, and the answer was no. Nothing re-measured the
+strip after a text-size change at all. Fixing the stub found that, a row pitch
+that never grew with the text it held, and a sort caption drawn on top of the
+first row of four tabs.
+
+That makes twenty defects this project has traced to a test double being
+simpler or more forgiving than the real client.
+
+### Fixed
+
+- **`/cn scale` did not reach the navigation arrow, the follow frame, or the
+  welcome screen.** All three are built the first time they are needed rather
+  than at login, and the only thing that applies the saved scale runs at
+  login. So somebody who set 1.5 got the window and the heads-up line at 1.5
+  and the arrow â€” the frame the setting most obviously exists for, drawn over
+  the world at a distance â€” at 1.0, every session. The window and the
+  heads-up line were each given this fix in an earlier release; it landed on
+  two of five frames.
+- **Text sizes above about 130% broke the window's layout.** Tab captions grew
+  inside buttons sized for 100% and overflowed into their neighbours; list
+  rows kept a fixed 20-pixel pitch under a font the same setting takes to
+  24pt, so rows overlapped and the scrollbar's range fell short of the list.
+  Both are re-measured now. This is the accessibility control, and above
+  150% it had been making the window worse rather than better.
+- **The sort caption was drawn across the first row.** It is anchored inside
+  the list, under a comment explaining that the first row starts below the
+  scroll frame's inset. There was no inset. On Collections, Remaining,
+  Warband and Journey, "sort: as ranked" sat on top of the first row's
+  number.
+- **Map route numbers did not follow you.** The pin cache was keyed on what
+  the addon knows and not on where you are standing, and nothing invalidated
+  it when you moved â€” so you could open the map at one end of a zone, run to
+  the other end, open it again, and get the stops still ordered from where you
+  had been. Route order is the whole point of the feature. It is keyed on your
+  position now, coarsened to the same grid the router already uses so that
+  panning the map still costs nothing.
+- **The tooltip said "Faction-locked" about mounts of your own faction.** In
+  the warning colour, under "not collected", which reads as "you cannot have
+  this" â€” about roughly half the faction mounts in the game. It now names the
+  faction that actually holds it, in the client's own language, and says
+  nothing at all about a mount you can collect. The two halves of that tooltip
+  also disagreed depending on whether you had run `/cn mountscan`; they no
+  longer do.
+- **`/cn navdiag` reported an unmeasured map scale as a fact.** The function
+  returns a third value meaning "this is a shrug, not a measurement" and its
+  own header says callers wanting yards must check it. Two other files do. The
+  diagnostic command â€” the one whose output goes into bug reports â€” did not,
+  so during a loading screen or in an instance it printed "map scale 1 x 1
+  yards across".
+- **`/cn alts` reported a character with no recorded play time as played
+  today.** The suggestion line rebuilt a record from an age in days, where
+  "unknown" collapses to zero, which collapses to now. The roster list twenty
+  lines below reads the real record and says "never seen".
+- **`/cn harvestnow` said "Harvested 0 quests" right after harvesting every
+  quest in the log.** The number it printed was quests that learned something
+  new, and the login sweep had already learned it. It now says how many it
+  harvested and, separately, how many of those told it something.
+- **Two window lists padded their numbers with spaces.** WoW has no monospace
+  font in its UI, so padding rows 1â€“9 with a leading space moved the periods
+  further out of line rather than into it. The chat side has been swept for
+  this three times.
+- **A sighting counter nothing has ever read is gone.** One integer per
+  (quest, prerequisite) pair on a 2,000-row store, written on every quest
+  accepted inside a five-minute window and serialised at every logout.
+  Migration 34 removes it and the migration that seeded it stops seeding it.
+
 ## [0.89.0]
 
 **Five providers were charging one deadline twice.** Last release found the

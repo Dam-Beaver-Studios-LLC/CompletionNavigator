@@ -294,7 +294,7 @@ function Harvest.NoteTurnIn(questID)
     end
 end
 
--- observed[prereqID] = { seen = n, characters = { [key] = true } }
+-- observed[prereqID] = { characters = { [key] = true } }
 local function Observations(record)
     record.observed = record.observed or {}
 
@@ -319,12 +319,22 @@ function Harvest.NoteAccepted(questID)
         if time() - entry.at <= 300 and entry.questID ~= questID then
             local candidate = observed[entry.questID]
 
+            -- `seen` IS NOT STORED. 0.90.0.
+            --
+            -- One integer per (quest, prerequisite) pair, on a store capped
+            -- at 2000 rows, incremented on every quest accepted inside the
+            -- five-minute window, serialised at every logout and re-parsed at
+            -- every login -- and read by nothing. `Harvest.Confidence`, the
+            -- only thing that could want it, counts DISTINCT CHARACTERS
+            -- instead, deliberately: doing the same chain twice on one
+            -- character is still one character's opinion.
+            --
+            -- Migration 3 seeded it; migrations 4, 5, 14, 15, 16, 18, 31, 32
+            -- and 33 exist to remove exactly this shape.
             if not candidate then
-                candidate = { seen = 0, characters = {} }
+                candidate = { characters = {} }
                 observed[entry.questID] = candidate
             end
-
-            candidate.seen = candidate.seen + 1
 
             -- Counted by character, not by sighting: doing the same chain
             -- twice on one character is still one character's opinion.
@@ -710,15 +720,30 @@ CN:RegisterCommand{
     order   = 81,
     help    = "Harvest every quest currently in the log.",
     handler = function()
-        local captured = 0
+        -- THE NUMBER THE SENTENCE CLAIMS. 0.90.0.
+        --
+        -- `Harvest.Capture` returns whether anything CHANGED, and a field is
+        -- only written when it was previously nil -- while `CN:OnLogin`
+        -- already captures every entry in the log. So by the time a player
+        -- can type this, nothing changes, and the command reported
+        -- "Harvested 0 quests from the current log" immediately after
+        -- harvesting every quest in the log.
+        local seen, learned = 0, 0
 
         for _, info in ipairs(Blizzard.GetQuestLogEntries()) do
+            seen = seen + 1
+
             if Harvest.Capture(info.questID, "manual") then
-                captured = captured + 1
+                learned = learned + 1
             end
         end
 
-        Print("Harvested " .. captured .. " quests from the current log.")
+        Print("Harvested " .. CN.Count(seen, "quest")
+            .. " from the current log."
+            .. ((learned > 0)
+                and CN.Aside(CN.Count(learned, "with something new",
+                    "with something new") )
+                or CN.Aside("nothing new; the login sweep had them")))
     end,
 }
 

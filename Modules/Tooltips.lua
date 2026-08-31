@@ -85,14 +85,42 @@ local function MountLines(lines, itemID)
         return false
     end
 
+    -- A MOUNT OF YOUR OWN FACTION IS NOT LOCKED TO YOU. 0.90.0.
+    --
+    -- This printed "Faction-locked" in the warning colour -- which Design.lua
+    -- defines as "needs attention" -- for EVERY faction-specific mount,
+    -- including the roughly half that belong to the faction the player is on
+    -- and can collect. Under "Mount: not collected" it reads as "you cannot
+    -- get this".
+    --
+    -- `Mounts.IsUsableByCharacter` owns the question and the eligibility
+    -- checker has used it since it was written; the tooltip asked neither it
+    -- nor the faction's own name.
+    local mountModule = CN:GetModule("Mounts")
+
+    local function FactionLine(isFactionSpecific, record)
+        if not isFactionSpecific or not mountModule
+            or not mountModule.IsUsableByCharacter then
+
+            return
+        end
+
+        if mountModule.IsUsableByCharacter(record) then
+            return
+        end
+
+        local faction = mountModule.FactionOf and mountModule.FactionOf(record)
+
+        Add(lines, faction and ("Locked to " .. faction)
+            or "Locked to the other faction", YELLOW)
+    end
+
     local record = CN.Account("mounts")[mountID]
 
     if record then
         CollectedLine(lines, "Mount", record.collected)
 
-        if record.isFactionSpecific and record.faction then
-            Add(lines, "Faction-locked", YELLOW)
-        end
+        FactionLine(record.isFactionSpecific, record)
 
         return true
     end
@@ -101,6 +129,12 @@ local function MountLines(lines, itemID)
 
     if mount then
         CollectedLine(lines, "Mount", mount.isCollected)
+
+        -- AND THE SAME SENTENCE WITHOUT A SCAN. The two branches said
+        -- different things about one mount depending on whether
+        -- `/cn mountscan` had run: this one said nothing at all.
+        FactionLine(mount.isFactionSpecific, mount)
+
         return true
     end
 

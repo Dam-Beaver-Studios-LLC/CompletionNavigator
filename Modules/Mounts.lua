@@ -283,6 +283,14 @@ end, { events = { "NEW_MOUNT_ADDED" } })
 -- read "Faction: Alliance" beside "Sammelbar: nein". 0.66.0.
 local FACTION_NAMES = { [0] = "Horde", [1] = "Alliance" }
 
+-- Published, so the tooltip does not build a second copy of the mapping.
+-- Returns the client's own word for the faction, not the token.
+function Mounts.FactionOf(record)
+    local token = record and record.faction and FACTION_NAMES[record.faction]
+
+    return token and CN.FactionLabel(token) or nil
+end
+
 function Mounts.IsUsableByCharacter(record, character)
     if not record.isFactionSpecific then
         return true

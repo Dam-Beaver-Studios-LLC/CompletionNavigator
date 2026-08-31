@@ -4314,6 +4314,141 @@ mutate "Modules/Vault.lua" \
     "" \
     "the vault's threshold term is undeclared and reads as a second deadline"
 
+mutate "Modules/Navigation.lua" \
+    "    local hudModule = CN:GetModule(\"Hud\")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
+    return arrow" \
+    "    return arrow" \
+    "the arrow is drawn at 100% however the player set the scale"
+
+mutate "Modules/Follow.lua" \
+    "    local hudModule = CN:GetModule(\"Hud\")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
+    return frame" \
+    "    return frame" \
+    "the follow frame is drawn at 100% however the player set the scale"
+
+mutate "Modules/Welcome.lua" \
+    "    local hudModule = CN:GetModule(\"Hud\")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
+    return frame" \
+    "    return frame" \
+    "the welcome screen is drawn at 100% however the player set the scale"
+
+mutate "Modules/Navigation.lua" \
+    "    add(\"map scale\", scaleMeasured" \
+    "    add(\"map scale\", true" \
+    "/cn navdiag prints an unmeasured map scale as a fact"
+
+mutate "Design.lua" \
+    "        if CN.UI.RebuildTabs then
+            CN.UI.RebuildTabs()
+        end" \
+    "        if false then
+            CN.UI.RebuildTabs()
+        end" \
+    "the tab strip is never re-measured after a text-size change"
+
+mutate "Design.lua" \
+    "        if CN.UI.RelayoutLists then
+            CN.UI.RelayoutLists()
+        end" \
+    "        if false then
+            CN.UI.RelayoutLists()
+        end" \
+    "the rows already built keep the pitch they were built at"
+
+mutate "UI/List.lua" \
+    "    return math.floor(ROW_HEIGHT * scale + 0.5)" \
+    "    return ROW_HEIGHT" \
+    "a 24 point row is drawn on a 20 pixel pitch"
+
+mutate "UI/List.lua" \
+    "    scroll:SetPoint(\"TOPLEFT\", 0, -CaptionHeight())" \
+    "    scroll:SetPoint(\"TOPLEFT\")" \
+    "the sort caption is drawn on top of the first row"
+
+mutate "UI/List.lua" \
+    "    return math.floor(14 * scale + 0.5)" \
+    "    return 14" \
+    "the caption outgrows the band reserved for it"
+
+mutate "Modules/MapPins.lua" \
+    "    local generation = RouteGeneration()
+        .. \":\" .. tostring(math.floor((startX or 0.5) / CN.routeCacheStep))
+        .. \":\" .. tostring(math.floor((startY or 0.5) / CN.routeCacheStep))" \
+    "    local generation = RouteGeneration()" \
+    "the map route stays ordered from where you were an hour ago"
+
+mutate "Modules/MapPins.lua" \
+    "        .. \":\" .. tostring(math.floor((startX or 0.5) / CN.routeCacheStep))" \
+    "        .. \":\" .. tostring(startX)" \
+    "the zone route is rebuilt on every frame the map is open"
+
+mutate "Modules/Tooltips.lua" \
+    "        if mountModule.IsUsableByCharacter(record) then
+            return
+        end" \
+    "        if false then
+            return
+        end" \
+    "a mount of your own faction is flagged as locked to somebody else"
+
+mutate "Modules/Tooltips.lua" \
+    "        FactionLine(mount.isFactionSpecific, mount)" \
+    "" \
+    "one mount says two different things depending on whether you scanned"
+
+mutate "Modules/Harvest.lua" \
+    "        Print(\"Harvested \" .. CN.Count(seen, \"quest\")" \
+    "        Print(\"Harvested \" .. CN.Count(learned, \"quest\")" \
+    "/cn harvestnow reports zero after harvesting a full log"
+
+mutate "Modules/Harvest.lua" \
+    "                candidate = { characters = {} }" \
+    "                candidate = { seen = 0, characters = {} }" \
+    "a sighting counter nothing reads is stored again"
+
+mutate "Database.lua" \
+    "        local store = db.account and db.account.questHarvest" \
+    "        local store = db.account and db.account.questObservations" \
+    "the harvest counters already on disk stay there"
+
+mutate "Modules/Alts.lua" \
+    "                .. Alts.DescribeAge(CN.db and CN.db.characters
+                    and CN.db.characters[best.key])" \
+    "                .. Alts.DescribeAge({ lastSeen = time()
+                    - ((best.ageDays or 0) * 86400) })" \
+    "a character with no timestamp is reported as played today"
+
+# The Journey tab's copy; the Next tab's carries the note above it, so the
+# anchor includes the line before to stay unique.
+mutate "UI.lua" \
+    "        for index, objective in ipairs(route) do
+            table.insert(entries, {
+                text = string.format(\"|cff8a8f96%d.|r" \
+    "        for index, objective in ipairs(route) do
+            table.insert(entries, {
+                text = string.format(\"|cff8a8f96%2d.|r" \
+    "a window list pads its numbers with spaces"
+
+mutate "Modules/Mounts.lua" \
+    "    return token and CN.FactionLabel(token) or nil" \
+    "    return token" \
+    "the mount tooltip names a faction in English beside translated text"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

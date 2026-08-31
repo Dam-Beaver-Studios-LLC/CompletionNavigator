@@ -21,6 +21,37 @@ local UI = CN.UI
 local WINDOW_WIDTH = UI.WINDOW_WIDTH or 560
 local ROW_HEIGHT   = UI.ROW_HEIGHT or 20
 
+-- THE ROW PITCH FOLLOWS THE TEXT SIZE. 0.90.0.
+--
+-- `ROW_HEIGHT` was a flat 20 and the row label is a 12pt body font, so at
+-- `/cn textsize 175` the client derives a 21pt face and draws it inside a
+-- 20-pixel row on a 20-pixel pitch: every row overlapped the one below it,
+-- the value column and the chevron collided vertically, and `content:SetSize`
+-- under-reported the height so the scroll range was short of the list.
+--
+-- `/cn textsize` advertises 100 to 200 and `CN.SetTextScale` accepts 2.0.
+-- This is the accessibility control the notes around it say was rebuilt
+-- precisely for the players least likely to go hunting for a command, and
+-- above about 150% it made the window worse rather than better.
+--
+-- Rows are pooled and built once, so a change also has to re-lay out the
+-- rows that already exist -- see `list.Relayout` and `UI.RelayoutLists`.
+local function Pitch()
+    local scale = (CN.TextScale and CN.TextScale()) or 1
+
+    return math.floor(ROW_HEIGHT * scale + 0.5)
+end
+
+UI.RowPitch = Pitch
+
+-- The band the sort caption sits in, at the top of the list and above the
+-- rows. Scales with the text, because the caption does.
+local function CaptionHeight()
+    local scale = (CN.TextScale and CN.TextScale()) or 1
+
+    return math.floor(14 * scale + 0.5)
+end
+
 local SafeCreateFrame = UI.SafeCreateFrame
 
 -- WHICH PANELS HAVE A LIST, RECORDED RATHER THAN GUESSED.
@@ -35,6 +66,22 @@ local SafeCreateFrame = UI.SafeCreateFrame
 -- can only say yes when it is true.
 UI.listPanels = UI.listPanels or {}
 
+-- Every list in the window, re-anchored to the current text size. Called from
+-- `CN.RefreshTextScale`, which is the one place that knows the size changed.
+function UI.RelayoutLists()
+    local relaid = 0
+
+    for _, list in pairs(UI.listPanels) do
+        if list and list.Relayout then
+            list:Relayout()
+
+            relaid = relaid + 1
+        end
+    end
+
+    return relaid
+end
+
 -- Creates a reusable row list. Rows are pooled; SetRows swaps the data.
 local function CreateList(parent)
     local list = CreateFrame("Frame", nil, parent)
@@ -48,7 +95,21 @@ local function CreateList(parent)
 
     local scroll = SafeCreateFrame("ScrollFrame", nil, list, "UIPanelScrollFrameTemplate")
 
-    scroll:SetPoint("TOPLEFT")
+    -- THE INSET THE SORT CAPTION WAS ALREADY ASSUMING. 0.90.0.
+    --
+    -- The caption is anchored `TOPRIGHT, -28, 3` under a comment saying there
+    -- is "a free corner inside one, because the first row starts below the
+    -- scroll frame's own inset". There was no inset: this carried no offset,
+    -- and row 1 is anchored at `TOPLEFT, 0, 0`, so its top is exactly the
+    -- list's top. A 14-tall caption at y=+3 therefore spanned the top eleven
+    -- pixels of the first 20-pixel row, in the x-range that holds that row's
+    -- chevron and the right end of its value column -- and the caption is
+    -- deliberately four frame levels above the rows, so it won.
+    --
+    -- On every tab whose first row carries a number -- Collections,
+    -- Remaining, Warband, Journey -- "sort: as ranked" was drawn across it.
+    -- The inset the comment describes now exists.
+    scroll:SetPoint("TOPLEFT", 0, -CaptionHeight())
     scroll:SetPoint("BOTTOMRIGHT", -26, 0)
 
     local content = CreateFrame("Frame", nil, scroll)
@@ -65,9 +126,11 @@ local function CreateList(parent)
 
         local row = CreateFrame("Button", nil, content)
 
-        row:SetHeight(ROW_HEIGHT)
-        row:SetPoint("TOPLEFT", 0, -((index - 1) * ROW_HEIGHT))
-        row:SetPoint("TOPRIGHT", 0, -((index - 1) * ROW_HEIGHT))
+        local pitch = Pitch()
+
+        row:SetHeight(pitch)
+        row:SetPoint("TOPLEFT", 0, -((index - 1) * pitch))
+        row:SetPoint("TOPRIGHT", 0, -((index - 1) * pitch))
 
         -- Alternating rows, very faintly. Below the threshold at which
         -- anybody would call it striping, and above the threshold at which
@@ -334,8 +397,8 @@ local function CreateList(parent)
     -- of the "why this recommendation" text. There is no free band above a
     -- list; there is a free corner inside one, because the first row starts
     -- below the scroll frame's own inset.
-    sortButton:SetSize(96, 14)
-    sortButton:SetPoint("TOPRIGHT", list, "TOPRIGHT", -28, 3)
+    sortButton:SetSize(96, CaptionHeight())
+    sortButton:SetPoint("TOPRIGHT", list, "TOPRIGHT", -28, 0)
     -- Above the rows, so the caption is not painted over by a stripe.
     if list.GetFrameLevel and sortButton.SetFrameLevel then
         local level = list:GetFrameLevel()
@@ -665,7 +728,7 @@ local function CreateList(parent)
         if #entries == 0 then
             local row = self:GetRow(1)
 
-            content:SetSize(width, ROW_HEIGHT)
+            content:SetSize(width, Pitch())
 
             -- "NOTHING MATCHED" IS NOT "YOU HAVE NEVER SCANNED".
             --
@@ -717,7 +780,8 @@ local function CreateList(parent)
             truncated = truncated + 1
         end
 
-        content:SetSize(width, math.max(1, (shown + (truncated > 0 and 1 or 0)) * ROW_HEIGHT))
+        content:SetSize(width,
+            math.max(1, (shown + (truncated > 0 and 1 or 0)) * Pitch()))
 
         for index = 1, shown do
             local entry = entries[index]
@@ -813,6 +877,34 @@ local function CreateList(parent)
         end
 
         return used
+    end
+
+    -- AND THE ROWS THAT ALREADY EXIST MOVE WITH IT. Rows are pooled and
+    -- built once, so a text-size change has to re-anchor them; without this
+    -- the new pitch would apply only to rows created afterwards, which is
+    -- half a list at one spacing and half at another.
+    function list:Relayout()
+        local pitch = Pitch()
+
+        -- The caption band and the button in it grow with the text too, or
+        -- the caption outgrows the gap reserved for it and lands back on the
+        -- first row -- which is the defect this inset exists to fix.
+        local band = CaptionHeight()
+
+        scroll:ClearAllPoints()
+        scroll:SetPoint("TOPLEFT", 0, -band)
+        scroll:SetPoint("BOTTOMRIGHT", -26, 0)
+
+        if self.sortButton then
+            self.sortButton:SetSize(96, band)
+        end
+
+        for index, row in pairs(self.rows or {}) do
+            row:SetHeight(pitch)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", 0, -((index - 1) * pitch))
+            row:SetPoint("TOPRIGHT", 0, -((index - 1) * pitch))
+        end
     end
 
     return list

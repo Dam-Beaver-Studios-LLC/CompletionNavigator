@@ -348,6 +348,16 @@ function Welcome.Build()
 
     frame:Hide()
 
+    -- THE SAVED SCALE REACHES THIS FRAME TOO. 0.90.0. See the note in
+    -- `Modules/Navigation.lua`: three of the addon's five named frames are
+    -- built lazily, so the login handler's `ApplyScale` could not reach any
+    -- of them. This is the frame a first-time player sees.
+    local hudModule = CN:GetModule("Hud")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
     return frame
 end
 

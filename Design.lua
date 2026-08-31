@@ -394,6 +394,30 @@ function CN.RefreshTextScale()
         touched = touched + 1
     end
 
+    -- AND THE THINGS SIZED FROM THAT TEXT ARE RE-MEASURED. 0.90.0.
+    --
+    -- Re-applying a font object changes what is drawn and nothing that was
+    -- MEASURED from it. Two things in this window are:
+    --
+    --   * the tab strip, whose eleven buttons are sized from the rendered
+    --     width of the caption they have just adopted. At 130% and above the
+    --     captions grew inside buttons sized for 100%, so "Collections" and
+    --     "Remaining" overflowed into their neighbours and the strip did not
+    --     re-wrap.
+    --   * the list rows, whose pitch is derived from the same scale.
+    --
+    -- Both are idempotent and both are cheap; neither runs unless a window
+    -- exists.
+    if CN.UI then
+        if CN.UI.RebuildTabs then
+            CN.UI.RebuildTabs()
+        end
+
+        if CN.UI.RelayoutLists then
+            CN.UI.RelayoutLists()
+        end
+    end
+
     return touched
 end
 

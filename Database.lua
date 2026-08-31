@@ -162,7 +162,11 @@ CN.migrations = {
 
                 for _, prerequisiteID in ipairs(record.maybeRequires) do
                     record.observed[prerequisiteID] = record.observed[prerequisiteID]
-                        or { seen = 1, characters = { ["migrated"] = true } }
+                        -- `seen` NOT SEEDED. 0.90.0: migration 34 removes
+                        -- the field, and a migration that runs before it must
+                        -- not put it back on a database old enough to need
+                        -- both.
+                        or { characters = { ["migrated"] = true } }
                 end
 
                 record.maybeRequires = nil
@@ -1682,6 +1686,42 @@ CN.migrations = {
         if dropped > 0 then
             CN.DebugPrint("Dropped " .. dropped
                 .. " exploration timestamps nothing reads.")
+        end
+    end,
+
+    -- AND THE HARVEST SIGHTING COUNTER. 0.90.0.
+    --
+    -- One integer per (quest, prerequisite) pair, on a store capped at 2000
+    -- rows, incremented on every quest accepted inside the five-minute window
+    -- and read by nothing. `Harvest.Confidence` -- the only thing that could
+    -- want it -- counts distinct CHARACTERS instead, deliberately. Migration
+    -- 3 seeded the field; this removes it.
+    [34] = function(db)
+        local store = db.account and db.account.questHarvest
+
+        if type(store) ~= "table" then
+            return
+        end
+
+        local dropped = 0
+
+        for _, record in pairs(store) do
+            if type(record) == "table" and type(record.observed) == "table" then
+                for _, candidate in pairs(record.observed) do
+                    if type(candidate) == "table"
+                        and candidate.seen ~= nil then
+
+                        candidate.seen = nil
+
+                        dropped = dropped + 1
+                    end
+                end
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " harvest sighting counters nothing reads.")
         end
     end,
 }

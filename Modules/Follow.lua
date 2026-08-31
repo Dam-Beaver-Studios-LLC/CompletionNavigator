@@ -593,6 +593,28 @@ local function BuildFrame()
 
     frame:Hide()
 
+    -- THE SAVED SCALE REACHES THIS FRAME TOO. 0.90.0.
+    --
+    -- `Hud.ApplyScale` is the only thing that scales the addon's five named
+    -- frames, and it runs at login, from `/cn scale`, and from
+    -- `UI.BuildWindow`. Three of the five are built LAZILY -- this one among them -- so at login `_G[name]` is nil for all three and the saved scale
+    -- never reached them. `Hud.Build` and `UI.BuildWindow` each end by
+    -- applying it, the second under a comment stating exactly this reasoning;
+    -- the fix landed on two of five frames.
+    --
+    -- A player who sets `/cn scale 1.5` got the window and the heads-up line
+    -- at 1.5 and the ARROW at 1.0 -- the frame the setting most obviously
+    -- exists for, and the one drawn over the world at a distance.
+    --
+    -- Through `ApplyScale` rather than `SetScale`, so the screen-height clamp
+    -- 0.85.0 added is not a fourth hand-written copy.
+
+    local hudModule = CN:GetModule("Hud")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
     return frame
 end
 

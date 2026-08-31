@@ -1801,7 +1801,13 @@ UI.RegisterTab{
             local objective = results[index]
 
             table.insert(entries, {
-                text = string.format("|cff8a8f96%2d.|r %s |cff8a8f96[%s]|r",
+                -- NO PADDING. 0.90.0. `%2d` puts a leading space in front of
+                -- rows one to nine, and WoW ships no monospace font -- a
+                -- space is about three units against a digit's seven, so the
+                -- padding moved the periods further out of line rather than
+                -- into it. `UI/List.lua` states the rule; this is the third
+                -- and fourth site to break it.
+                text = string.format("|cff8a8f96%d.|r %s |cff8a8f96[%s]|r",
                     index, tostring(objective.name or objective.id),
                     CN.TypeBadge(objective.type)),
 
@@ -1951,7 +1957,7 @@ UI.RegisterTab{
 
         for index, objective in ipairs(route) do
             table.insert(entries, {
-                text = string.format("|cff8a8f96%2d.|r %s |cff8a8f96[%s]|r",
+                text = string.format("|cff8a8f96%d.|r %s |cff8a8f96[%s]|r",
                     index, tostring(objective.name or objective.id),
                     CN.TypeBadge(objective.type)),
 

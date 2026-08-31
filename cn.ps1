@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.89.0'
+$script:ToolkitVersion = '0.90.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.89.0"
-CN.dbVersion   = 34
+CN.version     = "0.90.0"
+CN.dbVersion   = 35
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -1550,6 +1550,30 @@ function CN.RefreshTextScale()
         touched = touched + 1
     end
 
+    -- AND THE THINGS SIZED FROM THAT TEXT ARE RE-MEASURED. 0.90.0.
+    --
+    -- Re-applying a font object changes what is drawn and nothing that was
+    -- MEASURED from it. Two things in this window are:
+    --
+    --   * the tab strip, whose eleven buttons are sized from the rendered
+    --     width of the caption they have just adopted. At 130% and above the
+    --     captions grew inside buttons sized for 100%, so "Collections" and
+    --     "Remaining" overflowed into their neighbours and the strip did not
+    --     re-wrap.
+    --   * the list rows, whose pitch is derived from the same scale.
+    --
+    -- Both are idempotent and both are cheap; neither runs unless a window
+    -- exists.
+    if CN.UI then
+        if CN.UI.RebuildTabs then
+            CN.UI.RebuildTabs()
+        end
+
+        if CN.UI.RelayoutLists then
+            CN.UI.RelayoutLists()
+        end
+    end
+
     return touched
 end
 
@@ -2104,7 +2128,11 @@ CN.migrations = {
 
                 for _, prerequisiteID in ipairs(record.maybeRequires) do
                     record.observed[prerequisiteID] = record.observed[prerequisiteID]
-                        or { seen = 1, characters = { ["migrated"] = true } }
+                        -- `seen` NOT SEEDED. 0.90.0: migration 34 removes
+                        -- the field, and a migration that runs before it must
+                        -- not put it back on a database old enough to need
+                        -- both.
+                        or { characters = { ["migrated"] = true } }
                 end
 
                 record.maybeRequires = nil
@@ -3624,6 +3652,42 @@ CN.migrations = {
         if dropped > 0 then
             CN.DebugPrint("Dropped " .. dropped
                 .. " exploration timestamps nothing reads.")
+        end
+    end,
+
+    -- AND THE HARVEST SIGHTING COUNTER. 0.90.0.
+    --
+    -- One integer per (quest, prerequisite) pair, on a store capped at 2000
+    -- rows, incremented on every quest accepted inside the five-minute window
+    -- and read by nothing. `Harvest.Confidence` -- the only thing that could
+    -- want it -- counts distinct CHARACTERS instead, deliberately. Migration
+    -- 3 seeded the field; this removes it.
+    [34] = function(db)
+        local store = db.account and db.account.questHarvest
+
+        if type(store) ~= "table" then
+            return
+        end
+
+        local dropped = 0
+
+        for _, record in pairs(store) do
+            if type(record) == "table" and type(record.observed) == "table" then
+                for _, candidate in pairs(record.observed) do
+                    if type(candidate) == "table"
+                        and candidate.seen ~= nil then
+
+                        candidate.seen = nil
+
+                        dropped = dropped + 1
+                    end
+                end
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " harvest sighting counters nothing reads.")
         end
     end,
 }
@@ -13874,7 +13938,13 @@ UI.RegisterTab{
             local objective = results[index]
 
             table.insert(entries, {
-                text = string.format("|cff8a8f96%2d.|r %s |cff8a8f96[%s]|r",
+                -- NO PADDING. 0.90.0. `%2d` puts a leading space in front of
+                -- rows one to nine, and WoW ships no monospace font -- a
+                -- space is about three units against a digit's seven, so the
+                -- padding moved the periods further out of line rather than
+                -- into it. `UI/List.lua` states the rule; this is the third
+                -- and fourth site to break it.
+                text = string.format("|cff8a8f96%d.|r %s |cff8a8f96[%s]|r",
                     index, tostring(objective.name or objective.id),
                     CN.TypeBadge(objective.type)),
 
@@ -14024,7 +14094,7 @@ UI.RegisterTab{
 
         for index, objective in ipairs(route) do
             table.insert(entries, {
-                text = string.format("|cff8a8f96%2d.|r %s |cff8a8f96[%s]|r",
+                text = string.format("|cff8a8f96%d.|r %s |cff8a8f96[%s]|r",
                     index, tostring(objective.name or objective.id),
                     CN.TypeBadge(objective.type)),
 
@@ -17180,6 +17250,37 @@ local UI = CN.UI
 local WINDOW_WIDTH = UI.WINDOW_WIDTH or 560
 local ROW_HEIGHT   = UI.ROW_HEIGHT or 20
 
+-- THE ROW PITCH FOLLOWS THE TEXT SIZE. 0.90.0.
+--
+-- `ROW_HEIGHT` was a flat 20 and the row label is a 12pt body font, so at
+-- `/cn textsize 175` the client derives a 21pt face and draws it inside a
+-- 20-pixel row on a 20-pixel pitch: every row overlapped the one below it,
+-- the value column and the chevron collided vertically, and `content:SetSize`
+-- under-reported the height so the scroll range was short of the list.
+--
+-- `/cn textsize` advertises 100 to 200 and `CN.SetTextScale` accepts 2.0.
+-- This is the accessibility control the notes around it say was rebuilt
+-- precisely for the players least likely to go hunting for a command, and
+-- above about 150% it made the window worse rather than better.
+--
+-- Rows are pooled and built once, so a change also has to re-lay out the
+-- rows that already exist -- see `list.Relayout` and `UI.RelayoutLists`.
+local function Pitch()
+    local scale = (CN.TextScale and CN.TextScale()) or 1
+
+    return math.floor(ROW_HEIGHT * scale + 0.5)
+end
+
+UI.RowPitch = Pitch
+
+-- The band the sort caption sits in, at the top of the list and above the
+-- rows. Scales with the text, because the caption does.
+local function CaptionHeight()
+    local scale = (CN.TextScale and CN.TextScale()) or 1
+
+    return math.floor(14 * scale + 0.5)
+end
+
 local SafeCreateFrame = UI.SafeCreateFrame
 
 -- WHICH PANELS HAVE A LIST, RECORDED RATHER THAN GUESSED.
@@ -17194,6 +17295,22 @@ local SafeCreateFrame = UI.SafeCreateFrame
 -- can only say yes when it is true.
 UI.listPanels = UI.listPanels or {}
 
+-- Every list in the window, re-anchored to the current text size. Called from
+-- `CN.RefreshTextScale`, which is the one place that knows the size changed.
+function UI.RelayoutLists()
+    local relaid = 0
+
+    for _, list in pairs(UI.listPanels) do
+        if list and list.Relayout then
+            list:Relayout()
+
+            relaid = relaid + 1
+        end
+    end
+
+    return relaid
+end
+
 -- Creates a reusable row list. Rows are pooled; SetRows swaps the data.
 local function CreateList(parent)
     local list = CreateFrame("Frame", nil, parent)
@@ -17207,7 +17324,21 @@ local function CreateList(parent)
 
     local scroll = SafeCreateFrame("ScrollFrame", nil, list, "UIPanelScrollFrameTemplate")
 
-    scroll:SetPoint("TOPLEFT")
+    -- THE INSET THE SORT CAPTION WAS ALREADY ASSUMING. 0.90.0.
+    --
+    -- The caption is anchored `TOPRIGHT, -28, 3` under a comment saying there
+    -- is "a free corner inside one, because the first row starts below the
+    -- scroll frame's own inset". There was no inset: this carried no offset,
+    -- and row 1 is anchored at `TOPLEFT, 0, 0`, so its top is exactly the
+    -- list's top. A 14-tall caption at y=+3 therefore spanned the top eleven
+    -- pixels of the first 20-pixel row, in the x-range that holds that row's
+    -- chevron and the right end of its value column -- and the caption is
+    -- deliberately four frame levels above the rows, so it won.
+    --
+    -- On every tab whose first row carries a number -- Collections,
+    -- Remaining, Warband, Journey -- "sort: as ranked" was drawn across it.
+    -- The inset the comment describes now exists.
+    scroll:SetPoint("TOPLEFT", 0, -CaptionHeight())
     scroll:SetPoint("BOTTOMRIGHT", -26, 0)
 
     local content = CreateFrame("Frame", nil, scroll)
@@ -17224,9 +17355,11 @@ local function CreateList(parent)
 
         local row = CreateFrame("Button", nil, content)
 
-        row:SetHeight(ROW_HEIGHT)
-        row:SetPoint("TOPLEFT", 0, -((index - 1) * ROW_HEIGHT))
-        row:SetPoint("TOPRIGHT", 0, -((index - 1) * ROW_HEIGHT))
+        local pitch = Pitch()
+
+        row:SetHeight(pitch)
+        row:SetPoint("TOPLEFT", 0, -((index - 1) * pitch))
+        row:SetPoint("TOPRIGHT", 0, -((index - 1) * pitch))
 
         -- Alternating rows, very faintly. Below the threshold at which
         -- anybody would call it striping, and above the threshold at which
@@ -17493,8 +17626,8 @@ local function CreateList(parent)
     -- of the "why this recommendation" text. There is no free band above a
     -- list; there is a free corner inside one, because the first row starts
     -- below the scroll frame's own inset.
-    sortButton:SetSize(96, 14)
-    sortButton:SetPoint("TOPRIGHT", list, "TOPRIGHT", -28, 3)
+    sortButton:SetSize(96, CaptionHeight())
+    sortButton:SetPoint("TOPRIGHT", list, "TOPRIGHT", -28, 0)
     -- Above the rows, so the caption is not painted over by a stripe.
     if list.GetFrameLevel and sortButton.SetFrameLevel then
         local level = list:GetFrameLevel()
@@ -17824,7 +17957,7 @@ local function CreateList(parent)
         if #entries == 0 then
             local row = self:GetRow(1)
 
-            content:SetSize(width, ROW_HEIGHT)
+            content:SetSize(width, Pitch())
 
             -- "NOTHING MATCHED" IS NOT "YOU HAVE NEVER SCANNED".
             --
@@ -17876,7 +18009,8 @@ local function CreateList(parent)
             truncated = truncated + 1
         end
 
-        content:SetSize(width, math.max(1, (shown + (truncated > 0 and 1 or 0)) * ROW_HEIGHT))
+        content:SetSize(width,
+            math.max(1, (shown + (truncated > 0 and 1 or 0)) * Pitch()))
 
         for index = 1, shown do
             local entry = entries[index]
@@ -17972,6 +18106,34 @@ local function CreateList(parent)
         end
 
         return used
+    end
+
+    -- AND THE ROWS THAT ALREADY EXIST MOVE WITH IT. Rows are pooled and
+    -- built once, so a text-size change has to re-anchor them; without this
+    -- the new pitch would apply only to rows created afterwards, which is
+    -- half a list at one spacing and half at another.
+    function list:Relayout()
+        local pitch = Pitch()
+
+        -- The caption band and the button in it grow with the text too, or
+        -- the caption outgrows the gap reserved for it and lands back on the
+        -- first row -- which is the defect this inset exists to fix.
+        local band = CaptionHeight()
+
+        scroll:ClearAllPoints()
+        scroll:SetPoint("TOPLEFT", 0, -band)
+        scroll:SetPoint("BOTTOMRIGHT", -26, 0)
+
+        if self.sortButton then
+            self.sortButton:SetSize(96, band)
+        end
+
+        for index, row in pairs(self.rows or {}) do
+            row:SetHeight(pitch)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", 0, -((index - 1) * pitch))
+            row:SetPoint("TOPRIGHT", 0, -((index - 1) * pitch))
+        end
     end
 
     return list
@@ -27405,6 +27567,14 @@ end, { events = { "NEW_MOUNT_ADDED" } })
 -- read "Faction: Alliance" beside "Sammelbar: nein". 0.66.0.
 local FACTION_NAMES = { [0] = "Horde", [1] = "Alliance" }
 
+-- Published, so the tooltip does not build a second copy of the mapping.
+-- Returns the client's own word for the faction, not the token.
+function Mounts.FactionOf(record)
+    local token = record and record.faction and FACTION_NAMES[record.faction]
+
+    return token and CN.FactionLabel(token) or nil
+end
+
 function Mounts.IsUsableByCharacter(record, character)
     if not record.isFactionSpecific then
         return true
@@ -29530,7 +29700,7 @@ function Harvest.NoteTurnIn(questID)
     end
 end
 
--- observed[prereqID] = { seen = n, characters = { [key] = true } }
+-- observed[prereqID] = { characters = { [key] = true } }
 local function Observations(record)
     record.observed = record.observed or {}
 
@@ -29555,12 +29725,22 @@ function Harvest.NoteAccepted(questID)
         if time() - entry.at <= 300 and entry.questID ~= questID then
             local candidate = observed[entry.questID]
 
+            -- `seen` IS NOT STORED. 0.90.0.
+            --
+            -- One integer per (quest, prerequisite) pair, on a store capped
+            -- at 2000 rows, incremented on every quest accepted inside the
+            -- five-minute window, serialised at every logout and re-parsed at
+            -- every login -- and read by nothing. `Harvest.Confidence`, the
+            -- only thing that could want it, counts DISTINCT CHARACTERS
+            -- instead, deliberately: doing the same chain twice on one
+            -- character is still one character's opinion.
+            --
+            -- Migration 3 seeded it; migrations 4, 5, 14, 15, 16, 18, 31, 32
+            -- and 33 exist to remove exactly this shape.
             if not candidate then
-                candidate = { seen = 0, characters = {} }
+                candidate = { characters = {} }
                 observed[entry.questID] = candidate
             end
-
-            candidate.seen = candidate.seen + 1
 
             -- Counted by character, not by sighting: doing the same chain
             -- twice on one character is still one character's opinion.
@@ -29946,15 +30126,30 @@ CN:RegisterCommand{
     order   = 81,
     help    = "Harvest every quest currently in the log.",
     handler = function()
-        local captured = 0
+        -- THE NUMBER THE SENTENCE CLAIMS. 0.90.0.
+        --
+        -- `Harvest.Capture` returns whether anything CHANGED, and a field is
+        -- only written when it was previously nil -- while `CN:OnLogin`
+        -- already captures every entry in the log. So by the time a player
+        -- can type this, nothing changes, and the command reported
+        -- "Harvested 0 quests from the current log" immediately after
+        -- harvesting every quest in the log.
+        local seen, learned = 0, 0
 
         for _, info in ipairs(Blizzard.GetQuestLogEntries()) do
+            seen = seen + 1
+
             if Harvest.Capture(info.questID, "manual") then
-                captured = captured + 1
+                learned = learned + 1
             end
         end
 
-        Print("Harvested " .. captured .. " quests from the current log.")
+        Print("Harvested " .. CN.Count(seen, "quest")
+            .. " from the current log."
+            .. ((learned > 0)
+                and CN.Aside(CN.Count(learned, "with something new",
+                    "with something new") )
+                or CN.Aside("nothing new; the login sweep had them")))
     end,
 }
 
@@ -36221,14 +36416,42 @@ local function MountLines(lines, itemID)
         return false
     end
 
+    -- A MOUNT OF YOUR OWN FACTION IS NOT LOCKED TO YOU. 0.90.0.
+    --
+    -- This printed "Faction-locked" in the warning colour -- which Design.lua
+    -- defines as "needs attention" -- for EVERY faction-specific mount,
+    -- including the roughly half that belong to the faction the player is on
+    -- and can collect. Under "Mount: not collected" it reads as "you cannot
+    -- get this".
+    --
+    -- `Mounts.IsUsableByCharacter` owns the question and the eligibility
+    -- checker has used it since it was written; the tooltip asked neither it
+    -- nor the faction's own name.
+    local mountModule = CN:GetModule("Mounts")
+
+    local function FactionLine(isFactionSpecific, record)
+        if not isFactionSpecific or not mountModule
+            or not mountModule.IsUsableByCharacter then
+
+            return
+        end
+
+        if mountModule.IsUsableByCharacter(record) then
+            return
+        end
+
+        local faction = mountModule.FactionOf and mountModule.FactionOf(record)
+
+        Add(lines, faction and ("Locked to " .. faction)
+            or "Locked to the other faction", YELLOW)
+    end
+
     local record = CN.Account("mounts")[mountID]
 
     if record then
         CollectedLine(lines, "Mount", record.collected)
 
-        if record.isFactionSpecific and record.faction then
-            Add(lines, "Faction-locked", YELLOW)
-        end
+        FactionLine(record.isFactionSpecific, record)
 
         return true
     end
@@ -36237,6 +36460,12 @@ local function MountLines(lines, itemID)
 
     if mount then
         CollectedLine(lines, "Mount", mount.isCollected)
+
+        -- AND THE SAME SENTENCE WITHOUT A SCAN. The two branches said
+        -- different things about one mount depending on whether
+        -- `/cn mountscan` had run: this one said nothing at all.
+        FactionLine(mount.isFactionSpecific, mount)
+
         return true
     end
 
@@ -42312,6 +42541,28 @@ local function BuildFrame()
 
     frame:Hide()
 
+    -- THE SAVED SCALE REACHES THIS FRAME TOO. 0.90.0.
+    --
+    -- `Hud.ApplyScale` is the only thing that scales the addon's five named
+    -- frames, and it runs at login, from `/cn scale`, and from
+    -- `UI.BuildWindow`. Three of the five are built LAZILY -- this one among them -- so at login `_G[name]` is nil for all three and the saved scale
+    -- never reached them. `Hud.Build` and `UI.BuildWindow` each end by
+    -- applying it, the second under a comment stating exactly this reasoning;
+    -- the fix landed on two of five frames.
+    --
+    -- A player who sets `/cn scale 1.5` got the window and the heads-up line
+    -- at 1.5 and the ARROW at 1.0 -- the frame the setting most obviously
+    -- exists for, and the one drawn over the world at a distance.
+    --
+    -- Through `ApplyScale` rather than `SetScale`, so the screen-height clamp
+    -- 0.85.0 added is not a fourth hand-written copy.
+
+    local hudModule = CN:GetModule("Hud")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
     return frame
 end
 
@@ -44343,8 +44594,22 @@ CN:RegisterCommand{
         if best then
             Print("|cffffc74f" .. tostring(best.name) .. "|r"
                 .. (best.level and (" (" .. best.level .. ")") or "")
+                -- THE REAL RECORD, NOT A REBUILT ONE. 0.90.0.
+                --
+                -- `Alts.AgeDays` returns nil when a character has no
+                -- `lastSeen`, and `DescribeAge` renders that as "never seen".
+                -- This rebuilt a record out of `ageDays`, and `or 0` turned
+                -- "unknown" into `time()` -- "today". The path is reachable:
+                -- `Alts.Assignments` admits a character on
+                -- `not age or age <= staleDays`, so a record with no
+                -- timestamp is exactly what arrives here.
+                --
+                -- The roster loop twenty lines below passes the real
+                -- character and gets the right answer. Same file, same
+                -- command, two spellings of one rule.
                 .. " |cff8a8f96last played "
-                .. Alts.DescribeAge({ lastSeen = time() - ((best.ageDays or 0) * 86400) })
+                .. Alts.DescribeAge(CN.db and CN.db.characters
+                    and CN.db.characters[best.key])
                 .. "|r")
 
             for _, item in ipairs(best.items) do
@@ -45200,6 +45465,29 @@ local function BuildArrow()
         "Hide the arrow. /cn arrow on brings it back.")
 
     arrow:Hide()
+
+    -- THE SAVED SCALE REACHES THIS FRAME TOO. 0.90.0.
+    --
+    -- `Hud.ApplyScale` is the only thing that scales the addon's five named
+    -- frames, and it runs at login, from `/cn scale`, and from
+    -- `UI.BuildWindow`. Three of the five are built LAZILY -- this one among
+    -- them -- so at login `_G[name]` is nil for all three and the saved scale
+    -- never reached them. `Hud.Build` and `UI.BuildWindow` each end by
+    -- applying it, the second under a comment stating exactly this reasoning;
+    -- the fix landed on two of five frames.
+    --
+    -- A player who sets `/cn scale 1.5` got the window and the heads-up line
+    -- at 1.5 and the ARROW at 1.0 -- the frame the setting most obviously
+    -- exists for, and the one drawn over the world at a distance.
+    --
+    -- Through `ApplyScale` rather than `SetScale`, so the screen-height clamp
+    -- 0.85.0 added is not a fourth hand-written copy.
+
+    local hudModule = CN:GetModule("Hud")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
 
     return arrow
 end
@@ -46150,9 +46438,23 @@ function Navigation.Diagnose()
         or string.format("%d movement samples, %s",
             motionState.samples, tostring(motionState.verdict)))
 
-    local scaleX, scaleY = Navigation.MapScale(state.mapID or bestMap)
+    -- AND THE THIRD RETURN, WHICH THIS FILE'S OWN HEADER DEMANDS. 0.90.0.
+    --
+    -- `MapScale` returns `1, 1, false` on both refusal paths, and its header
+    -- says in as many words: "callers that want yards must check it".
+    -- `Routing.lua` checks it, `Modules/Capture.lua` checks it and quotes the
+    -- header while doing so, and the command written BECAUSE "prose is a bad
+    -- instrument; this is a better one" did not -- so during a loading
+    -- screen, in an instance, or on a map with no world position, which is
+    -- exactly when somebody runs a diagnostic, `/cn navdiag` reported
+    -- "map scale  1 x 1 yards across" as an observation, into a bug report.
+    local scaleX, scaleY, scaleMeasured =
+        Navigation.MapScale(state.mapID or bestMap)
 
-    add("map scale", string.format("%.0f x %.0f yards across", scaleX, scaleY))
+    add("map scale", scaleMeasured
+        and string.format("%.0f x %.0f yards across", scaleX, scaleY)
+        or "the client would not convert this map"
+            .. CN.DASH .. "distances here are estimates")
 
     add("relative bearing", state.relative
         and string.format("%.1f deg", math.deg(state.relative))
@@ -46945,7 +47247,29 @@ function MapPins.HubsForMap(mapID, force)
         return nil
     end
 
+    local startX, startY = MapPins.RouteStart(mapID)
+
+    -- AND WHERE THE ROUTE STARTS IS PART OF THE ROUTE. 0.90.0.
+    --
+    -- The key was the candidate generation and the type filter, and neither
+    -- moves when the player walks -- nor does anything else invalidate on
+    -- movement, since the only invalidators are the zone change and the quest
+    -- log. So: open the map at one end of a zone, run to the other end, open
+    -- it again, and the numbered stops are still ordered from where you were
+    -- standing the first time, for the rest of the session. Route ORDER is
+    -- the entire content of this feature; the header above calls it "the
+    -- SHAPE of the work".
+    --
+    -- `CN.BuildZoneRoute` already keys its own cache on the start point, so
+    -- the fresher answer existed and this layer declined to ask for it, and
+    -- `Travel.CostFor` solves the same problem with `costCacheYards`.
+    --
+    -- Coarsened to `CN.routeCacheStep`, the same grid the router uses, so a
+    -- map pan and a few yards of walking still hit the cache: this is the
+    -- work that must not happen on every frame the map is open.
     local generation = RouteGeneration()
+        .. ":" .. tostring(math.floor((startX or 0.5) / CN.routeCacheStep))
+        .. ":" .. tostring(math.floor((startY or 0.5) / CN.routeCacheStep))
 
     if not force
         and cache.mapID == mapID
@@ -46954,8 +47278,6 @@ function MapPins.HubsForMap(mapID, force)
 
         return cache.hubs
     end
-
-    local startX, startY = MapPins.RouteStart(mapID)
 
     local ok, _, _, hubs = pcall(CN.BuildZoneRoute, mapID, startX, startY)
 
@@ -56978,6 +57300,16 @@ function Welcome.Build()
 
     frame:Hide()
 
+    -- THE SAVED SCALE REACHES THIS FRAME TOO. 0.90.0. See the note in
+    -- `Modules/Navigation.lua`: three of the addon's five named frames are
+    -- built lazily, so the login handler's `ApplyScale` could not reach any
+    -- of them. This is the frame a first-time player sees.
+    local hudModule = CN:GetModule("Hud")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
     return frame
 end
 
@@ -58341,7 +58673,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.89.0
+## Version: 0.90.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -58596,6 +58928,79 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.90.0]
+
+**This release is mostly about the window, and it starts with a stub that had
+been lying since the window was written.** The offline test suite's fake
+`GetTextWidth` returned 60 for every caption at every text size, where the
+game returns the rendered width. The tab strip sizes its eleven buttons from
+exactly that call — so "does a caption still fit its button at 150% text?" was
+a question no test could ask, and the answer was no. Nothing re-measured the
+strip after a text-size change at all. Fixing the stub found that, a row pitch
+that never grew with the text it held, and a sort caption drawn on top of the
+first row of four tabs.
+
+That makes twenty defects this project has traced to a test double being
+simpler or more forgiving than the real client.
+
+### Fixed
+
+- **`/cn scale` did not reach the navigation arrow, the follow frame, or the
+  welcome screen.** All three are built the first time they are needed rather
+  than at login, and the only thing that applies the saved scale runs at
+  login. So somebody who set 1.5 got the window and the heads-up line at 1.5
+  and the arrow — the frame the setting most obviously exists for, drawn over
+  the world at a distance — at 1.0, every session. The window and the
+  heads-up line were each given this fix in an earlier release; it landed on
+  two of five frames.
+- **Text sizes above about 130% broke the window's layout.** Tab captions grew
+  inside buttons sized for 100% and overflowed into their neighbours; list
+  rows kept a fixed 20-pixel pitch under a font the same setting takes to
+  24pt, so rows overlapped and the scrollbar's range fell short of the list.
+  Both are re-measured now. This is the accessibility control, and above
+  150% it had been making the window worse rather than better.
+- **The sort caption was drawn across the first row.** It is anchored inside
+  the list, under a comment explaining that the first row starts below the
+  scroll frame's inset. There was no inset. On Collections, Remaining,
+  Warband and Journey, "sort: as ranked" sat on top of the first row's
+  number.
+- **Map route numbers did not follow you.** The pin cache was keyed on what
+  the addon knows and not on where you are standing, and nothing invalidated
+  it when you moved — so you could open the map at one end of a zone, run to
+  the other end, open it again, and get the stops still ordered from where you
+  had been. Route order is the whole point of the feature. It is keyed on your
+  position now, coarsened to the same grid the router already uses so that
+  panning the map still costs nothing.
+- **The tooltip said "Faction-locked" about mounts of your own faction.** In
+  the warning colour, under "not collected", which reads as "you cannot have
+  this" — about roughly half the faction mounts in the game. It now names the
+  faction that actually holds it, in the client's own language, and says
+  nothing at all about a mount you can collect. The two halves of that tooltip
+  also disagreed depending on whether you had run `/cn mountscan`; they no
+  longer do.
+- **`/cn navdiag` reported an unmeasured map scale as a fact.** The function
+  returns a third value meaning "this is a shrug, not a measurement" and its
+  own header says callers wanting yards must check it. Two other files do. The
+  diagnostic command — the one whose output goes into bug reports — did not,
+  so during a loading screen or in an instance it printed "map scale 1 x 1
+  yards across".
+- **`/cn alts` reported a character with no recorded play time as played
+  today.** The suggestion line rebuilt a record from an age in days, where
+  "unknown" collapses to zero, which collapses to now. The roster list twenty
+  lines below reads the real record and says "never seen".
+- **`/cn harvestnow` said "Harvested 0 quests" right after harvesting every
+  quest in the log.** The number it printed was quests that learned something
+  new, and the login sweep had already learned it. It now says how many it
+  harvested and, separately, how many of those told it something.
+- **Two window lists padded their numbers with spaces.** WoW has no monospace
+  font in its UI, so padding rows 1–9 with a leading space moved the periods
+  further out of line rather than into it. The chat side has been swept for
+  this three times.
+- **A sighting counter nothing has ever read is gone.** One integer per
+  (quest, prerequisite) pair on a 2,000-row store, written on every quest
+  accepted inside a five-minute window and serialised at every logout.
+  Migration 34 removes it and the migration that seeded it stops seeding it.
 
 ## [0.89.0]
 
@@ -65638,7 +66043,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.89.0
+0.90.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -70451,6 +70856,141 @@ mutate "Modules/Vault.lua" \
     "" \
     "the vault's threshold term is undeclared and reads as a second deadline"
 
+mutate "Modules/Navigation.lua" \
+    "    local hudModule = CN:GetModule(\"Hud\")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
+    return arrow" \
+    "    return arrow" \
+    "the arrow is drawn at 100% however the player set the scale"
+
+mutate "Modules/Follow.lua" \
+    "    local hudModule = CN:GetModule(\"Hud\")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
+    return frame" \
+    "    return frame" \
+    "the follow frame is drawn at 100% however the player set the scale"
+
+mutate "Modules/Welcome.lua" \
+    "    local hudModule = CN:GetModule(\"Hud\")
+
+    if hudModule and hudModule.ApplyScale then
+        hudModule.ApplyScale()
+    end
+
+    return frame" \
+    "    return frame" \
+    "the welcome screen is drawn at 100% however the player set the scale"
+
+mutate "Modules/Navigation.lua" \
+    "    add(\"map scale\", scaleMeasured" \
+    "    add(\"map scale\", true" \
+    "/cn navdiag prints an unmeasured map scale as a fact"
+
+mutate "Design.lua" \
+    "        if CN.UI.RebuildTabs then
+            CN.UI.RebuildTabs()
+        end" \
+    "        if false then
+            CN.UI.RebuildTabs()
+        end" \
+    "the tab strip is never re-measured after a text-size change"
+
+mutate "Design.lua" \
+    "        if CN.UI.RelayoutLists then
+            CN.UI.RelayoutLists()
+        end" \
+    "        if false then
+            CN.UI.RelayoutLists()
+        end" \
+    "the rows already built keep the pitch they were built at"
+
+mutate "UI/List.lua" \
+    "    return math.floor(ROW_HEIGHT * scale + 0.5)" \
+    "    return ROW_HEIGHT" \
+    "a 24 point row is drawn on a 20 pixel pitch"
+
+mutate "UI/List.lua" \
+    "    scroll:SetPoint(\"TOPLEFT\", 0, -CaptionHeight())" \
+    "    scroll:SetPoint(\"TOPLEFT\")" \
+    "the sort caption is drawn on top of the first row"
+
+mutate "UI/List.lua" \
+    "    return math.floor(14 * scale + 0.5)" \
+    "    return 14" \
+    "the caption outgrows the band reserved for it"
+
+mutate "Modules/MapPins.lua" \
+    "    local generation = RouteGeneration()
+        .. \":\" .. tostring(math.floor((startX or 0.5) / CN.routeCacheStep))
+        .. \":\" .. tostring(math.floor((startY or 0.5) / CN.routeCacheStep))" \
+    "    local generation = RouteGeneration()" \
+    "the map route stays ordered from where you were an hour ago"
+
+mutate "Modules/MapPins.lua" \
+    "        .. \":\" .. tostring(math.floor((startX or 0.5) / CN.routeCacheStep))" \
+    "        .. \":\" .. tostring(startX)" \
+    "the zone route is rebuilt on every frame the map is open"
+
+mutate "Modules/Tooltips.lua" \
+    "        if mountModule.IsUsableByCharacter(record) then
+            return
+        end" \
+    "        if false then
+            return
+        end" \
+    "a mount of your own faction is flagged as locked to somebody else"
+
+mutate "Modules/Tooltips.lua" \
+    "        FactionLine(mount.isFactionSpecific, mount)" \
+    "" \
+    "one mount says two different things depending on whether you scanned"
+
+mutate "Modules/Harvest.lua" \
+    "        Print(\"Harvested \" .. CN.Count(seen, \"quest\")" \
+    "        Print(\"Harvested \" .. CN.Count(learned, \"quest\")" \
+    "/cn harvestnow reports zero after harvesting a full log"
+
+mutate "Modules/Harvest.lua" \
+    "                candidate = { characters = {} }" \
+    "                candidate = { seen = 0, characters = {} }" \
+    "a sighting counter nothing reads is stored again"
+
+mutate "Database.lua" \
+    "        local store = db.account and db.account.questHarvest" \
+    "        local store = db.account and db.account.questObservations" \
+    "the harvest counters already on disk stay there"
+
+mutate "Modules/Alts.lua" \
+    "                .. Alts.DescribeAge(CN.db and CN.db.characters
+                    and CN.db.characters[best.key])" \
+    "                .. Alts.DescribeAge({ lastSeen = time()
+                    - ((best.ageDays or 0) * 86400) })" \
+    "a character with no timestamp is reported as played today"
+
+# The Journey tab's copy; the Next tab's carries the note above it, so the
+# anchor includes the line before to stay unique.
+mutate "UI.lua" \
+    "        for index, objective in ipairs(route) do
+            table.insert(entries, {
+                text = string.format(\"|cff8a8f96%d.|r" \
+    "        for index, objective in ipairs(route) do
+            table.insert(entries, {
+                text = string.format(\"|cff8a8f96%2d.|r" \
+    "a window list pads its numbers with spaces"
+
+mutate "Modules/Mounts.lua" \
+    "    return token and CN.FactionLabel(token) or nil" \
+    "    return token" \
+    "the mount tooltip names a faction in English beside translated text"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 
@@ -70740,6 +71280,23 @@ for _, name in ipairs({
     CN_KNOWN_EVENTS[name] = true
 end
 
+-- The addon's own text scale, read back by the text-measuring stubs below.
+-- Set once the addon has loaded; before that every measurement is at 100%,
+-- which is what the client would report with no setting applied.
+function CN_TEST_TEXT_SCALE()
+    local addon = CN_TEST_ADDON
+
+    if addon and addon.TextScale then
+        local ok, scale = pcall(addon.TextScale)
+
+        if ok and type(scale) == "number" then
+            return scale
+        end
+    end
+
+    return 1
+end
+
 local function Frame()
     local f = {}
     local events, scripts = {}, {}
@@ -71009,8 +71566,49 @@ local function Frame()
     end
 
     function f:GetScale() return rawget(f, "scale") or 1 end
-    function f:GetTextWidth() return 60 end
-    function f:GetTextHeight() return 12 end
+
+    -- TEXT HAS A WIDTH, AND IT DEPENDS ON THE TEXT. 0.90.0.
+    --
+    -- This answered a flat 60 for every caption at every font size, where the
+    -- client returns the rendered width. `UI.RebuildTabs` sizes each of the
+    -- eleven tab buttons from exactly this call, so "does a caption still fit
+    -- its button at 150% text" was unanswerable by any test -- and the answer
+    -- was no, because nothing re-measured the strip after a size change.
+    --
+    -- Not a font metric: a proportional-font approximation, seven units a
+    -- character times the text scale, which is enough to make a button sized
+    -- at 100% demonstrably too narrow at 150% and enough to tell "Journey"
+    -- from "Achievements". Colour codes are not drawn, so they are not
+    -- measured.
+    --
+    -- Twentieth entry in this project's list of defects hidden by a stub
+    -- simpler than the client.
+    local function RenderedText(region)
+        local text = tostring((region.GetText and region:GetText())
+            or rawget(region, "text") or "")
+
+        text = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+
+        return text
+    end
+
+    function f:GetTextWidth()
+        local caption = RenderedText(f)
+
+        if caption == "" and f.fontString then
+            caption = RenderedText(f.fontString)
+        end
+
+        local scale = (CN_TEST_TEXT_SCALE and CN_TEST_TEXT_SCALE()) or 1
+
+        return math.floor(#caption * 7 * scale + 0.5)
+    end
+
+    function f:GetTextHeight()
+        local scale = (CN_TEST_TEXT_SCALE and CN_TEST_TEXT_SCALE()) or 1
+
+        return math.floor(12 * scale + 0.5)
+    end
     function f:GetEffectiveScale() return 1 end
     function f:GetCenter() return 500, 400 end
     -- WHERE A REGION WAS ACTUALLY ANCHORED.
@@ -72729,7 +73327,11 @@ end
 RENOWN_LEVEL_LABEL         = "Ruf "
 
 FACTION_ALLIANCE           = "Allianz"
-FACTION_HORDE              = "Horde"
+-- TRANSLATED, LIKE ITS SIBLING. 0.90.0. This fixture is deliberately German
+-- so that a token leaking into display is visible, and this one was left as
+-- the English token -- which is also the addon's internal key, so any caller
+-- printing the key instead of the client's word looked correct.
+FACTION_HORDE              = "Die Horde"
 FACTION_STANDING_LABEL4    = "Neutral"
 
 LE_PET_JOURNAL_FILTER_COLLECTED     = 1
@@ -73820,6 +74422,12 @@ end
 local ADDON_NAME = "CompletionNavigator"
 local CN = {}
 
+-- Published so the text-measuring stubs at the top of this file can ask the
+-- addon what text size the player has chosen. The client's own
+-- `GetTextWidth` reports the rendered width; a stub that ignores the size is
+-- the shape that let a tab strip overflow at 150% with every test green.
+CN_TEST_ADDON = CN
+
 print("Loading " .. #files .. " files:")
 
 for _, relative in ipairs(files) do
@@ -74720,8 +75328,87 @@ local mountLines = tooltipText(CN_TEST_FireItemTooltip(800, "Reins of the Horde 
 print("  item 800 -> " .. mountLines)
 assert(mountLines:find("Mount: not collected", 1, true),
     "a mount item must report collection state, got " .. mountLines)
-assert(mountLines:find("Faction%-locked"),
-    "a faction-specific mount must be flagged, got " .. mountLines)
+-- A MOUNT OF YOUR OWN FACTION IS NOT LOCKED TO YOU. 0.90.0.
+--
+-- The tooltip printed "Faction-locked" in the warning colour for EVERY
+-- faction-specific mount, including the roughly half belonging to the faction
+-- the player is on -- which under "not collected" reads as "you cannot get
+-- this". `Mounts.IsUsableByCharacter` owns the question and the eligibility
+-- checker has always used it; the tooltip asked neither it nor the faction's
+-- own name.
+assert(mountLines:find("Locked to ", 1, true),
+    "a mount this character cannot use must say which faction has it, got "
+    .. mountLines)
+
+assert(not mountLines:find("Faction%-locked"),
+    "and not the shape that said it about every faction mount, got "
+    .. mountLines)
+
+;(function()
+    local mountModule = CN:GetModule("Mounts")
+
+    local record = CN.Account("mounts")[2]
+
+    assert(record and record.isFactionSpecific,
+        "the fixture must hold a faction-specific mount")
+
+    -- The same mount, on a character of its own faction.
+    local realFaction = CN.character and CN.character.faction
+
+    if CN.character then
+        CN.character.faction =
+            mountModule.FactionOf and "Horde" or realFaction
+    end
+
+    local mine = tooltipText(CN_TEST_FireItemTooltip(800,
+        "Reins of the Horde Wolf"))
+
+    if CN.character then
+        CN.character.faction = realFaction
+    end
+
+    assert(not mine:find("Locked to", 1, true),
+        "a mount of your own faction carries no lock warning at all, got "
+        .. mine)
+
+    assert(mine:find("Mount: not collected", 1, true),
+        "while still saying whether you have it, got " .. mine)
+
+    ------------------------------------------------------------
+    -- AND THE SAME SENTENCE WITHOUT A SCAN.
+    ------------------------------------------------------------
+    -- The tooltip has two branches -- the stored record and the journal read
+    -- that answers when there is no record -- and only the first said
+    -- anything about faction. So one mount said two different things
+    -- depending on whether `/cn mountscan` had been run.
+    -- Item 800 teaches mount 2, which the fixture leaves uncollected and
+    -- faction-specific to the Horde.
+    local storedMount = CN.Account("mounts")[2]
+
+    assert(storedMount, "the scanned branch was reachable in the first place")
+
+    CN.Account("mounts")[2] = nil
+
+    local unscanned = tooltipText(CN_TEST_FireItemTooltip(800,
+        "Reins of the Horde Wolf"))
+
+    CN.Account("mounts")[2] = storedMount
+
+    assert(unscanned:find("Mount: not collected", 1, true),
+        "the journal still answers with no stored record, got " .. unscanned)
+
+    assert(unscanned:find("Locked to ", 1, true),
+        "and says the same thing about faction as the scanned branch, got "
+        .. unscanned)
+
+    -- IN THE CLIENT'S OWN WORD, not the addon's internal key. `FACTION_HORDE`
+    -- is "Die Horde" in this fixture precisely so a key leaking into display
+    -- is visible.
+    assert(unscanned:find(FACTION_HORDE, 1, true),
+        "in the language the client uses, got " .. unscanned)
+
+    print("  a mount of your own faction is not flagged as locked")
+end)()
 
 -- A caged pet.
 local petLines = tooltipText(CN_TEST_FireItemTooltip(801, "Wild Critter Cage"))
@@ -107225,6 +107912,511 @@ end)()
     end
 
     print("  finding a candidate is an index, not a walk")
+end)()
+
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SAVED SCALE REACHES EVERY FRAME THE ADDON DRAWS.
+    ------------------------------------------------------------
+    -- `Hud.ApplyScale` is the only thing that scales the addon's five named
+    -- frames, and it runs at login, from `/cn scale`, and from
+    -- `UI.BuildWindow`. Three of the five -- the arrow, the follow frame and
+    -- the welcome screen -- are built LAZILY, so at login `_G[name]` is nil
+    -- for all three and the saved scale never reached them. `Hud.Build` and
+    -- `UI.BuildWindow` each end by applying it; the fix landed on two of five.
+    --
+    -- A player who set `/cn scale 1.5` got the window and the heads-up line
+    -- at 1.5 and the ARROW at 1.0, on every login, for the whole session.
+    local hud = CN:GetModule("Hud")
+
+    assert(hud and hud.SetScale, "the scale setting exists")
+
+    hud.SetScale(1.4)
+
+    local builders = {
+        CompletionNavigatorArrow   = function()
+            return CN:GetModule("Navigation").BuildArrow()
+        end,
+        CompletionNavigatorFollow  = function()
+            return CN:GetModule("Follow").BuildFrame()
+        end,
+        CompletionNavigatorWelcome = function()
+            return CN:GetModule("Welcome").Build()
+        end,
+        CompletionNavigatorHud     = function() return hud.Build() end,
+    }
+
+    for name, build in pairs(builders) do
+        _G[name] = nil
+
+        local made = build()
+
+        assert(made, name .. " builds")
+
+        assert(math.abs((made:GetScale() or 1) - 1.4) < 0.001,
+            name .. " is built at the scale the player chose, got "
+            .. tostring(made:GetScale()))
+    end
+
+    -- AND EVERY FRAME `ApplyScale` KNOWS ABOUT HAS A BUILDER THAT APPLIES IT.
+    -- A sixth frame added later must not repeat this.
+    local hudSource = CN_TEST_ReadAddonFile("Modules/Hud.lua")
+
+    local named = 0
+
+    for name in string.gmatch(hudSource, '"(CompletionNavigator%w*)"') do
+        if name ~= "CompletionNavigatorFrame" then
+            named = named + 1
+
+            assert(builders[name],
+                "every frame ApplyScale scales is built at that scale: "
+                .. name)
+        end
+    end
+
+    assert(named >= 4, "the list was found: " .. tostring(named))
+
+    -- THE BUILDERS THEMSELVES, because a frame is built once per session and
+    -- the harness cannot un-build one: by the time this runs the login sweep
+    -- has already made them, so the assertion above would hold even if the
+    -- builder did nothing. The defect was in the BUILD path, so that is what
+    -- is checked.
+    --
+    -- The window and the heads-up line have applied it since 0.85.0 and
+    -- 0.84.0; these three are the ones the fix missed.
+    for _, file in ipairs({ "Modules/Navigation.lua", "Modules/Follow.lua",
+                            "Modules/Welcome.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(text and text:find("hudModule.ApplyScale()", 1, true),
+            file .. " applies the saved scale to the frame it builds")
+    end
+
+    -- And through the one writer, not a fourth hand-written copy of the
+    -- screen-height clamp 0.85.0 added.
+    for _, file in ipairs({ "Modules/Navigation.lua", "Modules/Follow.lua",
+                            "Modules/Welcome.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(not text:find("SetScale(hud", 1, true)
+            and not text:find(":SetScale(Hud.Scale", 1, true),
+            file .. " does not keep its own copy of the scaling rule")
+    end
+
+    hud.SetScale(1)
+
+    print("  the saved scale reaches every frame the addon draws")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn navdiag DOES NOT PRINT A SHRUG AS A MEASUREMENT.
+    ------------------------------------------------------------
+    -- `Navigation.MapScale` returns `1, 1, false` on both refusal paths and
+    -- its own header says "callers that want yards must check it". Routing
+    -- checks it, Capture checks it and quotes the header while doing so, and
+    -- the diagnostic command -- in the file that owns the function -- did
+    -- not. So during a loading screen or in an instance, which is exactly
+    -- when somebody runs a diagnostic, it reported "map scale 1 x 1 yards
+    -- across" as an observation.
+    local navigation = CN:GetModule("Navigation")
+
+    local realScale = navigation.MapScale
+
+    navigation.MapScale = function() return 1, 1, false end
+
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("navdiag")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    navigation.MapScale = realScale
+
+    local text = table.concat(spoken, "\n")
+
+    assert(not text:find("1 x 1 yards", 1, true),
+        "an unmeasured map scale is not printed as a number:\n" .. text)
+
+    assert(text:find("would not convert", 1, true),
+        "it says the client would not answer instead:\n" .. text)
+
+    -- And a real measurement is still printed.
+    spoken = {}
+
+    navigation.MapScale = function() return 3000, 2000, true end
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("navdiag")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    navigation.MapScale = realScale
+
+    assert(table.concat(spoken, "\n"):find("3000 x 2000 yards", 1, true),
+        "a measured one still is:\n" .. table.concat(spoken, "\n"))
+
+    print("  /cn navdiag does not print a shrug as a measurement")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LARGER TEXT SIZE RE-MEASURES WHAT WAS SIZED FROM THE TEXT.
+    ------------------------------------------------------------
+    -- Re-applying a font object changes what is drawn and nothing that was
+    -- MEASURED from it. The eleven tab buttons are sized from the rendered
+    -- width of their caption, and the list rows sit on a fixed 20-pixel
+    -- pitch under a 12pt font the same setting grows to 24pt.
+    --
+    -- The harness could not see either, because `GetTextWidth` answered a
+    -- flat 60 for every caption at every size -- the twentieth defect in this
+    -- project hidden by a stub simpler than the client.
+    local ui = CN.UI
+
+    local window = ui.BuildWindow()
+
+    assert(window and window.tabButtons and #window.tabButtons > 0,
+        "the window and its tab strip build")
+
+    CN.SetTextScale(1)
+
+    ui.RebuildTabs()
+
+    local narrow = {}
+
+    for index, button in ipairs(window.tabButtons) do
+        narrow[index] = button:GetWidth()
+    end
+
+    CN.SetTextScale(1.5)
+
+    local grew = 0
+
+    for index, button in ipairs(window.tabButtons) do
+        local width = button:GetWidth()
+
+        assert(width >= (narrow[index] or 0),
+            "a tab button never shrinks when its caption grows: "
+            .. tostring(narrow[index]) .. " -> " .. tostring(width))
+
+        if width > (narrow[index] or 0) then
+            grew = grew + 1
+        end
+    end
+
+    assert(grew > 0,
+        "the strip is re-measured when the text size changes, not only when "
+        .. "a tab is registered")
+
+    -- AND THE ROWS MOVE APART, so a 21pt line is not drawn on a 20px pitch.
+    assert(ui.RowPitch and ui.RowPitch() > 20,
+        "the row pitch follows the text size: " .. tostring(ui.RowPitch()))
+
+    CN.SetTextScale(1)
+
+    assert(ui.RowPitch() == 20,
+        "and comes back: " .. tostring(ui.RowPitch()))
+
+    ui.RebuildTabs()
+
+    print("  a larger text size re-measures what was sized from the text")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SORT CAPTION IS NOT DRAWN ON THE FIRST ROW.
+    ------------------------------------------------------------
+    -- The caption is anchored inside the list under a comment claiming "the
+    -- first row starts below the scroll frame's own inset". There was no
+    -- inset, so a 14-tall caption at y=+3 covered the top eleven pixels of
+    -- the first 20-pixel row, in the x-range holding that row's chevron and
+    -- the right end of its value column -- and it is deliberately four frame
+    -- levels above the rows, so it won. Every tab whose first row carries a
+    -- number showed it.
+    local source = CN_TEST_ReadAddonFile("UI/List.lua")
+
+    assert(source and source:find('scroll:SetPoint("TOPLEFT", 0, -CaptionHeight())',
+            1, true),
+        "the scroll frame reserves the band the caption sits in")
+
+    assert(not source:find('sortButton:SetPoint("TOPRIGHT", list, "TOPRIGHT", -28, 3)',
+            1, true),
+        "and the caption no longer hangs three pixels into the rows")
+
+    -- The band grows with the text, or the caption outgrows its own gap.
+    CN.SetTextScale(1)
+
+    local panel = CN.UI and CN.UI.listPanels and next(CN.UI.listPanels)
+
+    if panel then
+        local list = CN.UI.listPanels[panel]
+
+        local narrow = list.sortButton and list.sortButton:GetHeight()
+
+        CN.SetTextScale(1.5)
+
+        local wide = list.sortButton and list.sortButton:GetHeight()
+
+        assert(narrow and wide and wide > narrow,
+            "the caption band grows with the caption: " .. tostring(narrow)
+            .. " -> " .. tostring(wide))
+
+        CN.SetTextScale(1)
+    end
+
+    print("  the sort caption is not drawn on the first row")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE MAP ROUTE IS ORDERED FROM WHERE YOU ARE NOW.
+    ------------------------------------------------------------
+    -- The pin cache was keyed on the candidate generation and the type
+    -- filter, and neither moves when the player walks -- nor does anything
+    -- else invalidate on movement. So: open the map at one end of a zone, run
+    -- to the other end, open it again, and the numbered stops were still
+    -- ordered from where you were standing the first time, for the rest of
+    -- the session. Route order is the entire content of this feature.
+    local pins = CN:GetModule("MapPins")
+
+    pins.InvalidateCache()
+
+    local realPosition = CN.GetPlayerPosition
+
+    local at = { 94, 0.10, 0.10 }
+
+    CN.GetPlayerPosition = function() return at[1], at[2], at[3] end
+
+    local asked = {}
+
+    local realRoute = CN.BuildZoneRoute
+
+    CN.BuildZoneRoute = function(mapID, startX, startY)
+        table.insert(asked, tostring(startX) .. "," .. tostring(startY))
+
+        return realRoute(mapID, startX, startY)
+    end
+
+    pins.HubsForMap(94)
+
+    -- A pan, or a step: the cache must still answer, because rebuilding on
+    -- every frame the map is open is the cost it exists to avoid.
+    at[2], at[3] = 0.105, 0.105
+
+    pins.HubsForMap(94)
+
+    assert(#asked == 1,
+        "a few yards does not rebuild the route: " .. tostring(#asked))
+
+    -- The other end of the zone is a different route.
+    at[2], at[3] = 0.90, 0.90
+
+    pins.HubsForMap(94)
+
+    assert(#asked == 2,
+        "walking across the zone does: " .. tostring(#asked))
+
+    CN.BuildZoneRoute    = realRoute
+    CN.GetPlayerPosition = realPosition
+
+    pins.InvalidateCache()
+
+    print("  the map route is ordered from where you are now")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn harvestnow COUNTS WHAT ITS SENTENCE CLAIMS.
+    ------------------------------------------------------------
+    -- `Harvest.Capture` returns whether anything CHANGED, and a field is
+    -- written only when it was previously nil -- while the login hook already
+    -- captures every entry in the log. So by the time a player could type
+    -- this, nothing changed, and the command reported "Harvested 0 quests
+    -- from the current log" immediately after harvesting every quest in it.
+    local sweep = CN:GetModule("Harvest")
+
+    for _, info in ipairs(CN.Blizzard.GetQuestLogEntries()) do
+        sweep.Capture(info.questID, "login")
+    end
+
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("harvestnow")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    local entries = #CN.Blizzard.GetQuestLogEntries()
+
+    assert(entries > 0, "the fixture must have quests in the log")
+
+    assert(text:find(tostring(entries), 1, true),
+        "the count is the number of quests it harvested (" .. entries
+        .. "):\n" .. text)
+
+    assert(not text:find("Harvested 0 ", 1, true),
+        "and never zero after harvesting a full log:\n" .. text)
+
+    print("  /cn harvestnow counts what its sentence claims")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SIGHTING COUNTER NOTHING READS IS NOT STORED.
+    ------------------------------------------------------------
+    -- One integer per (quest, prerequisite) pair, on a store capped at 2000
+    -- rows, incremented on every quest accepted inside the five-minute window
+    -- and read by nothing: `Harvest.Confidence` counts distinct CHARACTERS
+    -- instead, deliberately.
+    for _, record in pairs(CN.Account("questHarvest")) do
+        if type(record) == "table" and type(record.observed) == "table" then
+            for prerequisiteID, candidate in pairs(record.observed) do
+                assert(type(candidate) ~= "table" or candidate.seen == nil,
+                    "prerequisite " .. tostring(prerequisiteID)
+                    .. " must not persist a sighting counter")
+            end
+        end
+    end
+
+    -- AND THE MIGRATION REMOVES ONE ALREADY ON DISK.
+    local aged = {
+        version = 34,
+        account = {
+            questHarvest = {
+                [4242] = { observed = {
+                    [1111] = { seen = 9, characters = { ["a"] = true } },
+                } },
+            },
+        },
+        characters = {},
+    }
+
+    CN.RunMigrations(aged)
+
+    local row = aged.account.questHarvest[4242].observed[1111]
+
+    assert(row.seen == nil,
+        "the field is dropped from a database that already has it")
+
+    assert(row.characters and row.characters["a"],
+        "without taking the evidence with it")
+
+    -- AND THE MIGRATION THAT SEEDED IT STOPS SEEDING IT. A database old
+    -- enough to run migration 3 runs 34 afterwards, but a migration that puts
+    -- back what a later one removes is a rule written twice.
+    local database = CN_TEST_ReadAddonFile("Database.lua")
+
+    assert(database and not database:find("seen = 1, characters", 1, true),
+        "migration 3 does not seed a field migration 34 removes")
+
+    print("  a sighting counter nothing reads is not stored")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn alts DOES NOT INVENT A DATE FOR A CHARACTER WITHOUT ONE.
+    ------------------------------------------------------------
+    -- `Alts.AgeDays` returns nil when a record has no `lastSeen` and
+    -- `DescribeAge` renders that as "never seen". The suggestion line rebuilt
+    -- a record out of `ageDays`, and `or 0` turned "unknown" into `time()` --
+    -- "today". `Alts.Assignments` admits a character on
+    -- `not age or age <= staleDays`, so a record with no timestamp is exactly
+    -- what arrives there.
+    local alts = CN:GetModule("Alts")
+
+    local key = "Undated-Testrealm"
+
+    CN.db.characters[key] = {
+        name  = "Undated",
+        realm = "Testrealm",
+        level = 80,
+    }
+
+    assert(alts.AgeDays(CN.db.characters[key]) == nil,
+        "the fixture character has no timestamp")
+
+    assert(alts.DescribeAge(CN.db.characters[key]):find("never", 1, true),
+        "which the describer calls never seen: "
+        .. alts.DescribeAge(CN.db.characters[key]))
+
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("alts")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    if text:find("Undated", 1, true) then
+        assert(not text:find("Undated|r %(80%) |cff8a8f96last played today"),
+            "a character with no timestamp is never reported as played "
+            .. "today:\n" .. text)
+    end
+
+    local source = CN_TEST_ReadAddonFile("Modules/Alts.lua")
+
+    assert(source and not source:find("best.ageDays", 1, true),
+        "the command reads the real record rather than rebuilding one out of "
+        .. "an age in days, whose 'unknown' collapses to 'today'")
+
+    CN.db.characters[key] = nil
+
+    print("  /cn alts does not invent a date for a character without one")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- NO WINDOW LIST PADS A NUMBER WITH SPACES.
+    ------------------------------------------------------------
+    -- `%2d` puts a leading space in front of rows one to nine. WoW ships no
+    -- monospace font -- a space is about three units against a digit's seven
+    -- -- so the padding moved the periods further out of line rather than
+    -- into it. The chat side has been swept for this three times; the window
+    -- had two sites left.
+    local offenders = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        if text then
+            for line in string.gmatch(text, "[^\n]+") do
+                if not string.find(line, "^%s*%-%-") then
+                    for pad in string.gmatch(line, "%%%d+d") do
+                        table.insert(offenders, file .. " uses " .. pad)
+                    end
+                end
+            end
+        end
+    end
+
+    assert(#offenders == 0,
+        "a number is never padded to a column width:\n"
+        .. table.concat(offenders, "\n"))
+
+    print("  no window list pads a number with spaces")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")
