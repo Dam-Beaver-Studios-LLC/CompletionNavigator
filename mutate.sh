@@ -102,8 +102,10 @@ mutate "Modules/Preference.lua" \
     "    if not row then" \
     "learning acts before it has evidence"
 
+# RE-ANCHORED IN 0.89.0: the boundary case is refused now, so the comparison
+# is `<=` rather than `<`.
 mutate "Modules/Chase.lua" \
-    "    if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then" \
+    "    if timed == 0 or (timed / outstanding) <= Chase.estimateCoverage then" \
     "    if false then" \
     "chase estimates a time from nothing"
 
@@ -3092,13 +3094,15 @@ mutate "Modules/Errors.lua" \
 
 # ---- 0.75.0 ----
 
+# RE-ANCHORED IN 0.89.0: the two arms this sat inside were dead once the zero
+# case moved out of the loop, so the write is one level shallower.
 mutate "Modules/Achievements.lua" \
-    "                            held.criteria = criteria
+    "                        held.criteria = criteria
 
-                            Achievements.NoteProgress(held, done)" \
-    "                            held.criteria = criteria
+                        Achievements.NoteProgress(held, done)" \
+    "                        held.criteria = criteria
 
-                            held.done = done" \
+                        held.done = done" \
     "the achievement scan writes a figure every other character inherits"
 
 mutate "Modules/Achievements.lua" \
@@ -3269,11 +3273,15 @@ mutate "Modules/Achievements.lua" \
     "    if false then" \
     "a cold achievement scan prunes the store and stamps itself done"
 
+# RE-ANCHORED IN 0.89.0: the guard moved up a level. A zero never reaches the
+# branch that writes a count; it is held back until the sweep has proved the
+# criteria API answers, and the "never overwrite a stored count" test lives in
+# the loop that runs after that guard.
 mutate "Modules/Achievements.lua" \
-    "                        if criteria > 0 then
-                            held.criteria = criteria" \
-    "                        if true then
-                            held.criteria = criteria" \
+    "        if held.criteria == nil then
+            held.criteria = 0" \
+    "        if true then
+            held.criteria = 0" \
     "a client that answers nothing overwrites real criteria with zero"
 
 mutate "Modules/Setup.lua" \
@@ -3670,12 +3678,21 @@ mutate "Modules/Appearances.lua" \
         }" \
     "every appearance scan writes a timestamp nothing reads"
 
+# RE-ANCHORED IN 0.89.0: migration 33 sweeps the exploration store with the
+# same loop, so the guard needs the line after it to stay unique.
 mutate "Database.lua" \
     "            if type(record) == \"table\" and record.lastSeen ~= nil then
-                record.lastSeen = nil" \
+                record.lastSeen = nil
+                dropped = dropped + 1" \
     "            if false then
-                record.lastSeen = nil" \
+                record.lastSeen = nil
+                dropped = dropped + 1" \
     "the appearance timestamps already on disk stay there"
+
+mutate "Database.lua" \
+    "        local store = db.account and db.account.exploration" \
+    "        local store = db.account and db.account.mounts" \
+    "the exploration timestamps already on disk stay there"
 
 # ---- 0.81.0 ----
 
@@ -4187,6 +4204,115 @@ mutate "UI.lua" \
     "                (filters and filters.DurationSeconds(\"hour\")) or 3600)" \
     "                3600)" \
     "the defer button writes its own copy of what an hour is"
+
+mutate "Modules/Waiting.lua" \
+    "            completionValue  = 6,
+" \
+    "            completionValue  = 6,
+            limitedTimeBonus = 3,
+" \
+    "expiring mail charges its deadline through two curves"
+
+mutate "Modules/Waiting.lua" \
+    "            -- ONE DEADLINE, ONE CURVE. 0.89.0. See the mail row above.
+            limitedTimeBonus = 0,
+            travelCost       = 3,
+            expiresIn        = keystone.expiresIn," \
+    "            limitedTimeBonus = 2,
+            travelCost       = 3,
+            expiresIn        = keystone.expiresIn," \
+    "the keystone charges the reset through two curves"
+
+mutate "Modules/Waiting.lua" \
+    "                -- ONE DEADLINE, ONE CURVE. 0.89.0. See the mail row above.
+                limitedTimeBonus = 0," \
+    "                limitedTimeBonus = 2," \
+    "weekly knowledge charges the reset through two curves"
+
+mutate "Modules/Currencies.lua" \
+    "                limitedTimeBonus = 0,
+                travelCost       = 0," \
+    "                limitedTimeBonus = 1,
+                travelCost       = 0," \
+    "a capped currency charges the reset through two curves"
+
+mutate "Modules/Orders.lua" \
+    "                limitedTimeBonus = 0,
+                travelCost       = CN.placelessCost,
+                expiresIn        = order.expiresIn," \
+    "                limitedTimeBonus = 2,
+                travelCost       = CN.placelessCost,
+                expiresIn        = order.expiresIn," \
+    "a crafting order charges its expiry through two curves"
+
+mutate "Modules/Achievements.lua" \
+    "        if record.criteria and record.criteria > 0 and done > 0
+            and done < record.criteria then" \
+    "        if record.criteria and record.criteria > 0 and done > 0 then" \
+    "an achievement with nothing left is offered as closest to finishing"
+
+mutate "Modules/Achievements.lua" \
+    "                    if criteria == 0 then
+                        table.insert(criteriaLess, {" \
+    "                    if false then
+                        table.insert(criteriaLess, {" \
+    "a cold sweep writes a criteria-less row for every achievement"
+
+mutate "Modules/Achievements.lua" \
+    "    for _, row in ipairs(criteriaLess) do" \
+    "    for _, row in ipairs({}) do" \
+    "a genuinely criteria-less achievement is never recorded"
+
+mutate "Modules/Session.lua" \
+    "local function Mounted()
+    if UnitOnTaxi and UnitOnTaxi(\"player\") then
+        return false
+    end" \
+    "local function Mounted()
+    if UnitOnTaxi and UnitOnTaxi(\"player\") then
+        return true
+    end" \
+    "a flight path is sampled as ground-mount speed"
+
+mutate "Modules/Quests.lua" \
+    "        if record.mapID and nearby[record.mapID] then" \
+    "        if true then" \
+    "a quest offered on another continent is available in this zone"
+
+mutate "Modules/Professions.lua" \
+    "                if names[recipeID] ~= info.name then" \
+    "                if true then" \
+    "every profession list update stales the whole name index"
+
+mutate "Modules/Exploration.lua" \
+    "        held.lastSeen = nil" \
+    "        held.lastSeen = time()" \
+    "an exploration row persists a timestamp nothing reads"
+
+mutate "Modules/Chase.lua" \
+    "    if timed == 0 or (timed / outstanding) <= Chase.estimateCoverage then" \
+    "    if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then" \
+    "half the steps timed is enough for a confident estimate"
+
+mutate "Modules/Group.lua" \
+    "        local others = math.max(0, Group.Size() - 1)" \
+    "        local others = Group.Size()" \
+    "the group sentence counts the player among the people they are with"
+
+mutate "Scoring.lua" \
+    "    local index = CN.Memo(\"CandidateIndex\", aggregate.generation, function()" \
+    "    local index = CN.Memo(\"CandidateIndex\", 1, function()" \
+    "the candidate index never notices a rebuild"
+
+# NOT A MUTATION: the aggregate dedupes by type-and-id before this index is
+# built, so first-match and last-match cannot differ. The `built[key] == nil`
+# check preserves the walk's documented semantics against a future aggregate
+# that stops deduping; it is not a behaviour any fixture can distinguish today.
+
+mutate "Modules/Vault.lua" \
+    "                limitedTimeBonusIsProgress = true," \
+    "" \
+    "the vault's threshold term is undeclared and reads as a second deadline"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

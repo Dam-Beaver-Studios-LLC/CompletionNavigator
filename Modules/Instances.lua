@@ -519,6 +519,12 @@ CN.RegisterCandidateProvider("Instances", function()
                 -- that one. The sibling this file shares the defect with.
                 limitedTimeBonus = Urgency(lockout.remaining, nil,
                     lockout.defeated),
+
+                -- DECLARED. 0.89.0. See the sibling in `Modules/Vault.lua`:
+                -- this term is how close the lockout is to being cleared,
+                -- not when it resets, and the reset is charged once through
+                -- `expiresIn` below.
+                limitedTimeBonusIsProgress = true,
                 -- No map coordinate, but not "location unknown" either: the
                 -- group finder is one click. Same figure the Vault uses.
                 travelCost       = 3,

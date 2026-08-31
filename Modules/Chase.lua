@@ -207,48 +207,20 @@ builders.REPUTATION = function(goal)
     }
 end
 
-builders.APPEARANCE = function(goal)
-    local steps = {}
-
-    local sources = Blizzard.GetAppearanceSources(goal.id) or {}
-
-    if #sources == 0 then
-        return steps, nil
-    end
-
-    local collected = 0
-    local first = true
-
-    for _, source in ipairs(sources) do
-        local name = source.name or ("item " .. tostring(source.itemID or "?"))
-
-        if source.collected then
-            collected = collected + 1
-
-            table.insert(steps, NewStep(Chase.states.DONE, name))
-        else
-            local state = Chase.states.TODO
-
-            if first then
-                state = Chase.states.NEXT
-                first = false
-            end
-
-            table.insert(steps, NewStep(state, name, { itemID = source.itemID }))
-        end
-    end
-
-    -- An appearance needs ONE of its sources, not all of them, so the count
-    -- is deliberately not offered as progress toward the appearance. Saying
-    -- "1 of 9" would suggest eight more to go when in fact you are finished.
-    table.insert(steps, 1, NewStep(Chase.states.NOTE,
-        collected > 0
-            and "Collected. Any one source is enough."
-            or string.format("Any ONE of these %d sources unlocks it.", #sources)))
-
-    return steps, nil
-end
-
+-- NO APPEARANCE BUILDER. 0.89.0.
+--
+-- Thirty-five lines walking an appearance's sources sat here, unreachable
+-- since the file was written: a builder is keyed on `goal.type`, goals are
+-- created only through `Goals.Add`, and `Goals.types` has no appearance
+-- entry. `Modules/Tooltips.lua` recorded that fact in 0.80.0 and deleted its
+-- own unreachable branch; this pair was not swept with it.
+--
+-- Wiring it up is not the fix either. It called
+-- `Blizzard.GetAppearanceSources(goal.id)`, which takes an appearance VISUAL
+-- id, while every APPEARANCE row the addon produces is keyed `"set:<setID>"`
+-- or by a transmog categoryID -- three different numbers. A goal made from
+-- any of them would chase the wrong one. Dead code that reads as a live
+-- feature is worse than an absent one, so it is gone.
 builders.QUEST = function(goal)
     local steps = {}
 
@@ -295,7 +267,6 @@ Chase.instanceSourceTypes = {
     [CN.objectiveTypes.MOUNT]      = true,
     [CN.objectiveTypes.PET]        = true,
     [CN.objectiveTypes.TOY]        = true,
-    [CN.objectiveTypes.APPEARANCE] = true,
     [CN.objectiveTypes.TITLE]      = true,
 }
 
@@ -729,7 +700,13 @@ function Chase.Estimate(chain)
         end
     end
 
-    if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then
+    -- THE BOUNDARY THE RULE BELOW ACTUALLY STATES. 0.89.0.
+    --
+    -- "no estimate at all is offered unless more steps are timed than are
+    -- not" -- and at exactly half, two timed and two untimed, `0.5 < 0.5` is
+    -- false, so the guard passed and `/cn chase` printed a confident range in
+    -- which half the total was extrapolation.
+    if timed == 0 or (timed / outstanding) <= Chase.estimateCoverage then
         return {
             seconds     = nil,
             timed       = timed,

@@ -439,7 +439,13 @@ CN.RegisterCandidateProvider("Currencies", function()
                     .. (shared and " (Warband)" or ""),
                 accountWide      = shared and true or false,
                 completionValue  = 2,
-                limitedTimeBonus = 1,
+
+                -- ONE DEADLINE, ONE CURVE. 0.89.0. `expiresIn` below is the
+                -- weekly reset and the note beside it says why -- so this
+                -- charged the same reset a second time, through a shape
+                -- `/cn urgency` does not plot. Fifth row in the addon to do
+                -- it; a sweep in the harness now covers every provider.
+                limitedTimeBonus = 0,
                 travelCost       = 0,
 
                 -- A capped currency is not "expiring", but every hour spent

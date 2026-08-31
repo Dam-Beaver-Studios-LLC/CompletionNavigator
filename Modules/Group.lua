@@ -649,9 +649,17 @@ function Group.Notice()
     if situation == "instanced" then
         -- "a instance". 0.80.0. Two words, one article, and it had been in
         -- every `/cn situation` since 0.44.0.
-        return "You are in " .. where
-            .. " with " .. Group.Size() .. " people; outside work is ranked "
-            .. "down until you leave."
+        -- THE OTHER PEOPLE, NOT THE GROUP. 0.89.0.
+        --
+        -- `GetNumGroupMembers` counts the player, so a full party read "with
+        -- 5 people" to somebody standing with four others. `Group.Units`
+        -- twelve lines up already takes the player out for exactly this
+        -- reason; the sentence did not.
+        local others = math.max(0, Group.Size() - 1)
+
+        return "You are in " .. where .. " with "
+            .. CN.Count(others, "other person", "other people")
+            .. "; outside work is ranked down until you leave."
     end
 
     -- AND ALONE INSIDE IS STILL INSIDE. 0.81.0.

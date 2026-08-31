@@ -2128,18 +2128,46 @@ CN.RankedCandidates = Ranked
 -- interesting thing about a step is usually where it currently IS -- and that
 -- moves. Looking it up at navigation time gets the coordinates the providers
 -- have now, instead of the ones they had when the chain was drawn.
+-- AN INDEX, NOT A WALK. 0.89.0.
+--
+-- This is called from `Tooltips.ItemLines` on every mount, pet and toy the
+-- player mouses over, and from `Chase.Plan` once per step of a chain -- and
+-- it walked the whole candidate list each time, comparing two fields per row.
+-- At a couple of hundred candidates and a bag being swept that is tens of
+-- thousands of comparisons for information that never changes between
+-- rebuilds.
+--
+-- The same shape has been removed from the pet tooltip path (0.87.0) and the
+-- recipe tooltip path (0.86.0), each time by building the index once and
+-- keying it on the thing that actually moves. Here that is
+-- `aggregate.generation`, which is bumped exactly when the aggregate is
+-- rebuilt and not otherwise -- so a mouse crossing a full bag builds the
+-- index once and answers every subsequent row from it.
+--
+-- FIRST MATCH WINS, which is what the walk did: two providers can emit the
+-- same pair and the earlier one is the one every caller has been reading.
 function CN.FindCandidate(objectiveType, id)
     if not objectiveType or not id then
         return nil
     end
 
-    for _, objective in ipairs(CN.CollectCandidates() or {}) do
-        if objective.type == objectiveType and objective.id == id then
-            return objective
-        end
-    end
+    local candidates = CN.CollectCandidates() or {}
 
-    return nil
+    local index = CN.Memo("CandidateIndex", aggregate.generation, function()
+        local built = {}
+
+        for _, objective in ipairs(candidates) do
+            local key = tostring(objective.type) .. "\0" .. tostring(objective.id)
+
+            if built[key] == nil then
+                built[key] = objective
+            end
+        end
+
+        return built
+    end)
+
+    return index[tostring(objectiveType) .. "\0" .. tostring(id)]
 end
 
 -- Things that want to know what was actually put in front of the player, as

@@ -53,6 +53,17 @@ Goals.types = {
     reputation  = CN.objectiveTypes.REPUTATION,
     rare        = CN.objectiveTypes.RARE,
     currency    = CN.objectiveTypes.CURRENCY,
+
+    -- NO `appearance` ENTRY, DELIBERATELY. 0.89.0.
+    --
+    -- Not an oversight, and not a gap worth closing as written. Every
+    -- APPEARANCE row this addon produces is keyed `"set:<setID>"` (Sets) or
+    -- by a transmog categoryID (Appearances), while `Blizzard.GetAppearanceSources`
+    -- -- the only client call that can build a path to one -- takes an
+    -- appearance VISUAL id, which is a third kind of number. A goal made from
+    -- any of the three would decorate nothing and chase the wrong id, so the
+    -- dead builder in `Modules/Chase.lua` was deleted rather than wired up.
+    -- `Modules/Tooltips.lua` reached the same conclusion in 0.80.0.
 }
 
 local function ResolveType(text)

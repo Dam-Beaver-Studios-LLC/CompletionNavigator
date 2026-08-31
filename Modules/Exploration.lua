@@ -125,7 +125,15 @@ function Exploration.Scan()
 
         held.achievementID = achievement.achievementID
         held.criteria      = achievement.criteria
-        held.lastSeen      = time()
+
+        -- `lastSeen` IS NOT STORED. 0.89.0.
+        --
+        -- Nothing anywhere reads an exploration record's `lastSeen`. This is
+        -- the field migration 5 stripped from four stores, migration 31 from
+        -- appearances and migration 32 from mounts and reputations -- three
+        -- sweeps, none of which reached this one, whose writer went on
+        -- putting it back on every scan.
+        held.lastSeen = nil
 
         -- `name` IS NOT STORED. See `Exploration.NameOf`.
         held.name = nil

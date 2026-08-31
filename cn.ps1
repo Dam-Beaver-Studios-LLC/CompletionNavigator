@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.88.0'
+$script:ToolkitVersion = '0.89.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.88.0"
-CN.dbVersion   = 33
+CN.version     = "0.89.0"
+CN.dbVersion   = 34
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -3592,6 +3592,38 @@ CN.migrations = {
         if dropped > 0 then
             CN.DebugPrint("Dropped " .. dropped
                 .. " stored values nothing reads.")
+        end
+    end,
+
+    -- AND THE SIXTH STORE. 0.89.0.
+    --
+    -- Migration 5 stripped `lastSeen` from four stores, 31 from appearances,
+    -- 32 from mounts and reputations. `exploration` was in none of the three
+    -- sweeps and its writer went on putting the field back on every scan and
+    -- every `/cn explorescan`. Nothing in the addon has ever read it.
+    --
+    -- Migration 32's note said a fifth store found later would be one line;
+    -- it is one line, in a new migration, because 32 has shipped.
+    [33] = function(db)
+        local store = db.account and db.account.exploration
+
+        if type(store) ~= "table" then
+            return
+        end
+
+        local dropped = 0
+
+        for _, record in pairs(store) do
+            if type(record) == "table" and record.lastSeen ~= nil then
+                record.lastSeen = nil
+
+                dropped = dropped + 1
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " exploration timestamps nothing reads.")
         end
     end,
 }
@@ -9454,18 +9486,46 @@ CN.RankedCandidates = Ranked
 -- interesting thing about a step is usually where it currently IS -- and that
 -- moves. Looking it up at navigation time gets the coordinates the providers
 -- have now, instead of the ones they had when the chain was drawn.
+-- AN INDEX, NOT A WALK. 0.89.0.
+--
+-- This is called from `Tooltips.ItemLines` on every mount, pet and toy the
+-- player mouses over, and from `Chase.Plan` once per step of a chain -- and
+-- it walked the whole candidate list each time, comparing two fields per row.
+-- At a couple of hundred candidates and a bag being swept that is tens of
+-- thousands of comparisons for information that never changes between
+-- rebuilds.
+--
+-- The same shape has been removed from the pet tooltip path (0.87.0) and the
+-- recipe tooltip path (0.86.0), each time by building the index once and
+-- keying it on the thing that actually moves. Here that is
+-- `aggregate.generation`, which is bumped exactly when the aggregate is
+-- rebuilt and not otherwise -- so a mouse crossing a full bag builds the
+-- index once and answers every subsequent row from it.
+--
+-- FIRST MATCH WINS, which is what the walk did: two providers can emit the
+-- same pair and the earlier one is the one every caller has been reading.
 function CN.FindCandidate(objectiveType, id)
     if not objectiveType or not id then
         return nil
     end
 
-    for _, objective in ipairs(CN.CollectCandidates() or {}) do
-        if objective.type == objectiveType and objective.id == id then
-            return objective
-        end
-    end
+    local candidates = CN.CollectCandidates() or {}
 
-    return nil
+    local index = CN.Memo("CandidateIndex", aggregate.generation, function()
+        local built = {}
+
+        for _, objective in ipairs(candidates) do
+            local key = tostring(objective.type) .. "\0" .. tostring(objective.id)
+
+            if built[key] == nil then
+                built[key] = objective
+            end
+        end
+
+        return built
+    end)
+
+    return index[tostring(objectiveType) .. "\0" .. tostring(id)]
 end
 
 -- Things that want to know what was actually put in front of the player, as
@@ -22822,13 +22882,32 @@ function Quests.AvailableOnMap(mapID, quiet)
 
     -- 2. Anything an NPC has actually offered us, remembered from the
     --    conversation. Only kept while it is still plausibly nearby.
+    --
+    -- ON THE MAP IT WAS SEEN ON. 0.89.0.
+    --
+    -- This function takes a map and the source above honours it; this one did
+    -- not, so anything a gossip window offered in the last fifteen minutes
+    -- was reported as being on whatever map was asked about. The provider
+    -- then wrote "available to pick up in this zone" on a row whose travel
+    -- cost was computed against the PREVIOUS zone -- the sentence and the
+    -- number on one row contradicting each other -- `/cn available` counted
+    -- it, and walking into an empty zone within fifteen minutes of a
+    -- conversation fired "3 quests here you have not picked up".
+    local nearby = {}
+
+    for _, relatedID in ipairs(Blizzard.RelatedMapIDs(mapID)) do
+        nearby[relatedID] = true
+    end
+
     for questID, record in pairs(Quests.RecentOffers()) do
-        consider({
-            questID = questID,
-            mapID   = record.mapID,
-            x       = record.x,
-            y       = record.y,
-        }, "offered")
+        if record.mapID and nearby[record.mapID] then
+            consider({
+                questID = questID,
+                mapID   = record.mapID,
+                x       = record.x,
+                y       = record.y,
+            }, "offered")
+        end
     end
 
     table.sort(found, function(a, b) return a.questID < b.questID end)
@@ -25815,6 +25894,11 @@ function Achievements.Scan()
     -- Which categories the client actually populated this time.
     local answeringCategories = {}
 
+    -- Achievements the client reported no criteria for, held back until the
+    -- guard below has decided whether the criteria API answered at all. See
+    -- the note at the gate.
+    local criteriaLess = {}
+
     Achievements.revision = Achievements.revision + 1
 
     local scanned, completed, nearlyDone = 0, 0, 0
@@ -25891,7 +25975,37 @@ function Achievements.Scan()
 
                     -- Store only what is unfinished, and only if there is
                     -- real progress or it is small enough to be actionable.
-                    if criteria == 0 or done > 0 then
+                    --
+                    -- A ZERO IS NOT AN ANSWER UNTIL THE SWEEP HAS HAD ONE.
+                    -- 0.89.0.
+                    --
+                    -- `GetAchievementProgress` answers `0, 0` when the
+                    -- criteria API is cold, which the note above calls
+                    -- routine for a window after logging in -- and when it is
+                    -- cold it is cold for EVERY row. So a cold `/cn setup`
+                    -- took this branch for every incomplete achievement in
+                    -- the game and wrote a `criteria = 0` row for each.
+                    --
+                    -- Those rows were then unrepairable: a later warm scan
+                    -- reads `criteria = 12, done = 0`, and this gate is false
+                    -- for both halves, so the branch is never entered again.
+                    -- The prune keeps them, because they are in `seen`. The
+                    -- result was thousands of junk rows rewritten to disk on
+                    -- every logout, in the store whose own header says
+                    -- keeping a row for each completed achievement would
+                    -- triple the saved-variables file -- and `/cn achievements`
+                    -- printing "Tracked in progress: 3000".
+                    --
+                    -- The refusal check below already knows whether the API
+                    -- answered at all. Hold the criteria-less rows until it
+                    -- has decided.
+                    if criteria == 0 then
+                        table.insert(criteriaLess, {
+                            achievementID = achievement.achievementID,
+                            categoryID    = categoryID,
+                            done          = done,
+                        })
+                    elseif done > 0 then
                         -- THROUGH THE ONE WRITER, AND ON TOP OF WHAT IS
                         -- ALREADY THERE. 0.75.0.
                         --
@@ -25918,19 +26032,18 @@ function Achievements.Scan()
                         -- The guard `Exploration` has carried since 0.61.0,
                         -- `Loremaster` since 0.71.0, and that this file's own
                         -- criteria sweep four hundred lines down already had.
-                        -- Third writer, no guard.
-                        if criteria > 0 then
-                            held.criteria = criteria
+                        --
+                        -- IT MOVED UP A LEVEL IN 0.89.0. A zero no longer
+                        -- reaches this branch at all: it is held back until
+                        -- the sweep has proved the criteria API answers, and
+                        -- written by the loop after that guard, which is
+                        -- where the "never overwrite a stored count with a
+                        -- refusal" test now lives. `criteria` is positive
+                        -- here by construction, so the two arms that used to
+                        -- stand here would both be dead code.
+                        held.criteria = criteria
 
-                            Achievements.NoteProgress(held, done)
-                        elseif held.criteria == nil then
-                            -- Genuinely a criteria-less achievement, and new
-                            -- to the store. A stored `criteria > 0` is never
-                            -- overwritten with a refusal.
-                            held.criteria = 0
-
-                            Achievements.NoteProgress(held, done)
-                        end
+                        Achievements.NoteProgress(held, done)
 
                         store[achievement.achievementID] = held
 
@@ -25965,6 +26078,25 @@ function Achievements.Scan()
         DebugPrint("Achievement scan answered for nothing; not recording it.")
 
         return scanned, completed, nearlyDone, 0
+    end
+
+    -- THE CRITERIA-LESS ROWS, now that the sweep has proved the API answers.
+    -- A genuinely criteria-less achievement is a real thing and belongs in
+    -- the store; a whole client's worth of zeros is not.
+    for _, row in ipairs(criteriaLess) do
+        local held = store[row.achievementID] or {}
+
+        held.achievementID = row.achievementID
+        held.categoryID    = row.categoryID
+
+        -- A stored `criteria > 0` is never overwritten with a zero.
+        if held.criteria == nil then
+            held.criteria = 0
+
+            Achievements.NoteProgress(held, row.done)
+        end
+
+        store[row.achievementID] = held
     end
 
     -- ROWS THE CLIENT NO LONGER RETURNS, dropped explicitly. This is what the
@@ -26076,7 +26208,20 @@ function Achievements.Closest(limit)
     for achievementID, record in pairs(Store()) do
         local done = Achievements.DoneFor(record) or 0
 
-        if record.criteria and record.criteria > 0 and done > 0 then
+        -- AND NOTHING LEFT IS NOT CLOSEST TO FINISHING. 0.89.0.
+        --
+        -- `Loremaster.Closest` and `Exploration.Closest` have carried
+        -- `done < criteria` since 0.71.0, whose note says in as many words
+        -- that the rule is written twice and the third copy is elsewhere.
+        -- This is the third copy, and it never got the guard.
+        --
+        -- The client is slow to flip `completed`, and `ACHIEVEMENT_EARNED` is
+        -- what deletes the row here -- so a row at 12 of 12 sorts to the very
+        -- front of a list headed "closest to completion" and the addon sends
+        -- the player to finish something with nothing left in it.
+        if record.criteria and record.criteria > 0 and done > 0
+            and done < record.criteria then
+
             names[record] = NameOf(achievementID, record) or ""
             left[record]  = record.criteria - done
 
@@ -28593,11 +28738,25 @@ function Professions.CaptureOpenProfession()
         if info then
             seen = seen + 1
 
+            -- ONLY WHEN A NAME ACTUALLY CHANGES. 0.89.0.
+            --
+            -- The write is idempotent -- almost every pass sets a key to the
+            -- value it already holds -- and the revision moved anyway, once
+            -- per recipe, about 2,500 times per capture. This runs from
+            -- `TRADE_SKILL_LIST_UPDATE`, which `Scoring.lua` classifies as
+            -- bursty, so the next tooltip after every list update rebuilt the
+            -- whole index: 2,500 iterations and 2,500 `string.lower`
+            -- allocations. That is the per-mouseover cost this index was
+            -- written to remove, reintroduced at the one moment the player is
+            -- hovering items in their profession window.
             if info.name and info.name ~= "" then
-                names[recipeID] = info.name
+                if names[recipeID] ~= info.name then
+                    names[recipeID] = info.name
 
-                -- The name index is now stale.
-                Professions.nameRevision = (Professions.nameRevision or 0) + 1
+                    -- The name index is now stale.
+                    Professions.nameRevision =
+                        (Professions.nameRevision or 0) + 1
+                end
             end
 
             if info.learned then
@@ -32363,7 +32522,13 @@ CN.RegisterCandidateProvider("Currencies", function()
                     .. (shared and " (Warband)" or ""),
                 accountWide      = shared and true or false,
                 completionValue  = 2,
-                limitedTimeBonus = 1,
+
+                -- ONE DEADLINE, ONE CURVE. 0.89.0. `expiresIn` below is the
+                -- weekly reset and the note beside it says why -- so this
+                -- charged the same reset a second time, through a shape
+                -- `/cn urgency` does not plot. Fifth row in the addon to do
+                -- it; a sweep in the harness now covers every provider.
+                limitedTimeBonus = 0,
                 travelCost       = 0,
 
                 -- A capped currency is not "expiring", but every hour spent
@@ -33591,7 +33756,15 @@ function Exploration.Scan()
 
         held.achievementID = achievement.achievementID
         held.criteria      = achievement.criteria
-        held.lastSeen      = time()
+
+        -- `lastSeen` IS NOT STORED. 0.89.0.
+        --
+        -- Nothing anywhere reads an exploration record's `lastSeen`. This is
+        -- the field migration 5 stripped from four stores, migration 31 from
+        -- appearances and migration 32 from mounts and reputations -- three
+        -- sweeps, none of which reached this one, whose writer went on
+        -- putting it back on every scan.
+        held.lastSeen = nil
 
         -- `name` IS NOT STORED. See `Exploration.NameOf`.
         held.name = nil
@@ -37231,6 +37404,17 @@ Goals.types = {
     reputation  = CN.objectiveTypes.REPUTATION,
     rare        = CN.objectiveTypes.RARE,
     currency    = CN.objectiveTypes.CURRENCY,
+
+    -- NO `appearance` ENTRY, DELIBERATELY. 0.89.0.
+    --
+    -- Not an oversight, and not a gap worth closing as written. Every
+    -- APPEARANCE row this addon produces is keyed `"set:<setID>"` (Sets) or
+    -- by a transmog categoryID (Appearances), while `Blizzard.GetAppearanceSources`
+    -- -- the only client call that can build a path to one -- takes an
+    -- appearance VISUAL id, which is a third kind of number. A goal made from
+    -- any of the three would decorate nothing and chase the wrong id, so the
+    -- dead builder in `Modules/Chase.lua` was deleted rather than wired up.
+    -- `Modules/Tooltips.lua` reached the same conclusion in 0.80.0.
 }
 
 local function ResolveType(text)
@@ -38314,48 +38498,20 @@ builders.REPUTATION = function(goal)
     }
 end
 
-builders.APPEARANCE = function(goal)
-    local steps = {}
-
-    local sources = Blizzard.GetAppearanceSources(goal.id) or {}
-
-    if #sources == 0 then
-        return steps, nil
-    end
-
-    local collected = 0
-    local first = true
-
-    for _, source in ipairs(sources) do
-        local name = source.name or ("item " .. tostring(source.itemID or "?"))
-
-        if source.collected then
-            collected = collected + 1
-
-            table.insert(steps, NewStep(Chase.states.DONE, name))
-        else
-            local state = Chase.states.TODO
-
-            if first then
-                state = Chase.states.NEXT
-                first = false
-            end
-
-            table.insert(steps, NewStep(state, name, { itemID = source.itemID }))
-        end
-    end
-
-    -- An appearance needs ONE of its sources, not all of them, so the count
-    -- is deliberately not offered as progress toward the appearance. Saying
-    -- "1 of 9" would suggest eight more to go when in fact you are finished.
-    table.insert(steps, 1, NewStep(Chase.states.NOTE,
-        collected > 0
-            and "Collected. Any one source is enough."
-            or string.format("Any ONE of these %d sources unlocks it.", #sources)))
-
-    return steps, nil
-end
-
+-- NO APPEARANCE BUILDER. 0.89.0.
+--
+-- Thirty-five lines walking an appearance's sources sat here, unreachable
+-- since the file was written: a builder is keyed on `goal.type`, goals are
+-- created only through `Goals.Add`, and `Goals.types` has no appearance
+-- entry. `Modules/Tooltips.lua` recorded that fact in 0.80.0 and deleted its
+-- own unreachable branch; this pair was not swept with it.
+--
+-- Wiring it up is not the fix either. It called
+-- `Blizzard.GetAppearanceSources(goal.id)`, which takes an appearance VISUAL
+-- id, while every APPEARANCE row the addon produces is keyed `"set:<setID>"`
+-- or by a transmog categoryID -- three different numbers. A goal made from
+-- any of them would chase the wrong one. Dead code that reads as a live
+-- feature is worse than an absent one, so it is gone.
 builders.QUEST = function(goal)
     local steps = {}
 
@@ -38402,7 +38558,6 @@ Chase.instanceSourceTypes = {
     [CN.objectiveTypes.MOUNT]      = true,
     [CN.objectiveTypes.PET]        = true,
     [CN.objectiveTypes.TOY]        = true,
-    [CN.objectiveTypes.APPEARANCE] = true,
     [CN.objectiveTypes.TITLE]      = true,
 }
 
@@ -38836,7 +38991,13 @@ function Chase.Estimate(chain)
         end
     end
 
-    if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then
+    -- THE BOUNDARY THE RULE BELOW ACTUALLY STATES. 0.89.0.
+    --
+    -- "no estimate at all is offered unless more steps are timed than are
+    -- not" -- and at exactly half, two timed and two untimed, `0.5 < 0.5` is
+    -- false, so the guard passed and `/cn chase` printed a confident range in
+    -- which half the total was extrapolation.
+    if timed == 0 or (timed / outstanding) <= Chase.estimateCoverage then
         return {
             seconds     = nil,
             timed       = timed,
@@ -42628,12 +42789,33 @@ end
 
 Session.speedSampleCap = 40
 
+-- A TAXI IS NOT A GROUND MOUNT. 0.89.0.
+--
+-- `Flying` twelve lines below excludes the taxi, under a comment saying that
+-- movement "belongs to Travel's flight-speed measurement rather than to this
+-- one". It was excluded from `flying` and then caught by `mounted`, which
+-- returned true on a taxi -- so every flight that stayed inside one map was
+-- filed as a ground-mount speed sample. `Session.Observe`'s own header claims
+-- it discards a flight path, and `Modules/Travel.lua` states as fact that
+-- "Session already discards taxi movement when learning running speed".
+-- Neither was true.
+--
+-- Nothing downstream caught it either: `mounted` stays true for the whole
+-- flight so the bucket never changes, and the plausibility band for `mounted`
+-- is 0.5 to 60 yards a second, which admits every flight speed in the game.
+--
+-- It matters because `Session.Speed("onFoot")` falls back to the `mounted`
+-- median below `minSamples`, and `Travel.EstimateSeconds` uses that for the
+-- run-the-whole-way option and for both walking legs of every flight route --
+-- which feeds `/cn plan`'s budget, `CN.SecondsNeeded` and the urgency term's
+-- "can I still get there" test. 0.43.0 records fixing exactly this one level
+-- down, for self-flight, and not for the taxi.
 local function Mounted()
-    if IsMounted and IsMounted() then
-        return true
+    if UnitOnTaxi and UnitOnTaxi("player") then
+        return false
     end
 
-    if UnitOnTaxi and UnitOnTaxi("player") then
+    if IsMounted and IsMounted() then
         return true
     end
 
@@ -44526,6 +44708,14 @@ CN.RegisterCandidateProvider("Vault", function()
                 -- next threshold", which is not a deadline and is charged
                 -- nowhere else.
                 limitedTimeBonus = Urgency(row.remaining),
+
+                -- DECLARED, BECAUSE THE SWEEP REFUSES THIS SHAPE OTHERWISE.
+                -- 0.89.0. A row may not carry both a deadline and a flat
+                -- bonus -- five providers were charging one fact twice. This
+                -- one is the exception the rule needs: the term above is how
+                -- close the row is to its NEXT THRESHOLD, which is not a
+                -- deadline and is charged nowhere else.
+                limitedTimeBonusIsProgress = true,
                 -- Instanced content has no map coordinate, but it is not
                 -- "location unknown" either: the group finder is one click.
                 travelCost       = 3,
@@ -48201,9 +48391,17 @@ function Group.Notice()
     if situation == "instanced" then
         -- "a instance". 0.80.0. Two words, one article, and it had been in
         -- every `/cn situation` since 0.44.0.
-        return "You are in " .. where
-            .. " with " .. Group.Size() .. " people; outside work is ranked "
-            .. "down until you leave."
+        -- THE OTHER PEOPLE, NOT THE GROUP. 0.89.0.
+        --
+        -- `GetNumGroupMembers` counts the player, so a full party read "with
+        -- 5 people" to somebody standing with four others. `Group.Units`
+        -- twelve lines up already takes the player out for exactly this
+        -- reason; the sentence did not.
+        local others = math.max(0, Group.Size() - 1)
+
+        return "You are in " .. where .. " with "
+            .. CN.Count(others, "other person", "other people")
+            .. "; outside work is ranked down until you leave."
     end
 
     -- AND ALONE INSIDE IS STILL INSIDE. 0.81.0.
@@ -49585,7 +49783,22 @@ CN.RegisterCandidateProvider("Waiting", function()
             type             = CN.objectiveTypes.CURRENCY,
             name             = #expiring .. " mail expiring",
             completionValue  = 6,
-            limitedTimeBonus = 3,
+            -- ONE DEADLINE, ONE CURVE. 0.89.0.
+            --
+            -- This was 3, and `expiresIn` below hands the SAME fact -- mail
+            -- is destroyed on a timer -- to the scorer's urgency term. The
+            -- flat bonus is worth 3.0 per point and the curve up to 4.0, so
+            -- one deadline was charged nine points plus the ramp, through two
+            -- shapes tuned independently, only one of which `/cn urgency`
+            -- plots. "3 mail expiring" outranked a world quest with nine
+            -- minutes left.
+            --
+            -- `Opportunities` states the settled convention: the flat term is
+            -- what you charge only when there is NO deadline to charge.
+            -- Fixed in `Opportunities` in 0.63.0 and in `Vault` and
+            -- `Instances` in 0.88.0; the sweep reached three files and left
+            -- this one, which has the largest flat bonus of the four.
+            limitedTimeBonus = 0,
             travelCost       = 3,
             expiresIn        = math.max(0, (soonest.daysLeft or 0) * 86400),
             reasons          = {
@@ -49609,7 +49822,8 @@ CN.RegisterCandidateProvider("Waiting", function()
             name             = "Keystone: " .. (keystone.name or "unknown")
                 .. " +" .. keystone.level,
             completionValue  = 4,
-            limitedTimeBonus = 2,
+            -- ONE DEADLINE, ONE CURVE. 0.89.0. See the mail row above.
+            limitedTimeBonus = 0,
             travelCost       = 3,
             expiresIn        = keystone.expiresIn,
             reasons          = {
@@ -49630,7 +49844,8 @@ CN.RegisterCandidateProvider("Waiting", function()
                 type             = CN.objectiveTypes.PROFESSION,
                 name             = row.name .. ": " .. row.remaining .. " left this week",
                 completionValue  = 5,
-                limitedTimeBonus = 2,
+                -- ONE DEADLINE, ONE CURVE. 0.89.0. See the mail row above.
+                limitedTimeBonus = 0,
                 travelCost       = CN.placelessCost,
                 expiresIn        = Blizzard.GetSecondsUntilWeeklyReset(),
                 reasons          = {
@@ -49656,7 +49871,11 @@ CN:RegisterCommand{
     name    = "clock",
     aliases = { "expiring" },
     order   = 29,
-    help    = "Everything on a weekly or daily timer: vault, caps, lockouts.",
+    -- WHAT IT PRINTS, NOT WHAT ANOTHER COMMAND PRINTS. 0.89.0. This named
+    -- the vault (`/cn vault`) and lockouts (`/cn instances`) -- both separate
+    -- commands in the same essentials list -- and left out mail and heirlooms,
+    -- which are the two largest things it does show.
+    help    = "Mail about to expire, your keystone, weekly caps, heirlooms.",
     handler = function()
         local said = false
 
@@ -53061,6 +53280,12 @@ CN.RegisterCandidateProvider("Instances", function()
                 -- that one. The sibling this file shares the defect with.
                 limitedTimeBonus = Urgency(lockout.remaining, nil,
                     lockout.defeated),
+
+                -- DECLARED. 0.89.0. See the sibling in `Modules/Vault.lua`:
+                -- this term is how close the lockout is to being cleared,
+                -- not when it resets, and the reset is charged once through
+                -- `expiresIn` below.
+                limitedTimeBonusIsProgress = true,
                 -- No map coordinate, but not "location unknown" either: the
                 -- group finder is one click. Same figure the Vault uses.
                 travelCost       = 3,
@@ -55776,7 +56001,12 @@ CN.RegisterCandidateProvider("Orders", function()
                 name             = "Crafting order: "
                     .. tostring(order.itemName or order.itemID or "?"),
                 completionValue  = 3,
-                limitedTimeBonus = 2,
+
+                -- ONE DEADLINE, ONE CURVE. 0.89.0. `expiresIn` on the next
+                -- line is the same expiry, and the reason text below quotes
+                -- it a third time. The claim row further down keeps its flat
+                -- bonus, correctly: nothing there expires.
+                limitedTimeBonus = 0,
                 travelCost       = CN.placelessCost,
                 expiresIn        = order.expiresIn,
                 reasons          = {
@@ -58111,7 +58341,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.88.0
+## Version: 0.89.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -58366,6 +58596,82 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.89.0]
+
+**Five providers were charging one deadline twice.** Last release found the
+pattern in the Great Vault and the raid lockout list and fixed both; this
+release went looking for the rest of it and found expiring mail, your
+keystone, the week's profession knowledge, a capped currency and a crafting
+order — each feeding one fact into a flat bonus *and* into the urgency curve,
+through two shapes tuned independently, only one of which `/cn urgency` plots.
+Mail carried the largest: nine points of flat bonus on top of the ramp, which
+is why "3 mail expiring" could outrank a world quest with nine minutes left.
+
+The harness now sweeps every provider in the addon for that shape on every
+build, with the two legitimate exceptions declared on the rows themselves. It
+is the sixth time this project has fixed one instance of a rule and left its
+siblings, and the first time the check that finds them all has been written.
+
+### Fixed
+
+- **Mail, the keystone, weekly knowledge, capped currencies and crafting
+  orders each charged their deadline once**, not twice.
+- **A cold `/cn setup` wrote a junk row for every incomplete achievement in
+  the game.** The criteria API answers "0 of 0" for a window after login —
+  which the file's own note says is exactly when a first scan is run — and a
+  zero was taken as a real answer. Those rows were unrepairable afterwards
+  and the prune deliberately kept them, so the store filled with thousands of
+  entries rewritten to disk on every logout, and `/cn achievements` reported
+  "Tracked in progress: 3000" for a player with a dozen. The refusal guard was
+  already there; it just ran after the writes.
+- **An achievement with every criterion done was offered as the one closest
+  to finishing.** The client is slow to flip the completed flag, so a 12-of-12
+  row sorted to the very top of a list headed "closest to completion". The
+  sibling rule in the Loremaster and Exploration lists has carried the guard
+  since 0.71.0 — and its note says, in as many words, that a third copy exists
+  elsewhere. This was it.
+- **Flight paths were being timed as ground-mount speed.** The speed sampler
+  excludes the taxi from its flying bucket, under a comment saying that
+  movement belongs to the flight-path measurement instead — and then caught it
+  in the mounted bucket, whose plausibility band happens to admit every flight
+  speed in the game. Two other files state as fact that this already worked.
+  It matters because on-foot speed falls back to the mounted median, and that
+  feeds every journey estimate, `/cn plan`'s budget, and the "can I still get
+  there in time" test.
+- **A quest an NPC offered you fifteen minutes ago was reported as being in
+  whatever zone you are standing in now.** The row said "available to pick up
+  in this zone" while its travel cost was measured against the zone you were
+  actually in when you heard about it, `/cn available` counted it, and walking
+  into an empty zone could announce three quests that are not there.
+- **Opening a profession window made the next item you hovered rebuild a
+  2,500-entry index.** The capture bumped the index's revision once per
+  recipe whether or not anything had changed, on an event that fires in
+  bursts. It bumps when a name actually changes now.
+- **`/cn chase` gave a confident time estimate when exactly half the steps
+  had never been timed** — the rule printed beside it says an estimate is
+  offered only when *more* are timed than are not.
+- **`/cn situation` counted you among the people you were with** — "in an
+  instance with 5 people" to somebody standing with four others.
+- **`/cn clock`'s help named two commands' contents and not its own.** It
+  advertised the vault and lockouts, which are `/cn vault` and
+  `/cn instances`, and left out mail and heirlooms, which are the two largest
+  things it prints.
+- **The exploration store kept a timestamp nothing reads.** Three earlier
+  migrations removed this field from six other stores; this one was in none of
+  the sweeps. Migration 33 drops it and the writer stops adding it back.
+- **Thirty-five lines of unreachable chase code were deleted.** They built a
+  path for an appearance goal, and no appearance goal can be created — nor
+  should the gap be closed as written, since the builder asks the client for a
+  third kind of id from the two the addon actually uses. The harness now
+  refuses any chase builder for a goal type nothing can pin.
+
+### Changed
+
+- **Finding a candidate by type and id is an index rather than a walk.** It
+  runs on every mount, pet and toy tooltip and once per step of every chase
+  chain; a mouse crossing a full bag now builds the index once instead of
+  re-walking the list per row.
 
 ## [0.88.0]
 
@@ -65332,7 +65638,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.88.0
+0.89.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -65933,8 +66239,10 @@ mutate "Modules/Preference.lua" \
     "    if not row then" \
     "learning acts before it has evidence"
 
+# RE-ANCHORED IN 0.89.0: the boundary case is refused now, so the comparison
+# is `<=` rather than `<`.
 mutate "Modules/Chase.lua" \
-    "    if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then" \
+    "    if timed == 0 or (timed / outstanding) <= Chase.estimateCoverage then" \
     "    if false then" \
     "chase estimates a time from nothing"
 
@@ -68923,13 +69231,15 @@ mutate "Modules/Errors.lua" \
 
 # ---- 0.75.0 ----
 
+# RE-ANCHORED IN 0.89.0: the two arms this sat inside were dead once the zero
+# case moved out of the loop, so the write is one level shallower.
 mutate "Modules/Achievements.lua" \
-    "                            held.criteria = criteria
+    "                        held.criteria = criteria
 
-                            Achievements.NoteProgress(held, done)" \
-    "                            held.criteria = criteria
+                        Achievements.NoteProgress(held, done)" \
+    "                        held.criteria = criteria
 
-                            held.done = done" \
+                        held.done = done" \
     "the achievement scan writes a figure every other character inherits"
 
 mutate "Modules/Achievements.lua" \
@@ -69100,11 +69410,15 @@ mutate "Modules/Achievements.lua" \
     "    if false then" \
     "a cold achievement scan prunes the store and stamps itself done"
 
+# RE-ANCHORED IN 0.89.0: the guard moved up a level. A zero never reaches the
+# branch that writes a count; it is held back until the sweep has proved the
+# criteria API answers, and the "never overwrite a stored count" test lives in
+# the loop that runs after that guard.
 mutate "Modules/Achievements.lua" \
-    "                        if criteria > 0 then
-                            held.criteria = criteria" \
-    "                        if true then
-                            held.criteria = criteria" \
+    "        if held.criteria == nil then
+            held.criteria = 0" \
+    "        if true then
+            held.criteria = 0" \
     "a client that answers nothing overwrites real criteria with zero"
 
 mutate "Modules/Setup.lua" \
@@ -69501,12 +69815,21 @@ mutate "Modules/Appearances.lua" \
         }" \
     "every appearance scan writes a timestamp nothing reads"
 
+# RE-ANCHORED IN 0.89.0: migration 33 sweeps the exploration store with the
+# same loop, so the guard needs the line after it to stay unique.
 mutate "Database.lua" \
     "            if type(record) == \"table\" and record.lastSeen ~= nil then
-                record.lastSeen = nil" \
+                record.lastSeen = nil
+                dropped = dropped + 1" \
     "            if false then
-                record.lastSeen = nil" \
+                record.lastSeen = nil
+                dropped = dropped + 1" \
     "the appearance timestamps already on disk stay there"
+
+mutate "Database.lua" \
+    "        local store = db.account and db.account.exploration" \
+    "        local store = db.account and db.account.mounts" \
+    "the exploration timestamps already on disk stay there"
 
 # ---- 0.81.0 ----
 
@@ -70018,6 +70341,115 @@ mutate "UI.lua" \
     "                (filters and filters.DurationSeconds(\"hour\")) or 3600)" \
     "                3600)" \
     "the defer button writes its own copy of what an hour is"
+
+mutate "Modules/Waiting.lua" \
+    "            completionValue  = 6,
+" \
+    "            completionValue  = 6,
+            limitedTimeBonus = 3,
+" \
+    "expiring mail charges its deadline through two curves"
+
+mutate "Modules/Waiting.lua" \
+    "            -- ONE DEADLINE, ONE CURVE. 0.89.0. See the mail row above.
+            limitedTimeBonus = 0,
+            travelCost       = 3,
+            expiresIn        = keystone.expiresIn," \
+    "            limitedTimeBonus = 2,
+            travelCost       = 3,
+            expiresIn        = keystone.expiresIn," \
+    "the keystone charges the reset through two curves"
+
+mutate "Modules/Waiting.lua" \
+    "                -- ONE DEADLINE, ONE CURVE. 0.89.0. See the mail row above.
+                limitedTimeBonus = 0," \
+    "                limitedTimeBonus = 2," \
+    "weekly knowledge charges the reset through two curves"
+
+mutate "Modules/Currencies.lua" \
+    "                limitedTimeBonus = 0,
+                travelCost       = 0," \
+    "                limitedTimeBonus = 1,
+                travelCost       = 0," \
+    "a capped currency charges the reset through two curves"
+
+mutate "Modules/Orders.lua" \
+    "                limitedTimeBonus = 0,
+                travelCost       = CN.placelessCost,
+                expiresIn        = order.expiresIn," \
+    "                limitedTimeBonus = 2,
+                travelCost       = CN.placelessCost,
+                expiresIn        = order.expiresIn," \
+    "a crafting order charges its expiry through two curves"
+
+mutate "Modules/Achievements.lua" \
+    "        if record.criteria and record.criteria > 0 and done > 0
+            and done < record.criteria then" \
+    "        if record.criteria and record.criteria > 0 and done > 0 then" \
+    "an achievement with nothing left is offered as closest to finishing"
+
+mutate "Modules/Achievements.lua" \
+    "                    if criteria == 0 then
+                        table.insert(criteriaLess, {" \
+    "                    if false then
+                        table.insert(criteriaLess, {" \
+    "a cold sweep writes a criteria-less row for every achievement"
+
+mutate "Modules/Achievements.lua" \
+    "    for _, row in ipairs(criteriaLess) do" \
+    "    for _, row in ipairs({}) do" \
+    "a genuinely criteria-less achievement is never recorded"
+
+mutate "Modules/Session.lua" \
+    "local function Mounted()
+    if UnitOnTaxi and UnitOnTaxi(\"player\") then
+        return false
+    end" \
+    "local function Mounted()
+    if UnitOnTaxi and UnitOnTaxi(\"player\") then
+        return true
+    end" \
+    "a flight path is sampled as ground-mount speed"
+
+mutate "Modules/Quests.lua" \
+    "        if record.mapID and nearby[record.mapID] then" \
+    "        if true then" \
+    "a quest offered on another continent is available in this zone"
+
+mutate "Modules/Professions.lua" \
+    "                if names[recipeID] ~= info.name then" \
+    "                if true then" \
+    "every profession list update stales the whole name index"
+
+mutate "Modules/Exploration.lua" \
+    "        held.lastSeen = nil" \
+    "        held.lastSeen = time()" \
+    "an exploration row persists a timestamp nothing reads"
+
+mutate "Modules/Chase.lua" \
+    "    if timed == 0 or (timed / outstanding) <= Chase.estimateCoverage then" \
+    "    if timed == 0 or (timed / outstanding) < Chase.estimateCoverage then" \
+    "half the steps timed is enough for a confident estimate"
+
+mutate "Modules/Group.lua" \
+    "        local others = math.max(0, Group.Size() - 1)" \
+    "        local others = Group.Size()" \
+    "the group sentence counts the player among the people they are with"
+
+mutate "Scoring.lua" \
+    "    local index = CN.Memo(\"CandidateIndex\", aggregate.generation, function()" \
+    "    local index = CN.Memo(\"CandidateIndex\", 1, function()" \
+    "the candidate index never notices a rebuild"
+
+# NOT A MUTATION: the aggregate dedupes by type-and-id before this index is
+# built, so first-match and last-match cannot differ. The `built[key] == nil`
+# check preserves the walk's documented semantics against a future aggregate
+# that stops deduping; it is not a behaviour any fixture can distinguish today.
+
+mutate "Modules/Vault.lua" \
+    "                limitedTimeBonusIsProgress = true," \
+    "" \
+    "the vault's threshold term is undeclared and reads as a second deadline"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -103441,6 +103873,37 @@ end)()
     assert(goalModule and goalModule.types and goalModule.types.appearance == nil,
         "there is no way to make an APPEARANCE goal")
 
+    -- AND NOTHING PRETENDS OTHERWISE. 0.89.0.
+    --
+    -- `Chase.builders.APPEARANCE` and its `instanceSourceTypes` entry were
+    -- keyed on a goal type that cannot exist, so thirty-five lines of
+    -- unreachable code read as a live feature. Wiring them up was not the fix
+    -- either: the builder asked the client for an appearance VISUAL id while
+    -- every APPEARANCE row the addon produces is keyed "set:<setID>" or by a
+    -- transmog categoryID.
+    local chaseModule = CN:GetModule("Chase")
+
+    assert(chaseModule and chaseModule.builders
+        and chaseModule.builders[CN.objectiveTypes.APPEARANCE] == nil,
+        "and no builder is kept for a goal type that cannot be created")
+
+    assert(chaseModule.instanceSourceTypes[CN.objectiveTypes.APPEARANCE]
+        == nil,
+        "nor an entry beside it saying the Adventure Guide knows about one")
+
+    -- EVERY BUILDER IS FOR A TYPE A PLAYER CAN ACTUALLY PIN.
+    local pinnable = {}
+
+    for _, objectiveType in pairs(goalModule.types) do
+        pinnable[objectiveType] = true
+    end
+
+    for objectiveType in pairs(chaseModule.builders) do
+        assert(pinnable[objectiveType],
+            "a chase builder exists for a goal type nothing can create: "
+            .. tostring(objectiveType))
+    end
+
     for _, objective in ipairs(CN.CollectCandidates() or {}) do
         if objective.type == CN.objectiveTypes.APPEARANCE then
             local id = objective.id
@@ -106140,6 +106603,628 @@ end)()
         .. table.concat(offenders, "\n"))
 
     print("  an em dash is spaced on both sides or on neither")
+end)()
+
+
+;(function()
+    ------------------------------------------------------------
+    -- MAIL, THE KEYSTONE AND THE WEEK'S KNOWLEDGE CHARGE THEIR
+    -- DEADLINE ONCE.
+    ------------------------------------------------------------
+    -- All three rows fed one fact -- destroyed on a timer, replaced at the
+    -- reset, gone at the reset -- into `limitedTimeBonus` AND into
+    -- `expiresIn`. The flat term is worth 3.0 a point and the curve up to
+    -- 4.0, so "3 mail expiring" carried nine points of flat bonus plus the
+    -- ramp and outranked a world quest with nine minutes left. `/cn urgency`
+    -- plots only the curve, so the addon could not explain its own ordering.
+    --
+    -- Fixed in Opportunities in 0.63.0 and in Vault and Instances in 0.88.0.
+    -- This file was the fourth, and had the largest flat bonus of the four.
+    local waitingRows = CN.candidateProviders["Waiting"].fn() or {}
+
+    local checked = 0
+
+    for _, objective in ipairs(waitingRows) do
+        if objective.expiresIn then
+            assert((objective.limitedTimeBonus or 0) == 0,
+                "a Waiting row with a deadline charges it through the curve "
+                .. "the addon plots, and not also through a second one: "
+                .. tostring(objective.name) .. " carries "
+                .. tostring(objective.limitedTimeBonus))
+
+            checked = checked + 1
+        end
+    end
+
+    assert(checked >= 2,
+        "the fixture must produce Waiting rows with deadlines: "
+        .. tostring(checked))
+
+    -- AND THE RULE NOW HOLDS ACROSS EVERY PROVIDER IN THE ADDON, which is
+    -- what the four separate fixes were each half of.
+    for name, provider in pairs(CN.candidateProviders) do
+        for _, objective in ipairs(provider.fn() or {}) do
+            if objective.expiresIn and objective.expiresIn > 0 then
+                local bonus = objective.limitedTimeBonus or 0
+
+                assert(bonus == 0 or objective.limitedTimeBonusIsProgress,
+                    name .. " charges one deadline through two curves: "
+                    .. tostring(objective.name) .. " has expiresIn "
+                    .. tostring(objective.expiresIn) .. " and a flat bonus of "
+                    .. tostring(bonus))
+            end
+        end
+    end
+
+    ------------------------------------------------------------
+    -- AND WHERE THE FIXTURE CANNOT REACH, THE SOURCE IS READ.
+    ------------------------------------------------------------
+    -- Expiring mail, a held keystone and an outstanding crafting order are
+    -- all built from client state the offline fixture does not carry by
+    -- default, so a runtime sweep alone would report a clean list while three
+    -- of the five defective rows sat untested. Every objective the addon
+    -- constructs is checked where it is written instead.
+    --
+    -- The rule: a row may not carry both a live `expiresIn` and a non-zero
+    -- flat `limitedTimeBonus`. Where the flat term genuinely measures
+    -- something other than a deadline -- how close a vault row is to its next
+    -- threshold, how close a lockout is to being cleared -- the row declares
+    -- `limitedTimeBonusIsProgress`, which is the whole exception list.
+    local doubleCharged = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        if text then
+            local depth, bonus, expires, declared = nil, nil, false, false
+
+            for line in string.gmatch(text, "[^\n]+") do
+                local code = string.find(line, "^%s*%-%-") and "" or line
+
+                if depth == nil then
+                    if string.find(code, "CN.NewObjective({", 1, true) then
+                        depth, bonus, expires, declared = 0, nil, false, false
+                    end
+                else
+                    local value = string.match(code,
+                        "limitedTimeBonus%s*=%s*(.-),%s*$")
+
+                    -- ANY offending line in the block, not the last one. A
+                    -- second assignment further down cannot un-charge the
+                    -- first: whichever wins at runtime, the row was written
+                    -- twice and one of them is wrong.
+                    if value and value ~= "0"
+                        and not string.find(value, "and 0 or", 1, true) then
+
+                        bonus = value
+                    end
+
+                    if string.find(code, "limitedTimeBonusIsProgress", 1, true) then
+                        declared = true
+                    end
+
+                    if string.find(code, "expiresIn%s*=%s*[^n]") then
+                        expires = true
+                    end
+
+                    if string.find(code, "^%s*}%)%)") or string.find(code, "^%s*}%)$") then
+                        if expires and bonus and not declared then
+                            table.insert(doubleCharged, file
+                                .. ": a row with expiresIn also carries a flat "
+                                .. "limitedTimeBonus of " .. bonus)
+                        end
+
+                        depth = nil
+                    end
+                end
+            end
+        end
+    end
+
+    assert(#doubleCharged == 0,
+        "one deadline is charged once, through the curve /cn urgency plots:\n"
+        .. table.concat(doubleCharged, "\n"))
+
+    print("  a deadline is charged once, in every provider")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ACHIEVEMENT WITH NOTHING LEFT IS NOT CLOSEST TO FINISHING.
+    ------------------------------------------------------------
+    -- `Loremaster.Closest` and `Exploration.Closest` have carried
+    -- `done < criteria` since 0.71.0, whose note says the rule is written
+    -- twice and names the third copy. The third copy never got it, so a row
+    -- the client had not yet flipped to completed sorted to the very front of
+    -- a list headed "closest to completion".
+    local achievements = CN:GetModule("Achievements")
+
+    local store = achievements.Store()
+
+    local finished = 970071
+
+    store[finished] = {
+        achievementID = finished,
+        categoryID    = 92,
+        criteria      = 12,
+    }
+
+    achievements.NoteProgress(store[finished], 12)
+
+    for _, record in ipairs(achievements.Closest(10) or {}) do
+        assert(record.achievementID ~= finished,
+            "an achievement with every criterion done is not offered as the "
+            .. "one closest to finishing")
+    end
+
+    -- And one with real work left still is.
+    local ongoing = 970072
+
+    store[ongoing] = {
+        achievementID = ongoing,
+        categoryID    = 92,
+        criteria      = 12,
+    }
+
+    achievements.NoteProgress(store[ongoing], 11)
+
+    local listedClose = false
+
+    for _, record in ipairs(achievements.Closest(10) or {}) do
+        if record.achievementID == ongoing then
+            listedClose = true
+        end
+    end
+
+    assert(listedClose, "and one criterion from done is")
+
+    -- THE SAME RULE, IN ALL THREE FILES THAT STATE IT.
+    for _, file in ipairs({ "Modules/Achievements.lua",
+                            "Modules/Loremaster.lua",
+                            "Modules/Exploration.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        assert(text and text:find("done < record.criteria", 1, true),
+            file .. " excludes a row with nothing left from its closest list")
+    end
+
+    store[finished] = nil
+    store[ongoing]  = nil
+
+    print("  an achievement with nothing left is not closest to finishing")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD ACHIEVEMENT SWEEP WRITES NO ROWS AT ALL.
+    ------------------------------------------------------------
+    -- `GetAchievementProgress` answers `0, 0` when the criteria API is cold,
+    -- and when it is cold it is cold for EVERY row -- so a cold `/cn setup`
+    -- took the criteria-less branch for every incomplete achievement in the
+    -- game and wrote a `criteria = 0` row for each. Those rows were then
+    -- unrepairable: a warm scan reads `criteria = 12, done = 0`, which fails
+    -- both halves of the gate, and the prune keeps them because they are in
+    -- `seen`. The refusal guard at the bottom returned early -- after the
+    -- writes had already happened.
+    local achievements = CN:GetModule("Achievements")
+
+    local store = achievements.Store()
+
+    local heldBefore = 0
+
+    for _ in pairs(store) do heldBefore = heldBefore + 1 end
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function() return 0, 0 end
+
+    local _, _, _, answered = achievements.Scan()
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(answered == 0,
+        "the sweep reports that the client answered for nothing: "
+        .. tostring(answered))
+
+    local after = 0
+
+    for _ in pairs(store) do after = after + 1 end
+
+    assert(after == heldBefore,
+        "and writes nothing over a store it could not read: " .. tostring(after)
+        .. " rows where there were " .. tostring(heldBefore))
+
+    -- AND A WARM SWEEP STILL RECORDS A GENUINELY CRITERIA-LESS ACHIEVEMENT.
+    achievements.Scan()
+
+    local warm = 0
+
+    for _ in pairs(store) do warm = warm + 1 end
+
+    assert(warm > 0, "a warm sweep still records rows: " .. tostring(warm))
+
+    ------------------------------------------------------------
+    -- AND A SINGLE ROW'S ZERO NEVER OVERWRITES A STORED COUNT.
+    ------------------------------------------------------------
+    -- The guard moved up a level in 0.89.0 -- a zero is held back until the
+    -- sweep has proved the API answers -- so the test that it cannot flatten
+    -- a stored count has to run on a sweep that DID answer, with one row
+    -- refusing. A stored 40 going to 0 was the 0.76.0 defect: `IsNearlyDone`
+    -- went false and the row left the shortlist.
+    -- A REAL ROW FROM THE FIXTURE, because the prune deletes anything the
+    -- client's own walk did not return -- so a fabricated id would leave this
+    -- assertion true of nil, which is the 0.87.0 defect (backlog rule 87).
+    local shy
+
+    for achievementID, record in pairs(store) do
+        if type(record) == "table" and (record.criteria or 0) > 0 then
+            shy = achievementID
+        end
+    end
+
+    assert(shy, "the fixture must hold an achievement with criteria")
+
+    store[shy].criteria = 40
+
+    local realRow = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function(achievementID)
+        if achievementID == shy then
+            return 0, 0
+        end
+
+        return realRow(achievementID)
+    end
+
+    achievements.Scan()
+
+    CN.Blizzard.GetAchievementProgress = realRow
+
+    assert(store[shy], "the row is still in the store")
+
+    assert(store[shy].criteria == 40,
+        "a row the client refused about keeps the count it had: "
+        .. tostring(store[shy].criteria))
+
+    ------------------------------------------------------------
+    -- AND A GENUINELY CRITERIA-LESS ACHIEVEMENT IS STILL RECORDED.
+    ------------------------------------------------------------
+    -- The two cases are indistinguishable per row -- both read `0, 0` -- and
+    -- only distinguishable in aggregate, which is exactly why the decision
+    -- moved to after the refusal guard. A sweep that DID answer, with one row
+    -- reporting no criteria, must still store that row.
+    store[shy] = nil
+
+    CN.Blizzard.GetAchievementProgress = function(achievementID)
+        if achievementID == shy then
+            return 0, 0
+        end
+
+        return realRow(achievementID)
+    end
+
+    achievements.Scan()
+
+    CN.Blizzard.GetAchievementProgress = realRow
+
+    assert(store[shy],
+        "an achievement the client reports no criteria for is still recorded "
+        .. "on a sweep that answered")
+
+    assert(store[shy].criteria == 0,
+        "as criteria-less, which is what the client said: "
+        .. tostring(store[shy].criteria))
+
+    achievements.Scan()
+
+    print("  a cold achievement sweep writes no rows at all")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A FLIGHT PATH IS NOT A GROUND MOUNT.
+    ------------------------------------------------------------
+    -- `Session.Flying` excludes the taxi under a comment saying that movement
+    -- belongs to Travel's flight measurement. It was excluded from `flying`
+    -- and then caught by `Mounted`, so every taxi interval inside one map was
+    -- filed as a ground-mount speed sample. `Session.Observe`'s header claims
+    -- it discards a flight path and `Modules/Travel.lua` states as fact that
+    -- it already does; neither was true. The `mounted` plausibility band
+    -- admits every flight speed in the game, so nothing downstream caught it
+    -- either.
+    local session = CN:GetModule("Session")
+
+    local realTaxi    = UnitOnTaxi
+    local realMounted = IsMounted
+    local realFlying  = IsFlying
+
+    UnitOnTaxi = function() return true end
+    IsMounted  = function() return true end
+    IsFlying   = function() return true end
+
+    assert(session.IsMounted() == false,
+        "a player on a flight path is not on a ground mount")
+
+    assert(session.IsFlying() == false,
+        "and is not flying themselves either")
+
+    assert(session.Bucket() == "onFoot",
+        "so nothing files their speed in a bucket it does not belong in: "
+        .. tostring(session.Bucket()))
+
+    -- The ordinary cases are unchanged.
+    UnitOnTaxi = function() return false end
+
+    assert(session.IsFlying() == true, "flying yourself is still flying")
+
+    IsFlying = function() return false end
+
+    assert(session.IsMounted() == true and session.Bucket() == "mounted",
+        "and a ground mount is still a ground mount")
+
+    UnitOnTaxi = realTaxi
+    IsMounted  = realMounted
+    IsFlying   = realFlying
+
+    print("  a flight path is not a ground mount")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A QUEST AN NPC OFFERED YOU IS ON THE MAP YOU SAW IT ON.
+    ------------------------------------------------------------
+    -- `AvailableOnMap` takes a map, and the remembered-offer source ignored
+    -- it -- so anything a gossip window offered in the last fifteen minutes
+    -- was reported as being on whatever map was asked about. The provider
+    -- then wrote "available to pick up in this zone" on a row whose travel
+    -- cost was measured against a different zone, `/cn available` counted it,
+    -- and walking into an empty zone within fifteen minutes of a conversation
+    -- fired "3 quests here you have not picked up".
+    local quests = CN:GetModule("Quests")
+
+    local farAway = 970199
+
+    quests.RecentOffers()[farAway] = {
+        at    = time(),
+        mapID = 2274,
+        x     = 0.5,
+        y     = 0.5,
+    }
+
+    for _, row in ipairs(quests.AvailableOnMap(94, true)) do
+        assert(row.questID ~= farAway,
+            "a quest offered on another continent is not available in this "
+            .. "zone")
+    end
+
+    -- And one offered HERE still is.
+    local here = 970198
+
+    quests.RecentOffers()[here] = {
+        at    = time(),
+        mapID = 94,
+        x     = 0.5,
+        y     = 0.5,
+    }
+
+    local listedHere = false
+
+    for _, row in ipairs(quests.AvailableOnMap(94, true)) do
+        if row.questID == here then
+            listedHere = true
+        end
+    end
+
+    assert(listedHere, "a quest offered on this map is still available here")
+
+    quests.RecentOffers()[farAway] = nil
+    quests.RecentOffers()[here]      = nil
+
+    print("  a remembered offer belongs to the map it was seen on")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A RECIPE NAME THAT HAS NOT CHANGED DOES NOT STALE THE INDEX.
+    ------------------------------------------------------------
+    -- The capture wrote every recipe's name -- almost always the value
+    -- already there -- and bumped the index revision each time, about 2,500
+    -- times a capture, from `TRADE_SKILL_LIST_UPDATE`, which this addon's own
+    -- scoring classifies as bursty. So the next tooltip after every list
+    -- update rebuilt the whole name index: exactly the per-mouseover cost the
+    -- index was written to remove, reintroduced at the one moment the player
+    -- is hovering items in their profession window.
+    local professions = CN:GetModule("Professions")
+
+    professions.CaptureOpenProfession()
+
+    local settled = professions.nameRevision
+
+    professions.CaptureOpenProfession()
+
+    assert(professions.nameRevision == settled,
+        "a capture that learns nothing new leaves the name index alone: "
+        .. tostring(settled) .. " -> " .. tostring(professions.nameRevision))
+
+    -- And a name that really did change still moves it.
+    local index = professions.NameIndex()
+
+    assert(type(index) == "table", "the index builds")
+
+    local realInfo = CN.Blizzard.GetRecipeInfo
+
+    CN.Blizzard.GetRecipeInfo = function(recipeID)
+        local info = realInfo(recipeID)
+
+        if info then
+            info.name = tostring(info.name) .. " (Renamed)"
+        end
+
+        return info
+    end
+
+    professions.CaptureOpenProfession()
+
+    CN.Blizzard.GetRecipeInfo = realInfo
+
+    assert(professions.nameRevision > settled,
+        "and a name the client has actually changed still does: "
+        .. tostring(professions.nameRevision))
+
+    professions.CaptureOpenProfession()
+
+    print("  a recipe name that has not changed does not stale the index")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EXPLORATION STORES NO TIMESTAMP, AND THE OLD ONES ARE GONE.
+    ------------------------------------------------------------
+    -- Migration 5 stripped `lastSeen` from four stores, 31 from appearances,
+    -- 32 from mounts and reputations. `exploration` was in none of the three
+    -- sweeps and its writer went on putting the field back on every scan.
+    local explorationModule = CN:GetModule("Exploration")
+
+    explorationModule.Scan()
+
+    for id, record in pairs(CN.Account("exploration")) do
+        assert(type(record) ~= "table" or record.lastSeen == nil,
+            "exploration row " .. tostring(id)
+            .. " must not persist a timestamp nothing reads")
+    end
+
+    -- AND THE MIGRATION REMOVES ONE ALREADY ON DISK.
+    local aged = {
+        version = 32,
+        account = {
+            exploration = {
+                [1234] = { achievementID = 1234, criteria = 6,
+                           lastSeen = 1 },
+            },
+        },
+        characters = {},
+    }
+
+    CN.RunMigrations(aged)
+
+    assert(aged.account.exploration[1234].lastSeen == nil,
+        "and the field is dropped from a database that already has it")
+
+    assert(aged.account.exploration[1234].criteria == 6,
+        "without taking the row with it")
+
+    print("  exploration stores no timestamp")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- HALF IS NOT "MORE TIMED THAN NOT".
+    ------------------------------------------------------------
+    -- The rule the comment states is "no estimate at all is offered unless
+    -- more steps are timed than are not", and at exactly half `0.5 < 0.5` is
+    -- false -- so the guard passed and `/cn chase` printed a confident range
+    -- in which half the total was extrapolation.
+    local chase = CN:GetModule("Chase")
+
+    assert(chase.estimateCoverage == 0.5,
+        "the coverage floor is a half: " .. tostring(chase.estimateCoverage))
+
+    local source = CN_TEST_ReadAddonFile("Modules/Chase.lua")
+
+    assert(source and source:find("<= Chase.estimateCoverage", 1, true),
+        "and the boundary case is refused, as the rule beside it says")
+
+    print("  half the steps timed is not enough for an estimate")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "WITH FOUR OTHERS" IS FOUR OTHERS.
+    ------------------------------------------------------------
+    -- `GetNumGroupMembers` counts the player, so a full party read "with 5
+    -- people" to somebody standing with four others. `Group.Units` twelve
+    -- lines above already takes the player out for exactly this reason.
+    local group = CN:GetModule("Group")
+
+    local realSize     = group.Size
+    local realSituation = group.Situation
+
+    group.Size      = function() return 5 end
+    group.Situation = function() return "instanced" end
+
+    local notice = group.Notice()
+
+    group.Size      = realSize
+    group.Situation = realSituation
+
+    assert(notice and notice:find("4 other people", 1, true),
+        "a party of five is four other people: " .. tostring(notice))
+
+    assert(not notice:find("5 people", 1, true),
+        "and never counts the player among the people they are with: "
+        .. tostring(notice))
+
+    print("  the group sentence counts the other people")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- FINDING A CANDIDATE IS AN INDEX, NOT A WALK.
+    ------------------------------------------------------------
+    -- `CN.FindCandidate` is called from the item tooltip on every mount, pet
+    -- and toy the player hovers, and once per step of every chase chain, and
+    -- it walked the whole candidate list each time. The same shape was
+    -- removed from the pet tooltip path in 0.87.0 and the recipe tooltip path
+    -- in 0.86.0.
+    local allRows = CN.CollectCandidates() or {}
+
+    assert(#allRows > 0, "the fixture must produce candidates")
+
+    -- IT STILL ANSWERS THE SAME, ROW FOR ROW, INCLUDING FIRST-MATCH-WINS.
+    for _, objective in ipairs(allRows) do
+        local found = CN.FindCandidate(objective.type, objective.id)
+
+        assert(found,
+            "every candidate is findable by its own pair: "
+            .. tostring(objective.type) .. " / " .. tostring(objective.id))
+
+        local walked
+
+        for _, row in ipairs(allRows) do
+            if row.type == objective.type and row.id == objective.id then
+                walked = row
+                break
+            end
+        end
+
+        assert(found == walked,
+            "and the index returns the row the walk returned: "
+            .. tostring(objective.name))
+    end
+
+    assert(CN.FindCandidate(CN.objectiveTypes.QUEST, 970404) == nil,
+        "and something that is not a candidate is still not found")
+
+    -- AND IT IS BUILT ONCE, not once per lookup.
+    local source = CN_TEST_ReadAddonFile("Scoring.lua")
+
+    assert(source and source:find('CN.Memo("CandidateIndex"', 1, true),
+        "the index is memoised rather than rebuilt per call")
+
+    -- THE KEY MOVES WHEN THE LIST DOES. A row added by a rebuild has to be
+    -- findable, which a memo keyed on something that does not move would not
+    -- manage -- the 0.87.0 defect, in the other direction.
+    CN.InvalidateCandidates()
+
+    local rebuilt = CN.CollectCandidates() or {}
+
+    for _, objective in ipairs(rebuilt) do
+        assert(CN.FindCandidate(objective.type, objective.id),
+            "a candidate present after a rebuild is found after it: "
+            .. tostring(objective.name))
+    end
+
+    print("  finding a candidate is an index, not a walk")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

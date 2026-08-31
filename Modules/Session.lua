@@ -204,12 +204,33 @@ end
 
 Session.speedSampleCap = 40
 
+-- A TAXI IS NOT A GROUND MOUNT. 0.89.0.
+--
+-- `Flying` twelve lines below excludes the taxi, under a comment saying that
+-- movement "belongs to Travel's flight-speed measurement rather than to this
+-- one". It was excluded from `flying` and then caught by `mounted`, which
+-- returned true on a taxi -- so every flight that stayed inside one map was
+-- filed as a ground-mount speed sample. `Session.Observe`'s own header claims
+-- it discards a flight path, and `Modules/Travel.lua` states as fact that
+-- "Session already discards taxi movement when learning running speed".
+-- Neither was true.
+--
+-- Nothing downstream caught it either: `mounted` stays true for the whole
+-- flight so the bucket never changes, and the plausibility band for `mounted`
+-- is 0.5 to 60 yards a second, which admits every flight speed in the game.
+--
+-- It matters because `Session.Speed("onFoot")` falls back to the `mounted`
+-- median below `minSamples`, and `Travel.EstimateSeconds` uses that for the
+-- run-the-whole-way option and for both walking legs of every flight route --
+-- which feeds `/cn plan`'s budget, `CN.SecondsNeeded` and the urgency term's
+-- "can I still get there" test. 0.43.0 records fixing exactly this one level
+-- down, for self-flight, and not for the taxi.
 local function Mounted()
-    if IsMounted and IsMounted() then
-        return true
+    if UnitOnTaxi and UnitOnTaxi("player") then
+        return false
     end
 
-    if UnitOnTaxi and UnitOnTaxi("player") then
+    if IsMounted and IsMounted() then
         return true
     end
 

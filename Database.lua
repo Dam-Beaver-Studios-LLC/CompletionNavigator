@@ -1652,6 +1652,38 @@ CN.migrations = {
                 .. " stored values nothing reads.")
         end
     end,
+
+    -- AND THE SIXTH STORE. 0.89.0.
+    --
+    -- Migration 5 stripped `lastSeen` from four stores, 31 from appearances,
+    -- 32 from mounts and reputations. `exploration` was in none of the three
+    -- sweeps and its writer went on putting the field back on every scan and
+    -- every `/cn explorescan`. Nothing in the addon has ever read it.
+    --
+    -- Migration 32's note said a fifth store found later would be one line;
+    -- it is one line, in a new migration, because 32 has shipped.
+    [33] = function(db)
+        local store = db.account and db.account.exploration
+
+        if type(store) ~= "table" then
+            return
+        end
+
+        local dropped = 0
+
+        for _, record in pairs(store) do
+            if type(record) == "table" and record.lastSeen ~= nil then
+                record.lastSeen = nil
+
+                dropped = dropped + 1
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " exploration timestamps nothing reads.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

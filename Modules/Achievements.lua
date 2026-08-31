@@ -175,6 +175,11 @@ function Achievements.Scan()
     -- Which categories the client actually populated this time.
     local answeringCategories = {}
 
+    -- Achievements the client reported no criteria for, held back until the
+    -- guard below has decided whether the criteria API answered at all. See
+    -- the note at the gate.
+    local criteriaLess = {}
+
     Achievements.revision = Achievements.revision + 1
 
     local scanned, completed, nearlyDone = 0, 0, 0
@@ -251,7 +256,37 @@ function Achievements.Scan()
 
                     -- Store only what is unfinished, and only if there is
                     -- real progress or it is small enough to be actionable.
-                    if criteria == 0 or done > 0 then
+                    --
+                    -- A ZERO IS NOT AN ANSWER UNTIL THE SWEEP HAS HAD ONE.
+                    -- 0.89.0.
+                    --
+                    -- `GetAchievementProgress` answers `0, 0` when the
+                    -- criteria API is cold, which the note above calls
+                    -- routine for a window after logging in -- and when it is
+                    -- cold it is cold for EVERY row. So a cold `/cn setup`
+                    -- took this branch for every incomplete achievement in
+                    -- the game and wrote a `criteria = 0` row for each.
+                    --
+                    -- Those rows were then unrepairable: a later warm scan
+                    -- reads `criteria = 12, done = 0`, and this gate is false
+                    -- for both halves, so the branch is never entered again.
+                    -- The prune keeps them, because they are in `seen`. The
+                    -- result was thousands of junk rows rewritten to disk on
+                    -- every logout, in the store whose own header says
+                    -- keeping a row for each completed achievement would
+                    -- triple the saved-variables file -- and `/cn achievements`
+                    -- printing "Tracked in progress: 3000".
+                    --
+                    -- The refusal check below already knows whether the API
+                    -- answered at all. Hold the criteria-less rows until it
+                    -- has decided.
+                    if criteria == 0 then
+                        table.insert(criteriaLess, {
+                            achievementID = achievement.achievementID,
+                            categoryID    = categoryID,
+                            done          = done,
+                        })
+                    elseif done > 0 then
                         -- THROUGH THE ONE WRITER, AND ON TOP OF WHAT IS
                         -- ALREADY THERE. 0.75.0.
                         --
@@ -278,19 +313,18 @@ function Achievements.Scan()
                         -- The guard `Exploration` has carried since 0.61.0,
                         -- `Loremaster` since 0.71.0, and that this file's own
                         -- criteria sweep four hundred lines down already had.
-                        -- Third writer, no guard.
-                        if criteria > 0 then
-                            held.criteria = criteria
+                        --
+                        -- IT MOVED UP A LEVEL IN 0.89.0. A zero no longer
+                        -- reaches this branch at all: it is held back until
+                        -- the sweep has proved the criteria API answers, and
+                        -- written by the loop after that guard, which is
+                        -- where the "never overwrite a stored count with a
+                        -- refusal" test now lives. `criteria` is positive
+                        -- here by construction, so the two arms that used to
+                        -- stand here would both be dead code.
+                        held.criteria = criteria
 
-                            Achievements.NoteProgress(held, done)
-                        elseif held.criteria == nil then
-                            -- Genuinely a criteria-less achievement, and new
-                            -- to the store. A stored `criteria > 0` is never
-                            -- overwritten with a refusal.
-                            held.criteria = 0
-
-                            Achievements.NoteProgress(held, done)
-                        end
+                        Achievements.NoteProgress(held, done)
 
                         store[achievement.achievementID] = held
 
@@ -325,6 +359,25 @@ function Achievements.Scan()
         DebugPrint("Achievement scan answered for nothing; not recording it.")
 
         return scanned, completed, nearlyDone, 0
+    end
+
+    -- THE CRITERIA-LESS ROWS, now that the sweep has proved the API answers.
+    -- A genuinely criteria-less achievement is a real thing and belongs in
+    -- the store; a whole client's worth of zeros is not.
+    for _, row in ipairs(criteriaLess) do
+        local held = store[row.achievementID] or {}
+
+        held.achievementID = row.achievementID
+        held.categoryID    = row.categoryID
+
+        -- A stored `criteria > 0` is never overwritten with a zero.
+        if held.criteria == nil then
+            held.criteria = 0
+
+            Achievements.NoteProgress(held, row.done)
+        end
+
+        store[row.achievementID] = held
     end
 
     -- ROWS THE CLIENT NO LONGER RETURNS, dropped explicitly. This is what the
@@ -436,7 +489,20 @@ function Achievements.Closest(limit)
     for achievementID, record in pairs(Store()) do
         local done = Achievements.DoneFor(record) or 0
 
-        if record.criteria and record.criteria > 0 and done > 0 then
+        -- AND NOTHING LEFT IS NOT CLOSEST TO FINISHING. 0.89.0.
+        --
+        -- `Loremaster.Closest` and `Exploration.Closest` have carried
+        -- `done < criteria` since 0.71.0, whose note says in as many words
+        -- that the rule is written twice and the third copy is elsewhere.
+        -- This is the third copy, and it never got the guard.
+        --
+        -- The client is slow to flip `completed`, and `ACHIEVEMENT_EARNED` is
+        -- what deletes the row here -- so a row at 12 of 12 sorts to the very
+        -- front of a list headed "closest to completion" and the addon sends
+        -- the player to finish something with nothing left in it.
+        if record.criteria and record.criteria > 0 and done > 0
+            and done < record.criteria then
+
             names[record] = NameOf(achievementID, record) or ""
             left[record]  = record.criteria - done
 

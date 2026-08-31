@@ -7,6 +7,82 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.89.0]
+
+**Five providers were charging one deadline twice.** Last release found the
+pattern in the Great Vault and the raid lockout list and fixed both; this
+release went looking for the rest of it and found expiring mail, your
+keystone, the week's profession knowledge, a capped currency and a crafting
+order â€” each feeding one fact into a flat bonus *and* into the urgency curve,
+through two shapes tuned independently, only one of which `/cn urgency` plots.
+Mail carried the largest: nine points of flat bonus on top of the ramp, which
+is why "3 mail expiring" could outrank a world quest with nine minutes left.
+
+The harness now sweeps every provider in the addon for that shape on every
+build, with the two legitimate exceptions declared on the rows themselves. It
+is the sixth time this project has fixed one instance of a rule and left its
+siblings, and the first time the check that finds them all has been written.
+
+### Fixed
+
+- **Mail, the keystone, weekly knowledge, capped currencies and crafting
+  orders each charged their deadline once**, not twice.
+- **A cold `/cn setup` wrote a junk row for every incomplete achievement in
+  the game.** The criteria API answers "0 of 0" for a window after login â€”
+  which the file's own note says is exactly when a first scan is run â€” and a
+  zero was taken as a real answer. Those rows were unrepairable afterwards
+  and the prune deliberately kept them, so the store filled with thousands of
+  entries rewritten to disk on every logout, and `/cn achievements` reported
+  "Tracked in progress: 3000" for a player with a dozen. The refusal guard was
+  already there; it just ran after the writes.
+- **An achievement with every criterion done was offered as the one closest
+  to finishing.** The client is slow to flip the completed flag, so a 12-of-12
+  row sorted to the very top of a list headed "closest to completion". The
+  sibling rule in the Loremaster and Exploration lists has carried the guard
+  since 0.71.0 â€” and its note says, in as many words, that a third copy exists
+  elsewhere. This was it.
+- **Flight paths were being timed as ground-mount speed.** The speed sampler
+  excludes the taxi from its flying bucket, under a comment saying that
+  movement belongs to the flight-path measurement instead â€” and then caught it
+  in the mounted bucket, whose plausibility band happens to admit every flight
+  speed in the game. Two other files state as fact that this already worked.
+  It matters because on-foot speed falls back to the mounted median, and that
+  feeds every journey estimate, `/cn plan`'s budget, and the "can I still get
+  there in time" test.
+- **A quest an NPC offered you fifteen minutes ago was reported as being in
+  whatever zone you are standing in now.** The row said "available to pick up
+  in this zone" while its travel cost was measured against the zone you were
+  actually in when you heard about it, `/cn available` counted it, and walking
+  into an empty zone could announce three quests that are not there.
+- **Opening a profession window made the next item you hovered rebuild a
+  2,500-entry index.** The capture bumped the index's revision once per
+  recipe whether or not anything had changed, on an event that fires in
+  bursts. It bumps when a name actually changes now.
+- **`/cn chase` gave a confident time estimate when exactly half the steps
+  had never been timed** â€” the rule printed beside it says an estimate is
+  offered only when *more* are timed than are not.
+- **`/cn situation` counted you among the people you were with** â€” "in an
+  instance with 5 people" to somebody standing with four others.
+- **`/cn clock`'s help named two commands' contents and not its own.** It
+  advertised the vault and lockouts, which are `/cn vault` and
+  `/cn instances`, and left out mail and heirlooms, which are the two largest
+  things it prints.
+- **The exploration store kept a timestamp nothing reads.** Three earlier
+  migrations removed this field from six other stores; this one was in none of
+  the sweeps. Migration 33 drops it and the writer stops adding it back.
+- **Thirty-five lines of unreachable chase code were deleted.** They built a
+  path for an appearance goal, and no appearance goal can be created â€” nor
+  should the gap be closed as written, since the builder asks the client for a
+  third kind of id from the two the addon actually uses. The harness now
+  refuses any chase builder for a goal type nothing can pin.
+
+### Changed
+
+- **Finding a candidate by type and id is an index rather than a walk.** It
+  runs on every mount, pet and toy tooltip and once per step of every chase
+  chain; a mouse crossing a full bag now builds the index once instead of
+  re-walking the list per row.
+
 ## [0.88.0]
 
 **Six of this release's ten fixes are the same shape: a number the addon

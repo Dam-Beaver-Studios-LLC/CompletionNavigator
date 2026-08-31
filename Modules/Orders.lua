@@ -146,7 +146,12 @@ CN.RegisterCandidateProvider("Orders", function()
                 name             = "Crafting order: "
                     .. tostring(order.itemName or order.itemID or "?"),
                 completionValue  = 3,
-                limitedTimeBonus = 2,
+
+                -- ONE DEADLINE, ONE CURVE. 0.89.0. `expiresIn` on the next
+                -- line is the same expiry, and the reason text below quotes
+                -- it a third time. The claim row further down keeps its flat
+                -- bonus, correctly: nothing there expires.
+                limitedTimeBonus = 0,
                 travelCost       = CN.placelessCost,
                 expiresIn        = order.expiresIn,
                 reasons          = {

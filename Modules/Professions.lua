@@ -145,11 +145,25 @@ function Professions.CaptureOpenProfession()
         if info then
             seen = seen + 1
 
+            -- ONLY WHEN A NAME ACTUALLY CHANGES. 0.89.0.
+            --
+            -- The write is idempotent -- almost every pass sets a key to the
+            -- value it already holds -- and the revision moved anyway, once
+            -- per recipe, about 2,500 times per capture. This runs from
+            -- `TRADE_SKILL_LIST_UPDATE`, which `Scoring.lua` classifies as
+            -- bursty, so the next tooltip after every list update rebuilt the
+            -- whole index: 2,500 iterations and 2,500 `string.lower`
+            -- allocations. That is the per-mouseover cost this index was
+            -- written to remove, reintroduced at the one moment the player is
+            -- hovering items in their profession window.
             if info.name and info.name ~= "" then
-                names[recipeID] = info.name
+                if names[recipeID] ~= info.name then
+                    names[recipeID] = info.name
 
-                -- The name index is now stale.
-                Professions.nameRevision = (Professions.nameRevision or 0) + 1
+                    -- The name index is now stale.
+                    Professions.nameRevision =
+                        (Professions.nameRevision or 0) + 1
+                end
             end
 
             if info.learned then

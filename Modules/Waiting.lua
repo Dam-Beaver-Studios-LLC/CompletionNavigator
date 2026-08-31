@@ -340,7 +340,22 @@ CN.RegisterCandidateProvider("Waiting", function()
             type             = CN.objectiveTypes.CURRENCY,
             name             = #expiring .. " mail expiring",
             completionValue  = 6,
-            limitedTimeBonus = 3,
+            -- ONE DEADLINE, ONE CURVE. 0.89.0.
+            --
+            -- This was 3, and `expiresIn` below hands the SAME fact -- mail
+            -- is destroyed on a timer -- to the scorer's urgency term. The
+            -- flat bonus is worth 3.0 per point and the curve up to 4.0, so
+            -- one deadline was charged nine points plus the ramp, through two
+            -- shapes tuned independently, only one of which `/cn urgency`
+            -- plots. "3 mail expiring" outranked a world quest with nine
+            -- minutes left.
+            --
+            -- `Opportunities` states the settled convention: the flat term is
+            -- what you charge only when there is NO deadline to charge.
+            -- Fixed in `Opportunities` in 0.63.0 and in `Vault` and
+            -- `Instances` in 0.88.0; the sweep reached three files and left
+            -- this one, which has the largest flat bonus of the four.
+            limitedTimeBonus = 0,
             travelCost       = 3,
             expiresIn        = math.max(0, (soonest.daysLeft or 0) * 86400),
             reasons          = {
@@ -364,7 +379,8 @@ CN.RegisterCandidateProvider("Waiting", function()
             name             = "Keystone: " .. (keystone.name or "unknown")
                 .. " +" .. keystone.level,
             completionValue  = 4,
-            limitedTimeBonus = 2,
+            -- ONE DEADLINE, ONE CURVE. 0.89.0. See the mail row above.
+            limitedTimeBonus = 0,
             travelCost       = 3,
             expiresIn        = keystone.expiresIn,
             reasons          = {
@@ -385,7 +401,8 @@ CN.RegisterCandidateProvider("Waiting", function()
                 type             = CN.objectiveTypes.PROFESSION,
                 name             = row.name .. ": " .. row.remaining .. " left this week",
                 completionValue  = 5,
-                limitedTimeBonus = 2,
+                -- ONE DEADLINE, ONE CURVE. 0.89.0. See the mail row above.
+                limitedTimeBonus = 0,
                 travelCost       = CN.placelessCost,
                 expiresIn        = Blizzard.GetSecondsUntilWeeklyReset(),
                 reasons          = {
@@ -411,7 +428,11 @@ CN:RegisterCommand{
     name    = "clock",
     aliases = { "expiring" },
     order   = 29,
-    help    = "Everything on a weekly or daily timer: vault, caps, lockouts.",
+    -- WHAT IT PRINTS, NOT WHAT ANOTHER COMMAND PRINTS. 0.89.0. This named
+    -- the vault (`/cn vault`) and lockouts (`/cn instances`) -- both separate
+    -- commands in the same essentials list -- and left out mail and heirlooms,
+    -- which are the two largest things it does show.
+    help    = "Mail about to expire, your keystone, weekly caps, heirlooms.",
     handler = function()
         local said = false
 

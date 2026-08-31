@@ -326,6 +326,14 @@ CN.RegisterCandidateProvider("Vault", function()
                 -- next threshold", which is not a deadline and is charged
                 -- nowhere else.
                 limitedTimeBonus = Urgency(row.remaining),
+
+                -- DECLARED, BECAUSE THE SWEEP REFUSES THIS SHAPE OTHERWISE.
+                -- 0.89.0. A row may not carry both a deadline and a flat
+                -- bonus -- five providers were charging one fact twice. This
+                -- one is the exception the rule needs: the term above is how
+                -- close the row is to its NEXT THRESHOLD, which is not a
+                -- deadline and is charged nowhere else.
+                limitedTimeBonusIsProgress = true,
                 -- Instanced content has no map coordinate, but it is not
                 -- "location unknown" either: the group finder is one click.
                 travelCost       = 3,

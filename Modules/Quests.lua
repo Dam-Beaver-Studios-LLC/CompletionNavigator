@@ -346,13 +346,32 @@ function Quests.AvailableOnMap(mapID, quiet)
 
     -- 2. Anything an NPC has actually offered us, remembered from the
     --    conversation. Only kept while it is still plausibly nearby.
+    --
+    -- ON THE MAP IT WAS SEEN ON. 0.89.0.
+    --
+    -- This function takes a map and the source above honours it; this one did
+    -- not, so anything a gossip window offered in the last fifteen minutes
+    -- was reported as being on whatever map was asked about. The provider
+    -- then wrote "available to pick up in this zone" on a row whose travel
+    -- cost was computed against the PREVIOUS zone -- the sentence and the
+    -- number on one row contradicting each other -- `/cn available` counted
+    -- it, and walking into an empty zone within fifteen minutes of a
+    -- conversation fired "3 quests here you have not picked up".
+    local nearby = {}
+
+    for _, relatedID in ipairs(Blizzard.RelatedMapIDs(mapID)) do
+        nearby[relatedID] = true
+    end
+
     for questID, record in pairs(Quests.RecentOffers()) do
-        consider({
-            questID = questID,
-            mapID   = record.mapID,
-            x       = record.x,
-            y       = record.y,
-        }, "offered")
+        if record.mapID and nearby[record.mapID] then
+            consider({
+                questID = questID,
+                mapID   = record.mapID,
+                x       = record.x,
+                y       = record.y,
+            }, "offered")
+        end
     end
 
     table.sort(found, function(a, b) return a.questID < b.questID end)
