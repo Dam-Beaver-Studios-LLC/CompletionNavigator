@@ -818,14 +818,34 @@ local function CreateList(parent)
             --
             -- 0.54.0 gave it a fixed width, and the label's right edge is
             -- anchored to it -- so every row on every tab that sets no value
-            -- lost a hundred and seventy-eight pixels of label to an empty
+            -- lost the whole width of the value column to an empty
             -- fontstring. Of forty-three entry sites in the window, nine set
             -- a value; the other thirty-four were paying for a column that
             -- was not there.
             --
             -- Wide enough for the widest thing any tab puts in it, which is
             -- the reputation row's "412 account-wide, 96 this character".
-            row.value:SetWidth(entry.value and CN.UI.VALUE_WIDTH or 0.001)
+            --
+            -- AND IT SCALES WITH THE TEXT. 0.96.0.
+            --
+            -- `Pitch()` and `CaptionHeight()` were both taught to follow
+            -- `CN.TextScale()` in 0.90.0 and this constant was not, while the
+            -- width is applied unconditionally. FontStrings word-wrap by
+            -- default and nothing here turns that off, so at `/cn textsize
+            -- 150` a string needing about 285 pixels was given 210, wrapped
+            -- onto a second line, and overflowed a row onto the one below --
+            -- on Collections and Warband, the two tabs that use the column
+            -- most.
+            --
+            -- Same defect this file records fixing for `ROW_HEIGHT` one
+            -- constant along, in a feature "rebuilt precisely for the players
+            -- least likely to go hunting for a command".
+            local valueWidth = CN.UI.VALUE_WIDTH
+                * ((CN.TextScale and CN.TextScale()) or 1)
+
+            row.value:SetWidth(entry.value
+                and math.floor(valueWidth + 0.5)
+                or 0.001)
 
             row.selected:SetShown(entry.selected and true or false)
 

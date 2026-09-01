@@ -4883,6 +4883,34 @@ mutate "Modules/Pets.lua" \
     "    Pets.Scan()" \
     "a bag of caged pets costs one full journal sweep per pet"
 
+mutate "Modules/Progress.lua" \
+    "    if Progress.resetIsEstimate and type(store.dayKey) == \"number\" then
+        return store.dayKey
+    end" \
+    "" \
+    "a reload before the client speaks moves today's count into yesterday"
+
+mutate "Modules/Progress.lua" \
+    "    if Progress.resetIsEstimate and type(store.dayKey) == \"number\" then" \
+    "    if Progress.resetIsEstimate and store.dayKey ~= nil then" \
+    "a corrupt day key is held for ever instead of rolling over"
+
+mutate "Modules/Inventory.lua" \
+    "    store.scannedAt = oldest" \
+    "    store.scannedAt = oldest or time()" \
+    "a bank the client would not describe is reported as seen just now"
+
+mutate "UI/List.lua" \
+    "            local valueWidth = CN.UI.VALUE_WIDTH
+                * ((CN.TextScale and CN.TextScale()) or 1)" \
+    "            local valueWidth = CN.UI.VALUE_WIDTH" \
+    "the value column ignores the text size and overflows its row"
+
+mutate "UI.lua" \
+    "                .. \"been scanned; /cn setup fills them.|r\")" \
+    "                .. \"been scanned; /cn scan fills them.|r\")" \
+    "the empty-search message names a command that does not exist"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

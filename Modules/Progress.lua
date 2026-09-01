@@ -261,6 +261,32 @@ function Progress.RollDay(store)
         return today
     end
 
+    -- AND A PROVISIONAL KEY IS NOT EVIDENCE OF A BOUNDARY EITHER. 0.96.0.
+    --
+    -- The branch below guards the ESTIMATE-to-REAL transition. Nothing
+    -- guarded REAL-on-disk against ESTIMATE-in-hand, which is the shape that
+    -- happens at every login: `BeginSession` runs at `PLAYER_LOGIN`, the
+    -- client has usually not answered `GetQuestResetTime` yet, and the
+    -- estimate lands on a different day index from the true reset for roughly
+    -- half of all login times -- whenever the real instant and `now + 12h`
+    -- fall in different UTC days.
+    --
+    -- So the rollover fired against a perfectly good stored key: today's
+    -- count went into "yesterday" and today restarted at zero, on a reload,
+    -- on the same game day. That is this module's founding complaint --
+    -- "a player who logs in the next morning does not see yesterday's number
+    -- labelled today" -- in the mirror direction.
+    --
+    -- The client speaks moments later and the branch below then decides
+    -- correctly, so nothing is lost by waiting.
+    --
+    -- `type(...) == "number"` is load-bearing, not decorative: a corrupt
+    -- non-numeric key on disk must still roll over rather than being held
+    -- forever by this guard.
+    if Progress.resetIsEstimate and type(store.dayKey) == "number" then
+        return store.dayKey
+    end
+
     -- A PROVISIONAL KEY BEING REPLACED IS NOT A NEW DAY.
     --
     -- Before the client has said when the reset is, the key is an estimate

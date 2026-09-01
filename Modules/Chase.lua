@@ -449,8 +449,12 @@ function Chase.Summarize(chain)
     if nextStep then
         table.insert(parts, "next: " .. tostring(nextStep.text))
     elseif #parts == 0 then
+        -- SPACED, like the line four below it. 0.96.0. Both put a value
+        -- after a name, which is the job `CN.Aside` spaces; this one read
+        -- "Invincible\226\128\148the game does not say".
         return tostring(chain.name)
-            .. CN.DASH .. "the game does not say how this is obtained."
+            .. " " .. CN.DASH .. " "
+            .. "the game does not say how this is obtained."
     end
 
     return tostring(chain.name) .. " " .. CN.DASH .. " " .. table.concat(parts, ", ")

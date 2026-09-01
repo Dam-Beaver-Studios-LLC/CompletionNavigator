@@ -547,7 +547,27 @@ local function Fill(store, containers, items, answered)
         end
     end
 
-    store.scannedAt = oldest or now
+    -- AND A REFUSAL DOES NOT GET A TIMESTAMP AT ALL. 0.96.0.
+    --
+    -- `oldest` is nil exactly when `seenAt` is empty, which is when the
+    -- client has never described a single container -- a player who has
+    -- bought no Warband bank tab is in that state permanently. `or now` then
+    -- wrote a fresh stamp over a record built from nothing, and `/cn bags`
+    -- announced "Warband bank: 0 kinds of item, seen just now", for ever,
+    -- about a bank this addon has never read.
+    --
+    -- Same shape as 0.95.0's cold toy box and 0.94.0's cold recipe list: a
+    -- refusal recorded as a successful read, on the one field that says
+    -- whether anything was read.
+    --
+    -- NO FALLBACK IS NEEDED, and the first draft of this fix added one. It
+    -- was dead on arrival: `seenAt` is one of the two keys the wipe above
+    -- deliberately preserves, so a store that has EVER been read keeps its
+    -- per-container times and `oldest` finds them. The only store `oldest`
+    -- comes back nil for is one that has never been read -- and the honest
+    -- value for that is nothing. The mutation suite caught it: a mutant that
+    -- deleted the fallback changed no behaviour, which is what dead code is.
+    store.scannedAt = oldest
 
     return seen
 end
@@ -774,7 +794,9 @@ CN.RegisterCandidateProvider("Inventory", function()
                 travelCost       = travel or CN.unknownLocationCost,
                 travelCosted     = costed or nil,
                 reasons          = {
-                    string.format("%s" .. CN.DASH .. "%d of %d done",
+                    -- Spaced: an objective's name followed by its count is
+                    -- the label-and-value shape, not a clause break. 0.96.0.
+                    string.format("%s " .. CN.DASH .. " %d of %d done",
                         tostring(row.text or "objective"), row.done, row.required),
                 },
             }))

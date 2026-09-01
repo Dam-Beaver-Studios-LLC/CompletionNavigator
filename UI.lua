@@ -4986,8 +4986,14 @@ CN:RegisterCommand{
 
         if #hits == 0 then
             Print("Nothing in the window matches: " .. args)
+            -- `/cn setup`, WHICH IS A COMMAND THAT EXISTS. 0.96.0.
+            --
+            -- This said `/cn scan`, which is not a command or an alias
+            -- anywhere in the tree -- so the recovery instruction shown at
+            -- the exact moment a player has failed to find something
+            -- produced "Unknown command: scan".
             Print("|cff8a8f96Collections and goals are searched from what has "
-                .. "been scanned; /cn scan fills them.|r")
+                .. "been scanned; /cn setup fills them.|r")
             return
         end
 

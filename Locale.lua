@@ -209,7 +209,10 @@ CN:RegisterCommand{
 
         -- WHAT IS IN SCOPE, SAID PLAINLY.
         --
-        -- `CN.localeKeys` is 33 strings and internally consistent: every key
+        -- `CN.localeKeys` is a few dozen strings and internally consistent:
+        -- the count is not written out here, because it was written as 33,
+        -- reached 37, and a number in a comment has no way to notice. `/cn
+        -- locale` prints the live figure. Every key
         -- has a call site, nothing is orphaned, and `/cn locale missing`
         -- names exactly what fell back. What it does NOT cover is the several
         -- hundred chat lines that never go through CN.L at all -- so a

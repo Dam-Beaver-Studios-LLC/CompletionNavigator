@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.95.0'
+$script:ToolkitVersion = '0.96.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.95.0"
+CN.version     = "0.96.0"
 CN.dbVersion   = 38
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -6954,7 +6954,10 @@ CN:RegisterCommand{
 
         -- WHAT IS IN SCOPE, SAID PLAINLY.
         --
-        -- `CN.localeKeys` is 33 strings and internally consistent: every key
+        -- `CN.localeKeys` is a few dozen strings and internally consistent:
+        -- the count is not written out here, because it was written as 33,
+        -- reached 37, and a number in a comment has no way to notice. `/cn
+        -- locale` prints the live figure. Every key
         -- has a call site, nothing is orphaned, and `/cn locale missing`
         -- names exactly what fell back. What it does NOT cover is the several
         -- hundred chat lines that never go through CN.L at all -- so a
@@ -17370,8 +17373,14 @@ CN:RegisterCommand{
 
         if #hits == 0 then
             Print("Nothing in the window matches: " .. args)
+            -- `/cn setup`, WHICH IS A COMMAND THAT EXISTS. 0.96.0.
+            --
+            -- This said `/cn scan`, which is not a command or an alias
+            -- anywhere in the tree -- so the recovery instruction shown at
+            -- the exact moment a player has failed to find something
+            -- produced "Unknown command: scan".
             Print("|cff8a8f96Collections and goals are searched from what has "
-                .. "been scanned; /cn scan fills them.|r")
+                .. "been scanned; /cn setup fills them.|r")
             return
         end
 
@@ -18324,14 +18333,34 @@ local function CreateList(parent)
             --
             -- 0.54.0 gave it a fixed width, and the label's right edge is
             -- anchored to it -- so every row on every tab that sets no value
-            -- lost a hundred and seventy-eight pixels of label to an empty
+            -- lost the whole width of the value column to an empty
             -- fontstring. Of forty-three entry sites in the window, nine set
             -- a value; the other thirty-four were paying for a column that
             -- was not there.
             --
             -- Wide enough for the widest thing any tab puts in it, which is
             -- the reputation row's "412 account-wide, 96 this character".
-            row.value:SetWidth(entry.value and CN.UI.VALUE_WIDTH or 0.001)
+            --
+            -- AND IT SCALES WITH THE TEXT. 0.96.0.
+            --
+            -- `Pitch()` and `CaptionHeight()` were both taught to follow
+            -- `CN.TextScale()` in 0.90.0 and this constant was not, while the
+            -- width is applied unconditionally. FontStrings word-wrap by
+            -- default and nothing here turns that off, so at `/cn textsize
+            -- 150` a string needing about 285 pixels was given 210, wrapped
+            -- onto a second line, and overflowed a row onto the one below --
+            -- on Collections and Warband, the two tabs that use the column
+            -- most.
+            --
+            -- Same defect this file records fixing for `ROW_HEIGHT` one
+            -- constant along, in a feature "rebuilt precisely for the players
+            -- least likely to go hunting for a command".
+            local valueWidth = CN.UI.VALUE_WIDTH
+                * ((CN.TextScale and CN.TextScale()) or 1)
+
+            row.value:SetWidth(entry.value
+                and math.floor(valueWidth + 0.5)
+                or 0.001)
 
             row.selected:SetShown(entry.selected and true or false)
 
@@ -31335,8 +31364,11 @@ CN:RegisterCommand{
                     .. CN.Count(supplier.count, "quest row"))
             end
 
+            -- No trailing `|r`: `CN.Muted` closes its own colour, and a
+            -- second terminator is a stray escape in the middle of a
+            -- sentence. 0.96.0.
             CN.PrintLine(CN.Muted("  " .. CN.Accent("/cn provenance")
-                .. " says which rows this addon checked itself.|r"))
+                .. " says which rows this addon checked itself."))
         end
     end,
 }
@@ -40279,8 +40311,12 @@ function Chase.Summarize(chain)
     if nextStep then
         table.insert(parts, "next: " .. tostring(nextStep.text))
     elseif #parts == 0 then
+        -- SPACED, like the line four below it. 0.96.0. Both put a value
+        -- after a name, which is the job `CN.Aside` spaces; this one read
+        -- "Invincible\226\128\148the game does not say".
         return tostring(chain.name)
-            .. CN.DASH .. "the game does not say how this is obtained."
+            .. " " .. CN.DASH .. " "
+            .. "the game does not say how this is obtained."
     end
 
     return tostring(chain.name) .. " " .. CN.DASH .. " " .. table.concat(parts, ", ")
@@ -41019,6 +41055,32 @@ function Progress.RollDay(store)
 
     if not store then
         return today
+    end
+
+    -- AND A PROVISIONAL KEY IS NOT EVIDENCE OF A BOUNDARY EITHER. 0.96.0.
+    --
+    -- The branch below guards the ESTIMATE-to-REAL transition. Nothing
+    -- guarded REAL-on-disk against ESTIMATE-in-hand, which is the shape that
+    -- happens at every login: `BeginSession` runs at `PLAYER_LOGIN`, the
+    -- client has usually not answered `GetQuestResetTime` yet, and the
+    -- estimate lands on a different day index from the true reset for roughly
+    -- half of all login times -- whenever the real instant and `now + 12h`
+    -- fall in different UTC days.
+    --
+    -- So the rollover fired against a perfectly good stored key: today's
+    -- count went into "yesterday" and today restarted at zero, on a reload,
+    -- on the same game day. That is this module's founding complaint --
+    -- "a player who logs in the next morning does not see yesterday's number
+    -- labelled today" -- in the mirror direction.
+    --
+    -- The client speaks moments later and the branch below then decides
+    -- correctly, so nothing is lost by waiting.
+    --
+    -- `type(...) == "number"` is load-bearing, not decorative: a corrupt
+    -- non-numeric key on disk must still roll over rather than being held
+    -- forever by this guard.
+    if Progress.resetIsEstimate and type(store.dayKey) == "number" then
+        return store.dayKey
     end
 
     -- A PROVISIONAL KEY BEING REPLACED IS NOT A NEW DAY.
@@ -48691,16 +48753,24 @@ local function HidePinTooltip()
     end
 end
 
--- Clicking navigates to the STOP, not to whichever objective happens to be
--- listed first there.
+-- Clicking navigates to the first objective at the stop THAT HAS
+-- COORDINATES, and falls back to the stop itself.
 --
--- Those are different things. An objective's own coordinates may be missing
--- -- plenty of collectibles are known to be in a zone and nowhere more
--- precise -- while the stop's are the centre of everything at it and always
--- exist, because that is how the stop was formed. Routing to the member and
--- finding it has no location would answer a click with "no coordinates are
--- known", which from the player's side is the addon refusing to go to a place
--- it just drew a pin on.
+-- THE COMMENT HERE DESCRIBED THE OPPOSITE ORDER. 0.96.0. It said clicking
+-- navigates to the stop "not to whichever objective happens to be listed
+-- first there", which is not what the loop below does and never was. The
+-- behaviour is right -- routing to the objective carries the objective
+-- through `NavigateToObjective`, so the arrow knows what it is pointing at
+-- -- and the comment would have sent the next reader to "fix" working code.
+--
+-- The reasoning it got right, and which the fallback exists for: an
+-- objective's own coordinates may be missing -- plenty of collectibles are
+-- known to be in a zone and nowhere more precise -- while the stop's are the
+-- centre of everything at it and always exist, because that is how the stop
+-- was formed. Answering a click with "no coordinates are known" is, from the
+-- player's side, the addon refusing to go to a place it just drew a pin on.
+-- So: the objective where one can be routed to, the stop otherwise, and
+-- never a refusal.
 local function ClickPin(frame)
     local pin = frame.pin
 
@@ -50696,7 +50766,27 @@ local function Fill(store, containers, items, answered)
         end
     end
 
-    store.scannedAt = oldest or now
+    -- AND A REFUSAL DOES NOT GET A TIMESTAMP AT ALL. 0.96.0.
+    --
+    -- `oldest` is nil exactly when `seenAt` is empty, which is when the
+    -- client has never described a single container -- a player who has
+    -- bought no Warband bank tab is in that state permanently. `or now` then
+    -- wrote a fresh stamp over a record built from nothing, and `/cn bags`
+    -- announced "Warband bank: 0 kinds of item, seen just now", for ever,
+    -- about a bank this addon has never read.
+    --
+    -- Same shape as 0.95.0's cold toy box and 0.94.0's cold recipe list: a
+    -- refusal recorded as a successful read, on the one field that says
+    -- whether anything was read.
+    --
+    -- NO FALLBACK IS NEEDED, and the first draft of this fix added one. It
+    -- was dead on arrival: `seenAt` is one of the two keys the wipe above
+    -- deliberately preserves, so a store that has EVER been read keeps its
+    -- per-container times and `oldest` finds them. The only store `oldest`
+    -- comes back nil for is one that has never been read -- and the honest
+    -- value for that is nothing. The mutation suite caught it: a mutant that
+    -- deleted the fallback changed no behaviour, which is what dead code is.
+    store.scannedAt = oldest
 
     return seen
 end
@@ -50923,7 +51013,9 @@ CN.RegisterCandidateProvider("Inventory", function()
                 travelCost       = travel or CN.unknownLocationCost,
                 travelCosted     = costed or nil,
                 reasons          = {
-                    string.format("%s" .. CN.DASH .. "%d of %d done",
+                    -- Spaced: an objective's name followed by its count is
+                    -- the label-and-value shape, not a clause break. 0.96.0.
+                    string.format("%s " .. CN.DASH .. " %d of %d done",
                         tostring(row.text or "objective"), row.done, row.required),
                 },
             }))
@@ -60303,7 +60395,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.95.0
+## Version: 0.96.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -60558,6 +60650,50 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.96.0]
+
+**Reloading on the same day moved today's quest count into "yesterday", about
+half the time.** The addon works out which day it is from when the next quest
+reset falls, and the game does not answer that question immediately after you
+log in — so the addon estimates, and the estimate lands on a different day
+from the true reset for roughly half of all login times. It then took its own
+estimate as proof that the day had turned and shovelled the count across.
+`/cn progress` read "Today: 0, Previous day: 12" after a reload, on the same
+game day. It waits for the client now, which answers moments later.
+
+**`/cn find` with no matches told you to type a command that does not exist.**
+The recovery line shown at the exact moment you have failed to find something
+named `/cn scan`; the command is `/cn setup`. The offline suite now checks
+every command this addon names in its own output against the commands it
+actually registers.
+
+### Fixed
+
+- **A Warband bank the game would not describe was reported as freshly
+  read.** For a player who has bought no Warband bank tab — the common case —
+  `/cn bags` said "0 kinds of item, seen just now", permanently, about a bank
+  the addon has never seen. Same shape as 0.95.0's cold toy box and 0.94.0's
+  cold recipe list: a refusal recorded as a successful read, on the one field
+  that says whether anything was read. A refusal now keeps whatever the last
+  real reading recorded, and records nothing if there has never been one.
+- **The value column did not grow with the text size.** Row height and line
+  spacing were both taught to follow `/cn textsize` in 0.90.0; the width of
+  the right-hand column was not, and the width is applied regardless. At 150%
+  the longest value wrapped onto a second line and overflowed its row onto the
+  one below, on the two tabs that use that column most — in the feature built
+  for the players least likely to go hunting for a command.
+- Two em dashes sat against the word before them, in a goal's explanation and
+  in a bag objective's progress line.
+
+### Changed
+
+- The map-pin click comment described the opposite of what the code does. The
+  behaviour was right; the comment would have sent the next reader to "fix"
+  working code.
+- A stray colour terminator in the middle of a `/cn providers` sentence, and a
+  count in a comment that had been out of date for four releases — the file
+  now points at the command that prints the live figure instead.
 
 ## [0.95.0]
 
@@ -68054,7 +68190,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.95.0
+0.96.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -73436,6 +73572,34 @@ mutate "Modules/Pets.lua" \
     "    Pets.Scan()" \
     "a bag of caged pets costs one full journal sweep per pet"
 
+mutate "Modules/Progress.lua" \
+    "    if Progress.resetIsEstimate and type(store.dayKey) == \"number\" then
+        return store.dayKey
+    end" \
+    "" \
+    "a reload before the client speaks moves today's count into yesterday"
+
+mutate "Modules/Progress.lua" \
+    "    if Progress.resetIsEstimate and type(store.dayKey) == \"number\" then" \
+    "    if Progress.resetIsEstimate and store.dayKey ~= nil then" \
+    "a corrupt day key is held for ever instead of rolling over"
+
+mutate "Modules/Inventory.lua" \
+    "    store.scannedAt = oldest" \
+    "    store.scannedAt = oldest or time()" \
+    "a bank the client would not describe is reported as seen just now"
+
+mutate "UI/List.lua" \
+    "            local valueWidth = CN.UI.VALUE_WIDTH
+                * ((CN.TextScale and CN.TextScale()) or 1)" \
+    "            local valueWidth = CN.UI.VALUE_WIDTH" \
+    "the value column ignores the text size and overflows its row"
+
+mutate "UI.lua" \
+    "                .. \"been scanned; /cn setup fills them.|r\")" \
+    "                .. \"been scanned; /cn scan fills them.|r\")" \
+    "the empty-search message names a command that does not exist"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 
@@ -73931,8 +74095,25 @@ local function Frame()
         -- real call would have worked. Thirteenth entry in the list. Roughly
         -- six pixels per character is close enough for a hit rect and is not
         -- claimed to be more than that.
+        --
+        -- AND IT COUNTS WHAT IS DRAWN, AT THE SIZE IT IS DRAWN AT. 0.96.0.
+        --
+        -- Colour codes are markup: `|cffffc74f412|r` is three characters on
+        -- screen and fourteen in the string, so this over-measured every
+        -- coloured label -- and it ignored the text scale entirely, so the
+        -- question "does this still fit at 150%?" could not be asked at all.
+        -- The sibling `Button:GetTextWidth` below has stripped colour codes
+        -- and honoured `CN_TEST_TEXT_SCALE` since it was hardened for exactly
+        -- that question; this one was left behind, in the same file, for the
+        -- same feature.
         function fs:GetStringWidth()
-            return #tostring(fs.text or "") * 6
+            local text = tostring(fs.text or "")
+
+            text = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+
+            local scale = (CN_TEST_TEXT_SCALE and CN_TEST_TEXT_SCALE()) or 1
+
+            return math.floor(#text * 6 * scale + 0.5)
         end
 
         function fs:GetStringHeight() return 12 end
@@ -74720,6 +74901,21 @@ C_TaxiMap = {
 -- could not either -- which is how an entire class of behaviour stays
 -- invisible to a suite that otherwise looks thorough.
 CN_TEST_BAGS = {
+    -- A WARBAND BANK TAB THE CLIENT WILL DESCRIBE. 0.96.0.
+    --
+    -- Only bag 0 was defined, so every offline bank scan found no container
+    -- the client would answer for -- which meant the "oldest container's
+    -- timestamp" logic was never exercised and, worse, the branch that
+    -- stamped `now` over a record built from nothing was the ONLY branch the
+    -- suite ever took. That is a player with no Warband bank tab being told
+    -- "0 kinds of item, seen just now" for ever, and it was unreachable from
+    -- here.
+    --
+    -- 13 is the first account-bank container id.
+    [13] = {
+        { itemID = 60004, stackCount = 5 },
+    },
+
     [0] = {
         { itemID = 60001, stackCount = 1, quest = { questID = 44001, isActive = false } },
         -- Worthless to a vendor and not a quest item: the two facts the addon
@@ -113831,6 +114027,336 @@ end)()
         .. "throwing")
 
     print("  the published provider API exists before anything registers")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- EVERY COMMAND THIS ADDON NAMES IN ITS OWN OUTPUT EXISTS.
+    ------------------------------------------------------------
+    -- `/cn find` with no matches told the player "Collections and goals are
+    -- searched from what has been scanned; /cn scan fills them" -- and there
+    -- is no `scan` command or alias anywhere in the tree, so the recovery
+    -- instruction shown at the exact moment a player has failed to find
+    -- something answered "Unknown command: scan". The command is `/cn setup`.
+    --
+    -- This is the rule about a comment naming a mechanism, applied to the
+    -- half the player can see: a string naming a command is a claim, and this
+    -- addon prints 126 commands' worth of them.
+    local known = {}
+
+    for name in pairs(CN.commands) do
+        known[name] = true
+    end
+
+    -- A BARE `/cn` IS ITSELF A COMMAND, so the word after it in a sentence
+    -- is ordinary prose. Listed rather than pattern-matched: an allowance
+    -- written down is one the next reader can argue with, and a heuristic for
+    -- "is this an English word" is one nobody can.
+    local prose = {
+        ["to"] = true,
+    }
+
+    local offenders = {}
+
+    for _, relative in ipairs(CN_TEST_ADDON_FILES or {}) do
+        local text = CN_TEST_ReadAddonFile(relative)
+
+        if text then
+            for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+                -- Comment lines are skipped: this file's own prose quotes
+                -- commands that were removed, precisely to record that they
+                -- were, and a lint that fires on its own history is a lint
+                -- somebody deletes.
+                if not line:match("^%s*%-%-") then
+                    for quoted in line:gmatch('"([^"]*)"') do
+                        for word in quoted:gmatch("/cn%s+([%a]+)") do
+                            local lowered = string.lower(word)
+
+                            if not known[lowered] and not prose[lowered] then
+                                offenders[lowered] =
+                                    offenders[lowered] or relative
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local named = {}
+
+    for word, where in pairs(offenders) do
+        table.insert(named, "/cn " .. word .. " (" .. where .. ")")
+    end
+
+    table.sort(named)
+
+    assert(#named == 0,
+        "every command this addon names in its own output must exist; these "
+        .. "do not: " .. table.concat(named, ", "))
+
+    -- AND THE CHECK ITSELF IS NOT VACUOUS, which is the failure mode of a
+    -- lint that scans for a pattern: one that matches nothing passes.
+    local sawOne = false
+
+    for _, relative in ipairs(CN_TEST_ADDON_FILES or {}) do
+        local text = CN_TEST_ReadAddonFile(relative)
+
+        if text and text:find("/cn setup", 1, true) then
+            sawOne = true
+        end
+    end
+
+    assert(sawOne, "the scan found command references to check")
+
+    print("  every command this addon names in its own output exists")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A RELOAD ON THE SAME DAY DOES NOT MOVE TODAY INTO YESTERDAY.
+    ------------------------------------------------------------
+    -- `CurrentDayKey` invents a provisional key -- now plus twelve hours --
+    -- until the client answers `GetQuestResetTime`, and that is exactly the
+    -- state at `PLAYER_LOGIN`, where `BeginSession` calls `RollDay`. The
+    -- estimate lands on a different day index from the true reset for roughly
+    -- half of all login times, so the rollover fired against a perfectly good
+    -- stored key: `/cn progress` read "Today: 0, Previous day: 12" after a
+    -- reload on the same game day.
+    --
+    -- The guard that existed covered the ESTIMATE-to-REAL transition. This is
+    -- the mirror -- REAL on disk, ESTIMATE in hand -- and it is the one that
+    -- happens every login.
+    local progress = CN:GetModule("Progress")
+
+    assert(progress, "the progress module must be loaded")
+
+    local store = CN.character and CN.character.progress
+
+    assert(store, "the character has a progress store")
+
+    -- A day's work, recorded against the client's real reset.
+    progress.knownResetAt    = nil
+    progress.resetIsEstimate = false
+
+    local realReset = GetQuestResetTime
+
+    GetQuestResetTime = function() return 3600 end
+
+    local dayKey = progress.RollDay(store)
+
+    store.dayKey      = dayKey
+    store.today       = 12
+    store.previousDay = 0
+
+    -- Now log in again: same game day, and the client has not answered yet.
+    progress.knownResetAt    = nil
+    progress.resetIsEstimate = false
+
+    GetQuestResetTime = function() return nil end
+
+    progress.RollDay(store)
+
+    assert(store.today == 12 and store.previousDay == 0,
+        "a login before the client has said when the reset is must not move "
+        .. "today into yesterday; today=" .. tostring(store.today)
+        .. " previousDay=" .. tostring(store.previousDay))
+
+    -- And when the client speaks, the key is still the right one.
+    GetQuestResetTime = function() return 3600 end
+
+    progress.knownResetAt    = nil
+    progress.resetIsEstimate = false
+
+    progress.RollDay(store)
+
+    assert(store.today == 12,
+        "and the count survives the client answering: "
+        .. tostring(store.today))
+
+    -- A GENUINE NEW DAY STILL ROLLS, so this is a guard and not a wall.
+    store.dayKey = (store.dayKey or 0) - 1
+
+    progress.RollDay(store)
+
+    assert(store.today == 0 and store.previousDay == 12,
+        "a real day boundary still rolls over: today="
+        .. tostring(store.today) .. " previousDay="
+        .. tostring(store.previousDay))
+
+    -- AND A CORRUPT KEY IS NOT HELD FOREVER by the new guard, which is why it
+    -- tests the type rather than merely the presence.
+    store.dayKey      = "not-a-day"
+    store.today       = 5
+    store.previousDay = 0
+
+    progress.knownResetAt    = nil
+    progress.resetIsEstimate = false
+
+    GetQuestResetTime = function() return nil end
+
+    progress.RollDay(store)
+
+    assert(type(store.dayKey) == "number" and store.today == 0,
+        "a key that is not a number is rolled over rather than preserved: "
+        .. tostring(store.dayKey))
+
+    GetQuestResetTime = realReset
+
+    progress.knownResetAt    = nil
+    progress.resetIsEstimate = false
+
+    store.today       = 0
+    store.previousDay = 0
+    store.dayKey      = progress.RollDay(store)
+
+    print("  a reload on the same day does not move today into yesterday")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A BANK THE CLIENT WOULD NOT DESCRIBE IS NOT A BANK THAT WAS READ.
+    ------------------------------------------------------------
+    -- `Fill` stamped `scannedAt = oldest or now`, and `oldest` is nil exactly
+    -- when the client described no container at all -- which is the permanent
+    -- state for a player who has bought no Warband bank tab. `/cn bags` then
+    -- announced "Warband bank: 0 kinds of item, seen just now", for ever,
+    -- about a bank this addon has never read.
+    local inventory = CN:GetModule("Inventory")
+
+    assert(inventory, "the inventory module must be loaded")
+
+    local warband = CN.Account("warbandBank")
+
+    for key in pairs(warband) do
+        warband[key] = nil
+    end
+
+    local realSlots = C_Container.GetContainerNumSlots
+
+    C_Container.GetContainerNumSlots = function() return 0 end
+
+    inventory.ScanBank("warband")
+
+    C_Container.GetContainerNumSlots = realSlots
+
+    assert(warband.scannedAt == nil,
+        "a bank the client would not describe carries no reading time: "
+        .. tostring(warband.scannedAt))
+
+    -- AND A REAL READ DOES STAMP ONE.
+    --
+    -- The container is set here rather than relied on from the fixture: an
+    -- earlier block in this file deletes the account-bank tabs on its way
+    -- out, and a test that depends on another test's leftovers is a test that
+    -- passes for the wrong reason.
+    local tab = inventory.accountBankIDs[1]
+
+    CN_TEST_BAGS[tab] = { { itemID = 60004, stackCount = 5 } }
+
+    inventory.ScanBank("warband")
+
+    assert(type(warband.scannedAt) == "number",
+        "a bank the client did describe carries one")
+
+    -- AND A LATER REFUSAL DOES NOT ERASE THE EARLIER READING.
+    --
+    -- Not by a fallback -- the first draft of the fix added one and the
+    -- mutation suite showed it changed nothing. `seenAt` is one of the two
+    -- keys the wipe preserves, so a store that has ever been read keeps its
+    -- per-container times and the stamp is recomputed from them. This asserts
+    -- the property, not the mechanism.
+    local stamped = warband.scannedAt
+
+    C_Container.GetContainerNumSlots = function() return 0 end
+
+    inventory.ScanBank("warband")
+
+    C_Container.GetContainerNumSlots = realSlots
+
+    assert(warband.scannedAt == stamped,
+        "a refusal keeps whatever the last real read recorded: "
+        .. tostring(warband.scannedAt) .. " against " .. tostring(stamped))
+
+    CN_TEST_BAGS[tab] = nil
+
+    for key in pairs(warband) do
+        warband[key] = nil
+    end
+
+    print("  a bank the client would not describe is not a bank that was read")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE VALUE COLUMN GROWS WITH THE TEXT IN IT.
+    ------------------------------------------------------------
+    -- `Pitch()` and `CaptionHeight()` were both taught to follow
+    -- `CN.TextScale()` in 0.90.0; `UI.VALUE_WIDTH` was not, and the width is
+    -- applied unconditionally. FontStrings word-wrap by default and nothing
+    -- in `UI/List.lua` turns that off, so at `/cn textsize 150` the widest
+    -- thing any tab puts there needed about 285 pixels in a 210-pixel box,
+    -- wrapped, and overflowed its row onto the one below -- on Collections
+    -- and Warband, the two tabs that use the column most.
+    --
+    -- The same defect `UI/List.lua` records fixing for `ROW_HEIGHT`, one
+    -- constant along, in the accessibility feature it calls "rebuilt
+    -- precisely for the players least likely to go hunting for a command".
+    local panel = CN.UI and CN.UI.listPanels and next(CN.UI.listPanels)
+
+    assert(panel, "the window has a list to measure")
+
+    local list = CN.UI.listPanels[panel]
+
+    -- The row the constant was measured against, in its own comment.
+    list:SetEntries({
+        { text = "The Severed Threads",
+          value = "412 account-wide, 96 this character" },
+    })
+
+    local row = list.rows and list.rows[1]
+
+    assert(row and row.value, "the row has a value column")
+
+    local normalWidth = row.value:GetWidth()
+
+    assert(normalWidth and normalWidth > 1,
+        "which has a width at normal size: " .. tostring(normalWidth))
+
+    assert(CN.SetTextScale(1.5), "the text size can be raised")
+
+    list:SetEntries({
+        { text = "The Severed Threads",
+          value = "412 account-wide, 96 this character" },
+    })
+
+    local biggerWidth = list.rows[1].value:GetWidth()
+
+    CN.SetTextScale(1.0)
+
+    assert(biggerWidth > normalWidth,
+        "and the column grows with it: " .. tostring(biggerWidth)
+        .. " against " .. tostring(normalWidth))
+
+    -- THE TEST THAT MATTERS: what is drawn still fits in what it is drawn
+    -- into. A column that merely got bigger could still be too small.
+    local measured = row.value.GetStringWidth and row.value:GetStringWidth()
+
+    if measured then
+        assert(biggerWidth >= measured,
+            "the enlarged string fits the enlarged column: " .. measured
+            .. " into " .. biggerWidth)
+    end
+
+    -- AND A ROW WITH NO VALUE STILL GIVES ITS WHOLE WIDTH TO THE LABEL,
+    -- which is what the zero-width branch is for and is most of the window.
+    list:SetEntries({ { text = "No value here" } })
+
+    assert(list.rows[1].value:GetWidth() < 1,
+        "a row with no value keeps no column: "
+        .. tostring(list.rows[1].value:GetWidth()))
+
+    print("  the value column grows with the text in it")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

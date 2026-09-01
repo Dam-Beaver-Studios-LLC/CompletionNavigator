@@ -7,6 +7,50 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.96.0]
+
+**Reloading on the same day moved today's quest count into "yesterday", about
+half the time.** The addon works out which day it is from when the next quest
+reset falls, and the game does not answer that question immediately after you
+log in â€” so the addon estimates, and the estimate lands on a different day
+from the true reset for roughly half of all login times. It then took its own
+estimate as proof that the day had turned and shovelled the count across.
+`/cn progress` read "Today: 0, Previous day: 12" after a reload, on the same
+game day. It waits for the client now, which answers moments later.
+
+**`/cn find` with no matches told you to type a command that does not exist.**
+The recovery line shown at the exact moment you have failed to find something
+named `/cn scan`; the command is `/cn setup`. The offline suite now checks
+every command this addon names in its own output against the commands it
+actually registers.
+
+### Fixed
+
+- **A Warband bank the game would not describe was reported as freshly
+  read.** For a player who has bought no Warband bank tab â€” the common case â€”
+  `/cn bags` said "0 kinds of item, seen just now", permanently, about a bank
+  the addon has never seen. Same shape as 0.95.0's cold toy box and 0.94.0's
+  cold recipe list: a refusal recorded as a successful read, on the one field
+  that says whether anything was read. A refusal now keeps whatever the last
+  real reading recorded, and records nothing if there has never been one.
+- **The value column did not grow with the text size.** Row height and line
+  spacing were both taught to follow `/cn textsize` in 0.90.0; the width of
+  the right-hand column was not, and the width is applied regardless. At 150%
+  the longest value wrapped onto a second line and overflowed its row onto the
+  one below, on the two tabs that use that column most â€” in the feature built
+  for the players least likely to go hunting for a command.
+- Two em dashes sat against the word before them, in a goal's explanation and
+  in a bag objective's progress line.
+
+### Changed
+
+- The map-pin click comment described the opposite of what the code does. The
+  behaviour was right; the comment would have sent the next reader to "fix"
+  working code.
+- A stray colour terminator in the middle of a `/cn providers` sentence, and a
+  count in a comment that had been out of date for four releases â€” the file
+  now points at the command that prints the live figure instead.
+
 ## [0.95.0]
 
 **At every login with a cold Pet Journal or Toy Box, the addon wiped filters

@@ -866,8 +866,11 @@ CN:RegisterCommand{
                     .. CN.Count(supplier.count, "quest row"))
             end
 
+            -- No trailing `|r`: `CN.Muted` closes its own colour, and a
+            -- second terminator is a stray escape in the middle of a
+            -- sentence. 0.96.0.
             CN.PrintLine(CN.Muted("  " .. CN.Accent("/cn provenance")
-                .. " says which rows this addon checked itself.|r"))
+                .. " says which rows this addon checked itself."))
         end
     end,
 }

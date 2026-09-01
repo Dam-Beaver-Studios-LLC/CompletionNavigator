@@ -431,16 +431,24 @@ local function HidePinTooltip()
     end
 end
 
--- Clicking navigates to the STOP, not to whichever objective happens to be
--- listed first there.
+-- Clicking navigates to the first objective at the stop THAT HAS
+-- COORDINATES, and falls back to the stop itself.
 --
--- Those are different things. An objective's own coordinates may be missing
--- -- plenty of collectibles are known to be in a zone and nowhere more
--- precise -- while the stop's are the centre of everything at it and always
--- exist, because that is how the stop was formed. Routing to the member and
--- finding it has no location would answer a click with "no coordinates are
--- known", which from the player's side is the addon refusing to go to a place
--- it just drew a pin on.
+-- THE COMMENT HERE DESCRIBED THE OPPOSITE ORDER. 0.96.0. It said clicking
+-- navigates to the stop "not to whichever objective happens to be listed
+-- first there", which is not what the loop below does and never was. The
+-- behaviour is right -- routing to the objective carries the objective
+-- through `NavigateToObjective`, so the arrow knows what it is pointing at
+-- -- and the comment would have sent the next reader to "fix" working code.
+--
+-- The reasoning it got right, and which the fallback exists for: an
+-- objective's own coordinates may be missing -- plenty of collectibles are
+-- known to be in a zone and nowhere more precise -- while the stop's are the
+-- centre of everything at it and always exist, because that is how the stop
+-- was formed. Answering a click with "no coordinates are known" is, from the
+-- player's side, the addon refusing to go to a place it just drew a pin on.
+-- So: the objective where one can be routed to, the stop otherwise, and
+-- never a refusal.
 local function ClickPin(frame)
     local pin = frame.pin
 
