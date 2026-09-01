@@ -738,7 +738,12 @@ CN:RegisterCommand{
         local seen, atCap, weekly = Currencies.Scan()
 
         Print("Scanned " .. seen .. " currencies.")
-        Print("At cap: " .. atCap .. "   With weekly earning left: " .. weekly)
+        -- NO COLUMN PADDING. 0.92.0. Three spaces after a one-digit count and
+    -- after a four-digit count are two different widths in a proportional
+    -- font, so the second label never lines up. The 0.77.0 sweep reached
+    -- three files and not this one.
+    Print("At cap: " .. atCap .. CN.DOT
+        .. " with weekly earning left: " .. weekly)
     end,
 }
 

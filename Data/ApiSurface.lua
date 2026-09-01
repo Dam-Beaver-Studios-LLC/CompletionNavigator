@@ -166,6 +166,7 @@ CN.apiSurface = {
     "GetCategoryInfo",
     "GetCategoryList",
     "GetCategoryNumAchievements",
+    "GetCoinTextureString",
     "GetCursorPosition",
     "GetDifficultyInfo",
     "GetGuildInfo",

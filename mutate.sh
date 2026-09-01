@@ -4519,19 +4519,20 @@ mutate "Providers/StaticData.lua" \
     "        table.insert({}, {" \
     "two suppliers claiming one quest is resolved silently"
 
+# RE-ANCHORED IN 0.92.0: `UnregisterOrigin` bumps the revision too, so the
+# anchor needs the line above it to stay unique.
 mutate "Providers/StaticData.lua" \
-    "        Static.revision = Static.revision + 1" \
-    "" \
+    "    if added > 0 then
+        Static.revision = Static.revision + 1" \
+    "    if added > 0 then" \
     "a row registered late is ignored for the rest of the session"
 
+# RE-ANCHORED IN 0.92.0: withdrawal invalidates too, so the anchor carries
+# the harvest call that only the registration path makes.
 mutate "Providers/StaticData.lua" \
-    "        if CN.InvalidateCandidates then
-            CN.InvalidateCandidates()
-        end" \
-    "        if false then
-            CN.InvalidateCandidates()
-        end" \
-    "a late registration leaves the ranked list holding the old answer"
+    "        local harvest = CN.modules and CN:GetModule(\"Harvest\")" \
+    "        local harvest = nil" \
+    "a late registration leaves the unlock index holding the old answer"
 
 mutate "Providers/StaticData.lua" \
     "    if schemaVersion and schemaVersion ~= Static.schemaVersion then" \
@@ -4582,6 +4583,161 @@ mutate "Scoring.lua" \
     "        note    = \"Quests and exploration only, with quests weighted up.\"," \
     "        note    = \"Quests and exploration only, weighted toward fast travel.\"," \
     "/cn mode leveling advertises a weighting its profile does not carry"
+
+mutate "Objectives.lua" \
+    "    if seconds ~= math.huge then
+        expires = time() + seconds
+    end" \
+    "    expires = time() + seconds" \
+    "an endless deferral stores a deadline that cannot be read back"
+
+mutate "Modules/Pets.lua" \
+    "    if seen == 0 then
+        DebugPrint(\"Pet journal answered for nothing; not recording it.\")
+
+        return 0, 0, 0
+    end" \
+    "    if false then
+        DebugPrint(\"Pet journal answered for nothing; not recording it.\")
+
+        return 0, 0, 0
+    end" \
+    "a cold pet journal is recorded as an empty collection"
+
+mutate "Modules/Pets.lua" \
+    "    Pets.lastScan = time()" \
+    "    Pets.lastScan = 0" \
+    "caging a pet scans the whole journal twice"
+
+mutate "Modules/Pets.lua" \
+    "CN:RegisterEvent(\"PET_JOURNAL_LIST_UPDATE\", SweepIfDue)" \
+    "CN:RegisterEvent(\"PET_JOURNAL_LIST_UPDATE\", Pets.Scan)" \
+    "every pet journal update rescans the whole journal"
+
+mutate "Modules/Warband.lua" \
+    "        if switchable == false then
+            Print(\"Nothing to switch for.\")" \
+    "        if false then
+            Print(\"Nothing to switch for.\")" \
+    "/cn who names the character who already did it as the one to switch to"
+
+mutate "Modules/Rares.lua" \
+    "                if vignette.mapID and vignette.mapID == playerMap then" \
+    "                if playerX and playerY then" \
+    "a rare on another map is reported as in your current zone"
+
+mutate "Modules/Vendors.lua" \
+    "    local record = store[npcID] or { npcID = npcID }" \
+    "    local record = store[npcID] or { npcID = npcID, firstSeen = time() }" \
+    "a vendor stores a timestamp nothing reads"
+
+mutate "Modules/Rares.lua" \
+    "    local record = existing or {
+        vignetteID = vignette.vignetteID,
+        sightings  = 0,
+    }" \
+    "    local record = existing or {
+        vignetteID = vignette.vignetteID,
+        firstSeen  = time(),
+        sightings  = 0,
+    }" \
+    "a rare stores a timestamp nothing reads"
+
+mutate "Providers/StaticData.lua" \
+    "Static.apiVersion = 1" \
+    "Static.apiVersionUnpublished = 1" \
+    "a supplier cannot tell what this registrar promises"
+
+mutate "Providers/StaticData.lua" \
+    "    if refused > 0 then" \
+    "    if false then" \
+    "a supplier's refused rows are never reported at all"
+
+mutate "Providers/StaticData.lua" \
+    "            firstRefusal = firstRefusal or why" \
+    "            firstRefusal = why
+
+            local errors = CN.modules and CN:GetModule(\"Errors\")
+
+            if errors and errors.Record then
+                errors.Record(\"a curated quest row was refused\",
+                    tostring(origin or \"unknown\") .. \": \" .. tostring(why))
+            end" \
+    "a bad supplier evicts every other error in the ring"
+
+mutate "Providers/StaticData.lua" \
+    "        if record.origin == origin then
+            Static.quests[questID] = nil
+
+            removed = removed + 1
+        end" \
+    "        if false then
+            Static.quests[questID] = nil
+
+            removed = removed + 1
+        end" \
+    "a supplier cannot take its own rows back"
+
+mutate "Modules/Harvest.lua" \
+    "        Print(\"Curated row suppliers:\")" \
+    "        if false then Print(\"Curated row suppliers:\") end" \
+    "/cn providers cannot answer the question its help line asks"
+
+mutate "Modules/Harvest.lua" \
+    "            if provider then
+
+            local ok, isAvailable = pcall(provider.IsAvailable)" \
+    "            if true then
+
+            local ok, isAvailable = pcall(provider.IsAvailable)" \
+    "/cn providers throws when a provider has been withdrawn"
+
+# RE-ANCHORED IN 0.92.0: the parameter was renamed to stop it shadowing an
+# upvalue of the same name in the registrar above.
+mutate "Dependencies.lua" \
+    "        if CN.questDataOrder[index].name == providerName then
+            table.remove(CN.questDataOrder, index)
+        end" \
+    "        if false then
+            table.remove(CN.questDataOrder, index)
+        end" \
+    "withdrawing a provider leaves it in the order list"
+
+mutate "Modules/SelfTest.lua" \
+    "        local rows = CN.commandCollisions or {}
+
+        if #rows == 0 then
+            return PASS, \"every command and alias is claimed once\"
+        end" \
+    "        local rows = {}
+
+        if #rows == 0 then
+            return PASS, \"every command and alias is claimed once\"
+        end" \
+    "a command name claimed twice is recorded where nobody looks"
+
+mutate "Modules/SelfTest.lua" \
+    "        local rows = (CN.Static and CN.Static.collisions) or {}" \
+    "        local rows = {}" \
+    "two suppliers claiming one quest is never named"
+
+mutate "UI/List.lua" \
+    "            row:EnableMouse(false)
+            row.highlight:SetAlpha(0)" \
+    "            row.highlight:SetAlpha(0)" \
+    "the truncation row takes the mouse from the row it replaced"
+
+mutate "UI/List.lua" \
+    "        local trimmed = CN.Trim(needle)
+
+        filterText = (trimmed ~= \"\") and string.lower(trimmed) or nil" \
+    "        filterText = string.lower(needle)" \
+    "a trailing space makes the cross-tab count disagree with the tab"
+
+mutate "Modules/Vendors.lua" \
+    "            seller.price, seller.extendedCost = Vendors.PriceOf(record, itemID)" \
+    "            seller.price = Vendors.PriceOf(record, itemID)" \
+    "/cn sells cannot tell a gold price from a currency cost"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

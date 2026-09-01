@@ -484,7 +484,7 @@ CN:RegisterCommand{
             -- there fell through to "Could not resolve" -- which reads as
             -- "that recipe does not exist" rather than "give me the id".
             Print("Usage: /cn who <rep|title> <id or name>")
-            Print("|cff8a8f96       /cn who <recipe|profession> <id>|r")
+            Print("|cff8a8f96/cn who <recipe|profession> <id>|r")
             Print("|cff8a8f96Recipes and professions are looked up by id "
                 .. "only; |cffffc74f/cn recipes|r|cff8a8f96 lists yours.|r")
             return
@@ -539,7 +539,34 @@ CN:RegisterCommand{
             return
         end
 
-        local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
+        -- AND THE FOURTH RETURN. 0.92.0.
+        --
+        -- `WhoShould` sets `switchable = false` on the RECIPE and TITLE
+        -- branches because the character it names is the one who has ALREADY
+        -- done it. `Alts.Assignments` honoured that in 0.79.0, `Goals` in
+        -- 0.84.0, `Warband.Suitability` in 0.88.0 -- whose own note calls
+        -- itself "the third caller". This is the fourth, and it is the
+        -- command whose help line is "Which character should do something",
+        -- so it answered "Best character: Bob" and then, one line down,
+        -- "already known by another character" -- about Bob.
+        --
+        -- Tenth time in this project a fix has landed at one call site.
+        local bestKey, detail, scope, switchable =
+            Warband.WhoShould(objectiveType, id)
+
+        if switchable == false then
+            Print("Nothing to switch for.")
+
+            if scope then
+                CN.PrintLine(CN.Muted(tostring(scope)))
+            end
+
+            if detail then
+                CN.PrintLine(CN.Muted("Held by: " .. tostring(detail)))
+            end
+
+            return
+        end
 
         if scope == CN.scopes.ACCOUNT then
             Print("That is account-wide; any character counts.")

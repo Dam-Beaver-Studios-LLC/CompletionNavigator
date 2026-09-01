@@ -2799,7 +2799,7 @@ UI.RegisterTab{
             CN.collectionGeneration, module.Coverage)
 
         panel.header:SetText(string.format(
-            "%d character%s  |cff8a8f96combined: %d professions, %d recipes, %d titles|r",
+            "%d character%s |cff8a8f96combined: %d professions, %d recipes, %d titles|r",
             #rows, CN.Pluralize(#rows, ""),
             coverage.professions, coverage.recipes, coverage.titles))
 
@@ -3991,7 +3991,7 @@ UI.RegisterTab{
             end
         end
 
-        panel.header:SetText("Account completion  |cff8a8f96(collected / "
+        panel.header:SetText("Account completion |cff8a8f96(collected / "
             .. "known at the last scan" .. CN.DASH .. "not of everything in the game)|r")
         panel.list:SetEntries(entries)
     end,

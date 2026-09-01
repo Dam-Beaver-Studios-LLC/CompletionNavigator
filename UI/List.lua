@@ -625,7 +625,19 @@ local function CreateList(parent)
 
         local held = filterText
 
-        filterText = string.lower(needle)
+        -- THE SAME NEEDLE THE TAB ITSELF WAS FILTERED WITH. 0.92.0.
+        --
+        -- `SetFilter` trims and then lowers; this only lowered. The window
+        -- passes the raw search-box text here, so one trailing space made
+        -- "Also on: Collections (0)" appear beside a Collections tab showing
+        -- twelve matching rows -- or a count with nothing behind it.
+        --
+        -- 0.77.0 unified the text these two search and 0.79.0 unified the
+        -- unit they count; neither unified the needle. Same defect, third
+        -- dimension.
+        local trimmed = CN.Trim(needle)
+
+        filterText = (trimmed ~= "") and string.lower(trimmed) or nil
 
         local kept = self:Filter(self:Entries())
 
@@ -868,6 +880,22 @@ local function CreateList(parent)
             row.chevron:Hide()
 
             row.entry = nil
+
+            -- AND IT LOOKS INERT, BECAUSE IT IS. 0.92.0.
+            --
+            -- Rows are pooled. The fill loop above sets `EnableMouse` and the
+            -- highlight alpha per row; the EMPTY branch clears both. This
+            -- branch cleared neither -- so when index `shown + 1` had last
+            -- held an actionable row, "and N more not shown" still took the
+            -- mouse and still lit up on hover, while `row.entry = nil` made
+            -- its click a no-op.
+            --
+            -- That is exactly the state the chevron and highlight rules
+            -- twenty lines up exist to prevent: a highlight under an inert
+            -- row says "this is clickable".
+            row:EnableMouse(false)
+            row.highlight:SetAlpha(0)
+            row.value:SetWidth(0.001)
 
             row:Show()
         end

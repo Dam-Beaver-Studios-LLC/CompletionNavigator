@@ -30,6 +30,7 @@ read_globals = {
     "CreateFrame", "CreateFont", "GetAchievementCriteriaInfo", "GetAchievementInfo",
     "IsMounted", "UnitOnTaxi",
     "GetAchievementNumCriteria", "GetCategoryList", "GetCategoryNumAchievements",
+    "GetCoinTextureString",
     "GetCursorPosition", "GetItemInfo", "GetMerchantItemInfo",
     "GetMerchantItemLink", "GetMerchantNumItems", "GetNumCompletedAchievements",
     "GetNumTitles", "GetProfessionInfo", "GetProfessions", "GetQuestResetTime",

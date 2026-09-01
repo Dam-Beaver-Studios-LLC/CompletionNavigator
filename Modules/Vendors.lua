@@ -52,7 +52,11 @@ function Vendors.CaptureOpenMerchant()
     end
 
     local store  = Store()
-    local record = store[npcID] or { npcID = npcID, firstSeen = time() }
+    -- `firstSeen` IS NOT STORED. 0.92.0. `Modules/Mounts.lua` states the
+    -- rule -- "nothing has ever read a mount record's `firstSeen`" -- and
+    -- migration 5 stripped it from four stores. `vendors` and `rares` were in
+    -- none of those sweeps and both writers were live.
+    local record = store[npcID] or { npcID = npcID }
 
     record.name     = npcName or record.name
     record.lastSeen = time()
@@ -255,7 +259,9 @@ function Vendors.WhoSells(itemID)
             -- cannot describe a seller differently again. 0.65.0.
             local seller = Vendors.SellerFrom(record, npcID)
 
-            seller.price = Vendors.PriceOf(record, itemID)
+            -- BOTH RETURNS. The second says whether the number is gold at
+            -- all, and `/cn sells` prints a different sentence for each.
+            seller.price, seller.extendedCost = Vendors.PriceOf(record, itemID)
 
             table.insert(sellers, seller)
         end
@@ -633,10 +639,34 @@ CN:RegisterCommand{
             .. " |cff8a8f96(" .. itemID .. ")|r is sold by:")
 
         for index, seller in ipairs(sellers) do
+            -- WHAT IT COSTS, WHICH IS WHY THE PRICE IS ON DISK. 0.92.0.
+            --
+            -- The capture stores a price under a comment justifying the disk
+            -- space: "the client only reports it while the merchant window is
+            -- open, so unlike the item's name it genuinely cannot be
+            -- recovered later." Nothing then read it. `Vendors.PriceOf` had
+            -- one caller, which filled a field no surface printed, and
+            -- `record.extendedCost` had no reader at all.
+            --
+            -- Storing it and not showing it was the worst of the three
+            -- options. The second return is what distinguishes a gold price
+            -- from a currency or token cost, which is the difference a player
+            -- deciding whether to walk there actually cares about.
+            local cost = ""
+
+            if seller.price and seller.price > 0 then
+                cost = CN.Aside(GetCoinTextureString
+                    and GetCoinTextureString(seller.price)
+                    or (seller.price .. "c"))
+            elseif seller.extendedCost then
+                cost = CN.Aside("costs a currency, not gold")
+            end
+
             CN.PrintLine("  " .. index .. ". " .. tostring(seller.name)
                 .. (seller.zone and (" |cff8a8f96in " .. seller.zone .. "|r") or "")
                 .. (seller.x and string.format(" |cff8a8f96%.1f, %.1f|r",
-                    seller.x * 100, seller.y * 100) or ""))
+                    seller.x * 100, seller.y * 100) or "")
+                .. cost)
         end
 
         Print("|cffffc74f/cn tovendor " .. itemID .. "|r to set a waypoint.")

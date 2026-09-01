@@ -1420,7 +1420,8 @@ CN:RegisterCommand{
         Print("Zones worth doing next:")
 
         for index, row in ipairs(rows) do
-            CN.PrintLine(string.format("  %d. %s%s|r  |cff8a8f96%d/%d|r",
+            CN.PrintLine(string.format(
+                "  %d. %s%s|r |cff8a8f96%d/%d|r",
                 index,
                 row.here and "|cff5dd2fb" or "|cffffc74f",
                 tostring(row.name),

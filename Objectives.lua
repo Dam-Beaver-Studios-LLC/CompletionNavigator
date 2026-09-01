@@ -784,9 +784,30 @@ function CN.SetDeferred(objectiveType, id, seconds)
 
     deferred[objectiveType] = deferred[objectiveType] or {}
 
+    -- AN INFINITE DEADLINE IS NOT STORED AS A NUMBER. 0.92.0.
+    --
+    -- `/cn defer forever` passes `math.huge`, so this wrote `until_ = inf`
+    -- into saved variables. The client serialises that as the bare word
+    -- `inf`, which on the next login parses as an UNDEFINED GLOBAL and comes
+    -- back as nil -- so the addon wrote a deadline and read back nothing,
+    -- silently, with no error anywhere.
+    --
+    -- It happened to behave correctly, because `CN.IsDeferred` treats a
+    -- missing `until_` as "no expiry". Behaving correctly by accident is not
+    -- the same as being correct: any global named `inf` in any addon would
+    -- have changed the value, and every reader doing arithmetic on it was one
+    -- line away from a bug nobody could reproduce.
+    --
+    -- "Forever" IS the absence of a deadline. Store that.
+    local expires
+
+    if seconds ~= math.huge then
+        expires = time() + seconds
+    end
+
     deferred[objectiveType][id] = {
         since  = time(),
-        until_ = time() + seconds,
+        until_ = expires,
     }
 
     Rebuild()

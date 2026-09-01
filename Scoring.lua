@@ -2590,7 +2590,7 @@ CN:RegisterCommand{
                 objective.priorityWeight or 0))
 
             for _, term in ipairs(CN.ExplainScore(objective)) do
-                CN.PrintLine(string.format("     %s%+.1f|r  %s",
+                CN.PrintLine(string.format("     %s%+.1f|r %s",
                     term.value >= 0 and "|cff73b873" or "|cffe2564c",
                     term.value, term.label))
             end

@@ -133,7 +133,35 @@ function CN.RegisterQuestDataProvider(name, provider)
         end
     end
 
-    -- A STABLE ORDER, BECAUSE `table.sort` IS NOT STABLE.
+-- AND A PROVIDER CAN BE WITHDRAWN. 0.92.0.
+--
+-- `CN.questDataProviders` and `CN.questDataOrder` are two views of one thing,
+-- and only registration kept them in step. Clearing a provider from the table
+-- without removing it from the order left `/cn providers` indexing a nil --
+-- an error in a command whose whole job is to say what is installed.
+--
+-- Published beside the registrar because an addon that can register can stop:
+-- a data source the player turns off in that addon's own settings, or one
+-- swapping itself out. Returns whether anything was removed.
+function CN.UnregisterQuestDataProvider(providerName)
+    if type(providerName) ~= "string"
+        or not CN.questDataProviders[providerName] then
+
+        return false
+    end
+
+    CN.questDataProviders[providerName] = nil
+
+    for index = #CN.questDataOrder, 1, -1 do
+        if CN.questDataOrder[index].name == providerName then
+            table.remove(CN.questDataOrder, index)
+        end
+    end
+
+    return true
+end
+
+-- A STABLE ORDER, BECAUSE `table.sort` IS NOT STABLE.
     --
     -- The list is re-sorted on every registration, so two providers that omit
     -- `priority` -- which every third-party provider will -- can swap places

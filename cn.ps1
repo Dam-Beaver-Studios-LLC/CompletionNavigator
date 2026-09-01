@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.91.0'
+$script:ToolkitVersion = '0.92.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.91.0"
-CN.dbVersion   = 36
+CN.version     = "0.92.0"
+CN.dbVersion   = 37
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -3749,6 +3749,78 @@ CN.migrations = {
                 .. " stored values nothing reads.")
         end
     end,
+
+    -- TWO MORE STORES, AND ONE VALUE THAT CANNOT BE READ BACK. 0.92.0.
+    --
+    -- `vendors.firstSeen` and `rares.firstSeen` are the sixth and seventh
+    -- stores to carry a timestamp nothing reads; `Modules/Mounts.lua` states
+    -- the rule and migration 5 stripped four of them.
+    --
+    -- The deferral is a different problem. `/cn defer forever` stored
+    -- `until_ = time() + math.huge`, which is `inf`. The client serialises
+    -- that as the bare word `inf`, which parses on the next login as an
+    -- UNDEFINED GLOBAL and comes back as nil -- so the value written was not
+    -- the value read, silently. It behaved correctly by accident, because a
+    -- missing `until_` means "never expires", and that is what it is written
+    -- as now. Any row already on disk carrying a non-finite number is
+    -- normalised here rather than left to be read as whatever a global named
+    -- `inf` happens to hold.
+    [36] = function(db)
+        local dropped = 0
+
+        local function strip(store, fields)
+            if type(store) ~= "table" then
+                return
+            end
+
+            for _, record in pairs(store) do
+                if type(record) == "table" then
+                    for _, field in ipairs(fields) do
+                        if record[field] ~= nil then
+                            record[field] = nil
+
+                            dropped = dropped + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        strip(db.account and db.account.vendors, { "firstSeen" })
+        strip(db.account and db.account.rares,   { "firstSeen" })
+
+        local normalised = 0
+
+        local deferred = db.account and db.account.deferredObjectives
+
+        for _, byType in pairs(deferred or {}) do
+            if type(byType) == "table" then
+                for _, entry in pairs(byType) do
+                    if type(entry) == "table" then
+                        local until_ = entry.until_
+
+                        -- A non-finite number, or the nil an `inf` round-trip
+                        -- produced. `x ~= x` catches nan; the comparison
+                        -- catches inf without naming `math.huge` twice.
+                        if type(until_) == "number"
+                            and (until_ ~= until_
+                                or until_ >= math.huge) then
+
+                            entry.until_ = nil
+
+                            normalised = normalised + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        if dropped > 0 or normalised > 0 then
+            CN.DebugPrint("Dropped " .. dropped .. " stored values nothing "
+                .. "reads and normalised " .. normalised
+                .. " deferrals that could not be read back.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A
@@ -5181,9 +5253,30 @@ function CN.SetDeferred(objectiveType, id, seconds)
 
     deferred[objectiveType] = deferred[objectiveType] or {}
 
+    -- AN INFINITE DEADLINE IS NOT STORED AS A NUMBER. 0.92.0.
+    --
+    -- `/cn defer forever` passes `math.huge`, so this wrote `until_ = inf`
+    -- into saved variables. The client serialises that as the bare word
+    -- `inf`, which on the next login parses as an UNDEFINED GLOBAL and comes
+    -- back as nil -- so the addon wrote a deadline and read back nothing,
+    -- silently, with no error anywhere.
+    --
+    -- It happened to behave correctly, because `CN.IsDeferred` treats a
+    -- missing `until_` as "no expiry". Behaving correctly by accident is not
+    -- the same as being correct: any global named `inf` in any addon would
+    -- have changed the value, and every reader doing arithmetic on it was one
+    -- line away from a bug nobody could reproduce.
+    --
+    -- "Forever" IS the absence of a deadline. Store that.
+    local expires
+
+    if seconds ~= math.huge then
+        expires = time() + seconds
+    end
+
     deferred[objectiveType][id] = {
         since  = time(),
-        until_ = time() + seconds,
+        until_ = expires,
     }
 
     Rebuild()
@@ -5367,7 +5460,35 @@ function CN.RegisterQuestDataProvider(name, provider)
         end
     end
 
-    -- A STABLE ORDER, BECAUSE `table.sort` IS NOT STABLE.
+-- AND A PROVIDER CAN BE WITHDRAWN. 0.92.0.
+--
+-- `CN.questDataProviders` and `CN.questDataOrder` are two views of one thing,
+-- and only registration kept them in step. Clearing a provider from the table
+-- without removing it from the order left `/cn providers` indexing a nil --
+-- an error in a command whose whole job is to say what is installed.
+--
+-- Published beside the registrar because an addon that can register can stop:
+-- a data source the player turns off in that addon's own settings, or one
+-- swapping itself out. Returns whether anything was removed.
+function CN.UnregisterQuestDataProvider(providerName)
+    if type(providerName) ~= "string"
+        or not CN.questDataProviders[providerName] then
+
+        return false
+    end
+
+    CN.questDataProviders[providerName] = nil
+
+    for index = #CN.questDataOrder, 1, -1 do
+        if CN.questDataOrder[index].name == providerName then
+            table.remove(CN.questDataOrder, index)
+        end
+    end
+
+    return true
+end
+
+-- A STABLE ORDER, BECAUSE `table.sort` IS NOT STABLE.
     --
     -- The list is re-sorted on every registration, so two providers that omit
     -- `priority` -- which every third-party provider will -- can swap places
@@ -7175,9 +7296,9 @@ CN.RegisterLocale("frFR", {
     ["Stop cleared"] = "Étape terminée",
     ["Stop %d of %d cleared"] = "Étape %d sur %d terminée",
     ["Route complete."] = "Itinéraire terminé.",
-    ["All %d stops done."] = "Les %d etapes terminees.",
-    ["All 1 stop done."] = "1 etape terminee.",
-    ["stop %d of %d"] = "etape %d sur %d",
+    ["All %d stops done."] = "Les %d étapes terminées.",
+    ["All 1 stop done."] = "1 étape terminée.",
+    ["stop %d of %d"] = "étape %d sur %d",
     ["estimated"] = "estimé",
     ["unknown"] = "inconnu",
     ["solo"] = "seul",
@@ -7321,8 +7442,8 @@ CN.RegisterLocale("ptBR", {
     ["account-wide"] = "para toda a conta",
     ["nothing actionable"] = "nada a fazer",
     ["Stop cleared"] = "Parada concluída",
-    ["All %d stops done."] = "Todas as %d paradas concluidas.",
-    ["All 1 stop done."] = "1 parada concluida.",
+    ["All %d stops done."] = "Todas as %d paradas concluídas.",
+    ["All 1 stop done."] = "1 parada concluída.",
     ["stop %d of %d"] = "parada %d de %d",
     ["Stop %d of %d cleared"] = "Parada %d de %d concluída",
     ["Route complete."] = "Rota concluída.",
@@ -7370,9 +7491,9 @@ CN.RegisterLocale("ruRU", {
     ["account-wide"] = "для всей учётной записи",
     ["nothing actionable"] = "нечего делать",
     ["Stop cleared"] = "Точка пройдена",
-    ["All %d stops done."] = "Vse %d ostanovok zaversheny.",
-    ["All 1 stop done."] = "1 ostanovka zavershena.",
-    ["stop %d of %d"] = "ostanovka %d iz %d",
+    ["All %d stops done."] = "Все %d остановок завершены.",
+    ["All 1 stop done."] = "1 остановка завершена.",
+    ["stop %d of %d"] = "остановка %d из %d",
     ["Stop %d of %d cleared"] = "Точка %d из %d пройдена",
     ["estimated"] = "оценка",
     ["unknown"] = "неизвестно",
@@ -10071,7 +10192,7 @@ CN:RegisterCommand{
                 objective.priorityWeight or 0))
 
             for _, term in ipairs(CN.ExplainScore(objective)) do
-                CN.PrintLine(string.format("     %s%+.1f|r  %s",
+                CN.PrintLine(string.format("     %s%+.1f|r %s",
                     term.value >= 0 and "|cff73b873" or "|cffe2564c",
                     term.value, term.label))
             end
@@ -15026,7 +15147,7 @@ UI.RegisterTab{
             CN.collectionGeneration, module.Coverage)
 
         panel.header:SetText(string.format(
-            "%d character%s  |cff8a8f96combined: %d professions, %d recipes, %d titles|r",
+            "%d character%s |cff8a8f96combined: %d professions, %d recipes, %d titles|r",
             #rows, CN.Pluralize(#rows, ""),
             coverage.professions, coverage.recipes, coverage.titles))
 
@@ -16218,7 +16339,7 @@ UI.RegisterTab{
             end
         end
 
-        panel.header:SetText("Account completion  |cff8a8f96(collected / "
+        panel.header:SetText("Account completion |cff8a8f96(collected / "
             .. "known at the last scan" .. CN.DASH .. "not of everything in the game)|r")
         panel.list:SetEntries(entries)
     end,
@@ -17944,7 +18065,19 @@ local function CreateList(parent)
 
         local held = filterText
 
-        filterText = string.lower(needle)
+        -- THE SAME NEEDLE THE TAB ITSELF WAS FILTERED WITH. 0.92.0.
+        --
+        -- `SetFilter` trims and then lowers; this only lowered. The window
+        -- passes the raw search-box text here, so one trailing space made
+        -- "Also on: Collections (0)" appear beside a Collections tab showing
+        -- twelve matching rows -- or a count with nothing behind it.
+        --
+        -- 0.77.0 unified the text these two search and 0.79.0 unified the
+        -- unit they count; neither unified the needle. Same defect, third
+        -- dimension.
+        local trimmed = CN.Trim(needle)
+
+        filterText = (trimmed ~= "") and string.lower(trimmed) or nil
 
         local kept = self:Filter(self:Entries())
 
@@ -18187,6 +18320,22 @@ local function CreateList(parent)
             row.chevron:Hide()
 
             row.entry = nil
+
+            -- AND IT LOOKS INERT, BECAUSE IT IS. 0.92.0.
+            --
+            -- Rows are pooled. The fill loop above sets `EnableMouse` and the
+            -- highlight alpha per row; the EMPTY branch clears both. This
+            -- branch cleared neither -- so when index `shown + 1` had last
+            -- held an actionable row, "and N more not shown" still took the
+            -- mouse and still lit up on hover, while `row.entry = nil` made
+            -- its click a no-op.
+            --
+            -- That is exactly the state the chevron and highlight rules
+            -- twenty lines up exist to prevent: a highlight under an inert
+            -- row says "this is clickable".
+            row:EnableMouse(false)
+            row.highlight:SetAlpha(0)
+            row.value:SetWidth(0.001)
 
             row:Show()
         end
@@ -18488,6 +18637,7 @@ CN.apiSurface = {
     "GetCategoryInfo",
     "GetCategoryList",
     "GetCategoryNumAchievements",
+    "GetCoinTextureString",
     "GetCursorPosition",
     "GetDifficultyInfo",
     "GetGuildInfo",
@@ -21721,6 +21871,26 @@ Static.quests    = {}
 -- afterwards. A row that cannot say where it came from cannot preserve it.
 Static.schemaVersion = 1
 
+-- WHAT THIS REGISTRAR PROMISES, AS A NUMBER A SUPPLIER CAN TEST. 0.92.0.
+--
+-- `RegisterQuests` existed before 0.91.0 too, and the old one took anything,
+-- returned nothing, and stamped no origin. So a companion addon guarding on
+-- `type(CN.Static.RegisterQuests) == "function"` passes on an OLD build and
+-- then silently gets `nil, nil` back -- with every one of its rows counted by
+-- that build's `/cn provenance` under "each one checked by hand", which is
+-- this addon making a false provenance claim about somebody else's data.
+--
+-- `schemaVersion` describes the RECORD SHAPE. This describes the REGISTRAR:
+--
+--   1 -- validates keys and fields, returns `added, refused`, stamps
+--        `origin`, records collisions, invalidates caches on registration,
+--        and accepts `UnregisterOrigin`.
+--
+-- A supplier tests `(CN.Static.apiVersion or 0) >= 1` and refuses to register
+-- otherwise, with one line in chat. `CN.version` cannot serve: it is a
+-- marketing string, not a contract.
+Static.apiVersion = 1
+
 -- Rows that lost a collision, so `/cn selftest` can say two suppliers
 -- disagree rather than the later one silently winning.
 Static.collisions = {}
@@ -21816,6 +21986,19 @@ function Static.RegisterQuests(records, origin, schemaVersion)
 
     local added, refused = 0, 0
 
+    -- ONE ENTRY, NOT ONE PER ROW. 0.92.0.
+    --
+    -- `Errors.capacity` is 20 and the dedupe key is context plus message, so
+    -- a supplier with a bad generator and twenty-one refused rows evicted
+    -- every other error recorded that session -- including whatever the addon
+    -- itself had logged, and including the supplier's own summary. `/cn
+    -- errors` then printed twenty near-identical lines with the one real
+    -- problem buried underneath.
+    --
+    -- The first reason is the one worth having; the rest are almost always
+    -- the same mistake repeated.
+    local firstRefusal
+
     for questID, record in pairs(records) do
         local ok, why = Static.RegisterQuest(questID, record, origin)
 
@@ -21824,12 +22007,18 @@ function Static.RegisterQuests(records, origin, schemaVersion)
         else
             refused = refused + 1
 
-            local errors = CN.modules and CN:GetModule("Errors")
+            firstRefusal = firstRefusal or why
+        end
+    end
 
-            if errors and errors.Record then
-                errors.Record("a curated quest row was refused",
-                    tostring(origin or "unknown") .. ": " .. tostring(why))
-            end
+    if refused > 0 then
+        local errors = CN.modules and CN:GetModule("Errors")
+
+        if errors and errors.Record then
+            errors.Record("curated quest rows were refused",
+                tostring(origin or "unknown") .. ": "
+                .. CN.Count(refused, "row") .. " refused, first: "
+                .. tostring(firstRefusal))
         end
     end
 
@@ -21839,7 +22028,15 @@ function Static.RegisterQuests(records, origin, schemaVersion)
     -- addon registering on demand, per expansion, or after a settings toggle
     -- would otherwise leave the aggregate candidate cache, the ranked list
     -- and the unlock index holding the pre-registration answer for the whole
-    -- session. `Contribute.Import` calls exactly this, for exactly this.
+    -- session.
+    --
+    -- 0.92.0: this said "`Contribute.Import` calls exactly this, for exactly
+    -- this", and `Contribute.Import` has never called it -- it writes its own
+    -- store and adds dependencies. The paragraph explaining why the block is
+    -- here named a caller that does not exist, which is how the next reader
+    -- builds a wrong model. The real caller is a companion data addon
+    -- registering after login; `Data/Quests.lua` registers at file-load time
+    -- and never needed it.
     if added > 0 then
         Static.revision = Static.revision + 1
 
@@ -22041,6 +22238,53 @@ function Static.GetQuestLocation(questID)
     end
 
     return record.mapID, record.x, record.y
+end
+
+-- REGISTERING TWICE IS NOT A COLLISION WITH SOMEBODY ELSE. 0.92.0.
+--
+-- `Static.revision` exists so a supplier can register late -- on demand, per
+-- expansion, after a settings toggle. A supplier doing that a second time
+-- collided with ITSELF: `Static.collisions` filled with rows whose `kept` and
+-- `lost` were the same name, and `/cn provenance` reported "N quests claimed
+-- by more than one source" about one addon registering twice.
+--
+-- Dropping an origin's rows first makes the case the revision was built for
+-- actually work. Returns how many rows were removed.
+function Static.UnregisterOrigin(origin)
+    if type(origin) ~= "string" or origin == "" or origin == "curated" then
+        return 0
+    end
+
+    local removed = 0
+
+    for questID, record in pairs(Static.quests) do
+        if record.origin == origin then
+            Static.quests[questID] = nil
+
+            removed = removed + 1
+        end
+    end
+
+    -- Collisions this origin lost or won are no longer about anything.
+    local kept = {}
+
+    for _, clash in ipairs(Static.collisions) do
+        if clash.kept ~= origin and clash.lost ~= origin then
+            table.insert(kept, clash)
+        end
+    end
+
+    Static.collisions = kept
+
+    if removed > 0 then
+        Static.revision = Static.revision + 1
+
+        if CN.InvalidateCandidates then
+            CN.InvalidateCandidates()
+        end
+    end
+
+    return removed
 end
 
 -- How many curated rows are held, and how many of them came from this addon
@@ -27310,6 +27554,45 @@ function Pets.Scan()
         end
     end)
 
+    -- A REFUSAL IS NOT AN EMPTY JOURNAL. 0.92.0.
+    --
+    -- `GetNumPets` answers 0 while the journal is cold, which is exactly the
+    -- state at login -- and `CN:OnLogin` runs this. Recording that as a scan
+    -- costs three things:
+    --
+    --   * `nameRevision` is the key of the `PetNames` shortlist, so bumping
+    --     it throws away the index and forces ~1,800 protected client calls
+    --     to rebuild it, on the tooltip path. That is the exact cost the
+    --     0.87.0 note above the index says it exists to avoid.
+    --   * `CN.MarkScanned` invalidates three tabs' memoised summaries and
+    --     marks the setup step done, so the login reminder stops asking for a
+    --     scan that never happened.
+    --   * `/cn petscan` prints "Scanned 0 pet species" while `/cn pets`,
+    --     reading the store a second later, reports the full collection --
+    --     two commands contradicting each other about one journal.
+    --
+    -- `Currencies` has carried this guard since 0.88.0, `Achievements` since
+    -- 0.76.0, `Exploration` since 0.61.0, `Loremaster` since 0.71.0. Fifth
+    -- writer, no guard.
+    if seen == 0 then
+        DebugPrint("Pet journal answered for nothing; not recording it.")
+
+        return 0, 0, 0
+    end
+
+    -- THE THROTTLE IS STAMPED HERE, BY THE ONE FUNCTION THAT SCANS. 0.92.0.
+    --
+    -- `NEW_PET_ADDED` set `lastScan = 0` and then called this, which makes the
+    -- throttle test in the sibling handler false -- so caging a pet ran the
+    -- whole sweep, then `PET_JOURNAL_LIST_UPDATE` arrived and ran it again.
+    -- Each sweep widens and restores the player's own journal filters.
+    --
+    -- `Modules/Currencies.lua` records fixing this exact shape in 0.65.0, in
+    -- as many words: "resetting the timestamp BEFORE scanning sets it to
+    -- zero, which makes the throttle test false ... and guarantees the very
+    -- double sweep the comment says it prevents."
+    Pets.lastScan = time()
+
     -- The name index is now stale. See `Pets.NameIndex`.
     Pets.nameRevision = (Pets.nameRevision or 0) + 1
 
@@ -27537,27 +27820,32 @@ end, { events = { "NEW_PET_ADDED" } })
 -- EVENTS
 ------------------------------------------------------------
 
-local lastScan = 0
+-- ONE WRITER. `Pets.Scan` stamps it, because `Pets.Scan` is what scans.
+Pets.lastScan     = 0
+Pets.rescanSeconds = 30
 
-CN:RegisterEvent("NEW_PET_ADDED", function()
-    lastScan = 0
-    Pets.Scan()
-    DebugPrint("Pet added; journal rescanned.")
-end)
-
-CN:RegisterEvent("PET_JOURNAL_LIST_UPDATE", function()
-    local now = time()
-
-    if now - lastScan < 30 then
-        return
+local function SweepIfDue()
+    if time() - (Pets.lastScan or 0) < Pets.rescanSeconds then
+        return false
     end
-
-    lastScan = now
 
     local seen = Pets.Scan()
 
-    DebugPrint("Pet journal scan: " .. seen .. " species.")
+    DebugPrint("Pet journal scan: " .. tostring(seen) .. " species.")
+
+    return true
+end
+
+-- Caging or learning a pet is the player acting, and no cooldown may delay
+-- it. The scan stamps the throttle itself, so the `PET_JOURNAL_LIST_UPDATE`
+-- that follows finds it fresh instead of running the same sweep again.
+CN:RegisterEvent("NEW_PET_ADDED", function()
+    Pets.Scan()
+
+    DebugPrint("Pet added; journal rescanned.")
 end)
+
+CN:RegisterEvent("PET_JOURNAL_LIST_UPDATE", SweepIfDue)
 
 ------------------------------------------------------------
 -- COMMANDS
@@ -27582,9 +27870,13 @@ CN:RegisterCommand{
         local counts = Pets.Summary()
 
         Print("Scanned " .. CN.Count(seen, "pet species", "pet species") .. ".")
-        Print("Collected: " .. owned .. "   Missing: " .. missing
+        -- NO COLUMN PADDING. 0.92.0. See the note in
+        -- `Modules/Currencies.lua`: three spaces after a one-digit count and
+        -- after a four-digit count are two different widths.
+        Print("Collected: " .. owned .. CN.DOT .. " missing: " .. missing
             .. ((counts and (counts.unobtainable or 0) > 0)
-                and ("   Unobtainable: " .. counts.unobtainable) or ""))
+                and (CN.DOT .. " unobtainable: " .. counts.unobtainable)
+                or ""))
     end,
 }
 
@@ -27635,7 +27927,7 @@ CN:RegisterCommand{
         Print("Collected: " .. CN.YesNo(record.collected)
             .. (record.collected and (" (" .. record.count .. "/" .. record.limit .. ")") or ""))
         Print("Wild: " .. CN.YesNo(record.isWild)
-            .. "   Battle pet: " .. CN.YesNo(record.canBattle))
+            .. CN.DOT .. " battle pet: " .. CN.YesNo(record.canBattle))
 
         if record.obtainable == false then
             Print("|cffe2564cCurrently unobtainable.|r")
@@ -30571,6 +30863,15 @@ CN:RegisterCommand{
         for _, entry in ipairs(CN.questDataOrder) do
             local provider = CN.questDataProviders[entry.name]
 
+            -- A DIAGNOSTIC THAT THROWS IS NOT A DIAGNOSTIC. 0.92.0.
+            --
+            -- The order list and the provider table are two views of one
+            -- thing, and this indexed the second by the first with no guard.
+            -- `CN.UnregisterQuestDataProvider` now keeps them in step, but
+            -- the command that reports what is installed should be the last
+            -- thing in the addon to fall over when something is not.
+            if provider then
+
             local ok, isAvailable = pcall(provider.IsAvailable)
 
             local status = (ok and isAvailable)
@@ -30588,6 +30889,8 @@ CN:RegisterCommand{
             end
 
             CN.PrintLine("  " .. entry.name .. ": " .. status .. detail)
+
+            end
         end
 
         Print("Waypoint providers:")
@@ -30595,10 +30898,55 @@ CN:RegisterCommand{
         for _, entry in ipairs(CN.waypointOrder) do
             local provider = CN.waypointProviders[entry.name]
 
-            local ok, isAvailable = pcall(provider.IsAvailable)
+            -- THE SIBLING LOOP, GUARDED THE SAME WAY. 0.92.0. The quest-data
+            -- loop above had this fix applied first and this one was left --
+            -- inside the same command, ten lines apart, which is this
+            -- project's most-recorded defect committed while writing the note
+            -- about it.
+            if provider then
+                local ok, isAvailable = pcall(provider.IsAvailable)
 
-            CN.PrintLine("  " .. entry.name .. ": "
-                .. ((ok and isAvailable) and "|cff73b873available|r" or "|cff8a8f96unavailable|r"))
+                CN.PrintLine("  " .. entry.name .. ": "
+                    .. ((ok and isAvailable)
+                        and "|cff73b873available|r"
+                        or "|cff8a8f96unavailable|r"))
+            end
+        end
+
+        -- AND THE ADDONS THAT SUPPLY ROWS. 0.92.0.
+        --
+        -- This command's help line is "Show which external data addons were
+        -- detected", and it enumerated the two live-query registries only. An
+        -- addon that hands over curated rows is not a `questDataProvider` --
+        -- it registers once and stops -- so the one command named for this
+        -- question was structurally unable to answer it, and a player who
+        -- installed a data addon had no reachable confirmation it did
+        -- anything.
+        local origins = CN.Static and CN.Static.Origins and CN.Static.Origins()
+
+        local suppliers = {}
+
+        for origin, count in pairs(origins or {}) do
+            if origin ~= "curated" then
+                table.insert(suppliers, { origin = origin, count = count })
+            end
+        end
+
+        table.sort(suppliers, function(a, b) return a.origin < b.origin end)
+
+        Print("Curated row suppliers:")
+
+        if #suppliers == 0 then
+            CN.PrintLine(CN.Muted("  none installed"
+                .. CN.DASH .. "the curated rows in use are this addon's own"))
+        else
+            for _, supplier in ipairs(suppliers) do
+                CN.PrintLine("  " .. CN.Accent(supplier.origin) .. ": "
+                    .. CN.Count(supplier.count, "quest row"))
+            end
+
+            CN.PrintLine(CN.Muted("  " .. CN.Accent("/cn provenance")
+                .. " says which rows this addon checked itself.|r"))
         end
     end,
 }
@@ -31801,7 +32149,7 @@ CN:RegisterCommand{
             -- there fell through to "Could not resolve" -- which reads as
             -- "that recipe does not exist" rather than "give me the id".
             Print("Usage: /cn who <rep|title> <id or name>")
-            Print("|cff8a8f96       /cn who <recipe|profession> <id>|r")
+            Print("|cff8a8f96/cn who <recipe|profession> <id>|r")
             Print("|cff8a8f96Recipes and professions are looked up by id "
                 .. "only; |cffffc74f/cn recipes|r|cff8a8f96 lists yours.|r")
             return
@@ -31856,7 +32204,34 @@ CN:RegisterCommand{
             return
         end
 
-        local bestKey, detail, scope = Warband.WhoShould(objectiveType, id)
+        -- AND THE FOURTH RETURN. 0.92.0.
+        --
+        -- `WhoShould` sets `switchable = false` on the RECIPE and TITLE
+        -- branches because the character it names is the one who has ALREADY
+        -- done it. `Alts.Assignments` honoured that in 0.79.0, `Goals` in
+        -- 0.84.0, `Warband.Suitability` in 0.88.0 -- whose own note calls
+        -- itself "the third caller". This is the fourth, and it is the
+        -- command whose help line is "Which character should do something",
+        -- so it answered "Best character: Bob" and then, one line down,
+        -- "already known by another character" -- about Bob.
+        --
+        -- Tenth time in this project a fix has landed at one call site.
+        local bestKey, detail, scope, switchable =
+            Warband.WhoShould(objectiveType, id)
+
+        if switchable == false then
+            Print("Nothing to switch for.")
+
+            if scope then
+                CN.PrintLine(CN.Muted(tostring(scope)))
+            end
+
+            if detail then
+                CN.PrintLine(CN.Muted("Held by: " .. tostring(detail)))
+            end
+
+            return
+        end
 
         if scope == CN.scopes.ACCOUNT then
             Print("That is account-wide; any character counts.")
@@ -32063,9 +32438,13 @@ function Rares.Record(vignette)
     local store    = Store()
     local existing = store[vignette.vignetteID]
 
+    -- `firstSeen` IS NOT STORED. 0.92.0. `Modules/Mounts.lua` states the
+    -- rule -- "nothing has ever read a mount record's `firstSeen`" -- and
+    -- migration 5 stripped it from four stores. `rares` and `vendors` were in
+    -- none of those sweeps and both writers were live. `lastSeen` below IS
+    -- read, for the sightings gap, and stays.
     local record = existing or {
         vignetteID = vignette.vignetteID,
-        firstSeen  = time(),
         sightings  = 0,
     }
 
@@ -32368,7 +32747,9 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.TREASURE, Eligibility)
 CN.RegisterCandidateProvider("Rares", function()
     local candidates = {}
 
-    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+    -- The point is not read here any more: the "in your current zone" line
+    -- compares MAPS now, and the travel cost takes the vignette's own point.
+    local playerMap = CN.GetPlayerPosition()
 
     for _, vignette in ipairs(Rares.GetActive(playerMap)) do
         local objectiveType = vignette.kind == "TREASURE"
@@ -32415,7 +32796,19 @@ CN.RegisterCandidateProvider("Rares", function()
             if vignette.x and vignette.y then
                 travel, costed = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)
 
-                if playerX and playerY then
+                -- THE ZONE, NOT WHETHER THE CLIENT WOULD PLACE YOU. 0.92.0.
+                --
+                -- The sentence is a claim about map identity; the guard
+                -- tested whether the client answered with a position at all.
+                -- So a vignette on another map was still labelled "in your
+                -- current zone", and a rare genuinely in this zone lost the
+                -- line whenever the client withheld coordinates -- indoors,
+                -- mid-loading-screen -- which is when a `/cn why` line is
+                -- most likely to be read.
+                --
+                -- `Modules/Opportunities.lua` has this right three files
+                -- over: `if worldQuest.mapID == playerMap then`.
+                if vignette.mapID and vignette.mapID == playerMap then
                     table.insert(reasons, "in your current zone")
                 end
             end
@@ -33403,7 +33796,12 @@ CN:RegisterCommand{
         local seen, atCap, weekly = Currencies.Scan()
 
         Print("Scanned " .. seen .. " currencies.")
-        Print("At cap: " .. atCap .. "   With weekly earning left: " .. weekly)
+        -- NO COLUMN PADDING. 0.92.0. Three spaces after a one-digit count and
+    -- after a four-digit count are two different widths in a proportional
+    -- font, so the second label never lines up. The 0.77.0 sweep reached
+    -- three files and not this one.
+    Print("At cap: " .. atCap .. CN.DOT
+        .. " with weekly earning left: " .. weekly)
     end,
 }
 
@@ -34103,7 +34501,10 @@ local function PrintRow(row)
     local percentage = Percentage(row.collected, row.total)
 
     if percentage then
-        Print(string.format("|cffffc74f%s|r  %d / %d  (%s)",
+        -- NO COLUMN PADDING. 0.92.0. A double space is padding wearing a
+        -- different hat: in a proportional font it neither aligns anything
+        -- nor separates as clearly as the addon's own dot does.
+        Print(string.format("|cffffc74f%s|r " .. CN.DOT .. " %d / %d (%s)",
             row.name, row.collected, row.total,
             CN.PercentText(percentage / 100, 1)))
     else
@@ -34114,7 +34515,7 @@ local function PrintRow(row)
         -- currencies NOT at cap, and this rendered it as "Currencies 12
         -- collected" -- one line above its own note saying currencies are not
         -- a set to complete.
-        Print(string.format("|cffffc74f%s|r  %d %s",
+        Print(string.format("|cffffc74f%s|r " .. CN.DOT .. " %d %s",
             row.name, row.collected or 0, row.collectedLabel or "collected"))
 
         if row.unknownTotal then
@@ -36113,7 +36514,11 @@ function Vendors.CaptureOpenMerchant()
     end
 
     local store  = Store()
-    local record = store[npcID] or { npcID = npcID, firstSeen = time() }
+    -- `firstSeen` IS NOT STORED. 0.92.0. `Modules/Mounts.lua` states the
+    -- rule -- "nothing has ever read a mount record's `firstSeen`" -- and
+    -- migration 5 stripped it from four stores. `vendors` and `rares` were in
+    -- none of those sweeps and both writers were live.
+    local record = store[npcID] or { npcID = npcID }
 
     record.name     = npcName or record.name
     record.lastSeen = time()
@@ -36316,7 +36721,9 @@ function Vendors.WhoSells(itemID)
             -- cannot describe a seller differently again. 0.65.0.
             local seller = Vendors.SellerFrom(record, npcID)
 
-            seller.price = Vendors.PriceOf(record, itemID)
+            -- BOTH RETURNS. The second says whether the number is gold at
+            -- all, and `/cn sells` prints a different sentence for each.
+            seller.price, seller.extendedCost = Vendors.PriceOf(record, itemID)
 
             table.insert(sellers, seller)
         end
@@ -36694,10 +37101,34 @@ CN:RegisterCommand{
             .. " |cff8a8f96(" .. itemID .. ")|r is sold by:")
 
         for index, seller in ipairs(sellers) do
+            -- WHAT IT COSTS, WHICH IS WHY THE PRICE IS ON DISK. 0.92.0.
+            --
+            -- The capture stores a price under a comment justifying the disk
+            -- space: "the client only reports it while the merchant window is
+            -- open, so unlike the item's name it genuinely cannot be
+            -- recovered later." Nothing then read it. `Vendors.PriceOf` had
+            -- one caller, which filled a field no surface printed, and
+            -- `record.extendedCost` had no reader at all.
+            --
+            -- Storing it and not showing it was the worst of the three
+            -- options. The second return is what distinguishes a gold price
+            -- from a currency or token cost, which is the difference a player
+            -- deciding whether to walk there actually cares about.
+            local cost = ""
+
+            if seller.price and seller.price > 0 then
+                cost = CN.Aside(GetCoinTextureString
+                    and GetCoinTextureString(seller.price)
+                    or (seller.price .. "c"))
+            elseif seller.extendedCost then
+                cost = CN.Aside("costs a currency, not gold")
+            end
+
             CN.PrintLine("  " .. index .. ". " .. tostring(seller.name)
                 .. (seller.zone and (" |cff8a8f96in " .. seller.zone .. "|r") or "")
                 .. (seller.x and string.format(" |cff8a8f96%.1f, %.1f|r",
-                    seller.x * 100, seller.y * 100) or ""))
+                    seller.x * 100, seller.y * 100) or "")
+                .. cost)
         end
 
         Print("|cffffc74f/cn tovendor " .. itemID .. "|r to set a waypoint.")
@@ -41830,7 +42261,8 @@ CN:RegisterCommand{
         Print("Zones worth doing next:")
 
         for index, row in ipairs(rows) do
-            CN.PrintLine(string.format("  %d. %s%s|r  |cff8a8f96%d/%d|r",
+            CN.PrintLine(string.format(
+                "  %d. %s%s|r |cff8a8f96%d/%d|r",
                 index,
                 row.here and "|cff5dd2fb" or "|cffffc74f",
                 tostring(row.name),
@@ -56620,6 +57052,113 @@ CN:RegisterCommand{
     end,
 }
 
+------------------------------------------------------------
+-- WHAT THE ADDON KNOWS, AND WHO TOLD IT
+------------------------------------------------------------
+
+-- A NAME CLAIMED TWICE IS RECORDED SOMEWHERE A PERSON LOOKS. 0.92.0.
+--
+-- `Core.lua` has recorded every slash command claimed twice since it was
+-- written, under a comment saying: "Recorded rather than refused: refusing
+-- would change which command wins at load time... `/cn selftest` names them."
+-- Nothing named them. `CN.commandCollisions` had two references in the whole
+-- tree and both were writes -- so the mechanism built to stop `/cn zones`
+-- silently resolving to the wrong handler wrote into a table nobody read,
+-- while the addon's own comment asserted a live contract that did not hold.
+--
+-- The curated-data collision list has the same shape and the same need, so
+-- both are reported here rather than in two places that can drift.
+local function Named(rows, describe, limit)
+    local named = {}
+
+    for index = 1, math.min(limit or 6, #rows) do
+        table.insert(named, describe(rows[index]))
+    end
+
+    if #rows > #named then
+        table.insert(named, "and " .. (#rows - #named) .. " more")
+    end
+
+    return table.concat(named, ", ")
+end
+
+CN.RegisterSelfTest{
+    area  = "database",
+    order = 1,
+    name  = "no command name is claimed twice",
+    run   = function()
+        local rows = CN.commandCollisions or {}
+
+        if #rows == 0 then
+            return PASS, "every command and alias is claimed once"
+        end
+
+        return FAIL, #rows .. " claimed twice: " .. Named(rows, function(row)
+            return tostring(row.name) .. " (" .. tostring(row.kind) .. ", "
+                .. tostring(row.from) .. " kept over " .. tostring(row.to)
+                .. ")"
+        end)
+    end,
+}
+
+CN.RegisterSelfTest{
+    area  = "database",
+    order = 2,
+    name  = "no quest is claimed by two data sources",
+    run   = function()
+        local rows = (CN.Static and CN.Static.collisions) or {}
+
+        if #rows == 0 then
+            return PASS, "every curated quest row has one source"
+        end
+
+        -- NOT A FAILURE OF THIS ADDON. Two suppliers disagreeing is a thing
+        -- for their authors to settle, and the player's only useful action is
+        -- to be able to name the quests. First registration wins, and this
+        -- says which that was.
+        return SKIP, #rows .. " claimed twice: " .. Named(rows, function(row)
+            return "quest " .. tostring(row.questID) .. " ("
+                .. tostring(row.kept) .. " kept over " .. tostring(row.lost)
+                .. ")"
+        end)
+    end,
+}
+
+CN.RegisterSelfTest{
+    area  = "database",
+    order = 3,
+    name  = "curated quest data",
+    run   = function()
+        if not (CN.Static and CN.Static.Count) then
+            return FAIL, "the curated data layer did not load"
+        end
+
+        local total, mine = CN.Static.Count()
+
+        local suppliers = {}
+
+        for origin, count in pairs(CN.Static.Origins()) do
+            if origin ~= "curated" then
+                table.insert(suppliers,
+                    origin .. " (" .. count .. ")")
+            end
+        end
+
+        table.sort(suppliers)
+
+        if #suppliers == 0 then
+            -- NOT A FAILURE. No supplier installed is the ordinary state, and
+            -- an addon that reports its own optional companions as problems
+            -- teaches the player to ignore this command.
+            return SKIP, mine .. " rows, all checked by this addon"
+                .. CN.DASH .. "no external supplier is installed"
+        end
+
+        return PASS, total .. " rows: " .. mine .. " this addon's own, plus "
+            .. table.concat(suppliers, ", ")
+    end,
+}
+
 return SelfTest
 '@
 
@@ -59149,7 +59688,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.91.0
+## Version: 0.92.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -59404,6 +59943,99 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.92.0]
+
+**A deferral set to "forever" was writing a value the game cannot read back.**
+`/cn defer forever` stored a deadline of infinity; the client serialises that
+as the bare word `inf`, which on the next login parses as an undefined global
+and comes back as nothing. The addon wrote a deadline and read back nil,
+silently, every session. It happened to behave correctly — a missing deadline
+means "never expires" — which is not the same as being correct, and is one
+line away from a bug nobody could reproduce. Forever is now stored as what it
+is: the absence of a deadline.
+
+This release also finishes the work of making a companion data addon a real
+citizen rather than an invisible one.
+
+### Fixed
+
+- **Caging a pet scanned the whole journal twice.** One handler cleared the
+  scan timestamp and then scanned, which makes the throttle in the handler
+  beside it read as "never scanned" — so the sweep that widens and restores
+  your own journal filters ran, and then ran again. `Modules/Currencies.lua`
+  records fixing this exact shape in 0.65.0, in as many words.
+- **A cold pet journal was recorded as an empty collection.** The journal
+  answers with nothing for a moment after login, which is when the addon
+  scans it. That threw away the pet name index — 1,800 client calls to
+  rebuild, on the tooltip path — marked the setup step done so the reminder
+  stopped asking, and made `/cn petscan` print "0 species" while `/cn pets`
+  reported the full collection a second later. Four other scans have carried
+  this guard for releases; pets was the fifth without one.
+- **`/cn who` named the character who had already done the thing.** For a
+  recipe or a title, the character the addon picks is the one who *has* it —
+  there is nothing to switch to. Three other callers have honoured that since
+  0.79.0, 0.84.0 and 0.88.0, and the last of those calls itself "the third
+  caller" in a comment. This was the fourth, and it is the command whose help
+  line is "Which character should do something".
+- **"In your current zone" was not a claim about the zone.** The check asked
+  whether the game would tell the addon where you were standing at all — so a
+  rare on a different map still said it was here, and a rare genuinely here
+  lost the line indoors or mid-loading-screen, which is exactly when somebody
+  reads it.
+- **`/cn sells` now says what something costs.** The price has been stored on
+  disk since vendors were added, under a comment explaining that the client
+  only reports it while the merchant window is open and it genuinely cannot be
+  recovered later. Nothing then printed it. It also distinguishes a gold price
+  from a currency or token cost, which is the difference that decides whether
+  the walk is worth it.
+- **A duplicate command name was recorded where nobody looks.** The addon has
+  recorded every slash command claimed twice since it was written, under a
+  comment reading "`/cn selftest` names them". Nothing named them. Both that
+  list and the curated-data collision list are reported now, with the
+  conflicting names spelled out rather than counted.
+- **Three translations had been stripped of their own alphabet.** Three
+  strings added in 0.78.0 were transliterated in Russian and had their accents
+  removed in French and Portuguese, while each of those files spells the same
+  words correctly elsewhere. A Russian player finishing a route read Latin
+  script between two Cyrillic lines. The build now refuses an all-ASCII value
+  in a file that is otherwise accented.
+- **The "and N more not shown" row took the mouse.** List rows are reused, so
+  when that line landed on an index that had held a clickable row, it still lit
+  up under the cursor and still swallowed the click — while doing nothing.
+- **A trailing space in the search box broke the cross-tab count.** "Also on:
+  Collections (0)" beside a Collections tab showing twelve matches. Two places
+  normalised the search text differently.
+- **Seven printed lines padded their columns with spaces.** WoW has no
+  monospace font in its UI, so the second label never lines up. The 0.77.0
+  sweep reached three files; the rest are done, and the build checks for it
+  now — while allowing the three shapes that are not padding, including the
+  addon generating Lua source for its own data files.
+- **Two more stores kept a timestamp nothing reads**, and migration 36 removes
+  them.
+
+### Changed — data suppliers
+
+- **`/cn providers` answers the question its help line asks.** Its job is
+  "show which external data addons were detected", and it listed only the two
+  live-query registries. An addon that hands over curated rows registers once
+  and stops, so the one command named for this could not see it. It now names
+  each supplier and how many rows it contributed.
+- **`/cn selftest` reports curated data**, including which supplier provided
+  what, and treats "no supplier installed" as a normal state rather than a
+  problem.
+- **A bad supplier can no longer bury every other error.** Refused rows were
+  recorded one per row against a twenty-entry ring, so twenty-one bad rows
+  evicted everything else that session — including the supplier's own summary.
+  One entry per registration now, with the count and the first reason.
+- **A supplier can test what it is talking to.** `CN.Static.apiVersion` says
+  what the registrar promises, which the addon's version string cannot. Before
+  this, a companion built for the current contract would load against an old
+  build, get nothing back, and have all of its rows counted as hand-checked by
+  this addon.
+- **A supplier can withdraw its rows**, so registering twice is no longer a
+  collision with itself. Quest data providers can be withdrawn too, and
+  `/cn providers` survives one going away mid-session.
 
 ## [0.91.0]
 
@@ -66606,7 +67238,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.91.0
+0.92.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -71624,19 +72256,20 @@ mutate "Providers/StaticData.lua" \
     "        table.insert({}, {" \
     "two suppliers claiming one quest is resolved silently"
 
+# RE-ANCHORED IN 0.92.0: `UnregisterOrigin` bumps the revision too, so the
+# anchor needs the line above it to stay unique.
 mutate "Providers/StaticData.lua" \
-    "        Static.revision = Static.revision + 1" \
-    "" \
+    "    if added > 0 then
+        Static.revision = Static.revision + 1" \
+    "    if added > 0 then" \
     "a row registered late is ignored for the rest of the session"
 
+# RE-ANCHORED IN 0.92.0: withdrawal invalidates too, so the anchor carries
+# the harvest call that only the registration path makes.
 mutate "Providers/StaticData.lua" \
-    "        if CN.InvalidateCandidates then
-            CN.InvalidateCandidates()
-        end" \
-    "        if false then
-            CN.InvalidateCandidates()
-        end" \
-    "a late registration leaves the ranked list holding the old answer"
+    "        local harvest = CN.modules and CN:GetModule(\"Harvest\")" \
+    "        local harvest = nil" \
+    "a late registration leaves the unlock index holding the old answer"
 
 mutate "Providers/StaticData.lua" \
     "    if schemaVersion and schemaVersion ~= Static.schemaVersion then" \
@@ -71687,6 +72320,161 @@ mutate "Scoring.lua" \
     "        note    = \"Quests and exploration only, with quests weighted up.\"," \
     "        note    = \"Quests and exploration only, weighted toward fast travel.\"," \
     "/cn mode leveling advertises a weighting its profile does not carry"
+
+mutate "Objectives.lua" \
+    "    if seconds ~= math.huge then
+        expires = time() + seconds
+    end" \
+    "    expires = time() + seconds" \
+    "an endless deferral stores a deadline that cannot be read back"
+
+mutate "Modules/Pets.lua" \
+    "    if seen == 0 then
+        DebugPrint(\"Pet journal answered for nothing; not recording it.\")
+
+        return 0, 0, 0
+    end" \
+    "    if false then
+        DebugPrint(\"Pet journal answered for nothing; not recording it.\")
+
+        return 0, 0, 0
+    end" \
+    "a cold pet journal is recorded as an empty collection"
+
+mutate "Modules/Pets.lua" \
+    "    Pets.lastScan = time()" \
+    "    Pets.lastScan = 0" \
+    "caging a pet scans the whole journal twice"
+
+mutate "Modules/Pets.lua" \
+    "CN:RegisterEvent(\"PET_JOURNAL_LIST_UPDATE\", SweepIfDue)" \
+    "CN:RegisterEvent(\"PET_JOURNAL_LIST_UPDATE\", Pets.Scan)" \
+    "every pet journal update rescans the whole journal"
+
+mutate "Modules/Warband.lua" \
+    "        if switchable == false then
+            Print(\"Nothing to switch for.\")" \
+    "        if false then
+            Print(\"Nothing to switch for.\")" \
+    "/cn who names the character who already did it as the one to switch to"
+
+mutate "Modules/Rares.lua" \
+    "                if vignette.mapID and vignette.mapID == playerMap then" \
+    "                if playerX and playerY then" \
+    "a rare on another map is reported as in your current zone"
+
+mutate "Modules/Vendors.lua" \
+    "    local record = store[npcID] or { npcID = npcID }" \
+    "    local record = store[npcID] or { npcID = npcID, firstSeen = time() }" \
+    "a vendor stores a timestamp nothing reads"
+
+mutate "Modules/Rares.lua" \
+    "    local record = existing or {
+        vignetteID = vignette.vignetteID,
+        sightings  = 0,
+    }" \
+    "    local record = existing or {
+        vignetteID = vignette.vignetteID,
+        firstSeen  = time(),
+        sightings  = 0,
+    }" \
+    "a rare stores a timestamp nothing reads"
+
+mutate "Providers/StaticData.lua" \
+    "Static.apiVersion = 1" \
+    "Static.apiVersionUnpublished = 1" \
+    "a supplier cannot tell what this registrar promises"
+
+mutate "Providers/StaticData.lua" \
+    "    if refused > 0 then" \
+    "    if false then" \
+    "a supplier's refused rows are never reported at all"
+
+mutate "Providers/StaticData.lua" \
+    "            firstRefusal = firstRefusal or why" \
+    "            firstRefusal = why
+
+            local errors = CN.modules and CN:GetModule(\"Errors\")
+
+            if errors and errors.Record then
+                errors.Record(\"a curated quest row was refused\",
+                    tostring(origin or \"unknown\") .. \": \" .. tostring(why))
+            end" \
+    "a bad supplier evicts every other error in the ring"
+
+mutate "Providers/StaticData.lua" \
+    "        if record.origin == origin then
+            Static.quests[questID] = nil
+
+            removed = removed + 1
+        end" \
+    "        if false then
+            Static.quests[questID] = nil
+
+            removed = removed + 1
+        end" \
+    "a supplier cannot take its own rows back"
+
+mutate "Modules/Harvest.lua" \
+    "        Print(\"Curated row suppliers:\")" \
+    "        if false then Print(\"Curated row suppliers:\") end" \
+    "/cn providers cannot answer the question its help line asks"
+
+mutate "Modules/Harvest.lua" \
+    "            if provider then
+
+            local ok, isAvailable = pcall(provider.IsAvailable)" \
+    "            if true then
+
+            local ok, isAvailable = pcall(provider.IsAvailable)" \
+    "/cn providers throws when a provider has been withdrawn"
+
+# RE-ANCHORED IN 0.92.0: the parameter was renamed to stop it shadowing an
+# upvalue of the same name in the registrar above.
+mutate "Dependencies.lua" \
+    "        if CN.questDataOrder[index].name == providerName then
+            table.remove(CN.questDataOrder, index)
+        end" \
+    "        if false then
+            table.remove(CN.questDataOrder, index)
+        end" \
+    "withdrawing a provider leaves it in the order list"
+
+mutate "Modules/SelfTest.lua" \
+    "        local rows = CN.commandCollisions or {}
+
+        if #rows == 0 then
+            return PASS, \"every command and alias is claimed once\"
+        end" \
+    "        local rows = {}
+
+        if #rows == 0 then
+            return PASS, \"every command and alias is claimed once\"
+        end" \
+    "a command name claimed twice is recorded where nobody looks"
+
+mutate "Modules/SelfTest.lua" \
+    "        local rows = (CN.Static and CN.Static.collisions) or {}" \
+    "        local rows = {}" \
+    "two suppliers claiming one quest is never named"
+
+mutate "UI/List.lua" \
+    "            row:EnableMouse(false)
+            row.highlight:SetAlpha(0)" \
+    "            row.highlight:SetAlpha(0)" \
+    "the truncation row takes the mouse from the row it replaced"
+
+mutate "UI/List.lua" \
+    "        local trimmed = CN.Trim(needle)
+
+        filterText = (trimmed ~= \"\") and string.lower(trimmed) or nil" \
+    "        filterText = string.lower(needle)" \
+    "a trailing space makes the cross-tab count disagree with the tab"
+
+mutate "Modules/Vendors.lua" \
+    "            seller.price, seller.extendedCost = Vendors.PriceOf(record, itemID)" \
+    "            seller.price = Vendors.PriceOf(record, itemID)" \
+    "/cn sells cannot tell a gold price from a currency cost"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -71752,6 +72540,7 @@ read_globals = {
     "CreateFrame", "CreateFont", "GetAchievementCriteriaInfo", "GetAchievementInfo",
     "IsMounted", "UnitOnTaxi",
     "GetAchievementNumCriteria", "GetCategoryList", "GetCategoryNumAchievements",
+    "GetCoinTextureString",
     "GetCursorPosition", "GetItemInfo", "GetMerchantItemInfo",
     "GetMerchantItemLink", "GetMerchantNumItems", "GetNumCompletedAchievements",
     "GetNumTitles", "GetProfessionInfo", "GetProfessions", "GetQuestResetTime",
@@ -75014,6 +75803,20 @@ worldQuests = {   -- global on purpose: C_TaskQuest above closes over it
 -- assigns it reads the same first answer it always did.
 CN_TEST_DAILY_RESET_AT = nil
 
+-- The client's own money formatter. Guarded at its one call site, because a
+-- client without it should print a bare number rather than nothing -- and a
+-- stub that always answers makes that guard unreachable.
+function GetCoinTextureString(copper)
+    if type(copper) ~= "number" then
+        return nil
+    end
+
+    return string.format("%dg %ds %dc",
+        math.floor(copper / 10000),
+        math.floor((copper % 10000) / 100),
+        copper % 100)
+end
+
 function GetQuestResetTime()
     if CN_TEST_DAILY_RESET_IN == nil then
         return nil
@@ -75036,8 +75839,46 @@ end
 
 CN_TEST_SetDailyReset(5 * 3600)
 
+-- AND THE WEEKLY ONE COUNTS DOWN TOO. 0.92.0.
+--
+-- 0.91.0 converted the DAILY reset from a constant to a countdown and left
+-- its sibling eighteen lines below untouched. The weekly stub was more
+-- forgiving than the client in two ways:
+--
+--   * It never refused. `Providers/BlizzardWorld.lua` returns nil unless the
+--     client answers a positive number, and the client does withhold this
+--     during loading -- `Modules/Rares.lua` has an explicit fallback for that
+--     which no offline test could reach.
+--   * It had no fixed instant. `Rares.ClearedUntil` computes `time() +
+--     seconds` and persists it, so with the real client two rares cleared two
+--     days apart expire at the SAME reset. With a constant they expired two
+--     days apart -- making the intended behaviour and a wrong implementation
+--     indistinguishable, in the one module whose whole promise is
+--     "remembered until the weekly reset".
+--
+-- It also means the `days <= 1` and `<= 2` cliffs in `Vault.Urgency` and
+-- `Instances.Urgency` were never reached from a client answer.
+CN_TEST_WEEKLY_RESET_IN = 3 * 86400
+CN_TEST_WEEKLY_RESET_AT = nil
+
+function CN_TEST_SetWeeklyReset(seconds)
+    CN_TEST_WEEKLY_RESET_IN = seconds
+
+    CN_TEST_WEEKLY_RESET_AT = seconds and (time() + seconds) or nil
+end
+
 C_DateAndTime = {
-    GetSecondsUntilWeeklyReset = function() return 3 * 86400 end,
+    GetSecondsUntilWeeklyReset = function()
+        if CN_TEST_WEEKLY_RESET_IN == nil then
+            return nil
+        end
+
+        if CN_TEST_WEEKLY_RESET_AT == nil then
+            CN_TEST_WEEKLY_RESET_AT = time() + CN_TEST_WEEKLY_RESET_IN
+        end
+
+        return CN_TEST_WEEKLY_RESET_AT - time()
+    end,
     GetCurrentCalendarTime     = function()
         return { year = 2026, month = 8, monthDay = 18, hour = 12, minute = 0 }
     end,
@@ -109600,6 +110441,30 @@ end)()
     assert(invalidated == 0,
         "and a batch where nothing landed invalidates nothing")
 
+    -- AND THE UNLOCK INDEX TOO. A curated row's `unlocks` feeds the index
+    -- `Harvest` builds, so a supplier arriving after login leaves that index
+    -- holding the pre-registration answer for the session -- the same defect
+    -- as the candidate cache, in the other direction.
+    local unlocksNoted = 0
+
+    unlockIndex.NoteUnlocksChanged = function(...)
+        unlocksNoted = unlocksNoted + 1
+
+        return realUnlocks(...)
+    end
+
+    Static.RegisterQuests({ [88143] = { name = "Unlocking",
+                                        unlocks = { 88144 } } },
+        "TestSupplier")
+
+    unlockIndex.NoteUnlocksChanged = realUnlocks
+
+    assert(unlocksNoted > 0,
+        "registering a row rebuilds the unlock index rather than leaving it "
+        .. "holding what it had before the supplier loaded")
+
+    Static.quests[88143] = nil
+
     -- AND SO DOES FINISHING ONE, through the one function that re-reads the
     -- completed set rather than at three of its seven call sites.
     local wasAt = CN:GetModule("Quests").completionRevision
@@ -109722,7 +110587,10 @@ end)()
             .. tostring(record.name))
     end
 
-    CN.questDataProviders["TestExternal"] = nil
+    -- Through the registrar's own withdrawal, so the order list and the
+    -- provider table stay in step. Clearing one and not the other is what
+    -- made  throw.
+    CN.UnregisterQuestDataProvider("TestExternal")
 
     Static.quests[88160] = nil
     Static.quests[88161] = nil
@@ -109955,6 +110823,882 @@ end)()
         "by exactly the minute that passed: " .. tostring(first - later))
 
     print("  the daily reset is an instant, and it does not move")
+end)()
+
+
+;(function()
+    ------------------------------------------------------------
+    -- "FOREVER" IS THE ABSENCE OF A DEADLINE, NOT AN INFINITE ONE.
+    ------------------------------------------------------------
+    -- `/cn defer forever` passes `math.huge`, and `CN.SetDeferred` stored
+    -- `time() + math.huge` -- which is `inf`. The client serialises that as
+    -- the bare word `inf`, which parses on the next login as an UNDEFINED
+    -- GLOBAL and comes back as nil. So the addon wrote a deadline and read
+    -- back nothing, silently, with no error anywhere.
+    --
+    -- It behaved correctly by accident: a missing `until_` means "never
+    -- expires". Behaving correctly by accident is not being correct -- any
+    -- addon defining a global named `inf` would have changed the value, and
+    -- every reader doing arithmetic on it was one line from a bug nobody
+    -- could reproduce.
+    local objective = { type = CN.objectiveTypes.QUEST, id = 970771 }
+
+    CN.SetDeferred(objective.type, objective.id, math.huge)
+
+    local store = CN.Account("deferredObjectives")
+
+    local entry = store[objective.type] and store[objective.type][objective.id]
+
+    assert(entry, "the deferral is stored")
+
+    assert(entry.until_ == nil,
+        "an endless deferral stores no deadline, rather than one that cannot "
+        .. "be read back: " .. tostring(entry.until_))
+
+    assert(CN.IsDeferred(objective.type, objective.id),
+        "and it is still deferred, which is what forever means")
+
+    -- A FINITE ONE STILL STORES A NUMBER.
+    CN.SetDeferred(objective.type, objective.id, 3600)
+
+    entry = store[objective.type][objective.id]
+
+    assert(type(entry.until_) == "number" and entry.until_ > time(),
+        "an hour is still an hour: " .. tostring(entry.until_))
+
+    -- AND EVERY DURATION THE ADDON OFFERS ROUND-TRIPS.
+    local durationTable = CN:GetModule("Filters")
+
+    for _, duration in ipairs(durationTable.durations) do
+        local seconds = durationTable.DurationSeconds(duration.key)
+
+        CN.SetDeferred(objective.type, objective.id, seconds)
+
+        local held = store[objective.type][objective.id]
+
+        assert(held.until_ == nil
+            or (held.until_ == held.until_ and held.until_ < math.huge),
+            "the duration named " .. tostring(duration.key)
+            .. " stores a value the client can write and read back: "
+            .. tostring(held.until_))
+    end
+
+    -- AND THE MIGRATION NORMALISES ONE ALREADY ON DISK.
+    local aged = {
+        version = 36,
+        account = {
+            deferredObjectives = {
+                QUEST = { [4242] = { since = 1, until_ = math.huge } },
+            },
+            vendors = { [77] = { npcID = 77, firstSeen = 1, name = "Bob" } },
+            rares   = { [88] = { vignetteID = 88, firstSeen = 1,
+                                 lastSeen = 2 } },
+        },
+        characters = {},
+    }
+
+    CN.RunMigrations(aged)
+
+    assert(aged.account.deferredObjectives.QUEST[4242].until_ == nil,
+        "a deadline that could not be read back is normalised away")
+
+    assert(aged.account.vendors[77].firstSeen == nil
+        and aged.account.vendors[77].name == "Bob",
+        "the vendor loses a timestamp nothing reads and keeps its name")
+
+    assert(aged.account.rares[88].firstSeen == nil
+        and aged.account.rares[88].lastSeen == 2,
+        "and the rare keeps `lastSeen`, which the sightings gap does read")
+
+    CN.SetDeferred(objective.type, objective.id, nil)
+
+    print("  an endless deferral stores no deadline")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- CAGING A PET SCANS THE JOURNAL ONCE.
+    ------------------------------------------------------------
+    -- `NEW_PET_ADDED` set `lastScan = 0` and then called `Pets.Scan`, which
+    -- makes the throttle test in the sibling handler false -- so caging a pet
+    -- ran the whole sweep, then `PET_JOURNAL_LIST_UPDATE` arrived and ran it
+    -- again. Each sweep widens and restores the player's own journal filters.
+    --
+    -- `Modules/Currencies.lua` records fixing this exact shape in 0.65.0, in
+    -- as many words.
+    local pets = CN:GetModule("Pets")
+
+    -- COUNTED AT THE CLIENT, not at `Pets.Scan`. An event handler registered
+    -- with the function VALUE holds the original, so wrapping the module
+    -- field measures nothing about what the handler actually calls.
+    -- COUNTED AT THE JOURNAL SWEEP, not at `Pets.Scan`. An event handler
+    -- registered with the function VALUE holds the original, so wrapping the
+    -- module field measures nothing about what the handler actually calls --
+    -- and `GetNumPets` is asked more than once per sweep, so it is not a
+    -- sweep counter either.
+    --
+    -- `WithAllPetsShown` runs exactly once per scan, and it is the expensive
+    -- part: it widens and then restores the player's own journal filters.
+    local sweeps = 0
+
+    local realShown = CN.Blizzard.WithAllPetsShown
+
+    CN.Blizzard.WithAllPetsShown = function(...)
+        sweeps = sweeps + 1
+
+        return realShown(...)
+    end
+
+    pets.lastScan = 0
+
+    CN.FireEvent("NEW_PET_ADDED")
+    CN.FireEvent("PET_JOURNAL_LIST_UPDATE")
+
+    CN.Blizzard.WithAllPetsShown = realShown
+
+    assert(sweeps == 1,
+        "caging a pet reads the journal once, not twice: " .. tostring(sweeps))
+
+    -- AND THE SCAN STAMPS THE THROTTLE ITSELF, which is what makes that true
+    -- from every entry point rather than from one handler.
+    assert(type(pets.lastScan) == "number" and pets.lastScan > 0,
+        "the scan records when it ran: " .. tostring(pets.lastScan))
+
+    local source = CN_TEST_ReadAddonFile("Modules/Pets.lua")
+
+    for line in string.gmatch(source, "[^\n]+") do
+        if not line:find("^%s*%-%-") then
+            assert(not line:find("Pets.lastScan = 0", 1, true)
+                or line:find("^Pets.lastScan", 1, true),
+                "nothing clears the stamp before scanning, which is the "
+                .. "shape that guarantees the double sweep: " .. line)
+        end
+    end
+
+    print("  caging a pet scans the journal once")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD PET JOURNAL IS NOT AN EMPTY COLLECTION.
+    ------------------------------------------------------------
+    -- `GetNumPets` answers 0 while the journal is cold, which is the state at
+    -- login -- and `CN:OnLogin` runs the scan. Recording that as a scan threw
+    -- away the name index (~1,800 client calls to rebuild, on the tooltip
+    -- path), marked the setup step done so the reminder stopped asking, and
+    -- made `/cn petscan` print "0 species" while `/cn pets` reported the full
+    -- collection a second later.
+    local pets = CN:GetModule("Pets")
+
+    pets.Scan()
+
+    local held = CN.CountKeys(pets.Store())
+
+    assert(held > 0, "the fixture has pets")
+
+    local settled = pets.nameRevision
+
+    local realNum = C_PetJournal.GetNumPets
+
+    C_PetJournal.GetNumPets = function() return 0, 0 end
+
+    local seen, owned, missing = pets.Scan()
+
+    C_PetJournal.GetNumPets = realNum
+
+    assert(seen == 0 and owned == 0 and missing == 0,
+        "a refused sweep reports nothing rather than a confident zero: "
+        .. tostring(seen))
+
+    assert(CN.CountKeys(pets.Store()) == held,
+        "and leaves the store alone: " .. tostring(CN.CountKeys(pets.Store()))
+        .. " of " .. tostring(held))
+
+    assert(pets.nameRevision == settled,
+        "and does not throw away the name index the tooltip path depends on: "
+        .. tostring(settled) .. " -> " .. tostring(pets.nameRevision))
+
+    print("  a cold pet journal is not an empty collection")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn who DOES NOT NAME THE CHARACTER WHO ALREADY DID IT.
+    ------------------------------------------------------------
+    -- `WhoShould` sets `switchable = false` for a recipe or title, because
+    -- the character it names is the one who ALREADY HAS IT. Three callers
+    -- honour that -- `Alts.Assignments` since 0.79.0, `Goals` since 0.84.0,
+    -- `Warband.Suitability` since 0.88.0, whose own note calls itself "the
+    -- third caller". `/cn who` was the fourth, and it is the command whose
+    -- help line is "Which character should do something".
+    local warband = CN:GetModule("Warband")
+
+    local holder = "Holder-Testrealm"
+
+    CN.db.characters[holder] = {
+        name     = "Holder",
+        realm    = "Testrealm",
+        lastSeen = time(),
+        recipes  = { [7301] = true },
+    }
+
+    local _, _, _, switchable =
+        warband.WhoShould(CN.objectiveTypes.RECIPE, 7301)
+
+    assert(switchable == false,
+        "the fixture reaches the branch where there is nothing to switch for")
+
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("who recipe 7301")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    assert(not text:find("Best character", 1, true),
+        "a recipe somebody already knows has no better character to switch "
+        .. "to:\n" .. text)
+
+    assert(text:find("Holder", 1, true),
+        "while still naming who holds it:\n" .. text)
+
+    CN.db.characters[holder] = nil
+
+    print("  /cn who does not name the character who already did it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "IN YOUR CURRENT ZONE" IS A CLAIM ABOUT THE ZONE.
+    ------------------------------------------------------------
+    -- The guard tested whether the client would give the player a position at
+    -- all. So a vignette on another map was still labelled "in your current
+    -- zone", and a rare genuinely in this zone lost the line whenever the
+    -- client withheld coordinates -- indoors, mid-loading-screen -- which is
+    -- when a `/cn why` line is most likely to be read.
+    local source = CN_TEST_ReadAddonFile("Modules/Rares.lua")
+
+    assert(source:find("if vignette.mapID and vignette.mapID == playerMap then",
+            1, true),
+        "the guard compares maps")
+
+    assert(not source:find("if playerX and playerY then", 1, true),
+        "and not whether the client placed the player")
+
+    for _, objective in ipairs(CN.candidateProviders["Rares"].fn() or {}) do
+        local claimsZone = false
+
+        for _, reason in ipairs(objective.reasons or {}) do
+            if reason:find("in your current zone", 1, true) then
+                claimsZone = true
+            end
+        end
+
+        if claimsZone then
+            assert(objective.mapID == nil
+                or objective.mapID == select(1, CN.GetPlayerPosition()),
+                "only a rare actually on this map says it is on this map: "
+                .. tostring(objective.name))
+        end
+    end
+
+    -- AND NEITHER STORE WRITES A TIMESTAMP NOTHING READS. `lastSeen` on a
+    -- rare IS read, for the sightings gap, and stays.
+    for id, record in pairs(CN.Account("rares") or {}) do
+        assert(type(record) ~= "table" or record.firstSeen == nil,
+            "rare " .. tostring(id) .. " stores no firstSeen")
+    end
+
+    for id, record in pairs(CN.Account("vendors") or {}) do
+        assert(type(record) ~= "table" or record.firstSeen == nil,
+            "vendor " .. tostring(id) .. " stores no firstSeen")
+    end
+
+    for _, file in ipairs({ "Modules/Rares.lua", "Modules/Vendors.lua" }) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        for line in string.gmatch(text, "[^\n]+") do
+            if not line:find("^%s*%-%-") then
+                assert(not line:find("firstSeen", 1, true),
+                    file .. " does not write a timestamp nothing reads: "
+                    .. line)
+            end
+        end
+    end
+
+    print("  in your current zone is a claim about the zone")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A NAME CLAIMED TWICE IS SAID OUT LOUD.
+    ------------------------------------------------------------
+    -- `Core.lua` has recorded duplicate command names since it was written,
+    -- under a comment reading "`/cn selftest` names them". Nothing named
+    -- them: `CN.commandCollisions` had two references in the tree and both
+    -- were writes. The same is true of the curated-data collision list, which
+    -- `/cn provenance` reported only as a count -- so a player told "3 quests
+    -- claimed by more than one source" could not find out which three.
+    local selftest = CN:GetModule("SelfTest")
+
+    local byName = {}
+
+    for _, check in ipairs(selftest.Run().checks) do
+        byName[check.name] = check
+    end
+
+    assert(byName["no command name is claimed twice"],
+        "the command collision list has a reader")
+
+    assert(byName["no quest is claimed by two data sources"],
+        "and so does the curated data one")
+
+    assert(byName["curated quest data"],
+        "and a player can see whether a supplier is installed")
+
+    -- AND IT FAILS WHEN THERE IS ONE. A check that reads a list nothing fills
+    -- always passes, which is the state this replaced.
+    local realCommandCollisions = CN.commandCollisions
+
+    CN.commandCollisions = {
+        { name = "zones", kind = "alias", from = "Zones", to = "Loremaster" },
+    }
+
+    local reportedCommand
+
+    for _, check in ipairs(selftest.Run().checks) do
+        if check.name == "no command name is claimed twice" then
+            reportedCommand = check
+        end
+    end
+
+    CN.commandCollisions = realCommandCollisions
+
+    assert(reportedCommand.status == selftest.results.FAIL,
+        "a command claimed twice is a failure, not a pass: "
+        .. tostring(reportedCommand.status))
+
+    assert(reportedCommand.detail:find("zones", 1, true),
+        "and the name is printed: " .. tostring(reportedCommand.detail))
+
+    -- WITH THE COLLISION NAMED, not just counted.
+    local realCollisions = CN.Static.collisions
+
+    CN.Static.collisions = {
+        { questID = 970772, kept = "curated", lost = "SomeSupplier" },
+    }
+
+    local reported
+
+    for _, check in ipairs(selftest.Run().checks) do
+        if check.name == "no quest is claimed by two data sources" then
+            reported = check
+        end
+    end
+
+    CN.Static.collisions = realCollisions
+
+    assert(reported.detail and reported.detail:find("970772", 1, true),
+        "the quest is named: " .. tostring(reported.detail))
+
+    assert(reported.detail:find("SomeSupplier", 1, true),
+        "and so is the source that lost: " .. tostring(reported.detail))
+
+    print("  a name claimed twice is said out loud")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A DATA SUPPLIER IS VISIBLE WHERE THE PLAYER LOOKS FOR ONE.
+    ------------------------------------------------------------
+    -- `/cn providers`' help line is "Show which external data addons were
+    -- detected", and it enumerated the two live-query registries only. An
+    -- addon that hands over curated rows registers once and stops, so it is
+    -- not a `questDataProvider` -- and the one command named for this
+    -- question was structurally unable to answer it.
+    local landed = CN.Static.RegisterQuests({
+        [970780] = { name = "Supplied one" },
+        [970781] = { name = "Supplied two" },
+    }, "ProbeSupplier")
+
+    assert(landed == 2, "the probe rows registered: " .. tostring(landed))
+
+    assert(CN.Static.Origins().ProbeSupplier == 2,
+        "and are counted under their supplier: "
+        .. tostring(CN.Static.Origins().ProbeSupplier))
+
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    local ranOk, ranErr = pcall(CN.HandleSlashCommand, "providers")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    assert(ranOk, "/cn providers runs: " .. tostring(ranErr))
+
+    local text = table.concat(spoken, "\n")
+
+    assert(#spoken > 0, "and prints something")
+
+    assert(text:find("ProbeSupplier", 1, true),
+        "the supplier is named:\n" .. text)
+
+    assert(text:find("2 quest rows", 1, true),
+        "with how many rows it supplied:\n" .. text)
+
+    -- AND A SUPPLIER CAN TAKE THEM BACK, which is what makes registering
+    -- twice work rather than colliding with itself.
+    assert(CN.Static.UnregisterOrigin("ProbeSupplier") == 2,
+        "an origin's rows can be withdrawn")
+
+    assert(CN.Static.GetQuest(970780) == nil,
+        "and they are gone")
+
+    assert(CN.Static.UnregisterOrigin("curated") == 0,
+        "but this addon's own rows are not a supplier's to withdraw")
+
+    -- THE HEADING, NOT ONLY THE ROWS. A supplier line with nothing above it
+    -- reads as part of the waypoint list.
+    assert(text:find("Curated row suppliers", 1, true),
+        "the section is labelled:\n" .. text)
+
+    ------------------------------------------------------------
+    -- AND A WITHDRAWN PROVIDER LEAVES BOTH REGISTRIES.
+    ------------------------------------------------------------
+    -- `CN.questDataProviders` and `CN.questDataOrder` are two views of one
+    -- thing, and only registration kept them in step. Clearing one without
+    -- the other left the command that reports what is installed indexing a
+    -- nil.
+    CN.RegisterQuestDataProvider("WithdrawMe", {
+        IsAvailable  = function() return true end,
+        GetQuestData = function() return nil end,
+    })
+
+    local listed = 0
+
+    for _, entry in ipairs(CN.questDataOrder) do
+        if entry.name == "WithdrawMe" then listed = listed + 1 end
+    end
+
+    assert(listed == 1, "the provider registered into the order")
+
+    assert(CN.UnregisterQuestDataProvider("WithdrawMe") == true,
+        "and can be withdrawn")
+
+    assert(CN.questDataProviders["WithdrawMe"] == nil,
+        "out of the table")
+
+    for _, entry in ipairs(CN.questDataOrder) do
+        assert(entry.name ~= "WithdrawMe",
+            "and out of the order, which is the half that was forgotten")
+    end
+
+    assert(CN.UnregisterQuestDataProvider("NeverRegistered") == false,
+        "and withdrawing something absent says so rather than throwing")
+
+    ------------------------------------------------------------
+    -- THE COMMAND SURVIVES A REGISTRY THAT IS OUT OF STEP ANYWAY.
+    ------------------------------------------------------------
+    -- The withdrawal above keeps them together. This is the belt: a
+    -- diagnostic that reports what is installed should be the last thing in
+    -- the addon to fall over when something is not.
+    table.insert(CN.questDataOrder, { name = "GhostProvider", sequence = 999 })
+
+    spoken = {}
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    local survived = pcall(CN.HandleSlashCommand, "providers")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    for index = #CN.questDataOrder, 1, -1 do
+        if CN.questDataOrder[index].name == "GhostProvider" then
+            table.remove(CN.questDataOrder, index)
+        end
+    end
+
+    assert(survived, "the command does not throw on a half-removed provider")
+
+    assert(not table.concat(spoken, "\n"):find("Error in", 1, true),
+        "and does not report an error:\n" .. table.concat(spoken, "\n"))
+
+    print("  a data supplier is visible where the player looks for one")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A BAD SUPPLIER DOES NOT EVICT EVERY OTHER ERROR.
+    ------------------------------------------------------------
+    -- `Errors.capacity` is 20 and the dedupe key is context plus message, so
+    -- one entry per refused row meant twenty-one bad rows evicted everything
+    -- else recorded that session -- including the supplier's own summary --
+    -- and `/cn errors` printed twenty near-identical lines with the one real
+    -- problem buried underneath.
+    local errors = CN:GetModule("Errors")
+
+    errors.Record("a marker", "something that must survive")
+
+    local rows = {}
+
+    for id = 971000, 971040 do
+        rows[tostring(id)] = { name = "Bad key " .. id }
+    end
+
+    local landedRows, refusedRows = CN.Static.RegisterQuests(rows, "NoisySupplier")
+
+    assert(landedRows == 0 and refusedRows == 41,
+        "every row was refused: " .. tostring(landedRows) .. " / "
+        .. tostring(refusedRows))
+
+    local kept, mentioned = 0, false
+
+    for _, notice in ipairs(errors.All()) do
+        if notice.context == "a marker" then
+            kept = kept + 1
+        end
+
+        -- This supplier's entry, not an earlier block's. Every refusal shares
+        -- one context now, which is the point.
+        if tostring(notice.context):find("refused", 1, true)
+            and tostring(notice.message):find("NoisySupplier", 1, true) then
+
+            mentioned = true
+
+            assert(tostring(notice.message):find("41", 1, true),
+                "the one entry says how many: " .. tostring(notice.message))
+        end
+    end
+
+    assert(mentioned, "the refusal is recorded")
+
+    assert(kept == 1,
+        "and forty-one bad rows do not evict what was already there")
+
+    print("  a bad supplier does not evict every other error")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- /cn sells SAYS WHAT SOMETHING COSTS.
+    ------------------------------------------------------------
+    -- The price has been on disk since vendors were added, under a comment
+    -- justifying the space: the client only reports it while the merchant
+    -- window is open, so unlike the item's name it genuinely cannot be
+    -- recovered later. Nothing then read it -- `Vendors.PriceOf` had one
+    -- caller, filling a field no surface printed, and `record.extendedCost`
+    -- had no reader at all.
+    local vendorModule = CN:GetModule("Vendors")
+
+    local rows = vendorModule.WhoSells(700)
+
+    assert(rows and #rows > 0, "the fixture records a seller for 700")
+
+    local sawPrice = false
+
+    for _, seller in ipairs(rows) do
+        if seller.price ~= nil then
+            sawPrice = true
+        end
+
+        -- BOTH RETURNS. The second is what distinguishes a gold price from a
+        -- currency or token cost, which is the difference that decides
+        -- whether the walk is worth it.
+        assert(seller.extendedCost ~= nil or seller.price == nil,
+            "a seller carries whether its price is gold at all: "
+            .. tostring(seller.name))
+    end
+
+    assert(sawPrice, "and at least one price survived the lookup")
+
+    local source = CN_TEST_ReadAddonFile("Modules/Vendors.lua")
+
+    assert(source:find("seller.price, seller.extendedCost", 1, true),
+        "the lookup binds both returns rather than truncating the second")
+
+    assert(source:find("costs a currency, not gold", 1, true),
+        "and the command has a sentence for each")
+
+    -- AND THE PRICE IS PRINTED IN THE CLIENT'S OWN MONEY FORMAT.
+    local spoken = {}
+
+    local realAdd = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(self, message)
+        table.insert(spoken, tostring(message))
+    end
+
+    CN.HandleSlashCommand("sells 700")
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAdd
+
+    local text = table.concat(spoken, "\n")
+
+    assert(text:find("g ", 1, true) or text:find("currency", 1, true),
+        "what it costs is on the line, not only in the store:\n" .. text)
+
+    print("  /cn sells says what something costs")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SUPPLIER CAN TELL WHAT THIS REGISTRAR PROMISES.
+    ------------------------------------------------------------
+    -- `RegisterQuests` existed before 0.91.0 too, and the old one took
+    -- anything, returned nothing and stamped no origin -- so a companion
+    -- guarding on `type(RegisterQuests) == "function"` passes on an old build
+    -- and gets `nil, nil` back, with all of its rows counted under "each one
+    -- checked by hand".
+    assert(type(CN.Static.apiVersion) == "number"
+        and CN.Static.apiVersion >= 1,
+        "the registrar publishes a contract number a supplier can test: "
+        .. tostring(CN.Static.apiVersion))
+
+    assert(CN.Static.apiVersion ~= CN.Static.schemaVersion
+        or type(CN.Static.schemaVersion) == "number",
+        "and it is separate from the record schema version")
+
+    -- Everything the number promises is actually there.
+    for _, name in ipairs({ "RegisterQuest", "RegisterQuests", "Origins",
+                            "Count", "UnregisterOrigin" }) do
+        assert(type(CN.Static[name]) == "function",
+            "apiVersion 1 promises " .. name)
+    end
+
+    assert(type(CN.Static.collisions) == "table"
+        and type(CN.Static.revision) == "number",
+        "and a collision list and a revision")
+
+    print("  a supplier can tell what this registrar promises")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE WEEKLY RESET IS AN INSTANT, AND IT DOES NOT MOVE.
+    ------------------------------------------------------------
+    -- 0.91.0 converted the daily reset from a constant to a countdown and
+    -- left its sibling in the same table untouched. `Rares.ClearedUntil`
+    -- persists `time() + seconds`, so with the real client two rares cleared
+    -- two days apart expire at the SAME reset -- and with a constant they
+    -- expired two days apart, making the intended behaviour and a wrong
+    -- implementation indistinguishable.
+    CN_TEST_SetWeeklyReset(3 * 86400)
+
+    local first = C_DateAndTime.GetSecondsUntilWeeklyReset()
+
+    assert(type(first) == "number" and first > 0,
+        "the client answers with seconds remaining: " .. tostring(first))
+
+    local realTime = time
+
+    time = function() return realTime() + 3600 end
+
+    local later = C_DateAndTime.GetSecondsUntilWeeklyReset()
+
+    time = realTime
+
+    assert(math.abs((first - later) - 3600) <= 1,
+        "and an hour later there is an hour less of it: "
+        .. tostring(first - later))
+
+    -- AND IT CAN REFUSE, which the client does during loading and which
+    -- `Modules/Rares.lua` has a fallback for that nothing could reach.
+    CN_TEST_SetWeeklyReset(nil)
+
+    assert(C_DateAndTime.GetSecondsUntilWeeklyReset() == nil,
+        "a client that will not answer answers with nothing")
+
+    assert(CN.Blizzard.GetSecondsUntilWeeklyReset() == nil,
+        "and the wrapper passes that through rather than inventing a week")
+
+    CN_TEST_SetWeeklyReset(3 * 86400)
+
+    print("  the weekly reset is an instant, and it does not move")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- NO PRINTED LINE PADS BETWEEN TWO LABELS.
+    ------------------------------------------------------------
+    -- WoW ships no monospace chat font, so three spaces after a one-digit
+    -- count and after a four-digit count are two different widths and the
+    -- second label never lines up. The 0.77.0 sweep reached three files;
+    -- seven more had it, including two in the window.
+    --
+    -- Leading indentation is not padding -- a nested line under a heading is
+    -- deliberate -- so only runs INSIDE the text are refused.
+    local offenders = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        local text = CN_TEST_ReadAddonFile(file)
+
+        if text then
+            for line in string.gmatch(text, "[^\n]+") do
+                if not string.find(line, "^%s*%-%-") then
+                    for literal in string.gmatch(line, '"([^"]*)"') do
+                        -- Strip colour codes first: they are not drawn, so
+                        -- they are not spacing.
+                        local shown = literal
+                            :gsub("|c%x%x%x%x%x%x%x%x", "")
+                            :gsub("|r", "")
+
+                        -- THREE SHAPES ARE NOT COLUMN PADDING.
+                        --
+                        --   * A run around a separator glyph, which is
+                        --     symmetric by design: "a  <dot>  b".
+                        --   * A run after a list number: "1.  Scan once".
+                        --   * A run around an `=`, which is this addon
+                        --     GENERATING Lua source for a data file, where
+                        --     aligned assignments are the point.
+                        local padded = string.find(shown, "%S  +%S")
+
+                        local exempt = string.find(shown, "  " .. CN.DOT)
+                            or string.find(shown, CN.DOT .. "  ")
+                            or string.find(shown, "%d%.  ")
+                            or string.find(shown, "  =")
+                            or string.find(shown, "=  ")
+
+                        if padded and not exempt then
+                            table.insert(offenders,
+                                file .. ': "' .. literal .. '"')
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    assert(#offenders == 0,
+        "a printed line separates with a word or a dot, never with spaces:\n"
+        .. table.concat(offenders, "\n"))
+
+    print("  no printed line pads between two labels")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A TRANSLATION IS IN THE LANGUAGE IT CLAIMS TO BE.
+    ------------------------------------------------------------
+    -- Three strings added in 0.78.0 were transliterated or stripped of
+    -- diacritics in ruRU, frFR and ptBR, while each of those files spelled
+    -- the identical word correctly elsewhere in its own table. A Russian
+    -- player finishing a route read Latin-script text between two Cyrillic
+    -- lines.
+    --
+    -- Checked structurally rather than by eye: in a file whose values are
+    -- mostly non-ASCII, an all-ASCII value is either a proper noun or a
+    -- mistake, and this addon has no proper nouns in its locale tables.
+    local suspicious = {}
+
+    for _, file in ipairs(CN_TEST_ADDON_FILES) do
+        if file:find("^Locales/") and not file:find("enUS") then
+            local text = CN_TEST_ReadAddonFile(file)
+
+            local values, ascii = 0, {}
+
+            for value in string.gmatch(text or "", '%]%s*=%s*"([^"]+)"') do
+                values = values + 1
+
+                if not string.find(value, "[\128-\255]") then
+                    table.insert(ascii, value)
+                end
+            end
+
+            -- Only files that are MOSTLY non-ASCII, so a Latin-script locale
+            -- is not accused of failing to be Cyrillic.
+            if values > 20 and (#ascii / values) < 0.35 then
+                for _, value in ipairs(ascii) do
+                    -- A value that is only format specifiers and punctuation
+                    -- has no letters to accent.
+                    if string.find(value, "%a%a%a") then
+                        table.insert(suspicious, file .. ': "' .. value .. '"')
+                    end
+                end
+            end
+        end
+    end
+
+    assert(#suspicious == 0,
+        "a value with no accented characters, in a file that is otherwise "
+        .. "accented, is a stripped translation:\n"
+        .. table.concat(suspicious, "\n"))
+
+    print("  a translation is in the language it claims to be")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE TRUNCATION ROW LOOKS AS INERT AS IT IS.
+    ------------------------------------------------------------
+    -- Rows are pooled. The fill loop sets `EnableMouse` and the highlight
+    -- alpha per row and the empty branch clears both; the truncation branch
+    -- cleared neither. So when that index had last held an actionable row,
+    -- "and N more not shown" still took the mouse and still lit on hover,
+    -- while its click was a no-op.
+    local source = CN_TEST_ReadAddonFile("UI/List.lua")
+
+    -- Anchored on the row's own text, not on `if truncated > 0`: that
+    -- appears twice, and the first is the block that makes ROOM for this one.
+    local block = source:match(
+        '(row%.label:SetText%(CN%.Muted%("and ".-row:Show%(%))')
+
+    assert(block, "the truncation branch is findable")
+
+    assert(block:find("row:EnableMouse(false)", 1, true),
+        "the truncation row takes no mouse input")
+
+    assert(block:find("row.highlight:SetAlpha(0)", 1, true),
+        "and does not light up under the cursor, which would say it is "
+        .. "clickable")
+
+    print("  the truncation row looks as inert as it is")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE CROSS-TAB COUNT SEARCHES WHAT THE TAB SEARCHED.
+    ------------------------------------------------------------
+    -- `SetFilter` trims and lowers; `CountMatching` only lowered, and the
+    -- window passes the raw search-box text. So one trailing space made
+    -- "Also on: Collections (0)" appear beside a Collections tab showing
+    -- twelve matching rows.
+    local panel = CN.UI and CN.UI.listPanels and next(CN.UI.listPanels)
+
+    if panel then
+        local list = CN.UI.listPanels[panel]
+
+        list:SetEntries({
+            { text = "Alpha thing" },
+            { text = "Beta thing" },
+            { text = "Alpha other" },
+        })
+
+        local exact   = list:CountMatching("alpha")
+        local spaced  = list:CountMatching("alpha ")
+        local padded  = list:CountMatching("  alpha  ")
+
+        assert(exact > 0, "the fixture matches something: " .. tostring(exact))
+
+        assert(spaced == exact and padded == exact,
+            "a trailing space is not a different search: " .. tostring(exact)
+            .. " vs " .. tostring(spaced) .. " vs " .. tostring(padded))
+    end
+
+    print("  the cross-tab count searches what the tab searched")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

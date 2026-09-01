@@ -50,6 +50,26 @@ Static.quests    = {}
 -- afterwards. A row that cannot say where it came from cannot preserve it.
 Static.schemaVersion = 1
 
+-- WHAT THIS REGISTRAR PROMISES, AS A NUMBER A SUPPLIER CAN TEST. 0.92.0.
+--
+-- `RegisterQuests` existed before 0.91.0 too, and the old one took anything,
+-- returned nothing, and stamped no origin. So a companion addon guarding on
+-- `type(CN.Static.RegisterQuests) == "function"` passes on an OLD build and
+-- then silently gets `nil, nil` back -- with every one of its rows counted by
+-- that build's `/cn provenance` under "each one checked by hand", which is
+-- this addon making a false provenance claim about somebody else's data.
+--
+-- `schemaVersion` describes the RECORD SHAPE. This describes the REGISTRAR:
+--
+--   1 -- validates keys and fields, returns `added, refused`, stamps
+--        `origin`, records collisions, invalidates caches on registration,
+--        and accepts `UnregisterOrigin`.
+--
+-- A supplier tests `(CN.Static.apiVersion or 0) >= 1` and refuses to register
+-- otherwise, with one line in chat. `CN.version` cannot serve: it is a
+-- marketing string, not a contract.
+Static.apiVersion = 1
+
 -- Rows that lost a collision, so `/cn selftest` can say two suppliers
 -- disagree rather than the later one silently winning.
 Static.collisions = {}
@@ -145,6 +165,19 @@ function Static.RegisterQuests(records, origin, schemaVersion)
 
     local added, refused = 0, 0
 
+    -- ONE ENTRY, NOT ONE PER ROW. 0.92.0.
+    --
+    -- `Errors.capacity` is 20 and the dedupe key is context plus message, so
+    -- a supplier with a bad generator and twenty-one refused rows evicted
+    -- every other error recorded that session -- including whatever the addon
+    -- itself had logged, and including the supplier's own summary. `/cn
+    -- errors` then printed twenty near-identical lines with the one real
+    -- problem buried underneath.
+    --
+    -- The first reason is the one worth having; the rest are almost always
+    -- the same mistake repeated.
+    local firstRefusal
+
     for questID, record in pairs(records) do
         local ok, why = Static.RegisterQuest(questID, record, origin)
 
@@ -153,12 +186,18 @@ function Static.RegisterQuests(records, origin, schemaVersion)
         else
             refused = refused + 1
 
-            local errors = CN.modules and CN:GetModule("Errors")
+            firstRefusal = firstRefusal or why
+        end
+    end
 
-            if errors and errors.Record then
-                errors.Record("a curated quest row was refused",
-                    tostring(origin or "unknown") .. ": " .. tostring(why))
-            end
+    if refused > 0 then
+        local errors = CN.modules and CN:GetModule("Errors")
+
+        if errors and errors.Record then
+            errors.Record("curated quest rows were refused",
+                tostring(origin or "unknown") .. ": "
+                .. CN.Count(refused, "row") .. " refused, first: "
+                .. tostring(firstRefusal))
         end
     end
 
@@ -168,7 +207,15 @@ function Static.RegisterQuests(records, origin, schemaVersion)
     -- addon registering on demand, per expansion, or after a settings toggle
     -- would otherwise leave the aggregate candidate cache, the ranked list
     -- and the unlock index holding the pre-registration answer for the whole
-    -- session. `Contribute.Import` calls exactly this, for exactly this.
+    -- session.
+    --
+    -- 0.92.0: this said "`Contribute.Import` calls exactly this, for exactly
+    -- this", and `Contribute.Import` has never called it -- it writes its own
+    -- store and adds dependencies. The paragraph explaining why the block is
+    -- here named a caller that does not exist, which is how the next reader
+    -- builds a wrong model. The real caller is a companion data addon
+    -- registering after login; `Data/Quests.lua` registers at file-load time
+    -- and never needed it.
     if added > 0 then
         Static.revision = Static.revision + 1
 
@@ -370,6 +417,53 @@ function Static.GetQuestLocation(questID)
     end
 
     return record.mapID, record.x, record.y
+end
+
+-- REGISTERING TWICE IS NOT A COLLISION WITH SOMEBODY ELSE. 0.92.0.
+--
+-- `Static.revision` exists so a supplier can register late -- on demand, per
+-- expansion, after a settings toggle. A supplier doing that a second time
+-- collided with ITSELF: `Static.collisions` filled with rows whose `kept` and
+-- `lost` were the same name, and `/cn provenance` reported "N quests claimed
+-- by more than one source" about one addon registering twice.
+--
+-- Dropping an origin's rows first makes the case the revision was built for
+-- actually work. Returns how many rows were removed.
+function Static.UnregisterOrigin(origin)
+    if type(origin) ~= "string" or origin == "" or origin == "curated" then
+        return 0
+    end
+
+    local removed = 0
+
+    for questID, record in pairs(Static.quests) do
+        if record.origin == origin then
+            Static.quests[questID] = nil
+
+            removed = removed + 1
+        end
+    end
+
+    -- Collisions this origin lost or won are no longer about anything.
+    local kept = {}
+
+    for _, clash in ipairs(Static.collisions) do
+        if clash.kept ~= origin and clash.lost ~= origin then
+            table.insert(kept, clash)
+        end
+    end
+
+    Static.collisions = kept
+
+    if removed > 0 then
+        Static.revision = Static.revision + 1
+
+        if CN.InvalidateCandidates then
+            CN.InvalidateCandidates()
+        end
+    end
+
+    return removed
 end
 
 -- How many curated rows are held, and how many of them came from this addon

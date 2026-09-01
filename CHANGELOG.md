@@ -7,6 +7,99 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.92.0]
+
+**A deferral set to "forever" was writing a value the game cannot read back.**
+`/cn defer forever` stored a deadline of infinity; the client serialises that
+as the bare word `inf`, which on the next login parses as an undefined global
+and comes back as nothing. The addon wrote a deadline and read back nil,
+silently, every session. It happened to behave correctly â€” a missing deadline
+means "never expires" â€” which is not the same as being correct, and is one
+line away from a bug nobody could reproduce. Forever is now stored as what it
+is: the absence of a deadline.
+
+This release also finishes the work of making a companion data addon a real
+citizen rather than an invisible one.
+
+### Fixed
+
+- **Caging a pet scanned the whole journal twice.** One handler cleared the
+  scan timestamp and then scanned, which makes the throttle in the handler
+  beside it read as "never scanned" â€” so the sweep that widens and restores
+  your own journal filters ran, and then ran again. `Modules/Currencies.lua`
+  records fixing this exact shape in 0.65.0, in as many words.
+- **A cold pet journal was recorded as an empty collection.** The journal
+  answers with nothing for a moment after login, which is when the addon
+  scans it. That threw away the pet name index â€” 1,800 client calls to
+  rebuild, on the tooltip path â€” marked the setup step done so the reminder
+  stopped asking, and made `/cn petscan` print "0 species" while `/cn pets`
+  reported the full collection a second later. Four other scans have carried
+  this guard for releases; pets was the fifth without one.
+- **`/cn who` named the character who had already done the thing.** For a
+  recipe or a title, the character the addon picks is the one who *has* it â€”
+  there is nothing to switch to. Three other callers have honoured that since
+  0.79.0, 0.84.0 and 0.88.0, and the last of those calls itself "the third
+  caller" in a comment. This was the fourth, and it is the command whose help
+  line is "Which character should do something".
+- **"In your current zone" was not a claim about the zone.** The check asked
+  whether the game would tell the addon where you were standing at all â€” so a
+  rare on a different map still said it was here, and a rare genuinely here
+  lost the line indoors or mid-loading-screen, which is exactly when somebody
+  reads it.
+- **`/cn sells` now says what something costs.** The price has been stored on
+  disk since vendors were added, under a comment explaining that the client
+  only reports it while the merchant window is open and it genuinely cannot be
+  recovered later. Nothing then printed it. It also distinguishes a gold price
+  from a currency or token cost, which is the difference that decides whether
+  the walk is worth it.
+- **A duplicate command name was recorded where nobody looks.** The addon has
+  recorded every slash command claimed twice since it was written, under a
+  comment reading "`/cn selftest` names them". Nothing named them. Both that
+  list and the curated-data collision list are reported now, with the
+  conflicting names spelled out rather than counted.
+- **Three translations had been stripped of their own alphabet.** Three
+  strings added in 0.78.0 were transliterated in Russian and had their accents
+  removed in French and Portuguese, while each of those files spells the same
+  words correctly elsewhere. A Russian player finishing a route read Latin
+  script between two Cyrillic lines. The build now refuses an all-ASCII value
+  in a file that is otherwise accented.
+- **The "and N more not shown" row took the mouse.** List rows are reused, so
+  when that line landed on an index that had held a clickable row, it still lit
+  up under the cursor and still swallowed the click â€” while doing nothing.
+- **A trailing space in the search box broke the cross-tab count.** "Also on:
+  Collections (0)" beside a Collections tab showing twelve matches. Two places
+  normalised the search text differently.
+- **Seven printed lines padded their columns with spaces.** WoW has no
+  monospace font in its UI, so the second label never lines up. The 0.77.0
+  sweep reached three files; the rest are done, and the build checks for it
+  now â€” while allowing the three shapes that are not padding, including the
+  addon generating Lua source for its own data files.
+- **Two more stores kept a timestamp nothing reads**, and migration 36 removes
+  them.
+
+### Changed â€” data suppliers
+
+- **`/cn providers` answers the question its help line asks.** Its job is
+  "show which external data addons were detected", and it listed only the two
+  live-query registries. An addon that hands over curated rows registers once
+  and stops, so the one command named for this could not see it. It now names
+  each supplier and how many rows it contributed.
+- **`/cn selftest` reports curated data**, including which supplier provided
+  what, and treats "no supplier installed" as a normal state rather than a
+  problem.
+- **A bad supplier can no longer bury every other error.** Refused rows were
+  recorded one per row against a twenty-entry ring, so twenty-one bad rows
+  evicted everything else that session â€” including the supplier's own summary.
+  One entry per registration now, with the count and the first reason.
+- **A supplier can test what it is talking to.** `CN.Static.apiVersion` says
+  what the registrar promises, which the addon's version string cannot. Before
+  this, a companion built for the current contract would load against an old
+  build, get nothing back, and have all of its rows counted as hand-checked by
+  this addon.
+- **A supplier can withdraw its rows**, so registering twice is no longer a
+  collision with itself. Quest data providers can be withdrawn too, and
+  `/cn providers` survives one going away mid-session.
+
 ## [0.91.0]
 
 **This release makes the addon's data contract real, because something is

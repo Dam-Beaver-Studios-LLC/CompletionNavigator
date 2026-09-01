@@ -690,7 +690,10 @@ local function PrintRow(row)
     local percentage = Percentage(row.collected, row.total)
 
     if percentage then
-        Print(string.format("|cffffc74f%s|r  %d / %d  (%s)",
+        -- NO COLUMN PADDING. 0.92.0. A double space is padding wearing a
+        -- different hat: in a proportional font it neither aligns anything
+        -- nor separates as clearly as the addon's own dot does.
+        Print(string.format("|cffffc74f%s|r " .. CN.DOT .. " %d / %d (%s)",
             row.name, row.collected, row.total,
             CN.PercentText(percentage / 100, 1)))
     else
@@ -701,7 +704,7 @@ local function PrintRow(row)
         -- currencies NOT at cap, and this rendered it as "Currencies 12
         -- collected" -- one line above its own note saying currencies are not
         -- a set to complete.
-        Print(string.format("|cffffc74f%s|r  %d %s",
+        Print(string.format("|cffffc74f%s|r " .. CN.DOT .. " %d %s",
             row.name, row.collected or 0, row.collectedLabel or "collected"))
 
         if row.unknownTotal then

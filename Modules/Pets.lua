@@ -106,6 +106,45 @@ function Pets.Scan()
         end
     end)
 
+    -- A REFUSAL IS NOT AN EMPTY JOURNAL. 0.92.0.
+    --
+    -- `GetNumPets` answers 0 while the journal is cold, which is exactly the
+    -- state at login -- and `CN:OnLogin` runs this. Recording that as a scan
+    -- costs three things:
+    --
+    --   * `nameRevision` is the key of the `PetNames` shortlist, so bumping
+    --     it throws away the index and forces ~1,800 protected client calls
+    --     to rebuild it, on the tooltip path. That is the exact cost the
+    --     0.87.0 note above the index says it exists to avoid.
+    --   * `CN.MarkScanned` invalidates three tabs' memoised summaries and
+    --     marks the setup step done, so the login reminder stops asking for a
+    --     scan that never happened.
+    --   * `/cn petscan` prints "Scanned 0 pet species" while `/cn pets`,
+    --     reading the store a second later, reports the full collection --
+    --     two commands contradicting each other about one journal.
+    --
+    -- `Currencies` has carried this guard since 0.88.0, `Achievements` since
+    -- 0.76.0, `Exploration` since 0.61.0, `Loremaster` since 0.71.0. Fifth
+    -- writer, no guard.
+    if seen == 0 then
+        DebugPrint("Pet journal answered for nothing; not recording it.")
+
+        return 0, 0, 0
+    end
+
+    -- THE THROTTLE IS STAMPED HERE, BY THE ONE FUNCTION THAT SCANS. 0.92.0.
+    --
+    -- `NEW_PET_ADDED` set `lastScan = 0` and then called this, which makes the
+    -- throttle test in the sibling handler false -- so caging a pet ran the
+    -- whole sweep, then `PET_JOURNAL_LIST_UPDATE` arrived and ran it again.
+    -- Each sweep widens and restores the player's own journal filters.
+    --
+    -- `Modules/Currencies.lua` records fixing this exact shape in 0.65.0, in
+    -- as many words: "resetting the timestamp BEFORE scanning sets it to
+    -- zero, which makes the throttle test false ... and guarantees the very
+    -- double sweep the comment says it prevents."
+    Pets.lastScan = time()
+
     -- The name index is now stale. See `Pets.NameIndex`.
     Pets.nameRevision = (Pets.nameRevision or 0) + 1
 
@@ -333,27 +372,32 @@ end, { events = { "NEW_PET_ADDED" } })
 -- EVENTS
 ------------------------------------------------------------
 
-local lastScan = 0
+-- ONE WRITER. `Pets.Scan` stamps it, because `Pets.Scan` is what scans.
+Pets.lastScan     = 0
+Pets.rescanSeconds = 30
 
-CN:RegisterEvent("NEW_PET_ADDED", function()
-    lastScan = 0
-    Pets.Scan()
-    DebugPrint("Pet added; journal rescanned.")
-end)
-
-CN:RegisterEvent("PET_JOURNAL_LIST_UPDATE", function()
-    local now = time()
-
-    if now - lastScan < 30 then
-        return
+local function SweepIfDue()
+    if time() - (Pets.lastScan or 0) < Pets.rescanSeconds then
+        return false
     end
-
-    lastScan = now
 
     local seen = Pets.Scan()
 
-    DebugPrint("Pet journal scan: " .. seen .. " species.")
+    DebugPrint("Pet journal scan: " .. tostring(seen) .. " species.")
+
+    return true
+end
+
+-- Caging or learning a pet is the player acting, and no cooldown may delay
+-- it. The scan stamps the throttle itself, so the `PET_JOURNAL_LIST_UPDATE`
+-- that follows finds it fresh instead of running the same sweep again.
+CN:RegisterEvent("NEW_PET_ADDED", function()
+    Pets.Scan()
+
+    DebugPrint("Pet added; journal rescanned.")
 end)
+
+CN:RegisterEvent("PET_JOURNAL_LIST_UPDATE", SweepIfDue)
 
 ------------------------------------------------------------
 -- COMMANDS
@@ -378,9 +422,13 @@ CN:RegisterCommand{
         local counts = Pets.Summary()
 
         Print("Scanned " .. CN.Count(seen, "pet species", "pet species") .. ".")
-        Print("Collected: " .. owned .. "   Missing: " .. missing
+        -- NO COLUMN PADDING. 0.92.0. See the note in
+        -- `Modules/Currencies.lua`: three spaces after a one-digit count and
+        -- after a four-digit count are two different widths.
+        Print("Collected: " .. owned .. CN.DOT .. " missing: " .. missing
             .. ((counts and (counts.unobtainable or 0) > 0)
-                and ("   Unobtainable: " .. counts.unobtainable) or ""))
+                and (CN.DOT .. " unobtainable: " .. counts.unobtainable)
+                or ""))
     end,
 }
 
@@ -431,7 +479,7 @@ CN:RegisterCommand{
         Print("Collected: " .. CN.YesNo(record.collected)
             .. (record.collected and (" (" .. record.count .. "/" .. record.limit .. ")") or ""))
         Print("Wild: " .. CN.YesNo(record.isWild)
-            .. "   Battle pet: " .. CN.YesNo(record.canBattle))
+            .. CN.DOT .. " battle pet: " .. CN.YesNo(record.canBattle))
 
         if record.obtainable == false then
             Print("|cffe2564cCurrently unobtainable.|r")

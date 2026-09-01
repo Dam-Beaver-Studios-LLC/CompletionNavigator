@@ -849,4 +849,111 @@ CN:RegisterCommand{
     end,
 }
 
+------------------------------------------------------------
+-- WHAT THE ADDON KNOWS, AND WHO TOLD IT
+------------------------------------------------------------
+
+-- A NAME CLAIMED TWICE IS RECORDED SOMEWHERE A PERSON LOOKS. 0.92.0.
+--
+-- `Core.lua` has recorded every slash command claimed twice since it was
+-- written, under a comment saying: "Recorded rather than refused: refusing
+-- would change which command wins at load time... `/cn selftest` names them."
+-- Nothing named them. `CN.commandCollisions` had two references in the whole
+-- tree and both were writes -- so the mechanism built to stop `/cn zones`
+-- silently resolving to the wrong handler wrote into a table nobody read,
+-- while the addon's own comment asserted a live contract that did not hold.
+--
+-- The curated-data collision list has the same shape and the same need, so
+-- both are reported here rather than in two places that can drift.
+local function Named(rows, describe, limit)
+    local named = {}
+
+    for index = 1, math.min(limit or 6, #rows) do
+        table.insert(named, describe(rows[index]))
+    end
+
+    if #rows > #named then
+        table.insert(named, "and " .. (#rows - #named) .. " more")
+    end
+
+    return table.concat(named, ", ")
+end
+
+CN.RegisterSelfTest{
+    area  = "database",
+    order = 1,
+    name  = "no command name is claimed twice",
+    run   = function()
+        local rows = CN.commandCollisions or {}
+
+        if #rows == 0 then
+            return PASS, "every command and alias is claimed once"
+        end
+
+        return FAIL, #rows .. " claimed twice: " .. Named(rows, function(row)
+            return tostring(row.name) .. " (" .. tostring(row.kind) .. ", "
+                .. tostring(row.from) .. " kept over " .. tostring(row.to)
+                .. ")"
+        end)
+    end,
+}
+
+CN.RegisterSelfTest{
+    area  = "database",
+    order = 2,
+    name  = "no quest is claimed by two data sources",
+    run   = function()
+        local rows = (CN.Static and CN.Static.collisions) or {}
+
+        if #rows == 0 then
+            return PASS, "every curated quest row has one source"
+        end
+
+        -- NOT A FAILURE OF THIS ADDON. Two suppliers disagreeing is a thing
+        -- for their authors to settle, and the player's only useful action is
+        -- to be able to name the quests. First registration wins, and this
+        -- says which that was.
+        return SKIP, #rows .. " claimed twice: " .. Named(rows, function(row)
+            return "quest " .. tostring(row.questID) .. " ("
+                .. tostring(row.kept) .. " kept over " .. tostring(row.lost)
+                .. ")"
+        end)
+    end,
+}
+
+CN.RegisterSelfTest{
+    area  = "database",
+    order = 3,
+    name  = "curated quest data",
+    run   = function()
+        if not (CN.Static and CN.Static.Count) then
+            return FAIL, "the curated data layer did not load"
+        end
+
+        local total, mine = CN.Static.Count()
+
+        local suppliers = {}
+
+        for origin, count in pairs(CN.Static.Origins()) do
+            if origin ~= "curated" then
+                table.insert(suppliers,
+                    origin .. " (" .. count .. ")")
+            end
+        end
+
+        table.sort(suppliers)
+
+        if #suppliers == 0 then
+            -- NOT A FAILURE. No supplier installed is the ordinary state, and
+            -- an addon that reports its own optional companions as problems
+            -- teaches the player to ignore this command.
+            return SKIP, mine .. " rows, all checked by this addon"
+                .. CN.DASH .. "no external supplier is installed"
+        end
+
+        return PASS, total .. " rows: " .. mine .. " this addon's own, plus "
+            .. table.concat(suppliers, ", ")
+    end,
+}
+
 return SelfTest

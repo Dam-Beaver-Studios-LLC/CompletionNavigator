@@ -130,9 +130,13 @@ function Rares.Record(vignette)
     local store    = Store()
     local existing = store[vignette.vignetteID]
 
+    -- `firstSeen` IS NOT STORED. 0.92.0. `Modules/Mounts.lua` states the
+    -- rule -- "nothing has ever read a mount record's `firstSeen`" -- and
+    -- migration 5 stripped it from four stores. `rares` and `vendors` were in
+    -- none of those sweeps and both writers were live. `lastSeen` below IS
+    -- read, for the sightings gap, and stays.
     local record = existing or {
         vignetteID = vignette.vignetteID,
-        firstSeen  = time(),
         sightings  = 0,
     }
 
@@ -435,7 +439,9 @@ CN.RegisterEligibilityChecker(CN.objectiveTypes.TREASURE, Eligibility)
 CN.RegisterCandidateProvider("Rares", function()
     local candidates = {}
 
-    local playerMap, playerX, playerY = CN.GetPlayerPosition()
+    -- The point is not read here any more: the "in your current zone" line
+    -- compares MAPS now, and the travel cost takes the vignette's own point.
+    local playerMap = CN.GetPlayerPosition()
 
     for _, vignette in ipairs(Rares.GetActive(playerMap)) do
         local objectiveType = vignette.kind == "TREASURE"
@@ -482,7 +488,19 @@ CN.RegisterCandidateProvider("Rares", function()
             if vignette.x and vignette.y then
                 travel, costed = CN.TravelCost(vignette.mapID, vignette.x, vignette.y)
 
-                if playerX and playerY then
+                -- THE ZONE, NOT WHETHER THE CLIENT WOULD PLACE YOU. 0.92.0.
+                --
+                -- The sentence is a claim about map identity; the guard
+                -- tested whether the client answered with a position at all.
+                -- So a vignette on another map was still labelled "in your
+                -- current zone", and a rare genuinely in this zone lost the
+                -- line whenever the client withheld coordinates -- indoors,
+                -- mid-loading-screen -- which is when a `/cn why` line is
+                -- most likely to be read.
+                --
+                -- `Modules/Opportunities.lua` has this right three files
+                -- over: `if worldQuest.mapID == playerMap then`.
+                if vignette.mapID and vignette.mapID == playerMap then
                     table.insert(reasons, "in your current zone")
                 end
             end

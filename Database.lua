@@ -1783,6 +1783,78 @@ CN.migrations = {
                 .. " stored values nothing reads.")
         end
     end,
+
+    -- TWO MORE STORES, AND ONE VALUE THAT CANNOT BE READ BACK. 0.92.0.
+    --
+    -- `vendors.firstSeen` and `rares.firstSeen` are the sixth and seventh
+    -- stores to carry a timestamp nothing reads; `Modules/Mounts.lua` states
+    -- the rule and migration 5 stripped four of them.
+    --
+    -- The deferral is a different problem. `/cn defer forever` stored
+    -- `until_ = time() + math.huge`, which is `inf`. The client serialises
+    -- that as the bare word `inf`, which parses on the next login as an
+    -- UNDEFINED GLOBAL and comes back as nil -- so the value written was not
+    -- the value read, silently. It behaved correctly by accident, because a
+    -- missing `until_` means "never expires", and that is what it is written
+    -- as now. Any row already on disk carrying a non-finite number is
+    -- normalised here rather than left to be read as whatever a global named
+    -- `inf` happens to hold.
+    [36] = function(db)
+        local dropped = 0
+
+        local function strip(store, fields)
+            if type(store) ~= "table" then
+                return
+            end
+
+            for _, record in pairs(store) do
+                if type(record) == "table" then
+                    for _, field in ipairs(fields) do
+                        if record[field] ~= nil then
+                            record[field] = nil
+
+                            dropped = dropped + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        strip(db.account and db.account.vendors, { "firstSeen" })
+        strip(db.account and db.account.rares,   { "firstSeen" })
+
+        local normalised = 0
+
+        local deferred = db.account and db.account.deferredObjectives
+
+        for _, byType in pairs(deferred or {}) do
+            if type(byType) == "table" then
+                for _, entry in pairs(byType) do
+                    if type(entry) == "table" then
+                        local until_ = entry.until_
+
+                        -- A non-finite number, or the nil an `inf` round-trip
+                        -- produced. `x ~= x` catches nan; the comparison
+                        -- catches inf without naming `math.huge` twice.
+                        if type(until_) == "number"
+                            and (until_ ~= until_
+                                or until_ >= math.huge) then
+
+                            entry.until_ = nil
+
+                            normalised = normalised + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        if dropped > 0 or normalised > 0 then
+            CN.DebugPrint("Dropped " .. dropped .. " stored values nothing "
+                .. "reads and normalised " .. normalised
+                .. " deferrals that could not be read back.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

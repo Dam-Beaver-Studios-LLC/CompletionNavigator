@@ -784,6 +784,15 @@ CN:RegisterCommand{
         for _, entry in ipairs(CN.questDataOrder) do
             local provider = CN.questDataProviders[entry.name]
 
+            -- A DIAGNOSTIC THAT THROWS IS NOT A DIAGNOSTIC. 0.92.0.
+            --
+            -- The order list and the provider table are two views of one
+            -- thing, and this indexed the second by the first with no guard.
+            -- `CN.UnregisterQuestDataProvider` now keeps them in step, but
+            -- the command that reports what is installed should be the last
+            -- thing in the addon to fall over when something is not.
+            if provider then
+
             local ok, isAvailable = pcall(provider.IsAvailable)
 
             local status = (ok and isAvailable)
@@ -801,6 +810,8 @@ CN:RegisterCommand{
             end
 
             CN.PrintLine("  " .. entry.name .. ": " .. status .. detail)
+
+            end
         end
 
         Print("Waypoint providers:")
@@ -808,10 +819,55 @@ CN:RegisterCommand{
         for _, entry in ipairs(CN.waypointOrder) do
             local provider = CN.waypointProviders[entry.name]
 
-            local ok, isAvailable = pcall(provider.IsAvailable)
+            -- THE SIBLING LOOP, GUARDED THE SAME WAY. 0.92.0. The quest-data
+            -- loop above had this fix applied first and this one was left --
+            -- inside the same command, ten lines apart, which is this
+            -- project's most-recorded defect committed while writing the note
+            -- about it.
+            if provider then
+                local ok, isAvailable = pcall(provider.IsAvailable)
 
-            CN.PrintLine("  " .. entry.name .. ": "
-                .. ((ok and isAvailable) and "|cff73b873available|r" or "|cff8a8f96unavailable|r"))
+                CN.PrintLine("  " .. entry.name .. ": "
+                    .. ((ok and isAvailable)
+                        and "|cff73b873available|r"
+                        or "|cff8a8f96unavailable|r"))
+            end
+        end
+
+        -- AND THE ADDONS THAT SUPPLY ROWS. 0.92.0.
+        --
+        -- This command's help line is "Show which external data addons were
+        -- detected", and it enumerated the two live-query registries only. An
+        -- addon that hands over curated rows is not a `questDataProvider` --
+        -- it registers once and stops -- so the one command named for this
+        -- question was structurally unable to answer it, and a player who
+        -- installed a data addon had no reachable confirmation it did
+        -- anything.
+        local origins = CN.Static and CN.Static.Origins and CN.Static.Origins()
+
+        local suppliers = {}
+
+        for origin, count in pairs(origins or {}) do
+            if origin ~= "curated" then
+                table.insert(suppliers, { origin = origin, count = count })
+            end
+        end
+
+        table.sort(suppliers, function(a, b) return a.origin < b.origin end)
+
+        Print("Curated row suppliers:")
+
+        if #suppliers == 0 then
+            CN.PrintLine(CN.Muted("  none installed"
+                .. CN.DASH .. "the curated rows in use are this addon's own"))
+        else
+            for _, supplier in ipairs(suppliers) do
+                CN.PrintLine("  " .. CN.Accent(supplier.origin) .. ": "
+                    .. CN.Count(supplier.count, "quest row"))
+            end
+
+            CN.PrintLine(CN.Muted("  " .. CN.Accent("/cn provenance")
+                .. " says which rows this addon checked itself.|r"))
         end
     end,
 }
