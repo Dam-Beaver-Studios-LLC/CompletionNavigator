@@ -96,7 +96,28 @@ function Blizzard.WithAllPetsShown(scan)
     -- widened above, a count of zero can only mean the source or type checks
     -- are hiding everything. Only then is the widening justified -- and the
     -- player is told, because it is not recoverable.
-    if select(1, Blizzard.GetNumPets()) == 0 then
+    -- AND ZERO HAS A SECOND MEANING, WHICH IS THE ONE AT LOGIN. 0.95.0.
+    --
+    -- `GetNumPets` returns `numShown, numOwned`. The first is filtered; the
+    -- SECOND is not, and it answers zero only while the journal is cold --
+    -- which `Modules/Pets.lua` states in its own words: "answers 0 while the
+    -- journal is cold, which is exactly the state at login, and `CN:OnLogin`
+    -- runs this". The guard 0.92.0 added for that sits in `Pets.Scan`, which
+    -- runs INSIDE the callback below -- after this block has already widened
+    -- and already apologised. A guard that runs after the writes is not a
+    -- guard.
+    --
+    -- So a player who had narrowed their Pet Journal lost the narrowing at
+    -- every cold login, was told it could not be undone, and was right. That
+    -- is the act this file's own header says the project's standing rule
+    -- "forbids outright".
+    --
+    -- Widened only when the journal has answered AND the filtered count is
+    -- still zero, which is the only state that means the checkboxes are
+    -- hiding everything.
+    local shown, owned = Blizzard.GetNumPets()
+
+    if shown == 0 and (owned or 0) > 0 then
         local widened = false
 
         if C_PetJournal.SetAllPetSourcesChecked then
@@ -323,7 +344,22 @@ function Blizzard.WithAllToysShown(scan)
     -- collected and uncollected filters already widened above, a filtered
     -- count of zero can only be the source-type checks, and that is the one
     -- case where changing them beats returning an empty collection.
-    if Blizzard.GetNumToys() == 0 and C_ToyBox.SetAllSourceTypeFilters then
+    --
+    -- AND THE SAME SECOND MEANING OF ZERO. 0.95.0.
+    --
+    -- `GetNumFilteredToys` answers zero while the toy box is cold, and
+    -- `Toys.Scan` runs from `CN:OnLogin` -- so a player who had narrowed
+    -- their Toy Box lost the narrowing at every cold login and was told it
+    -- could not be put back. `C_ToyBox.GetNumToys` is the UNFILTERED total
+    -- and is the proof the client answered at all; the pet journal path above
+    -- uses the second return of `GetNumPets` for exactly the same job.
+    --
+    -- The toy path had no guard of any kind: `Modules/Toys.lua` never grew
+    -- the one `Modules/Pets.lua` was given in 0.92.0.
+    if Blizzard.GetNumToys() == 0
+        and Blizzard.GetNumOwnableToys() > 0
+        and C_ToyBox.SetAllSourceTypeFilters then
+
         C_ToyBox.SetAllSourceTypeFilters(true)
 
         CN.Print("Your Toy Box's source filters were hiding every toy, so "
@@ -363,6 +399,24 @@ function Blizzard.GetNumToys()
 
     if C_ToyBox and C_ToyBox.GetNumToys then
         return C_ToyBox.GetNumToys()
+    end
+
+    return 0
+end
+
+-- THE TOTAL THE FILTERS DO NOT TOUCH. 0.95.0.
+--
+-- `GetNumFilteredToys` is what the player's filters allow; `GetNumToys` is
+-- every toy the game has. Zero from the second means the toy box has not
+-- answered yet, which is a different fact from "your filters hide
+-- everything" and is the ordinary state at login.
+function Blizzard.GetNumOwnableToys()
+    if C_ToyBox and C_ToyBox.GetNumToys then
+        local ok, total = pcall(C_ToyBox.GetNumToys)
+
+        if ok and type(total) == "number" then
+            return total
+        end
     end
 
     return 0

@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.94.0'
+$script:ToolkitVersion = '0.95.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.94.0"
+CN.version     = "0.95.0"
 CN.dbVersion   = 38
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -1836,6 +1836,16 @@ end
 -- of what separates a hobby addon's chat output from a product's.
 CN.DASH = "\226\128\148"
 CN.DOT  = "\194\183"
+
+-- AND AN ELLIPSIS IS ONE CHARACTER. 0.95.0.
+--
+-- Two labels spelled a pending state as three separator dots -- `CN.DOT`
+-- repeated -- which is a middle dot at mid-height, three times, with no
+-- spacing rules of its own. "Reading" followed by three floating dots is not
+-- what an ellipsis looks like, and it is the same class of thing as the
+-- em dash sweep above: small, and most of what separates a hobby addon's
+-- output from a product's.
+CN.ELLIPSIS = "\226\128\166"
 
 -- Wraps an aside in the dash and the muted colour in one call, which is the
 -- single commonest shape in the addon's output.
@@ -5510,35 +5520,7 @@ function CN.RegisterQuestDataProvider(name, provider)
         end
     end
 
--- AND A PROVIDER CAN BE WITHDRAWN. 0.92.0.
---
--- `CN.questDataProviders` and `CN.questDataOrder` are two views of one thing,
--- and only registration kept them in step. Clearing a provider from the table
--- without removing it from the order left `/cn providers` indexing a nil --
--- an error in a command whose whole job is to say what is installed.
---
--- Published beside the registrar because an addon that can register can stop:
--- a data source the player turns off in that addon's own settings, or one
--- swapping itself out. Returns whether anything was removed.
-function CN.UnregisterQuestDataProvider(providerName)
-    if type(providerName) ~= "string"
-        or not CN.questDataProviders[providerName] then
-
-        return false
-    end
-
-    CN.questDataProviders[providerName] = nil
-
-    for index = #CN.questDataOrder, 1, -1 do
-        if CN.questDataOrder[index].name == providerName then
-            table.remove(CN.questDataOrder, index)
-        end
-    end
-
-    return true
-end
-
--- A STABLE ORDER, BECAUSE `table.sort` IS NOT STABLE.
+    -- A STABLE ORDER, BECAUSE `table.sort` IS NOT STABLE.
     --
     -- The list is re-sorted on every registration, so two providers that omit
     -- `priority` -- which every third-party provider will -- can swap places
@@ -5566,6 +5548,45 @@ end
 
         return a.priority < b.priority
     end)
+
+    return true
+end
+
+-- MOVED OUT OF THE FUNCTION ABOVE. 0.95.0.
+--
+-- This was defined INSIDE the body of `CN.RegisterQuestDataProvider`, between
+-- the removal loop and the sequence block -- so it came into existence only
+-- as a side effect of a SUCCESSFUL registration, below four early returns,
+-- and was rebuilt on every one after that. It happened to exist in game only
+-- because three provider files register unconditionally at load; a build
+-- without them, or a third-party addon calling this published function before
+-- registering anything, got a nil-call out of the API 0.92.0 added. Both
+-- tests for it registered first, so the ordering was invisible.
+
+-- AND A PROVIDER CAN BE WITHDRAWN. 0.92.0.
+--
+-- `CN.questDataProviders` and `CN.questDataOrder` are two views of one thing,
+-- and only registration kept them in step. Clearing a provider from the table
+-- without removing it from the order left `/cn providers` indexing a nil --
+-- an error in a command whose whole job is to say what is installed.
+--
+-- Published beside the registrar because an addon that can register can stop:
+-- a data source the player turns off in that addon's own settings, or one
+-- swapping itself out. Returns whether anything was removed.
+function CN.UnregisterQuestDataProvider(providerName)
+    if type(providerName) ~= "string"
+        or not CN.questDataProviders[providerName] then
+
+        return false
+    end
+
+    CN.questDataProviders[providerName] = nil
+
+    for index = #CN.questDataOrder, 1, -1 do
+        if CN.questDataOrder[index].name == providerName then
+            table.remove(CN.questDataOrder, index)
+        end
+    end
 
     return true
 end
@@ -10764,20 +10785,6 @@ end
 -- CLUSTERING
 ------------------------------------------------------------
 
--- Groups objectives by mapID so a zone sweep can be planned.
-function CN.ClusterByMap(objectives)
-    local clusters = {}
-
-    for _, objective in ipairs(objectives) do
-        if objective.mapID then
-            clusters[objective.mapID] = clusters[objective.mapID] or {}
-            table.insert(clusters[objective.mapID], objective)
-        end
-    end
-
-    return clusters
-end
-
 ------------------------------------------------------------
 -- HUBS
 ------------------------------------------------------------
@@ -10797,41 +10804,18 @@ CN.hubRadiusYards = 70
 -- is not.
 CN.fallbackZoneYards = 2000
 
--- Distance between two objectives in real yards where the client can convert,
--- falling back to normalized map units scaled to a plausible zone size.
+-- BOTH DEAD HELPERS DELETED. 0.95.0.
 --
--- The fallback matters: map coordinates are normalized per map, so the same
--- 0.01 is a different real distance in every zone, and clustering on raw
--- normalized distance would make hubs enormous in small zones and useless in
--- large ones.
-function CN.ObjectiveDistanceYards(a, b)
-    if not (a and b and a.x and a.y and b.x and b.y) then
-        return nil
-    end
-
-    if a.mapID and b.mapID and a.mapID ~= b.mapID then
-        return nil
-    end
-
-    local navigation = CN:GetModule("Navigation")
-
-    if navigation and a.mapID then
-        local yards = navigation.DistanceYards(a.mapID, a.x, a.y, b.x, b.y)
-
-        if yards then
-            return yards
-        end
-    end
-
-    -- Fallback: assume a zone is about 2000 yards across. Crude, and only
-    -- used when the client will not convert. Read from the constant below
-    -- rather than written out again, so the two fallbacks in this file agree
-    -- by construction rather than by somebody remembering to change both.
-    local dx = a.x - b.x
-    local dy = a.y - b.y
-
-    return math.sqrt((dx * dx) + (dy * dy)) * CN.fallbackZoneYards
-end
+-- `CN.ClusterByMap` and `CN.ObjectiveDistanceYards` had no caller in the
+-- addon, the harness or the benchmark, and coverage showed zero hits on
+-- either body. The 0.54.0 bucketing rewrite replaced the one call site and
+-- left the functions -- and left a comment below claiming, in the present
+-- tense, that one of them "in this very file converts properly", which is a
+-- comment naming a mechanism that no longer runs. Dead code that reads as a
+-- live feature is worse than an absent one: `CN.fallbackZoneYards` documents
+-- itself as read by "both fallbacks in this file", and for two releases only
+-- one of the two was reachable, so the next change to that constant would
+-- have been tested against dead code.
 
 -- The scale is resolved once per route rather than per comparison: it is a
 -- property of the map being routed, and asking the client per pair would be
@@ -11165,8 +11149,10 @@ end
 -- This is the SAME defect as the bearing bug of 0.40.0, in the same addon,
 -- eight releases later: the assumption that a map is square. Navigation
 -- measures the real spans and this file was the last place still ignoring
--- them -- while, forty lines above, CN.ObjectiveDistanceYards in this very
--- file converts properly. Clustering and routing disagreed with each other.
+-- them. The conversion lives in `UseMapScale` and `Distance2` below; it used
+-- to live in a second helper forty lines above, which 0.95.0 deleted as dead
+-- -- so clustering and routing now disagree with each other nowhere, because
+-- there is one implementation.
 --
 -- The scale is resolved once per route rather than per comparison: it is a
 -- Total length of a route starting from the player, in yards.
@@ -16149,7 +16135,7 @@ UI.RegisterTab{
         -- first, which is the whole difference.
         local function RunScans(button, label, work)
             button:SetEnabled(false)
-            button:SetText("Working" .. CN.DOT .. CN.DOT .. CN.DOT)
+            button:SetText("Working" .. CN.ELLIPSIS)
 
             local function finish()
                 -- PROTECTED, OR THE BUTTON WEDGES.
@@ -16955,7 +16941,7 @@ UI.RegisterTab{
 
         if active then
             panel.focusNote:SetText(active.note
-                .. (hidden > 0 and ("  " .. CN.DOT .. "  hiding " .. hidden
+                .. (hidden > 0 and (" " .. CN.DOT .. " hiding " .. hidden
                     .. " of " .. #filters.TypeOrder() .. " kinds") or ""))
         elseif hidden > 0 then
             panel.focusNote:SetText("No focus set. " .. hidden .. " kind"
@@ -19482,7 +19468,28 @@ function Blizzard.WithAllPetsShown(scan)
     -- widened above, a count of zero can only mean the source or type checks
     -- are hiding everything. Only then is the widening justified -- and the
     -- player is told, because it is not recoverable.
-    if select(1, Blizzard.GetNumPets()) == 0 then
+    -- AND ZERO HAS A SECOND MEANING, WHICH IS THE ONE AT LOGIN. 0.95.0.
+    --
+    -- `GetNumPets` returns `numShown, numOwned`. The first is filtered; the
+    -- SECOND is not, and it answers zero only while the journal is cold --
+    -- which `Modules/Pets.lua` states in its own words: "answers 0 while the
+    -- journal is cold, which is exactly the state at login, and `CN:OnLogin`
+    -- runs this". The guard 0.92.0 added for that sits in `Pets.Scan`, which
+    -- runs INSIDE the callback below -- after this block has already widened
+    -- and already apologised. A guard that runs after the writes is not a
+    -- guard.
+    --
+    -- So a player who had narrowed their Pet Journal lost the narrowing at
+    -- every cold login, was told it could not be undone, and was right. That
+    -- is the act this file's own header says the project's standing rule
+    -- "forbids outright".
+    --
+    -- Widened only when the journal has answered AND the filtered count is
+    -- still zero, which is the only state that means the checkboxes are
+    -- hiding everything.
+    local shown, owned = Blizzard.GetNumPets()
+
+    if shown == 0 and (owned or 0) > 0 then
         local widened = false
 
         if C_PetJournal.SetAllPetSourcesChecked then
@@ -19709,7 +19716,22 @@ function Blizzard.WithAllToysShown(scan)
     -- collected and uncollected filters already widened above, a filtered
     -- count of zero can only be the source-type checks, and that is the one
     -- case where changing them beats returning an empty collection.
-    if Blizzard.GetNumToys() == 0 and C_ToyBox.SetAllSourceTypeFilters then
+    --
+    -- AND THE SAME SECOND MEANING OF ZERO. 0.95.0.
+    --
+    -- `GetNumFilteredToys` answers zero while the toy box is cold, and
+    -- `Toys.Scan` runs from `CN:OnLogin` -- so a player who had narrowed
+    -- their Toy Box lost the narrowing at every cold login and was told it
+    -- could not be put back. `C_ToyBox.GetNumToys` is the UNFILTERED total
+    -- and is the proof the client answered at all; the pet journal path above
+    -- uses the second return of `GetNumPets` for exactly the same job.
+    --
+    -- The toy path had no guard of any kind: `Modules/Toys.lua` never grew
+    -- the one `Modules/Pets.lua` was given in 0.92.0.
+    if Blizzard.GetNumToys() == 0
+        and Blizzard.GetNumOwnableToys() > 0
+        and C_ToyBox.SetAllSourceTypeFilters then
+
         C_ToyBox.SetAllSourceTypeFilters(true)
 
         CN.Print("Your Toy Box's source filters were hiding every toy, so "
@@ -19749,6 +19771,24 @@ function Blizzard.GetNumToys()
 
     if C_ToyBox and C_ToyBox.GetNumToys then
         return C_ToyBox.GetNumToys()
+    end
+
+    return 0
+end
+
+-- THE TOTAL THE FILTERS DO NOT TOUCH. 0.95.0.
+--
+-- `GetNumFilteredToys` is what the player's filters allow; `GetNumToys` is
+-- every toy the game has. Zero from the second means the toy box has not
+-- answered yet, which is a different fact from "your filters hide
+-- everything" and is the ordinary state at login.
+function Blizzard.GetNumOwnableToys()
+    if C_ToyBox and C_ToyBox.GetNumToys then
+        local ok, total = pcall(C_ToyBox.GetNumToys)
+
+        if ok and type(total) == "number" then
+            return total
+        end
     end
 
     return 0
@@ -28062,10 +28102,30 @@ end
 -- Caging or learning a pet is the player acting, and no cooldown may delay
 -- it. The scan stamps the throttle itself, so the `PET_JOURNAL_LIST_UPDATE`
 -- that follows finds it fresh instead of running the same sweep again.
+--
+-- ONE PET IS AN EVENT; A BAG OF THEM IS A BURST. 0.95.0.
+--
+-- `bench.lua` measures this handler at 2.554 ms against 1,800 species -- the
+-- most expensive single event in the whole benchmark by a factor of forty,
+-- the next being `NEW_MOUNT_ADDED` at 0.065 -- and every sweep also drives
+-- `WithAllPetsShown`, which saves, clears and restores the player's own
+-- search box and collected checkboxes. Unthrottled, that ran once per pet.
+--
+-- `Routing.lua` debounces its own handler for this event and says why in as
+-- many words: "`Modules/Pets.lua` already runs a full journal rescan on it
+-- with no throttle, so a mass loot cost two full scans and an unthrottled
+-- recommendation pass per pet". The tree documented the problem next door and
+-- left it here.
+--
+-- `CN.Debounce` answers the first pet immediately -- which is the half that
+-- must not be delayed -- and collapses the rest of the burst into one
+-- trailing sweep.
 CN:RegisterEvent("NEW_PET_ADDED", function()
-    Pets.Scan()
+    CN.Debounce("Pets.journal", 2, function()
+        Pets.Scan()
 
-    DebugPrint("Pet added; journal rescanned.")
+        DebugPrint("Pet added; journal rescanned.")
+    end)
 end)
 
 CN:RegisterEvent("PET_JOURNAL_LIST_UPDATE", SweepIfDue)
@@ -28096,9 +28156,9 @@ CN:RegisterCommand{
         -- NO COLUMN PADDING. 0.92.0. See the note in
         -- `Modules/Currencies.lua`: three spaces after a one-digit count and
         -- after a four-digit count are two different widths.
-        Print("Collected: " .. owned .. CN.DOT .. " missing: " .. missing
+        Print("Collected: " .. owned .. " " .. CN.DOT .. " Missing: " .. missing
             .. ((counts and (counts.unobtainable or 0) > 0)
-                and (CN.DOT .. " unobtainable: " .. counts.unobtainable)
+                and (" " .. CN.DOT .. " Unobtainable: " .. counts.unobtainable)
                 or ""))
     end,
 }
@@ -28150,7 +28210,7 @@ CN:RegisterCommand{
         Print("Collected: " .. CN.YesNo(record.collected)
             .. (record.collected and (" (" .. record.count .. "/" .. record.limit .. ")") or ""))
         Print("Wild: " .. CN.YesNo(record.isWild)
-            .. CN.DOT .. " battle pet: " .. CN.YesNo(record.canBattle))
+            .. " " .. CN.DOT .. " battle pet: " .. CN.YesNo(record.canBattle))
 
         if record.obtainable == false then
             Print("|cffe2564cCurrently unobtainable.|r")
@@ -28273,6 +28333,17 @@ function Mounts.Scan()
                 missing = missing + 1
             end
         end
+    end
+
+    -- ZERO IS THE CLIENT DECLINING, NOT AN EMPTY collection. 0.95.0.
+    --
+    -- `CN.MarkScanned` routes to `CN.NoteSetupStep`, so stamping it removes
+    -- mounts from `Setup.NeverScanned` for ever: the new player is never told to
+    -- run `/cn mountscan`, and the Scans tab reads "just now" over a read that returned
+    -- nothing. Same shape as toys next door; see the note there.
+
+    if seen == 0 then
+        return 0, 0, 0
     end
 
     CN.MarkScanned("mounts")
@@ -28752,6 +28823,21 @@ function Toys.Scan()
             end
         end
     end)
+
+    -- ZERO IS THE CLIENT DECLINING, NOT AN EMPTY collection. 0.95.0.
+    --
+    -- `CN.MarkScanned` routes to `CN.NoteSetupStep`, so stamping it removes
+    -- toys from `Setup.NeverScanned` for ever: the new player is never told to
+    -- run `/cn toyscan`, and the Scans tab reads "just now" over a read that returned
+    -- nothing. Pets was given this guard in 0.92.0, Currencies in
+    -- 0.88.0, Achievements in 0.76.0, Exploration in 0.61.0 and Loremaster in
+    -- 0.71.0. Toys, mounts and titles were the three the sweep never
+    -- reached -- and this one runs from `CN:OnLogin`, which is precisely when
+    -- the toy box is cold.
+
+    if seen == 0 then
+        return 0, 0, 0
+    end
 
     CN.MarkScanned("toys")
 
@@ -29455,11 +29541,19 @@ function Titles.Scan()
         end
     end
 
-    CN.MarkScanned("titles")
+    -- ZERO IS THE CLIENT DECLINING, NOT AN EMPTY list. 0.95.0.
+    --
+    -- `CN.MarkScanned` routes to `CN.NoteSetupStep`, so stamping it removes
+    -- titles from `Setup.NeverScanned` for ever: the new player is never told to
+    -- run `/cn titlescan`, and the Scans tab reads "just now" over a read that returned
+    -- nothing. Same shape as toys and mounts; see the note in
+    -- `Modules/Toys.lua`.
 
-    if CN.character then
-        CN.character.titlesKnown = known
+    if seen == 0 then
+        return 0, 0
     end
+
+    CN.MarkScanned("titles")
 
     return seen, known
 end
@@ -34117,7 +34211,7 @@ CN:RegisterCommand{
     -- after a four-digit count are two different widths in a proportional
     -- font, so the second label never lines up. The 0.77.0 sweep reached
     -- three files and not this one.
-    Print("At cap: " .. atCap .. CN.DOT
+    Print("At cap: " .. atCap .. " " .. CN.DOT
         .. " with weekly earning left: " .. weekly)
     end,
 }
@@ -36374,7 +36468,7 @@ CN:RegisterCommand{
                 -- print it. Every other row in this command carried one.
                 CN.PrintLine(row.name .. " " .. CN.Muted("["
                     .. CN.TypeBadge(row.type) .. " " .. tostring(row.id)
-                    .. CN.DOT .. " " .. FormatRemaining(row.remaining)
+                    .. " " .. CN.DOT .. " " .. FormatRemaining(row.remaining)
                     .. " left]"))
             end
         end
@@ -36437,7 +36531,7 @@ CN:RegisterCommand{
         CN.InvalidateCandidates()
 
         Print("Deferred: " .. tostring(objective.name or objective.id)
-            .. CN.Aside(matched.label .. CN.DOT .. " "
+            .. CN.Aside(matched.label .. " " .. CN.DOT .. " "
                 .. FormatRemaining(seconds)))
 
         Print("|cff8a8f96|cffffc74f/cn unhide " .. tostring(objective.id)
@@ -51642,6 +51736,26 @@ function Sets.All(limit)
         end
     end
 
+    -- A REFUSAL IS NOT AN ANSWER, AND CACHING ONE IS PERMANENT. 0.95.0.
+    --
+    -- `GetAllSets` returns an empty table while the wardrobe is still
+    -- streaming, and that was stored as `readable = true, rows = {}` -- with
+    -- `TRANSMOG_COLLECTION_UPDATED` as the only invalidator. That event fires
+    -- when a transmog is COLLECTED, so a player who collects nothing keeps
+    -- the empty answer for the whole session: `/cn sets` reports zero sets
+    -- read and the Sets provider emits nothing, which is the "3 of 5 pieces"
+    -- denominator this file's header calls the thing the addon is otherwise
+    -- very short of.
+    --
+    -- `Modules/Instances.lua` reasons this out correctly for the async
+    -- Adventure Guide search, under the header "A ZERO IS 'NOT YET', NOT
+    -- 'NOTHING'". The sibling did not get it.
+    --
+    -- Returned but not cached, exactly as the two refusal paths above do.
+    if examined == 0 then
+        return rows, true, 0
+    end
+
     cache = {
         rows     = rows,
         readable = true,
@@ -54472,7 +54586,27 @@ function Instances.Lockouts()
     for _, saved in ipairs(raw) do
         -- An expired lockout is still listed for a while. Anything with no
         -- time left on it is not a lockout, it is a memory.
-        if not saved.reset or saved.reset > 0 then
+        --
+        -- AND THE CLIENT SAYS SO DIRECTLY. 0.95.0.
+        --
+        -- `RequestRaidInfo` reports a `locked` flag per row, `BlizzardWorld`
+        -- has read it into the record since the function was written, and
+        -- nothing in this addon has ever looked at it -- a grep for `.locked`
+        -- returned the write and nothing else. The countdown was used to
+        -- infer what the flag states, and the two disagree: a row you are no
+        -- longer saved to is still listed, with time left on it, until the
+        -- reset comes round.
+        --
+        -- So "six bosses of spent effort, expiring soon" -- the strongest
+        -- urgency signal this addon emits -- was being raised for an instance
+        -- the player is not saved to, sending them to re-clear from zero.
+        -- This file's own header calls a stale lockout "actively wrong
+        -- advice".
+        --
+        -- `locked ~= false` rather than `locked`, because a client that does
+        -- not report the field at all must not have every lockout dropped on
+        -- the strength of a nil.
+        if saved.locked ~= false and (not saved.reset or saved.reset > 0) then
             local encounters = saved.encounters or 0
             local defeated   = saved.defeated or 0
 
@@ -54493,6 +54627,10 @@ function Instances.Lockouts()
                 remaining    = math.max(0, encounters - defeated),
                 resetsIn     = saved.reset,
                 extended     = saved.extended,
+
+                -- Carried so a reader can say WHY a row is here, rather than
+                -- leaving the filter above as the only thing that knows.
+                locked       = saved.locked ~= false,
                 complete     = encounters > 0 and defeated >= encounters,
             })
         end
@@ -54845,7 +54983,15 @@ end
 -- the week. Same shape as the Vault's rule, and for the same reason.
 Instances.maxRemaining = 6
 
-local function Urgency(remaining, resetsIn, defeated)
+-- HOW CLOSE THIS LOCKOUT IS TO BEING FINISHED. NOT WHEN IT RESETS.
+--
+-- The reset used to be a third term here, and 0.88.0 stopped passing it --
+-- `expiresIn` hands the same deadline to the scorer's own urgency curve, and
+-- charging it twice through a shape `/cn urgency` does not plot was the
+-- defect that release fixed. The parameter and its whole branch stayed, dead,
+-- for seven releases, reading as though this function weights reset proximity
+-- and inviting the next reader to double-count it a third time. 0.95.0.
+local function Urgency(remaining, defeated)
     local value = 0
 
     -- Already started is the whole point: those kills are spent effort that
@@ -54864,21 +55010,11 @@ local function Urgency(remaining, resetsIn, defeated)
         end
     end
 
-    if resetsIn then
-        local days = resetsIn / 86400
-
-        if days <= 1 then
-            value = value + 3
-        elseif days <= 2 then
-            value = value + 2
-        elseif days <= 4 then
-            value = value + 1
-        end
-    end
-
     return value
 end
 
+-- Published so the harness can drive the term directly rather than inferring
+-- it from a ranked list.
 Instances.Urgency = Urgency
 
 CN.RegisterCandidateProvider("Instances", function()
@@ -54936,7 +55072,7 @@ CN.RegisterCandidateProvider("Instances", function()
                 -- vault row: `expiresIn` below hands the same reset to the
                 -- scorer's own urgency term, and `/cn urgency` plots only
                 -- that one. The sibling this file shares the defect with.
-                limitedTimeBonus = Urgency(lockout.remaining, nil,
+                limitedTimeBonus = Urgency(lockout.remaining,
                     lockout.defeated),
 
                 -- DECLARED. 0.89.0. See the sibling in `Modules/Vault.lua`:
@@ -58642,7 +58778,7 @@ function Welcome.Build()
 
         if setup then
             scan:SetEnabled(false)
-            scan:SetText("Reading" .. CN.DOT .. CN.DOT .. CN.DOT)
+            scan:SetText("Reading" .. CN.ELLIPSIS)
 
             setup.Run(function()
                 -- A STATUS MESSAGE IS NOT A BUTTON.
@@ -59448,7 +59584,7 @@ function Hud.RegisterOptionsPanel()
     local version = CN.Label(panel, "ARTWORK", "LABEL")
     version:SetPoint("TOPLEFT", scan, "BOTTOMLEFT", 0, -12)
     version:SetText("v" .. tostring(CN.version)
-        .. "  " .. CN.DOT .. "  Dam Beaver Studios, LLC")
+        .. " " .. CN.DOT .. " Dam Beaver Studios, LLC")
 
     -- Modern path first.
     if SettingsPanel and Settings and Settings.RegisterCanvasLayoutCategory
@@ -60167,7 +60303,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.94.0
+## Version: 0.95.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -60422,6 +60558,65 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.95.0]
+
+**At every login with a cold Pet Journal or Toy Box, the addon wiped filters
+you had chosen — and told you it could not put them back.** Both journals
+answer zero while they are still loading, which is exactly when the addon
+scans them, and both read that zero as "your source and type checkboxes are
+hiding everything" and widened them. The client offers no getter for those
+checkboxes, so the widening is permanent. The guard written for this in 0.92.0
+sits *inside* the scan, which runs after the widening has already happened — a
+guard that runs after the writes is not a guard. Both now check a count the
+filters cannot touch first, so "you filtered everything out" and "the journal
+has not answered yet" are told apart before anything is changed.
+
+**A raid lockout you are no longer saved to was being offered as spent effort
+about to expire.** The client reports a `locked` flag per instance; the addon
+has read it into its own records since that code was written and never once
+looked at it, inferring the same fact from the reset countdown instead. But an
+expired lockout stays in the list with time still showing on it. So the
+strongest urgency signal this addon emits — "six bosses already down, resets
+soon" — was being raised for an instance you would have to clear from zero.
+
+### Fixed
+
+- **A cold toy box, mount journal or title list was recorded as a completed
+  scan.** Stamping that flag removes the step from the setup reminder for the
+  life of the install, so a new player was never told to run the scan, and the
+  Scans tab read "just now" over a read that returned nothing. Pets got this
+  guard in 0.92.0, currencies in 0.88.0, achievements in 0.76.0, exploration
+  in 0.61.0 and Loremaster in 0.71.0; these three were the ones the sweep
+  never reached, and all three scan at login.
+- **A wardrobe that had not loaded was cached as an empty one for the whole
+  session.** The only thing that clears that cache is collecting a transmog,
+  so a player who collected nothing had `/cn sets` reporting zero and the sets
+  provider silent until they logged out — losing the "3 of 5 pieces"
+  denominator this addon is otherwise short of.
+- **A bag of caged pets cost a full journal sweep per pet.** That sweep is the
+  most expensive single event in the addon by a factor of forty, and each one
+  also saves, clears and restores your own journal search and checkboxes. The
+  first pet still answers immediately; the rest of a burst collapse into one.
+  The routing file has debounced its own handler for this event for releases,
+  naming the pet module as the reason.
+- **`CN.UnregisterQuestDataProvider` was defined inside another function.** It
+  existed only as a side effect of a successful registration, so a third-party
+  addon calling the published API before registering anything got an error out
+  of it.
+- Chat separators were missing their leading space in four places, so counts
+  and separators collided — and two labels spelled a pending state as three
+  middle dots rather than an ellipsis.
+
+### Changed
+
+- The reset-proximity branch of the lockout urgency term has been removed. It
+  has been unreachable since 0.88.0 moved that deadline onto the scorer's own
+  curve, and it read as though the term still weighted it — an invitation to
+  charge the same reset a third time.
+- Two routing helpers with no callers are gone, along with a comment claiming
+  in the present tense that one of them was doing the conversion the file
+  relies on. There is one implementation of that conversion now.
 
 ## [0.94.0]
 
@@ -67859,7 +68054,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.94.0
+0.95.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -69022,7 +69217,7 @@ mutate "Modules/Navigation.lua" \
     "clearing waypoints deletes a pin the player placed by hand"
 
 mutate "Providers/BlizzardCollections.lua" \
-    "    if select(1, Blizzard.GetNumPets()) == 0 then" \
+    "    if shown == 0 and (owned or 0) > 0 then" \
     "    if true then" \
     "the pet journal's source and type filters are widened on every scan"
 
@@ -72517,11 +72712,18 @@ mutate "Modules/Vault.lua" \
     "            limitedTimeBonus = Urgency(row.remaining, resetsIn)," \
     "the vault charges the weekly reset through two curves"
 
+# RE-ANCHORED IN 0.95.0. The reset used to be a third PARAMETER of `Urgency`,
+# passed as nil since 0.88.0; that release left the parameter and its branch
+# in place, dead, and 0.95.0 deleted both. The invariant is unchanged -- the
+# reset is charged once, through `expiresIn` -- so the mutation now adds the
+# second charge at the call site rather than re-enabling a branch that no
+# longer exists.
 mutate "Modules/Instances.lua" \
-    "                limitedTimeBonus = Urgency(lockout.remaining, nil,
+    "                limitedTimeBonus = Urgency(lockout.remaining,
                     lockout.defeated)," \
-    "                limitedTimeBonus = Urgency(lockout.remaining, lockout.resetsIn,
-                    lockout.defeated)," \
+    "                limitedTimeBonus = Urgency(lockout.remaining,
+                    lockout.defeated)
+                    + (((lockout.resetsIn or math.huge) <= 86400) and 3 or 0)," \
     "a lockout charges the weekly reset through two curves"
 
 mutate "Modules/Warband.lua" \
@@ -73178,6 +73380,61 @@ mutate "Providers/BlizzardWorld.lua" \
         Restore()" \
     "    if not ok or type(size) ~= \"number\" then" \
     "a refused currency list leaves the player's headers forced open"
+
+mutate "Providers/BlizzardCollections.lua" \
+    "    if shown == 0 and (owned or 0) > 0 then" \
+    "    if shown == 0 then" \
+    "a cold pet journal has the player's filters wiped at every login"
+
+mutate "Providers/BlizzardCollections.lua" \
+    "    if Blizzard.GetNumToys() == 0
+        and Blizzard.GetNumOwnableToys() > 0
+        and C_ToyBox.SetAllSourceTypeFilters then" \
+    "    if Blizzard.GetNumToys() == 0
+        and C_ToyBox.SetAllSourceTypeFilters then" \
+    "a cold toy box has the player's source filters wiped at every login"
+
+mutate "Modules/Sets.lua" \
+    "    if examined == 0 then
+        return rows, true, 0
+    end" \
+    "" \
+    "a wardrobe that had not loaded is cached as an empty one for the session"
+
+mutate "Modules/Toys.lua" \
+    "    if seen == 0 then
+        return 0, 0, 0
+    end" \
+    "" \
+    "a cold toy scan is recorded as a completed read"
+
+mutate "Modules/Mounts.lua" \
+    "    if seen == 0 then
+        return 0, 0, 0
+    end" \
+    "" \
+    "a cold mount scan is recorded as a completed read"
+
+mutate "Modules/Titles.lua" \
+    "    if seen == 0 then
+        return 0, 0
+    end" \
+    "" \
+    "a cold title scan is recorded as a completed read"
+
+mutate "Modules/Instances.lua" \
+    "        if saved.locked ~= false and (not saved.reset or saved.reset > 0) then" \
+    "        if not saved.reset or saved.reset > 0 then" \
+    "a lockout you are no longer saved to is offered as spent effort"
+
+mutate "Modules/Pets.lua" \
+    "    CN.Debounce(\"Pets.journal\", 2, function()
+        Pets.Scan()
+
+        DebugPrint(\"Pet added; journal rescanned.\")
+    end)" \
+    "    Pets.Scan()" \
+    "a bag of caged pets costs one full journal sweep per pet"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."
@@ -75651,7 +75908,24 @@ C_PetJournal = {
             CN_TEST_PET_FILTERS.uncollected = value
         end
     end,
-    GetNumPets               = function() return #CN_TEST_PetDisplayRows(), 1 end,
+    -- BOTH RETURNS ARE REAL. 0.95.0.
+    --
+    -- The second is the OWNED total and the filters do not touch it, which is
+    -- what separates "your checkboxes hide everything" from "the journal has
+    -- not answered yet". It was the literal 1, so the second state -- the
+    -- ordinary one at login, where the addon irreversibly widens filters it
+    -- cannot read back -- could not be told from the first.
+    GetNumPets               = function()
+        local owned = 0
+
+        for _, pet in ipairs(CN_TEST_PetDisplayRows()) do
+            if pet.owned then
+                owned = owned + 1
+            end
+        end
+
+        return #CN_TEST_PetDisplayRows(), owned
+    end,
     GetPetInfoByIndex        = function(i)
         local p = CN_TEST_PetDisplayRows()[i]
         if not p then return nil end
@@ -75689,7 +75963,15 @@ function CN_TEST_SetMountCollected(mountID, collected)
 end
 
 C_MountJournal = {
-    GetMountIDs           = function() return { 1, 2, 3 } end,
+    -- A MOUNT JOURNAL THAT CAN BE COLD, for the reason `GetNumTitles` below
+    -- carries. 0.95.0.
+    GetMountIDs           = function()
+        if CN_TEST_MOUNTS_COLD then
+            return {}
+        end
+
+        return { 1, 2, 3 }
+    end,
     GetMountInfoByID      = function(id)
         local m = mounts[id]
         if not m then return nil end
@@ -75721,7 +76003,31 @@ C_ToyBox = {
     SetAllSourceTypeFilters = function()
         CN_TEST_TOY_SOURCES_WIDENED = (CN_TEST_TOY_SOURCES_WIDENED or 0) + 1
     end,
-    GetNumFilteredToys      = function() return #toys end,
+    -- A TOY BOX THAT CAN BE COLD, AND A TOTAL THE FILTERS DO NOT TOUCH.
+    -- 0.95.0.
+    --
+    -- `GetNumFilteredToys` returned `#toys` unconditionally, so the state the
+    -- client is actually in at login -- answering zero because the toy box
+    -- has not streamed -- was unreachable, and the code that reads a filtered
+    -- zero as "your filters hide everything" and irreversibly widens them
+    -- could not be tested. Twenty-fifth entry in this project's list of
+    -- defects hidden by a stub kinder than the client.
+    GetNumFilteredToys      = function()
+        if CN_TEST_TOYS_COLD then
+            return 0
+        end
+
+        return #toys
+    end,
+
+    -- The unfiltered total, which is the proof the client answered at all.
+    GetNumToys              = function()
+        if CN_TEST_TOYS_COLD then
+            return 0
+        end
+
+        return #toys
+    end,
     GetToyFromIndex         = function(i) return toys[i] and toys[i].itemID or nil end,
     GetToyInfo              = function(itemID)
         for _, t in ipairs(toys) do
@@ -75780,7 +76086,19 @@ local titleList = {
     { name = "the Patient",  known = true },
 }
 
-function GetNumTitles() return #titleList end
+-- A TITLE LIST THAT CAN BE COLD. 0.95.0.
+--
+-- `GetNumTitles` answers zero before the client has sent them, which is the
+-- ordinary state at login -- and `Titles.Scan` runs from `CN:OnLogin`. The
+-- literal made that state unreachable, so a scan that read nothing and then
+-- stamped itself as complete could not be caught.
+function GetNumTitles()
+    if CN_TEST_TITLES_COLD then
+        return 0
+    end
+
+    return #titleList
+end
 function GetTitleName(i) return titleList[i] and titleList[i].name or nil end
 function IsTitleKnown(i) return titleList[i] and titleList[i].known or false end
 
@@ -76009,6 +76327,12 @@ function CN_TEST_OpenTradeSkill() tradeSkillReady = true end
 -- The window is open and ready, and the recipe list has not arrived. Set on
 -- the global so the main chunk stays under Lua's 200-local ceiling.
 CN_TEST_RECIPES_COLD = false
+
+-- The same, for the collections that scan at login. Globals rather than
+-- locals: the main chunk is at Lua's 200-local ceiling.
+CN_TEST_TOYS_COLD   = false
+CN_TEST_MOUNTS_COLD = false
+CN_TEST_TITLES_COLD = false
 
 
 
@@ -100940,9 +101264,19 @@ print("\nFeatures that were wired to nothing:")
     -- Unless the player's own filters hide everything, which is the one case
     -- where changing them beats reporting an empty collection -- and it is
     -- announced, because it cannot be undone.
+    --
+    -- FILTERED TO NOTHING, NOT COLD. 0.95.0.
+    --
+    -- This test used to force `0, 0` -- both returns zero -- and require the
+    -- widen. That is the COLD journal, which is the ordinary state at login,
+    -- and requiring the widen there is requiring the defect: a player who had
+    -- narrowed their journal lost the narrowing at every login and was told
+    -- it could not be put back. The second return is the OWNED total and the
+    -- filters do not touch it, so `0, 1803` is "your checkboxes hide
+    -- everything" and `0, 0` is "the journal has not answered".
     local realNumPets = C_PetJournal.GetNumPets
 
-    C_PetJournal.GetNumPets = function() return 0, 0 end
+    C_PetJournal.GetNumPets = function() return 0, 1803 end
 
     CN_TEST_PET_FILTERS = { collected = false, uncollected = true }
 
@@ -100950,8 +101284,21 @@ print("\nFeatures that were wired to nothing:")
 
     assert((CN_TEST_PET_FILTERS.sourceWidens or 0) == 1
         and (CN_TEST_PET_FILTERS.typeWidens or 0) == 1,
-        "but when the journal reports nothing at all, widening is the only "
-        .. "way to answer")
+        "when a player's own checkboxes hide every pet they own, widening is "
+        .. "the only way to answer")
+
+    -- AND A COLD JOURNAL IS NOT THAT, which is the whole point.
+    C_PetJournal.GetNumPets = function() return 0, 0 end
+
+    CN_TEST_PET_FILTERS = { collected = false, uncollected = true }
+
+    CN.Blizzard.WithAllPetsShown(function() end)
+
+    assert((CN_TEST_PET_FILTERS.sourceWidens or 0) == 0
+        and (CN_TEST_PET_FILTERS.typeWidens or 0) == 0,
+        "a journal that has not answered yet must not have the player's "
+        .. "filters wiped on the strength of it; that is every login, and it "
+        .. "cannot be undone")
 
     C_PetJournal.GetNumPets = realNumPets
 
@@ -100965,6 +101312,39 @@ print("\nFeatures that were wired to nothing:")
     assert(CN_TEST_TOY_SOURCES_WIDENED == 0,
         "a toy scan that can see toys must not widen the source filters "
         .. "either; SetAllSourceTypeFilters has no getter")
+
+    -- A COLD TOY BOX IS NOT A FILTERED ONE. 0.95.0.
+    --
+    -- `GetNumFilteredToys` answers zero while the box is streaming, and
+    -- `Toys.Scan` runs from `CN:OnLogin`. Toys never had the guard pets were
+    -- given in 0.92.0, so a player who had narrowed their Toy Box lost the
+    -- narrowing at every cold login and was told it could not be put back.
+    CN_TEST_TOY_SOURCES_WIDENED = 0
+    CN_TEST_TOYS_COLD = true
+
+    CN.Blizzard.WithAllToysShown(function() end)
+
+    CN_TEST_TOYS_COLD = false
+
+    assert(CN_TEST_TOY_SOURCES_WIDENED == 0,
+        "a toy box that has not answered yet must not have the player's "
+        .. "source filters wiped on the strength of it")
+
+    -- AND A GENUINELY FILTERED ONE STILL IS, so this is a guard and not a
+    -- wall: every toy hidden, with the box itself answering.
+    local realFiltered = C_ToyBox.GetNumFilteredToys
+
+    C_ToyBox.GetNumFilteredToys = function() return 0 end
+
+    CN_TEST_TOY_SOURCES_WIDENED = 0
+
+    CN.Blizzard.WithAllToysShown(function() end)
+
+    C_ToyBox.GetNumFilteredToys = realFiltered
+
+    assert(CN_TEST_TOY_SOURCES_WIDENED == 1,
+        "when a player's own source filters hide every toy, widening is the "
+        .. "only way to answer")
 
     print("  and so is the toy box")
 end)()
@@ -113201,6 +113581,258 @@ end)()
     print("  a currency read the client refused does not complete setup")
 end)()
 
+;(function()
+    ------------------------------------------------------------
+    -- A WARDROBE THAT HAS NOT ANSWERED IS NOT AN EMPTY WARDROBE.
+    ------------------------------------------------------------
+    -- `Sets.All` cached `readable = true, rows = {}` when `GetAllSets`
+    -- returned nothing, and the only invalidator is
+    -- `TRANSMOG_COLLECTION_UPDATED` -- which fires when a transmog is
+    -- COLLECTED. A player who collects nothing keeps the empty answer for the
+    -- whole session: `/cn sets` reports zero and the Sets provider emits
+    -- nothing, which is the "3 of 5 pieces" denominator this addon is
+    -- otherwise short of.
+    --
+    -- `Modules/Instances.lua` reasons this out for the Adventure Guide under
+    -- the header "A ZERO IS 'NOT YET', NOT 'NOTHING'". The sibling did not
+    -- get it.
+    local sets = CN:GetModule("Sets")
+
+    assert(sets, "the sets module must be loaded")
+
+    sets.Forget()
+
+    local realAllSets = C_TransmogSets.GetAllSets
+
+    C_TransmogSets.GetAllSets = function() return {} end
+
+    local coldRows, coldReadable = sets.All()
+
+    C_TransmogSets.GetAllSets = realAllSets
+
+    assert(#coldRows == 0, "a cold wardrobe reports no sets")
+
+    -- The very next call, with the client warm, must answer.
+    local warmRows = sets.All()
+
+    assert(#warmRows > 0,
+        "a refusal must not be cached as an answer for the session; got "
+        .. #warmRows .. " sets after the client warmed up")
+
+    assert(coldReadable ~= nil, "the readable flag is still returned")
+
+    -- AND THE WARM ANSWER *IS* CACHED, which is what the cache is for: the
+    -- walk is one client call per set plus a piece query each.
+    local asks = 0
+
+    C_TransmogSets.GetAllSets = function(...)
+        asks = asks + 1
+
+        return realAllSets(...)
+    end
+
+    sets.All()
+    sets.All()
+
+    C_TransmogSets.GetAllSets = realAllSets
+
+    assert(asks == 0,
+        "a wardrobe that answered is read once and held: " .. asks)
+
+    print("  a wardrobe that has not answered is not an empty wardrobe")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD COLLECTION SCAN IS NOT A SCAN.
+    ------------------------------------------------------------
+    -- `CN.MarkScanned` routes to `CN.NoteSetupStep`, so stamping it removes
+    -- the step from `Setup.NeverScanned` for ever -- the new player is never
+    -- told to run the scan, and the Scans tab reads "just now" over a read
+    -- that returned nothing. Pets got this guard in 0.92.0, Currencies in
+    -- 0.88.0, Achievements in 0.76.0, Exploration in 0.61.0 and Loremaster in
+    -- 0.71.0; toys, mounts and titles were the three the sweep never reached,
+    -- and all three run from `CN:OnLogin`.
+    local scans = CN.Account("collectionScans")
+
+    local cases = {
+        {
+            key    = "toys",
+            module = "Toys",
+            cold   = function() CN_TEST_TOYS_COLD = true end,
+            warm   = function() CN_TEST_TOYS_COLD = false end,
+        },
+        {
+            key    = "mounts",
+            module = "Mounts",
+            cold   = function()
+                CN_TEST_MOUNTS_COLD = true
+            end,
+            warm   = function()
+                CN_TEST_MOUNTS_COLD = false
+            end,
+        },
+        {
+            key    = "titles",
+            module = "Titles",
+            cold   = function()
+                CN_TEST_TITLES_COLD = true
+            end,
+            warm   = function()
+                CN_TEST_TITLES_COLD = false
+            end,
+        },
+    }
+
+    for _, case in ipairs(cases) do
+        local module = CN:GetModule(case.module)
+
+        assert(module, case.module .. " must be loaded")
+
+        -- A real read first, so there is a stamp to be wrongly refreshed.
+        case.warm()
+        module.Scan()
+
+        local stamped = scans[case.key]
+
+        assert(stamped, case.key .. " records a real scan")
+
+        scans[case.key] = 1
+
+        case.cold()
+
+        local seen = module.Scan()
+
+        case.warm()
+
+        assert(seen == 0,
+            case.key .. " reports reading nothing when the client answered "
+            .. "nothing: " .. tostring(seen))
+
+        assert(scans[case.key] == 1,
+            "and a read that returned nothing does not stamp " .. case.key
+            .. " as scanned, which is what silences the setup reminder for "
+            .. "the life of the install")
+
+        module.Scan()
+
+        assert(scans[case.key] ~= 1,
+            "while a real read does stamp " .. case.key)
+    end
+
+    print("  a cold toy box, mount journal or title list is not a scan")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LOCKOUT YOU ARE NO LONGER SAVED TO IS NOT WORK.
+    ------------------------------------------------------------
+    -- The client reports a `locked` flag per saved instance, this addon has
+    -- read it into the record since the function was written, and nothing
+    -- ever looked at it: the filter inferred the same fact from the reset
+    -- countdown instead. An expired row is listed with time still on it, so
+    -- "six bosses of spent effort, expiring soon" -- the strongest urgency
+    -- signal this addon emits -- was raised for an instance the player is not
+    -- saved to, sending them to re-clear from zero.
+    local instances = CN:GetModule("Instances")
+
+    CN_TEST_SetLockouts({
+        { name = "Still Saved", difficulty = "Normal", encounters = 8,
+          defeated = 2, resetsIn = 3600, locked = true },
+        { name = "Expired Raid", difficulty = "Normal", encounters = 8,
+          defeated = 6, resetsIn = 3600, locked = false, id = 2147483101 },
+    })
+
+    local named = {}
+
+    for _, lockout in ipairs(instances.Lockouts()) do
+        named[lockout.name] = lockout
+    end
+
+    assert(named["Still Saved"],
+        "a lockout the client says you are saved to is listed")
+
+    assert(not named["Expired Raid"],
+        "a lockout the client says you are NOT saved to is not listed, "
+        .. "however much time its reset still shows")
+
+    assert(named["Still Saved"].locked == true,
+        "and the row carries the fact, so a reader can say why")
+
+    -- AND NOTHING RANKS IT EITHER, which is where the wrong advice reached
+    -- the player.
+    CN.InvalidateCandidates()
+
+    for _, candidate in ipairs(CN.CollectCandidates(true) or {}) do
+        if candidate.type == CN.objectiveTypes.INSTANCE then
+            assert(not tostring(candidate.name):find("Expired", 1, true),
+                "and it is not offered as a next action: "
+                .. tostring(candidate.name))
+        end
+    end
+
+    CN_TEST_SetLockouts(nil)
+    CN.InvalidateCandidates()
+
+    print("  a lockout you are no longer saved to is not offered as work")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A BAG OF CAGED PETS IS ONE SWEEP, NOT ONE PER PET.
+    ------------------------------------------------------------
+    -- `NEW_PET_ADDED` called `Pets.Scan` directly. `bench.lua` measures that
+    -- at 2.554 ms against 1,800 species -- the most expensive single event in
+    -- the benchmark by a factor of forty -- and every sweep also saves,
+    -- clears and restores the player's own journal filters. `Routing.lua`
+    -- debounces its own handler for this event and names this file as the
+    -- reason.
+    local sweeps = 0
+
+    local realWith = CN.Blizzard.WithAllPetsShown
+
+    CN.Blizzard.WithAllPetsShown = function(...)
+        sweeps = sweeps + 1
+
+        return realWith(...)
+    end
+
+    CN.ForgetDebounces()
+
+    for _ = 1, 6 do
+        CN.Dispatch("NEW_PET_ADDED")
+    end
+
+    CN.Blizzard.WithAllPetsShown = realWith
+
+    assert(sweeps == 1,
+        "six pets in one burst cost one journal sweep, not six: " .. sweeps)
+
+    print("  a bag of caged pets costs one journal sweep")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A PUBLISHED FUNCTION EXISTS BEFORE ANYTHING CALLS THE OTHER ONE.
+    ------------------------------------------------------------
+    -- `CN.UnregisterQuestDataProvider` was defined INSIDE the body of
+    -- `CN.RegisterQuestDataProvider`, below four early returns -- so it came
+    -- into existence only as a side effect of a successful registration. It
+    -- happened to exist in game only because three provider files register
+    -- unconditionally at load. Both tests for it registered first, so the
+    -- ordering was invisible.
+    assert(type(CN.UnregisterQuestDataProvider) == "function",
+        "the withdrawal half of the published provider API is a function "
+        .. "from load, not from the first successful registration")
+
+    assert(CN.UnregisterQuestDataProvider("nothing registered under this name")
+        == false,
+        "and it answers for a name that was never registered rather than "
+        .. "throwing")
+
+    print("  the published provider API exists before anything registers")
+end)()
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -113878,16 +114510,49 @@ local BUDGETS = {
 
     -- Added in 0.93.0, and the measurement said what the algorithm promises:
     -- 4.5 ms at 90 stops, 21.7 at 200, which is (200/90)^2 to within noise.
-    -- No hidden cubic term, so the ceiling is set where a genuinely quadratic
-    -- curve puts it and not where a defensive guess would.
+    -- No hidden cubic term.
     --
     -- Twenty-two milliseconds IS a dropped frame. It is paid once per route
     -- and then cached (`routeCache`), never on the two-second refresh -- the
-    -- distinction 0.57.0 drew when it chose correct-and-slower. A ceiling
-    -- here means a regression that moves the work back onto the refresh path
-    -- is caught by a number rather than by a player.
-    ["ImproveRoute() over 200 stops"] = 30.0,
+    -- distinction 0.57.0 drew when it chose correct-and-slower.
+    --
+    -- AN ABSOLUTE CEILING HERE MEASURED THE MACHINE. 0.95.0.
+    --
+    -- 30 ms was set from a 21.7 ms reading. The same code on the same
+    -- fixture measured 27.5, then 29.4, then 30.7 on a build container that
+    -- had got slower -- verified by extracting the SHIPPED 0.93.0 tree from
+    -- its own release artefact and benchmarking it side by side, where it
+    -- measured the same. So the gate was days away from failing a release
+    -- over somebody else's noisy neighbour, and raising the number each time
+    -- is how a budget stops meaning anything.
+    --
+    -- The invariant worth gating is not "under 30 ms on this box". It is
+    -- "still quadratic", and that is a RATIO against the 90-stop row measured
+    -- in the same process, on the same machine, in the same second. See
+    -- `RATIOS` below. The absolute ceiling stays as a catastrophe guard, set
+    -- where a genuine collapse would land rather than where the last good
+    -- reading did.
+    ["ImproveRoute() over 200 stops"] = 60.0,
     ["ClusterByProximity() over 110 objectives"] = 3.0,
+}
+
+-- WHAT THE CODE PROMISES, RATHER THAN WHAT THIS MACHINE DID. 0.95.0.
+--
+-- A ratio between two rows measured in the same process cancels the machine
+-- out: a container three times slower moves both numbers and leaves the
+-- quotient alone. It fails on the thing an absolute ceiling cannot see -- a
+-- change in the SHAPE of the curve -- and does not fail on a slow afternoon.
+--
+-- 2-opt is quadratic in stops, so 200 against 90 is (200/90)^2 = 4.94.
+-- Allowed 5.6, which is noise around a quadratic and nowhere near the 11.1 a
+-- cubic term would produce at this ratio.
+local RATIOS = {
+    {
+        label   = "ImproveRoute() over 200 stops",
+        against = "ImproveRoute() over 90 stops",
+        most    = 5.6,
+        says    = "2-opt is quadratic in stops; 200 against 90 is 4.94",
+    },
 }
 
 if ENFORCE_BUDGETS then
@@ -113922,6 +114587,30 @@ if ENFORCE_BUDGETS then
         else
             print(string.format("  ok       %-38s %.3f ms of %.3f ms",
                 label, measured, ceiling))
+        end
+    end
+
+    for _, ratio in ipairs(RATIOS) do
+        local big   = CN_BENCH_RESULTS[ratio.label]
+        local small = CN_BENCH_RESULTS[ratio.against]
+
+        if not big or not small or small <= 0 then
+            print(string.format("  MISSING  %-38s (needs both rows)",
+                ratio.label .. " vs " .. ratio.against))
+
+            failed = failed + 1
+        else
+            local seen = big / small
+
+            if seen > ratio.most then
+                print(string.format("  SHAPE    %-38s %.2fx > %.2fx  (%s)",
+                    ratio.label, seen, ratio.most, ratio.says))
+
+                failed = failed + 1
+            else
+                print(string.format("  ok       %-38s %.2fx of %.2fx",
+                    ratio.label .. " shape", seen, ratio.most))
+            end
         end
     end
 

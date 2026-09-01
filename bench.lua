@@ -670,16 +670,49 @@ local BUDGETS = {
 
     -- Added in 0.93.0, and the measurement said what the algorithm promises:
     -- 4.5 ms at 90 stops, 21.7 at 200, which is (200/90)^2 to within noise.
-    -- No hidden cubic term, so the ceiling is set where a genuinely quadratic
-    -- curve puts it and not where a defensive guess would.
+    -- No hidden cubic term.
     --
     -- Twenty-two milliseconds IS a dropped frame. It is paid once per route
     -- and then cached (`routeCache`), never on the two-second refresh -- the
-    -- distinction 0.57.0 drew when it chose correct-and-slower. A ceiling
-    -- here means a regression that moves the work back onto the refresh path
-    -- is caught by a number rather than by a player.
-    ["ImproveRoute() over 200 stops"] = 30.0,
+    -- distinction 0.57.0 drew when it chose correct-and-slower.
+    --
+    -- AN ABSOLUTE CEILING HERE MEASURED THE MACHINE. 0.95.0.
+    --
+    -- 30 ms was set from a 21.7 ms reading. The same code on the same
+    -- fixture measured 27.5, then 29.4, then 30.7 on a build container that
+    -- had got slower -- verified by extracting the SHIPPED 0.93.0 tree from
+    -- its own release artefact and benchmarking it side by side, where it
+    -- measured the same. So the gate was days away from failing a release
+    -- over somebody else's noisy neighbour, and raising the number each time
+    -- is how a budget stops meaning anything.
+    --
+    -- The invariant worth gating is not "under 30 ms on this box". It is
+    -- "still quadratic", and that is a RATIO against the 90-stop row measured
+    -- in the same process, on the same machine, in the same second. See
+    -- `RATIOS` below. The absolute ceiling stays as a catastrophe guard, set
+    -- where a genuine collapse would land rather than where the last good
+    -- reading did.
+    ["ImproveRoute() over 200 stops"] = 60.0,
     ["ClusterByProximity() over 110 objectives"] = 3.0,
+}
+
+-- WHAT THE CODE PROMISES, RATHER THAN WHAT THIS MACHINE DID. 0.95.0.
+--
+-- A ratio between two rows measured in the same process cancels the machine
+-- out: a container three times slower moves both numbers and leaves the
+-- quotient alone. It fails on the thing an absolute ceiling cannot see -- a
+-- change in the SHAPE of the curve -- and does not fail on a slow afternoon.
+--
+-- 2-opt is quadratic in stops, so 200 against 90 is (200/90)^2 = 4.94.
+-- Allowed 5.6, which is noise around a quadratic and nowhere near the 11.1 a
+-- cubic term would produce at this ratio.
+local RATIOS = {
+    {
+        label   = "ImproveRoute() over 200 stops",
+        against = "ImproveRoute() over 90 stops",
+        most    = 5.6,
+        says    = "2-opt is quadratic in stops; 200 against 90 is 4.94",
+    },
 }
 
 if ENFORCE_BUDGETS then
@@ -714,6 +747,30 @@ if ENFORCE_BUDGETS then
         else
             print(string.format("  ok       %-38s %.3f ms of %.3f ms",
                 label, measured, ceiling))
+        end
+    end
+
+    for _, ratio in ipairs(RATIOS) do
+        local big   = CN_BENCH_RESULTS[ratio.label]
+        local small = CN_BENCH_RESULTS[ratio.against]
+
+        if not big or not small or small <= 0 then
+            print(string.format("  MISSING  %-38s (needs both rows)",
+                ratio.label .. " vs " .. ratio.against))
+
+            failed = failed + 1
+        else
+            local seen = big / small
+
+            if seen > ratio.most then
+                print(string.format("  SHAPE    %-38s %.2fx > %.2fx  (%s)",
+                    ratio.label, seen, ratio.most, ratio.says))
+
+                failed = failed + 1
+            else
+                print(string.format("  ok       %-38s %.2fx of %.2fx",
+                    ratio.label .. " shape", seen, ratio.most))
+            end
         end
     end
 

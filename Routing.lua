@@ -238,20 +238,6 @@ end
 -- CLUSTERING
 ------------------------------------------------------------
 
--- Groups objectives by mapID so a zone sweep can be planned.
-function CN.ClusterByMap(objectives)
-    local clusters = {}
-
-    for _, objective in ipairs(objectives) do
-        if objective.mapID then
-            clusters[objective.mapID] = clusters[objective.mapID] or {}
-            table.insert(clusters[objective.mapID], objective)
-        end
-    end
-
-    return clusters
-end
-
 ------------------------------------------------------------
 -- HUBS
 ------------------------------------------------------------
@@ -271,41 +257,18 @@ CN.hubRadiusYards = 70
 -- is not.
 CN.fallbackZoneYards = 2000
 
--- Distance between two objectives in real yards where the client can convert,
--- falling back to normalized map units scaled to a plausible zone size.
+-- BOTH DEAD HELPERS DELETED. 0.95.0.
 --
--- The fallback matters: map coordinates are normalized per map, so the same
--- 0.01 is a different real distance in every zone, and clustering on raw
--- normalized distance would make hubs enormous in small zones and useless in
--- large ones.
-function CN.ObjectiveDistanceYards(a, b)
-    if not (a and b and a.x and a.y and b.x and b.y) then
-        return nil
-    end
-
-    if a.mapID and b.mapID and a.mapID ~= b.mapID then
-        return nil
-    end
-
-    local navigation = CN:GetModule("Navigation")
-
-    if navigation and a.mapID then
-        local yards = navigation.DistanceYards(a.mapID, a.x, a.y, b.x, b.y)
-
-        if yards then
-            return yards
-        end
-    end
-
-    -- Fallback: assume a zone is about 2000 yards across. Crude, and only
-    -- used when the client will not convert. Read from the constant below
-    -- rather than written out again, so the two fallbacks in this file agree
-    -- by construction rather than by somebody remembering to change both.
-    local dx = a.x - b.x
-    local dy = a.y - b.y
-
-    return math.sqrt((dx * dx) + (dy * dy)) * CN.fallbackZoneYards
-end
+-- `CN.ClusterByMap` and `CN.ObjectiveDistanceYards` had no caller in the
+-- addon, the harness or the benchmark, and coverage showed zero hits on
+-- either body. The 0.54.0 bucketing rewrite replaced the one call site and
+-- left the functions -- and left a comment below claiming, in the present
+-- tense, that one of them "in this very file converts properly", which is a
+-- comment naming a mechanism that no longer runs. Dead code that reads as a
+-- live feature is worse than an absent one: `CN.fallbackZoneYards` documents
+-- itself as read by "both fallbacks in this file", and for two releases only
+-- one of the two was reachable, so the next change to that constant would
+-- have been tested against dead code.
 
 -- The scale is resolved once per route rather than per comparison: it is a
 -- property of the map being routed, and asking the client per pair would be
@@ -639,8 +602,10 @@ end
 -- This is the SAME defect as the bearing bug of 0.40.0, in the same addon,
 -- eight releases later: the assumption that a map is square. Navigation
 -- measures the real spans and this file was the last place still ignoring
--- them -- while, forty lines above, CN.ObjectiveDistanceYards in this very
--- file converts properly. Clustering and routing disagreed with each other.
+-- them. The conversion lives in `UseMapScale` and `Distance2` below; it used
+-- to live in a second helper forty lines above, which 0.95.0 deleted as dead
+-- -- so clustering and routing now disagree with each other nowhere, because
+-- there is one implementation.
 --
 -- The scale is resolved once per route rather than per comparison: it is a
 -- Total length of a route starting from the player, in yards.

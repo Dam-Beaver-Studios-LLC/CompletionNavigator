@@ -66,11 +66,19 @@ function Titles.Scan()
         end
     end
 
-    CN.MarkScanned("titles")
+    -- ZERO IS THE CLIENT DECLINING, NOT AN EMPTY list. 0.95.0.
+    --
+    -- `CN.MarkScanned` routes to `CN.NoteSetupStep`, so stamping it removes
+    -- titles from `Setup.NeverScanned` for ever: the new player is never told to
+    -- run `/cn titlescan`, and the Scans tab reads "just now" over a read that returned
+    -- nothing. Same shape as toys and mounts; see the note in
+    -- `Modules/Toys.lua`.
 
-    if CN.character then
-        CN.character.titlesKnown = known
+    if seen == 0 then
+        return 0, 0
     end
+
+    CN.MarkScanned("titles")
 
     return seen, known
 end

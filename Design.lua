@@ -681,6 +681,16 @@ end
 CN.DASH = "\226\128\148"
 CN.DOT  = "\194\183"
 
+-- AND AN ELLIPSIS IS ONE CHARACTER. 0.95.0.
+--
+-- Two labels spelled a pending state as three separator dots -- `CN.DOT`
+-- repeated -- which is a middle dot at mid-height, three times, with no
+-- spacing rules of its own. "Reading" followed by three floating dots is not
+-- what an ellipsis looks like, and it is the same class of thing as the
+-- em dash sweep above: small, and most of what separates a hobby addon's
+-- output from a product's.
+CN.ELLIPSIS = "\226\128\166"
+
 -- Wraps an aside in the dash and the muted colour in one call, which is the
 -- single commonest shape in the addon's output.
 function CN.Aside(text)

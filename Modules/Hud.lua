@@ -573,7 +573,7 @@ function Hud.RegisterOptionsPanel()
     local version = CN.Label(panel, "ARTWORK", "LABEL")
     version:SetPoint("TOPLEFT", scan, "BOTTOMLEFT", 0, -12)
     version:SetText("v" .. tostring(CN.version)
-        .. "  " .. CN.DOT .. "  Dam Beaver Studios, LLC")
+        .. " " .. CN.DOT .. " Dam Beaver Studios, LLC")
 
     -- Modern path first.
     if SettingsPanel and Settings and Settings.RegisterCanvasLayoutCategory

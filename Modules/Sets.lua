@@ -125,6 +125,26 @@ function Sets.All(limit)
         end
     end
 
+    -- A REFUSAL IS NOT AN ANSWER, AND CACHING ONE IS PERMANENT. 0.95.0.
+    --
+    -- `GetAllSets` returns an empty table while the wardrobe is still
+    -- streaming, and that was stored as `readable = true, rows = {}` -- with
+    -- `TRANSMOG_COLLECTION_UPDATED` as the only invalidator. That event fires
+    -- when a transmog is COLLECTED, so a player who collects nothing keeps
+    -- the empty answer for the whole session: `/cn sets` reports zero sets
+    -- read and the Sets provider emits nothing, which is the "3 of 5 pieces"
+    -- denominator this file's header calls the thing the addon is otherwise
+    -- very short of.
+    --
+    -- `Modules/Instances.lua` reasons this out correctly for the async
+    -- Adventure Guide search, under the header "A ZERO IS 'NOT YET', NOT
+    -- 'NOTHING'". The sibling did not get it.
+    --
+    -- Returned but not cached, exactly as the two refusal paths above do.
+    if examined == 0 then
+        return rows, true, 0
+    end
+
     cache = {
         rows     = rows,
         readable = true,

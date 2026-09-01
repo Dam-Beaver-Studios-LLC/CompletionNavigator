@@ -7,6 +7,65 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.95.0]
+
+**At every login with a cold Pet Journal or Toy Box, the addon wiped filters
+you had chosen â€” and told you it could not put them back.** Both journals
+answer zero while they are still loading, which is exactly when the addon
+scans them, and both read that zero as "your source and type checkboxes are
+hiding everything" and widened them. The client offers no getter for those
+checkboxes, so the widening is permanent. The guard written for this in 0.92.0
+sits *inside* the scan, which runs after the widening has already happened â€” a
+guard that runs after the writes is not a guard. Both now check a count the
+filters cannot touch first, so "you filtered everything out" and "the journal
+has not answered yet" are told apart before anything is changed.
+
+**A raid lockout you are no longer saved to was being offered as spent effort
+about to expire.** The client reports a `locked` flag per instance; the addon
+has read it into its own records since that code was written and never once
+looked at it, inferring the same fact from the reset countdown instead. But an
+expired lockout stays in the list with time still showing on it. So the
+strongest urgency signal this addon emits â€” "six bosses already down, resets
+soon" â€” was being raised for an instance you would have to clear from zero.
+
+### Fixed
+
+- **A cold toy box, mount journal or title list was recorded as a completed
+  scan.** Stamping that flag removes the step from the setup reminder for the
+  life of the install, so a new player was never told to run the scan, and the
+  Scans tab read "just now" over a read that returned nothing. Pets got this
+  guard in 0.92.0, currencies in 0.88.0, achievements in 0.76.0, exploration
+  in 0.61.0 and Loremaster in 0.71.0; these three were the ones the sweep
+  never reached, and all three scan at login.
+- **A wardrobe that had not loaded was cached as an empty one for the whole
+  session.** The only thing that clears that cache is collecting a transmog,
+  so a player who collected nothing had `/cn sets` reporting zero and the sets
+  provider silent until they logged out â€” losing the "3 of 5 pieces"
+  denominator this addon is otherwise short of.
+- **A bag of caged pets cost a full journal sweep per pet.** That sweep is the
+  most expensive single event in the addon by a factor of forty, and each one
+  also saves, clears and restores your own journal search and checkboxes. The
+  first pet still answers immediately; the rest of a burst collapse into one.
+  The routing file has debounced its own handler for this event for releases,
+  naming the pet module as the reason.
+- **`CN.UnregisterQuestDataProvider` was defined inside another function.** It
+  existed only as a side effect of a successful registration, so a third-party
+  addon calling the published API before registering anything got an error out
+  of it.
+- Chat separators were missing their leading space in four places, so counts
+  and separators collided â€” and two labels spelled a pending state as three
+  middle dots rather than an ellipsis.
+
+### Changed
+
+- The reset-proximity branch of the lockout urgency term has been removed. It
+  has been unreachable since 0.88.0 moved that deadline onto the scorer's own
+  curve, and it read as though the term still weighted it â€” an invitation to
+  charge the same reset a third time.
+- Two routing helpers with no callers are gone, along with a comment claiming
+  in the present tense that one of them was doing the conversion the file
+  relies on. There is one implementation of that conversion now.
+
 ## [0.94.0]
 
 **Opening a profession window before the game had sent the recipe list was

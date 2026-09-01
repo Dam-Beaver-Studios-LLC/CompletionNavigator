@@ -824,7 +824,7 @@ CN:RegisterCommand{
                 -- print it. Every other row in this command carried one.
                 CN.PrintLine(row.name .. " " .. CN.Muted("["
                     .. CN.TypeBadge(row.type) .. " " .. tostring(row.id)
-                    .. CN.DOT .. " " .. FormatRemaining(row.remaining)
+                    .. " " .. CN.DOT .. " " .. FormatRemaining(row.remaining)
                     .. " left]"))
             end
         end
@@ -887,7 +887,7 @@ CN:RegisterCommand{
         CN.InvalidateCandidates()
 
         Print("Deferred: " .. tostring(objective.name or objective.id)
-            .. CN.Aside(matched.label .. CN.DOT .. " "
+            .. CN.Aside(matched.label .. " " .. CN.DOT .. " "
                 .. FormatRemaining(seconds)))
 
         Print("|cff8a8f96|cffffc74f/cn unhide " .. tostring(objective.id)

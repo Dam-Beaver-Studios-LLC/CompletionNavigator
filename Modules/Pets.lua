@@ -391,10 +391,30 @@ end
 -- Caging or learning a pet is the player acting, and no cooldown may delay
 -- it. The scan stamps the throttle itself, so the `PET_JOURNAL_LIST_UPDATE`
 -- that follows finds it fresh instead of running the same sweep again.
+--
+-- ONE PET IS AN EVENT; A BAG OF THEM IS A BURST. 0.95.0.
+--
+-- `bench.lua` measures this handler at 2.554 ms against 1,800 species -- the
+-- most expensive single event in the whole benchmark by a factor of forty,
+-- the next being `NEW_MOUNT_ADDED` at 0.065 -- and every sweep also drives
+-- `WithAllPetsShown`, which saves, clears and restores the player's own
+-- search box and collected checkboxes. Unthrottled, that ran once per pet.
+--
+-- `Routing.lua` debounces its own handler for this event and says why in as
+-- many words: "`Modules/Pets.lua` already runs a full journal rescan on it
+-- with no throttle, so a mass loot cost two full scans and an unthrottled
+-- recommendation pass per pet". The tree documented the problem next door and
+-- left it here.
+--
+-- `CN.Debounce` answers the first pet immediately -- which is the half that
+-- must not be delayed -- and collapses the rest of the burst into one
+-- trailing sweep.
 CN:RegisterEvent("NEW_PET_ADDED", function()
-    Pets.Scan()
+    CN.Debounce("Pets.journal", 2, function()
+        Pets.Scan()
 
-    DebugPrint("Pet added; journal rescanned.")
+        DebugPrint("Pet added; journal rescanned.")
+    end)
 end)
 
 CN:RegisterEvent("PET_JOURNAL_LIST_UPDATE", SweepIfDue)
@@ -425,9 +445,9 @@ CN:RegisterCommand{
         -- NO COLUMN PADDING. 0.92.0. See the note in
         -- `Modules/Currencies.lua`: three spaces after a one-digit count and
         -- after a four-digit count are two different widths.
-        Print("Collected: " .. owned .. CN.DOT .. " missing: " .. missing
+        Print("Collected: " .. owned .. " " .. CN.DOT .. " Missing: " .. missing
             .. ((counts and (counts.unobtainable or 0) > 0)
-                and (CN.DOT .. " unobtainable: " .. counts.unobtainable)
+                and (" " .. CN.DOT .. " Unobtainable: " .. counts.unobtainable)
                 or ""))
     end,
 }
@@ -479,7 +499,7 @@ CN:RegisterCommand{
         Print("Collected: " .. CN.YesNo(record.collected)
             .. (record.collected and (" (" .. record.count .. "/" .. record.limit .. ")") or ""))
         Print("Wild: " .. CN.YesNo(record.isWild)
-            .. CN.DOT .. " battle pet: " .. CN.YesNo(record.canBattle))
+            .. " " .. CN.DOT .. " battle pet: " .. CN.YesNo(record.canBattle))
 
         if record.obtainable == false then
             Print("|cffe2564cCurrently unobtainable.|r")

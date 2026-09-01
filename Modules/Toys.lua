@@ -72,6 +72,21 @@ function Toys.Scan()
         end
     end)
 
+    -- ZERO IS THE CLIENT DECLINING, NOT AN EMPTY collection. 0.95.0.
+    --
+    -- `CN.MarkScanned` routes to `CN.NoteSetupStep`, so stamping it removes
+    -- toys from `Setup.NeverScanned` for ever: the new player is never told to
+    -- run `/cn toyscan`, and the Scans tab reads "just now" over a read that returned
+    -- nothing. Pets was given this guard in 0.92.0, Currencies in
+    -- 0.88.0, Achievements in 0.76.0, Exploration in 0.61.0 and Loremaster in
+    -- 0.71.0. Toys, mounts and titles were the three the sweep never
+    -- reached -- and this one runs from `CN:OnLogin`, which is precisely when
+    -- the toy box is cold.
+
+    if seen == 0 then
+        return 0, 0, 0
+    end
+
     CN.MarkScanned("toys")
 
     return seen, collected, missing

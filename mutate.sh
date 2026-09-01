@@ -664,7 +664,7 @@ mutate "Modules/Navigation.lua" \
     "clearing waypoints deletes a pin the player placed by hand"
 
 mutate "Providers/BlizzardCollections.lua" \
-    "    if select(1, Blizzard.GetNumPets()) == 0 then" \
+    "    if shown == 0 and (owned or 0) > 0 then" \
     "    if true then" \
     "the pet journal's source and type filters are widened on every scan"
 
@@ -4159,11 +4159,18 @@ mutate "Modules/Vault.lua" \
     "            limitedTimeBonus = Urgency(row.remaining, resetsIn)," \
     "the vault charges the weekly reset through two curves"
 
+# RE-ANCHORED IN 0.95.0. The reset used to be a third PARAMETER of `Urgency`,
+# passed as nil since 0.88.0; that release left the parameter and its branch
+# in place, dead, and 0.95.0 deleted both. The invariant is unchanged -- the
+# reset is charged once, through `expiresIn` -- so the mutation now adds the
+# second charge at the call site rather than re-enabling a branch that no
+# longer exists.
 mutate "Modules/Instances.lua" \
-    "                limitedTimeBonus = Urgency(lockout.remaining, nil,
+    "                limitedTimeBonus = Urgency(lockout.remaining,
                     lockout.defeated)," \
-    "                limitedTimeBonus = Urgency(lockout.remaining, lockout.resetsIn,
-                    lockout.defeated)," \
+    "                limitedTimeBonus = Urgency(lockout.remaining,
+                    lockout.defeated)
+                    + (((lockout.resetsIn or math.huge) <= 86400) and 3 or 0)," \
     "a lockout charges the weekly reset through two curves"
 
 mutate "Modules/Warband.lua" \
@@ -4820,6 +4827,61 @@ mutate "Providers/BlizzardWorld.lua" \
         Restore()" \
     "    if not ok or type(size) ~= \"number\" then" \
     "a refused currency list leaves the player's headers forced open"
+
+mutate "Providers/BlizzardCollections.lua" \
+    "    if shown == 0 and (owned or 0) > 0 then" \
+    "    if shown == 0 then" \
+    "a cold pet journal has the player's filters wiped at every login"
+
+mutate "Providers/BlizzardCollections.lua" \
+    "    if Blizzard.GetNumToys() == 0
+        and Blizzard.GetNumOwnableToys() > 0
+        and C_ToyBox.SetAllSourceTypeFilters then" \
+    "    if Blizzard.GetNumToys() == 0
+        and C_ToyBox.SetAllSourceTypeFilters then" \
+    "a cold toy box has the player's source filters wiped at every login"
+
+mutate "Modules/Sets.lua" \
+    "    if examined == 0 then
+        return rows, true, 0
+    end" \
+    "" \
+    "a wardrobe that had not loaded is cached as an empty one for the session"
+
+mutate "Modules/Toys.lua" \
+    "    if seen == 0 then
+        return 0, 0, 0
+    end" \
+    "" \
+    "a cold toy scan is recorded as a completed read"
+
+mutate "Modules/Mounts.lua" \
+    "    if seen == 0 then
+        return 0, 0, 0
+    end" \
+    "" \
+    "a cold mount scan is recorded as a completed read"
+
+mutate "Modules/Titles.lua" \
+    "    if seen == 0 then
+        return 0, 0
+    end" \
+    "" \
+    "a cold title scan is recorded as a completed read"
+
+mutate "Modules/Instances.lua" \
+    "        if saved.locked ~= false and (not saved.reset or saved.reset > 0) then" \
+    "        if not saved.reset or saved.reset > 0 then" \
+    "a lockout you are no longer saved to is offered as spent effort"
+
+mutate "Modules/Pets.lua" \
+    "    CN.Debounce(\"Pets.journal\", 2, function()
+        Pets.Scan()
+
+        DebugPrint(\"Pet added; journal rescanned.\")
+    end)" \
+    "    Pets.Scan()" \
+    "a bag of caged pets costs one full journal sweep per pet"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

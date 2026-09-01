@@ -2242,7 +2242,24 @@ C_PetJournal = {
             CN_TEST_PET_FILTERS.uncollected = value
         end
     end,
-    GetNumPets               = function() return #CN_TEST_PetDisplayRows(), 1 end,
+    -- BOTH RETURNS ARE REAL. 0.95.0.
+    --
+    -- The second is the OWNED total and the filters do not touch it, which is
+    -- what separates "your checkboxes hide everything" from "the journal has
+    -- not answered yet". It was the literal 1, so the second state -- the
+    -- ordinary one at login, where the addon irreversibly widens filters it
+    -- cannot read back -- could not be told from the first.
+    GetNumPets               = function()
+        local owned = 0
+
+        for _, pet in ipairs(CN_TEST_PetDisplayRows()) do
+            if pet.owned then
+                owned = owned + 1
+            end
+        end
+
+        return #CN_TEST_PetDisplayRows(), owned
+    end,
     GetPetInfoByIndex        = function(i)
         local p = CN_TEST_PetDisplayRows()[i]
         if not p then return nil end
@@ -2280,7 +2297,15 @@ function CN_TEST_SetMountCollected(mountID, collected)
 end
 
 C_MountJournal = {
-    GetMountIDs           = function() return { 1, 2, 3 } end,
+    -- A MOUNT JOURNAL THAT CAN BE COLD, for the reason `GetNumTitles` below
+    -- carries. 0.95.0.
+    GetMountIDs           = function()
+        if CN_TEST_MOUNTS_COLD then
+            return {}
+        end
+
+        return { 1, 2, 3 }
+    end,
     GetMountInfoByID      = function(id)
         local m = mounts[id]
         if not m then return nil end
@@ -2312,7 +2337,31 @@ C_ToyBox = {
     SetAllSourceTypeFilters = function()
         CN_TEST_TOY_SOURCES_WIDENED = (CN_TEST_TOY_SOURCES_WIDENED or 0) + 1
     end,
-    GetNumFilteredToys      = function() return #toys end,
+    -- A TOY BOX THAT CAN BE COLD, AND A TOTAL THE FILTERS DO NOT TOUCH.
+    -- 0.95.0.
+    --
+    -- `GetNumFilteredToys` returned `#toys` unconditionally, so the state the
+    -- client is actually in at login -- answering zero because the toy box
+    -- has not streamed -- was unreachable, and the code that reads a filtered
+    -- zero as "your filters hide everything" and irreversibly widens them
+    -- could not be tested. Twenty-fifth entry in this project's list of
+    -- defects hidden by a stub kinder than the client.
+    GetNumFilteredToys      = function()
+        if CN_TEST_TOYS_COLD then
+            return 0
+        end
+
+        return #toys
+    end,
+
+    -- The unfiltered total, which is the proof the client answered at all.
+    GetNumToys              = function()
+        if CN_TEST_TOYS_COLD then
+            return 0
+        end
+
+        return #toys
+    end,
     GetToyFromIndex         = function(i) return toys[i] and toys[i].itemID or nil end,
     GetToyInfo              = function(itemID)
         for _, t in ipairs(toys) do
@@ -2371,7 +2420,19 @@ local titleList = {
     { name = "the Patient",  known = true },
 }
 
-function GetNumTitles() return #titleList end
+-- A TITLE LIST THAT CAN BE COLD. 0.95.0.
+--
+-- `GetNumTitles` answers zero before the client has sent them, which is the
+-- ordinary state at login -- and `Titles.Scan` runs from `CN:OnLogin`. The
+-- literal made that state unreachable, so a scan that read nothing and then
+-- stamped itself as complete could not be caught.
+function GetNumTitles()
+    if CN_TEST_TITLES_COLD then
+        return 0
+    end
+
+    return #titleList
+end
 function GetTitleName(i) return titleList[i] and titleList[i].name or nil end
 function IsTitleKnown(i) return titleList[i] and titleList[i].known or false end
 
@@ -2600,6 +2661,12 @@ function CN_TEST_OpenTradeSkill() tradeSkillReady = true end
 -- The window is open and ready, and the recipe list has not arrived. Set on
 -- the global so the main chunk stays under Lua's 200-local ceiling.
 CN_TEST_RECIPES_COLD = false
+
+-- The same, for the collections that scan at login. Globals rather than
+-- locals: the main chunk is at Lua's 200-local ceiling.
+CN_TEST_TOYS_COLD   = false
+CN_TEST_MOUNTS_COLD = false
+CN_TEST_TITLES_COLD = false
 
 
 
@@ -27531,9 +27598,19 @@ print("\nFeatures that were wired to nothing:")
     -- Unless the player's own filters hide everything, which is the one case
     -- where changing them beats reporting an empty collection -- and it is
     -- announced, because it cannot be undone.
+    --
+    -- FILTERED TO NOTHING, NOT COLD. 0.95.0.
+    --
+    -- This test used to force `0, 0` -- both returns zero -- and require the
+    -- widen. That is the COLD journal, which is the ordinary state at login,
+    -- and requiring the widen there is requiring the defect: a player who had
+    -- narrowed their journal lost the narrowing at every login and was told
+    -- it could not be put back. The second return is the OWNED total and the
+    -- filters do not touch it, so `0, 1803` is "your checkboxes hide
+    -- everything" and `0, 0` is "the journal has not answered".
     local realNumPets = C_PetJournal.GetNumPets
 
-    C_PetJournal.GetNumPets = function() return 0, 0 end
+    C_PetJournal.GetNumPets = function() return 0, 1803 end
 
     CN_TEST_PET_FILTERS = { collected = false, uncollected = true }
 
@@ -27541,8 +27618,21 @@ print("\nFeatures that were wired to nothing:")
 
     assert((CN_TEST_PET_FILTERS.sourceWidens or 0) == 1
         and (CN_TEST_PET_FILTERS.typeWidens or 0) == 1,
-        "but when the journal reports nothing at all, widening is the only "
-        .. "way to answer")
+        "when a player's own checkboxes hide every pet they own, widening is "
+        .. "the only way to answer")
+
+    -- AND A COLD JOURNAL IS NOT THAT, which is the whole point.
+    C_PetJournal.GetNumPets = function() return 0, 0 end
+
+    CN_TEST_PET_FILTERS = { collected = false, uncollected = true }
+
+    CN.Blizzard.WithAllPetsShown(function() end)
+
+    assert((CN_TEST_PET_FILTERS.sourceWidens or 0) == 0
+        and (CN_TEST_PET_FILTERS.typeWidens or 0) == 0,
+        "a journal that has not answered yet must not have the player's "
+        .. "filters wiped on the strength of it; that is every login, and it "
+        .. "cannot be undone")
 
     C_PetJournal.GetNumPets = realNumPets
 
@@ -27556,6 +27646,39 @@ print("\nFeatures that were wired to nothing:")
     assert(CN_TEST_TOY_SOURCES_WIDENED == 0,
         "a toy scan that can see toys must not widen the source filters "
         .. "either; SetAllSourceTypeFilters has no getter")
+
+    -- A COLD TOY BOX IS NOT A FILTERED ONE. 0.95.0.
+    --
+    -- `GetNumFilteredToys` answers zero while the box is streaming, and
+    -- `Toys.Scan` runs from `CN:OnLogin`. Toys never had the guard pets were
+    -- given in 0.92.0, so a player who had narrowed their Toy Box lost the
+    -- narrowing at every cold login and was told it could not be put back.
+    CN_TEST_TOY_SOURCES_WIDENED = 0
+    CN_TEST_TOYS_COLD = true
+
+    CN.Blizzard.WithAllToysShown(function() end)
+
+    CN_TEST_TOYS_COLD = false
+
+    assert(CN_TEST_TOY_SOURCES_WIDENED == 0,
+        "a toy box that has not answered yet must not have the player's "
+        .. "source filters wiped on the strength of it")
+
+    -- AND A GENUINELY FILTERED ONE STILL IS, so this is a guard and not a
+    -- wall: every toy hidden, with the box itself answering.
+    local realFiltered = C_ToyBox.GetNumFilteredToys
+
+    C_ToyBox.GetNumFilteredToys = function() return 0 end
+
+    CN_TEST_TOY_SOURCES_WIDENED = 0
+
+    CN.Blizzard.WithAllToysShown(function() end)
+
+    C_ToyBox.GetNumFilteredToys = realFiltered
+
+    assert(CN_TEST_TOY_SOURCES_WIDENED == 1,
+        "when a player's own source filters hide every toy, widening is the "
+        .. "only way to answer")
 
     print("  and so is the toy box")
 end)()
@@ -39790,6 +39913,258 @@ end)()
     CN:GetModule("Currencies").Scan()
 
     print("  a currency read the client refused does not complete setup")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A WARDROBE THAT HAS NOT ANSWERED IS NOT AN EMPTY WARDROBE.
+    ------------------------------------------------------------
+    -- `Sets.All` cached `readable = true, rows = {}` when `GetAllSets`
+    -- returned nothing, and the only invalidator is
+    -- `TRANSMOG_COLLECTION_UPDATED` -- which fires when a transmog is
+    -- COLLECTED. A player who collects nothing keeps the empty answer for the
+    -- whole session: `/cn sets` reports zero and the Sets provider emits
+    -- nothing, which is the "3 of 5 pieces" denominator this addon is
+    -- otherwise short of.
+    --
+    -- `Modules/Instances.lua` reasons this out for the Adventure Guide under
+    -- the header "A ZERO IS 'NOT YET', NOT 'NOTHING'". The sibling did not
+    -- get it.
+    local sets = CN:GetModule("Sets")
+
+    assert(sets, "the sets module must be loaded")
+
+    sets.Forget()
+
+    local realAllSets = C_TransmogSets.GetAllSets
+
+    C_TransmogSets.GetAllSets = function() return {} end
+
+    local coldRows, coldReadable = sets.All()
+
+    C_TransmogSets.GetAllSets = realAllSets
+
+    assert(#coldRows == 0, "a cold wardrobe reports no sets")
+
+    -- The very next call, with the client warm, must answer.
+    local warmRows = sets.All()
+
+    assert(#warmRows > 0,
+        "a refusal must not be cached as an answer for the session; got "
+        .. #warmRows .. " sets after the client warmed up")
+
+    assert(coldReadable ~= nil, "the readable flag is still returned")
+
+    -- AND THE WARM ANSWER *IS* CACHED, which is what the cache is for: the
+    -- walk is one client call per set plus a piece query each.
+    local asks = 0
+
+    C_TransmogSets.GetAllSets = function(...)
+        asks = asks + 1
+
+        return realAllSets(...)
+    end
+
+    sets.All()
+    sets.All()
+
+    C_TransmogSets.GetAllSets = realAllSets
+
+    assert(asks == 0,
+        "a wardrobe that answered is read once and held: " .. asks)
+
+    print("  a wardrobe that has not answered is not an empty wardrobe")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD COLLECTION SCAN IS NOT A SCAN.
+    ------------------------------------------------------------
+    -- `CN.MarkScanned` routes to `CN.NoteSetupStep`, so stamping it removes
+    -- the step from `Setup.NeverScanned` for ever -- the new player is never
+    -- told to run the scan, and the Scans tab reads "just now" over a read
+    -- that returned nothing. Pets got this guard in 0.92.0, Currencies in
+    -- 0.88.0, Achievements in 0.76.0, Exploration in 0.61.0 and Loremaster in
+    -- 0.71.0; toys, mounts and titles were the three the sweep never reached,
+    -- and all three run from `CN:OnLogin`.
+    local scans = CN.Account("collectionScans")
+
+    local cases = {
+        {
+            key    = "toys",
+            module = "Toys",
+            cold   = function() CN_TEST_TOYS_COLD = true end,
+            warm   = function() CN_TEST_TOYS_COLD = false end,
+        },
+        {
+            key    = "mounts",
+            module = "Mounts",
+            cold   = function()
+                CN_TEST_MOUNTS_COLD = true
+            end,
+            warm   = function()
+                CN_TEST_MOUNTS_COLD = false
+            end,
+        },
+        {
+            key    = "titles",
+            module = "Titles",
+            cold   = function()
+                CN_TEST_TITLES_COLD = true
+            end,
+            warm   = function()
+                CN_TEST_TITLES_COLD = false
+            end,
+        },
+    }
+
+    for _, case in ipairs(cases) do
+        local module = CN:GetModule(case.module)
+
+        assert(module, case.module .. " must be loaded")
+
+        -- A real read first, so there is a stamp to be wrongly refreshed.
+        case.warm()
+        module.Scan()
+
+        local stamped = scans[case.key]
+
+        assert(stamped, case.key .. " records a real scan")
+
+        scans[case.key] = 1
+
+        case.cold()
+
+        local seen = module.Scan()
+
+        case.warm()
+
+        assert(seen == 0,
+            case.key .. " reports reading nothing when the client answered "
+            .. "nothing: " .. tostring(seen))
+
+        assert(scans[case.key] == 1,
+            "and a read that returned nothing does not stamp " .. case.key
+            .. " as scanned, which is what silences the setup reminder for "
+            .. "the life of the install")
+
+        module.Scan()
+
+        assert(scans[case.key] ~= 1,
+            "while a real read does stamp " .. case.key)
+    end
+
+    print("  a cold toy box, mount journal or title list is not a scan")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LOCKOUT YOU ARE NO LONGER SAVED TO IS NOT WORK.
+    ------------------------------------------------------------
+    -- The client reports a `locked` flag per saved instance, this addon has
+    -- read it into the record since the function was written, and nothing
+    -- ever looked at it: the filter inferred the same fact from the reset
+    -- countdown instead. An expired row is listed with time still on it, so
+    -- "six bosses of spent effort, expiring soon" -- the strongest urgency
+    -- signal this addon emits -- was raised for an instance the player is not
+    -- saved to, sending them to re-clear from zero.
+    local instances = CN:GetModule("Instances")
+
+    CN_TEST_SetLockouts({
+        { name = "Still Saved", difficulty = "Normal", encounters = 8,
+          defeated = 2, resetsIn = 3600, locked = true },
+        { name = "Expired Raid", difficulty = "Normal", encounters = 8,
+          defeated = 6, resetsIn = 3600, locked = false, id = 2147483101 },
+    })
+
+    local named = {}
+
+    for _, lockout in ipairs(instances.Lockouts()) do
+        named[lockout.name] = lockout
+    end
+
+    assert(named["Still Saved"],
+        "a lockout the client says you are saved to is listed")
+
+    assert(not named["Expired Raid"],
+        "a lockout the client says you are NOT saved to is not listed, "
+        .. "however much time its reset still shows")
+
+    assert(named["Still Saved"].locked == true,
+        "and the row carries the fact, so a reader can say why")
+
+    -- AND NOTHING RANKS IT EITHER, which is where the wrong advice reached
+    -- the player.
+    CN.InvalidateCandidates()
+
+    for _, candidate in ipairs(CN.CollectCandidates(true) or {}) do
+        if candidate.type == CN.objectiveTypes.INSTANCE then
+            assert(not tostring(candidate.name):find("Expired", 1, true),
+                "and it is not offered as a next action: "
+                .. tostring(candidate.name))
+        end
+    end
+
+    CN_TEST_SetLockouts(nil)
+    CN.InvalidateCandidates()
+
+    print("  a lockout you are no longer saved to is not offered as work")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A BAG OF CAGED PETS IS ONE SWEEP, NOT ONE PER PET.
+    ------------------------------------------------------------
+    -- `NEW_PET_ADDED` called `Pets.Scan` directly. `bench.lua` measures that
+    -- at 2.554 ms against 1,800 species -- the most expensive single event in
+    -- the benchmark by a factor of forty -- and every sweep also saves,
+    -- clears and restores the player's own journal filters. `Routing.lua`
+    -- debounces its own handler for this event and names this file as the
+    -- reason.
+    local sweeps = 0
+
+    local realWith = CN.Blizzard.WithAllPetsShown
+
+    CN.Blizzard.WithAllPetsShown = function(...)
+        sweeps = sweeps + 1
+
+        return realWith(...)
+    end
+
+    CN.ForgetDebounces()
+
+    for _ = 1, 6 do
+        CN.Dispatch("NEW_PET_ADDED")
+    end
+
+    CN.Blizzard.WithAllPetsShown = realWith
+
+    assert(sweeps == 1,
+        "six pets in one burst cost one journal sweep, not six: " .. sweeps)
+
+    print("  a bag of caged pets costs one journal sweep")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A PUBLISHED FUNCTION EXISTS BEFORE ANYTHING CALLS THE OTHER ONE.
+    ------------------------------------------------------------
+    -- `CN.UnregisterQuestDataProvider` was defined INSIDE the body of
+    -- `CN.RegisterQuestDataProvider`, below four early returns -- so it came
+    -- into existence only as a side effect of a successful registration. It
+    -- happened to exist in game only because three provider files register
+    -- unconditionally at load. Both tests for it registered first, so the
+    -- ordering was invisible.
+    assert(type(CN.UnregisterQuestDataProvider) == "function",
+        "the withdrawal half of the published provider API is a function "
+        .. "from load, not from the first successful registration")
+
+    assert(CN.UnregisterQuestDataProvider("nothing registered under this name")
+        == false,
+        "and it answers for a name that was never registered rather than "
+        .. "throwing")
+
+    print("  the published provider API exists before anything registers")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

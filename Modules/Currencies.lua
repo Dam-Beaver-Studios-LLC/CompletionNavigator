@@ -763,7 +763,7 @@ CN:RegisterCommand{
     -- after a four-digit count are two different widths in a proportional
     -- font, so the second label never lines up. The 0.77.0 sweep reached
     -- three files and not this one.
-    Print("At cap: " .. atCap .. CN.DOT
+    Print("At cap: " .. atCap .. " " .. CN.DOT
         .. " with weekly earning left: " .. weekly)
     end,
 }

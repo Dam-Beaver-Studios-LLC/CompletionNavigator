@@ -196,7 +196,7 @@ function Welcome.Build()
 
         if setup then
             scan:SetEnabled(false)
-            scan:SetText("Reading" .. CN.DOT .. CN.DOT .. CN.DOT)
+            scan:SetText("Reading" .. CN.ELLIPSIS)
 
             setup.Run(function()
                 -- A STATUS MESSAGE IS NOT A BUTTON.

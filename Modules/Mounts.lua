@@ -95,6 +95,17 @@ function Mounts.Scan()
         end
     end
 
+    -- ZERO IS THE CLIENT DECLINING, NOT AN EMPTY collection. 0.95.0.
+    --
+    -- `CN.MarkScanned` routes to `CN.NoteSetupStep`, so stamping it removes
+    -- mounts from `Setup.NeverScanned` for ever: the new player is never told to
+    -- run `/cn mountscan`, and the Scans tab reads "just now" over a read that returned
+    -- nothing. Same shape as toys next door; see the note there.
+
+    if seen == 0 then
+        return 0, 0, 0
+    end
+
     CN.MarkScanned("mounts")
 
     return seen, collected, missing

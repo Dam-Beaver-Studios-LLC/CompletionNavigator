@@ -133,35 +133,7 @@ function CN.RegisterQuestDataProvider(name, provider)
         end
     end
 
--- AND A PROVIDER CAN BE WITHDRAWN. 0.92.0.
---
--- `CN.questDataProviders` and `CN.questDataOrder` are two views of one thing,
--- and only registration kept them in step. Clearing a provider from the table
--- without removing it from the order left `/cn providers` indexing a nil --
--- an error in a command whose whole job is to say what is installed.
---
--- Published beside the registrar because an addon that can register can stop:
--- a data source the player turns off in that addon's own settings, or one
--- swapping itself out. Returns whether anything was removed.
-function CN.UnregisterQuestDataProvider(providerName)
-    if type(providerName) ~= "string"
-        or not CN.questDataProviders[providerName] then
-
-        return false
-    end
-
-    CN.questDataProviders[providerName] = nil
-
-    for index = #CN.questDataOrder, 1, -1 do
-        if CN.questDataOrder[index].name == providerName then
-            table.remove(CN.questDataOrder, index)
-        end
-    end
-
-    return true
-end
-
--- A STABLE ORDER, BECAUSE `table.sort` IS NOT STABLE.
+    -- A STABLE ORDER, BECAUSE `table.sort` IS NOT STABLE.
     --
     -- The list is re-sorted on every registration, so two providers that omit
     -- `priority` -- which every third-party provider will -- can swap places
@@ -189,6 +161,45 @@ end
 
         return a.priority < b.priority
     end)
+
+    return true
+end
+
+-- MOVED OUT OF THE FUNCTION ABOVE. 0.95.0.
+--
+-- This was defined INSIDE the body of `CN.RegisterQuestDataProvider`, between
+-- the removal loop and the sequence block -- so it came into existence only
+-- as a side effect of a SUCCESSFUL registration, below four early returns,
+-- and was rebuilt on every one after that. It happened to exist in game only
+-- because three provider files register unconditionally at load; a build
+-- without them, or a third-party addon calling this published function before
+-- registering anything, got a nil-call out of the API 0.92.0 added. Both
+-- tests for it registered first, so the ordering was invisible.
+
+-- AND A PROVIDER CAN BE WITHDRAWN. 0.92.0.
+--
+-- `CN.questDataProviders` and `CN.questDataOrder` are two views of one thing,
+-- and only registration kept them in step. Clearing a provider from the table
+-- without removing it from the order left `/cn providers` indexing a nil --
+-- an error in a command whose whole job is to say what is installed.
+--
+-- Published beside the registrar because an addon that can register can stop:
+-- a data source the player turns off in that addon's own settings, or one
+-- swapping itself out. Returns whether anything was removed.
+function CN.UnregisterQuestDataProvider(providerName)
+    if type(providerName) ~= "string"
+        or not CN.questDataProviders[providerName] then
+
+        return false
+    end
+
+    CN.questDataProviders[providerName] = nil
+
+    for index = #CN.questDataOrder, 1, -1 do
+        if CN.questDataOrder[index].name == providerName then
+            table.remove(CN.questDataOrder, index)
+        end
+    end
 
     return true
 end

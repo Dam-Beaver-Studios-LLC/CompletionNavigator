@@ -53,7 +53,27 @@ function Instances.Lockouts()
     for _, saved in ipairs(raw) do
         -- An expired lockout is still listed for a while. Anything with no
         -- time left on it is not a lockout, it is a memory.
-        if not saved.reset or saved.reset > 0 then
+        --
+        -- AND THE CLIENT SAYS SO DIRECTLY. 0.95.0.
+        --
+        -- `RequestRaidInfo` reports a `locked` flag per row, `BlizzardWorld`
+        -- has read it into the record since the function was written, and
+        -- nothing in this addon has ever looked at it -- a grep for `.locked`
+        -- returned the write and nothing else. The countdown was used to
+        -- infer what the flag states, and the two disagree: a row you are no
+        -- longer saved to is still listed, with time left on it, until the
+        -- reset comes round.
+        --
+        -- So "six bosses of spent effort, expiring soon" -- the strongest
+        -- urgency signal this addon emits -- was being raised for an instance
+        -- the player is not saved to, sending them to re-clear from zero.
+        -- This file's own header calls a stale lockout "actively wrong
+        -- advice".
+        --
+        -- `locked ~= false` rather than `locked`, because a client that does
+        -- not report the field at all must not have every lockout dropped on
+        -- the strength of a nil.
+        if saved.locked ~= false and (not saved.reset or saved.reset > 0) then
             local encounters = saved.encounters or 0
             local defeated   = saved.defeated or 0
 
@@ -74,6 +94,10 @@ function Instances.Lockouts()
                 remaining    = math.max(0, encounters - defeated),
                 resetsIn     = saved.reset,
                 extended     = saved.extended,
+
+                -- Carried so a reader can say WHY a row is here, rather than
+                -- leaving the filter above as the only thing that knows.
+                locked       = saved.locked ~= false,
                 complete     = encounters > 0 and defeated >= encounters,
             })
         end
@@ -426,7 +450,15 @@ end
 -- the week. Same shape as the Vault's rule, and for the same reason.
 Instances.maxRemaining = 6
 
-local function Urgency(remaining, resetsIn, defeated)
+-- HOW CLOSE THIS LOCKOUT IS TO BEING FINISHED. NOT WHEN IT RESETS.
+--
+-- The reset used to be a third term here, and 0.88.0 stopped passing it --
+-- `expiresIn` hands the same deadline to the scorer's own urgency curve, and
+-- charging it twice through a shape `/cn urgency` does not plot was the
+-- defect that release fixed. The parameter and its whole branch stayed, dead,
+-- for seven releases, reading as though this function weights reset proximity
+-- and inviting the next reader to double-count it a third time. 0.95.0.
+local function Urgency(remaining, defeated)
     local value = 0
 
     -- Already started is the whole point: those kills are spent effort that
@@ -445,21 +477,11 @@ local function Urgency(remaining, resetsIn, defeated)
         end
     end
 
-    if resetsIn then
-        local days = resetsIn / 86400
-
-        if days <= 1 then
-            value = value + 3
-        elseif days <= 2 then
-            value = value + 2
-        elseif days <= 4 then
-            value = value + 1
-        end
-    end
-
     return value
 end
 
+-- Published so the harness can drive the term directly rather than inferring
+-- it from a ranked list.
 Instances.Urgency = Urgency
 
 CN.RegisterCandidateProvider("Instances", function()
@@ -517,7 +539,7 @@ CN.RegisterCandidateProvider("Instances", function()
                 -- vault row: `expiresIn` below hands the same reset to the
                 -- scorer's own urgency term, and `/cn urgency` plots only
                 -- that one. The sibling this file shares the defect with.
-                limitedTimeBonus = Urgency(lockout.remaining, nil,
+                limitedTimeBonus = Urgency(lockout.remaining,
                     lockout.defeated),
 
                 -- DECLARED. 0.89.0. See the sibling in `Modules/Vault.lua`:

@@ -3751,7 +3751,7 @@ UI.RegisterTab{
         -- first, which is the whole difference.
         local function RunScans(button, label, work)
             button:SetEnabled(false)
-            button:SetText("Working" .. CN.DOT .. CN.DOT .. CN.DOT)
+            button:SetText("Working" .. CN.ELLIPSIS)
 
             local function finish()
                 -- PROTECTED, OR THE BUTTON WEDGES.
@@ -4557,7 +4557,7 @@ UI.RegisterTab{
 
         if active then
             panel.focusNote:SetText(active.note
-                .. (hidden > 0 and ("  " .. CN.DOT .. "  hiding " .. hidden
+                .. (hidden > 0 and (" " .. CN.DOT .. " hiding " .. hidden
                     .. " of " .. #filters.TypeOrder() .. " kinds") or ""))
         elseif hidden > 0 then
             panel.focusNote:SetText("No focus set. " .. hidden .. " kind"
