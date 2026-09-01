@@ -388,15 +388,15 @@ function Filters.DescribeObjective(objectiveType, id)
         end
 
         if numericID then
-            local categories = CN.Blizzard.GetAppearanceCategories
-                and CN.Blizzard.GetAppearanceCategories() or nil
+            -- Was a full enumeration of every category to find one name.
+            -- 0.93.0.
+            local appearances = CN:GetModule("Appearances")
 
-            if type(categories) == "table" then
-                for _, category in ipairs(categories) do
-                    if category.categoryID == numericID and category.name then
-                        return category.name
-                    end
-                end
+            local name = appearances and appearances.NameOf
+                and appearances.NameOf(numericID)
+
+            if name and name ~= ("Slot " .. numericID) then
+                return name
             end
 
             return "Appearance slot " .. numericID

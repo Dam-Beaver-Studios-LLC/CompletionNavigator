@@ -78,11 +78,17 @@ function Travel.WorldPoint(mapID, x, y)
 
     local cached = worldPoints[key]
 
-    if cached ~= nil then
-        if cached == false then
-            return nil
-        end
-
+    -- NO `false` SENTINEL TO READ BACK. 0.93.0.
+    --
+    -- `worldPoints` is written in exactly one place, and what it writes is
+    -- always a table -- the note below says in as many words that a refusal
+    -- is not cached. So the branch that read `false` back was unreachable,
+    -- standing exactly where the next reader looks to find out whether misses
+    -- are cached.
+    --
+    -- `Travel.CostFor` records removing the identical dead reader eighteen
+    -- hundred lines down; the sweep stopped at one of the two caches.
+    if cached then
         return cached
     end
 
@@ -1324,7 +1330,57 @@ function Travel.BindPointCount()
     return CN.CountKeys(BindPoints())
 end
 
+-- WHAT THE PLAYER CARRIES, NOT WHERE THEY ARE GOING. 0.93.0.
+--
+-- This answers about bags and the spellbook, and it was called once per
+-- CROSS-CONTINENT CANDIDATE, inside `EstimateSeconds`. Each call walks all
+-- fourteen entries, and each entry costs an item-count plus an item-cooldown,
+-- or a known-spell probe plus a player-spell probe plus a spell-cooldown --
+-- every one of them inside a pcall -- then allocates a row per available
+-- entry and sorts the result. Roughly twenty-eight protected client calls and
+-- a sort, per candidate.
+--
+-- `Travel.CostFor` deliberately does not memoise a nil, under a note reading
+-- "re-deriving a nil costs one failed estimate". That is true of the
+-- same-continent nil, which is two cheap calls. It is not true of this one:
+-- the nil is reached AFTER the full fourteen-entry walk, when no teleport
+-- lands on the target continent. On an account with a few hundred
+-- cross-continent objectives that is thousands of protected client calls per
+-- rebuild.
+--
+-- NOT MEMOISED ON `GetTime()`. That is the shape backlog rule 60 records:
+-- 0.81.0 keyed a per-frame memo on the clock, the offline suite runs many
+-- scenarios inside one frame, and the branch silently went stale and stopped
+-- being exercised at all.
+--
+-- Two things can change this answer, and they need different treatment:
+--
+--   * WHAT THE PLAYER HAS -- a hearthstone bought or destroyed, a toy
+--     learned. Those fire events, and the revision below moves on them.
+--   * A COOLDOWN RUNNING DOWN. Nothing fires for that, so a revision alone
+--     would hold "not ready" for a teleport that came off cooldown minutes
+--     ago -- and `/cn travel` prints those numbers.
+--
+-- So the held answer also carries the SHORTEST cooldown it saw, and expires
+-- itself when that much time has passed. Nothing is stale for longer than the
+-- soonest thing that could change it, and a list where everything is ready
+-- expires on the event alone.
+Travel.teleportRevision = 0
+
+local teleportsHeld, teleportsAt, teleportsUntil = nil, nil, nil
+
+function Travel.NoteTeleportsChanged()
+    Travel.teleportRevision = (Travel.teleportRevision or 0) + 1
+end
+
 function Travel.ReadyTeleports()
+    if teleportsHeld
+        and teleportsAt == Travel.teleportRevision
+        and (teleportsUntil == nil or time() < teleportsUntil) then
+
+        return teleportsHeld
+    end
+
     local available = {}
 
     for _, entry in ipairs(Travel.teleports) do
@@ -1364,6 +1420,21 @@ function Travel.ReadyTeleports()
 
         return a.remaining < b.remaining
     end)
+
+    -- The soonest moment any of these could stop being true.
+    local soonest
+
+    for _, entry in ipairs(available) do
+        if entry.remaining and entry.remaining > 0 then
+            if not soonest or entry.remaining < soonest then
+                soonest = entry.remaining
+            end
+        end
+    end
+
+    teleportsHeld  = available
+    teleportsAt    = Travel.teleportRevision
+    teleportsUntil = soonest and (time() + soonest) or nil
 
     return available
 end
@@ -2101,7 +2172,30 @@ CN:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED", function(_, unit, _, spellID)
     if unit == "player" and Travel.hearthSpells[spellID] then
         hearthPending = true
     end
+
+    -- ANY cast by the player can have started a cooldown this list reports.
+    -- Cheap: it moves a counter, and the walk happens on the next read.
+    if unit == "player" then
+        Travel.NoteTeleportsChanged()
+    end
 end)
+
+-- WHAT ELSE CAN CHANGE THE ANSWER. 0.93.0. A hearthstone bought, used up or
+-- destroyed; a toy learned; and the world reloading under us.
+--
+-- `SPELLS_CHANGED` and `LEARNED_SPELL_IN_TAB` are NOT here. Both are real
+-- client events, and the harness's known-event guard -- the one added after
+-- 0.46.0 shipped a name that does not exist -- refused them until they were
+-- added deliberately. Asked deliberately, the answer was no: `SPELLS_CHANGED`
+-- fires constantly and would defeat the cache it is meant to protect, and a
+-- newly learned teleport is picked up by the next bag update or zone change,
+-- which is soon enough for a travel estimate.
+for _, event in ipairs({
+    "BAG_UPDATE_DELAYED",
+    "PLAYER_ENTERING_WORLD",
+}) do
+    CN:RegisterEvent(event, Travel.NoteTeleportsChanged)
+end
 
 -- NARROWED TO THE PLAYER. 0.86.0.
 --

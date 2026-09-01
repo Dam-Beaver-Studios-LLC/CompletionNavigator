@@ -773,8 +773,35 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
             end
         end
 
+        -- A ROW MUST BE ABLE TO ENTER THE SHORTLIST, NOT ONLY LEAVE IT.
+        -- 0.93.0.
+        --
+        -- `watched` was exactly the rows that ALREADY qualify, plus pinned
+        -- goals. So an achievement at 37 of 40 was never observed, its
+        -- progress was never recorded, and it could never become nearly done
+        -- -- while `ACHIEVEMENT_EARNED` deletes rows outright. Between two
+        -- manual full scans the shortlist could only shrink, and nothing runs
+        -- a full scan on its own.
+        --
+        -- The file's own headline says "an achievement sitting at 9 of 10
+        -- criteria is worth far more attention than one at 0 of 10, and
+        -- nothing else in the addon surfaces that". That was true only of
+        -- rows that were already near-done the last time the player scanned.
+        -- 0.72.0's note says it fixed exactly this -- the fix went into the
+        -- throttle and the watch set kept the defect.
+        --
+        -- One threshold either side, so the boundary is observable while the
+        -- sweep stays at a dozen rows rather than several hundred, which is
+        -- the saving the 0.62.0 note protects.
+        local band = (Achievements.nearlyDoneThreshold or 2) * 2
+
         for achievementID, record in pairs(store) do
-            if watched[achievementID]
+            local remaining = (record.criteria or 0)
+                - (Achievements.DoneFor(record) or 0)
+
+            local approaching = remaining > 0 and remaining <= band
+
+            if (watched[achievementID] or approaching)
                 and record.criteria and record.criteria > 0 then
 
                 -- BOTH RETURNS, BECAUSE A REFUSAL LOOKS LIKE ZERO. 0.67.0.

@@ -59,7 +59,20 @@ local function BuildRecord(data)
 
     local record = {
         factionID   = factionID,
-        name        = data.name,
+
+        -- `name` IS NOT STORED ON THE RECORD. 0.93.0.
+        --
+        -- `NameStore` exists for exactly this and `Reputations.NameOf` asks
+        -- the client first and falls back to it, so every display site is
+        -- already covered. The only reader of `record.name` in the tree was
+        -- the line that copies it INTO the name store, which can read the
+        -- client's answer directly.
+        --
+        -- A localized string, written into both the account store and the
+        -- character store, for every faction, on every scan, read by nothing.
+        -- Third field this file has stripped -- `standing` in 0.72.0,
+        -- `lastSeen` in 0.82.0 -- and the one that also breaks the rule that
+        -- a localized string is never persisted.
         reaction    = data.reaction,
         -- `standing` IS NOT STORED. 0.72.0. See `StandingText`.
         current     = (data.currentStanding or 0) - (data.currentReactionThreshold or 0),
@@ -201,7 +214,7 @@ function Reputations.Scan()
             if hasStanding then
                 local record = BuildRecord(data)
 
-                nameStore[data.factionID] = record.name
+                nameStore[data.factionID] = data.name
 
                 -- ONE SCOPE PER FACTION, AND THE OTHER ONE IS DELETED.
                 --

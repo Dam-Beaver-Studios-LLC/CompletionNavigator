@@ -1953,10 +1953,45 @@ local factions = {
     { factionID = 946,  name = "Honor Hold", reaction = 8, isHeader = true, isHeaderWithRep = true,
       currentStanding = 43000, currentReactionThreshold = 42000, nextReactionThreshold = 43000 },
     { factionID = 0,    name = "Legacy", isHeader = true, isCollapsed = true },
+    -- BEHIND THE COLLAPSED HEADER. 0.93.0.
+    --
+    -- The collapsed header had no children, so the stub's willingness to
+    -- report every row regardless of collapse state cost nothing and hid
+    -- everything: `WithAllFactionsExpanded` could be deleted outright and
+    -- this suite would still have passed. A faction only reachable by
+    -- expanding is what makes that helper load-bearing here.
+    { factionID = 69,   name = "Darnassus", reaction = 6,
+      currentStanding = 9000, currentReactionThreshold = 9000,
+      nextReactionThreshold = 21000 },
 }
 
 function CN_TEST_Factions()
     return factions
+end
+
+-- WHAT THE CLIENT WOULD ACTUALLY LIST, GIVEN THE HEADER STATES. 0.93.0.
+--
+-- `GetNumFactions` counted the whole fixture and `GetFactionDataByIndex`
+-- indexed straight into it, so the stub was more forgiving than the real
+-- client in the one way that matters: children of a collapsed header are not
+-- in the list at all, and expanding SHIFTS every index after it. Mirrors
+-- `CurrencyVisible`, which models the same client behaviour for the currency
+-- list.
+function CN_TEST_FactionVisible()
+    local visible = {}
+    local showing = true
+
+    for _, row in ipairs(factions) do
+        if row.isHeader then
+            showing = not row.isCollapsed
+
+            table.insert(visible, row)
+        elseif showing then
+            table.insert(visible, row)
+        end
+    end
+
+    return visible
 end
 
 local accountWideFactions = { [2600] = true, [2590] = true }
@@ -1984,8 +2019,8 @@ function CN_TEST_SetParagon(factionID, value, threshold, pending)
 end
 
 C_Reputation = {
-    GetNumFactions          = function() return #factions end,
-    GetFactionDataByIndex   = function(i) return factions[i] end,
+    GetNumFactions          = function() return #CN_TEST_FactionVisible() end,
+    GetFactionDataByIndex   = function(i) return CN_TEST_FactionVisible()[i] end,
     GetFactionDataByID      = function(id)
         for _, f in ipairs(factions) do
             if f.factionID == id then return f end
@@ -2032,7 +2067,9 @@ C_Reputation = {
     CollapseFactionHeader   = function(index)
         collapseCalls = collapseCalls + 1
 
-        local faction = factions[index]
+        -- A VISIBLE INDEX, not a fixture index. The client's collapse call
+        -- takes the row number the player would see.
+        local faction = CN_TEST_FactionVisible()[index]
 
         if faction and faction.isHeader then
             faction.isCollapsed = true
@@ -2309,6 +2346,17 @@ local appearanceSources = {
         { sourceID = 5, name = "Another way entirely",  isCollected = false, itemID = 505 },
     },
 }
+
+-- A CLIENT THAT CAN CHANGE LANGUAGE. 0.93.0.
+--
+-- The slot names here were fixed for the life of a run, so a store that had
+-- written the localized name once looked identical to one that asked the
+-- client every time.
+function CN_TEST_SetAppearanceCategoryName(categoryID, name)
+    if appearanceData[categoryID] then
+        appearanceData[categoryID].name = name
+    end
+end
 
 C_TransmogCollection = {
     GetCategoryInfo           = function(id) return appearanceData[id] and appearanceData[id].name or nil end,
@@ -3655,8 +3703,17 @@ print("  reputations(character)= " .. count(profile.reputations))
 
 assert(count(db.account.reputations) == 2,
     "account-wide reputations must be stored account-side")
-assert(count(profile.reputations) == 3,
-    "character-specific reputations must be stored on the character profile")
+-- FOUR, NOT THREE, and the fourth is the proof. 0.93.0.
+--
+-- Darnassus sits behind a COLLAPSED header, and the faction stubs now hide
+-- what a collapsed header hides. It can only be counted if
+-- `WithAllFactionsExpanded` actually expanded the list before the scan walked
+-- it -- so this number falling back to three means that helper stopped
+-- working, which is precisely what the old always-visible stub could not say.
+assert(count(profile.reputations) == 4,
+    "character-specific reputations must be stored on the character profile, "
+    .. "including the one behind a collapsed header; got "
+    .. count(profile.reputations))
 assert(db.account.reputations[2590].paragon.pending == true,
     "paragon pending flag must persist")
 assert(db.account.reputations[2600].renown == 12,
@@ -4149,6 +4206,33 @@ do
         .. "a scan; got " .. shut .. " collapsed and " .. open .. " open")
 
     print("  and reputation headers are restored one by one, not all at once")
+
+    -- AND THE LIST IS SHORT AGAIN AFTERWARDS. 0.93.0.
+    --
+    -- Restoring the header states is only meaningful if collapsing actually
+    -- hides something. With the header shut, Darnassus must be out of the
+    -- list the client reports -- if it is still countable, the restore put a
+    -- flag back on a fixture nobody consults.
+    local visible = C_Reputation.GetNumFactions()
+    local found   = false
+
+    for index = 1, visible do
+        local data = C_Reputation.GetFactionDataByIndex(index)
+
+        if data and data.factionID == 69 then
+            found = true
+        end
+    end
+
+    assert(not found,
+        "a faction behind a collapsed header must not be listed once the "
+        .. "header is collapsed again")
+
+    assert(visible == #CN_TEST_Factions() - 1,
+        "exactly the one hidden row must be missing; " .. visible
+        .. " of " .. #CN_TEST_Factions() .. " listed")
+
+    print("  and collapsing a header actually hides what is under it")
 end
 
 print("\nRares and treasures:")
@@ -38993,6 +39077,240 @@ end)()
     end
 
     print("  the cross-tab count searches what the tab searched")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN APPEARANCE SLOT IS NAMED IN THE LANGUAGE THE CLIENT IS IN.
+    ------------------------------------------------------------
+    -- `Appearances.Scan` wrote `name = category.name` into every stored row
+    -- and `Summary`, `Remaining` and the candidate provider all read it back
+    -- off disk. Nine other modules in this addon have a live-name accessor
+    -- for exactly this reason, and three of them carry a comment saying
+    -- `Appearances.lua` made the argument first -- in 0.58.0 -- and was
+    -- itself never swept.
+    --
+    -- A player who changes client language keeps the old language until
+    -- something happens to rescan, which is throttled to ten minutes.
+    local slotModule = CN:GetModule("Appearances")
+
+    assert(slotModule, "the appearances module must be loaded")
+
+    slotModule.Scan()
+
+    for _, record in pairs(slotModule.Store()) do
+        assert(record.name == nil,
+            "no appearance row stores a localized name")
+    end
+
+    CN_TEST_SetAppearanceCategoryName(1, "Kopf")
+
+    local sawGerman = false
+
+    for _, row in ipairs(slotModule.Remaining()) do
+        if row.name == "Kopf" then
+            sawGerman = true
+        end
+
+        assert(row.name ~= "Head",
+            "the old language must not survive a client language change")
+    end
+
+    assert(sawGerman,
+        "the slot name comes from the client, not from disk")
+
+    -- AND THE CANDIDATE THE PLAYER READS IN `/cn next`, which is the third
+    -- read site and the one that was missed when the other two were fixed.
+    local slotCandidates = CN.CollectCandidates and CN.CollectCandidates(true) or {}
+    local named      = false
+
+    for _, candidate in ipairs(slotCandidates) do
+        if candidate.type == CN.objectiveTypes.APPEARANCE then
+            assert(not string.find(tostring(candidate.name), "Head", 1, true),
+                "and neither does the candidate: " .. tostring(candidate.name))
+
+            named = true
+        end
+    end
+
+    assert(named, "the appearance provider still produces candidates")
+
+    CN_TEST_SetAppearanceCategoryName(1, "Head")
+
+    -- A CLIENT THAT CANNOT ANSWER STILL NAMES THE ROW.
+    local held = C_TransmogCollection.GetCategoryInfo
+
+    C_TransmogCollection.GetCategoryInfo = function() return nil end
+
+    assert(slotModule.NameOf(1) == "Slot 1",
+        "with no client answer the row is identified by its id, not by a "
+        .. "guess in a language: " .. tostring(slotModule.NameOf(1)))
+
+    C_TransmogCollection.GetCategoryInfo = held
+
+    -- AND MIGRATION 37 TAKES THE FIELD OFF DISK -- ON BOTH SIDES.
+    local aged = {
+        version = 36,
+        account = {
+            appearances = { [1] = { categoryID = 1, name = "Head",
+                                    collected = 120, total = 400 } },
+            reputations = { [2600] = { factionID = 2600, name = "Threads",
+                                       reaction = 5 } },
+        },
+        characters = {
+            ["Someone-Realm"] = {
+                reputations = { [1090] = { factionID = 1090,
+                                           name = "Kirin Tor", reaction = 7 } },
+            },
+        },
+    }
+
+    CN.RunMigrations(aged)
+
+    assert(aged.account.appearances[1].name == nil
+        and aged.account.appearances[1].collected == 120,
+        "the appearance row loses its name and keeps its counts")
+
+    assert(aged.account.reputations[2600].name == nil
+        and aged.account.reputations[2600].reaction == 5,
+        "the account faction loses its name and keeps its standing")
+
+    assert(aged.characters["Someone-Realm"].reputations[1090].name == nil,
+        "and so does the CHARACTER-side faction, which is the half a "
+        .. "one-call-site fix would have left behind")
+
+    print("  an appearance slot is named in the client's language, not disk's")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ACHIEVEMENT CAN ENTER THE SHORTLIST BY APPROACHING IT.
+    ------------------------------------------------------------
+    -- The five-second criteria sweep read only rows ALREADY on the shortlist
+    -- plus pinned goals, so a row at 37 of 40 was never observed and could
+    -- never become nearly done -- while `ACHIEVEMENT_EARNED` deletes rows
+    -- outright. Between two manual full scans the shortlist could only
+    -- shrink, and nothing runs a full scan on its own.
+    local achievements = CN:GetModule("Achievements")
+
+    assert(achievements, "the achievements module must be loaded")
+
+    local store = achievements.Store and achievements.Store()
+        or CN.Account("achievements")
+
+    local key       = CN.characterKey or CN.GetCharacterKey()
+    local threshold = achievements.nearlyDoneThreshold or 2
+
+    -- Outside the shortlist, inside the band: exactly the row the sweep
+    -- could not see. `band` is twice the threshold, so threshold + 1 is
+    -- approaching without being nearly done.
+    local id = 909093
+
+    store[id] = {
+        id        = id,
+        criteria  = 40,
+        completed = false,
+        progress  = { [key] = 40 - (threshold + 1) },
+    }
+
+    assert(not achievements.IsNearlyDone(store[id]),
+        "the fixture row starts off the shortlist")
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function(achievementID)
+        if achievementID == id then
+            -- One more criterion done: now inside the shortlist.
+            return 40 - threshold, 40
+        end
+
+        return realProgress(achievementID)
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(achievements.DoneFor(store[id]) == 40 - threshold,
+        "the sweep must observe a row that was approaching the shortlist, "
+        .. "not only rows already on it; got "
+        .. tostring(achievements.DoneFor(store[id])))
+
+    assert(achievements.IsNearlyDone(store[id]),
+        "and that row is now on the shortlist")
+
+    -- AND A ROW NOWHERE NEAR IT IS STILL NOT POLLED, which is the saving the
+    -- watch set exists for: a band, not the whole store.
+    local far = 909094
+
+    store[far] = {
+        id        = far,
+        criteria  = 40,
+        completed = false,
+        progress  = { [key] = 1 },
+    }
+
+    local asked = false
+
+    CN.Blizzard.GetAchievementProgress = function(achievementID)
+        if achievementID == far then
+            asked = true
+        end
+
+        return realProgress(achievementID)
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(not asked,
+        "a row 39 criteria from done is not polled every five seconds")
+
+    store[id]  = nil
+    store[far] = nil
+
+    print("  an achievement enters the shortlist by getting closer to done")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE FUNCTION THAT WALKS EVERY CATEGORY STAMPS THE THROTTLE.
+    ------------------------------------------------------------
+    -- The transmog rescan stamp lived in the `TRANSMOG_COLLECTION_UPDATED`
+    -- handler, so only that path advanced it. The login scan and
+    -- `/cn appearancescan` both did the whole walk and left the throttle
+    -- reading "never scanned" -- so a login followed seconds later by a
+    -- looted appearance ran it twice. `Modules/Currencies.lua` records
+    -- fixing this shape in 0.65.0 and `Modules/Pets.lua` in 0.92.0.
+    local transmogModule = CN:GetModule("Appearances")
+
+    local scans = 0
+
+    local real = CN.Blizzard.GetAppearanceCategories
+
+    CN.Blizzard.GetAppearanceCategories = function(...)
+        scans = scans + 1
+
+        return real(...)
+    end
+
+    transmogModule.Scan()
+
+    assert(scans == 1, "the scan under test ran once")
+
+    CN.ForgetDebounces()
+    CN.Dispatch("TRANSMOG_COLLECTION_UPDATED")
+
+    CN.Blizzard.GetAppearanceCategories = real
+
+    assert(scans == 1,
+        "a scan that just walked every category must have stamped its own "
+        .. "throttle; the event ran it again after " .. scans .. " scans")
+
+    print("  a transmog scan stamps its own throttle, whoever called it")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

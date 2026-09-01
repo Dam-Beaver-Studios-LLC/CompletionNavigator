@@ -2122,10 +2122,43 @@ mutate "Modules/Currencies.lua" \
     "a currency capped on earnings is measured against the balance"
 
 mutate "Modules/Achievements.lua" \
-    "            if watched[achievementID]
+    "            if (watched[achievementID] or approaching)
                 and record.criteria and record.criteria > 0 then" \
     "            if record.criteria and record.criteria > 0 then" \
     "the criteria sweep polls every tracked achievement every five seconds"
+
+mutate "Modules/Achievements.lua" \
+    "            if (watched[achievementID] or approaching)" \
+    "            if (watched[achievementID])" \
+    "an achievement can only enter the shortlist if it was already on it"
+
+mutate "Modules/Appearances.lua" \
+    "    local live = Blizzard.GetAppearanceCategoryName
+        and Blizzard.GetAppearanceCategoryName(categoryID)
+
+    if live then
+        return live
+    end" \
+    "    local record = Store()[categoryID]
+
+    if record and record.name then
+        return record.name
+    end" \
+    "an appearance slot is named from disk instead of from the client"
+
+mutate "Modules/Appearances.lua" \
+    "    lastRescan = time()" \
+    "" \
+    "a login scan leaves the transmog throttle unstamped"
+
+mutate "Database.lua" \
+    "        for _, profile in pairs(db.characters or {}) do
+            if type(profile) == \"table\" then
+                strip(profile.reputations)
+            end
+        end" \
+    "" \
+    "migration 37 strips account names and leaves every character's behind"
 
 mutate "Character.lua" \
     "    return tostring(realm or \"UnknownRealm\") .. \"-\" .. tostring(name or \"Unknown\")" \

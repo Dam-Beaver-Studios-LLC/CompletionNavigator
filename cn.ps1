@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.92.0'
+$script:ToolkitVersion = '0.93.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,8 +121,8 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.92.0"
-CN.dbVersion   = 37
+CN.version     = "0.93.0"
+CN.dbVersion   = 38
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
 -- line and the minimap button.
@@ -3819,6 +3819,56 @@ CN.migrations = {
             CN.DebugPrint("Dropped " .. dropped .. " stored values nothing "
                 .. "reads and normalised " .. normalised
                 .. " deferrals that could not be read back.")
+        end
+    end,
+
+    -- THE LAST TWO STORES THAT PERSISTED A LOCALIZED NAME. 0.93.0.
+    --
+    -- `reputations.name` and `appearances.name` are the last of them. The
+    -- rule -- a localized string is for DISPLAY, never to BRANCH on and never
+    -- to PERSIST -- has been stated in this file since migration 16, and both
+    -- of these were written every scan anyway.
+    --
+    -- Reputations kept a SEPARATE name store keyed by factionID before this
+    -- release and still wrote `name` into each record as well, so the same
+    -- string sat on disk twice per faction, per scope. Appearances had no
+    -- accessor at all and read the localized slot name straight off disk, so
+    -- a player who changed client language kept reading the old language
+    -- until the next scan.
+    --
+    -- The character-side reputation store has to be swept too: reputations
+    -- are split by scope, and stripping only `db.account` would have left
+    -- every character-specific faction carrying the field. That is the
+    -- one-call-site defect this project has recorded ten times.
+    [37] = function(db)
+        local dropped = 0
+
+        local function strip(store)
+            if type(store) ~= "table" then
+                return
+            end
+
+            for _, record in pairs(store) do
+                if type(record) == "table" and record.name ~= nil then
+                    record.name = nil
+
+                    dropped = dropped + 1
+                end
+            end
+        end
+
+        strip(db.account and db.account.reputations)
+        strip(db.account and db.account.appearances)
+
+        for _, profile in pairs(db.characters or {}) do
+            if type(profile) == "table" then
+                strip(profile.reputations)
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " stored names the client re-supplies.")
         end
     end,
 }
@@ -19691,6 +19741,29 @@ end
 -- Appearance counts are reported per category. Individual appearance
 -- enumeration is enormous; the per-category totals are what a completion
 -- dashboard actually needs.
+-- ONE CATEGORY, NOT ALL OF THEM. 0.93.0.
+--
+-- `GetAppearanceCategories` costs three client calls per category plus a
+-- sort, and every caller that wanted a single name was paying the whole
+-- walk: `Filters.lua` enumerated all of them and then compared IDs.
+function Blizzard.GetAppearanceCategoryName(categoryID)
+    if not C_TransmogCollection or not C_TransmogCollection.GetCategoryInfo then
+        return nil
+    end
+
+    if type(categoryID) ~= "number" then
+        return nil
+    end
+
+    local name = C_TransmogCollection.GetCategoryInfo(categoryID)
+
+    if type(name) == "string" and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
 function Blizzard.GetAppearanceCategories()
     local categories = {}
 
@@ -25718,7 +25791,20 @@ local function BuildRecord(data)
 
     local record = {
         factionID   = factionID,
-        name        = data.name,
+
+        -- `name` IS NOT STORED ON THE RECORD. 0.93.0.
+        --
+        -- `NameStore` exists for exactly this and `Reputations.NameOf` asks
+        -- the client first and falls back to it, so every display site is
+        -- already covered. The only reader of `record.name` in the tree was
+        -- the line that copies it INTO the name store, which can read the
+        -- client's answer directly.
+        --
+        -- A localized string, written into both the account store and the
+        -- character store, for every faction, on every scan, read by nothing.
+        -- Third field this file has stripped -- `standing` in 0.72.0,
+        -- `lastSeen` in 0.82.0 -- and the one that also breaks the rule that
+        -- a localized string is never persisted.
         reaction    = data.reaction,
         -- `standing` IS NOT STORED. 0.72.0. See `StandingText`.
         current     = (data.currentStanding or 0) - (data.currentReactionThreshold or 0),
@@ -25860,7 +25946,7 @@ function Reputations.Scan()
             if hasStanding then
                 local record = BuildRecord(data)
 
-                nameStore[data.factionID] = record.name
+                nameStore[data.factionID] = data.name
 
                 -- ONE SCOPE PER FACTION, AND THE OTHER ONE IS DELETED.
                 --
@@ -27279,8 +27365,35 @@ CN:RegisterEvent("CRITERIA_UPDATE", function()
             end
         end
 
+        -- A ROW MUST BE ABLE TO ENTER THE SHORTLIST, NOT ONLY LEAVE IT.
+        -- 0.93.0.
+        --
+        -- `watched` was exactly the rows that ALREADY qualify, plus pinned
+        -- goals. So an achievement at 37 of 40 was never observed, its
+        -- progress was never recorded, and it could never become nearly done
+        -- -- while `ACHIEVEMENT_EARNED` deletes rows outright. Between two
+        -- manual full scans the shortlist could only shrink, and nothing runs
+        -- a full scan on its own.
+        --
+        -- The file's own headline says "an achievement sitting at 9 of 10
+        -- criteria is worth far more attention than one at 0 of 10, and
+        -- nothing else in the addon surfaces that". That was true only of
+        -- rows that were already near-done the last time the player scanned.
+        -- 0.72.0's note says it fixed exactly this -- the fix went into the
+        -- throttle and the watch set kept the defect.
+        --
+        -- One threshold either side, so the boundary is observable while the
+        -- sweep stays at a dozen rows rather than several hundred, which is
+        -- the saving the 0.62.0 note protects.
+        local band = (Achievements.nearlyDoneThreshold or 2) * 2
+
         for achievementID, record in pairs(store) do
-            if watched[achievementID]
+            local remaining = (record.criteria or 0)
+                - (Achievements.DoneFor(record) or 0)
+
+            local approaching = remaining > 0 and remaining <= band
+
+            if (watched[achievementID] or approaching)
                 and record.criteria and record.criteria > 0 then
 
                 -- BOTH RETURNS, BECAUSE A REFUSAL LOOKS LIKE ZERO. 0.67.0.
@@ -28841,14 +28954,48 @@ end
 
 Appearances.Store = Store
 
+-- THE LIVE NAME, NEVER A STORED ONE. 0.93.0.
+--
+-- `C_TransmogCollection.GetCategoryInfo` re-supplies the localized slot name
+-- instantly, so persisting it bought nothing and cost correctness: a player
+-- who changed client language kept reading the old language off disk until
+-- the next scan. Same argument `Appearances.lua` itself made in 0.58.0 for
+-- other stores, applied at last to this one.
+--
+-- The fallback is deliberately an English-free identifier plus the ID rather
+-- than a localized guess -- callers append " appearances", and a wrong
+-- language is worse than a plain slot number.
+function Appearances.NameOf(categoryID)
+    local live = Blizzard.GetAppearanceCategoryName
+        and Blizzard.GetAppearanceCategoryName(categoryID)
+
+    if live then
+        return live
+    end
+
+    return "Slot " .. tostring(categoryID)
+end
+
 ------------------------------------------------------------
 -- SCAN
 ------------------------------------------------------------
+
+-- THE FUNCTION THAT DOES THE WORK STAMPS THE THROTTLE. 0.93.0.
+--
+-- The stamp used to live in the `TRANSMOG_COLLECTION_UPDATED` handler, so
+-- only that one path advanced it. The login scan and `/cn appearancescan`
+-- both walked every category and left `lastRescan` untouched, which meant a
+-- login scan followed seconds later by a looted appearance ran the whole
+-- walk twice. Declared here so `Scan` -- the thing that actually spends the
+-- time -- owns it.
+local lastRescan = 0
 
 function Appearances.Scan()
     if not C_TransmogCollection then
         return 0
     end
+
+    lastRescan = time()
 
     local store      = Store()
     local categories = Blizzard.GetAppearanceCategories()
@@ -28885,7 +29032,21 @@ function Appearances.Scan()
         -- back.
         store[category.categoryID] = {
             categoryID = category.categoryID,
-            name       = category.name,
+
+            -- `name` IS NOT STORED. 0.93.0.
+            --
+            -- Nine modules in this addon have a live-name accessor with a
+            -- store fallback, and three of them -- Toys, Mounts, Pets --
+            -- carry a comment saying "`Appearances.lua` made exactly this
+            -- argument in 0.58.0 and the same argument applies here." This
+            -- file made the argument and was never swept: it had no
+            -- accessor, and `Summary`, `Remaining` and the candidate provider
+            -- all took the localized name straight off disk.
+            --
+            -- `C_TransmogCollection.GetCategoryInfo` re-supplies it instantly
+            -- and in the player's own language, so a player who changed
+            -- client language read "Schulter appearances" in `/cn next` until
+            -- the next scan.
             collected  = collected,
             total      = category.total,
         }
@@ -28930,7 +29091,7 @@ function Appearances.Remaining()
 
         if remaining > 0 then
             table.insert(rows, {
-                name      = record.name,
+                name      = Appearances.NameOf(record.categoryID),
                 collected = record.collected,
                 total     = record.total,
                 remaining = remaining,
@@ -28972,7 +29133,7 @@ CN.RegisterCandidateProvider("Appearances", function()
 
             table.insert(rows, {
                 categoryID = categoryID,
-                name       = record.name,
+                name       = Appearances.NameOf(record.categoryID),
                 collected  = collected,
                 total      = total,
                 remaining  = total - collected,
@@ -29033,8 +29194,6 @@ end, { events = { "TRANSMOG_COLLECTION_UPDATED" }, cooldown = 10 })
 -- the scan walks every category.
 Appearances.rescanSeconds = 600
 
-local lastRescan = 0
-
 -- AND ONCE AT LOGIN, which is the one path this store did not have.
 --
 -- Every other setup-scanned store -- currencies, reputations, titles,
@@ -29057,8 +29216,6 @@ CN:RegisterEvent("TRANSMOG_COLLECTION_UPDATED", function()
     if (now - lastRescan) < Appearances.rescanSeconds then
         return
     end
-
-    lastRescan = now
 
     pcall(Appearances.Scan)
 end)
@@ -35621,15 +35778,15 @@ function Filters.DescribeObjective(objectiveType, id)
         end
 
         if numericID then
-            local categories = CN.Blizzard.GetAppearanceCategories
-                and CN.Blizzard.GetAppearanceCategories() or nil
+            -- Was a full enumeration of every category to find one name.
+            -- 0.93.0.
+            local appearances = CN:GetModule("Appearances")
 
-            if type(categories) == "table" then
-                for _, category in ipairs(categories) do
-                    if category.categoryID == numericID and category.name then
-                        return category.name
-                    end
-                end
+            local name = appearances and appearances.NameOf
+                and appearances.NameOf(numericID)
+
+            if name and name ~= ("Slot " .. numericID) then
+                return name
             end
 
             return "Appearance slot " .. numericID
@@ -38994,7 +39151,28 @@ end, {
 local goalZones, goalZoneGeneration = nil, -1
 
 local function GoalZones()
-    local generation = Goals.zoneGeneration or 0
+    -- AND THE PLANS, NOT ONLY THE LIST. 0.93.0.
+    --
+    -- `Goals.zoneGeneration` moves when a goal is pinned, unpinned or
+    -- cleared. Neither thing this cache is derived from is a property of the
+    -- list: `plan.done` comes from `CN.Explain` and flips the moment the
+    -- player finishes the pinned thing, and `plan.mapID` is LEARNED during
+    -- play -- a quest POI resolving, a merchant being opened, a rare being
+    -- sighted.
+    --
+    -- So: pin a recipe before opening the vendor who sells it and its zone
+    -- never enters the set, for the rest of the session, however many times
+    -- you later stand in front of that vendor. And finish a pinned rare and
+    -- every objective in that zone keeps its +2 forever. Nothing else could
+    -- dislodge either -- `NoteDecoratorsChanged` and `InvalidateRanking` do
+    -- not touch this counter.
+    --
+    -- The candidate generation is the right second half: this provider
+    -- already declares every event that can move a plan.
+    local cacheState = CN.GetCandidateCacheState and CN.GetCandidateCacheState()
+
+    local generation = tostring(Goals.zoneGeneration or 0) .. ":"
+        .. tostring(cacheState and cacheState.generation or 0)
 
     if goalZones and goalZoneGeneration == generation then
         return goalZones
@@ -47667,7 +47845,16 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "nav",
-    args    = "[auto, native, tomtom or blizzard]",
+    -- THE REGISTRY, NOT THREE SPECIAL CASES. 0.93.0.
+    --
+    -- `Navigation.SetPreference` matches against `CN.waypointProviders`, and
+    -- the REJECTION message was changed to print `PreferenceNames()` under a
+    -- comment saying "a registry with a closed selector is three special
+    -- cases wearing a registry's name". This string -- which is what
+    -- `/cn help` prints, and what a player reads BEFORE they earn the
+    -- rejection -- was not swept. A fourth provider registered by another
+    -- addon is usable, selectable, named in the error, and invisible here.
+    args    = "[auto or a provider name]",
     order   = 41,
     help    = "Choose which navigation provider to use.",
     handler = function(args)
@@ -51570,11 +51757,17 @@ function Travel.WorldPoint(mapID, x, y)
 
     local cached = worldPoints[key]
 
-    if cached ~= nil then
-        if cached == false then
-            return nil
-        end
-
+    -- NO `false` SENTINEL TO READ BACK. 0.93.0.
+    --
+    -- `worldPoints` is written in exactly one place, and what it writes is
+    -- always a table -- the note below says in as many words that a refusal
+    -- is not cached. So the branch that read `false` back was unreachable,
+    -- standing exactly where the next reader looks to find out whether misses
+    -- are cached.
+    --
+    -- `Travel.CostFor` records removing the identical dead reader eighteen
+    -- hundred lines down; the sweep stopped at one of the two caches.
+    if cached then
         return cached
     end
 
@@ -52816,7 +53009,57 @@ function Travel.BindPointCount()
     return CN.CountKeys(BindPoints())
 end
 
+-- WHAT THE PLAYER CARRIES, NOT WHERE THEY ARE GOING. 0.93.0.
+--
+-- This answers about bags and the spellbook, and it was called once per
+-- CROSS-CONTINENT CANDIDATE, inside `EstimateSeconds`. Each call walks all
+-- fourteen entries, and each entry costs an item-count plus an item-cooldown,
+-- or a known-spell probe plus a player-spell probe plus a spell-cooldown --
+-- every one of them inside a pcall -- then allocates a row per available
+-- entry and sorts the result. Roughly twenty-eight protected client calls and
+-- a sort, per candidate.
+--
+-- `Travel.CostFor` deliberately does not memoise a nil, under a note reading
+-- "re-deriving a nil costs one failed estimate". That is true of the
+-- same-continent nil, which is two cheap calls. It is not true of this one:
+-- the nil is reached AFTER the full fourteen-entry walk, when no teleport
+-- lands on the target continent. On an account with a few hundred
+-- cross-continent objectives that is thousands of protected client calls per
+-- rebuild.
+--
+-- NOT MEMOISED ON `GetTime()`. That is the shape backlog rule 60 records:
+-- 0.81.0 keyed a per-frame memo on the clock, the offline suite runs many
+-- scenarios inside one frame, and the branch silently went stale and stopped
+-- being exercised at all.
+--
+-- Two things can change this answer, and they need different treatment:
+--
+--   * WHAT THE PLAYER HAS -- a hearthstone bought or destroyed, a toy
+--     learned. Those fire events, and the revision below moves on them.
+--   * A COOLDOWN RUNNING DOWN. Nothing fires for that, so a revision alone
+--     would hold "not ready" for a teleport that came off cooldown minutes
+--     ago -- and `/cn travel` prints those numbers.
+--
+-- So the held answer also carries the SHORTEST cooldown it saw, and expires
+-- itself when that much time has passed. Nothing is stale for longer than the
+-- soonest thing that could change it, and a list where everything is ready
+-- expires on the event alone.
+Travel.teleportRevision = 0
+
+local teleportsHeld, teleportsAt, teleportsUntil = nil, nil, nil
+
+function Travel.NoteTeleportsChanged()
+    Travel.teleportRevision = (Travel.teleportRevision or 0) + 1
+end
+
 function Travel.ReadyTeleports()
+    if teleportsHeld
+        and teleportsAt == Travel.teleportRevision
+        and (teleportsUntil == nil or time() < teleportsUntil) then
+
+        return teleportsHeld
+    end
+
     local available = {}
 
     for _, entry in ipairs(Travel.teleports) do
@@ -52856,6 +53099,21 @@ function Travel.ReadyTeleports()
 
         return a.remaining < b.remaining
     end)
+
+    -- The soonest moment any of these could stop being true.
+    local soonest
+
+    for _, entry in ipairs(available) do
+        if entry.remaining and entry.remaining > 0 then
+            if not soonest or entry.remaining < soonest then
+                soonest = entry.remaining
+            end
+        end
+    end
+
+    teleportsHeld  = available
+    teleportsAt    = Travel.teleportRevision
+    teleportsUntil = soonest and (time() + soonest) or nil
 
     return available
 end
@@ -53593,7 +53851,30 @@ CN:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED", function(_, unit, _, spellID)
     if unit == "player" and Travel.hearthSpells[spellID] then
         hearthPending = true
     end
+
+    -- ANY cast by the player can have started a cooldown this list reports.
+    -- Cheap: it moves a counter, and the walk happens on the next read.
+    if unit == "player" then
+        Travel.NoteTeleportsChanged()
+    end
 end)
+
+-- WHAT ELSE CAN CHANGE THE ANSWER. 0.93.0. A hearthstone bought, used up or
+-- destroyed; a toy learned; and the world reloading under us.
+--
+-- `SPELLS_CHANGED` and `LEARNED_SPELL_IN_TAB` are NOT here. Both are real
+-- client events, and the harness's known-event guard -- the one added after
+-- 0.46.0 shipped a name that does not exist -- refused them until they were
+-- added deliberately. Asked deliberately, the answer was no: `SPELLS_CHANGED`
+-- fires constantly and would defeat the cache it is meant to protect, and a
+-- newly learned teleport is picked up by the next bag update or zone change,
+-- which is soon enough for a travel estimate.
+for _, event in ipairs({
+    "BAG_UPDATE_DELAYED",
+    "PLAYER_ENTERING_WORLD",
+}) do
+    CN:RegisterEvent(event, Travel.NoteTeleportsChanged)
+end
 
 -- NARROWED TO THE PLAYER. 0.86.0.
 --
@@ -59688,7 +59969,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.92.0
+## Version: 0.93.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -59943,6 +60224,74 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.93.0]
+
+**An achievement could not get onto the shortlist by getting closer to done.**
+The five-second criteria sweep — the thing that keeps "3 of 5 rares" honest
+while you are out doing it — only ever looked at achievements that were
+*already* on the shortlist. An achievement one step from finishing sat unread
+until something else forced a full rescan, which meant the sweep did its best
+work precisely where it was least needed and none at all where it mattered.
+
+The rest of this release is a sweep of a rule this project has stated in six
+files and broken in two: **a localized string is for display, never to persist**.
+Faction and transmog-slot names were being written to disk on every scan and
+read back on every list, so a player who changed client language kept reading
+the old one until something happened to rescan — up to ten minutes, for
+appearances.
+
+### Fixed
+
+- **Appearance slots were named from disk, in whatever language you used
+  last.** `Modules/Appearances.lua` made this exact argument in 0.58.0 and was
+  never swept itself: nine other modules have a live-name accessor with the
+  same comment, three of them naming this file as the precedent. It had none,
+  and `/cn next`, `/cn appearances` and the filter labels all read the stored
+  string. The client re-supplies the name instantly, so it is asked every
+  time now, and migration 37 takes the field off disk.
+- **Faction names were stored twice.** Reputations already keep a separate
+  name index; each record was carrying its own copy as well, per scope. The
+  copy is gone and the index is the single source, on the account side and
+  the character side both.
+- **A collapsed reputation header hid factions from the addon's own test
+  suite.** Not a player-visible bug, but the reason one was possible: the
+  offline client model listed every faction regardless of whether its header
+  was collapsed, so the code that expands the list before scanning could have
+  been deleted outright and nothing would have complained. The model now
+  hides what the game hides, and a faction behind a collapsed header is what
+  proves the expansion works.
+- **`/cn nav` described its argument as something else.** The help line named
+  a parameter the command does not take.
+
+### Changed
+
+- **The criteria sweep now watches a band, not a list.** Anything within twice
+  the "nearly done" threshold is polled, so an achievement can enter the
+  shortlist by approaching completion rather than only by being on it already.
+- **Teleport readiness is computed once and reused.** The list of teleports
+  and their cooldowns was rebuilt from scratch for every candidate on another
+  continent — dozens of client calls per refresh. It is cached against an
+  explicit revision now, bumped when bags change, when a teleport is cast and
+  at login, and expires on its own when the shortest cooldown it saw runs out.
+  A cache with no expiry would have held a finished cooldown for ever, because
+  nothing fires when one ends.
+- **Zone goals are recached when the candidate list moves.** The goal-zone
+  cache keyed only on its own generation, so a rebuild of the candidates left
+  it answering from before.
+- **A single appearance-slot name no longer walks every slot.** The filter
+  label enumerated the whole category list and compared IDs to find one name.
+
+### Performance
+
+- Route optimisation is now measured at 200 stops as well as 90 — one zone's
+  worth of a full completionist sweep — and confirmed to scale exactly
+  quadratically with no hidden term. It carries a ceiling now, so a change
+  that moves that work back onto the refresh path is caught by a number.
+- The cross-continent travel estimate had never been measured at all: every
+  point in the offline fixture sat on one continent, so the branch that walks
+  your teleports and costs the onward journey from each had no number beside
+  it. It has one, and a budget.
 
 ## [0.92.0]
 
@@ -67238,7 +67587,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.92.0
+0.93.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -69859,10 +70208,43 @@ mutate "Modules/Currencies.lua" \
     "a currency capped on earnings is measured against the balance"
 
 mutate "Modules/Achievements.lua" \
-    "            if watched[achievementID]
+    "            if (watched[achievementID] or approaching)
                 and record.criteria and record.criteria > 0 then" \
     "            if record.criteria and record.criteria > 0 then" \
     "the criteria sweep polls every tracked achievement every five seconds"
+
+mutate "Modules/Achievements.lua" \
+    "            if (watched[achievementID] or approaching)" \
+    "            if (watched[achievementID])" \
+    "an achievement can only enter the shortlist if it was already on it"
+
+mutate "Modules/Appearances.lua" \
+    "    local live = Blizzard.GetAppearanceCategoryName
+        and Blizzard.GetAppearanceCategoryName(categoryID)
+
+    if live then
+        return live
+    end" \
+    "    local record = Store()[categoryID]
+
+    if record and record.name then
+        return record.name
+    end" \
+    "an appearance slot is named from disk instead of from the client"
+
+mutate "Modules/Appearances.lua" \
+    "    lastRescan = time()" \
+    "" \
+    "a login scan leaves the transmog throttle unstamped"
+
+mutate "Database.lua" \
+    "        for _, profile in pairs(db.characters or {}) do
+            if type(profile) == \"table\" then
+                strip(profile.reputations)
+            end
+        end" \
+    "" \
+    "migration 37 strips account names and leaves every character's behind"
 
 mutate "Character.lua" \
     "    return tostring(realm or \"UnknownRealm\") .. \"-\" .. tostring(name or \"Unknown\")" \
@@ -74659,10 +75041,45 @@ local factions = {
     { factionID = 946,  name = "Honor Hold", reaction = 8, isHeader = true, isHeaderWithRep = true,
       currentStanding = 43000, currentReactionThreshold = 42000, nextReactionThreshold = 43000 },
     { factionID = 0,    name = "Legacy", isHeader = true, isCollapsed = true },
+    -- BEHIND THE COLLAPSED HEADER. 0.93.0.
+    --
+    -- The collapsed header had no children, so the stub's willingness to
+    -- report every row regardless of collapse state cost nothing and hid
+    -- everything: `WithAllFactionsExpanded` could be deleted outright and
+    -- this suite would still have passed. A faction only reachable by
+    -- expanding is what makes that helper load-bearing here.
+    { factionID = 69,   name = "Darnassus", reaction = 6,
+      currentStanding = 9000, currentReactionThreshold = 9000,
+      nextReactionThreshold = 21000 },
 }
 
 function CN_TEST_Factions()
     return factions
+end
+
+-- WHAT THE CLIENT WOULD ACTUALLY LIST, GIVEN THE HEADER STATES. 0.93.0.
+--
+-- `GetNumFactions` counted the whole fixture and `GetFactionDataByIndex`
+-- indexed straight into it, so the stub was more forgiving than the real
+-- client in the one way that matters: children of a collapsed header are not
+-- in the list at all, and expanding SHIFTS every index after it. Mirrors
+-- `CurrencyVisible`, which models the same client behaviour for the currency
+-- list.
+function CN_TEST_FactionVisible()
+    local visible = {}
+    local showing = true
+
+    for _, row in ipairs(factions) do
+        if row.isHeader then
+            showing = not row.isCollapsed
+
+            table.insert(visible, row)
+        elseif showing then
+            table.insert(visible, row)
+        end
+    end
+
+    return visible
 end
 
 local accountWideFactions = { [2600] = true, [2590] = true }
@@ -74690,8 +75107,8 @@ function CN_TEST_SetParagon(factionID, value, threshold, pending)
 end
 
 C_Reputation = {
-    GetNumFactions          = function() return #factions end,
-    GetFactionDataByIndex   = function(i) return factions[i] end,
+    GetNumFactions          = function() return #CN_TEST_FactionVisible() end,
+    GetFactionDataByIndex   = function(i) return CN_TEST_FactionVisible()[i] end,
     GetFactionDataByID      = function(id)
         for _, f in ipairs(factions) do
             if f.factionID == id then return f end
@@ -74738,7 +75155,9 @@ C_Reputation = {
     CollapseFactionHeader   = function(index)
         collapseCalls = collapseCalls + 1
 
-        local faction = factions[index]
+        -- A VISIBLE INDEX, not a fixture index. The client's collapse call
+        -- takes the row number the player would see.
+        local faction = CN_TEST_FactionVisible()[index]
 
         if faction and faction.isHeader then
             faction.isCollapsed = true
@@ -75015,6 +75434,17 @@ local appearanceSources = {
         { sourceID = 5, name = "Another way entirely",  isCollected = false, itemID = 505 },
     },
 }
+
+-- A CLIENT THAT CAN CHANGE LANGUAGE. 0.93.0.
+--
+-- The slot names here were fixed for the life of a run, so a store that had
+-- written the localized name once looked identical to one that asked the
+-- client every time.
+function CN_TEST_SetAppearanceCategoryName(categoryID, name)
+    if appearanceData[categoryID] then
+        appearanceData[categoryID].name = name
+    end
+end
 
 C_TransmogCollection = {
     GetCategoryInfo           = function(id) return appearanceData[id] and appearanceData[id].name or nil end,
@@ -76361,8 +76791,17 @@ print("  reputations(character)= " .. count(profile.reputations))
 
 assert(count(db.account.reputations) == 2,
     "account-wide reputations must be stored account-side")
-assert(count(profile.reputations) == 3,
-    "character-specific reputations must be stored on the character profile")
+-- FOUR, NOT THREE, and the fourth is the proof. 0.93.0.
+--
+-- Darnassus sits behind a COLLAPSED header, and the faction stubs now hide
+-- what a collapsed header hides. It can only be counted if
+-- `WithAllFactionsExpanded` actually expanded the list before the scan walked
+-- it -- so this number falling back to three means that helper stopped
+-- working, which is precisely what the old always-visible stub could not say.
+assert(count(profile.reputations) == 4,
+    "character-specific reputations must be stored on the character profile, "
+    .. "including the one behind a collapsed header; got "
+    .. count(profile.reputations))
 assert(db.account.reputations[2590].paragon.pending == true,
     "paragon pending flag must persist")
 assert(db.account.reputations[2600].renown == 12,
@@ -76855,6 +77294,33 @@ do
         .. "a scan; got " .. shut .. " collapsed and " .. open .. " open")
 
     print("  and reputation headers are restored one by one, not all at once")
+
+    -- AND THE LIST IS SHORT AGAIN AFTERWARDS. 0.93.0.
+    --
+    -- Restoring the header states is only meaningful if collapsing actually
+    -- hides something. With the header shut, Darnassus must be out of the
+    -- list the client reports -- if it is still countable, the restore put a
+    -- flag back on a fixture nobody consults.
+    local visible = C_Reputation.GetNumFactions()
+    local found   = false
+
+    for index = 1, visible do
+        local data = C_Reputation.GetFactionDataByIndex(index)
+
+        if data and data.factionID == 69 then
+            found = true
+        end
+    end
+
+    assert(not found,
+        "a faction behind a collapsed header must not be listed once the "
+        .. "header is collapsed again")
+
+    assert(visible == #CN_TEST_Factions() - 1,
+        "exactly the one hidden row must be missing; " .. visible
+        .. " of " .. #CN_TEST_Factions() .. " listed")
+
+    print("  and collapsing a header actually hides what is under it")
 end
 
 print("\nRares and treasures:")
@@ -111701,6 +112167,240 @@ end)()
     print("  the cross-tab count searches what the tab searched")
 end)()
 
+;(function()
+    ------------------------------------------------------------
+    -- AN APPEARANCE SLOT IS NAMED IN THE LANGUAGE THE CLIENT IS IN.
+    ------------------------------------------------------------
+    -- `Appearances.Scan` wrote `name = category.name` into every stored row
+    -- and `Summary`, `Remaining` and the candidate provider all read it back
+    -- off disk. Nine other modules in this addon have a live-name accessor
+    -- for exactly this reason, and three of them carry a comment saying
+    -- `Appearances.lua` made the argument first -- in 0.58.0 -- and was
+    -- itself never swept.
+    --
+    -- A player who changes client language keeps the old language until
+    -- something happens to rescan, which is throttled to ten minutes.
+    local slotModule = CN:GetModule("Appearances")
+
+    assert(slotModule, "the appearances module must be loaded")
+
+    slotModule.Scan()
+
+    for _, record in pairs(slotModule.Store()) do
+        assert(record.name == nil,
+            "no appearance row stores a localized name")
+    end
+
+    CN_TEST_SetAppearanceCategoryName(1, "Kopf")
+
+    local sawGerman = false
+
+    for _, row in ipairs(slotModule.Remaining()) do
+        if row.name == "Kopf" then
+            sawGerman = true
+        end
+
+        assert(row.name ~= "Head",
+            "the old language must not survive a client language change")
+    end
+
+    assert(sawGerman,
+        "the slot name comes from the client, not from disk")
+
+    -- AND THE CANDIDATE THE PLAYER READS IN `/cn next`, which is the third
+    -- read site and the one that was missed when the other two were fixed.
+    local slotCandidates = CN.CollectCandidates and CN.CollectCandidates(true) or {}
+    local named      = false
+
+    for _, candidate in ipairs(slotCandidates) do
+        if candidate.type == CN.objectiveTypes.APPEARANCE then
+            assert(not string.find(tostring(candidate.name), "Head", 1, true),
+                "and neither does the candidate: " .. tostring(candidate.name))
+
+            named = true
+        end
+    end
+
+    assert(named, "the appearance provider still produces candidates")
+
+    CN_TEST_SetAppearanceCategoryName(1, "Head")
+
+    -- A CLIENT THAT CANNOT ANSWER STILL NAMES THE ROW.
+    local held = C_TransmogCollection.GetCategoryInfo
+
+    C_TransmogCollection.GetCategoryInfo = function() return nil end
+
+    assert(slotModule.NameOf(1) == "Slot 1",
+        "with no client answer the row is identified by its id, not by a "
+        .. "guess in a language: " .. tostring(slotModule.NameOf(1)))
+
+    C_TransmogCollection.GetCategoryInfo = held
+
+    -- AND MIGRATION 37 TAKES THE FIELD OFF DISK -- ON BOTH SIDES.
+    local aged = {
+        version = 36,
+        account = {
+            appearances = { [1] = { categoryID = 1, name = "Head",
+                                    collected = 120, total = 400 } },
+            reputations = { [2600] = { factionID = 2600, name = "Threads",
+                                       reaction = 5 } },
+        },
+        characters = {
+            ["Someone-Realm"] = {
+                reputations = { [1090] = { factionID = 1090,
+                                           name = "Kirin Tor", reaction = 7 } },
+            },
+        },
+    }
+
+    CN.RunMigrations(aged)
+
+    assert(aged.account.appearances[1].name == nil
+        and aged.account.appearances[1].collected == 120,
+        "the appearance row loses its name and keeps its counts")
+
+    assert(aged.account.reputations[2600].name == nil
+        and aged.account.reputations[2600].reaction == 5,
+        "the account faction loses its name and keeps its standing")
+
+    assert(aged.characters["Someone-Realm"].reputations[1090].name == nil,
+        "and so does the CHARACTER-side faction, which is the half a "
+        .. "one-call-site fix would have left behind")
+
+    print("  an appearance slot is named in the client's language, not disk's")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ACHIEVEMENT CAN ENTER THE SHORTLIST BY APPROACHING IT.
+    ------------------------------------------------------------
+    -- The five-second criteria sweep read only rows ALREADY on the shortlist
+    -- plus pinned goals, so a row at 37 of 40 was never observed and could
+    -- never become nearly done -- while `ACHIEVEMENT_EARNED` deletes rows
+    -- outright. Between two manual full scans the shortlist could only
+    -- shrink, and nothing runs a full scan on its own.
+    local achievements = CN:GetModule("Achievements")
+
+    assert(achievements, "the achievements module must be loaded")
+
+    local store = achievements.Store and achievements.Store()
+        or CN.Account("achievements")
+
+    local key       = CN.characterKey or CN.GetCharacterKey()
+    local threshold = achievements.nearlyDoneThreshold or 2
+
+    -- Outside the shortlist, inside the band: exactly the row the sweep
+    -- could not see. `band` is twice the threshold, so threshold + 1 is
+    -- approaching without being nearly done.
+    local id = 909093
+
+    store[id] = {
+        id        = id,
+        criteria  = 40,
+        completed = false,
+        progress  = { [key] = 40 - (threshold + 1) },
+    }
+
+    assert(not achievements.IsNearlyDone(store[id]),
+        "the fixture row starts off the shortlist")
+
+    local realProgress = CN.Blizzard.GetAchievementProgress
+
+    CN.Blizzard.GetAchievementProgress = function(achievementID)
+        if achievementID == id then
+            -- One more criterion done: now inside the shortlist.
+            return 40 - threshold, 40
+        end
+
+        return realProgress(achievementID)
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(achievements.DoneFor(store[id]) == 40 - threshold,
+        "the sweep must observe a row that was approaching the shortlist, "
+        .. "not only rows already on it; got "
+        .. tostring(achievements.DoneFor(store[id])))
+
+    assert(achievements.IsNearlyDone(store[id]),
+        "and that row is now on the shortlist")
+
+    -- AND A ROW NOWHERE NEAR IT IS STILL NOT POLLED, which is the saving the
+    -- watch set exists for: a band, not the whole store.
+    local far = 909094
+
+    store[far] = {
+        id        = far,
+        criteria  = 40,
+        completed = false,
+        progress  = { [key] = 1 },
+    }
+
+    local asked = false
+
+    CN.Blizzard.GetAchievementProgress = function(achievementID)
+        if achievementID == far then
+            asked = true
+        end
+
+        return realProgress(achievementID)
+    end
+
+    CN.ForgetDebounces()
+    CN.Dispatch("CRITERIA_UPDATE")
+
+    CN.Blizzard.GetAchievementProgress = realProgress
+
+    assert(not asked,
+        "a row 39 criteria from done is not polled every five seconds")
+
+    store[id]  = nil
+    store[far] = nil
+
+    print("  an achievement enters the shortlist by getting closer to done")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE FUNCTION THAT WALKS EVERY CATEGORY STAMPS THE THROTTLE.
+    ------------------------------------------------------------
+    -- The transmog rescan stamp lived in the `TRANSMOG_COLLECTION_UPDATED`
+    -- handler, so only that path advanced it. The login scan and
+    -- `/cn appearancescan` both did the whole walk and left the throttle
+    -- reading "never scanned" -- so a login followed seconds later by a
+    -- looted appearance ran it twice. `Modules/Currencies.lua` records
+    -- fixing this shape in 0.65.0 and `Modules/Pets.lua` in 0.92.0.
+    local transmogModule = CN:GetModule("Appearances")
+
+    local scans = 0
+
+    local real = CN.Blizzard.GetAppearanceCategories
+
+    CN.Blizzard.GetAppearanceCategories = function(...)
+        scans = scans + 1
+
+        return real(...)
+    end
+
+    transmogModule.Scan()
+
+    assert(scans == 1, "the scan under test ran once")
+
+    CN.ForgetDebounces()
+    CN.Dispatch("TRANSMOG_COLLECTION_UPDATED")
+
+    CN.Blizzard.GetAppearanceCategories = real
+
+    assert(scans == 1,
+        "a scan that just walked every category must have stamped its own "
+        .. "throttle; the event ran it again after " .. scans .. " scans")
+
+    print("  a transmog scan stamps its own throttle, whoever called it")
+end)()
+
 print("\nALL HARNESS CHECKS PASSED")
 
 '@
@@ -112189,6 +112889,35 @@ do
         CN.ImproveRoute(copy, 0.5, 0.5)
     end)
 
+    -- AND AT THE SIZE A COMPLETIONIST ACTUALLY REACHES. 0.93.0.
+    --
+    -- 2-opt is quadratic, so ninety stops measures a quarter of what two
+    -- hundred costs -- and two hundred is not a hypothetical: it is one
+    -- zone's worth of rares, treasures and quest objectives for a player
+    -- running the full sweep this addon exists to plan. The 90-stop row was
+    -- the largest number in this file, so the shape of the curve past it was
+    -- an assumption.
+    local manyStops = {}
+
+    for index = 1, 200 do
+        table.insert(manyStops, {
+            name  = "Stop " .. index,
+            mapID = 94,
+            x     = 0.05 + (((index * 13) % 29) * 0.031),
+            y     = 0.05 + (((index * 17) % 31) * 0.029),
+        })
+    end
+
+    bench("ImproveRoute() over 200 stops", 20, function()
+        local copy = {}
+
+        for index = 1, #manyStops do
+            copy[index] = manyStops[index]
+        end
+
+        CN.ImproveRoute(copy, 0.5, 0.5)
+    end)
+
     -- And the clustering that produces those stops, which was quadratic in
     -- objectives with a module lookup and a square root inside the inner
     -- loop.
@@ -112237,6 +112966,50 @@ do
         bench("CostFor() as the scorer calls it", 200, function()
             travel.CostFor(94, 0.90, 0.90)
         end)
+
+        -- THE BRANCH THAT WAS NEVER MEASURED AT ALL. 0.93.0.
+        --
+        -- Every point in this file's fixture sat on continent 1, so
+        -- `EstimateSeconds` took the same-continent path every single time
+        -- and the cross-continent branch -- which walks every teleport the
+        -- character owns and RECURSES into a full estimate for each one whose
+        -- destination lands on the target's continent -- had no number beside
+        -- it. It is called from the scorer for every candidate with a
+        -- location, exactly like the measured branch.
+        --
+        -- A known teleport plus two maps declared to be on continent 2 is the
+        -- smallest fixture that reaches it.
+        local heldKnown = IsSpellKnown
+        local heldMaps  = CN_TEST_CONTINENT_FOR_MAP
+
+        -- Teleport: Stormwind (mapID 84).
+        IsSpellKnown = function(spellID) return spellID == 3561 end
+
+        CN_TEST_CONTINENT_FOR_MAP = { [84] = 2, [2112] = 2 }
+
+        if travel.NoteTeleportsChanged then
+            travel.NoteTeleportsChanged()
+        end
+
+        local reached = select(3, travel.EstimateSeconds(
+            94, 0.10, 0.10, 2112, 0.90, 0.90))
+
+        -- A BUDGET ON A BRANCH THAT DID NOT RUN GUARDS NOTHING, which is the
+        -- mistake this file records making with `UI.Refresh`.
+        assert(reached and reached.mode == "teleport",
+            "the cross-continent fixture must actually reach the teleport "
+            .. "branch; got " .. tostring(reached and reached.mode))
+
+        bench("EstimateSeconds() across continents", 200, function()
+            travel.EstimateSeconds(94, 0.10, 0.10, 2112, 0.90, 0.90)
+        end)
+
+        IsSpellKnown              = heldKnown
+        CN_TEST_CONTINENT_FOR_MAP = heldMaps
+
+        if travel.NoteTeleportsChanged then
+            travel.NoteTeleportsChanged()
+        end
     end
 end
 
@@ -112284,6 +113057,12 @@ local BUDGETS = {
     ["EstimateSeconds() across a zone"] = 0.25,
     ["CostFor() as the scorer calls it"] = 0.25,
 
+    -- Added in 0.93.0. This branch walks every teleport the character owns
+    -- and recurses into a full estimate for each viable one, so its cost
+    -- scales with the teleport list -- and it is called from the scorer for
+    -- every candidate on another continent.
+    ["EstimateSeconds() across continents"] = 0.50,
+
     -- Added in 0.54.0, and both of them were over a hundred times their
     -- eventual measured cost before that release. The fixture could not
     -- reach the size at which either mattered, so neither had a budget and
@@ -112296,6 +113075,18 @@ local BUDGETS = {
     -- slower is the right trade; the cost is paid once per route now rather
     -- than on every two-second refresh (see `routeCache`).
     ["ImproveRoute() over 90 stops"] = 8.0,
+
+    -- Added in 0.93.0, and the measurement said what the algorithm promises:
+    -- 4.5 ms at 90 stops, 21.7 at 200, which is (200/90)^2 to within noise.
+    -- No hidden cubic term, so the ceiling is set where a genuinely quadratic
+    -- curve puts it and not where a defensive guess would.
+    --
+    -- Twenty-two milliseconds IS a dropped frame. It is paid once per route
+    -- and then cached (`routeCache`), never on the two-second refresh -- the
+    -- distinction 0.57.0 drew when it chose correct-and-slower. A ceiling
+    -- here means a regression that moves the work back onto the refresh path
+    -- is caught by a number rather than by a player.
+    ["ImproveRoute() over 200 stops"] = 30.0,
     ["ClusterByProximity() over 110 objectives"] = 3.0,
 }
 

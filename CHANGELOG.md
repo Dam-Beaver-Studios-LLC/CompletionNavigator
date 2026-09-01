@@ -7,6 +7,74 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.93.0]
+
+**An achievement could not get onto the shortlist by getting closer to done.**
+The five-second criteria sweep â€” the thing that keeps "3 of 5 rares" honest
+while you are out doing it â€” only ever looked at achievements that were
+*already* on the shortlist. An achievement one step from finishing sat unread
+until something else forced a full rescan, which meant the sweep did its best
+work precisely where it was least needed and none at all where it mattered.
+
+The rest of this release is a sweep of a rule this project has stated in six
+files and broken in two: **a localized string is for display, never to persist**.
+Faction and transmog-slot names were being written to disk on every scan and
+read back on every list, so a player who changed client language kept reading
+the old one until something happened to rescan â€” up to ten minutes, for
+appearances.
+
+### Fixed
+
+- **Appearance slots were named from disk, in whatever language you used
+  last.** `Modules/Appearances.lua` made this exact argument in 0.58.0 and was
+  never swept itself: nine other modules have a live-name accessor with the
+  same comment, three of them naming this file as the precedent. It had none,
+  and `/cn next`, `/cn appearances` and the filter labels all read the stored
+  string. The client re-supplies the name instantly, so it is asked every
+  time now, and migration 37 takes the field off disk.
+- **Faction names were stored twice.** Reputations already keep a separate
+  name index; each record was carrying its own copy as well, per scope. The
+  copy is gone and the index is the single source, on the account side and
+  the character side both.
+- **A collapsed reputation header hid factions from the addon's own test
+  suite.** Not a player-visible bug, but the reason one was possible: the
+  offline client model listed every faction regardless of whether its header
+  was collapsed, so the code that expands the list before scanning could have
+  been deleted outright and nothing would have complained. The model now
+  hides what the game hides, and a faction behind a collapsed header is what
+  proves the expansion works.
+- **`/cn nav` described its argument as something else.** The help line named
+  a parameter the command does not take.
+
+### Changed
+
+- **The criteria sweep now watches a band, not a list.** Anything within twice
+  the "nearly done" threshold is polled, so an achievement can enter the
+  shortlist by approaching completion rather than only by being on it already.
+- **Teleport readiness is computed once and reused.** The list of teleports
+  and their cooldowns was rebuilt from scratch for every candidate on another
+  continent â€” dozens of client calls per refresh. It is cached against an
+  explicit revision now, bumped when bags change, when a teleport is cast and
+  at login, and expires on its own when the shortest cooldown it saw runs out.
+  A cache with no expiry would have held a finished cooldown for ever, because
+  nothing fires when one ends.
+- **Zone goals are recached when the candidate list moves.** The goal-zone
+  cache keyed only on its own generation, so a rebuild of the candidates left
+  it answering from before.
+- **A single appearance-slot name no longer walks every slot.** The filter
+  label enumerated the whole category list and compared IDs to find one name.
+
+### Performance
+
+- Route optimisation is now measured at 200 stops as well as 90 â€” one zone's
+  worth of a full completionist sweep â€” and confirmed to scale exactly
+  quadratically with no hidden term. It carries a ceiling now, so a change
+  that moves that work back onto the refresh path is caught by a number.
+- The cross-continent travel estimate had never been measured at all: every
+  point in the offline fixture sat on one continent, so the branch that walks
+  your teleports and costs the onward journey from each had no number beside
+  it. It has one, and a budget.
+
 ## [0.92.0]
 
 **A deferral set to "forever" was writing a value the game cannot read back.**

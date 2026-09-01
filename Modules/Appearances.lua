@@ -21,14 +21,48 @@ end
 
 Appearances.Store = Store
 
+-- THE LIVE NAME, NEVER A STORED ONE. 0.93.0.
+--
+-- `C_TransmogCollection.GetCategoryInfo` re-supplies the localized slot name
+-- instantly, so persisting it bought nothing and cost correctness: a player
+-- who changed client language kept reading the old language off disk until
+-- the next scan. Same argument `Appearances.lua` itself made in 0.58.0 for
+-- other stores, applied at last to this one.
+--
+-- The fallback is deliberately an English-free identifier plus the ID rather
+-- than a localized guess -- callers append " appearances", and a wrong
+-- language is worse than a plain slot number.
+function Appearances.NameOf(categoryID)
+    local live = Blizzard.GetAppearanceCategoryName
+        and Blizzard.GetAppearanceCategoryName(categoryID)
+
+    if live then
+        return live
+    end
+
+    return "Slot " .. tostring(categoryID)
+end
+
 ------------------------------------------------------------
 -- SCAN
 ------------------------------------------------------------
+
+-- THE FUNCTION THAT DOES THE WORK STAMPS THE THROTTLE. 0.93.0.
+--
+-- The stamp used to live in the `TRANSMOG_COLLECTION_UPDATED` handler, so
+-- only that one path advanced it. The login scan and `/cn appearancescan`
+-- both walked every category and left `lastRescan` untouched, which meant a
+-- login scan followed seconds later by a looted appearance ran the whole
+-- walk twice. Declared here so `Scan` -- the thing that actually spends the
+-- time -- owns it.
+local lastRescan = 0
 
 function Appearances.Scan()
     if not C_TransmogCollection then
         return 0
     end
+
+    lastRescan = time()
 
     local store      = Store()
     local categories = Blizzard.GetAppearanceCategories()
@@ -65,7 +99,21 @@ function Appearances.Scan()
         -- back.
         store[category.categoryID] = {
             categoryID = category.categoryID,
-            name       = category.name,
+
+            -- `name` IS NOT STORED. 0.93.0.
+            --
+            -- Nine modules in this addon have a live-name accessor with a
+            -- store fallback, and three of them -- Toys, Mounts, Pets --
+            -- carry a comment saying "`Appearances.lua` made exactly this
+            -- argument in 0.58.0 and the same argument applies here." This
+            -- file made the argument and was never swept: it had no
+            -- accessor, and `Summary`, `Remaining` and the candidate provider
+            -- all took the localized name straight off disk.
+            --
+            -- `C_TransmogCollection.GetCategoryInfo` re-supplies it instantly
+            -- and in the player's own language, so a player who changed
+            -- client language read "Schulter appearances" in `/cn next` until
+            -- the next scan.
             collected  = collected,
             total      = category.total,
         }
@@ -110,7 +158,7 @@ function Appearances.Remaining()
 
         if remaining > 0 then
             table.insert(rows, {
-                name      = record.name,
+                name      = Appearances.NameOf(record.categoryID),
                 collected = record.collected,
                 total     = record.total,
                 remaining = remaining,
@@ -152,7 +200,7 @@ CN.RegisterCandidateProvider("Appearances", function()
 
             table.insert(rows, {
                 categoryID = categoryID,
-                name       = record.name,
+                name       = Appearances.NameOf(record.categoryID),
                 collected  = collected,
                 total      = total,
                 remaining  = total - collected,
@@ -213,8 +261,6 @@ end, { events = { "TRANSMOG_COLLECTION_UPDATED" }, cooldown = 10 })
 -- the scan walks every category.
 Appearances.rescanSeconds = 600
 
-local lastRescan = 0
-
 -- AND ONCE AT LOGIN, which is the one path this store did not have.
 --
 -- Every other setup-scanned store -- currencies, reputations, titles,
@@ -237,8 +283,6 @@ CN:RegisterEvent("TRANSMOG_COLLECTION_UPDATED", function()
     if (now - lastRescan) < Appearances.rescanSeconds then
         return
     end
-
-    lastRescan = now
 
     pcall(Appearances.Scan)
 end)

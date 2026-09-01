@@ -1757,7 +1757,16 @@ CN:RegisterCommand{
 
 CN:RegisterCommand{
     name    = "nav",
-    args    = "[auto, native, tomtom or blizzard]",
+    -- THE REGISTRY, NOT THREE SPECIAL CASES. 0.93.0.
+    --
+    -- `Navigation.SetPreference` matches against `CN.waypointProviders`, and
+    -- the REJECTION message was changed to print `PreferenceNames()` under a
+    -- comment saying "a registry with a closed selector is three special
+    -- cases wearing a registry's name". This string -- which is what
+    -- `/cn help` prints, and what a player reads BEFORE they earn the
+    -- rejection -- was not swept. A fourth provider registered by another
+    -- addon is usable, selectable, named in the error, and invisible here.
+    args    = "[auto or a provider name]",
     order   = 41,
     help    = "Choose which navigation provider to use.",
     handler = function(args)

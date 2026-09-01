@@ -481,6 +481,35 @@ do
         CN.ImproveRoute(copy, 0.5, 0.5)
     end)
 
+    -- AND AT THE SIZE A COMPLETIONIST ACTUALLY REACHES. 0.93.0.
+    --
+    -- 2-opt is quadratic, so ninety stops measures a quarter of what two
+    -- hundred costs -- and two hundred is not a hypothetical: it is one
+    -- zone's worth of rares, treasures and quest objectives for a player
+    -- running the full sweep this addon exists to plan. The 90-stop row was
+    -- the largest number in this file, so the shape of the curve past it was
+    -- an assumption.
+    local manyStops = {}
+
+    for index = 1, 200 do
+        table.insert(manyStops, {
+            name  = "Stop " .. index,
+            mapID = 94,
+            x     = 0.05 + (((index * 13) % 29) * 0.031),
+            y     = 0.05 + (((index * 17) % 31) * 0.029),
+        })
+    end
+
+    bench("ImproveRoute() over 200 stops", 20, function()
+        local copy = {}
+
+        for index = 1, #manyStops do
+            copy[index] = manyStops[index]
+        end
+
+        CN.ImproveRoute(copy, 0.5, 0.5)
+    end)
+
     -- And the clustering that produces those stops, which was quadratic in
     -- objectives with a module lookup and a square root inside the inner
     -- loop.
@@ -529,6 +558,50 @@ do
         bench("CostFor() as the scorer calls it", 200, function()
             travel.CostFor(94, 0.90, 0.90)
         end)
+
+        -- THE BRANCH THAT WAS NEVER MEASURED AT ALL. 0.93.0.
+        --
+        -- Every point in this file's fixture sat on continent 1, so
+        -- `EstimateSeconds` took the same-continent path every single time
+        -- and the cross-continent branch -- which walks every teleport the
+        -- character owns and RECURSES into a full estimate for each one whose
+        -- destination lands on the target's continent -- had no number beside
+        -- it. It is called from the scorer for every candidate with a
+        -- location, exactly like the measured branch.
+        --
+        -- A known teleport plus two maps declared to be on continent 2 is the
+        -- smallest fixture that reaches it.
+        local heldKnown = IsSpellKnown
+        local heldMaps  = CN_TEST_CONTINENT_FOR_MAP
+
+        -- Teleport: Stormwind (mapID 84).
+        IsSpellKnown = function(spellID) return spellID == 3561 end
+
+        CN_TEST_CONTINENT_FOR_MAP = { [84] = 2, [2112] = 2 }
+
+        if travel.NoteTeleportsChanged then
+            travel.NoteTeleportsChanged()
+        end
+
+        local reached = select(3, travel.EstimateSeconds(
+            94, 0.10, 0.10, 2112, 0.90, 0.90))
+
+        -- A BUDGET ON A BRANCH THAT DID NOT RUN GUARDS NOTHING, which is the
+        -- mistake this file records making with `UI.Refresh`.
+        assert(reached and reached.mode == "teleport",
+            "the cross-continent fixture must actually reach the teleport "
+            .. "branch; got " .. tostring(reached and reached.mode))
+
+        bench("EstimateSeconds() across continents", 200, function()
+            travel.EstimateSeconds(94, 0.10, 0.10, 2112, 0.90, 0.90)
+        end)
+
+        IsSpellKnown              = heldKnown
+        CN_TEST_CONTINENT_FOR_MAP = heldMaps
+
+        if travel.NoteTeleportsChanged then
+            travel.NoteTeleportsChanged()
+        end
     end
 end
 
@@ -576,6 +649,12 @@ local BUDGETS = {
     ["EstimateSeconds() across a zone"] = 0.25,
     ["CostFor() as the scorer calls it"] = 0.25,
 
+    -- Added in 0.93.0. This branch walks every teleport the character owns
+    -- and recurses into a full estimate for each viable one, so its cost
+    -- scales with the teleport list -- and it is called from the scorer for
+    -- every candidate on another continent.
+    ["EstimateSeconds() across continents"] = 0.50,
+
     -- Added in 0.54.0, and both of them were over a hundred times their
     -- eventual measured cost before that release. The fixture could not
     -- reach the size at which either mattered, so neither had a budget and
@@ -588,6 +667,18 @@ local BUDGETS = {
     -- slower is the right trade; the cost is paid once per route now rather
     -- than on every two-second refresh (see `routeCache`).
     ["ImproveRoute() over 90 stops"] = 8.0,
+
+    -- Added in 0.93.0, and the measurement said what the algorithm promises:
+    -- 4.5 ms at 90 stops, 21.7 at 200, which is (200/90)^2 to within noise.
+    -- No hidden cubic term, so the ceiling is set where a genuinely quadratic
+    -- curve puts it and not where a defensive guess would.
+    --
+    -- Twenty-two milliseconds IS a dropped frame. It is paid once per route
+    -- and then cached (`routeCache`), never on the two-second refresh -- the
+    -- distinction 0.57.0 drew when it chose correct-and-slower. A ceiling
+    -- here means a regression that moves the work back onto the refresh path
+    -- is caught by a number rather than by a player.
+    ["ImproveRoute() over 200 stops"] = 30.0,
     ["ClusterByProximity() over 110 objectives"] = 3.0,
 }
 

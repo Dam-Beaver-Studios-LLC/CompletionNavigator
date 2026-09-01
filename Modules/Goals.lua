@@ -566,7 +566,28 @@ end, {
 local goalZones, goalZoneGeneration = nil, -1
 
 local function GoalZones()
-    local generation = Goals.zoneGeneration or 0
+    -- AND THE PLANS, NOT ONLY THE LIST. 0.93.0.
+    --
+    -- `Goals.zoneGeneration` moves when a goal is pinned, unpinned or
+    -- cleared. Neither thing this cache is derived from is a property of the
+    -- list: `plan.done` comes from `CN.Explain` and flips the moment the
+    -- player finishes the pinned thing, and `plan.mapID` is LEARNED during
+    -- play -- a quest POI resolving, a merchant being opened, a rare being
+    -- sighted.
+    --
+    -- So: pin a recipe before opening the vendor who sells it and its zone
+    -- never enters the set, for the rest of the session, however many times
+    -- you later stand in front of that vendor. And finish a pinned rare and
+    -- every objective in that zone keeps its +2 forever. Nothing else could
+    -- dislodge either -- `NoteDecoratorsChanged` and `InvalidateRanking` do
+    -- not touch this counter.
+    --
+    -- The candidate generation is the right second half: this provider
+    -- already declares every event that can move a plan.
+    local cacheState = CN.GetCandidateCacheState and CN.GetCandidateCacheState()
+
+    local generation = tostring(Goals.zoneGeneration or 0) .. ":"
+        .. tostring(cacheState and cacheState.generation or 0)
 
     if goalZones and goalZoneGeneration == generation then
         return goalZones

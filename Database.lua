@@ -1855,6 +1855,56 @@ CN.migrations = {
                 .. " deferrals that could not be read back.")
         end
     end,
+
+    -- THE LAST TWO STORES THAT PERSISTED A LOCALIZED NAME. 0.93.0.
+    --
+    -- `reputations.name` and `appearances.name` are the last of them. The
+    -- rule -- a localized string is for DISPLAY, never to BRANCH on and never
+    -- to PERSIST -- has been stated in this file since migration 16, and both
+    -- of these were written every scan anyway.
+    --
+    -- Reputations kept a SEPARATE name store keyed by factionID before this
+    -- release and still wrote `name` into each record as well, so the same
+    -- string sat on disk twice per faction, per scope. Appearances had no
+    -- accessor at all and read the localized slot name straight off disk, so
+    -- a player who changed client language kept reading the old language
+    -- until the next scan.
+    --
+    -- The character-side reputation store has to be swept too: reputations
+    -- are split by scope, and stripping only `db.account` would have left
+    -- every character-specific faction carrying the field. That is the
+    -- one-call-site defect this project has recorded ten times.
+    [37] = function(db)
+        local dropped = 0
+
+        local function strip(store)
+            if type(store) ~= "table" then
+                return
+            end
+
+            for _, record in pairs(store) do
+                if type(record) == "table" and record.name ~= nil then
+                    record.name = nil
+
+                    dropped = dropped + 1
+                end
+            end
+        end
+
+        strip(db.account and db.account.reputations)
+        strip(db.account and db.account.appearances)
+
+        for _, profile in pairs(db.characters or {}) do
+            if type(profile) == "table" then
+                strip(profile.reputations)
+            end
+        end
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " stored names the client re-supplies.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

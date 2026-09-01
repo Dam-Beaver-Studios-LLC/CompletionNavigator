@@ -396,6 +396,29 @@ end
 -- Appearance counts are reported per category. Individual appearance
 -- enumeration is enormous; the per-category totals are what a completion
 -- dashboard actually needs.
+-- ONE CATEGORY, NOT ALL OF THEM. 0.93.0.
+--
+-- `GetAppearanceCategories` costs three client calls per category plus a
+-- sort, and every caller that wanted a single name was paying the whole
+-- walk: `Filters.lua` enumerated all of them and then compared IDs.
+function Blizzard.GetAppearanceCategoryName(categoryID)
+    if not C_TransmogCollection or not C_TransmogCollection.GetCategoryInfo then
+        return nil
+    end
+
+    if type(categoryID) ~= "number" then
+        return nil
+    end
+
+    local name = C_TransmogCollection.GetCategoryInfo(categoryID)
+
+    if type(name) == "string" and name ~= "" then
+        return name
+    end
+
+    return nil
+end
+
 function Blizzard.GetAppearanceCategories()
     local categories = {}
 
