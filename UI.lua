@@ -643,7 +643,26 @@ local function BuildWindow()
         -- matched elsewhere -- so typing a single character after pressing
         -- "Scan everything" wiped "Read 6 collections." off the screen with
         -- nothing, and there was no way to get it back.
-        UI.ShowElsewhere(UI.SearchElsewhere(self:GetText()))
+        -- DEBOUNCED, BECAUSE IT WALKS EVERY TAB. 0.94.0.
+        --
+        -- `SetFilter` above touches the tab in front of the player;
+        -- `SearchElsewhere` walks the entries of all eleven, twice, and this
+        -- ran on every character typed with nothing between it and the
+        -- keyboard. `UI.RequestRefresh` has used this exact shape since
+        -- 0.5x for the same reason.
+        --
+        -- The first keystroke still answers immediately -- `CN.Debounce`
+        -- runs the first call and collapses the rest into one trailing run --
+        -- so a single-letter search is as responsive as it was.
+        -- THE BOX IS READ WHEN THE WORK RUNS, not when it was scheduled.
+        --
+        -- A trailing run fires up to a quarter-second later, and capturing
+        -- the text into the closure would have shown the results for
+        -- whatever had been typed at the moment the window opened -- so
+        -- typing "moun" quickly would answer for "mo" and stop.
+        CN.Debounce("UI.searchElsewhere", 0.25, function()
+            UI.ShowElsewhere(UI.SearchElsewhere(search:GetText()))
+        end)
     end)
 
     -- KEEP THE FILTER ACROSS TABS, OR CLEAR IT?
@@ -1202,9 +1221,20 @@ function UI.SearchAll(text)
             local count = (list.CountMatching and list:CountMatching(text))
                 or 0
 
+            -- STOPS AT THE FIRST MATCH. 0.94.0.
+            --
+            -- `first` is one name, and the loop went on building a
+            -- `CN.SearchKey` -- four `gsub`s and a `lower`, one throwaway
+            -- string each -- for every remaining entry on every one of the
+            -- eleven tabs after it already had one. The guard suppressed the
+            -- assignment and not the work.
             local first = nil
 
             for _, entry in ipairs(list:Entries()) do
+                if first then
+                    break
+                end
+
                 -- Plain find, for the reason the list's own filter gives:
                 -- somebody typing "mount (2)" is typing a name, not a
                 -- pattern, and a stray bracket must not throw.
@@ -1216,7 +1246,7 @@ function UI.SearchAll(text)
                 -- matched none. Two predicates for one question.
                 local haystack = CN.SearchKey(entry.text, entry.value)
 
-                if not first and haystack:find(needle, 1, true) then
+                if haystack:find(needle, 1, true) then
                     first = CN.Strip(tostring(entry.text or ""))
                 end
             end
@@ -2910,7 +2940,7 @@ UI.RegisterTab{
             return
         end
 
-        local summary = vault.Summary()
+        local summary = vault.Summary(rows)
 
         panel.header:SetText(summary.unlocked .. " reward"
             .. CN.Pluralize(summary.unlocked, "") .. " unlocked"

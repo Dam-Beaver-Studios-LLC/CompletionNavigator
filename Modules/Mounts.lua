@@ -413,7 +413,8 @@ CN:RegisterCommand{
         local seen, collected, missing = Mounts.Scan()
 
         Print("Scanned " .. seen .. " mounts.")
-        Print("Collected: " .. collected .. "   Missing: " .. missing)
+        Print("Collected: " .. collected .. " " .. CN.DOT
+            .. " Missing: " .. missing)
     end,
 }
 
@@ -430,7 +431,8 @@ CN:RegisterCommand{
         end
 
         Print("Mounts known to the journal: " .. counts.known)
-        Print("Collected: " .. counts.collected .. "   Missing: " .. counts.missing)
+        Print("Collected: " .. counts.collected .. " " .. CN.DOT
+            .. " Missing: " .. counts.missing)
 
         if counts.wrongFaction > 0 then
             Print("Missing and locked to the other faction: " .. counts.wrongFaction)

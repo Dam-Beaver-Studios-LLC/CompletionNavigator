@@ -295,7 +295,8 @@ CN:RegisterCommand{
         local seen, collected, missing = Toys.Scan()
 
         Print("Scanned " .. seen .. " toys.")
-        Print("Collected: " .. collected .. "   Missing: " .. missing)
+        Print("Collected: " .. collected .. " " .. CN.DOT
+            .. " Missing: " .. missing)
     end,
 }
 
@@ -312,7 +313,8 @@ CN:RegisterCommand{
         end
 
         Print("Toys known to the toy box: " .. counts.known)
-        Print("Collected: " .. counts.collected .. "   Missing: " .. counts.missing)
+        Print("Collected: " .. counts.collected .. " " .. CN.DOT
+            .. " Missing: " .. counts.missing)
     end,
 }
 

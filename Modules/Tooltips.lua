@@ -78,9 +78,8 @@ local function ToyLines(lines, itemID)
     return false
 end
 
-local function MountLines(lines, itemID)
-    local mountID = Blizzard.GetMountFromItem(itemID)
-
+-- `mountID` is passed in rather than re-asked. 0.94.0 -- see `ItemLines`.
+local function MountLines(lines, itemID, mountID)
     if not mountID then
         return false
     end
@@ -141,9 +140,8 @@ local function MountLines(lines, itemID)
     return false
 end
 
-local function PetLines(lines, itemID)
-    local speciesID = Blizzard.GetPetSpeciesFromItem(itemID)
-
+-- `speciesID` is passed in rather than re-asked. 0.94.0 -- see `ItemLines`.
+local function PetLines(lines, itemID, speciesID)
     if not speciesID then
         return false
     end
@@ -288,12 +286,23 @@ function Tooltips.ItemLines(itemID, itemName)
 
     itemName = itemName or Blizzard.GetItemName(itemID)
 
+    -- ASKED ONCE PER MOUSEOVER, NOT TWICE. 0.94.0.
+    --
+    -- `MountLines` and `PetLines` each resolved the item into a collection id
+    -- and the "why you should care" block below resolved both again -- two
+    -- extra `C_MountJournal` / `C_PetJournal` calls on what `bench.lua` calls
+    -- "the hottest path in the addon: every mouseover in the game, in bags,
+    -- in the auction house, on a vendor's entire inventory". A bag sweep or
+    -- an auction page fires dozens of these a second.
+    local mountID   = Blizzard.GetMountFromItem(itemID)
+    local speciesID = Blizzard.GetPetSpeciesFromItem(itemID)
+
     local collectible = false
 
-    collectible = ToyLines(lines, itemID)         or collectible
-    collectible = MountLines(lines, itemID)       or collectible
-    collectible = PetLines(lines, itemID)         or collectible
-    collectible = RecipeLines(lines, itemName)    or collectible
+    collectible = ToyLines(lines, itemID)             or collectible
+    collectible = MountLines(lines, itemID, mountID)  or collectible
+    collectible = PetLines(lines, itemID, speciesID)  or collectible
+    collectible = RecipeLines(lines, itemName)        or collectible
 
     -- Appearance state is noise on something that is not gear, so it is only
     -- consulted when nothing else claimed the item.
@@ -314,9 +323,6 @@ function Tooltips.ItemLines(itemID, itemName)
     -- tooltip people turn off.
     if collectible then
         local goals = CN:GetModule("Goals")
-
-        local mountID = Blizzard.GetMountFromItem(itemID)
-        local speciesID = Blizzard.GetPetSpeciesFromItem(itemID)
 
         -- TOYS TOO, which hovered silently.
         --

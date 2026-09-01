@@ -176,6 +176,31 @@ function Professions.CaptureOpenProfession()
         end
     end
 
+    -- ZERO RECIPES IS A REFUSAL, NOT A MEASUREMENT. 0.94.0.
+    --
+    -- `IsTradeSkillReady` says the FRAME is ready, not that the recipe list
+    -- has streamed -- and `GetAllRecipeIDs` answers with an empty table until
+    -- it has. Every profession in the game has recipes, so a zero here is the
+    -- client declining to answer.
+    --
+    -- Writing it anyway set `recipesSeen = true` with a total of zero, and
+    -- that flag is the ONE thing that stops the addon asking. `/cn setup`
+    -- stopped listing "open each profession window once", the Collections tab
+    -- dropped its hint, `/cn professions` printed "(0 of 0 recipes)", and the
+    -- state survived every login because `Professions.Scan` deliberately
+    -- preserves the field. The addon claimed to have read something it never
+    -- read, and removed the sentence that would have told the player how to
+    -- fix it.
+    --
+    -- Fifth writer of this shape. `Currencies.Scan`'s own header names
+    -- Achievements (0.76.0), Exploration (0.61.0) and Loremaster (0.71.0) as
+    -- carrying the same guard, under the words "a cold scan that read nothing
+    -- would otherwise delete every row it could not confirm". This file was
+    -- never swept.
+    if seen == 0 then
+        return false, 0, 0
+    end
+
     store[skillLineID] = store[skillLineID] or {
         skillLineID = skillLineID,
         name        = professionName,

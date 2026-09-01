@@ -123,14 +123,39 @@ function Static.RegisterQuest(questID, record, origin)
         end
     end
 
+    -- THE ROW THAT IS KEPT IS THE ROW THAT STAYS. 0.94.0.
+    --
+    -- The collision was recorded as `kept = existing.origin` and the next
+    -- line then OVERWROTE the existing row, so the last supplier to load won
+    -- and the record said the first one had. `/cn selftest` printed that
+    -- straight to the player -- "quest 970772 (curated kept over
+    -- SomeSupplier)" under a comment reading "First registration wins, and
+    -- this says which that was" -- with both halves false. A player with two
+    -- data addons was told the wrong one was authoritative, so the wrong one
+    -- got disabled.
+    --
+    -- First registration wins, which is what the comment, the self-test and
+    -- the provenance command all already claimed. It is also the only answer
+    -- that protects this addon's own hand-checked rows from being replaced by
+    -- a supplier that happens to load later: "checked by hand" is a claim
+    -- about who did the checking, and a silent overwrite destroys it.
+    --
+    -- A supplier that means to REPLACE its own rows has
+    -- `Static.UnregisterOrigin`, added in 0.92.0 for exactly this.
     local existing = Static.quests[questID]
 
     if existing then
+        local kept = existing.origin or "curated"
+        local lost = origin or "curated"
+
         table.insert(Static.collisions, {
             questID = questID,
-            kept    = existing.origin or "curated",
-            lost    = origin or "curated",
+            kept    = kept,
+            lost    = lost,
         })
+
+        return false, "quest " .. questID .. " is already supplied by "
+            .. kept .. "; the first registration is kept"
     end
 
     record.origin = origin or record.origin or "curated"

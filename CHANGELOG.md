@@ -7,6 +7,80 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.94.0]
+
+**Opening a profession window before the game had sent the recipe list was
+recorded as having read it.** The client reports the window as ready before the
+recipes arrive, and the addon wrote "0 of 0 recipes, read" to disk anyway â€”
+which is the one flag that stops it asking. `/cn setup` dropped "open each
+profession window once", the Collections tab dropped the same hint, and the
+state survived every login, because a rescan deliberately preserves it. The
+addon had made a claim about data it never read and removed the sentence that
+would have told you how to fix it.
+
+**A currency capped on what you have *earned* was telling you to spend your way
+out of it.** Some caps are measured against lifetime or seasonal earnings
+rather than the balance you hold. Spending moves the balance; the cap does not
+move. So the addon issued a high-urgency task that provably could not be
+satisfied, brought it back after every weekly reset, and left `/cn ignore` as
+the only escape. It now says what is true: at cap, and this one is on total
+earned.
+
+**With two data addons installed, the addon named the wrong one as
+authoritative.** A quest claimed by two suppliers recorded the first as the
+winner and then let the second overwrite it. `/cn selftest` printed that
+straight to you, so the wrong addon got disabled. First registration wins now â€”
+which is what the code, the self-test and `/cn provenance` all already claimed,
+and it is the only answer that stops a supplier silently replacing this addon's
+own hand-checked rows. A supplier replacing its *own* rows has had a way to do
+that since 0.92.0.
+
+### Fixed
+
+- **Setup could complete permanently on a currency read the game refused.**
+  `Currencies.Scan` documents `0` as its refusal â€” "what the client returns
+  while currency data is still streaming at login, which is exactly when this
+  runs" â€” and setup reported it in the success colour, counted it, and stamped
+  the completion flag. The login reminder then never fired again while
+  `/cn currencies` said "No currency data yet." Third step to need this guard;
+  0.73.0 and 0.86.0 fixed the other two without asking which else returned a
+  refusal shaped like a success. Professions is covered now too.
+- **A currency list the game refused mid-read left your collapsed headers
+  forced open.** The sweep expands every collapsed group, reads, and puts them
+  back; the early return between those two halves skipped the restore. Rare,
+  and permanent when it happened, against that function's own promise that
+  what it changes to read, it changes back.
+- **Chat output padded with spaces in five more places.** Three spaces are not
+  a column: they are three spaces, and they are a different width after "7"
+  than after "142". The 0.77.0 sweep reached three files and the 0.92.0 sweep
+  reached one more; this one reached `Progress`, `Toys`, `Mounts` and
+  `Loremaster`.
+- An empty search result left the previous row's highlight in place â€” no
+  visible symptom, and not what the note beside it claimed.
+
+### Changed
+
+- **The quest-log sweep stamps its own throttle.** It was stamped by the event
+  handler alone, so the login hook and `/cn discoveractive` left it unarmed â€”
+  and `QUEST_LOG_UPDATE` fires within the same second in both cases. The most
+  expensive scan in the addon, which walks every related map's points of
+  interest with a write and a title request per pin, ran twice at every login.
+  `Modules/Currencies.lua` records fixing this exact shape in 0.65.0; the fix
+  landed in one file and nowhere else.
+- **`/cn discoveractive` counted the walk it had already made.** It swept the
+  neighbourhood and then swept it again to produce a number the first sweep
+  already held.
+- **A mouseover resolves an item once.** The mount and pet lookups were each
+  performed twice per tooltip â€” on what the benchmark file calls the hottest
+  path in the addon, where a bag sweep or an auction page fires dozens a
+  second.
+- **Typing in the filter box no longer searches every other tab on every
+  keystroke.** The cross-tab count walked the entries of all eleven tabs
+  twice per character typed, and kept building throwaway strings after it
+  already had its answer. Debounced, and it stops at the first match â€” the
+  first keystroke still answers immediately.
+- The Great Vault is read once per refresh rather than twice.
+
 ## [0.93.0]
 
 **An achievement could not get onto the shortlist by getting closer to done.**

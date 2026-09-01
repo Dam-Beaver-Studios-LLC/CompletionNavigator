@@ -1250,6 +1250,28 @@ CN:RegisterEvent("ZONE_CHANGED_NEW_AREA", function()
     end)
 end)
 
+-- THE THROTTLE THE SWEEP STAMPS ITSELF. 0.94.0.
+--
+-- This lived in the `QUEST_LOG_UPDATE` handler, so only that path advanced
+-- it. The login hook and `/cn discoveractive` both ran the entire sweep --
+-- the quest log, then every related map's POIs, a `RememberOffer` write and
+-- an async title request per pin -- and left the stamp reading "never", and
+-- `QUEST_LOG_UPDATE` fires within the same second in both situations. So the
+-- most expensive scan in the addon ran twice at every login.
+--
+-- `Modules/Currencies.lua` records fixing exactly this in 0.65.0 ("the login
+-- scan and the manual one both left the timestamp alone, so the next coin
+-- picked up ran a second full sweep") and `Modules/Rares.lua` states the rule
+-- again. The fix landed in one file and nowhere else, which is this project's
+-- most-repeated defect.
+Quests.logScanSeconds = 10
+
+local lastLogScan = 0
+
+function Quests.LogScanIsDue()
+    return (time() - lastLogScan) >= Quests.logScanSeconds
+end
+
 function Quests.DiscoverActive()
     local entries = Blizzard.GetQuestLogEntries()
 
@@ -1257,6 +1279,9 @@ function Quests.DiscoverActive()
         Print("Quest Log API is unavailable.")
         return 0, 0
     end
+
+    -- Stamped by the function that does the work, whoever called it.
+    lastLogScan = time()
 
 
     local seen = 0
@@ -1279,7 +1304,17 @@ function Quests.DiscoverActive()
     -- Without these, "new" settled at zero permanently after the first scan:
     -- the only thing being discovered was your own quest log, which stops
     -- changing the moment you have scanned it once.
-    for _, poi in ipairs(Quests.AvailableOnMap()) do
+    --
+    -- WALKED ONCE AND COUNTED FROM THE SAME WALK. 0.94.0.
+    --
+    -- `/cn discoveractive` called this function and then `AvailableCount`,
+    -- which walks every related map's POIs all over again -- with the
+    -- `RememberOffer` writes and the async title request per pin -- to
+    -- produce a number this loop already knows. One command, two full
+    -- sweeps, in one frame.
+    local available = Quests.AvailableOnMap()
+
+    for _, poi in ipairs(available) do
         if Quests.RecordDiscovered(poi.questID, "available") then
             new = new + 1
         end
@@ -1297,7 +1332,7 @@ function Quests.DiscoverActive()
         seen = seen + 1
     end
 
-    return seen, new
+    return seen, new, #available
 end
 
 ------------------------------------------------------------
@@ -1991,17 +2026,12 @@ CN:RegisterEvent("QUEST_REMOVED", function(event, questID)
     DebugPrint("Quest removed from log: " .. questID)
 end)
 
--- QUEST_LOG_UPDATE fires constantly; throttle a full rescan.
-local lastLogScan = 0
-
+-- QUEST_LOG_UPDATE fires constantly; throttle a full rescan. The stamp is
+-- inside `DiscoverActive` -- see the note there.
 CN:RegisterEvent("QUEST_LOG_UPDATE", function()
-    local now = time()
-
-    if now - lastLogScan < 10 then
+    if not Quests.LogScanIsDue() then
         return
     end
-
-    lastLogScan = now
 
     local seen, new = Quests.DiscoverActive()
 
@@ -2291,9 +2321,7 @@ CN:RegisterCommand{
         -- of having already told them.
         Quests.ForgetArrivals()
 
-        local seen, recorded = Quests.DiscoverActive()
-
-        local available = Quests.AvailableCount()
+        local seen, recorded, available = Quests.DiscoverActive()
 
         Print("Quests: " .. seen .. " in your log, "
             .. "|cffffc74f" .. available .. "|r available to pick up nearby.")

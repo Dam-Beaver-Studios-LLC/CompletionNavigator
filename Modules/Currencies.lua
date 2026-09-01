@@ -441,10 +441,28 @@ CN.RegisterCandidateProvider("Currencies", function()
             -- to prevent, in the one store that had not been told about it.
             local shared = currency.accountWide
 
+            -- SPENDING CANNOT CLEAR A CAP ON WHAT YOU HAVE EARNED. 0.94.0.
+            --
+            -- 0.62.0 taught the detection that some caps apply to LIFETIME or
+            -- SEASONAL earnings rather than to the balance, and 0.63.0 taught
+            -- the display the same thing. The advice was never told: every
+            -- capped row was named "Spend <currency>" and reasoned "further
+            -- earning is wasted until you spend it".
+            --
+            -- For a total-earned cap that is not merely unhelpful, it is
+            -- wrong. Spending moves `quantity`; the cap is measured against
+            -- `totalEarned`, which only ever goes up. The row therefore came
+            -- back at full urgency after every weekly reset, having asked the
+            -- player to do something that provably cannot satisfy it, and the
+            -- only escape was `/cn ignore` -- which is the symptom this
+            -- file's header says the serial mechanism was written to end.
+            local spendable = not currency.usesTotalEarned
+
             table.insert(candidates, CN.NewObjective({
                 id               = currency.currencyID,
                 type             = CN.objectiveTypes.CURRENCY,
-                name             = "Spend " .. tostring(currency.name)
+                name             = (spendable and "Spend " or "At cap: ")
+                    .. tostring(currency.name)
                     .. (shared and " (Warband)" or ""),
                 accountWide      = shared and true or false,
                 completionValue  = 2,
@@ -468,7 +486,10 @@ CN.RegisterCandidateProvider("Currencies", function()
                     "at cap: " .. tostring(currency.quantity)
                         .. " / " .. tostring(currency.maximum)
                         .. (currency.usesTotalEarned and " earned" or ""),
-                    "further earning is wasted until you spend it",
+                    spendable
+                        and "further earning is wasted until you spend it"
+                        or "this cap is on total earned, so spending will "
+                            .. "not raise it",
                 },
             }))
         end

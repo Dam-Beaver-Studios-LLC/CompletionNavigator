@@ -4033,7 +4033,9 @@ mutate "Modules/Inventory.lua" \
     "the nearly-done row wins the dedup and throws the coordinates away"
 
 mutate "Modules/Setup.lua" \
-    "    if step.measuredAt == 3 then
+    "    if step.measuredAt == 1 then
+        measured = first
+    elseif step.measuredAt == 3 then
         measured = third
     elseif step.measuredAt == 4 then
         measured = fourth
@@ -4771,6 +4773,53 @@ mutate "Modules/Vendors.lua" \
     "            seller.price, seller.extendedCost = Vendors.PriceOf(record, itemID)" \
     "            seller.price = Vendors.PriceOf(record, itemID)" \
     "/cn sells cannot tell a gold price from a currency cost"
+
+mutate "Modules/Professions.lua" \
+    "    if seen == 0 then
+        return false, 0, 0
+    end" \
+    "" \
+    "a recipe list the client never sent is recorded as a complete read"
+
+mutate "Modules/Quests.lua" \
+    "    -- Stamped by the function that does the work, whoever called it.
+    lastLogScan = time()" \
+    "" \
+    "the login quest sweep leaves its throttle unarmed and runs twice"
+
+mutate "Modules/Quests.lua" \
+    "    return seen, new, #available" \
+    "    return seen, new" \
+    "/cn discoveractive walks every related map a second time to count it"
+
+mutate "Providers/StaticData.lua" \
+    "        return false, \"quest \" .. questID .. \" is already supplied by \"
+            .. kept .. \"; the first registration is kept\"" \
+    "" \
+    "the last supplier to load overwrites the row the record says was kept"
+
+mutate "Modules/Currencies.lua" \
+    "            local spendable = not currency.usesTotalEarned" \
+    "            local spendable = true" \
+    "a cap on lifetime earnings tells the player to spend their way out"
+
+mutate "Modules/Setup.lua" \
+    "    if step.measuredAt == 1 then
+        measured = first
+    elseif step.measuredAt == 3 then" \
+    "    if step.measuredAt == 3 then" \
+    "a currency read the client refused completes setup for ever"
+
+mutate "Modules/Tooltips.lua" \
+    "    collectible = MountLines(lines, itemID, mountID)  or collectible" \
+    "    collectible = MountLines(lines, itemID, Blizzard.GetMountFromItem(itemID))  or collectible" \
+    "every mouseover resolves the same item into a mount twice"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    if not ok or type(size) ~= \"number\" then
+        Restore()" \
+    "    if not ok or type(size) ~= \"number\" then" \
+    "a refused currency list leaves the player's headers forced open"
 
 echo
 echo "$PASSED killed, $SURVIVED survived."

@@ -517,15 +517,16 @@ CN:RegisterCommand{
         end
 
         Print("Today: |cffffc74f" .. summary.today .. "|r"
-            .. (summary.best > 0 and ("   |cff8a8f96best day: "
-                .. summary.best .. "|r") or ""))
+            .. (summary.best > 0
+                and CN.Aside("best day: " .. summary.best)
+                or ""))
 
         if summary.session > 0 then
             local line = "This session: |cffffc74f" .. summary.session .. "|r"
 
             if summary.perHour then
-                line = line .. string.format(
-                    "   |cff8a8f96%.0f per hour|r", summary.perHour)
+                line = line .. CN.Aside(
+                    string.format("%.0f per hour", summary.perHour))
             end
 
             Print(line)

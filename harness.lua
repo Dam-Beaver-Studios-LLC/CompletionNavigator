@@ -2573,7 +2573,21 @@ C_TradeSkillUI = {
     GetBaseProfessionInfo  = function()
         return { professionID = 171, professionName = "Alchemy" }
     end,
-    GetAllRecipeIDs        = function() return { 700, 701, 702 } end,
+    -- A LIST THAT CAN BE EMPTY, WHICH IS WHAT THE CLIENT DOES. 0.94.0.
+    --
+    -- This returned three ids unconditionally, so the whole "the recipe list
+    -- has not streamed yet" path -- the state `IsTradeSkillReady` does NOT
+    -- rule out -- was unreachable from the suite, and the code wrote a
+    -- complete-looking read of zero recipes into SavedVariables. Twenty-fourth
+    -- entry in this project's list of defects hidden by a stub kinder than
+    -- the client.
+    GetAllRecipeIDs        = function()
+        if CN_TEST_RECIPES_COLD then
+            return {}
+        end
+
+        return { 700, 701, 702 }
+    end,
     GetRecipeInfo          = function(id)
         local r = recipeData[id]
         if not r then return nil end
@@ -2582,6 +2596,10 @@ C_TradeSkillUI = {
 }
 
 function CN_TEST_OpenTradeSkill() tradeSkillReady = true end
+
+-- The window is open and ready, and the recipe list has not arrived. Set on
+-- the global so the main chunk stays under Lua's 200-local ceiling.
+CN_TEST_RECIPES_COLD = false
 
 
 
@@ -39311,6 +39329,467 @@ end)()
         .. "throttle; the event ran it again after " .. scans .. " scans")
 
     print("  a transmog scan stamps its own throttle, whoever called it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A RECIPE LIST THE CLIENT HAS NOT SENT IS NOT A READ.
+    ------------------------------------------------------------
+    -- `IsTradeSkillReady` says the FRAME is ready; the recipe list streams
+    -- separately. `CaptureOpenProfession` wrote `recipesSeen = true` with a
+    -- total of zero anyway -- and that flag is the one thing that stops the
+    -- addon asking, so `/cn setup` dropped "open each profession window
+    -- once", `/cn professions` printed "(0 of 0 recipes)", and the state
+    -- survived every login because `Professions.Scan` preserves the field.
+    -- Fifth writer of a shape `Currencies.Scan`'s header names three other
+    -- modules for carrying.
+    local professions = CN:GetModule("Professions")
+
+    assert(professions, "the professions module must be loaded")
+
+    CN_TEST_OpenTradeSkill()
+
+    -- Start from a character that knows about the profession and has never
+    -- had its recipe list read -- which is where a real player is the first
+    -- time they open the window, and where an earlier block in this suite
+    -- has already been.
+    professions.Scan()
+
+    for _, record in pairs(CN.character.professions or {}) do
+        if record.skillLineID == 171 then
+            record.recipesSeen = false
+            record.recipeTotal = nil
+            record.recipeKnown = nil
+        end
+    end
+
+    CN_TEST_RECIPES_COLD = true
+
+    local captured, seen = professions.CaptureOpenProfession()
+
+    CN_TEST_RECIPES_COLD = false
+
+    assert(captured == false and seen == 0,
+        "a capture the client answered nothing for reports itself as one")
+
+    -- The open profession -- Alchemy, skill line 171 -- is the one whose
+    -- list was refused, and it must still be listed as waiting.
+    local function Waiting(name)
+        for _, listed in ipairs(professions.AwaitingRecipeCapture()) do
+            if listed == name then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    assert(Waiting("Profession1"),
+        "the profession whose list was refused is still listed as awaiting "
+        .. "it, which is the sentence that tells the player what to do; "
+        .. "waiting: " .. table.concat(
+            professions.AwaitingRecipeCapture(), ", "))
+
+    -- AND THE WARM ONE STILL WORKS, so the guard is a guard and not a wall.
+    local warmed, warmSeen, warmKnown = professions.CaptureOpenProfession()
+
+    assert(warmed and warmSeen > 0 and warmKnown > 0,
+        "a client that answers is recorded: " .. tostring(warmSeen))
+
+    assert(not Waiting("Profession1"),
+        "and it stops being listed once its list was really read")
+
+    print("  a recipe list the client never sent is not recorded as read")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE QUEST-LOG SWEEP STAMPS ITS OWN THROTTLE.
+    ------------------------------------------------------------
+    -- `lastLogScan` was written by the `QUEST_LOG_UPDATE` handler alone, so
+    -- the login hook and `/cn discoveractive` left it unarmed -- and that
+    -- event fires within the same second in both cases. The sweep walks the
+    -- quest log, then every related map's POIs, with a SavedVariables write
+    -- and an async title request per pin. It ran twice at every login.
+    local quests = CN:GetModule("Quests")
+
+    local sweeps = 0
+
+    local realPOIs = CN.Blizzard.GetQuestPOIsOnMap
+
+    CN.Blizzard.GetQuestPOIsOnMap = function(...)
+        sweeps = sweeps + 1
+
+        return realPOIs(...)
+    end
+
+    quests.DiscoverActive()
+
+    local afterFirst = sweeps
+
+    assert(afterFirst > 0, "the sweep under test walked some maps")
+
+    CN.Dispatch("QUEST_LOG_UPDATE")
+
+    CN.Blizzard.GetQuestPOIsOnMap = realPOIs
+
+    assert(sweeps == afterFirst,
+        "a sweep that just walked every related map must have stamped its "
+        .. "own throttle; the event walked " .. (sweeps - afterFirst)
+        .. " more maps")
+
+    print("  the quest-log sweep stamps its own throttle, whoever called it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- FIRST REGISTRATION WINS, AND THE RECORD SAYS SO.
+    ------------------------------------------------------------
+    -- The collision row was written as `kept = existing.origin` and the next
+    -- line then overwrote the row, so the LAST supplier to load won while
+    -- `/cn selftest` told the player the first one had -- under a comment
+    -- reading "First registration wins, and this says which that was". A
+    -- player with two data addons disabled the wrong one.
+    local Static = CN.Static
+
+    local questID = 970773
+
+    Static.UnregisterOrigin("SupplierOne")
+    Static.UnregisterOrigin("SupplierTwo")
+
+    local collisionsBefore = #Static.collisions
+
+    local firstOK = Static.RegisterQuest(questID,
+        { name = "Owned By The First" }, "SupplierOne")
+
+    assert(firstOK, "the first supplier's row lands")
+
+    local secondOK, why = Static.RegisterQuest(questID,
+        { name = "Claimed By The Second" }, "SupplierTwo")
+
+    assert(secondOK == false,
+        "the second claim on one quest is refused, not applied silently")
+
+    assert(type(why) == "string" and why:find("SupplierOne", 1, true),
+        "and the refusal names who holds it: " .. tostring(why))
+
+    local held = Static.quests[questID]
+
+    assert(held and held.origin == "SupplierOne"
+        and held.name == "Owned By The First",
+        "the row that is kept is the row that stays: "
+        .. tostring(held and held.origin))
+
+    local row = Static.collisions[#Static.collisions]
+
+    assert(#Static.collisions == collisionsBefore + 1,
+        "one collision was recorded")
+
+    assert(row.kept == "SupplierOne" and row.lost == "SupplierTwo",
+        "and the record names the winner correctly: "
+        .. tostring(row.kept) .. " over " .. tostring(row.lost))
+
+    -- A SUPPLIER REPLACING ITS OWN ROWS HAS A WAY TO DO IT, which is what
+    -- makes first-wins safe rather than merely strict.
+    Static.UnregisterOrigin("SupplierOne")
+
+    assert(Static.quests[questID] == nil,
+        "withdrawing an origin takes its rows with it")
+
+    assert(Static.RegisterQuest(questID, { name = "Second Time" },
+        "SupplierOne"), "and the same supplier can then register again")
+
+    Static.UnregisterOrigin("SupplierOne")
+
+    table.remove(Static.collisions)
+
+    print("  two suppliers claiming one quest: the first one keeps it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CAP ON WHAT YOU HAVE EARNED IS NOT CLEARED BY SPENDING.
+    ------------------------------------------------------------
+    -- Every capped currency was named "Spend <name>" and reasoned "further
+    -- earning is wasted until you spend it". For a cap measured against
+    -- `totalEarned` that is advice which cannot be followed: spending moves
+    -- the balance, the cap does not move, and the row came back at full
+    -- urgency after every weekly reset.
+    local currencyModule = CN:GetModule("Currencies")
+
+    -- One currency capped on lifetime earnings and spent down to nothing,
+    -- and one capped on the balance it holds.
+    CN_TEST_SetTotalEarnedCurrency(4242, 2500, 2500, 0)
+
+    currencyModule.Scan()
+
+    local byID = {}
+
+    for _, candidate in ipairs(CN.CollectCandidates(true) or {}) do
+        if candidate.type == CN.objectiveTypes.CURRENCY then
+            byID[candidate.id] = candidate
+        end
+    end
+
+    local earned = byID[4242]
+
+    assert(earned, "the currency capped on lifetime earnings is offered")
+
+    assert(not tostring(earned.name):find("Spend", 1, true),
+        "a cap on total earned is not asking to be spent: "
+        .. tostring(earned.name))
+
+    local capReasons = table.concat(CN.Reasons(earned) or {}, " ")
+
+    assert(capReasons:find("spending will not raise it", 1, true),
+        "and it says why: " .. said)
+
+    -- AND THE ORDINARY CASE IS UNCHANGED, so this is a distinction and not a
+    -- blanket rewording.
+    local spendable
+
+    for _, row in ipairs(currencyModule.Capped() or {}) do
+        if not row.usesTotalEarned then
+            spendable = byID[row.currencyID]
+        end
+    end
+
+    assert(spendable,
+        "the fixture also carries a currency capped on its balance")
+
+    assert(tostring(spendable.name):find("Spend", 1, true),
+        "a cap on the balance still asks to be spent: "
+        .. tostring(spendable.name))
+
+    CN_TEST_SetTotalEarnedCurrency(4242, nil)
+
+    currencyModule.Scan()
+
+    print("  a cap on total earned does not ask you to spend it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE COMMAND, ONE WALK OF THE NEIGHBOURHOOD.
+    ------------------------------------------------------------
+    -- `/cn discoveractive` called `DiscoverActive` -- which walks every
+    -- related map's POIs, writing a remembered offer and requesting a title
+    -- per pin -- and then `AvailableCount`, which walks all of them again to
+    -- produce a number the first walk already had.
+    local walks = 0
+
+    local realPOIs = CN.Blizzard.GetQuestPOIsOnMap
+
+    CN.Blizzard.GetQuestPOIsOnMap = function(...)
+        walks = walks + 1
+
+        return realPOIs(...)
+    end
+
+    CN:GetModule("Quests").DiscoverActive()
+
+    local oneSweep = walks
+
+    walks = 0
+
+    CN.commands["discoveractive"].handler("")
+
+    CN.Blizzard.GetQuestPOIsOnMap = realPOIs
+
+    assert(oneSweep > 0, "the sweep under test walks some maps")
+
+    assert(walks == oneSweep,
+        "the command walks the neighbourhood once, not twice: " .. walks
+        .. " against " .. oneSweep)
+
+    print("  /cn discoveractive counts the walk it already made")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A MOUSEOVER RESOLVES AN ITEM ONCE.
+    ------------------------------------------------------------
+    -- `MountLines` and `PetLines` each turned the item into a collection id,
+    -- and the "why you should care" block resolved both a second time --
+    -- on what `bench.lua` calls the hottest path in the addon.
+    local tooltipModule = CN:GetModule("Tooltips")
+
+    local mountAsks, petAsks = 0, 0
+
+    local realMountLookup = CN.Blizzard.GetMountFromItem
+    local realPetLookup   = CN.Blizzard.GetPetSpeciesFromItem
+
+    CN.Blizzard.GetMountFromItem = function(...)
+        mountAsks = mountAsks + 1
+
+        return realMountLookup(...)
+    end
+
+    CN.Blizzard.GetPetSpeciesFromItem = function(...)
+        petAsks = petAsks + 1
+
+        return realPetLookup(...)
+    end
+
+    -- 502 is the mount item in this fixture; it takes the collectible branch,
+    -- which is the one that asked twice.
+    tooltipModule.ItemLines(502, "A Mount In A Box")
+
+    CN.Blizzard.GetMountFromItem      = realMountLookup
+    CN.Blizzard.GetPetSpeciesFromItem = realPetLookup
+
+    assert(mountAsks == 1,
+        "one mouseover asks the mount journal once: " .. mountAsks)
+
+    assert(petAsks == 1,
+        "and the pet journal once: " .. petAsks)
+
+    print("  a mouseover resolves the item once, not twice")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A REFUSAL BETWEEN THE EXPAND AND THE RESTORE STILL RESTORES.
+    ------------------------------------------------------------
+    -- The currency sweep expands every collapsed header, reads, and puts them
+    -- back. The size check between those two halves returns early when the
+    -- client will not answer -- and that path skipped the restore, so a
+    -- player whose list refused at that moment had their collapsed groups
+    -- silently reopened and never put back, against this function's own
+    -- promise that "what this addon changes to read, it changes back".
+    local function CollapsedHeaders()
+        local shut = 0
+
+        for _, row in ipairs(CN_TEST_CURRENCY_ROWS) do
+            if row.isHeader and row.isHeaderExpanded == false then
+                shut = shut + 1
+            end
+        end
+
+        return shut
+    end
+
+    local shutBefore = CollapsedHeaders()
+
+    assert(shutBefore > 0, "the fixture has a header the player collapsed")
+
+    local realSize = C_CurrencyInfo.GetCurrencyListSize
+    local asks     = 0
+
+    C_CurrencyInfo.GetCurrencyListSize = function(...)
+        asks = asks + 1
+
+        -- The first call is the one the expand pass makes; the second is the
+        -- one that decides whether there is anything to read.
+        if asks == 2 then
+            return nil
+        end
+
+        return realSize(...)
+    end
+
+    local rows = CN.Blizzard.GetCurrencyList()
+
+    C_CurrencyInfo.GetCurrencyListSize = realSize
+
+    assert(#rows == 0,
+        "a client that will not report a size reports no currencies")
+
+    assert(CollapsedHeaders() == shutBefore,
+        "and the player's collapsed headers are put back anyway: "
+        .. CollapsedHeaders() .. " against " .. shutBefore)
+
+    print("  a refused currency list still puts the headers back")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CURRENCY READ THE CLIENT REFUSED IS NOT A COMPLETED STEP.
+    ------------------------------------------------------------
+    -- `Currencies.Scan` documents `0, 0, 0` as its refusal -- "which is what
+    -- the client returns while currency data is still streaming at login,
+    -- which is exactly when `CN:OnLogin` runs this" -- and setup printed it
+    -- in the success colour, counted it as scanned and let `completedAt` be
+    -- stamped. `Setup.HasRun` then answers true for the life of the install:
+    -- the login reminder never fires again while `/cn currencies` says "No
+    -- currency data yet."
+    --
+    -- Third step to need this guard. 0.73.0 fixed `loremaster` and 0.86.0
+    -- fixed `achievements`; neither asked which other step returns a refusal
+    -- shaped like a success.
+    local setupModule = CN:GetModule("Setup")
+
+    assert(setupModule and setupModule.steps, "the setup module lists its steps")
+
+    local function StepFor(key)
+        for _, entry in ipairs(setupModule.steps) do
+            if entry.key == key then
+                return entry
+            end
+        end
+    end
+
+    for _, key in ipairs({ "currencies", "professions" }) do
+        assert(StepFor(key), "setup runs a " .. key .. " step")
+    end
+
+    local held = CN_TEST_CURRENCY_ROWS
+
+    CN_TEST_CURRENCY_ROWS = {}
+
+    local ok, why = setupModule.RunStep(StepFor("currencies"))
+
+    CN_TEST_CURRENCY_ROWS = held
+
+    assert(ok == nil,
+        "a currency sweep the client answered nothing for is reported as not "
+        .. "ready, not as a success: " .. tostring(ok) .. " " .. tostring(why))
+
+    assert(type(why) == "string" and why:find("not ready", 1, true),
+        "and says which it was: " .. tostring(why))
+
+    -- AND A REAL READ STILL PASSES, so this is a guard and not a wall.
+    local warm, scanned = setupModule.RunStep(StepFor("currencies"))
+
+    assert(warm == true and (scanned or 0) > 0,
+        "a client that answers completes the step: " .. tostring(warm)
+        .. " " .. tostring(scanned))
+
+    -- THE RIGHT RETURN, WHICH IS THE HALF THAT IS EASY TO GET WRONG.
+    --
+    -- `Currencies.Scan` returns `seen, atCap, weeklyRemaining`. The guard's
+    -- default reads the SECOND value, which is how many currencies are at
+    -- their cap -- legitimately zero on a real account with nothing capped.
+    -- Reading it here would report a perfectly good sweep as "the game was
+    -- not ready yet" for ever, which is the shape 0.86.0 found in the
+    -- Achievements step and this release could have reintroduced.
+    --
+    -- Every capped row removed, and the step must still pass.
+    local capped = {}
+
+    for index = #CN_TEST_CURRENCY_ROWS, 1, -1 do
+        local row = CN_TEST_CURRENCY_ROWS[index]
+
+        if row.maxQuantity and row.maxQuantity > 0 then
+            table.insert(capped, 1, row)
+
+            table.remove(CN_TEST_CURRENCY_ROWS, index)
+        end
+    end
+
+    local uncapped, stillSeen = setupModule.RunStep(StepFor("currencies"))
+
+    for _, row in ipairs(capped) do
+        table.insert(CN_TEST_CURRENCY_ROWS, row)
+    end
+
+    assert(uncapped == true and (stillSeen or 0) > 0,
+        "an account with nothing at its cap has still had its currencies "
+        .. "read: " .. tostring(uncapped) .. " " .. tostring(stillSeen))
+
+    CN:GetModule("Currencies").Scan()
+
+    print("  a currency read the client refused does not complete setup")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

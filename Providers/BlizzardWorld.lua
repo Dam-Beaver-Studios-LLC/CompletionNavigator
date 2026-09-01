@@ -594,9 +594,45 @@ end
         end
     end
 
+    -- RESTORED ON EVERY WAY OUT OF THIS FUNCTION. 0.94.0.
+    --
+    -- The restore was written inline at the bottom, and the size check below
+    -- returns early when the client will not answer -- BETWEEN the expand and
+    -- the restore. A player whose currency list refused at that moment had
+    -- every collapsed expansion group silently reopened and never put back,
+    -- against this function's own promise that "what this addon changes to
+    -- read, it changes back". Rare, and permanent when it happens.
+    local function Restore()
+        if #collapsed == 0 or not C_CurrencyInfo.ExpandCurrencyList then
+            return
+        end
+
+        local wanted = {}
+
+        for _, name in ipairs(collapsed) do
+            wanted[name] = true
+        end
+
+        local counted, final = pcall(C_CurrencyInfo.GetCurrencyListSize)
+
+        if counted and type(final) == "number" then
+            for index = final, 1, -1 do
+                local asked, row = pcall(C_CurrencyInfo.GetCurrencyListInfo, index)
+
+                if asked and type(row) == "table" and row.isHeader
+                    and row.name and wanted[row.name] then
+
+                    pcall(C_CurrencyInfo.ExpandCurrencyList, index, false)
+                end
+            end
+        end
+    end
+
     local ok, size = pcall(C_CurrencyInfo.GetCurrencyListSize)
 
     if not ok or type(size) ~= "number" then
+        Restore()
+
         return results
     end
 
@@ -661,27 +697,7 @@ end
     end
 
     -- Put the headers back the way the player had them.
-    if #collapsed > 0 and C_CurrencyInfo.ExpandCurrencyList then
-        local wanted = {}
-
-        for _, name in ipairs(collapsed) do
-            wanted[name] = true
-        end
-
-        local counted, final = pcall(C_CurrencyInfo.GetCurrencyListSize)
-
-        if counted and type(final) == "number" then
-            for index = final, 1, -1 do
-                local asked, row = pcall(C_CurrencyInfo.GetCurrencyListInfo, index)
-
-                if asked and type(row) == "table" and row.isHeader
-                    and row.name and wanted[row.name] then
-
-                    pcall(C_CurrencyInfo.ExpandCurrencyList, index, false)
-                end
-            end
-        end
-    end
+    Restore()
 
     return results
 end

@@ -773,6 +773,17 @@ local function CreateList(parent)
             row.entry = nil
 
             row:EnableMouse(false)
+
+            -- AND THE HIGHLIGHT, which the 0.92.0 note beside the truncation
+            -- row asserts this branch clears. It cleared `EnableMouse` only.
+            -- No visible symptom today -- a row that does not take the mouse
+            -- cannot light up -- but the invariant that note relies on was
+            -- not true, and the next row that keeps the mouse would inherit
+            -- the previous row's highlight. 0.94.0.
+            if row.highlight then
+                row.highlight:SetAlpha(0)
+            end
+
             row:Show()
 
             for index = 2, #self.rows do

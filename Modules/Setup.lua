@@ -35,9 +35,28 @@ local DebugPrint = CN.DebugPrint
 -- concluded it had found seventeen appearances.
 Setup.steps = {
     { key = "reputations", label = "Reputations", module = "Reputations", fn = "Scan",     unit = "factions" },
-    { key = "currencies",  label = "Currencies",  module = "Currencies",  fn = "Scan",     unit = "currencies" },
+    -- MEASURED AT THE FIRST RETURN. 0.94.0.
+    --
+    -- `Currencies.Scan` documents `0, 0, 0` as its REFUSAL value -- "which is
+    -- what the client returns while currency data is still streaming at
+    -- login, which is exactly when `CN:OnLogin` runs this" -- and this step
+    -- reported it in the success colour as "Currencies: 0 currencies",
+    -- counted it as scanned, and let `completedAt` be stamped. `Setup.HasRun`
+    -- then answers true for the life of the install: the login reminder never
+    -- fires again while `/cn currencies` says "No currency data yet."
+    --
+    -- Third step to need this. 0.73.0 fixed `loremaster`, 0.86.0 fixed
+    -- `achievements` -- the note there is headed "WHICH RETURN CARRIES how
+    -- many rows the client answered about" -- and neither release asked which
+    -- other steps return a refusal shaped like a success.
+    { key = "currencies",  label = "Currencies",  module = "Currencies",  fn = "Scan",     unit = "currencies", measured = true, measuredAt = 1, retry = "currencyscan" },
     { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan",     unit = "titles" },
-    { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines" },
+    -- Same shape: `Professions.Scan` returns `#lines`, and the client answers
+    -- with an empty list until the skill lines have streamed. A character
+    -- with no professions at all is real, so this one is not a hard failure
+    -- -- but it is not evidence of a completed read either, and the retry
+    -- costs the player one command.
+    { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines", measured = true, measuredAt = 1, retry = "profscan" },
     { key = "exploration", label = "Exploration", module = "Exploration", fn = "Scan",     unit = "zones" },
     -- LOREMASTER WAS MISSING FROM THIS LIST. 0.67.0.
     --
@@ -111,7 +130,12 @@ function Setup.RunStep(step)
     -- try again.
     local measured = second
 
-    if step.measuredAt == 3 then
+    -- `measuredAt = 1` is the step whose FIRST return is the count -- a scan
+    -- that answers with one number, where zero is the client declining. Added
+    -- 0.94.0 for `currencies` and `professions`.
+    if step.measuredAt == 1 then
+        measured = first
+    elseif step.measuredAt == 3 then
         measured = third
     elseif step.measuredAt == 4 then
         measured = fourth

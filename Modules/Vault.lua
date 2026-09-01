@@ -134,8 +134,15 @@ function Vault.IsAvailable()
 end
 
 -- Total reward choices unlocked across every row.
-function Vault.Summary()
-    local rows = Vault.Rows()
+-- ROWS ARE PASSED IN WHERE THE CALLER ALREADY HAS THEM. 0.94.0.
+--
+-- `Vault.Rows` is a `C_WeeklyRewards.GetActivities` call, a nine-row rebuild
+-- and a sort. Both callers -- the Vault tab, which refreshes every two
+-- seconds while it is open, and `/cn vault` -- asked for the rows and then
+-- asked for the summary, which asked for the rows again. `Broker.Refresh`
+-- takes its results the same way and for the same reason.
+function Vault.Summary(rows)
+    rows = rows or Vault.Rows()
 
     local summary = {
         rows     = #rows,
@@ -372,7 +379,7 @@ CN:RegisterCommand{
             return
         end
 
-        local summary = Vault.Summary()
+        local summary = Vault.Summary(rows)
 
         Print("Great Vault: " .. summary.unlocked .. " reward"
             .. CN.Pluralize(summary.unlocked, "") .. " unlocked"

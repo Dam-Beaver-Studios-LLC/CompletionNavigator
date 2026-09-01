@@ -1660,7 +1660,7 @@ CN:RegisterCommand{
         end
 
         Print("Quest achievements scanned: " .. scanned
-            .. "   Measured: " .. measured)
+            .. " " .. CN.DOT .. " Measured: " .. measured)
     end,
 }
 
