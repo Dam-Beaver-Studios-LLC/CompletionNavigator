@@ -34,7 +34,13 @@ local DebugPrint = CN.DebugPrint
 -- read their transmog was shown "Appearances: 17" beside "Mounts: 1104" and
 -- concluded it had found seventeen appearances.
 Setup.steps = {
-    { key = "reputations", label = "Reputations", module = "Reputations", fn = "Scan",     unit = "factions" },
+    -- MEASURED AT THE FIRST RETURN, like currencies and professions. 0.97.0.
+    --
+    -- `Reputations.Scan` returns zero when the faction list has not streamed,
+    -- and this is the FIRST step `/cn setup` runs -- so it is the one most
+    -- exposed to the cold client this file's own note says setup is usually
+    -- run against.
+    { key = "reputations", label = "Reputations", module = "Reputations", fn = "Scan",     unit = "factions", measured = true, measuredAt = 1, retry = "repscan" },
     -- MEASURED AT THE FIRST RETURN. 0.94.0.
     --
     -- `Currencies.Scan` documents `0, 0, 0` as its REFUSAL value -- "which is
@@ -57,7 +63,10 @@ Setup.steps = {
     -- -- but it is not evidence of a completed read either, and the retry
     -- costs the player one command.
     { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines", measured = true, measuredAt = 1, retry = "profscan" },
-    { key = "exploration", label = "Exploration", module = "Exploration", fn = "Scan",     unit = "zones" },
+    -- Same shape: `Exploration.Scan` now returns zero when the criteria API
+    -- refused every row, which is the state it wrote zeroes over until
+    -- 0.97.0.
+    { key = "exploration", label = "Exploration", module = "Exploration", fn = "Scan",     unit = "zones", measured = true, measuredAt = 1, retry = "explorescan" },
     -- LOREMASTER WAS MISSING FROM THIS LIST. 0.67.0.
     --
     -- Its store is per-character for `progress` and account-wide for

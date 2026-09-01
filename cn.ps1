@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.96.0'
+$script:ToolkitVersion = '0.97.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.96.0"
+CN.version     = "0.97.0"
 CN.dbVersion   = 38
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -18679,7 +18679,6 @@ CN.apiSurface = {
     "C_Reputation.IsFactionParagon",
     "C_Reputation.IsMajorFaction",
     "C_Spell.GetSpellCooldown",
-    "C_SuperTrack.GetSuperTrackedQuestID",
     "C_SuperTrack.SetSuperTrackedQuestID",
     "C_SuperTrack.SetSuperTrackedUserWaypoint",
     "C_TaskQuest.GetQuestInfoByQuestID",
@@ -18790,7 +18789,6 @@ CN.apiSurface = {
     "PlayerHasToy",
     "Settings",
     "UIFrameFadeIn",
-    "UIFrameFadeOut",
     "UIFrameFlash",
     "UiMapPoint",
     "UnitClass",
@@ -26105,6 +26103,37 @@ Reputations.BuildRecord = BuildRecord
 -- SCAN
 ------------------------------------------------------------
 
+-- THE THROTTLE THE SWEEP STAMPS ITSELF. 0.97.0.
+--
+-- This lived in the `UPDATE_FACTION` handler, so only that path advanced it.
+-- The login hook, both renown handlers, `/cn repscan` and the candidate
+-- provider all ran the full sweep and left the stamp alone -- and
+-- `UPDATE_FACTION` fires constantly, so the next tick ran a second one.
+--
+-- A sweep is not cheap: `WithAllFactionsExpanded` walks every faction row to
+-- record which headers the player had collapsed, expands them all, walks them
+-- again with about six client calls each, then walks them a third time to put
+-- the headers back. Two of those on the login frame, and two on every renown
+-- level-up, in the middle of the content that produces renown -- and it
+-- doubles the window in which the player's own collapsed headers are held
+-- open by this addon.
+--
+-- `Modules/Currencies.lua` records fixing this exact shape in 0.65.0 and
+-- `Modules/Quests.lua` in 0.94.0, whose note reads "the fix landed in one
+-- file and nowhere else, which is this project's most-repeated defect".
+-- Reputations was the last scanner with the stamp outside the work.
+Reputations.scanSeconds = 15
+
+local lastScan = 0
+
+function Reputations.ScanIsDue()
+    return (time() - lastScan) >= Reputations.scanSeconds
+end
+
+function Reputations.ForgetThrottle()
+    lastScan = 0
+end
+
 function Reputations.Scan()
     local accountStore   = AccountStore()
     local characterStore = CharacterStore()
@@ -26162,6 +26191,26 @@ function Reputations.Scan()
             end
         end
     end)
+
+    -- A FACTION LIST THE CLIENT HAS NOT SENT IS NOT AN EMPTY ONE. 0.97.0.
+    --
+    -- This runs from `CN:OnLogin`, which is the moment the list is least
+    -- likely to have streamed, and `/cn setup` runs it first of all thirteen
+    -- steps. Nothing is destroyed by a cold sweep -- the loop simply writes
+    -- nothing -- but both stamps fired anyway, and `MarkScanned` drops
+    -- Reputations out of `Setup.NeverScanned` for the life of the install
+    -- while the Scans tab reads "just now" over a read that returned nothing.
+    --
+    -- Sixth scanner to need this guard, after currencies, achievements,
+    -- loremaster, professions and the three collections.
+    if total == 0 then
+        DebugPrint("Faction sweep answered for nothing; not recording it.")
+
+        return 0, 0, 0, 0
+    end
+
+    -- Stamped by the function that does the work, whoever called it.
+    lastScan = time()
 
     if CN.character then
         CN.character.reputationsScanned = time()
@@ -26581,17 +26630,12 @@ end, { events = { "UPDATE_FACTION" }, cooldown = 5 })
 -- EVENTS
 ------------------------------------------------------------
 
--- UPDATE_FACTION fires on nearly every reputation tick. Throttle hard.
-local lastScan = 0
-
+-- UPDATE_FACTION fires on nearly every reputation tick. Throttle hard. The
+-- stamp is inside `Reputations.Scan` -- see the note there.
 CN:RegisterEvent("UPDATE_FACTION", function()
-    local now = time()
-
-    if now - lastScan < 15 then
+    if not Reputations.ScanIsDue() then
         return
     end
-
-    lastScan = now
 
     local total = Reputations.Scan()
 
@@ -26599,7 +26643,10 @@ CN:RegisterEvent("UPDATE_FACTION", function()
 end)
 
 CN:RegisterEvent("MAJOR_FACTION_RENOWN_LEVEL_CHANGED", function(event, factionID, newLevel)
-    lastScan = 0
+    -- The player just did something; no cooldown may delay the answer. The
+    -- scan re-stamps on its way out, so the `UPDATE_FACTION` that follows
+    -- finds the throttle fresh instead of sweeping again.
+    Reputations.ForgetThrottle()
 
     DebugPrint("Renown changed for faction " .. tostring(factionID)
         .. " to " .. tostring(newLevel) .. ".")
@@ -26608,7 +26655,7 @@ CN:RegisterEvent("MAJOR_FACTION_RENOWN_LEVEL_CHANGED", function(event, factionID
 end)
 
 CN:RegisterEvent("MAJOR_FACTION_UNLOCKED", function(event, factionID)
-    lastScan = 0
+    Reputations.ForgetThrottle()
 
     Reputations.Scan()
 
@@ -33545,7 +33592,9 @@ Currencies.CharacterStore = CharacterStore
 -- wasted until you spend it", every five seconds because this provider is
 -- volatile, with a fresh weekly urgency bonus every reset, for the life of
 -- the character. The player could not satisfy it and could not make it go
--- away except with `/cn ignore`.
+-- away except by hiding it from the window's own row menu, which `/cn
+-- hidden` lists and `/cn unhide` reverses. (There is no `/cn ignore`; this
+-- comment named one for three releases.)
 --
 -- A serial per sweep is the whole fix: a row the last scan did not see is not
 -- reported on. `lastSeen` was already being written and was read by nothing
@@ -33934,7 +33983,8 @@ CN.RegisterCandidateProvider("Currencies", function()
             -- `totalEarned`, which only ever goes up. The row therefore came
             -- back at full urgency after every weekly reset, having asked the
             -- player to do something that provably cannot satisfy it, and the
-            -- only escape was `/cn ignore` -- which is the symptom this
+            -- only escape was to hide the row by hand -- which is the
+            -- symptom this
             -- file's header says the serial mechanism was written to end.
             local spendable = not currency.usesTotalEarned
 
@@ -35208,6 +35258,29 @@ function Exploration.Scan()
     local seen, complete = 0, 0
 
     for _, achievement in ipairs(Blizzard.GetExplorationAchievements()) do
+        -- A ROW THE CRITERIA API REFUSED IS NOT A ROW WITH NO CRITERIA.
+        -- 0.97.0.
+        --
+        -- `GetAchievementNumCriteria` answers zero for a window after login,
+        -- and this wrote that zero straight over a good stored count -- then
+        -- `NoteProgress` wrote a `done` of zero over this character's real
+        -- progress. `Exploration.Closest` and the candidate provider both
+        -- filter on `criteria > 0`, so one `/cn setup` run in the first
+        -- seconds after logging in emptied the "closest to finishing" list,
+        -- turned "subzones discovered" into "0 of 0", and silenced the
+        -- provider -- permanently, because nothing runs this scan on its own.
+        --
+        -- `Exploration.RefreshCurrentZone` has had exactly this guard since
+        -- 0.61.0, in this file, thirty lines down. FIVE other modules name
+        -- "Exploration in 0.61.0" as the precedent for the guard they carry.
+        -- It landed at one call site and not at the other one beside it, and
+        -- was then cited by everybody as though it covered the file.
+        --
+        -- Counted rather than skipped with an empty branch: `seen` is what
+        -- the client answered about, and it is what decides below whether
+        -- this was a scan at all.
+        if achievement.criteria and achievement.criteria > 0 then
+
         local held = store[achievement.achievementID] or {}
 
         held.achievementID = achievement.achievementID
@@ -35234,6 +35307,20 @@ function Exploration.Scan()
         if achievement.completed then
             complete = complete + 1
         end
+
+        end
+    end
+
+    -- AND A SWEEP THE CLIENT ANSWERED NOTHING FOR IS NOT A SCAN. 0.97.0.
+    --
+    -- `CN.MarkScanned` routes to `CN.NoteSetupStep`, so stamping it drops
+    -- Exploration out of `Setup.NeverScanned` for the life of the install --
+    -- and nothing else ever runs this scan, so the reminder that would have
+    -- sent the player back was the only way it was going to happen.
+    if seen == 0 then
+        DebugPrint("Exploration sweep answered for nothing; not recording it.")
+
+        return 0, 0
     end
 
     CN.MarkScanned("exploration")
@@ -38265,7 +38352,13 @@ local DebugPrint = CN.DebugPrint
 -- read their transmog was shown "Appearances: 17" beside "Mounts: 1104" and
 -- concluded it had found seventeen appearances.
 Setup.steps = {
-    { key = "reputations", label = "Reputations", module = "Reputations", fn = "Scan",     unit = "factions" },
+    -- MEASURED AT THE FIRST RETURN, like currencies and professions. 0.97.0.
+    --
+    -- `Reputations.Scan` returns zero when the faction list has not streamed,
+    -- and this is the FIRST step `/cn setup` runs -- so it is the one most
+    -- exposed to the cold client this file's own note says setup is usually
+    -- run against.
+    { key = "reputations", label = "Reputations", module = "Reputations", fn = "Scan",     unit = "factions", measured = true, measuredAt = 1, retry = "repscan" },
     -- MEASURED AT THE FIRST RETURN. 0.94.0.
     --
     -- `Currencies.Scan` documents `0, 0, 0` as its REFUSAL value -- "which is
@@ -38288,7 +38381,10 @@ Setup.steps = {
     -- -- but it is not evidence of a completed read either, and the retry
     -- costs the player one command.
     { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines", measured = true, measuredAt = 1, retry = "profscan" },
-    { key = "exploration", label = "Exploration", module = "Exploration", fn = "Scan",     unit = "zones" },
+    -- Same shape: `Exploration.Scan` now returns zero when the criteria API
+    -- refused every row, which is the state it wrote zeroes over until
+    -- 0.97.0.
+    { key = "exploration", label = "Exploration", module = "Exploration", fn = "Scan",     unit = "zones", measured = true, measuredAt = 1, retry = "explorescan" },
     -- LOREMASTER WAS MISSING FROM THIS LIST. 0.67.0.
     --
     -- Its store is per-character for `progress` and account-wide for
@@ -40201,7 +40297,14 @@ function Chase.Chain(goal)
         local ok, description, first = pcall(instances.DescribeSource, chain.name)
 
         if ok and description and first then
-            local lockout = first.instance and instances.LockoutFor(first.instance)
+            -- THROUGH THE JOURNAL'S ID, not the localized name. 0.97.0. See
+            -- the note on `Instances.LockoutFor`: matching on two APIs'
+            -- display strings fails silently, and here that failure removes
+            -- the "you are saved to it and it is cleared" step from a goal --
+            -- which is the step that stops the player walking to a boss they
+            -- cannot loot.
+            local lockout = (first.instance or first.instanceID)
+                and instances.LockoutFor(first.instance, nil, first.instanceID)
 
             if lockout and lockout.complete then
                 table.insert(chain.steps, NewStep(Chase.states.BLOCKED,
@@ -54781,10 +54884,16 @@ function Instances.RemainingBosses(lockout)
         return {}, nil
     end
 
-    if not lockout.id then
-        return {}, "the client did not name this instance"
-    end
-
+    -- THE GUARD ON `lockout.id` IS GONE. 0.97.0.
+    --
+    -- `id` is the opaque lockout save id and nothing below this line uses it
+    -- -- the whole function runs on `instanceID`, which is checked on its own
+    -- two lines down with its own correct sentence. So this refused a boss
+    -- listing the function could have produced, and the sentence it printed
+    -- blamed the NAME, which the `/cn instances` row directly above had just
+    -- displayed. A dead guard with a false message, in the one place the
+    -- player is told why the boss list is missing.
+    --
     -- The JOURNAL's id, not the lockout id. See GetSavedInstances.
     if not lockout.instanceID then
         return {}, "the client did not give an Adventure Guide id for this "
@@ -54983,15 +55092,41 @@ end
 --
 -- Returns lockout, count -- where count is how many share the name, so a
 -- caller can say "on this difficulty" rather than implying there is only one.
-function Instances.LockoutFor(instanceName, difficulty)
-    if not instanceName then
+-- MATCHED ON THE JOURNAL'S ID WHERE THE CALLER HAS ONE. 0.97.0.
+--
+-- Both sides of this comparison carry the Encounter Journal's instance id --
+-- `SearchEncounterJournal` returns it on every row and `GetSavedInstances`
+-- reads it into every lockout -- and this compared two LOCALIZED DISPLAY
+-- NAMES from two different APIs instead. When those differ by anything at all
+-- (punctuation, a subtitle, a rename applied to one API and not the other),
+-- the match fails silently and `/cn drops` loses its "locked, resets in
+-- 2d 3h" clause -- the one decision-relevant line it prints -- so the player
+-- is told to go and kill a boss they are already saved to. A failure that
+-- looks exactly like "not saved".
+--
+-- This file records the same defect being fixed for the ignore key, under
+-- "it also meant the ignore store was keyed on a translated string". The
+-- standing rule is that a localized string is for display, never to branch
+-- on.
+--
+-- The name stays as a fallback for a caller that has no id.
+function Instances.LockoutFor(instanceName, difficulty, instanceID)
+    if not instanceName and not instanceID then
         return nil, 0
     end
 
     local matches, first, open, exact = 0, nil, nil, nil
 
     for _, lockout in ipairs(Instances.Lockouts()) do
-        if lockout.name == instanceName then
+        local same
+
+        if instanceID then
+            same = lockout.instanceID == instanceID
+        else
+            same = lockout.name == instanceName
+        end
+
+        if same then
             matches = matches + 1
 
             first = first or lockout
@@ -55295,8 +55430,9 @@ CN:RegisterCommand{
             -- clause looks like a lockout that is simply not shared.
             local lockout, sharing
 
-            if result.instance then
-                lockout, sharing = Instances.LockoutFor(result.instance)
+            if result.instance or result.instanceID then
+                lockout, sharing = Instances.LockoutFor(result.instance, nil,
+                    result.instanceID)
             end
 
             if lockout then
@@ -60395,7 +60531,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.96.0
+## Version: 0.97.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -60650,6 +60786,51 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.97.0]
+
+**Running `/cn setup` in the first seconds after logging in erased your
+exploration progress and then stopped the addon ever asking you to scan
+again.** The criteria API refuses for a moment after login — which is when
+setup is usually run — and the exploration scan wrote that refusal into the
+store as a real measurement: every zone's criteria count zeroed, every
+character's progress zeroed. Both the "closest to finishing" list and the
+exploration recommendations filter on a criteria count above zero, so they
+went empty, and nothing runs that scan on its own. The guard for this has been
+thirty lines away in the same file since 0.61.0, and five other modules cite
+it as the precedent for the guard they carry. It landed at one call site and
+not the other one beside it.
+
+**Every renown level-up rebuilt your entire faction list twice.** The
+reputation sweep's throttle was stamped by one event handler rather than by
+the sweep, so the login scan, both renown handlers, `/cn repscan` and the
+recommendation pass all ran it and left the throttle unarmed — and the next
+faction tick immediately ran it again. Each sweep walks every faction three
+times and holds your collapsed reputation headers open while it does.
+
+### Fixed
+
+- **A faction list the game had not sent yet was recorded as a completed
+  scan** — Reputations is the first of the thirteen setup steps, so it is the
+  most exposed to a cold client, and stamping it stops the reminder for the
+  life of the install. Sixth scanner to need that guard.
+- **`/cn drops` matched your lockout by the instance's translated name.** Both
+  sides carry the Adventure Guide's own id and the addon compared two
+  localized strings from two different game APIs instead. When they differ by
+  anything — punctuation, a subtitle, a rename applied to one API and not the
+  other — the "locked, resets in 2d 3h" clause silently vanished, which is the
+  one line that decides whether the trip is worth making. Goals used the same
+  path and lost the "you are saved to it and it is cleared" step the same way.
+- **A missing boss list blamed the wrong thing.** The guard refused on a field
+  the function never uses and told the player "the client did not name this
+  instance" — directly under a row displaying that name.
+
+### Changed
+
+- The published list of game APIs this addon touches was generated by scanning
+  the toolkit's whole file list, which includes the test harness — so an API
+  only the offline stubs mention was reported as one the addon requires.
+  `/cn capture` and the fixture audit both read that list.
 
 ## [0.96.0]
 
@@ -68190,7 +68371,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.96.0
+0.97.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -73600,6 +73781,44 @@ mutate "UI.lua" \
     "                .. \"been scanned; /cn scan fills them.|r\")" \
     "the empty-search message names a command that does not exist"
 
+mutate "Modules/Exploration.lua" \
+    "        if achievement.criteria and achievement.criteria > 0 then" \
+    "        if true then" \
+    "a cold criteria API zeroes every measured exploration count"
+
+mutate "Modules/Exploration.lua" \
+    "    if seen == 0 then
+        DebugPrint(\"Exploration sweep answered for nothing; not recording it.\")
+
+        return 0, 0
+    end" \
+    "" \
+    "an exploration sweep that read nothing silences the setup reminder"
+
+mutate "Modules/Reputations.lua" \
+    "    -- Stamped by the function that does the work, whoever called it.
+    lastScan = time()" \
+    "" \
+    "a renown level-up costs two full faction sweeps"
+
+mutate "Modules/Reputations.lua" \
+    "    if total == 0 then
+        DebugPrint(\"Faction sweep answered for nothing; not recording it.\")
+
+        return 0, 0, 0, 0
+    end" \
+    "" \
+    "a cold faction sweep silences the setup reminder for ever"
+
+mutate "Modules/Instances.lua" \
+    "        if instanceID then
+            same = lockout.instanceID == instanceID
+        else
+            same = lockout.name == instanceName
+        end" \
+    "        same = lockout.name == instanceName" \
+    "a lockout is matched on a translated name instead of the journal id"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 
@@ -76387,6 +76606,12 @@ function GetCategoryInfo(categoryID)
 end
 
 function GetCategoryNumAchievements(categoryID)
+    -- The category list refuses in the same window; see
+    -- `GetAchievementNumCriteria` below. 0.97.0.
+    if CN_TEST_ACHIEVEMENTS_COLD then
+        return 0, 0
+    end
+
     local list = categoryAchievements[categoryID] or {}
     local done = 0
     for _, id in ipairs(list) do
@@ -76414,7 +76639,28 @@ function CN_TEST_KnownAchievementID()
     return (next(achievementData))
 end
 
+-- AN ACHIEVEMENT API THAT CAN BE COLD. 0.97.0.
+--
+-- `GetAchievementNumCriteria` refuses for a window after login, which is
+-- exactly when `/cn setup` is usually run -- and this had no way to say so,
+-- unlike `CN_TEST_TOYS_COLD`, `CN_TEST_MOUNTS_COLD` and
+-- `CN_TEST_TITLES_COLD`. So the cold-scan test written in 0.95.0 could cover
+-- toys, mounts and titles and could not reach exploration, loremaster or
+-- achievements: the three scanners whose data the refusal actually destroys,
+-- because they write the zero into the store.
 function GetAchievementNumCriteria(id)
+    -- TWO LEVERS, BECAUSE THEY ARE TWO REFUSALS.
+    --
+    -- The category list and the criteria counts come back at different
+    -- moments, and the damaging case is the SECOND one on its own: the client
+    -- names every exploration achievement and then answers "0 criteria" for
+    -- each, so the scan has rows to walk and writes a zero into every one of
+    -- them. A single flag that silenced both made the loop empty, which is
+    -- the harmless case and hid the other.
+    if CN_TEST_ACHIEVEMENTS_COLD or CN_TEST_CRITERIA_COLD then
+        return 0
+    end
+
     return achievementData[id] and achievementData[id].criteria or 0
 end
 
@@ -76529,6 +76775,8 @@ CN_TEST_RECIPES_COLD = false
 CN_TEST_TOYS_COLD   = false
 CN_TEST_MOUNTS_COLD = false
 CN_TEST_TITLES_COLD = false
+CN_TEST_ACHIEVEMENTS_COLD = false
+CN_TEST_CRITERIA_COLD     = false
 
 
 
@@ -114308,6 +114556,15 @@ end)()
 
     local list = CN.UI.listPanels[panel]
 
+    -- NO FILTER IN FORCE. An earlier block in this file types into the search
+    -- box and does not clear it, and a filtered list renders its "nothing
+    -- matches" row -- which has no value column at all, so the measurement
+    -- below would be of the empty branch. A test that depends on what another
+    -- test left behind is a test that passes for the wrong reason.
+    if list.SetFilter then
+        list:SetFilter("")
+    end
+
     -- The row the constant was measured against, in its own comment.
     list:SetEntries({
         { text = "The Severed Threads",
@@ -114357,6 +114614,261 @@ end)()
         .. tostring(list.rows[1].value:GetWidth()))
 
     print("  the value column grows with the text in it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD CRITERIA API DOES NOT ZERO WHAT WAS ALREADY MEASURED.
+    ------------------------------------------------------------
+    -- `Exploration.Scan` wrote `criteria = 0` over a good stored count and
+    -- `done = 0` over this character's real progress, then stamped itself as
+    -- a completed scan -- and `Exploration.Closest` and the candidate
+    -- provider both filter on `criteria > 0`, so one `/cn setup` run in the
+    -- first seconds after logging in emptied the "closest to finishing" list
+    -- and silenced the provider. Permanently: nothing runs this scan on its
+    -- own, and the setup reminder that would have sent the player back had
+    -- just been switched off.
+    --
+    -- `Exploration.RefreshCurrentZone` has carried this guard since 0.61.0,
+    -- thirty lines away in the same file, and FIVE other modules cite
+    -- "Exploration in 0.61.0" as the precedent for the guard they carry. It
+    -- landed at one call site and not at the other one beside it.
+    local explorationModule = CN:GetModule("Exploration")
+
+    assert(explorationModule, "the exploration module must be loaded")
+
+    local scanned = explorationModule.Scan()
+
+    assert(scanned > 0, "the warm client answers about some zones")
+
+    local store = explorationModule.Store and explorationModule.Store()
+        or CN.Account("exploration")
+
+    local sampleID, sample
+
+    for achievementID, record in pairs(store) do
+        if (record.criteria or 0) > 0 then
+            sampleID, sample = achievementID, record
+            break
+        end
+    end
+
+    assert(sample, "and at least one row has a criteria count")
+
+    local heldCriteria = sample.criteria
+    local heldDone     = explorationModule.DoneFor and explorationModule.DoneFor(sample)
+
+    local scans = CN.Account("collectionScans")
+
+    scans.exploration = 1
+
+    -- THE CRITERIA API ALONE. The client still names every exploration
+    -- achievement, and answers "0 criteria" for each -- so the scan has rows
+    -- to walk and a zero to write into all of them. Silencing the category
+    -- list as well would empty the loop, which is the harmless half.
+    CN_TEST_CRITERIA_COLD = true
+
+    local cold = explorationModule.Scan()
+
+    CN_TEST_CRITERIA_COLD = false
+
+    assert(cold == 0,
+        "a sweep the criteria API refused reports reading nothing: " .. cold)
+
+    assert(store[sampleID].criteria == heldCriteria,
+        "and it does not write its refusal over a measured count: "
+        .. tostring(store[sampleID].criteria) .. " was " .. tostring(heldCriteria))
+
+    if heldDone then
+        assert(explorationModule.DoneFor(store[sampleID]) == heldDone,
+            "nor over this character's progress: "
+            .. tostring(explorationModule.DoneFor(store[sampleID]))
+            .. " was " .. tostring(heldDone))
+    end
+
+    assert(scans.exploration == 1,
+        "and it does not record itself as a scan, which is what silences the "
+        .. "setup reminder for the life of the install")
+
+    explorationModule.Scan()
+
+    assert(scans.exploration ~= 1, "while a real sweep does")
+
+    print("  a cold criteria API does not zero what was already measured")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE RENOWN LEVEL-UP IS ONE FACTION SWEEP.
+    ------------------------------------------------------------
+    -- `lastScan` was advanced by the `UPDATE_FACTION` handler alone, so the
+    -- login hook, both renown handlers, `/cn repscan` and the candidate
+    -- provider all ran the full sweep and left it unarmed -- and
+    -- `UPDATE_FACTION` fires constantly, so the next tick swept again. A
+    -- sweep walks every faction row three times and holds the player's
+    -- collapsed headers open while it does.
+    local reputations = CN:GetModule("Reputations")
+
+    local sweeps = 0
+
+    local realWith = CN.Blizzard.WithAllFactionsExpanded
+
+    CN.Blizzard.WithAllFactionsExpanded = function(...)
+        sweeps = sweeps + 1
+
+        return realWith(...)
+    end
+
+    reputations.ForgetThrottle()
+
+    reputations.Scan()
+
+    local afterFirst = sweeps
+
+    assert(afterFirst == 1, "the sweep under test ran once")
+
+    CN.Dispatch("UPDATE_FACTION")
+
+    assert(sweeps == afterFirst,
+        "a sweep that just walked every faction must have stamped its own "
+        .. "throttle; the event swept again")
+
+    -- AND THE PLAYER ACTING IS STILL ANSWERED AT ONCE, which is what the
+    -- handlers that clear the throttle are for.
+    CN.Dispatch("MAJOR_FACTION_RENOWN_LEVEL_CHANGED", 2600, 13)
+
+    assert(sweeps == afterFirst + 1,
+        "a renown level-up is swept immediately: " .. sweeps)
+
+    -- ...and exactly once. The scan re-stamps on its way out, so the
+    -- `UPDATE_FACTION` that follows a renown gain finds the throttle fresh.
+    CN.Dispatch("UPDATE_FACTION")
+
+    CN.Blizzard.WithAllFactionsExpanded = realWith
+
+    assert(sweeps == afterFirst + 1,
+        "and not twice: " .. sweeps)
+
+    print("  one renown level-up is one faction sweep")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A FACTION LIST THE CLIENT HAS NOT SENT IS NOT AN EMPTY ONE.
+    ------------------------------------------------------------
+    local reputations = CN:GetModule("Reputations")
+
+    local scans = CN.Account("collectionScans")
+
+    scans.reputations = 1
+
+    local realNum = C_Reputation.GetNumFactions
+
+    C_Reputation.GetNumFactions = function() return 0 end
+
+    local total = reputations.Scan()
+
+    C_Reputation.GetNumFactions = realNum
+
+    assert(total == 0, "a cold faction sweep reports reading nothing")
+
+    assert(scans.reputations == 1,
+        "and does not record itself as a scan; this is the FIRST step "
+        .. "/cn setup runs, so it is the one most exposed to a cold client")
+
+    reputations.ForgetThrottle()
+    reputations.Scan()
+
+    assert(scans.reputations ~= 1, "while a real sweep does")
+
+    print("  a faction list the client has not sent is not an empty one")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LOCKOUT IS MATCHED ON THE JOURNAL'S ID, NOT ON A TRANSLATED NAME.
+    ------------------------------------------------------------
+    -- Both sides carry the Encounter Journal's instance id and the addon
+    -- compared two localized display strings from two different APIs. When
+    -- they differ by anything -- punctuation, a subtitle, a rename applied to
+    -- one API and not the other -- `/cn drops` silently loses its "locked,
+    -- resets in 2d 3h" clause and tells the player to go and kill a boss they
+    -- are already saved to.
+    local instances = CN:GetModule("Instances")
+
+    CN_TEST_SetLockouts({
+        { name = "Nerub-ar Palace", difficulty = "Normal", encounters = 8,
+          defeated = 8, resetsIn = 7200, locked = true, instanceID = 1273 },
+    })
+
+    -- The journal's name for the same instance, spelled differently. This is
+    -- the whole scenario: one id, two strings.
+    local byID = instances.LockoutFor("Nerub-ar Palace (Raid)", nil, 1273)
+
+    assert(byID and byID.instanceID == 1273,
+        "the lockout is found through the id even when the names differ")
+
+    local byName = instances.LockoutFor("Nerub-ar Palace (Raid)")
+
+    assert(byName == nil,
+        "and matching on the name alone is what used to fail silently")
+
+    -- THE NAME STILL WORKS where a caller has no id, which is the fallback.
+    local fallback = instances.LockoutFor("Nerub-ar Palace")
+
+    assert(fallback and fallback.instanceID == 1273,
+        "a caller with only a name still gets an answer")
+
+    CN_TEST_SetLockouts(nil)
+    CN.InvalidateCandidates()
+
+    print("  a lockout is matched on the journal's id, not a translated name")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE PUBLISHED API SURFACE IS THE ADDON'S, NOT THE HARNESS'S.
+    ------------------------------------------------------------
+    -- `Data/ApiSurface.lua` is generated by walking the toolkit's file list,
+    -- and that list includes `harness.lua` and `bench.lua` -- so every client
+    -- API the offline STUBS mention was harvested into the list of names the
+    -- ADDON references. `/cn capture` asks the live client which of these
+    -- exist and the fixture audit fails on any it refused, so a name the
+    -- addon never calls could report a client as missing something it does
+    -- not need.
+    assert(type(CN.apiSurface) == "table" and #CN.apiSurface > 0,
+        "the addon publishes an API surface")
+
+    local missing = {}
+
+    for _, name in ipairs(CN.apiSurface) do
+        local namespace, method = name:match("^(C_[%a]+)%.([%w_]+)$")
+
+        if namespace then
+            local found = false
+
+            for _, relative in ipairs(CN_TEST_ADDON_FILES or {}) do
+                local text = CN_TEST_ReadAddonFile(relative)
+
+                if text and relative ~= "Data/ApiSurface.lua"
+                    and text:find(namespace .. "." .. method, 1, true) then
+
+                    found = true
+                    break
+                end
+            end
+
+            if not found then
+                table.insert(missing, name)
+            end
+        end
+    end
+
+    assert(#missing == 0,
+        "every name in the published surface is one the addon's own files "
+        .. "reference; these are not: " .. table.concat(missing, ", "))
+
+    print("  the published API surface is the addon's, not the harness's")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

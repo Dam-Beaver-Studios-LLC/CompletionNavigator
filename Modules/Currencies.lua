@@ -65,7 +65,9 @@ Currencies.CharacterStore = CharacterStore
 -- wasted until you spend it", every five seconds because this provider is
 -- volatile, with a fresh weekly urgency bonus every reset, for the life of
 -- the character. The player could not satisfy it and could not make it go
--- away except with `/cn ignore`.
+-- away except by hiding it from the window's own row menu, which `/cn
+-- hidden` lists and `/cn unhide` reverses. (There is no `/cn ignore`; this
+-- comment named one for three releases.)
 --
 -- A serial per sweep is the whole fix: a row the last scan did not see is not
 -- reported on. `lastSeen` was already being written and was read by nothing
@@ -454,7 +456,8 @@ CN.RegisterCandidateProvider("Currencies", function()
             -- `totalEarned`, which only ever goes up. The row therefore came
             -- back at full urgency after every weekly reset, having asked the
             -- player to do something that provably cannot satisfy it, and the
-            -- only escape was `/cn ignore` -- which is the symptom this
+            -- only escape was to hide the row by hand -- which is the
+            -- symptom this
             -- file's header says the serial mechanism was written to end.
             local spendable = not currency.usesTotalEarned
 

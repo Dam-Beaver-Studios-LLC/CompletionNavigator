@@ -339,7 +339,14 @@ function Chase.Chain(goal)
         local ok, description, first = pcall(instances.DescribeSource, chain.name)
 
         if ok and description and first then
-            local lockout = first.instance and instances.LockoutFor(first.instance)
+            -- THROUGH THE JOURNAL'S ID, not the localized name. 0.97.0. See
+            -- the note on `Instances.LockoutFor`: matching on two APIs'
+            -- display strings fails silently, and here that failure removes
+            -- the "you are saved to it and it is cleared" step from a goal --
+            -- which is the step that stops the player walking to a boss they
+            -- cannot loot.
+            local lockout = (first.instance or first.instanceID)
+                and instances.LockoutFor(first.instance, nil, first.instanceID)
 
             if lockout and lockout.complete then
                 table.insert(chain.steps, NewStep(Chase.states.BLOCKED,

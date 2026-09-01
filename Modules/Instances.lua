@@ -156,10 +156,16 @@ function Instances.RemainingBosses(lockout)
         return {}, nil
     end
 
-    if not lockout.id then
-        return {}, "the client did not name this instance"
-    end
-
+    -- THE GUARD ON `lockout.id` IS GONE. 0.97.0.
+    --
+    -- `id` is the opaque lockout save id and nothing below this line uses it
+    -- -- the whole function runs on `instanceID`, which is checked on its own
+    -- two lines down with its own correct sentence. So this refused a boss
+    -- listing the function could have produced, and the sentence it printed
+    -- blamed the NAME, which the `/cn instances` row directly above had just
+    -- displayed. A dead guard with a false message, in the one place the
+    -- player is told why the boss list is missing.
+    --
     -- The JOURNAL's id, not the lockout id. See GetSavedInstances.
     if not lockout.instanceID then
         return {}, "the client did not give an Adventure Guide id for this "
@@ -358,15 +364,41 @@ end
 --
 -- Returns lockout, count -- where count is how many share the name, so a
 -- caller can say "on this difficulty" rather than implying there is only one.
-function Instances.LockoutFor(instanceName, difficulty)
-    if not instanceName then
+-- MATCHED ON THE JOURNAL'S ID WHERE THE CALLER HAS ONE. 0.97.0.
+--
+-- Both sides of this comparison carry the Encounter Journal's instance id --
+-- `SearchEncounterJournal` returns it on every row and `GetSavedInstances`
+-- reads it into every lockout -- and this compared two LOCALIZED DISPLAY
+-- NAMES from two different APIs instead. When those differ by anything at all
+-- (punctuation, a subtitle, a rename applied to one API and not the other),
+-- the match fails silently and `/cn drops` loses its "locked, resets in
+-- 2d 3h" clause -- the one decision-relevant line it prints -- so the player
+-- is told to go and kill a boss they are already saved to. A failure that
+-- looks exactly like "not saved".
+--
+-- This file records the same defect being fixed for the ignore key, under
+-- "it also meant the ignore store was keyed on a translated string". The
+-- standing rule is that a localized string is for display, never to branch
+-- on.
+--
+-- The name stays as a fallback for a caller that has no id.
+function Instances.LockoutFor(instanceName, difficulty, instanceID)
+    if not instanceName and not instanceID then
         return nil, 0
     end
 
     local matches, first, open, exact = 0, nil, nil, nil
 
     for _, lockout in ipairs(Instances.Lockouts()) do
-        if lockout.name == instanceName then
+        local same
+
+        if instanceID then
+            same = lockout.instanceID == instanceID
+        else
+            same = lockout.name == instanceName
+        end
+
+        if same then
             matches = matches + 1
 
             first = first or lockout
@@ -670,8 +702,9 @@ CN:RegisterCommand{
             -- clause looks like a lockout that is simply not shared.
             local lockout, sharing
 
-            if result.instance then
-                lockout, sharing = Instances.LockoutFor(result.instance)
+            if result.instance or result.instanceID then
+                lockout, sharing = Instances.LockoutFor(result.instance, nil,
+                    result.instanceID)
             end
 
             if lockout then

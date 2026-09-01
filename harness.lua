@@ -2557,6 +2557,12 @@ function GetCategoryInfo(categoryID)
 end
 
 function GetCategoryNumAchievements(categoryID)
+    -- The category list refuses in the same window; see
+    -- `GetAchievementNumCriteria` below. 0.97.0.
+    if CN_TEST_ACHIEVEMENTS_COLD then
+        return 0, 0
+    end
+
     local list = categoryAchievements[categoryID] or {}
     local done = 0
     for _, id in ipairs(list) do
@@ -2584,7 +2590,28 @@ function CN_TEST_KnownAchievementID()
     return (next(achievementData))
 end
 
+-- AN ACHIEVEMENT API THAT CAN BE COLD. 0.97.0.
+--
+-- `GetAchievementNumCriteria` refuses for a window after login, which is
+-- exactly when `/cn setup` is usually run -- and this had no way to say so,
+-- unlike `CN_TEST_TOYS_COLD`, `CN_TEST_MOUNTS_COLD` and
+-- `CN_TEST_TITLES_COLD`. So the cold-scan test written in 0.95.0 could cover
+-- toys, mounts and titles and could not reach exploration, loremaster or
+-- achievements: the three scanners whose data the refusal actually destroys,
+-- because they write the zero into the store.
 function GetAchievementNumCriteria(id)
+    -- TWO LEVERS, BECAUSE THEY ARE TWO REFUSALS.
+    --
+    -- The category list and the criteria counts come back at different
+    -- moments, and the damaging case is the SECOND one on its own: the client
+    -- names every exploration achievement and then answers "0 criteria" for
+    -- each, so the scan has rows to walk and writes a zero into every one of
+    -- them. A single flag that silenced both made the loop empty, which is
+    -- the harmless case and hid the other.
+    if CN_TEST_ACHIEVEMENTS_COLD or CN_TEST_CRITERIA_COLD then
+        return 0
+    end
+
     return achievementData[id] and achievementData[id].criteria or 0
 end
 
@@ -2699,6 +2726,8 @@ CN_TEST_RECIPES_COLD = false
 CN_TEST_TOYS_COLD   = false
 CN_TEST_MOUNTS_COLD = false
 CN_TEST_TITLES_COLD = false
+CN_TEST_ACHIEVEMENTS_COLD = false
+CN_TEST_CRITERIA_COLD     = false
 
 
 
@@ -40478,6 +40507,15 @@ end)()
 
     local list = CN.UI.listPanels[panel]
 
+    -- NO FILTER IN FORCE. An earlier block in this file types into the search
+    -- box and does not clear it, and a filtered list renders its "nothing
+    -- matches" row -- which has no value column at all, so the measurement
+    -- below would be of the empty branch. A test that depends on what another
+    -- test left behind is a test that passes for the wrong reason.
+    if list.SetFilter then
+        list:SetFilter("")
+    end
+
     -- The row the constant was measured against, in its own comment.
     list:SetEntries({
         { text = "The Severed Threads",
@@ -40527,6 +40565,261 @@ end)()
         .. tostring(list.rows[1].value:GetWidth()))
 
     print("  the value column grows with the text in it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD CRITERIA API DOES NOT ZERO WHAT WAS ALREADY MEASURED.
+    ------------------------------------------------------------
+    -- `Exploration.Scan` wrote `criteria = 0` over a good stored count and
+    -- `done = 0` over this character's real progress, then stamped itself as
+    -- a completed scan -- and `Exploration.Closest` and the candidate
+    -- provider both filter on `criteria > 0`, so one `/cn setup` run in the
+    -- first seconds after logging in emptied the "closest to finishing" list
+    -- and silenced the provider. Permanently: nothing runs this scan on its
+    -- own, and the setup reminder that would have sent the player back had
+    -- just been switched off.
+    --
+    -- `Exploration.RefreshCurrentZone` has carried this guard since 0.61.0,
+    -- thirty lines away in the same file, and FIVE other modules cite
+    -- "Exploration in 0.61.0" as the precedent for the guard they carry. It
+    -- landed at one call site and not at the other one beside it.
+    local explorationModule = CN:GetModule("Exploration")
+
+    assert(explorationModule, "the exploration module must be loaded")
+
+    local scanned = explorationModule.Scan()
+
+    assert(scanned > 0, "the warm client answers about some zones")
+
+    local store = explorationModule.Store and explorationModule.Store()
+        or CN.Account("exploration")
+
+    local sampleID, sample
+
+    for achievementID, record in pairs(store) do
+        if (record.criteria or 0) > 0 then
+            sampleID, sample = achievementID, record
+            break
+        end
+    end
+
+    assert(sample, "and at least one row has a criteria count")
+
+    local heldCriteria = sample.criteria
+    local heldDone     = explorationModule.DoneFor and explorationModule.DoneFor(sample)
+
+    local scans = CN.Account("collectionScans")
+
+    scans.exploration = 1
+
+    -- THE CRITERIA API ALONE. The client still names every exploration
+    -- achievement, and answers "0 criteria" for each -- so the scan has rows
+    -- to walk and a zero to write into all of them. Silencing the category
+    -- list as well would empty the loop, which is the harmless half.
+    CN_TEST_CRITERIA_COLD = true
+
+    local cold = explorationModule.Scan()
+
+    CN_TEST_CRITERIA_COLD = false
+
+    assert(cold == 0,
+        "a sweep the criteria API refused reports reading nothing: " .. cold)
+
+    assert(store[sampleID].criteria == heldCriteria,
+        "and it does not write its refusal over a measured count: "
+        .. tostring(store[sampleID].criteria) .. " was " .. tostring(heldCriteria))
+
+    if heldDone then
+        assert(explorationModule.DoneFor(store[sampleID]) == heldDone,
+            "nor over this character's progress: "
+            .. tostring(explorationModule.DoneFor(store[sampleID]))
+            .. " was " .. tostring(heldDone))
+    end
+
+    assert(scans.exploration == 1,
+        "and it does not record itself as a scan, which is what silences the "
+        .. "setup reminder for the life of the install")
+
+    explorationModule.Scan()
+
+    assert(scans.exploration ~= 1, "while a real sweep does")
+
+    print("  a cold criteria API does not zero what was already measured")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- ONE RENOWN LEVEL-UP IS ONE FACTION SWEEP.
+    ------------------------------------------------------------
+    -- `lastScan` was advanced by the `UPDATE_FACTION` handler alone, so the
+    -- login hook, both renown handlers, `/cn repscan` and the candidate
+    -- provider all ran the full sweep and left it unarmed -- and
+    -- `UPDATE_FACTION` fires constantly, so the next tick swept again. A
+    -- sweep walks every faction row three times and holds the player's
+    -- collapsed headers open while it does.
+    local reputations = CN:GetModule("Reputations")
+
+    local sweeps = 0
+
+    local realWith = CN.Blizzard.WithAllFactionsExpanded
+
+    CN.Blizzard.WithAllFactionsExpanded = function(...)
+        sweeps = sweeps + 1
+
+        return realWith(...)
+    end
+
+    reputations.ForgetThrottle()
+
+    reputations.Scan()
+
+    local afterFirst = sweeps
+
+    assert(afterFirst == 1, "the sweep under test ran once")
+
+    CN.Dispatch("UPDATE_FACTION")
+
+    assert(sweeps == afterFirst,
+        "a sweep that just walked every faction must have stamped its own "
+        .. "throttle; the event swept again")
+
+    -- AND THE PLAYER ACTING IS STILL ANSWERED AT ONCE, which is what the
+    -- handlers that clear the throttle are for.
+    CN.Dispatch("MAJOR_FACTION_RENOWN_LEVEL_CHANGED", 2600, 13)
+
+    assert(sweeps == afterFirst + 1,
+        "a renown level-up is swept immediately: " .. sweeps)
+
+    -- ...and exactly once. The scan re-stamps on its way out, so the
+    -- `UPDATE_FACTION` that follows a renown gain finds the throttle fresh.
+    CN.Dispatch("UPDATE_FACTION")
+
+    CN.Blizzard.WithAllFactionsExpanded = realWith
+
+    assert(sweeps == afterFirst + 1,
+        "and not twice: " .. sweeps)
+
+    print("  one renown level-up is one faction sweep")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A FACTION LIST THE CLIENT HAS NOT SENT IS NOT AN EMPTY ONE.
+    ------------------------------------------------------------
+    local reputations = CN:GetModule("Reputations")
+
+    local scans = CN.Account("collectionScans")
+
+    scans.reputations = 1
+
+    local realNum = C_Reputation.GetNumFactions
+
+    C_Reputation.GetNumFactions = function() return 0 end
+
+    local total = reputations.Scan()
+
+    C_Reputation.GetNumFactions = realNum
+
+    assert(total == 0, "a cold faction sweep reports reading nothing")
+
+    assert(scans.reputations == 1,
+        "and does not record itself as a scan; this is the FIRST step "
+        .. "/cn setup runs, so it is the one most exposed to a cold client")
+
+    reputations.ForgetThrottle()
+    reputations.Scan()
+
+    assert(scans.reputations ~= 1, "while a real sweep does")
+
+    print("  a faction list the client has not sent is not an empty one")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A LOCKOUT IS MATCHED ON THE JOURNAL'S ID, NOT ON A TRANSLATED NAME.
+    ------------------------------------------------------------
+    -- Both sides carry the Encounter Journal's instance id and the addon
+    -- compared two localized display strings from two different APIs. When
+    -- they differ by anything -- punctuation, a subtitle, a rename applied to
+    -- one API and not the other -- `/cn drops` silently loses its "locked,
+    -- resets in 2d 3h" clause and tells the player to go and kill a boss they
+    -- are already saved to.
+    local instances = CN:GetModule("Instances")
+
+    CN_TEST_SetLockouts({
+        { name = "Nerub-ar Palace", difficulty = "Normal", encounters = 8,
+          defeated = 8, resetsIn = 7200, locked = true, instanceID = 1273 },
+    })
+
+    -- The journal's name for the same instance, spelled differently. This is
+    -- the whole scenario: one id, two strings.
+    local byID = instances.LockoutFor("Nerub-ar Palace (Raid)", nil, 1273)
+
+    assert(byID and byID.instanceID == 1273,
+        "the lockout is found through the id even when the names differ")
+
+    local byName = instances.LockoutFor("Nerub-ar Palace (Raid)")
+
+    assert(byName == nil,
+        "and matching on the name alone is what used to fail silently")
+
+    -- THE NAME STILL WORKS where a caller has no id, which is the fallback.
+    local fallback = instances.LockoutFor("Nerub-ar Palace")
+
+    assert(fallback and fallback.instanceID == 1273,
+        "a caller with only a name still gets an answer")
+
+    CN_TEST_SetLockouts(nil)
+    CN.InvalidateCandidates()
+
+    print("  a lockout is matched on the journal's id, not a translated name")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE PUBLISHED API SURFACE IS THE ADDON'S, NOT THE HARNESS'S.
+    ------------------------------------------------------------
+    -- `Data/ApiSurface.lua` is generated by walking the toolkit's file list,
+    -- and that list includes `harness.lua` and `bench.lua` -- so every client
+    -- API the offline STUBS mention was harvested into the list of names the
+    -- ADDON references. `/cn capture` asks the live client which of these
+    -- exist and the fixture audit fails on any it refused, so a name the
+    -- addon never calls could report a client as missing something it does
+    -- not need.
+    assert(type(CN.apiSurface) == "table" and #CN.apiSurface > 0,
+        "the addon publishes an API surface")
+
+    local missing = {}
+
+    for _, name in ipairs(CN.apiSurface) do
+        local namespace, method = name:match("^(C_[%a]+)%.([%w_]+)$")
+
+        if namespace then
+            local found = false
+
+            for _, relative in ipairs(CN_TEST_ADDON_FILES or {}) do
+                local text = CN_TEST_ReadAddonFile(relative)
+
+                if text and relative ~= "Data/ApiSurface.lua"
+                    and text:find(namespace .. "." .. method, 1, true) then
+
+                    found = true
+                    break
+                end
+            end
+
+            if not found then
+                table.insert(missing, name)
+            end
+        end
+    end
+
+    assert(#missing == 0,
+        "every name in the published surface is one the addon's own files "
+        .. "reference; these are not: " .. table.concat(missing, ", "))
+
+    print("  the published API surface is the addon's, not the harness's")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

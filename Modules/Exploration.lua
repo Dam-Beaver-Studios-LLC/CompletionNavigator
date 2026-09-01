@@ -121,6 +121,29 @@ function Exploration.Scan()
     local seen, complete = 0, 0
 
     for _, achievement in ipairs(Blizzard.GetExplorationAchievements()) do
+        -- A ROW THE CRITERIA API REFUSED IS NOT A ROW WITH NO CRITERIA.
+        -- 0.97.0.
+        --
+        -- `GetAchievementNumCriteria` answers zero for a window after login,
+        -- and this wrote that zero straight over a good stored count -- then
+        -- `NoteProgress` wrote a `done` of zero over this character's real
+        -- progress. `Exploration.Closest` and the candidate provider both
+        -- filter on `criteria > 0`, so one `/cn setup` run in the first
+        -- seconds after logging in emptied the "closest to finishing" list,
+        -- turned "subzones discovered" into "0 of 0", and silenced the
+        -- provider -- permanently, because nothing runs this scan on its own.
+        --
+        -- `Exploration.RefreshCurrentZone` has had exactly this guard since
+        -- 0.61.0, in this file, thirty lines down. FIVE other modules name
+        -- "Exploration in 0.61.0" as the precedent for the guard they carry.
+        -- It landed at one call site and not at the other one beside it, and
+        -- was then cited by everybody as though it covered the file.
+        --
+        -- Counted rather than skipped with an empty branch: `seen` is what
+        -- the client answered about, and it is what decides below whether
+        -- this was a scan at all.
+        if achievement.criteria and achievement.criteria > 0 then
+
         local held = store[achievement.achievementID] or {}
 
         held.achievementID = achievement.achievementID
@@ -147,6 +170,20 @@ function Exploration.Scan()
         if achievement.completed then
             complete = complete + 1
         end
+
+        end
+    end
+
+    -- AND A SWEEP THE CLIENT ANSWERED NOTHING FOR IS NOT A SCAN. 0.97.0.
+    --
+    -- `CN.MarkScanned` routes to `CN.NoteSetupStep`, so stamping it drops
+    -- Exploration out of `Setup.NeverScanned` for the life of the install --
+    -- and nothing else ever runs this scan, so the reminder that would have
+    -- sent the player back was the only way it was going to happen.
+    if seen == 0 then
+        DebugPrint("Exploration sweep answered for nothing; not recording it.")
+
+        return 0, 0
     end
 
     CN.MarkScanned("exploration")

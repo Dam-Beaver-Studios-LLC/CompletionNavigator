@@ -4911,6 +4911,44 @@ mutate "UI.lua" \
     "                .. \"been scanned; /cn scan fills them.|r\")" \
     "the empty-search message names a command that does not exist"
 
+mutate "Modules/Exploration.lua" \
+    "        if achievement.criteria and achievement.criteria > 0 then" \
+    "        if true then" \
+    "a cold criteria API zeroes every measured exploration count"
+
+mutate "Modules/Exploration.lua" \
+    "    if seen == 0 then
+        DebugPrint(\"Exploration sweep answered for nothing; not recording it.\")
+
+        return 0, 0
+    end" \
+    "" \
+    "an exploration sweep that read nothing silences the setup reminder"
+
+mutate "Modules/Reputations.lua" \
+    "    -- Stamped by the function that does the work, whoever called it.
+    lastScan = time()" \
+    "" \
+    "a renown level-up costs two full faction sweeps"
+
+mutate "Modules/Reputations.lua" \
+    "    if total == 0 then
+        DebugPrint(\"Faction sweep answered for nothing; not recording it.\")
+
+        return 0, 0, 0, 0
+    end" \
+    "" \
+    "a cold faction sweep silences the setup reminder for ever"
+
+mutate "Modules/Instances.lua" \
+    "        if instanceID then
+            same = lockout.instanceID == instanceID
+        else
+            same = lockout.name == instanceName
+        end" \
+    "        same = lockout.name == instanceName" \
+    "a lockout is matched on a translated name instead of the journal id"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

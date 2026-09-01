@@ -194,6 +194,37 @@ Reputations.BuildRecord = BuildRecord
 -- SCAN
 ------------------------------------------------------------
 
+-- THE THROTTLE THE SWEEP STAMPS ITSELF. 0.97.0.
+--
+-- This lived in the `UPDATE_FACTION` handler, so only that path advanced it.
+-- The login hook, both renown handlers, `/cn repscan` and the candidate
+-- provider all ran the full sweep and left the stamp alone -- and
+-- `UPDATE_FACTION` fires constantly, so the next tick ran a second one.
+--
+-- A sweep is not cheap: `WithAllFactionsExpanded` walks every faction row to
+-- record which headers the player had collapsed, expands them all, walks them
+-- again with about six client calls each, then walks them a third time to put
+-- the headers back. Two of those on the login frame, and two on every renown
+-- level-up, in the middle of the content that produces renown -- and it
+-- doubles the window in which the player's own collapsed headers are held
+-- open by this addon.
+--
+-- `Modules/Currencies.lua` records fixing this exact shape in 0.65.0 and
+-- `Modules/Quests.lua` in 0.94.0, whose note reads "the fix landed in one
+-- file and nowhere else, which is this project's most-repeated defect".
+-- Reputations was the last scanner with the stamp outside the work.
+Reputations.scanSeconds = 15
+
+local lastScan = 0
+
+function Reputations.ScanIsDue()
+    return (time() - lastScan) >= Reputations.scanSeconds
+end
+
+function Reputations.ForgetThrottle()
+    lastScan = 0
+end
+
 function Reputations.Scan()
     local accountStore   = AccountStore()
     local characterStore = CharacterStore()
@@ -251,6 +282,26 @@ function Reputations.Scan()
             end
         end
     end)
+
+    -- A FACTION LIST THE CLIENT HAS NOT SENT IS NOT AN EMPTY ONE. 0.97.0.
+    --
+    -- This runs from `CN:OnLogin`, which is the moment the list is least
+    -- likely to have streamed, and `/cn setup` runs it first of all thirteen
+    -- steps. Nothing is destroyed by a cold sweep -- the loop simply writes
+    -- nothing -- but both stamps fired anyway, and `MarkScanned` drops
+    -- Reputations out of `Setup.NeverScanned` for the life of the install
+    -- while the Scans tab reads "just now" over a read that returned nothing.
+    --
+    -- Sixth scanner to need this guard, after currencies, achievements,
+    -- loremaster, professions and the three collections.
+    if total == 0 then
+        DebugPrint("Faction sweep answered for nothing; not recording it.")
+
+        return 0, 0, 0, 0
+    end
+
+    -- Stamped by the function that does the work, whoever called it.
+    lastScan = time()
 
     if CN.character then
         CN.character.reputationsScanned = time()
@@ -670,17 +721,12 @@ end, { events = { "UPDATE_FACTION" }, cooldown = 5 })
 -- EVENTS
 ------------------------------------------------------------
 
--- UPDATE_FACTION fires on nearly every reputation tick. Throttle hard.
-local lastScan = 0
-
+-- UPDATE_FACTION fires on nearly every reputation tick. Throttle hard. The
+-- stamp is inside `Reputations.Scan` -- see the note there.
 CN:RegisterEvent("UPDATE_FACTION", function()
-    local now = time()
-
-    if now - lastScan < 15 then
+    if not Reputations.ScanIsDue() then
         return
     end
-
-    lastScan = now
 
     local total = Reputations.Scan()
 
@@ -688,7 +734,10 @@ CN:RegisterEvent("UPDATE_FACTION", function()
 end)
 
 CN:RegisterEvent("MAJOR_FACTION_RENOWN_LEVEL_CHANGED", function(event, factionID, newLevel)
-    lastScan = 0
+    -- The player just did something; no cooldown may delay the answer. The
+    -- scan re-stamps on its way out, so the `UPDATE_FACTION` that follows
+    -- finds the throttle fresh instead of sweeping again.
+    Reputations.ForgetThrottle()
 
     DebugPrint("Renown changed for faction " .. tostring(factionID)
         .. " to " .. tostring(newLevel) .. ".")
@@ -697,7 +746,7 @@ CN:RegisterEvent("MAJOR_FACTION_RENOWN_LEVEL_CHANGED", function(event, factionID
 end)
 
 CN:RegisterEvent("MAJOR_FACTION_UNLOCKED", function(event, factionID)
-    lastScan = 0
+    Reputations.ForgetThrottle()
 
     Reputations.Scan()
 
