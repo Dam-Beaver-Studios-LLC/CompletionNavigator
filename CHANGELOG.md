@@ -7,6 +7,51 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.98.0]
+
+**The addon's own curated quest data was being refused at load, and nothing
+said so.** 0.91.0 removed a field from the set the data registrar accepts; the
+shipped row still carried it, so the row was rejected â€” and the rejection was
+reported to the error collector, which loads *after* the data file, so it
+reached nothing at all. `/cn provenance` reported zero hand-checked rows and
+read exactly like a table nobody had filled in yet. Both halves are fixed: the
+row, and the silence. A complaint made before the collector exists is now held
+and delivered when it arrives.
+
+**For half an hour after every login, the Darkmoon Faire did not exist.** The
+calendar is asynchronous â€” it answers "no events" until the server sends the
+month â€” and the login warm-up cached that answer for thirty minutes. No row in
+`/cn next`, no map pin, no heads-up line, no "Active events" in `/cn now`.
+Only `/cn events` repaired it, and nothing told you to run it. An empty
+calendar is not cached at all now; a real one still is.
+
+### Fixed
+
+- **Putting a rare off did not stop the alert.** Right-clicking the heads-up
+  line, or `/cn later`, removed the rare from every list â€” and then the addon
+  made the one unsolicited noise it is capable of, a sound and a chat line,
+  about that exact rare the next time it drifted into range. This was the only
+  place in the addon that checked "ignored" without also checking "deferred".
+- **Pinning a reputation as a goal switched off its Warband advice.** Goals
+  were marked account-wide whatever they were, and that flag means "the
+  progress carries across your Warband" â€” so the "Bob is better suited,
+  highest standing" verdict was withdrawn for the one faction you had just
+  said you cared about, while `/cn goals` went on naming Bob. Two screens
+  contradicting each other about one row.
+
+### Changed
+
+- Two stored values with no reader anywhere â€” a mount's spell id and a pet's
+  type, about 2,700 numbers between them â€” are gone from the two largest
+  stores, written at every logout and parsed at every login for nothing.
+  Migration 38 removes them from existing databases.
+- `Group.Situation` is still asked once per candidate. A cache for it was
+  written, measured at 11â€“14% of a re-rank that sits well inside its budget,
+  and reverted: it is only correct while every change to death, group and
+  doorway announces itself, and that is not a dependency worth a tenth of a
+  millisecond. The measurement is recorded in the file so the next audit does
+  not spend an afternoon rediscovering it.
+
 ## [0.97.0]
 
 **Running `/cn setup` in the first seconds after logging in erased your

@@ -4949,6 +4949,52 @@ mutate "Modules/Instances.lua" \
     "        same = lockout.name == instanceName" \
     "a lockout is matched on a translated name instead of the journal id"
 
+mutate "Modules/Opportunities.lua" \
+    "    if #active > 0 then
+        eventCache    = active
+        eventCachedAt = time()
+    else
+        eventCache    = nil
+        eventCachedAt = 0
+    end" \
+    "    eventCache    = active
+    eventCachedAt = time()" \
+    "a calendar that had not replied is cached as an event-free day"
+
+mutate "Modules/Broker.lua" \
+    "            and not CN.IsDeferred(CN.objectiveTypes.RARE, id) then" \
+    "            then" \
+    "a rare the player put off is still announced out loud"
+
+mutate "Modules/Goals.lua" \
+    "                    zone            = plan.zone," \
+    "                    zone            = plan.zone,
+                    accountWide     = true," \
+    "pinning a reputation switches off its Warband verdict"
+
+mutate "Modules/Mounts.lua" \
+    "                isFactionSpecific = mount.isFactionSpecific," \
+    "                spellID           = mount.spellID,
+                isFactionSpecific = mount.isFactionSpecific," \
+    "nine hundred mount spell ids go back onto the disk"
+
+mutate "Providers/StaticData.lua" \
+    "        Static.Complain(\"curated quest rows were refused\"," \
+    "        local errors = CN.modules and CN:GetModule(\"Errors\")
+
+        if not errors or not errors.Record then
+            return added, refused
+        end
+
+        errors.Record(\"curated quest rows were refused\"," \
+    "a refusal before the error collector loads is dropped on the floor"
+
+mutate "Data/Quests.lua" \
+    "        name      = \"Vanquish the Invaders!\"," \
+    "        name      = \"Vanquish the Invaders!\",
+        expansion = \"Classic\"," \
+    "the addon's own curated row carries a field the registrar refuses"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

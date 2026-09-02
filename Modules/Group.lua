@@ -104,6 +104,31 @@ function Group.Instance()
 end
 
 -- One word for what the player is doing, which is all the ranking needs.
+-- ASKED ONCE PER CANDIDATE, AND MEASURED BEFORE BEING LEFT ALONE. 0.98.0.
+--
+-- The score adjuster calls this and `InsideInstance` for every candidate, and
+-- each pcalls into `UnitIsDeadOrGhost`, `IsInInstance` and
+-- `GetNumGroupMembers`: 136 protected calls per re-rank at 41 candidates,
+-- around 730 at retail scale, on a path that runs on every `BuildZoneRoute`.
+--
+-- A cache keyed on `CN.rankingGeneration` was written for it, and reverted.
+-- Measured, the saving is 0.026 ms of a 0.180 ms re-rank at 41 candidates and
+-- 0.108 ms of 0.994 ms at 241 -- 11 to 14 per cent of an operation that has a
+-- 0.40 ms budget and sits well inside it.
+--
+-- What it cost was worse than what it saved. The cache is only correct while
+-- every change to deadness, roster or doorway announces itself, and the
+-- suite showed the shape of that dependency at once: three separate tests
+-- move those fixtures directly, which is what the client's own state change
+-- looks like from the addon's side, and each one silently read a stale
+-- answer. Making it safe meant either thirty-eight test call sites routed
+-- through setters or a stub that guesses when the client would have fired an
+-- event -- and the second cannot work at all, because the first read after a
+-- change returns the cached value before touching a stub.
+--
+-- A correctness dependency on "the client always announces" is not worth a
+-- tenth of a millisecond. Recorded here so the next audit does not spend the
+-- afternoon rediscovering it.
 function Group.Situation()
     if Group.IsDead() then
         return "dead"

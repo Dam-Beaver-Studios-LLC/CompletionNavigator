@@ -519,7 +519,36 @@ CN.RegisterCandidateProvider("Goals", function()
                     x               = plan.x,
                     y               = plan.y,
                     zone            = plan.zone,
-                    accountWide     = true,
+
+                    -- `accountWide` IS NOT SET HERE. 0.98.0.
+                    --
+                    -- It was `true` for every goal whatever the type, and
+                    -- `Warband.Decorate` reads that field as "the progress
+                    -- carries across the Warband" -- so it withdrew the
+                    -- suitability score and its sentence. Goals load before
+                    -- Reputations and the aggregate keeps the first provider,
+                    -- so the pinned row is the one that reached the scorer.
+                    --
+                    -- Pinning a character-specific reputation therefore
+                    -- switched off the "Bob is better suited -- highest
+                    -- standing" advice for it, which is exactly the advice a
+                    -- player wants on a faction they have just declared a
+                    -- goal. `/cn goals` and the Goals tab went on printing
+                    -- "Best character: Bob" from `Goals.Plan`, so two
+                    -- surfaces contradicted each other about one goal.
+                    --
+                    -- One word, two meanings: this file's header says "goals
+                    -- are account-wide", which is about where the PIN is
+                    -- stored. `objective.accountWide` is about whether the
+                    -- PROGRESS carries.
+                    --
+                    -- `CN.NewObjective` defaults it to false, and for the
+                    -- genuinely account-wide types `Warband.WhoShould`
+                    -- already answers ACCOUNT, `switchable = false` or "not
+                    -- tracked per character" -- each of which withdraws the
+                    -- verdict anyway. The types whose behaviour changes are
+                    -- REPUTATION and PROFESSION, which are the two that
+                    -- should have carried a verdict all along.
                     completionValue = 6,
                     travelCost      = travel,
                     travelCosted    = costed or nil,

@@ -214,7 +214,21 @@ function Broker.PendingAlerts()
             and not announced[id]
             and vignette.kind == "RARE"
             and not rares.IsClearedByCharacter(id)
-            and not CN.IsIgnored(CN.objectiveTypes.RARE, id) then
+            and not CN.IsIgnored(CN.objectiveTypes.RARE, id)
+
+            -- AND NOT DEFERRED. 0.98.0.
+            --
+            -- This was the only live `CN.IsIgnored` call site in the addon
+            -- without its `IsDeferred` sibling. Vault, Rares, Opportunities,
+            -- Goals, Toys, Pets, Mounts, Instances and Sets all pair them,
+            -- and `CN.Explain` checks both.
+            --
+            -- So "not now" removed the rare from every list and then let the
+            -- addon make the one unsolicited noise it is capable of -- a
+            -- sound and a chat line -- about that exact rare, the next time
+            -- it drifted into range. The addon telling the player it has done
+            -- something it has not, in the loudest place it has.
+            and not CN.IsDeferred(CN.objectiveTypes.RARE, id) then
 
             table.insert(pending, vignette)
         end

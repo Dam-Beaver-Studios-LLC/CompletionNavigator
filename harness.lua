@@ -1330,17 +1330,19 @@ C_DeathInfo = {
 }
 
 CN_TEST_DEAD       = false
-CN_TEST_GHOST      = false
-CN_TEST_GROUP_SIZE = 1
-CN_TEST_INSTANCE   = nil
 
 function UnitIsDeadOrGhost(unit)
     return unit == "player" and CN_TEST_DEAD or false
 end
 
+CN_TEST_GHOST      = false
+
 function UnitIsGhost(unit)
     return unit == "player" and CN_TEST_GHOST or false
 end
+
+CN_TEST_GROUP_SIZE = 1
+CN_TEST_INSTANCE   = nil
 
 function GetNumGroupMembers()
     return CN_TEST_GROUP_SIZE
@@ -2727,6 +2729,7 @@ CN_TEST_TOYS_COLD   = false
 CN_TEST_MOUNTS_COLD = false
 CN_TEST_TITLES_COLD = false
 CN_TEST_ACHIEVEMENTS_COLD = false
+CN_TEST_CALENDAR_COLD     = false
 CN_TEST_CRITERIA_COLD     = false
 
 
@@ -3385,7 +3388,21 @@ CN_TEST_EVENT_ENDS_IN = 3 * 3600
 
 C_Calendar = {
     OpenCalendar    = function() end,
-    GetNumDayEvents = function(offset, day) return 2 end,
+    -- A CALENDAR THAT HAS NOT ARRIVED YET. 0.98.0.
+    --
+    -- `C_Calendar.OpenCalendar` asks the server for the month and this
+    -- answers zero until it comes back -- which is the state at every login,
+    -- and precisely when `CN:OnLogin` warms the cache. The literal made that
+    -- state unreachable, so a refusal being cached for half an hour could not
+    -- be caught. Same shape as the cold toy box, mount journal, title list
+    -- and criteria API.
+    GetNumDayEvents = function(offset, day)
+        if CN_TEST_CALENDAR_COLD then
+            return 0
+        end
+
+        return 2
+    end,
     GetDayEvent     = function(offset, day, index)
         if index == 1 then
             local finish = os.date("*t", time() + CN_TEST_EVENT_ENDS_IN)
@@ -26877,7 +26894,7 @@ print("\nA ghost is pointed at their body:")
     ------------------------------------------------------------
     local group = CN:GetModule("Group")
 
-    CN_TEST_DEAD  = true
+    CN_TEST_DEAD = true
     CN_TEST_GHOST = true
 
     local corpse = group.CorpseTarget()
@@ -26939,7 +26956,7 @@ print("\nA ghost is pointed at their body:")
     corpseFilters.SetTypeEnabled(CN.objectiveTypes.CORPSE, true)
 
     CN_TEST_GHOST = false
-    CN_TEST_DEAD  = false
+    CN_TEST_DEAD = false
 
     CN.CollectCandidates(true)
 
@@ -40340,7 +40357,31 @@ end)()
 
     local realReset = GetQuestResetTime
 
-    GetQuestResetTime = function() return 3600 end
+    -- THE FIXTURE MUST FORCE THE DISAGREEMENT, NOT HOPE FOR IT. 0.98.0.
+    --
+    -- The defect is that the twelve-hour ESTIMATE lands on a different day
+    -- index from the real reset -- which it does for about half of all clock
+    -- values. A fixed `3600` therefore reproduced it only when the suite
+    -- happened to run in the right half of the day: the mutation covering
+    -- this was killed in 0.96.0 and survived in 0.98.0 with no code change
+    -- between, because the clock had moved. A test that is right half the
+    -- time is the same shape as the bug it is testing.
+    --
+    -- The reset is chosen so the two keys always differ: one second away when
+    -- the estimate has already crossed midnight, and just past the next
+    -- midnight when it has not.
+    local now      = time()
+    local estimate = math.floor((now + 43200) / 86400)
+
+    local resetIn = (math.floor((now + 1) / 86400) ~= estimate)
+        and 1
+        or (86400 - (now % 86400) + 100)
+
+    assert(math.floor((now + resetIn) / 86400) ~= estimate,
+        "the fixture's real reset and its estimate fall on different days, "
+        .. "which is the whole scenario")
+
+    GetQuestResetTime = function() return resetIn end
 
     local dayKey = progress.RollDay(store)
 
@@ -40362,7 +40403,7 @@ end)()
         .. " previousDay=" .. tostring(store.previousDay))
 
     -- And when the client speaks, the key is still the right one.
-    GetQuestResetTime = function() return 3600 end
+    GetQuestResetTime = function() return resetIn end
 
     progress.knownResetAt    = nil
     progress.resetIsEstimate = false
@@ -40820,6 +40861,318 @@ end)()
         .. "reference; these are not: " .. table.concat(missing, ", "))
 
     print("  the published API surface is the addon's, not the harness's")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CALENDAR THAT HAS NOT ARRIVED IS NOT AN EVENT-FREE DAY.
+    ------------------------------------------------------------
+    -- `C_Calendar.OpenCalendar` is asynchronous, so the client answers "no
+    -- events" until the month comes back -- and `CN:OnLogin` warms the cache
+    -- by calling this with `force`, which skips the cache READ and still
+    -- performs the cache WRITE. The empty answer was then held for the full
+    -- half hour.
+    --
+    -- So for thirty minutes after every login the Darkmoon Faire, a
+    -- Timewalking week and every holiday were absent from the ranking
+    -- entirely: no row in `/cn next`, no map pin, no heads-up line, no
+    -- "Active events" in `/cn now`. Only `/cn events` repaired it, because it
+    -- passes `force` -- and nothing told the player to run it. The addon
+    -- subscribes to no calendar event, so there was no other invalidator.
+    local opportunities = CN:GetModule("Opportunities")
+
+    assert(opportunities, "the opportunities module must be loaded")
+
+    CN_TEST_CALENDAR_COLD = true
+
+    -- Exactly what the login hook does.
+    local cold = opportunities.GetActiveEvents(true)
+
+    CN_TEST_CALENDAR_COLD = false
+
+    assert(#cold == 0, "a cold calendar reports no events")
+
+    -- And now the month arrives. Without `force`, which is what every reader
+    -- in the addon uses.
+    local warm = opportunities.GetActiveEvents()
+
+    assert(#warm > 0,
+        "an empty answer must not be cached for half an hour over a client "
+        .. "that had simply not replied yet; got " .. #warm)
+
+    -- AND A REAL ANSWER IS STILL HELD, which is what the cache is for: the
+    -- calendar walk is a client call per event per day.
+    local asks = 0
+
+    local realNum = C_Calendar.GetNumDayEvents
+
+    C_Calendar.GetNumDayEvents = function(...)
+        asks = asks + 1
+
+        return realNum(...)
+    end
+
+    opportunities.GetActiveEvents()
+    opportunities.GetActiveEvents()
+
+    C_Calendar.GetNumDayEvents = realNum
+
+    assert(asks == 0,
+        "a calendar that answered is read once and held: " .. asks)
+
+    print("  a calendar that has not arrived is not an event-free day")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "NOT NOW" SILENCES THE ALERT, NOT JUST THE LIST.
+    ------------------------------------------------------------
+    -- The heads-up alert checked `CN.IsIgnored` and not `CN.IsDeferred` --
+    -- the only live call site in the addon missing its sibling. So deferring
+    -- a rare removed it from every list and then let the addon make the one
+    -- unsolicited noise it is capable of, a sound and a chat line, about that
+    -- exact rare the next time it drifted into range.
+    local brokerModule = CN:GetModule("Broker")
+
+    assert(brokerModule and brokerModule.PendingAlerts,
+        "the broker module must be loaded")
+
+    local raresModule = CN:GetModule("Rares")
+
+    local sighted = nil
+
+    for _, vignette in ipairs(raresModule.GetActive() or {}) do
+        if vignette.kind == "RARE" and vignette.vignetteID then
+            sighted = vignette.vignetteID
+            break
+        end
+    end
+
+    assert(sighted, "the fixture has a rare in sight")
+
+    CN.SetIgnored(CN.objectiveTypes.RARE, sighted, false)
+    CN.SetDeferred(CN.objectiveTypes.RARE, sighted, nil)
+
+    brokerModule.ResetAnnounced()
+
+    assert(#brokerModule.PendingAlerts() > 0, "which would be announced")
+
+    -- "Not now."
+    CN.SetDeferred(CN.objectiveTypes.RARE, sighted, 3600)
+
+    brokerModule.ResetAnnounced()
+
+    assert(#brokerModule.PendingAlerts() == 0,
+        "a rare put off is not announced; deferring hides it from every "
+        .. "list, and the alert is the loudest thing this addon does")
+
+    CN.SetDeferred(CN.objectiveTypes.RARE, sighted, nil)
+
+    brokerModule.ResetAnnounced()
+
+    assert(#brokerModule.PendingAlerts() > 0,
+        "and it comes back when the deferral is lifted")
+
+    print("  a rare put off is not announced either")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- PINNING A REPUTATION DOES NOT MAKE IT ACCOUNT-WIDE.
+    ------------------------------------------------------------
+    -- The Goals provider stamped `accountWide = true` on every goal whatever
+    -- the type, and `Warband.Decorate` reads that as "the progress carries
+    -- across the Warband" -- so it withdrew the suitability score and its
+    -- sentence. Goals load before Reputations and the aggregate keeps the
+    -- first provider, so the pinned row is the one that reached the scorer.
+    --
+    -- Declaring a faction a goal therefore switched off the "Bob is better
+    -- suited" advice for it, while `/cn goals` went on printing "Best
+    -- character: Bob" -- two surfaces contradicting each other about one row.
+    local goalsModule = CN:GetModule("Goals")
+
+    assert(goalsModule, "the goals module must be loaded")
+
+    local factionID = 1090
+
+    local pinned = false
+
+    for _, candidate in ipairs(CN.candidateProviders["Goals"].fn() or {}) do
+        if candidate.type == CN.objectiveTypes.REPUTATION then
+            pinned = true
+
+            assert(candidate.accountWide ~= true,
+                "a pinned character-specific reputation is not claimed to "
+                .. "be account-wide")
+        end
+    end
+
+    if not pinned and goalsModule.Add then
+        goalsModule.Add(CN.objectiveTypes.REPUTATION, factionID)
+
+        for _, candidate in ipairs(CN.candidateProviders["Goals"].fn() or {}) do
+            if candidate.type == CN.objectiveTypes.REPUTATION then
+                pinned = true
+
+                assert(candidate.accountWide ~= true,
+                    "a pinned character-specific reputation is not claimed "
+                    .. "to be account-wide")
+            end
+        end
+
+        if goalsModule.Remove then
+            goalsModule.Remove(CN.objectiveTypes.REPUTATION, factionID)
+        end
+    end
+
+    assert(pinned, "the fixture could pin a reputation to check it")
+
+    print("  pinning a reputation does not make it account-wide")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- TWO IDS WITH NO READER LEAVE THE LARGEST TWO STORES.
+    ------------------------------------------------------------
+    local aged = {
+        version = 38,
+        account = {
+            mounts = { [1] = { mountID = 1, spellID = 555, collected = true } },
+            pets   = { [2] = { speciesID = 2, petType = 3, collected = true } },
+        },
+        characters = {},
+    }
+
+    CN.RunMigrations(aged)
+
+    assert(aged.account.mounts[1].spellID == nil
+        and aged.account.mounts[1].collected == true,
+        "the mount loses an id nothing reads and keeps what it is for")
+
+    assert(aged.account.pets[2].petType == nil
+        and aged.account.pets[2].collected == true,
+        "and so does the pet")
+
+    -- AND THE SCANS DO NOT PUT THEM BACK, which is what made every earlier
+    -- sweep of these two stores temporary.
+    CN:GetModule("Mounts").Scan()
+    CN:GetModule("Pets").Scan()
+
+    for _, record in pairs(CN.Account("mounts")) do
+        assert(record.spellID == nil,
+            "a rescan does not write the id back")
+    end
+
+    for _, record in pairs(CN.Account("pets")) do
+        assert(record.petType == nil,
+            "nor the pet type")
+    end
+
+    print("  two ids with no reader leave the largest two stores")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ADDON'S OWN CURATED ROWS ACTUALLY REGISTER.
+    ------------------------------------------------------------
+    -- `Data/Quests.lua` shipped a row carrying `expansion`, which 0.91.0
+    -- removed from the fields the registrar accepts -- so the addon's own
+    -- curated table was refused at load. And the refusal was invisible:
+    -- `RegisterQuests` reports to `Modules/Errors.lua`, which loads long
+    -- after `Data/Quests.lua`, so the complaint reached a nil module and was
+    -- dropped. `/cn provenance` reported zero curated rows and read as though
+    -- the table had simply never been filled in.
+    --
+    -- Asserted from the file rather than from a count, because the count is
+    -- also what a table nobody has written to looks like.
+    local source = CN_TEST_ReadAddonFile("Data/Quests.lua")
+
+    assert(source, "the curated data file is readable")
+
+    local shipped, missing = 0, {}
+
+    for questID in source:gmatch("%[%s*(%d+)%s*%]%s*=%s*{") do
+        shipped = shipped + 1
+
+        if not CN.Static.quests[tonumber(questID)] then
+            table.insert(missing, questID)
+        end
+    end
+
+    assert(shipped > 0, "the file ships at least one curated row")
+
+    assert(#missing == 0,
+        "every row this addon ships is registered; these were refused at "
+        .. "load and nothing said so: " .. table.concat(missing, ", "))
+
+    -- EVERY FIELD THE FILE USES IS ONE THE REGISTRAR ACCEPTS, which is the
+    -- check that would have caught it before the row went missing.
+    for _, field in ipairs({ "expansion" }) do
+        assert(not CN.Static.validFields[field],
+            "this list names fields the registrar has REMOVED; " .. field
+            .. " is accepted again, so the check below is inverted")
+
+        assert(not source:find("%f[%w]" .. field .. "%s*="),
+            "the curated file still carries `" .. field .. "`, which the "
+            .. "registrar refuses -- the whole row goes with it")
+    end
+
+    print("  the addon's own curated rows actually register")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COMPLAINT WITH NOWHERE TO GO WAITS RATHER THAN EVAPORATING.
+    ------------------------------------------------------------
+    -- The data layer loads before the error collector, so anything it
+    -- refused at file-load time reported into nil. That is how the defect
+    -- above stayed invisible for seven releases.
+    local Static = CN.Static
+
+    local errors = CN:GetModule("Errors")
+
+    local heldModule = CN.modules.Errors
+
+    -- The load-order state: the collector does not exist yet.
+    CN.modules.Errors = nil
+
+    Static.pendingComplaints = {}
+
+    -- THROUGH THE REGISTRAR, NOT THROUGH THE HELPER. 0.98.0.
+    --
+    -- The first version of this called `Static.Complain` directly, so a
+    -- mutation that put the old unconditional Errors lookup back into
+    -- `RegisterQuests` changed nothing it could see. A test for "the reporter
+    -- reports" has to go in at the door the reporting happens behind.
+    local landed, rejected = Static.RegisterQuests({
+        [970901] = { name = "Fine" },
+        [970902] = { thisFieldDoesNotExist = true },
+    }, "LoadOrderSupplier")
+
+    assert(landed == 1 and rejected == 1,
+        "one row landed and one was refused: " .. landed .. ", " .. rejected)
+
+    assert(#Static.pendingComplaints == 1,
+        "and the refusal is held rather than reported into a module that "
+        .. "does not exist yet: " .. #Static.pendingComplaints)
+
+    Static.UnregisterOrigin("LoadOrderSupplier")
+
+    CN.modules.Errors = heldModule
+
+    local ringBefore = #errors.All()
+
+    local sent = Static.FlushComplaints()
+
+    assert(sent == 1, "and delivered once the collector arrives: " .. sent)
+
+    assert(#errors.All() > ringBefore,
+        "into the ring the player reads with /cn errors")
+
+    assert(#Static.pendingComplaints == 0,
+        "and not delivered twice")
+
+    print("  a complaint with nowhere to go waits rather than evaporating")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

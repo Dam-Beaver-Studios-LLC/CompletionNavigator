@@ -45,7 +45,6 @@ CN.Static.RegisterQuests({
 
     [8237] = {
         name      = "Vanquish the Invaders!",
-        expansion = "Classic",
     },
 
     -- CN:DATA:QUESTS -- new rows are inserted above this marker.

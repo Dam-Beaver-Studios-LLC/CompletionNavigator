@@ -68,7 +68,10 @@ function Pets.Scan()
 
                 store[pet.speciesID] = {
                     speciesID  = pet.speciesID,
-                    petType    = pet.petType,
+                    -- `petType` IS NOT STORED. 0.98.0. Same as the mount
+                    -- `spellID` beside it: eighteen hundred integers with no
+                    -- reader anywhere in the tree, written every logout and
+                    -- parsed every login. The journal answers it for free.
                     isWild     = pet.isWild,
                     canBattle  = pet.canBattle,
                     obtainable = pet.obtainable,

@@ -1905,6 +1905,43 @@ CN.migrations = {
                 .. " stored names the client re-supplies.")
         end
     end,
+
+    -- TWO IDS WITH NO READER, ON THE TWO LARGEST STORES. 0.98.0.
+    --
+    -- `mounts.spellID` and `pets.petType` were written by their scans and
+    -- read by nothing anywhere in the tree -- a grep finds the write and
+    -- stops. That is roughly 2,700 integers plus their hash slots, serialised
+    -- at every logout and parsed again at every login, for values the mount
+    -- journal and the pet journal both hand back instantly.
+    --
+    -- The same class migrations 4, 5, 14, 15, 16, 31 and 32 exist for. Those
+    -- sweeps looked for NAMES and for TIMESTAMPS, and these two are neither,
+    -- so both stores were visited repeatedly and these survived every visit.
+    [38] = function(db)
+        local dropped = 0
+
+        local function strip(store, field)
+            if type(store) ~= "table" then
+                return
+            end
+
+            for _, record in pairs(store) do
+                if type(record) == "table" and record[field] ~= nil then
+                    record[field] = nil
+
+                    dropped = dropped + 1
+                end
+            end
+        end
+
+        strip(db.account and db.account.mounts, "spellID")
+        strip(db.account and db.account.pets,   "petType")
+
+        if dropped > 0 then
+            CN.DebugPrint("Dropped " .. dropped
+                .. " stored values nothing reads.")
+        end
+    end,
 }
 
 -- Published so the harness can drive it against a hand-built database. A

@@ -94,6 +94,17 @@ end
 Errors.noticeDelaySeconds = 12
 
 CN:OnLogin(function()
+    -- ANYTHING THAT COMPLAINED BEFORE THIS MODULE EXISTED. 0.98.0.
+    --
+    -- `Providers/StaticData.lua` loads before this file and reports refused
+    -- curated rows -- so its complaint reached a nil module and vanished. It
+    -- holds them now, and this is where they arrive. Flushed before the
+    -- notice sweep below, so a refusal from load time is in the ring by the
+    -- time the player is told there is something to read.
+    if CN.Static and CN.Static.FlushComplaints then
+        CN.Guard("Static.FlushComplaints", CN.Static.FlushComplaints)
+    end
+
     if C_Timer and C_Timer.After then
         C_Timer.After(Errors.noticeDelaySeconds, function()
             CN.Guard("Errors.ShowNotices", Errors.ShowNotices)

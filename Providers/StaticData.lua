@@ -165,6 +165,59 @@ function Static.RegisterQuest(questID, record, origin)
     return true
 end
 
+-- A REFUSAL BEFORE THE ERROR COLLECTOR EXISTS IS STILL A REFUSAL. 0.98.0.
+--
+-- This reported straight to `Modules/Errors.lua`, which loads long AFTER
+-- `Data/Quests.lua` in the .toc -- so a refusal of the rows shipped inside
+-- this addon reached a nil module and was dropped on the floor. Silently, at
+-- every login, for ever.
+--
+-- That is not hypothetical: it is how this addon's own curated table came to
+-- be empty. 0.91.0 removed `expansion` from the fields the registrar accepts
+-- and the shipped row still carried it, so the row was refused at load and
+-- nothing anywhere said so. `/cn provenance` reported zero curated rows and
+-- read as though the table had simply never been filled in.
+--
+-- Held and flushed when the collector arrives. A complaint that has nowhere
+-- to go waits; it does not evaporate.
+Static.pendingComplaints = {}
+
+function Static.Complain(headline, detail)
+    local errors = CN.modules and CN:GetModule("Errors")
+
+    if errors and errors.Record then
+        errors.Record(headline, detail)
+
+        return
+    end
+
+    table.insert(Static.pendingComplaints, {
+        headline = headline,
+        detail   = detail,
+    })
+end
+
+-- Called once the module registry is populated. Safe to call repeatedly.
+function Static.FlushComplaints()
+    local errors = CN.modules and CN:GetModule("Errors")
+
+    if not errors or not errors.Record then
+        return 0
+    end
+
+    local sent = 0
+
+    for _, held in ipairs(Static.pendingComplaints) do
+        errors.Record(held.headline, held.detail)
+
+        sent = sent + 1
+    end
+
+    Static.pendingComplaints = {}
+
+    return sent
+end
+
 -- Registers a table of curated rows. Returns how many landed and how many
 -- were refused, with the refusals recorded to `/cn errors` rather than
 -- thrown, so one bad row in a supplier's file does not cost the rest.
@@ -216,14 +269,10 @@ function Static.RegisterQuests(records, origin, schemaVersion)
     end
 
     if refused > 0 then
-        local errors = CN.modules and CN:GetModule("Errors")
-
-        if errors and errors.Record then
-            errors.Record("curated quest rows were refused",
-                tostring(origin or "unknown") .. ": "
-                .. CN.Count(refused, "row") .. " refused, first: "
-                .. tostring(firstRefusal))
-        end
+        Static.Complain("curated quest rows were refused",
+            tostring(origin or "unknown") .. ": "
+            .. CN.Count(refused, "row") .. " refused, first: "
+            .. tostring(firstRefusal))
     end
 
     -- AND THE ANSWER CHANGES, so a supplier that registers late is not

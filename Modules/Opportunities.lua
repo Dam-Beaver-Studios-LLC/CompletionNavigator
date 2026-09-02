@@ -160,6 +160,36 @@ end
 
 -- Calendar reads are relatively expensive and the answer changes daily, not
 -- minute to minute.
+-- HOW LONG AN ANSWER IS GOOD FOR, AND HOW LONG A SILENCE IS. 0.98.0.
+--
+-- The calendar is asynchronous: `C_Calendar.OpenCalendar` asks the server for
+-- the month and `GetNumDayEvents` answers zero until it arrives. `CN:OnLogin`
+-- warms it by calling this with `force`, which skips the cache READ and then
+-- performs the cache WRITE -- so the empty answer was stamped and held for
+-- the full half hour.
+--
+-- For thirty minutes after every login, then, the Darkmoon Faire, a
+-- Timewalking week and every holiday were absent from the ranking entirely:
+-- no row in `/cn next`, no map pin, no heads-up line, and no "Active events"
+-- section in `/cn now`. Only `/cn events` repaired it, because it passes
+-- `force` -- and nothing told the player to run it. The addon subscribes to
+-- no calendar event, so there was no other invalidator.
+--
+-- AN EMPTY ANSWER IS NOT CACHED AT ALL.
+--
+-- The first draft gave a silence a shorter window than an answer, which is
+-- what `Instances.dropMissSeconds` does. That is right where re-asking is
+-- expensive: the Adventure Guide search is a full `EJ_SetSearch` cycle with a
+-- save and restore of the player's own selection.
+--
+-- Here it is two client calls. `GetNumDayEvents` answers zero and the loop
+-- that would walk the events does not run, so re-reading an event-free day
+-- costs nothing worth a second constant and a second window to reason about.
+-- Not caching it removes the question entirely: an answer is held, a silence
+-- is asked again next time, and there is no interval during which the addon
+-- is confidently wrong about the Darkmoon Faire.
+Opportunities.eventSeconds = 1800
+
 local eventCache, eventCachedAt = nil, 0
 
 -- KEYED ON SOMETHING THE CLIENT'S LANGUAGE CANNOT CHANGE.
@@ -241,7 +271,9 @@ function Opportunities.GetActiveEvents(force)
         return live
     end
 
-    if not force and eventCache and (time() - eventCachedAt) < 1800 then
+    if not force and eventCache
+        and (time() - eventCachedAt) < Opportunities.eventSeconds then
+
         return Freshen(eventCache)
     end
 
@@ -253,8 +285,13 @@ function Opportunities.GetActiveEvents(force)
         end
     end
 
-    eventCache    = active
-    eventCachedAt = time()
+    if #active > 0 then
+        eventCache    = active
+        eventCachedAt = time()
+    else
+        eventCache    = nil
+        eventCachedAt = 0
+    end
 
     return Freshen(active)
 end

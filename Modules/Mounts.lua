@@ -54,7 +54,19 @@ function Mounts.Scan()
                 --
                 -- `Mounts.NameOf` below is the one reader, matching
                 -- `Pets.NameOf` and `Achievements.NameOf`.
-                spellID           = mount.spellID,
+                -- `spellID` IS NOT STORED. 0.98.0.
+                --
+                -- Nothing in the tree has ever read a mount record's
+                -- `spellID`: a grep finds this write and nothing else. Nine
+                -- hundred integers plus their hash slots, serialised at every
+                -- logout and parsed again at every login, for a value
+                -- `GetMountInfoByID` hands back instantly.
+                --
+                -- The three comments immediately below explain what this scan
+                -- deliberately does not store, and were written with this
+                -- line directly above them. Migrations 4, 5, 14, 15, 16, 31
+                -- and 32 swept this store for names and for timestamps; none
+                -- of them asked about the ids.
                 sourceType        = mount.sourceType,
 
                 -- `source` IS NOT STORED ANY MORE. 0.62.0.
