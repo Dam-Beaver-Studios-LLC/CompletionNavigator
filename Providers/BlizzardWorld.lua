@@ -1608,6 +1608,44 @@ function Blizzard.ForgetSavedInstanceRequest()
     requestedRaidInfo = false
 end
 
+-- THE KEYSTONE HAS TO BE ASKED FOR TOO. 1.3.0.
+--
+-- `C_MythicPlus.GetOwnedKeystoneLevel()` reads a table the client fills only
+-- after `C_MythicPlus.RequestMapInfo()`; until then it answers nil or zero,
+-- and `Waiting.Keystone` reads a zero as "no keystone" and returns nil --
+-- correctly, for the wrong reason. So `/cn waiting`'s keystone row and the
+-- keystone objective were absent for the whole session unless the player
+-- happened to open the Mythic+ UI, which sends the request for them.
+--
+-- Third instance of backlog rule 163, written one release ago about the
+-- lockout list: the addon had the reader, the display and the row, and
+-- nothing that asked. The lockout fix looked for its siblings in the Lua
+-- tree; this is the one it did not find, because it lives in `Waiting.lua`
+-- rather than in a provider file and does not go through `Blizzard` at all.
+--
+-- Same shape as the raid-info pair above: once per segment, re-armed by a
+-- loading screen, because a keystone changes when one is used or the week
+-- resets.
+local requestedKeystone = false
+
+function Blizzard.RequestKeystoneInfo(force)
+    if not C_MythicPlus or not C_MythicPlus.RequestMapInfo then
+        return false
+    end
+
+    if requestedKeystone and not force then
+        return false
+    end
+
+    requestedKeystone = true
+
+    return (pcall(C_MythicPlus.RequestMapInfo))
+end
+
+function Blizzard.ForgetKeystoneRequest()
+    requestedKeystone = false
+end
+
 function Blizzard.GetSavedInstances()
     local results = {}
 

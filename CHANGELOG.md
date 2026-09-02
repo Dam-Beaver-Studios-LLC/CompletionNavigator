@@ -7,6 +7,50 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.3.0]
+
+1.2.0 found a system the addon was listening to and never asking. This release
+asked that question of everything else, and found the third one â€” and then
+found that the fix for a *different* defect had stopped at the language
+boundary and left the addon's own toolkit behind.
+
+**The keystone was never asked for.** `C_MythicPlus.GetOwnedKeystoneLevel()`
+reads a table the client fills only after `C_MythicPlus.RequestMapInfo()`;
+until then it answers zero, and the guard in `Waiting.Keystone` reads a zero as
+"this character has no keystone" â€” the right answer for the wrong reason, for
+the whole session, unless the player happened to open the Mythic+ UI, which
+sends the request for them. So `/cn waiting`'s keystone row and the keystone's
+own deadline were silently absent. Third instance of the same shape in two
+releases; the lockout fix swept for its siblings in the provider files and this
+one lives in a module and never went through `Blizzard` at all.
+
+**`cn.ps1 harvest` could not carry a turn-in location.** The addon began
+recording where a quest was handed in â€” the one coordinate the client can
+never re-supply â€” in 1.0.0. The companion data addon learned to carry it in its
+0.8.0 and to stop dropping such rows in its 0.9.0. The addon's *own* toolkit,
+which is the primary path into `Data/Quests.lua` and the one that file's header
+points at, had never mentioned the field: a row located only by its hand-in was
+counted as having no coordinates and dropped, and a row with both emitted only
+the pick-up. Both fixes were followed by the call-site grep this project
+requires â€” and the grep was run over the Lua tree, and both writers are
+PowerShell.
+
+### How defects were found
+
+- **The provider-event question, asked of requests instead of events.** Two
+  releases of "who handles this answer" became "who sends this request", and
+  the answer for the third asynchronous system was nobody.
+- **The test client answered a keystone it had never been asked for.** The
+  stub returned twelve from the line it was written on, so the state every
+  player is in at login had never existed in the suite. Twenty-first entry in
+  this project's list of defects hidden by a stub that skips a precondition
+  the client enforces.
+- **A call-site sweep stops at the language boundary unless it is told not
+  to.** `cn.ps1`'s harvest emitter is now checked against the field block at
+  the top of `Data/Quests.lua` â€” every coordinate field the schema documents
+  must be one the emitter can produce, read from the documentation rather than
+  from a list kept beside the check.
+
 ## [1.2.0]
 
 1.1.0 added "the client's item cache" to the list of systems a provider must

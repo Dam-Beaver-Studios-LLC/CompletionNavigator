@@ -26632,16 +26632,60 @@ print("\nWhat is on a clock, in detail:")
     ------------------------------------------------------------
     -- A KEYSTONE IS A DEADLINE, NOT A GEAR FEATURE.
     ------------------------------------------------------------
+    -- THE KEYSTONE TABLE IS EMPTY UNTIL IT IS ASKED FOR.
+    -- CN_TEST_KEYSTONE_UNREQUESTED, 1.3.0.
+    --
+    -- `C_MythicPlus.GetOwnedKeystoneLevel` reads a table the client fills
+    -- only after `C_MythicPlus.RequestMapInfo()`; until then it answers zero.
+    -- This stub answered twelve from the first line it was written, so the
+    -- state every player is in at login had never existed here -- and the
+    -- guard in `Waiting.Keystone` that reads a zero as "no keystone" gave the
+    -- right answer for the wrong reason, for the whole session.
+    --
+    -- Twenty-first entry in this project's list of defects hidden by a stub
+    -- that skips a precondition the client enforces, and the third system in
+    -- two releases where the missing piece was a REQUEST rather than a read.
+    CN_TEST_KEYSTONE_UNREQUESTED = true
+    CN_TEST_KEYSTONE_REQUESTS    = 0
+
     C_MythicPlus = {
-        GetOwnedKeystoneLevel = function() return 12 end,
-        GetOwnedKeystoneChallengeMapID = function() return 501 end,
+        RequestMapInfo = function()
+            CN_TEST_KEYSTONE_REQUESTS = CN_TEST_KEYSTONE_REQUESTS + 1
+
+            CN_TEST_KEYSTONE_UNREQUESTED = false
+        end,
+
+        GetOwnedKeystoneLevel = function()
+            if CN_TEST_KEYSTONE_UNREQUESTED then
+                return 0
+            end
+
+            return 12
+        end,
+
+        GetOwnedKeystoneChallengeMapID = function()
+            if CN_TEST_KEYSTONE_UNREQUESTED then
+                return nil
+            end
+
+            return 501
+        end,
     }
 
     C_ChallengeMode = {
         GetMapUIInfo = function() return "The Stonevault" end,
     }
 
+    -- The latch inside `RequestKeystoneInfo` has been closed since this
+    -- session's own login, so a loading screen is what re-arms it -- which is
+    -- also the path a real player takes to reach this state.
+    CN.Blizzard.ForgetKeystoneRequest()
+
     local keystone = waiting.Keystone()
+
+    assert(CN_TEST_KEYSTONE_REQUESTS >= 1,
+        "reading the keystone asks the client for it: "
+        .. CN_TEST_KEYSTONE_REQUESTS)
 
     assert(keystone, "a held keystone is found")
     assert(keystone.level == 12, "at its level")
@@ -26649,6 +26693,28 @@ print("\nWhat is on a clock, in detail:")
     assert(keystone.expiresIn and keystone.expiresIn > 0,
         "with the weekly reset as its expiry, because it is replaced then "
         .. "whether it is used or not")
+
+    -- AND ONCE PER SEGMENT, because it is a server round trip and every read
+    -- of the keystone goes through the function that sends it.
+    local sentSoFar = CN_TEST_KEYSTONE_REQUESTS
+
+    for _ = 1, 30 do
+        waiting.Keystone()
+    end
+
+    assert(CN_TEST_KEYSTONE_REQUESTS == sentSoFar,
+        "thirty reads do not send thirty requests: "
+        .. CN_TEST_KEYSTONE_REQUESTS)
+
+    -- AND A LOADING SCREEN ASKS AGAIN, because a keystone changes when one is
+    -- used and again at the weekly reset.
+    CN_TEST_KEYSTONE_REQUESTS = 0
+
+    CN.FireEvent("PLAYER_ENTERING_WORLD")
+
+    assert(CN_TEST_KEYSTONE_REQUESTS >= 1,
+        "entering the world asks for the keystone again: "
+        .. CN_TEST_KEYSTONE_REQUESTS)
 
     C_MythicPlus.GetOwnedKeystoneLevel = function() return 0 end
 

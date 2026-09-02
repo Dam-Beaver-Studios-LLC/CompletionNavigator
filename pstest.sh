@@ -218,6 +218,28 @@ tr -d '\r' < .pkgmeta | grep -q '^  - fixtures$' \
 rm -rf fixtures
 echo "    toolkit, CI, luacheck and .pkgmeta all ignore a captured fixture"
 
+# THE HARVEST EMITTER CARRIES EVERY FIELD THE SCHEMA DOCUMENTS.
+#
+# `cn.ps1 harvest` is the primary path into the addon's own
+# `Data/Quests.lua` -- that file's header says so in as many words -- and it
+# had never mentioned `turnInMapID/X/Y`, a field the addon began recording in
+# 1.0.0 and Navigator Data learned to carry in its 0.8.0. Two sweeps of the
+# same defect stopped at the language boundary, because the grep that follows
+# a fix of this shape was run over the Lua tree.
+#
+# Read from the schema's own documentation block rather than from a list kept
+# beside this check, because a list kept beside something is the thing that
+# goes stale.
+echo "  the harvest emitter carries every documented coordinate field"
+for field in mapID x y turnInMapID turnInX turnInY; do
+  sed -n '/^-- Fields\|^--   /p' Data/Quests.lua | grep -q "\b$field\b" \
+    || { echo "FAIL: Data/Quests.lua no longer documents $field, so this check is stale"; exit 1; }
+
+  grep -q "record\.$field\b\|ContainsKey('$field')" cn.ps1 \
+    || { echo "FAIL: cn.ps1 harvest cannot emit $field, which Data/Quests.lua documents"; exit 1; }
+done
+echo "    six coordinate fields, documented and emitted"
+
 echo "  release guard: the project page must be reviewed"
 # A release with no user-visible change legitimately needs no new copy -- but
 # that has to be a decision somebody made. It was not; it was an omission, and

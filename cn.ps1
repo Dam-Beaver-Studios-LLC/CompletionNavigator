@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '1.2.0'
+$script:ToolkitVersion = '1.3.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "1.2.0"
+CN.version     = "1.3.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -18894,6 +18894,7 @@ CN.apiSurface = {
     "C_MountJournal.GetMountInfoExtraByID",
     "C_MythicPlus.GetOwnedKeystoneChallengeMapID",
     "C_MythicPlus.GetOwnedKeystoneLevel",
+    "C_MythicPlus.RequestMapInfo",
     "C_PetJournal.GetNumCollectedInfo",
     "C_PetJournal.GetNumPets",
     "C_PetJournal.GetPetInfoByIndex",
@@ -22045,6 +22046,44 @@ end
 -- provider file does not listen to the game.
 function Blizzard.ForgetSavedInstanceRequest()
     requestedRaidInfo = false
+end
+
+-- THE KEYSTONE HAS TO BE ASKED FOR TOO. 1.3.0.
+--
+-- `C_MythicPlus.GetOwnedKeystoneLevel()` reads a table the client fills only
+-- after `C_MythicPlus.RequestMapInfo()`; until then it answers nil or zero,
+-- and `Waiting.Keystone` reads a zero as "no keystone" and returns nil --
+-- correctly, for the wrong reason. So `/cn waiting`'s keystone row and the
+-- keystone objective were absent for the whole session unless the player
+-- happened to open the Mythic+ UI, which sends the request for them.
+--
+-- Third instance of backlog rule 163, written one release ago about the
+-- lockout list: the addon had the reader, the display and the row, and
+-- nothing that asked. The lockout fix looked for its siblings in the Lua
+-- tree; this is the one it did not find, because it lives in `Waiting.lua`
+-- rather than in a provider file and does not go through `Blizzard` at all.
+--
+-- Same shape as the raid-info pair above: once per segment, re-armed by a
+-- loading screen, because a keystone changes when one is used or the week
+-- resets.
+local requestedKeystone = false
+
+function Blizzard.RequestKeystoneInfo(force)
+    if not C_MythicPlus or not C_MythicPlus.RequestMapInfo then
+        return false
+    end
+
+    if requestedKeystone and not force then
+        return false
+    end
+
+    requestedKeystone = true
+
+    return (pcall(C_MythicPlus.RequestMapInfo))
+end
+
+function Blizzard.ForgetKeystoneRequest()
+    requestedKeystone = false
 end
 
 function Blizzard.GetSavedInstances()
@@ -52405,6 +52444,18 @@ function Waiting.Keystone()
         return nil
     end
 
+    -- ASKED ON THE WAY PAST. 1.3.0.
+    --
+    -- `GetOwnedKeystoneLevel` reads a table the client fills only after
+    -- `C_MythicPlus.RequestMapInfo()`. Until then it answers zero, and the
+    -- guard eight lines below reads a zero as "this character has no
+    -- keystone" and returns nil -- the right answer for the wrong reason, for
+    -- the whole session, unless the player happened to open the Mythic+ UI.
+    --
+    -- The request costs nothing after the first: see
+    -- `Blizzard.RequestKeystoneInfo`, which sends it once per loading screen.
+    CN.Blizzard.RequestKeystoneInfo()
+
     local level, mapID
 
     if C_MythicPlus.GetOwnedKeystoneLevel then
@@ -52813,6 +52864,22 @@ CN:RegisterCommand{
         end
     end,
 }
+
+------------------------------------------------------------
+-- ASKING FOR THE KEYSTONE
+------------------------------------------------------------
+
+-- ON EVERY LOADING SCREEN, not once at login. A keystone changes when one is
+-- used and again at the weekly reset, and the latch inside
+-- `RequestKeystoneInfo` exists so that reading the keystone is not a server
+-- round trip every time -- not so that the addon asks once and never again.
+--
+-- The same pair `Modules/Instances.lua` uses for the lockout list, one
+-- release later, on the system that fix did not sweep for.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    CN.Blizzard.ForgetKeystoneRequest()
+    CN.Blizzard.RequestKeystoneInfo()
+end)
 
 return Waiting
 '@
@@ -61587,7 +61654,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 1.2.0
+## Version: 1.3.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -61842,6 +61909,50 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [1.3.0]
+
+1.2.0 found a system the addon was listening to and never asking. This release
+asked that question of everything else, and found the third one — and then
+found that the fix for a *different* defect had stopped at the language
+boundary and left the addon's own toolkit behind.
+
+**The keystone was never asked for.** `C_MythicPlus.GetOwnedKeystoneLevel()`
+reads a table the client fills only after `C_MythicPlus.RequestMapInfo()`;
+until then it answers zero, and the guard in `Waiting.Keystone` reads a zero as
+"this character has no keystone" — the right answer for the wrong reason, for
+the whole session, unless the player happened to open the Mythic+ UI, which
+sends the request for them. So `/cn waiting`'s keystone row and the keystone's
+own deadline were silently absent. Third instance of the same shape in two
+releases; the lockout fix swept for its siblings in the provider files and this
+one lives in a module and never went through `Blizzard` at all.
+
+**`cn.ps1 harvest` could not carry a turn-in location.** The addon began
+recording where a quest was handed in — the one coordinate the client can
+never re-supply — in 1.0.0. The companion data addon learned to carry it in its
+0.8.0 and to stop dropping such rows in its 0.9.0. The addon's *own* toolkit,
+which is the primary path into `Data/Quests.lua` and the one that file's header
+points at, had never mentioned the field: a row located only by its hand-in was
+counted as having no coordinates and dropped, and a row with both emitted only
+the pick-up. Both fixes were followed by the call-site grep this project
+requires — and the grep was run over the Lua tree, and both writers are
+PowerShell.
+
+### How defects were found
+
+- **The provider-event question, asked of requests instead of events.** Two
+  releases of "who handles this answer" became "who sends this request", and
+  the answer for the third asynchronous system was nobody.
+- **The test client answered a keystone it had never been asked for.** The
+  stub returned twelve from the line it was written on, so the state every
+  player is in at login had never existed in the suite. Twenty-first entry in
+  this project's list of defects hidden by a stub that skips a precondition
+  the client enforces.
+- **A call-site sweep stops at the language boundary unless it is told not
+  to.** `cn.ps1`'s harvest emitter is now checked against the field block at
+  the top of `Data/Quests.lua` — every coordinate field the schema documents
+  must be one the emitter can produce, read from the documentation rather than
+  from a list kept beside the check.
 
 ## [1.2.0]
 
@@ -69755,7 +69866,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-1.2.0
+1.3.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -75383,6 +75494,28 @@ mutate "Scoring.lua" \
     "    QUEST_DATA_LOAD_RESULT = 0.75," \
     "" \
     "forty quest titles arriving cost forty invalidation passes"
+
+mutate "Modules/Waiting.lua" \
+    "    CN.Blizzard.RequestKeystoneInfo()
+
+    local level, mapID" \
+    "    local level, mapID" \
+    "the keystone is read without ever being asked for"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    if requestedKeystone and not force then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "every keystone read is a server round trip"
+
+mutate "Modules/Waiting.lua" \
+    "    CN.Blizzard.ForgetKeystoneRequest()
+    CN.Blizzard.RequestKeystoneInfo()" \
+    "    CN.Blizzard.ForgetKeystoneRequest()" \
+    "a loading screen re-arms the keystone request and never sends it"
 
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
@@ -102251,16 +102384,60 @@ print("\nWhat is on a clock, in detail:")
     ------------------------------------------------------------
     -- A KEYSTONE IS A DEADLINE, NOT A GEAR FEATURE.
     ------------------------------------------------------------
+    -- THE KEYSTONE TABLE IS EMPTY UNTIL IT IS ASKED FOR.
+    -- CN_TEST_KEYSTONE_UNREQUESTED, 1.3.0.
+    --
+    -- `C_MythicPlus.GetOwnedKeystoneLevel` reads a table the client fills
+    -- only after `C_MythicPlus.RequestMapInfo()`; until then it answers zero.
+    -- This stub answered twelve from the first line it was written, so the
+    -- state every player is in at login had never existed here -- and the
+    -- guard in `Waiting.Keystone` that reads a zero as "no keystone" gave the
+    -- right answer for the wrong reason, for the whole session.
+    --
+    -- Twenty-first entry in this project's list of defects hidden by a stub
+    -- that skips a precondition the client enforces, and the third system in
+    -- two releases where the missing piece was a REQUEST rather than a read.
+    CN_TEST_KEYSTONE_UNREQUESTED = true
+    CN_TEST_KEYSTONE_REQUESTS    = 0
+
     C_MythicPlus = {
-        GetOwnedKeystoneLevel = function() return 12 end,
-        GetOwnedKeystoneChallengeMapID = function() return 501 end,
+        RequestMapInfo = function()
+            CN_TEST_KEYSTONE_REQUESTS = CN_TEST_KEYSTONE_REQUESTS + 1
+
+            CN_TEST_KEYSTONE_UNREQUESTED = false
+        end,
+
+        GetOwnedKeystoneLevel = function()
+            if CN_TEST_KEYSTONE_UNREQUESTED then
+                return 0
+            end
+
+            return 12
+        end,
+
+        GetOwnedKeystoneChallengeMapID = function()
+            if CN_TEST_KEYSTONE_UNREQUESTED then
+                return nil
+            end
+
+            return 501
+        end,
     }
 
     C_ChallengeMode = {
         GetMapUIInfo = function() return "The Stonevault" end,
     }
 
+    -- The latch inside `RequestKeystoneInfo` has been closed since this
+    -- session's own login, so a loading screen is what re-arms it -- which is
+    -- also the path a real player takes to reach this state.
+    CN.Blizzard.ForgetKeystoneRequest()
+
     local keystone = waiting.Keystone()
+
+    assert(CN_TEST_KEYSTONE_REQUESTS >= 1,
+        "reading the keystone asks the client for it: "
+        .. CN_TEST_KEYSTONE_REQUESTS)
 
     assert(keystone, "a held keystone is found")
     assert(keystone.level == 12, "at its level")
@@ -102268,6 +102445,28 @@ print("\nWhat is on a clock, in detail:")
     assert(keystone.expiresIn and keystone.expiresIn > 0,
         "with the weekly reset as its expiry, because it is replaced then "
         .. "whether it is used or not")
+
+    -- AND ONCE PER SEGMENT, because it is a server round trip and every read
+    -- of the keystone goes through the function that sends it.
+    local sentSoFar = CN_TEST_KEYSTONE_REQUESTS
+
+    for _ = 1, 30 do
+        waiting.Keystone()
+    end
+
+    assert(CN_TEST_KEYSTONE_REQUESTS == sentSoFar,
+        "thirty reads do not send thirty requests: "
+        .. CN_TEST_KEYSTONE_REQUESTS)
+
+    -- AND A LOADING SCREEN ASKS AGAIN, because a keystone changes when one is
+    -- used and again at the weekly reset.
+    CN_TEST_KEYSTONE_REQUESTS = 0
+
+    CN.FireEvent("PLAYER_ENTERING_WORLD")
+
+    assert(CN_TEST_KEYSTONE_REQUESTS >= 1,
+        "entering the world asks for the keystone again: "
+        .. CN_TEST_KEYSTONE_REQUESTS)
 
     C_MythicPlus.GetOwnedKeystoneLevel = function() return 0 end
 
@@ -119265,6 +119464,28 @@ tr -d '\r' < .pkgmeta | grep -q '^  - fixtures$' \
 rm -rf fixtures
 echo "    toolkit, CI, luacheck and .pkgmeta all ignore a captured fixture"
 
+# THE HARVEST EMITTER CARRIES EVERY FIELD THE SCHEMA DOCUMENTS.
+#
+# `cn.ps1 harvest` is the primary path into the addon's own
+# `Data/Quests.lua` -- that file's header says so in as many words -- and it
+# had never mentioned `turnInMapID/X/Y`, a field the addon began recording in
+# 1.0.0 and Navigator Data learned to carry in its 0.8.0. Two sweeps of the
+# same defect stopped at the language boundary, because the grep that follows
+# a fix of this shape was run over the Lua tree.
+#
+# Read from the schema's own documentation block rather than from a list kept
+# beside this check, because a list kept beside something is the thing that
+# goes stale.
+echo "  the harvest emitter carries every documented coordinate field"
+for field in mapID x y turnInMapID turnInX turnInY; do
+  sed -n '/^-- Fields\|^--   /p' Data/Quests.lua | grep -q "\b$field\b" \
+    || { echo "FAIL: Data/Quests.lua no longer documents $field, so this check is stale"; exit 1; }
+
+  grep -q "record\.$field\b\|ContainsKey('$field')" cn.ps1 \
+    || { echo "FAIL: cn.ps1 harvest cannot emit $field, which Data/Quests.lua documents"; exit 1; }
+done
+echo "    six coordinate fields, documented and emitted"
+
 echo "  release guard: the project page must be reviewed"
 # A release with no user-visible change legitimately needs no new copy -- but
 # that has to be a decision somebody made. It was not; it was an omission, and
@@ -122118,7 +122339,29 @@ function Invoke-CNHarvest {
 
         # A quest with no coordinates adds a name and nothing else. Useful,
         # but not what the static database exists for.
-        if (-not ($record.ContainsKey('x') -and $record.ContainsKey('y'))) {
+        #
+        # A TURN-IN IS COORDINATES. 1.3.0.
+        #
+        # The addon began recording where a quest was handed in -- the one
+        # coordinate the client can never re-supply -- in 1.0.0, and this
+        # emitter, which is the primary path into the addon's OWN
+        # `Data/Quests.lua`, has never mentioned the field. So a row located
+        # only by its hand-in was counted here as having no coordinates and
+        # dropped, and a row that had both emitted only the pick-up.
+        #
+        # Navigator Data fixed both halves of this on the companion side in
+        # its 0.8.0 and 0.9.0. Neither sweep reached here, because the grep
+        # that follows a fix of this shape -- backlog rule 160, "the grep for
+        # the old expression has to come back empty" -- was run over the Lua
+        # tree and this is PowerShell. A call-site sweep stops at the language
+        # boundary unless it is told not to.
+        $hasPickUp = $record.ContainsKey('x') -and $record.ContainsKey('y')
+
+        $hasTurnIn = $record.ContainsKey('turnInMapID') `
+            -and $record.ContainsKey('turnInX') `
+            -and $record.ContainsKey('turnInY')
+
+        if (-not ($hasPickUp -or $hasTurnIn)) {
             $unlocated++
 
             if (-not $Force) { continue }
@@ -122137,6 +122380,23 @@ function Invoke-CNHarvest {
         if ($record.x -and $record.y) {
             $lines.Add("        x         = $($record.x),") | Out-Null
             $lines.Add("        y         = $($record.y),") | Out-Null
+        }
+        elseif ($hasTurnIn) {
+            # AND THE ROW SAYS WHICH HALF WAS NEVER SEEN. 1.3.0.
+            #
+            # The same sentence `/cn export` writes into its own block. A row
+            # with a hand-in and no pick-up is not missing its coordinates by
+            # accident: it is a quest the addon met halfway through, and the
+            # warning is the whole difference between a curator adding the
+            # missing half and a curator assuming the hand-in point is where
+            # the quest is offered.
+            $lines.Add('        -- picked up: NOT SEEN. The addon met this quest at its hand-in.') | Out-Null
+        }
+
+        if ($hasTurnIn) {
+            $lines.Add("        turnInMapID = $($record.turnInMapID),") | Out-Null
+            $lines.Add("        turnInX   = $($record.turnInX),") | Out-Null
+            $lines.Add("        turnInY   = $($record.turnInY),") | Out-Null
         }
 
         if ($record.requiresLevel) {

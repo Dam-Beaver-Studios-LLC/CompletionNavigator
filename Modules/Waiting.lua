@@ -95,6 +95,18 @@ function Waiting.Keystone()
         return nil
     end
 
+    -- ASKED ON THE WAY PAST. 1.3.0.
+    --
+    -- `GetOwnedKeystoneLevel` reads a table the client fills only after
+    -- `C_MythicPlus.RequestMapInfo()`. Until then it answers zero, and the
+    -- guard eight lines below reads a zero as "this character has no
+    -- keystone" and returns nil -- the right answer for the wrong reason, for
+    -- the whole session, unless the player happened to open the Mythic+ UI.
+    --
+    -- The request costs nothing after the first: see
+    -- `Blizzard.RequestKeystoneInfo`, which sends it once per loading screen.
+    CN.Blizzard.RequestKeystoneInfo()
+
     local level, mapID
 
     if C_MythicPlus.GetOwnedKeystoneLevel then
@@ -503,5 +515,21 @@ CN:RegisterCommand{
         end
     end,
 }
+
+------------------------------------------------------------
+-- ASKING FOR THE KEYSTONE
+------------------------------------------------------------
+
+-- ON EVERY LOADING SCREEN, not once at login. A keystone changes when one is
+-- used and again at the weekly reset, and the latch inside
+-- `RequestKeystoneInfo` exists so that reading the keystone is not a server
+-- round trip every time -- not so that the addon asks once and never again.
+--
+-- The same pair `Modules/Instances.lua` uses for the lockout list, one
+-- release later, on the system that fix did not sweep for.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    CN.Blizzard.ForgetKeystoneRequest()
+    CN.Blizzard.RequestKeystoneInfo()
+end)
 
 return Waiting

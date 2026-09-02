@@ -5130,6 +5130,28 @@ mutate "Scoring.lua" \
     "" \
     "forty quest titles arriving cost forty invalidation passes"
 
+mutate "Modules/Waiting.lua" \
+    "    CN.Blizzard.RequestKeystoneInfo()
+
+    local level, mapID" \
+    "    local level, mapID" \
+    "the keystone is read without ever being asked for"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    if requestedKeystone and not force then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "every keystone read is a server round trip"
+
+mutate "Modules/Waiting.lua" \
+    "    CN.Blizzard.ForgetKeystoneRequest()
+    CN.Blizzard.RequestKeystoneInfo()" \
+    "    CN.Blizzard.ForgetKeystoneRequest()" \
+    "a loading screen re-arms the keystone request and never sends it"
+
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
     "            .. CN.Accent(\"/cn waiting\") .. \" for what is on a timer.\")" \

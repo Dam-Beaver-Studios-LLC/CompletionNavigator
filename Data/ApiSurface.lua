@@ -63,6 +63,7 @@ CN.apiSurface = {
     "C_MountJournal.GetMountInfoExtraByID",
     "C_MythicPlus.GetOwnedKeystoneChallengeMapID",
     "C_MythicPlus.GetOwnedKeystoneLevel",
+    "C_MythicPlus.RequestMapInfo",
     "C_PetJournal.GetNumCollectedInfo",
     "C_PetJournal.GetNumPets",
     "C_PetJournal.GetPetInfoByIndex",
