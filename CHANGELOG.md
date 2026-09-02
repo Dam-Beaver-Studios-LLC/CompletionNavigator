@@ -7,6 +7,52 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.5.0]
+
+Both of this release's defects were written by the two releases before it, and
+both were of a shape those releases had already named.
+
+**An item name the client had not cached was asked for again on every look.**
+1.4.0 added the request and shipped it unlatched, under a comment arguing that
+the client de-duplicates a load already in flight. It does â€” and that says
+nothing about the same miss happening again on the next rebuild.
+`Modules/Vendors.lua` measures its own loop at 2,503 lookups per rebuild and
+that provider rebuilds every five seconds, so a cold item cache meant thousands
+of client calls a second for items the server may never answer about. No
+benchmark could see it, because every benchmark runs with a warm cache and the
+branch that makes the call is never taken. It asks once per item per session
+now.
+
+**An unanswered lockout request was reported as a clear week.** 1.2.0 found
+that the addon read the lockout list and never asked for it, and sent the
+request â€” and left the other half alone: "the server has not answered yet" and
+"you are saved to nothing" both arrive as a count of zero, and
+`/cn instances` printed *You are not saved to anything* for both. That is worst
+in exactly the moment the request was added for, the first seconds after a
+login, which is also when somebody types the command. 1.4.0 fixed this same
+shape for the inbox and did not sweep for its siblings.
+
+The keystone is deliberately left as it is. It has no event that says "the
+answer arrived", so a third state there would replace a briefly wrong *you
+have no keystone* with a permanently wrong *still asking* for every character
+that genuinely holds none. Where there is no signal, the honest thing is to
+say nothing rather than to invent one â€” noted here so the omission is a
+decision rather than an oversight.
+
+### How defects were found
+
+- **A justification written into a comment is not a measurement.** The
+  unlatched request had a two-clause argument beside it; the first clause was
+  true and the second was never traced to the loop it sits in.
+- **Every benchmark runs with a warm cache**, so the miss branch of the
+  item-name accessor â€” the one that talks to the client â€” has never been
+  measured. The guard is an exact count in the suite instead: five hundred
+  looks at the same uncached item must send no further requests.
+- **A count of zero cannot distinguish an empty answer from no answer**, and
+  only an event can. The lockout check now exercises the event path on its
+  own, with an empty list, because a test that always answers with rows cannot
+  tell whether the handler is wired at all.
+
 ## [1.4.0]
 
 The question 1.2.0 and 1.3.0 kept asking â€” *who sends the request?* â€” has now

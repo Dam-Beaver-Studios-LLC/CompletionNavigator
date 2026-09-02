@@ -5180,13 +5180,46 @@ mutate "Modules/Waiting.lua" \
     "a loading screen re-arms the mail request and never sends it"
 
 mutate "Providers/BlizzardWorld.lua" \
-    "        if C_Item.RequestLoadItemDataByID then
+    "        if C_Item.RequestLoadItemDataByID and not askedForItem[itemID] then
+            askedForItem[itemID] = true
+
             pcall(C_Item.RequestLoadItemDataByID, itemID)
         end" \
     "        if false then
+            askedForItem[itemID] = true
+
             pcall(C_Item.RequestLoadItemDataByID, itemID)
         end" \
     "an item name the client has not cached is never asked for"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "        if C_Item.RequestLoadItemDataByID and not askedForItem[itemID] then
+            askedForItem[itemID] = true" \
+    "        if C_Item.RequestLoadItemDataByID then
+            askedForItem[itemID] = true" \
+    "an uncached item name is asked for again on every look"
+
+mutate "Modules/Instances.lua" \
+    "    return lockouts, Instances.answered" \
+    "    return lockouts, true" \
+    "an unanswered lockout list reads as a clear week"
+
+mutate "Modules/Instances.lua" \
+    "    if #raw > 0 then
+        Instances.answered = true
+    end" \
+    "    if false then
+        Instances.answered = true
+    end" \
+    "a lockout list that arrived before the addon loaded waits for ever"
+
+mutate "Modules/Instances.lua" \
+    "CN:RegisterEvent(\"UPDATE_INSTANCE_INFO\", function()
+    Instances.answered = true
+end)" \
+    "CN:RegisterEvent(\"UPDATE_INSTANCE_INFO\", function()
+end)" \
+    "the client saying the lockout list is in hand is ignored"
 
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \

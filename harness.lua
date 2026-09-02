@@ -42725,6 +42725,11 @@ end)()
     CN_TEST_ITEM_LOADS     = 0
     CN_TEST_LAST_ITEM_LOAD = nil
 
+    -- The session has already asked about several items by this point, and
+    -- 1.5.0 asks once per item per session. Cleared so this measures the
+    -- request rather than the latch.
+    CN.Blizzard.ForgetItemRequests()
+
     -- A name the client HAS, which must not send a request.
     local known = CN.Blizzard.GetItemName(500)
 
@@ -42749,6 +42754,42 @@ end)()
     assert(CN_TEST_LAST_ITEM_LOAD == 60001,
         "for the item that was wanted: " .. tostring(CN_TEST_LAST_ITEM_LOAD))
 
+    -- AND ONCE, NOT ONCE PER LOOK. 1.5.0.
+    --
+    -- 1.4.0 shipped this unlatched, with a comment arguing that the client
+    -- de-duplicates a load already in flight. It does -- and that says
+    -- nothing about the same miss happening again on the next rebuild.
+    -- `Modules/Vendors.lua` measures its own loop at 2,503 lookups per
+    -- rebuild, and the vendor provider rebuilds every five seconds, so a cold
+    -- cache meant thousands of client calls a second for items the server may
+    -- never answer about. No benchmark could see it: every benchmark runs
+    -- with a warm cache, so the branch that makes the call is never taken.
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    local askedAgain = CN_TEST_ITEM_LOADS
+
+    for _ = 1, 500 do
+        CN.Blizzard.GetItemName(60001)
+    end
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    assert(CN_TEST_ITEM_LOADS == askedAgain,
+        "five hundred more looks at the same uncached item send no further "
+        .. "requests: " .. (CN_TEST_ITEM_LOADS - askedAgain))
+
+    -- AND A DIFFERENT ITEM IS STILL ASKED FOR, so the latch is a latch and
+    -- not a mute.
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    CN.Blizzard.GetItemName(60002)
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    assert(CN_TEST_ITEM_LOADS == askedAgain + 1,
+        "an item not asked about before is asked about: "
+        .. CN_TEST_ITEM_LOADS)
+
     -- AND THE OLD PATH STILL WORKS, because a client without
     -- `GetItemNameByID` gets its load from `GetItemInfo` as a side effect and
     -- must not be made to ask twice.
@@ -42764,6 +42805,128 @@ end)()
         "a client with only the flat API still answers: " .. tostring(viaFlat))
 
     print("  an item name the client has not cached is asked for")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN UNANSWERED LOCKOUT REQUEST IS NOT AN EMPTY WEEK.
+    --
+    -- 1.2.0 found that the addon read the lockout list and never asked for
+    -- it, and sent the request. It did not touch the other half: "the server
+    -- has not answered yet" and "you are saved to nothing" both arrive as a
+    -- count of zero, and `/cn instances` printed "You are not saved to
+    -- anything" for both -- worst in the first seconds after a login, which
+    -- is the moment the request was added for and the moment somebody types
+    -- the command.
+    --
+    -- 1.4.0 fixed exactly this shape for the inbox and did not sweep for its
+    -- siblings, which is backlog rule 30 inside two releases.
+    ------------------------------------------------------------
+    local instances = CN:GetModule("Instances")
+
+    assert(instances, "the instances module is loaded")
+
+    CN_TEST_LOCKOUTS_UNREQUESTED = true
+
+    instances.answered = false
+
+    CN.Blizzard.ForgetSavedInstanceRequest()
+
+    local held = RequestRaidInfo
+
+    -- A request that goes out and is not answered: the state between the
+    -- login and the server's reply.
+    RequestRaidInfo = function() end
+
+    local rows, answered = instances.Lockouts()
+
+    RequestRaidInfo = held
+
+    assert(#rows == 0,
+        "an unanswered request reads as an empty list from the client")
+
+    assert(answered == false,
+        "and the addon says it has not been answered rather than that the "
+        .. "week is clear")
+
+    -- AND THE COMMAND SAYS SO, rather than reporting a clear week.
+    local spoke = {}
+
+    local realAddMessage = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(spoke, tostring(message))
+    end
+
+    RequestRaidInfo = function() end
+
+    CN.HandleSlashCommand("instances")
+
+    RequestRaidInfo = held
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAddMessage
+
+    local reported = table.concat(spoke, "\n")
+
+    assert(not reported:find("not saved to anything", 1, true),
+        "the command does not claim a clear week before the server has "
+        .. "answered: " .. reported)
+
+    assert(reported:find("Asking the server", 1, true),
+        "and says what it is waiting for: " .. reported)
+
+    -- AND ONCE THE ANSWER ARRIVES, the ordinary path is unchanged.
+    CN_TEST_LOCKOUTS_UNREQUESTED = false
+
+    instances.answered = false
+
+    local warm, warmAnswered = instances.Lockouts()
+
+    assert(#warm > 0 and warmAnswered,
+        "the answered list is reported normally: " .. #warm)
+
+    -- AND A GENUINELY CLEAR WEEK IS STILL A CLEAR WEEK, or the third state
+    -- has replaced the second rather than joined it.
+    local savedRows = CN_TEST_SAVED_INSTANCES
+
+    CN_TEST_SAVED_INSTANCES = {}
+
+    instances.answered = true
+
+    local none, stillAnswered = instances.Lockouts()
+
+    CN_TEST_SAVED_INSTANCES = savedRows
+
+    assert(#none == 0 and stillAnswered,
+        "an answered empty list is answered and empty")
+
+    -- AND THE EVENT IS WHAT SAYS SO WHEN THE LIST IS EMPTY.
+    --
+    -- The count cannot: an empty answer and no answer are the same number.
+    -- `UPDATE_INSTANCE_INFO` is the only signal that separates them, which is
+    -- why both paths exist and why a test that only ever answers with rows
+    -- cannot tell whether the handler is wired.
+    local emptied = CN_TEST_SAVED_INSTANCES
+
+    CN_TEST_SAVED_INSTANCES = {}
+
+    instances.answered = false
+
+    local beforeEvent = select(2, instances.Lockouts())
+
+    assert(beforeEvent == false,
+        "an empty list with no event is not an answer")
+
+    CN.FireEvent("UPDATE_INSTANCE_INFO")
+
+    local after = select(2, instances.Lockouts())
+
+    CN_TEST_SAVED_INSTANCES = emptied
+
+    assert(after == true,
+        "and the client saying the list is in hand is what makes it one")
+
+    print("  an unanswered lockout request is not an empty week")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

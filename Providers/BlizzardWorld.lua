@@ -1544,10 +1544,31 @@ end
 -- `GetItemInfo` fallback below already asked implicitly, which is why the
 -- defect was invisible on a client old enough to take it.
 --
--- No latch. The client de-duplicates a load already in flight, the call is
--- local, and a per-item latch would be a table the size of every item the
--- addon has ever asked about -- on a store the whole file set exists to keep
--- off disk.
+-- ONE REQUEST PER ITEM PER SESSION. 1.5.0.
+--
+-- 1.4.0 shipped this with no latch and a comment justifying it: "the client
+-- de-duplicates a load already in flight, the call is local, and a per-item
+-- latch would be a table the size of every item the addon has ever asked
+-- about". The first clause covers duplicate loads IN FLIGHT and nothing else,
+-- and the loop this is called from is measured, in `Modules/Vendors.lua`, at
+-- 2,503 lookups per rebuild -- so a cold item cache meant 2,503 client calls
+-- every five seconds, for items the server may never answer about.
+--
+-- No benchmark could see it: every benchmark runs with a warm cache, so the
+-- miss branch -- the one that makes the call -- is never taken. The
+-- justification was written and the call volume was never traced, which is
+-- this project's own rule 172 committed by the release that wrote it.
+--
+-- The latch is smaller than the objection assumed. It holds only ids that
+-- MISSED, each asked once, and the set of ids the addon looks at is
+-- `Vendors.ItemIndex()` plus what is in the player's bags. It is not
+-- persisted: the client's cache is per session and so is this.
+local askedForItem = {}
+
+function Blizzard.ForgetItemRequests()
+    askedForItem = {}
+end
+
 function Blizzard.GetItemName(itemID)
     if not itemID then
         return nil
@@ -1560,7 +1581,9 @@ function Blizzard.GetItemName(itemID)
             return name
         end
 
-        if C_Item.RequestLoadItemDataByID then
+        if C_Item.RequestLoadItemDataByID and not askedForItem[itemID] then
+            askedForItem[itemID] = true
+
             pcall(C_Item.RequestLoadItemDataByID, itemID)
         end
 

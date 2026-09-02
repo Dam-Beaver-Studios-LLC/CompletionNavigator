@@ -45,8 +45,46 @@ local Blizzard   = CN.Blizzard
 -- already killed stay dead, so the remaining ones cost a fraction of a fresh
 -- clear. A finished one is worth nothing until it resets. That difference is
 -- the entire reason this module scores anything.
+-- Whether the server has actually handed over the lockout list this segment.
+--
+-- AN UNANSWERED REQUEST AND AN EMPTY WEEK LOOK IDENTICAL. 1.5.0.
+--
+-- 1.2.0 found that the addon read `GetNumSavedInstances` and never called
+-- `RequestRaidInfo`, and sent the request. It did not touch the other half:
+-- both "the server has not answered yet" and "you are saved to nothing"
+-- arrive as a count of zero, and `/cn instances` printed "You are not saved
+-- to anything" for both. That is backlog rule 169 -- a guard whose empty
+-- branch is also its failure branch -- and it is worst in exactly the moment
+-- the request was added for, the first seconds after a login, which is when
+-- somebody types this command.
+--
+-- 1.4.0 fixed the same shape for the inbox and did not sweep for its
+-- siblings, which is rule 30 inside two releases.
+--
+-- `UPDATE_INSTANCE_INFO` is the client saying the list is in hand; the
+-- provider eight hundred lines below has declared it since it was written.
+Instances.answered = false
+
+CN:RegisterEvent("UPDATE_INSTANCE_INFO", function()
+    Instances.answered = true
+end)
+
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    -- A loading screen re-arms the request, so it re-arms the answer with it
+    -- or the addon reports a stale segment's reply as this one's.
+    Instances.answered = false
+end)
+
+-- Returns `lockouts, answered`.
 function Instances.Lockouts()
     local raw = Blizzard.GetSavedInstances()
+
+    -- A row the client answered with is the client having answered, even if
+    -- the event was missed -- a lockout list that arrived before this addon
+    -- loaded is a real state and must not read as "still waiting" for ever.
+    if #raw > 0 then
+        Instances.answered = true
+    end
 
     local lockouts = {}
 
@@ -116,7 +154,7 @@ function Instances.Lockouts()
         return (a.resetsIn or math.huge) < (b.resetsIn or math.huge)
     end)
 
-    return lockouts
+    return lockouts, Instances.answered
 end
 
 function Instances.Summary()
@@ -638,7 +676,19 @@ CN:RegisterCommand{
     order   = 24,
     help    = "What you are saved to, and how much of it is left.",
     handler = function()
-        local lockouts = Instances.Lockouts()
+        local lockouts, answered = Instances.Lockouts()
+
+        -- THREE ANSWERS, BECAUSE THERE ARE THREE STATES. 1.5.0.
+        --
+        -- "You are not saved to anything" was printed both when the week is
+        -- genuinely clear and when the server has not yet handed over the
+        -- list -- which is the first seconds after a login, and therefore
+        -- the likeliest moment for somebody to type this.
+        if not answered then
+            Print("Asking the server what you are saved to"
+                .. CN.ELLIPSIS .. " try again in a moment.")
+            return
+        end
 
         if #lockouts == 0 then
             Print("You are not saved to anything.")

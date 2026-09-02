@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '1.4.0'
+$script:ToolkitVersion = '1.5.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "1.4.0"
+CN.version     = "1.5.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -21986,10 +21986,31 @@ end
 -- `GetItemInfo` fallback below already asked implicitly, which is why the
 -- defect was invisible on a client old enough to take it.
 --
--- No latch. The client de-duplicates a load already in flight, the call is
--- local, and a per-item latch would be a table the size of every item the
--- addon has ever asked about -- on a store the whole file set exists to keep
--- off disk.
+-- ONE REQUEST PER ITEM PER SESSION. 1.5.0.
+--
+-- 1.4.0 shipped this with no latch and a comment justifying it: "the client
+-- de-duplicates a load already in flight, the call is local, and a per-item
+-- latch would be a table the size of every item the addon has ever asked
+-- about". The first clause covers duplicate loads IN FLIGHT and nothing else,
+-- and the loop this is called from is measured, in `Modules/Vendors.lua`, at
+-- 2,503 lookups per rebuild -- so a cold item cache meant 2,503 client calls
+-- every five seconds, for items the server may never answer about.
+--
+-- No benchmark could see it: every benchmark runs with a warm cache, so the
+-- miss branch -- the one that makes the call -- is never taken. The
+-- justification was written and the call volume was never traced, which is
+-- this project's own rule 172 committed by the release that wrote it.
+--
+-- The latch is smaller than the objection assumed. It holds only ids that
+-- MISSED, each asked once, and the set of ids the addon looks at is
+-- `Vendors.ItemIndex()` plus what is in the player's bags. It is not
+-- persisted: the client's cache is per session and so is this.
+local askedForItem = {}
+
+function Blizzard.ForgetItemRequests()
+    askedForItem = {}
+end
+
 function Blizzard.GetItemName(itemID)
     if not itemID then
         return nil
@@ -22002,7 +22023,9 @@ function Blizzard.GetItemName(itemID)
             return name
         end
 
-        if C_Item.RequestLoadItemDataByID then
+        if C_Item.RequestLoadItemDataByID and not askedForItem[itemID] then
+            askedForItem[itemID] = true
+
             pcall(C_Item.RequestLoadItemDataByID, itemID)
         end
 
@@ -55969,8 +55992,46 @@ local Blizzard   = CN.Blizzard
 -- already killed stay dead, so the remaining ones cost a fraction of a fresh
 -- clear. A finished one is worth nothing until it resets. That difference is
 -- the entire reason this module scores anything.
+-- Whether the server has actually handed over the lockout list this segment.
+--
+-- AN UNANSWERED REQUEST AND AN EMPTY WEEK LOOK IDENTICAL. 1.5.0.
+--
+-- 1.2.0 found that the addon read `GetNumSavedInstances` and never called
+-- `RequestRaidInfo`, and sent the request. It did not touch the other half:
+-- both "the server has not answered yet" and "you are saved to nothing"
+-- arrive as a count of zero, and `/cn instances` printed "You are not saved
+-- to anything" for both. That is backlog rule 169 -- a guard whose empty
+-- branch is also its failure branch -- and it is worst in exactly the moment
+-- the request was added for, the first seconds after a login, which is when
+-- somebody types this command.
+--
+-- 1.4.0 fixed the same shape for the inbox and did not sweep for its
+-- siblings, which is rule 30 inside two releases.
+--
+-- `UPDATE_INSTANCE_INFO` is the client saying the list is in hand; the
+-- provider eight hundred lines below has declared it since it was written.
+Instances.answered = false
+
+CN:RegisterEvent("UPDATE_INSTANCE_INFO", function()
+    Instances.answered = true
+end)
+
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    -- A loading screen re-arms the request, so it re-arms the answer with it
+    -- or the addon reports a stale segment's reply as this one's.
+    Instances.answered = false
+end)
+
+-- Returns `lockouts, answered`.
 function Instances.Lockouts()
     local raw = Blizzard.GetSavedInstances()
+
+    -- A row the client answered with is the client having answered, even if
+    -- the event was missed -- a lockout list that arrived before this addon
+    -- loaded is a real state and must not read as "still waiting" for ever.
+    if #raw > 0 then
+        Instances.answered = true
+    end
 
     local lockouts = {}
 
@@ -56040,7 +56101,7 @@ function Instances.Lockouts()
         return (a.resetsIn or math.huge) < (b.resetsIn or math.huge)
     end)
 
-    return lockouts
+    return lockouts, Instances.answered
 end
 
 function Instances.Summary()
@@ -56562,7 +56623,19 @@ CN:RegisterCommand{
     order   = 24,
     help    = "What you are saved to, and how much of it is left.",
     handler = function()
-        local lockouts = Instances.Lockouts()
+        local lockouts, answered = Instances.Lockouts()
+
+        -- THREE ANSWERS, BECAUSE THERE ARE THREE STATES. 1.5.0.
+        --
+        -- "You are not saved to anything" was printed both when the week is
+        -- genuinely clear and when the server has not yet handed over the
+        -- list -- which is the first seconds after a login, and therefore
+        -- the likeliest moment for somebody to type this.
+        if not answered then
+            Print("Asking the server what you are saved to"
+                .. CN.ELLIPSIS .. " try again in a moment.")
+            return
+        end
 
         if #lockouts == 0 then
             Print("You are not saved to anything.")
@@ -61769,7 +61842,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 1.4.0
+## Version: 1.5.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -62024,6 +62097,52 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [1.5.0]
+
+Both of this release's defects were written by the two releases before it, and
+both were of a shape those releases had already named.
+
+**An item name the client had not cached was asked for again on every look.**
+1.4.0 added the request and shipped it unlatched, under a comment arguing that
+the client de-duplicates a load already in flight. It does — and that says
+nothing about the same miss happening again on the next rebuild.
+`Modules/Vendors.lua` measures its own loop at 2,503 lookups per rebuild and
+that provider rebuilds every five seconds, so a cold item cache meant thousands
+of client calls a second for items the server may never answer about. No
+benchmark could see it, because every benchmark runs with a warm cache and the
+branch that makes the call is never taken. It asks once per item per session
+now.
+
+**An unanswered lockout request was reported as a clear week.** 1.2.0 found
+that the addon read the lockout list and never asked for it, and sent the
+request — and left the other half alone: "the server has not answered yet" and
+"you are saved to nothing" both arrive as a count of zero, and
+`/cn instances` printed *You are not saved to anything* for both. That is worst
+in exactly the moment the request was added for, the first seconds after a
+login, which is also when somebody types the command. 1.4.0 fixed this same
+shape for the inbox and did not sweep for its siblings.
+
+The keystone is deliberately left as it is. It has no event that says "the
+answer arrived", so a third state there would replace a briefly wrong *you
+have no keystone* with a permanently wrong *still asking* for every character
+that genuinely holds none. Where there is no signal, the honest thing is to
+say nothing rather than to invent one — noted here so the omission is a
+decision rather than an oversight.
+
+### How defects were found
+
+- **A justification written into a comment is not a measurement.** The
+  unlatched request had a two-clause argument beside it; the first clause was
+  true and the second was never traced to the loop it sits in.
+- **Every benchmark runs with a warm cache**, so the miss branch of the
+  item-name accessor — the one that talks to the client — has never been
+  measured. The guard is an exact count in the suite instead: five hundred
+  looks at the same uncached item must send no further requests.
+- **A count of zero cannot distinguish an empty answer from no answer**, and
+  only an event can. The lockout check now exercises the event path on its
+  own, with an empty list, because a test that always answers with rows cannot
+  tell whether the handler is wired at all.
 
 ## [1.4.0]
 
@@ -70023,7 +70142,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-1.4.0
+1.5.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -75702,13 +75821,46 @@ mutate "Modules/Waiting.lua" \
     "a loading screen re-arms the mail request and never sends it"
 
 mutate "Providers/BlizzardWorld.lua" \
-    "        if C_Item.RequestLoadItemDataByID then
+    "        if C_Item.RequestLoadItemDataByID and not askedForItem[itemID] then
+            askedForItem[itemID] = true
+
             pcall(C_Item.RequestLoadItemDataByID, itemID)
         end" \
     "        if false then
+            askedForItem[itemID] = true
+
             pcall(C_Item.RequestLoadItemDataByID, itemID)
         end" \
     "an item name the client has not cached is never asked for"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "        if C_Item.RequestLoadItemDataByID and not askedForItem[itemID] then
+            askedForItem[itemID] = true" \
+    "        if C_Item.RequestLoadItemDataByID then
+            askedForItem[itemID] = true" \
+    "an uncached item name is asked for again on every look"
+
+mutate "Modules/Instances.lua" \
+    "    return lockouts, Instances.answered" \
+    "    return lockouts, true" \
+    "an unanswered lockout list reads as a clear week"
+
+mutate "Modules/Instances.lua" \
+    "    if #raw > 0 then
+        Instances.answered = true
+    end" \
+    "    if false then
+        Instances.answered = true
+    end" \
+    "a lockout list that arrived before the addon loaded waits for ever"
+
+mutate "Modules/Instances.lua" \
+    "CN:RegisterEvent(\"UPDATE_INSTANCE_INFO\", function()
+    Instances.answered = true
+end)" \
+    "CN:RegisterEvent(\"UPDATE_INSTANCE_INFO\", function()
+end)" \
+    "the client saying the lockout list is in hand is ignored"
 
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
@@ -118670,6 +118822,11 @@ end)()
     CN_TEST_ITEM_LOADS     = 0
     CN_TEST_LAST_ITEM_LOAD = nil
 
+    -- The session has already asked about several items by this point, and
+    -- 1.5.0 asks once per item per session. Cleared so this measures the
+    -- request rather than the latch.
+    CN.Blizzard.ForgetItemRequests()
+
     -- A name the client HAS, which must not send a request.
     local known = CN.Blizzard.GetItemName(500)
 
@@ -118694,6 +118851,42 @@ end)()
     assert(CN_TEST_LAST_ITEM_LOAD == 60001,
         "for the item that was wanted: " .. tostring(CN_TEST_LAST_ITEM_LOAD))
 
+    -- AND ONCE, NOT ONCE PER LOOK. 1.5.0.
+    --
+    -- 1.4.0 shipped this unlatched, with a comment arguing that the client
+    -- de-duplicates a load already in flight. It does -- and that says
+    -- nothing about the same miss happening again on the next rebuild.
+    -- `Modules/Vendors.lua` measures its own loop at 2,503 lookups per
+    -- rebuild, and the vendor provider rebuilds every five seconds, so a cold
+    -- cache meant thousands of client calls a second for items the server may
+    -- never answer about. No benchmark could see it: every benchmark runs
+    -- with a warm cache, so the branch that makes the call is never taken.
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    local askedAgain = CN_TEST_ITEM_LOADS
+
+    for _ = 1, 500 do
+        CN.Blizzard.GetItemName(60001)
+    end
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    assert(CN_TEST_ITEM_LOADS == askedAgain,
+        "five hundred more looks at the same uncached item send no further "
+        .. "requests: " .. (CN_TEST_ITEM_LOADS - askedAgain))
+
+    -- AND A DIFFERENT ITEM IS STILL ASKED FOR, so the latch is a latch and
+    -- not a mute.
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    CN.Blizzard.GetItemName(60002)
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    assert(CN_TEST_ITEM_LOADS == askedAgain + 1,
+        "an item not asked about before is asked about: "
+        .. CN_TEST_ITEM_LOADS)
+
     -- AND THE OLD PATH STILL WORKS, because a client without
     -- `GetItemNameByID` gets its load from `GetItemInfo` as a side effect and
     -- must not be made to ask twice.
@@ -118709,6 +118902,128 @@ end)()
         "a client with only the flat API still answers: " .. tostring(viaFlat))
 
     print("  an item name the client has not cached is asked for")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN UNANSWERED LOCKOUT REQUEST IS NOT AN EMPTY WEEK.
+    --
+    -- 1.2.0 found that the addon read the lockout list and never asked for
+    -- it, and sent the request. It did not touch the other half: "the server
+    -- has not answered yet" and "you are saved to nothing" both arrive as a
+    -- count of zero, and `/cn instances` printed "You are not saved to
+    -- anything" for both -- worst in the first seconds after a login, which
+    -- is the moment the request was added for and the moment somebody types
+    -- the command.
+    --
+    -- 1.4.0 fixed exactly this shape for the inbox and did not sweep for its
+    -- siblings, which is backlog rule 30 inside two releases.
+    ------------------------------------------------------------
+    local instances = CN:GetModule("Instances")
+
+    assert(instances, "the instances module is loaded")
+
+    CN_TEST_LOCKOUTS_UNREQUESTED = true
+
+    instances.answered = false
+
+    CN.Blizzard.ForgetSavedInstanceRequest()
+
+    local held = RequestRaidInfo
+
+    -- A request that goes out and is not answered: the state between the
+    -- login and the server's reply.
+    RequestRaidInfo = function() end
+
+    local rows, answered = instances.Lockouts()
+
+    RequestRaidInfo = held
+
+    assert(#rows == 0,
+        "an unanswered request reads as an empty list from the client")
+
+    assert(answered == false,
+        "and the addon says it has not been answered rather than that the "
+        .. "week is clear")
+
+    -- AND THE COMMAND SAYS SO, rather than reporting a clear week.
+    local spoke = {}
+
+    local realAddMessage = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(spoke, tostring(message))
+    end
+
+    RequestRaidInfo = function() end
+
+    CN.HandleSlashCommand("instances")
+
+    RequestRaidInfo = held
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAddMessage
+
+    local reported = table.concat(spoke, "\n")
+
+    assert(not reported:find("not saved to anything", 1, true),
+        "the command does not claim a clear week before the server has "
+        .. "answered: " .. reported)
+
+    assert(reported:find("Asking the server", 1, true),
+        "and says what it is waiting for: " .. reported)
+
+    -- AND ONCE THE ANSWER ARRIVES, the ordinary path is unchanged.
+    CN_TEST_LOCKOUTS_UNREQUESTED = false
+
+    instances.answered = false
+
+    local warm, warmAnswered = instances.Lockouts()
+
+    assert(#warm > 0 and warmAnswered,
+        "the answered list is reported normally: " .. #warm)
+
+    -- AND A GENUINELY CLEAR WEEK IS STILL A CLEAR WEEK, or the third state
+    -- has replaced the second rather than joined it.
+    local savedRows = CN_TEST_SAVED_INSTANCES
+
+    CN_TEST_SAVED_INSTANCES = {}
+
+    instances.answered = true
+
+    local none, stillAnswered = instances.Lockouts()
+
+    CN_TEST_SAVED_INSTANCES = savedRows
+
+    assert(#none == 0 and stillAnswered,
+        "an answered empty list is answered and empty")
+
+    -- AND THE EVENT IS WHAT SAYS SO WHEN THE LIST IS EMPTY.
+    --
+    -- The count cannot: an empty answer and no answer are the same number.
+    -- `UPDATE_INSTANCE_INFO` is the only signal that separates them, which is
+    -- why both paths exist and why a test that only ever answers with rows
+    -- cannot tell whether the handler is wired.
+    local emptied = CN_TEST_SAVED_INSTANCES
+
+    CN_TEST_SAVED_INSTANCES = {}
+
+    instances.answered = false
+
+    local beforeEvent = select(2, instances.Lockouts())
+
+    assert(beforeEvent == false,
+        "an empty list with no event is not an answer")
+
+    CN.FireEvent("UPDATE_INSTANCE_INFO")
+
+    local after = select(2, instances.Lockouts())
+
+    CN_TEST_SAVED_INSTANCES = emptied
+
+    assert(after == true,
+        "and the client saying the list is in hand is what makes it one")
+
+    print("  an unanswered lockout request is not an empty week")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")
