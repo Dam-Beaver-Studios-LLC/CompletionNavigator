@@ -64,14 +64,38 @@ Professions.CharacterRecipes = CharacterRecipes
 -- PROFESSION SCAN
 ------------------------------------------------------------
 
+-- Returns `lines, answered`.
+--
+-- ZERO PROFESSIONS IS A CHARACTER, NOT A REFUSAL. 1.0.0.
+--
+-- `Modules/Setup.lua` gave this step `measured = true, measuredAt = 1` in
+-- 0.99.0 -- reading the FIRST return, the number of profession lines -- with a
+-- note that said in as many words "a character with no professions at all is
+-- real, so this one is not a hard failure". It is a hard failure: `RunStep`
+-- returns not-ready on a measured zero, and `Setup.Run` refuses to stamp
+-- `completedAt` while any step is not ready. So a character who has learned no
+-- professions -- every character, for its first hours, which is exactly when
+-- `/cn setup` is run -- could never complete setup. The login reminder fired
+-- for ever, `/cn setup check` answered "Not scanned yet" for ever, and the
+-- report told the player to run `/cn profscan`, which would change nothing.
+--
+-- And the two halves of the addon contradicted each other while it happened:
+-- this function calls `CN.MarkScanned("professions")` on that same run, so
+-- `Setup.NeverScanned` listed the step as done at the moment the report
+-- called it not ready.
+--
+-- The second return is the honest signal, and it comes from the layer that
+-- knows: `Blizzard.GetProfessionSkillLines` reports whether the client
+-- answered at all. Every other measured step keeps counting rows, because for
+-- every other step the count IS the client's own list length.
 function Professions.Scan()
     local store = CharacterStore()
 
     if not store then
-        return 0
+        return 0, false
     end
 
-    local lines = Blizzard.GetProfessionSkillLines()
+    local lines, answered = Blizzard.GetProfessionSkillLines()
 
     for _, line in ipairs(lines) do
         local existing = store[line.skillLineID]
@@ -107,7 +131,7 @@ function Professions.Scan()
     -- from the state before it.
     CN.MarkScanned("professions")
 
-    return #lines
+    return #lines, answered and true or false
 end
 
 ------------------------------------------------------------
@@ -428,9 +452,21 @@ CN:RegisterCommand{
     order   = 70,
     help    = "Rescan this character's professions.",
     handler = function()
-        local count = Professions.Scan()
+        local count, answered = Professions.Scan()
 
-        Print("Found " .. count .. " professions on this character.")
+        -- AND IT SAYS WHICH ZERO IT MEANS. 1.0.0.
+        --
+        -- "Found 0 professions on this character" is true of a character who
+        -- has learned none and of a client that has no profession API at all,
+        -- and the player's next move is different in each case.
+        if not answered then
+            Print("The client would not answer about professions. "
+                .. CN.Muted("/cn selftest says what is missing."))
+        elseif count == 0 then
+            Print("No professions learned on this character yet.")
+        else
+            Print("Found " .. count .. " professions on this character.")
+        end
 
         local waiting = Professions.AwaitingRecipeCapture()
 

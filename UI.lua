@@ -2073,13 +2073,29 @@ UI.RegisterTab{
         -- now, so the only button worth keeping is the one that does the
         -- thing a player would otherwise do eleven times.
         panel.stale = AddButton(panel, "Refresh what is stale", 190, function()
-            local refreshed = UI.RefreshStaleSources()
+            local refreshed, tried = UI.RefreshStaleSources()
 
-            if refreshed == 0 then
+            -- THREE ANSWERS, BECAUSE THERE ARE THREE OUTCOMES. 1.0.0.
+            --
+            -- "Nothing is stale" and "read some" were the only two, so a
+            -- press that tried twelve sources and got nothing from any of
+            -- them -- the cold client, which is the state this button is most
+            -- likely to be pressed in -- reported the FIRST of those: "Every
+            -- source has been read today", over twelve sources that had not
+            -- been read at all.
+            if (tried or 0) == 0 then
                 UI.Answer("Nothing is stale. Every source has been read today.")
+            elseif refreshed == 0 then
+                UI.Answer("The game would not answer about any of the "
+                    .. CN.Count(tried, "stale source", "stale sources")
+                    .. " just now. Try again in a few seconds.")
             else
                 UI.Answer("Read " .. refreshed .. " stale "
-                    .. CN.Pluralize(refreshed, "source", "sources") .. ".")
+                    .. CN.Pluralize(refreshed, "source", "sources")
+                    .. ((refreshed < tried)
+                        and CN.Aside((tried - refreshed)
+                            .. " the game would not answer about")
+                        or "."))
             end
 
             UI.Refresh()
@@ -2242,6 +2258,29 @@ function UI.Sources(which)
         steps = setup.Steps()
     end
 
+    -- THE AGE OF A PER-CHARACTER STORE IS A PER-CHARACTER AGE. 1.0.0.
+    --
+    -- This read `steps[module]`, which is account-wide, for all twelve rows.
+    -- Two of the twelve -- Achievements and Zone achievements -- are read per
+    -- character, which is why `Setup.steps` marks them `perCharacter` and why
+    -- 0.76.0 wrote `StepDoneHere` for the login reminder. That fix never
+    -- reached this tab, so a fresh alt was shown its MAIN'S timestamps: the
+    -- tab whose header is "Where every number in this addon comes from" said
+    -- two sources had been read today that this character had never read, and
+    -- "Refresh what is stale" -- which skips anything under a day old --
+    -- could not run either of them.
+    local function StampFor(moduleName)
+        if setup and setup.StampFor and setup.StepForModule then
+            local step = setup.StepForModule(moduleName)
+
+            if step then
+                return setup.StampFor(step)
+            end
+        end
+
+        return steps[string.lower(moduleName)]
+    end
+
     local function Stored(label, moduleName, command, value, detail)
         if which == "live" then
             return
@@ -2250,10 +2289,11 @@ function UI.Sources(which)
         table.insert(sources, {
             kind    = "stored",
             label   = label,
+            module  = moduleName,
             command = command,
             value   = value,
             detail  = detail,
-            at      = steps[string.lower(moduleName)],
+            at      = StampFor(moduleName),
         })
     end
 
@@ -2470,17 +2510,69 @@ function UI.RefreshStaleSources()
 
     local now = time()
 
-    for _, source in ipairs(UI.Sources()) do
+    -- `pcall` IS NOT "IT WAS READ". 1.0.0.
+    --
+    -- This counted every command that did not THROW, and a cold client
+    -- refuses without throwing: `/cn toyscan` on an unstreamed toy box
+    -- returns zero and deliberately does not stamp, which is the guard 0.92.0
+    -- through 0.99.0 added to six scanners. So the button answered "Read 12
+    -- stale sources" over twelve sources that were still exactly as stale,
+    -- and pressing it again did the same thing for ever -- it could never
+    -- reach "Nothing is stale", which is the other half of its own sentence.
+    --
+    -- This is the defect 0.99.0 removed from the "Scan everything" button,
+    -- in the same file, one screen away, in the release that wrote "the fix
+    -- landed at one call site and not at its sibling in the same file" in the
+    -- comment above it. Backlog rule 30, committed against its own note.
+    --
+    -- What is counted now is the only thing that means the scan worked: the
+    -- source's own stamp moved. That is the same value the row's staleness is
+    -- drawn from, so the count and the screen can no longer disagree.
+    --
+    -- ONE PASS OVER `UI.Sources`, NOT THREE. The first draft of this fix read
+    -- the list again for the before-snapshot and again for the after, and
+    -- each read runs ten module summaries and two store counts -- on the one
+    -- press that already freezes the client for twelve scans. The stamp comes
+    -- from `Setup` directly on the way out, which is a table lookup.
+    local setup = CN:GetModule("Setup")
+
+    local function StampFor(source)
+        if setup and setup.StampFor and setup.StepForModule then
+            local step = setup.StepForModule(source.module)
+
+            if step then
+                return setup.StampFor(step)
+            end
+        end
+
+        return nil
+    end
+
+    local stale, tried = {}, 0
+
+    for _, source in ipairs(UI.Sources("stored")) do
         if source.command
             and (not source.at or (now - source.at) > 86400) then
 
-            if pcall(CN.HandleSlashCommand, source.command) then
-                refreshed = refreshed + 1
-            end
+            tried = tried + 1
+
+            table.insert(stale, { source = source, was = source.at or false })
         end
     end
 
-    return refreshed
+    for _, entry in ipairs(stale) do
+        pcall(CN.HandleSlashCommand, entry.source.command)
+    end
+
+    for _, entry in ipairs(stale) do
+        local at = StampFor(entry.source)
+
+        if at and at ~= entry.was then
+            refreshed = refreshed + 1
+        end
+    end
+
+    return refreshed, tried
 end
 
 ------------------------------------------------------------
@@ -3852,9 +3944,20 @@ UI.RegisterTab{
                     local module = CN:GetModule(moduleName)
 
                     if module and module.Scan then
-                        local ok, read = pcall(module.Scan)
+                        -- AND ONE OF THE SIX ANSWERS WITH A BOOLEAN. 1.0.0.
+                        --
+                        -- `(read or 0) > 0` is the right test for five of
+                        -- these, whose count is the length of the client's own
+                        -- list. `Professions.Scan` counts what this CHARACTER
+                        -- has learned, so a character with none reads zero on
+                        -- a scan that worked perfectly -- and this button
+                        -- would have reported the whole press as "the game
+                        -- would not answer about any of them" for a new
+                        -- player who happened to own no pets, mounts, toys or
+                        -- titles either. It reports whether it answered.
+                        local ok, read, answered = pcall(module.Scan)
 
-                        if ok and (read or 0) > 0 then
+                        if ok and ((read or 0) > 0 or answered == true) then
                             scanned = scanned + 1
                         end
                     end

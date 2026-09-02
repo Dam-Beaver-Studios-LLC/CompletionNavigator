@@ -869,10 +869,12 @@ Loremaster.Bindings = Bindings
 -- Whether THIS character has ever read its own criteria progress. The
 -- sibling of `Achievements.HasScanned`, and the reason `loremasterScans`
 -- exists; `Setup` asks both now rather than reading an account-wide stamp.
+-- RETURNS THE STAMP. 1.0.0. See the note on `Achievements.HasScanned`: the
+-- marker is a `time()`, both callers want it, and both were handed a boolean.
 function Loremaster.HasScanned(characterKey)
     characterKey = characterKey or CN.characterKey or CN.GetCharacterKey()
 
-    return CN.Account("loremasterScans")[characterKey] ~= nil
+    return CN.Account("loremasterScans")[characterKey]
 end
 
 function Loremaster.ForgetBindings()

@@ -2978,9 +2978,14 @@ mutate "Database.lua" \
     "upgrading destroys every alt's friendship rank"
 
 mutate "Modules/Setup.lua" \
-    "    if step.measured and measured == 0 then" \
-    "    if false then" \
+    "        and (measured == 0 or measured == false or measured == nil) then" \
+    "        and false then" \
     "setup reports a clean bill for scans that recorded nothing"
+
+mutate "Modules/Setup.lua" \
+    "        and (measured == 0 or measured == false or measured == nil) then" \
+    "        and (measured == 0) then" \
+    "a boolean refusal from a scan reads as a success"
 
 mutate "Modules/Achievements.lua" \
     "        if crossed then
@@ -3318,9 +3323,26 @@ mutate "Modules/Achievements.lua" \
     "a client that answers nothing overwrites real criteria with zero"
 
 mutate "Modules/Setup.lua" \
-    "    if step.perCharacter then" \
-    "    if false then" \
+    "local function StepDoneHere(step)
+    if step.perCharacter then" \
+    "local function StepDoneHere(step)
+    if false then" \
     "an alt is never asked to read its own progress"
+
+mutate "Modules/Setup.lua" \
+    "function Setup.StampFor(step)
+    if type(step) ~= \"table\" then
+        return nil
+    end
+
+    if step.perCharacter then" \
+    "function Setup.StampFor(step)
+    if type(step) ~= \"table\" then
+        return nil
+    end
+
+    if false then" \
+    "a per-character source is dated from the account-wide stamp"
 
 mutate "Modules/Setup.lua" \
     "        if step.perCharacter and not StepDoneHere(step) then
@@ -5010,9 +5032,29 @@ mutate "Modules/Appearances.lua" \
     "a wardrobe that had not loaded is recorded as a completed scan"
 
 mutate "UI.lua" \
-    "                        if ok and (read or 0) > 0 then" \
+    "                        if ok and ((read or 0) > 0 or answered == true) then" \
     "                        if ok then" \
     "Scan everything counts a scan that read nothing"
+
+mutate "UI.lua" \
+    "                        if ok and ((read or 0) > 0 or answered == true) then" \
+    "                        if ok and (read or 0) > 0 then" \
+    "a profession scan on a character with none reads as a refusal"
+
+mutate "Modules/Harvest.lua" \
+    "    if reason == \"turnedin\" and mapID and x and y then" \
+    "    if false and mapID and x and y then" \
+    "where a quest was handed in is never recorded"
+
+mutate "Modules/Harvest.lua" \
+    "        if elsewhere and record.turnInMapID == nil then" \
+    "        if record.turnInMapID == nil then" \
+    "a quest handed in where it was taken carries three redundant numbers"
+
+mutate "UI.lua" \
+    "        if at and at ~= entry.was then" \
+    "        if true then" \
+    "refreshing stale sources counts a scan the client refused"
 
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \

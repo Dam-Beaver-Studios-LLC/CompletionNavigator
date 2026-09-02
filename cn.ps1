@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.99.0'
+$script:ToolkitVersion = '1.0.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.99.0"
+CN.version     = "1.0.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -14512,13 +14512,29 @@ UI.RegisterTab{
         -- now, so the only button worth keeping is the one that does the
         -- thing a player would otherwise do eleven times.
         panel.stale = AddButton(panel, "Refresh what is stale", 190, function()
-            local refreshed = UI.RefreshStaleSources()
+            local refreshed, tried = UI.RefreshStaleSources()
 
-            if refreshed == 0 then
+            -- THREE ANSWERS, BECAUSE THERE ARE THREE OUTCOMES. 1.0.0.
+            --
+            -- "Nothing is stale" and "read some" were the only two, so a
+            -- press that tried twelve sources and got nothing from any of
+            -- them -- the cold client, which is the state this button is most
+            -- likely to be pressed in -- reported the FIRST of those: "Every
+            -- source has been read today", over twelve sources that had not
+            -- been read at all.
+            if (tried or 0) == 0 then
                 UI.Answer("Nothing is stale. Every source has been read today.")
+            elseif refreshed == 0 then
+                UI.Answer("The game would not answer about any of the "
+                    .. CN.Count(tried, "stale source", "stale sources")
+                    .. " just now. Try again in a few seconds.")
             else
                 UI.Answer("Read " .. refreshed .. " stale "
-                    .. CN.Pluralize(refreshed, "source", "sources") .. ".")
+                    .. CN.Pluralize(refreshed, "source", "sources")
+                    .. ((refreshed < tried)
+                        and CN.Aside((tried - refreshed)
+                            .. " the game would not answer about")
+                        or "."))
             end
 
             UI.Refresh()
@@ -14681,6 +14697,29 @@ function UI.Sources(which)
         steps = setup.Steps()
     end
 
+    -- THE AGE OF A PER-CHARACTER STORE IS A PER-CHARACTER AGE. 1.0.0.
+    --
+    -- This read `steps[module]`, which is account-wide, for all twelve rows.
+    -- Two of the twelve -- Achievements and Zone achievements -- are read per
+    -- character, which is why `Setup.steps` marks them `perCharacter` and why
+    -- 0.76.0 wrote `StepDoneHere` for the login reminder. That fix never
+    -- reached this tab, so a fresh alt was shown its MAIN'S timestamps: the
+    -- tab whose header is "Where every number in this addon comes from" said
+    -- two sources had been read today that this character had never read, and
+    -- "Refresh what is stale" -- which skips anything under a day old --
+    -- could not run either of them.
+    local function StampFor(moduleName)
+        if setup and setup.StampFor and setup.StepForModule then
+            local step = setup.StepForModule(moduleName)
+
+            if step then
+                return setup.StampFor(step)
+            end
+        end
+
+        return steps[string.lower(moduleName)]
+    end
+
     local function Stored(label, moduleName, command, value, detail)
         if which == "live" then
             return
@@ -14689,10 +14728,11 @@ function UI.Sources(which)
         table.insert(sources, {
             kind    = "stored",
             label   = label,
+            module  = moduleName,
             command = command,
             value   = value,
             detail  = detail,
-            at      = steps[string.lower(moduleName)],
+            at      = StampFor(moduleName),
         })
     end
 
@@ -14909,17 +14949,69 @@ function UI.RefreshStaleSources()
 
     local now = time()
 
-    for _, source in ipairs(UI.Sources()) do
+    -- `pcall` IS NOT "IT WAS READ". 1.0.0.
+    --
+    -- This counted every command that did not THROW, and a cold client
+    -- refuses without throwing: `/cn toyscan` on an unstreamed toy box
+    -- returns zero and deliberately does not stamp, which is the guard 0.92.0
+    -- through 0.99.0 added to six scanners. So the button answered "Read 12
+    -- stale sources" over twelve sources that were still exactly as stale,
+    -- and pressing it again did the same thing for ever -- it could never
+    -- reach "Nothing is stale", which is the other half of its own sentence.
+    --
+    -- This is the defect 0.99.0 removed from the "Scan everything" button,
+    -- in the same file, one screen away, in the release that wrote "the fix
+    -- landed at one call site and not at its sibling in the same file" in the
+    -- comment above it. Backlog rule 30, committed against its own note.
+    --
+    -- What is counted now is the only thing that means the scan worked: the
+    -- source's own stamp moved. That is the same value the row's staleness is
+    -- drawn from, so the count and the screen can no longer disagree.
+    --
+    -- ONE PASS OVER `UI.Sources`, NOT THREE. The first draft of this fix read
+    -- the list again for the before-snapshot and again for the after, and
+    -- each read runs ten module summaries and two store counts -- on the one
+    -- press that already freezes the client for twelve scans. The stamp comes
+    -- from `Setup` directly on the way out, which is a table lookup.
+    local setup = CN:GetModule("Setup")
+
+    local function StampFor(source)
+        if setup and setup.StampFor and setup.StepForModule then
+            local step = setup.StepForModule(source.module)
+
+            if step then
+                return setup.StampFor(step)
+            end
+        end
+
+        return nil
+    end
+
+    local stale, tried = {}, 0
+
+    for _, source in ipairs(UI.Sources("stored")) do
         if source.command
             and (not source.at or (now - source.at) > 86400) then
 
-            if pcall(CN.HandleSlashCommand, source.command) then
-                refreshed = refreshed + 1
-            end
+            tried = tried + 1
+
+            table.insert(stale, { source = source, was = source.at or false })
         end
     end
 
-    return refreshed
+    for _, entry in ipairs(stale) do
+        pcall(CN.HandleSlashCommand, entry.source.command)
+    end
+
+    for _, entry in ipairs(stale) do
+        local at = StampFor(entry.source)
+
+        if at and at ~= entry.was then
+            refreshed = refreshed + 1
+        end
+    end
+
+    return refreshed, tried
 end
 
 ------------------------------------------------------------
@@ -16291,9 +16383,20 @@ UI.RegisterTab{
                     local module = CN:GetModule(moduleName)
 
                     if module and module.Scan then
-                        local ok, read = pcall(module.Scan)
+                        -- AND ONE OF THE SIX ANSWERS WITH A BOOLEAN. 1.0.0.
+                        --
+                        -- `(read or 0) > 0` is the right test for five of
+                        -- these, whose count is the length of the client's own
+                        -- list. `Professions.Scan` counts what this CHARACTER
+                        -- has learned, so a character with none reads zero on
+                        -- a scan that worked perfectly -- and this button
+                        -- would have reported the whole press as "the game
+                        -- would not answer about any of them" for a new
+                        -- player who happened to own no pets, mounts, toys or
+                        -- titles either. It reports whether it answered.
+                        local ok, read, answered = pcall(module.Scan)
 
-                        if ok and (read or 0) > 0 then
+                        if ok and ((read or 0) > 0 or answered == true) then
                             scanned = scanned + 1
                         end
                     end
@@ -20312,11 +20415,28 @@ local Blizzard = CN.Blizzard
 -- PROFESSIONS AND RECIPES
 ------------------------------------------------------------
 
+-- Returns `lines, answered`.
+--
+-- WHETHER THE CLIENT ANSWERED IS NOT THE SAME QUESTION AS HOW MANY IT NAMED.
+-- 1.0.0.
+--
+-- Every other scan in this addon can tell a refusal from an empty result by
+-- the count alone, because the count is the LENGTH OF THE CLIENT'S OWN LIST:
+-- the toy box holds every toy that exists, the mount journal every mount, the
+-- title list every title. Zero means the list did not stream.
+--
+-- Professions are the exception. `GetProfessions` names what THIS CHARACTER
+-- has learned, so zero is the ordinary state of a character who has learned
+-- none -- which is every character for its first hours -- and there is no
+-- count that separates that from a refusal. The separation has to be reported
+-- rather than inferred, and the only genuine refusal here is the API being
+-- absent, because `GetProfessions` reads skill lines that are present from
+-- `PLAYER_LOGIN` and does not stream the way a journal does.
 function Blizzard.GetProfessionSkillLines()
     local lines = {}
 
     if not GetProfessions then
-        return lines
+        return lines, false
     end
 
     -- Same nil-hole problem as above: index the five slots explicitly
@@ -20340,7 +20460,7 @@ function Blizzard.GetProfessionSkillLines()
         end
     end
 
-    return lines
+    return lines, true
 end
 
 -- Recipe enumeration only works while a trade skill window is open. This
@@ -25276,6 +25396,34 @@ function Quests.GetLocation(questID)
         return override.mapID, override.x, override.y, override.source or "manual"
     end
 
+    -- THIS ACCOUNT'S OWN OBSERVATION, WHEN NOTHING ABOVE ANSWERED. 1.0.0.
+    --
+    -- The curated branch at the top of this function is the right answer and
+    -- there are two curated rows in existence, so for every other quest the
+    -- three-phase model still rests on the client -- which is fine until the
+    -- client refuses, which it does for a quest whose giver is on a map it is
+    -- not currently describing. `Harvest` began recording where a quest was
+    -- handed in in 1.0.0, so this account usually has the answer for anything
+    -- it has done before on another character.
+    --
+    -- Below the override deliberately: an override is the player saying where
+    -- something is, and nothing the addon watched outranks that. Above the
+    -- curated PICK-UP location, because a quest that is ready to hand in is
+    -- not asking where it was taken from.
+    if Blizzard.IsQuestReadyForTurnIn
+        and Blizzard.IsQuestReadyForTurnIn(questID) then
+
+        local harvest = CN:GetModule("Harvest")
+
+        if harvest and harvest.TurnInFor then
+            local seenMap, seenX, seenY = harvest.TurnInFor(questID)
+
+            if seenMap and seenX and seenY then
+                return seenMap, seenX, seenY, "harvested turn-in"
+            end
+        end
+    end
+
     local staticMap, staticX, staticY = CN.Static.GetQuestLocation(questID)
 
     if staticMap and staticX and staticY then
@@ -27388,10 +27536,16 @@ function Achievements.Scan()
 end
 
 -- Whether THIS character has ever read its own criteria progress.
+-- RETURNS THE STAMP, WHICH IS STILL AN ANSWER TO "HAS IT". 1.0.0.
+--
+-- The marker on disk has always been `time()`, and this threw it away to
+-- return a boolean -- so `Setup.StampFor` had a per-character "yes" and no
+-- per-character "when", and the Sources tab fell back to the account-wide
+-- time. Every caller tests truthiness, and a timestamp is truthy.
 function Achievements.HasScanned(characterKey)
     characterKey = characterKey or CN.characterKey or CN.GetCharacterKey()
 
-    return CN.Account("achievementScans")[characterKey] ~= nil
+    return CN.Account("achievementScans")[characterKey]
 end
 
 ------------------------------------------------------------
@@ -30132,14 +30286,38 @@ Professions.CharacterRecipes = CharacterRecipes
 -- PROFESSION SCAN
 ------------------------------------------------------------
 
+-- Returns `lines, answered`.
+--
+-- ZERO PROFESSIONS IS A CHARACTER, NOT A REFUSAL. 1.0.0.
+--
+-- `Modules/Setup.lua` gave this step `measured = true, measuredAt = 1` in
+-- 0.99.0 -- reading the FIRST return, the number of profession lines -- with a
+-- note that said in as many words "a character with no professions at all is
+-- real, so this one is not a hard failure". It is a hard failure: `RunStep`
+-- returns not-ready on a measured zero, and `Setup.Run` refuses to stamp
+-- `completedAt` while any step is not ready. So a character who has learned no
+-- professions -- every character, for its first hours, which is exactly when
+-- `/cn setup` is run -- could never complete setup. The login reminder fired
+-- for ever, `/cn setup check` answered "Not scanned yet" for ever, and the
+-- report told the player to run `/cn profscan`, which would change nothing.
+--
+-- And the two halves of the addon contradicted each other while it happened:
+-- this function calls `CN.MarkScanned("professions")` on that same run, so
+-- `Setup.NeverScanned` listed the step as done at the moment the report
+-- called it not ready.
+--
+-- The second return is the honest signal, and it comes from the layer that
+-- knows: `Blizzard.GetProfessionSkillLines` reports whether the client
+-- answered at all. Every other measured step keeps counting rows, because for
+-- every other step the count IS the client's own list length.
 function Professions.Scan()
     local store = CharacterStore()
 
     if not store then
-        return 0
+        return 0, false
     end
 
-    local lines = Blizzard.GetProfessionSkillLines()
+    local lines, answered = Blizzard.GetProfessionSkillLines()
 
     for _, line in ipairs(lines) do
         local existing = store[line.skillLineID]
@@ -30175,7 +30353,7 @@ function Professions.Scan()
     -- from the state before it.
     CN.MarkScanned("professions")
 
-    return #lines
+    return #lines, answered and true or false
 end
 
 ------------------------------------------------------------
@@ -30496,9 +30674,21 @@ CN:RegisterCommand{
     order   = 70,
     help    = "Rescan this character's professions.",
     handler = function()
-        local count = Professions.Scan()
+        local count, answered = Professions.Scan()
 
-        Print("Found " .. count .. " professions on this character.")
+        -- AND IT SAYS WHICH ZERO IT MEANS. 1.0.0.
+        --
+        -- "Found 0 professions on this character" is true of a character who
+        -- has learned none and of a client that has no profession API at all,
+        -- and the player's next move is different in each case.
+        if not answered then
+            Print("The client would not answer about professions. "
+                .. CN.Muted("/cn selftest says what is missing."))
+        elseif count == 0 then
+            Print("No professions learned on this character yet.")
+        else
+            Print("Found " .. count .. " professions on this character.")
+        end
 
         local waiting = Professions.AwaitingRecipeCapture()
 
@@ -30914,6 +31104,43 @@ function Harvest.Capture(questID, reason)
         set("y", math.floor(y * 10000 + 0.5) / 10000)
     end
 
+    -- WHERE IT WAS HANDED IN, AT THE ONE MOMENT THE CLIENT KNOWS. 1.0.0.
+    --
+    -- `turnInMapID/X/Y` has been a documented field in `Data/Quests.lua`
+    -- since the three-phase quest model, `Static.GetQuestTurnIn` reads it,
+    -- and `Quests.WaypointFor` prefers it over the client's own moving
+    -- waypoint -- and NOTHING IN THE ADDON HAS EVER WRITTEN ONE. The backlog
+    -- carries it as item 7, "Turn-in NPC database", filed under *Later*
+    -- because "an independent table would make the three-phase quest model
+    -- stable". The table did not need to be independent. It needed this line.
+    --
+    -- `QUEST_TURNED_IN` already routes here, three lines from the capture
+    -- that discarded it: `set` writes a field only while it is nil, so the
+    -- waypoint read at turn-in time -- which IS the turn-in NPC, because the
+    -- client points at the hand-in once the quest is ready -- lost every race
+    -- with the accept-time capture of the same quest and was thrown away.
+    --
+    -- Recorded only on the turn-in pass, and only when it differs from where
+    -- the quest was picked up: a row saying "handed in where you got it" is
+    -- the ordinary case and costs three numbers per quest on a store capped
+    -- at two thousand.
+    if reason == "turnedin" and mapID and x and y then
+        local turnX = math.floor(x * 10000 + 0.5) / 10000
+        local turnY = math.floor(y * 10000 + 0.5) / 10000
+
+        local elsewhere = record.mapID ~= mapID
+            or record.x ~= turnX
+            or record.y ~= turnY
+
+        if elsewhere and record.turnInMapID == nil then
+            record.turnInMapID = mapID
+            record.turnInX     = turnX
+            record.turnInY     = turnY
+
+            changed = true
+        end
+    end
+
     -- ZONE IS NOT STORED. It is `GetMapName(record.mapID)`, which the client
     -- answers for free and forever -- the same duplication migrations 4 and 5
     -- removed from items, achievements and pets. The coordinates genuinely
@@ -30981,6 +31208,32 @@ function Harvest.Capture(questID, reason)
     end
 
     return changed
+end
+
+-- Where this account watched a quest be handed in, or nil.
+--
+-- An OBSERVATION, NOT A CURATED FACT, and the distinction is why this is a
+-- separate accessor from `Static.GetQuestTurnIn` rather than a fallback
+-- folded into it. Curated rows are checked by a person; this is a coordinate
+-- the client gave at the moment the quest was turned in on this account. It
+-- is good enough to walk to and not good enough to ship, which is exactly the
+-- line `/cn provenance` draws.
+function Harvest.TurnInFor(questID)
+    questID = CN.ToID(questID)
+
+    if not questID then
+        return nil
+    end
+
+    local record = Store()[questID]
+
+    if not record or not record.turnInMapID
+        or not record.turnInX or not record.turnInY then
+
+        return nil
+    end
+
+    return record.turnInMapID, record.turnInX, record.turnInY
 end
 
 ------------------------------------------------------------
@@ -31295,6 +31548,20 @@ function Harvest.BuildExport(onlyLocated)
         if record.x and record.y then
             table.insert(lines, "        x         = " .. record.x .. ",")
             table.insert(lines, "        y         = " .. record.y .. ",")
+        end
+
+        -- AND WHERE IT WAS HANDED IN, WHEN THAT IS SOMEWHERE ELSE. 1.0.0.
+        --
+        -- Emitted as fact rather than as a comment, unlike `observedRequires`
+        -- below, because the two are different kinds of claim. A prerequisite
+        -- is an inference from the ORDER things happened in and can be a
+        -- coincidence; a turn-in location is a coordinate the client gave for
+        -- this quest at the moment it was handed in. There is nothing for a
+        -- curator to confirm by reading quest text.
+        if record.turnInMapID and record.turnInX and record.turnInY then
+            table.insert(lines, "        turnInMapID = " .. record.turnInMapID .. ",")
+            table.insert(lines, "        turnInX   = " .. record.turnInX .. ",")
+            table.insert(lines, "        turnInY   = " .. record.turnInY .. ",")
         end
 
         if record.requiresLevel then
@@ -38624,12 +38891,27 @@ Setup.steps = {
     -- the step in front of it and none of them listed the remainder -- which
     -- is backlog rule 142, committed five more times in the same table.
     { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan",     unit = "titles", measured = true, measuredAt = 1, retry = "titlescan" },
-    -- Same shape: `Professions.Scan` returns `#lines`, and the client answers
-    -- with an empty list until the skill lines have streamed. A character
-    -- with no professions at all is real, so this one is not a hard failure
-    -- -- but it is not evidence of a completed read either, and the retry
-    -- costs the player one command.
-    { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines", measured = true, measuredAt = 1, retry = "profscan" },
+    -- NOT THE SAME SHAPE, AND MEASURING IT LIKE THE OTHERS BROKE SETUP FOR
+    -- EVERY NEW CHARACTER. 1.0.0.
+    --
+    -- 0.99.0 gave this step `measuredAt = 1` -- the number of profession
+    -- lines -- with a note saying "a character with no professions at all is
+    -- real, so this one is not a hard failure". It was a hard failure. A
+    -- measured zero returns not-ready, and `Setup.Run` refuses to stamp
+    -- `completedAt` while ANY step is not ready, so a character who had
+    -- learned no professions could never finish setup: the login reminder
+    -- fired for ever, `/cn setup check` answered "Not scanned yet" for ever,
+    -- and the report told the player to run `/cn profscan`, which changes
+    -- nothing. That is every character for its first hours, which is when
+    -- this command is run.
+    --
+    -- The rule the other eight steps rely on is that the count they return is
+    -- the length of the CLIENT'S list -- every toy that exists, every mount,
+    -- every title -- so zero can only be a refusal. Professions count what
+    -- this character has LEARNED, so zero is a person. The refusal is
+    -- reported instead of inferred: `Professions.Scan` returns
+    -- `#lines, answered`, and the second return is what is measured here.
+    { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines", measured = true, retry = "profscan" },
     -- Same shape: `Exploration.Scan` now returns zero when the criteria API
     -- refused every row, which is the state it wrote zeroes over until
     -- 0.97.0.
@@ -38717,7 +38999,17 @@ function Setup.RunStep(step)
         measured = fourth
     end
 
-    if step.measured and measured == 0 then
+    -- A REFUSAL IS ZERO, `false` OR ABSENT. 1.0.0.
+    --
+    -- This tested `measured == 0` only, and `false == 0` and `nil == 0` are
+    -- both false in Lua -- so a step whose designated return is a BOOLEAN
+    -- "did the client answer", which `professions` became this release,
+    -- would have reported a refusal as a success. The same hole covered a
+    -- step whose designated return simply is not there: `measuredAt = 4` on a
+    -- scan that took an early exit returns three values, and the fourth reads
+    -- `nil`, which slipped straight through the one comparison this guard had.
+    if step.measured
+        and (measured == 0 or measured == false or measured == nil) then
         return nil, "the game was not ready yet"
     end
 
@@ -39043,6 +39335,64 @@ end
 
 Setup.StepDoneHere = StepDoneHere
 
+-- WHEN THIS CHARACTER LAST READ IT, OR NIL. 1.0.0.
+--
+-- `StepDoneHere` answers the yes/no half of this question and 0.76.0 wrote it
+-- for the login reminder. The Sources tab asks the other half -- "when was
+-- this last read" -- and reached straight into the account-wide `Steps()`
+-- table for every row, which is the exact defect 0.76.0 named, one function
+-- away and four releases later. A fresh alt was shown the MAIN'S achievement
+-- and Loremaster timestamps, so the tab whose header is "Where every number
+-- in this addon comes from" reported two sources as read today that this
+-- character had never read at all -- and `UI.RefreshStaleSources`, which
+-- skips anything read within a day, could not run them.
+--
+-- Both per-character markers store `time()`, so the stamp is the value
+-- already on disk rather than a new field.
+function Setup.StampFor(step)
+    if type(step) ~= "table" then
+        return nil
+    end
+
+    if step.perCharacter then
+        local module = CN:GetModule(step.module)
+
+        local answers = module and module[step.perCharacter]
+
+        if type(answers) == "function" then
+            local ok, at = pcall(answers)
+
+            if not ok or not at then
+                return nil
+            end
+
+            -- A marker that is merely truthy still says "this character has
+            -- read it"; the account stamp is then the closest honest time.
+            if type(at) == "number" then
+                return at
+            end
+        end
+    end
+
+    return Steps()[string.lower(tostring(step.key))]
+        or Steps()[string.lower(tostring(step.module))]
+end
+
+-- The step whose store a row on the Sources tab is drawn from, by module
+-- name. One table, so the tab and the reminder cannot drift apart again.
+function Setup.StepForModule(moduleName)
+    local wanted = string.lower(tostring(moduleName))
+
+    for _, step in ipairs(Setup.steps) do
+        if string.lower(step.module) == wanted
+            or string.lower(step.key) == wanted then
+            return step
+        end
+    end
+
+    return nil
+end
+
 function Setup.NeverScanned()
     local missing = {}
 
@@ -39207,11 +39557,46 @@ end)
 CN:RegisterCommand{
     name    = "setup",
     aliases = { "scanall" },
-    args    = "[check]",
+    args    = "[check|again]",
     order   = 5,
     help    = "Scan every subsystem once. Run this first.",
     handler = function(args)
-        if string.lower(CN.Trim(args or "")) == "check" then
+        local word = string.lower(CN.Trim(args or ""))
+
+        -- THE WAY BACK. 1.0.0.
+        --
+        -- `completedAt` is stamped once and read for the life of the install:
+        -- `Setup.HasRun` short-circuits on it, which silences the login
+        -- reminder and makes `/cn setup check` answer for the whole account.
+        -- Nothing in the addon could clear it. So a player whose setup
+        -- completed against a client that was still warming up -- the state
+        -- five releases of guards exist to catch, and which those guards
+        -- cannot help with once the stamp is down -- had no way to ask for
+        -- the prompt back, and no way to make `check` tell the truth again.
+        --
+        -- It forgets the stamps, not the data: every scan is idempotent and
+        -- rewrites its own store, so the worst this costs is the few seconds
+        -- the scans take.
+        if word == "again" or word == "reset" then
+            local record = CN.Account("setup")
+
+            record.completedAt = nil
+            record.steps       = {}
+
+            CN.Account("achievementScans")[CN.characterKey
+                or CN.GetCharacterKey()] = nil
+
+            CN.Account("loremasterScans")[CN.characterKey
+                or CN.GetCharacterKey()] = nil
+
+            Print("Forgot what setup had recorded. Running it again.")
+
+            Setup.Run()
+
+            return
+        end
+
+        if word == "check" then
             -- Report without scanning. "What can you not see?" is a
             -- different question from "go and look again", and answering the
             -- first by doing the second is why people stop asking.
@@ -42616,10 +43001,12 @@ Loremaster.Bindings = Bindings
 -- Whether THIS character has ever read its own criteria progress. The
 -- sibling of `Achievements.HasScanned`, and the reason `loremasterScans`
 -- exists; `Setup` asks both now rather than reading an account-wide stamp.
+-- RETURNS THE STAMP. 1.0.0. See the note on `Achievements.HasScanned`: the
+-- marker is a `time()`, both callers want it, and both were handed a boolean.
 function Loremaster.HasScanned(characterKey)
     characterKey = characterKey or CN.characterKey or CN.GetCharacterKey()
 
-    return CN.Account("loremasterScans")[characterKey] ~= nil
+    return CN.Account("loremasterScans")[characterKey]
 end
 
 function Loremaster.ForgetBindings()
@@ -60891,7 +61278,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.99.0
+## Version: 1.0.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -61146,6 +61533,88 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [1.0.0]
+
+0.99.0 went looking for what a new player hits in their first hour and fixed
+five steps of `/cn setup` that reported a refusal as a success. This release
+audited that fix and found it had broken the same command a different way, for
+a different player — which is the shape this project has now found in every
+release for thirty in a row: **the worst defect in a release lives in the
+previous release's own changes.**
+
+**A character who had learned no professions could never finish setup.**
+0.99.0 gave the professions step the same "a zero means the client refused"
+rule as the eight steps beside it. That rule holds for those eight because
+their count is the length of the *client's* list — every toy that exists,
+every mount, every title — so zero can only be a refusal. Professions count
+what *this character has learned*, so zero is an ordinary person: every
+character, for its first hours, which is exactly when this command is run. A
+step that reports "not ready" blocks the whole run from being recorded, so the
+login reminder fired for ever, `/cn setup check` answered "Not scanned yet"
+for ever, and the report told the player to run `/cn profscan`, which changed
+nothing. The addon contradicted itself while it happened: the module marked
+itself scanned on the same run the report called it not ready. The refusal is
+now reported by the layer that knows rather than inferred from a count.
+
+**"Refresh what is stale" counted every scan that did not crash.** A cold
+client refuses without crashing — that is the whole point of the guards the
+last five releases added — so the button answered "Read 12 stale sources" over
+twelve sources that were exactly as stale as before, and could never reach
+"Nothing is stale", which is the other half of its own sentence. It counts
+what actually moved now, and has a third answer for the case where nothing
+did. This is the defect 0.99.0 removed from the "Scan everything" button, one
+screen away in the same file, in the release whose note on that fix reads *the
+fix landed at one call site and not at its sibling in the same file*.
+
+**A fresh alt was shown its main's timestamps.** Two of the twelve sources are
+read per character, and the Sources tab dated all twelve from the account-wide
+stamp — so the tab whose header is "Where every number in this addon comes
+from" reported two sources as read today that this character had never read,
+and the stale refresh could not run either of them because both looked fresh.
+
+### Added
+
+- **The addon records where a quest was handed in.** `turnInMapID` has been a
+  documented field since the three-phase quest model was designed — *a quest
+  is a pick up, a do, and a turn in* — with a reader, a schema and a curated
+  data pipeline behind it, and nothing in the addon had ever written one. The
+  backlog carries it as *Later* on the grounds that an independent table was
+  needed. What was needed was one line in the `QUEST_TURNED_IN` handler, which
+  already ran three lines from the capture that was discarding it. Recorded
+  only where the hand-in differs from the pick-up, exported for curation, and
+  used as the walking target for a quest that is ready to turn in when the
+  client will not answer — labelled as an observation, because that is what it
+  is.
+- **`/cn setup again`** forgets what setup recorded and runs it once more. The
+  "you are done" flag was written once and read for the life of the install
+  with nothing able to clear it, so a setup that completed against a warming-up
+  client could never be redone.
+
+### Changed
+
+- `/cn profscan` says which zero it means. "Found 0 professions" was true of a
+  character who has learned none and of a client with no profession API, and
+  the next move differs.
+- The "Scan everything" button counts a profession scan that answered for a
+  character with none, rather than reporting the whole press as a refusal.
+- Refreshing stale sources reads the source list once instead of three times.
+
+### How defects were found
+
+- **A count is only a refusal signal when it is the client's own list
+  length.** Nine steps were given one rule; one of them counts something else.
+  The suite now runs `/cn setup` on a character with no professions — a state
+  the test client had never been in, because its stub has answered with two
+  professions since the first release.
+- **The item cache is empty until it is not.** Eleven call sites take an item
+  name from the client and the rule they rely on — *unknown names are skipped
+  rather than guessed* — had never been exercised. Nothing was found wrong;
+  the state is now reachable.
+- **The waypoint moves to the hand-in once a quest is ready.** The stub
+  answered with one fixed point for the life of a quest, so the only state in
+  which a turn-in location is observable had never existed in the suite — and
+  the addon's failure to record one was invisible with it.
 
 ## [0.99.0]
 
@@ -68689,6 +69158,8 @@ Nothing is uploaded. The addon *cannot* upload; addons have no network access at
 
 **And you can ask which of its claims have never been checked.** `/cn provenance` lists every prerequisite the addon believes on evidence rather than on somebody having read it — learned from your own play, contributed by another player, or imported by hand — with how many characters or contributions stand behind each. `/cn why` has always named the source of an answer; this is the opposite question, and it is where checking one starts.
 
+**It also records where a quest was handed in.** A quest is a pick up, a do and a turn in, and the client's own waypoint moves with the work — so once a quest is ready to hand back, the addon walks you to where *this account* watched that quest be turned in, when the client will not say. It is labelled as an observation rather than as a checked fact, and it goes into `/cn contribute` with everything else.
+
 **And another addon can supply that data.** [Navigator Data](https://www.curseforge.com/wow/addons/navigator-data) is a companion that contributes hand-checked quest chains, turn-in spots and gating — no window, no commands, no settings; it hands over a table and stops. It is entirely optional, and everything here works without it.
 
 What matters is that installing it does not blur the line this addon draws. Rows from a supplier are counted separately from rows checked by this addon, `/cn providers` names who supplied what, and `/cn selftest` reports it. Two sources claiming the same quest is recorded and named rather than resolved quietly in favour of whoever loaded last. "Checked by hand" is a claim about *who* did the checking, and it survives having more than one answer.
@@ -68753,6 +69224,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |
+| `/cn setup again` | Forget what setup recorded and read everything once more |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |
@@ -68837,7 +69309,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.99.0
+1.0.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -72314,9 +72786,14 @@ mutate "Database.lua" \
     "upgrading destroys every alt's friendship rank"
 
 mutate "Modules/Setup.lua" \
-    "    if step.measured and measured == 0 then" \
-    "    if false then" \
+    "        and (measured == 0 or measured == false or measured == nil) then" \
+    "        and false then" \
     "setup reports a clean bill for scans that recorded nothing"
+
+mutate "Modules/Setup.lua" \
+    "        and (measured == 0 or measured == false or measured == nil) then" \
+    "        and (measured == 0) then" \
+    "a boolean refusal from a scan reads as a success"
 
 mutate "Modules/Achievements.lua" \
     "        if crossed then
@@ -72654,9 +73131,26 @@ mutate "Modules/Achievements.lua" \
     "a client that answers nothing overwrites real criteria with zero"
 
 mutate "Modules/Setup.lua" \
-    "    if step.perCharacter then" \
-    "    if false then" \
+    "local function StepDoneHere(step)
+    if step.perCharacter then" \
+    "local function StepDoneHere(step)
+    if false then" \
     "an alt is never asked to read its own progress"
+
+mutate "Modules/Setup.lua" \
+    "function Setup.StampFor(step)
+    if type(step) ~= \"table\" then
+        return nil
+    end
+
+    if step.perCharacter then" \
+    "function Setup.StampFor(step)
+    if type(step) ~= \"table\" then
+        return nil
+    end
+
+    if false then" \
+    "a per-character source is dated from the account-wide stamp"
 
 mutate "Modules/Setup.lua" \
     "        if step.perCharacter and not StepDoneHere(step) then
@@ -74346,9 +74840,29 @@ mutate "Modules/Appearances.lua" \
     "a wardrobe that had not loaded is recorded as a completed scan"
 
 mutate "UI.lua" \
-    "                        if ok and (read or 0) > 0 then" \
+    "                        if ok and ((read or 0) > 0 or answered == true) then" \
     "                        if ok then" \
     "Scan everything counts a scan that read nothing"
+
+mutate "UI.lua" \
+    "                        if ok and ((read or 0) > 0 or answered == true) then" \
+    "                        if ok and (read or 0) > 0 then" \
+    "a profession scan on a character with none reads as a refusal"
+
+mutate "Modules/Harvest.lua" \
+    "    if reason == \"turnedin\" and mapID and x and y then" \
+    "    if false and mapID and x and y then" \
+    "where a quest was handed in is never recorded"
+
+mutate "Modules/Harvest.lua" \
+    "        if elsewhere and record.turnInMapID == nil then" \
+    "        if record.turnInMapID == nil then" \
+    "a quest handed in where it was taken carries three redundant numbers"
+
+mutate "UI.lua" \
+    "        if at and at ~= entry.was then" \
+    "        if true then" \
+    "refreshing stale sources counts a scan the client refused"
 
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
@@ -75387,7 +75901,21 @@ function GetSpecializationInfoByID(specID)
 
     return specID, names[specID]
 end
-function GetProfessions() return 1, 2, nil, 4, 5 end
+-- A CHARACTER WHO HAS LEARNED NONE. CN_TEST_NO_PROFESSIONS, 1.0.0.
+--
+-- The stub has answered with two professions since the first release, so the
+-- suite had never once run `/cn setup` on the state every character is in for
+-- its first hours -- which is where 0.99.0's `measuredAt = 1` on the
+-- professions step made setup impossible to complete. Nineteenth entry in this
+-- project's list of defects hidden by a stub simpler than the client, and the
+-- first where the stub was more generous rather than more forgiving.
+function GetProfessions()
+    if CN_TEST_NO_PROFESSIONS then
+        return nil, nil, nil, nil, nil
+    end
+
+    return 1, 2, nil, 4, 5
+end
 function GetProfessionInfo(i) return "Profession" .. i, nil, 75, 100, nil, nil, 170 + i end
 
 -- UiMapPoint and Vector2D are DIFFERENT types, and modelling them as the same
@@ -76361,8 +76889,23 @@ C_QuestLog = {
     ReadyForTurnIn         = function(id) return id == 9001 end,
     IsComplete             = function(id) return id == 9001 end,
     GetNextWaypoint        = function(id)
-        -- The real client answers for very few quests. Only 9001 here.
-        if id == 9001 then return 84, 0.20, 0.80 end
+        -- THE WAYPOINT MOVES TO THE HAND-IN ONCE THE QUEST IS READY.
+        -- CN_TEST_WAYPOINT_MOVED, 1.0.0.
+        --
+        -- This is the whole reason `turnInMapID` exists as a curated field,
+        -- and the stub answered with one fixed point for the life of a quest
+        -- -- so the only state in which a turn-in location is observable had
+        -- never existed in the suite, and the addon's failure to record one
+        -- was unobservable with it.
+        if id == 9001 then
+            if CN_TEST_WAYPOINT_MOVED then
+                return CN_TEST_WAYPOINT_MOVED[1], CN_TEST_WAYPOINT_MOVED[2],
+                       CN_TEST_WAYPOINT_MOVED[3]
+            end
+
+            return 84, 0.20, 0.80
+        end
+
         return nil
     end,
     GetNextWaypointForMap  = function(id, mapID) return nil end,
@@ -77416,6 +77959,19 @@ C_Item = {
             -- for twenty releases.
             [880001] = "Recipe: Flask of Assertion",
         }
+
+        -- THE CLIENT'S ITEM CACHE IS EMPTY UNTIL IT IS NOT.
+        -- CN_TEST_ITEM_CACHE_COLD, 1.0.0.
+        --
+        -- The real client answers `nil` for any item it has not seen this
+        -- session and fills the cache asynchronously; this table always
+        -- answered. Eleven call sites take a name from it, and the rule they
+        -- rely on -- "unknown names are skipped rather than guessed" -- had
+        -- never been exercised anywhere in the suite.
+        if CN_TEST_ITEM_CACHE_COLD then
+            return nil
+        end
+
         return names[itemID]
     end,
 }
@@ -116059,6 +116615,40 @@ end)()
         "and a press against a client that answers records what it read: "
         .. read)
 
+    -- AND A PROFESSION SCAN ON A CHARACTER WITH NONE IS A SCAN THAT WORKED.
+    -- 1.0.0.
+    --
+    -- Five of the six modules behind this button count the length of the
+    -- client's own list, so `> 0` is the right test for them.
+    -- `Professions.Scan` counts what this CHARACTER has learned, and a
+    -- character who has learned none reads zero on a scan that answered
+    -- perfectly -- so the count has to consult whether it ANSWERED, or a new
+    -- player who also owns no pets, mounts, toys or titles is told the game
+    -- would not answer about any of them.
+    local warmAnswer = nil
+
+    CN.UI.Answer = function(text)
+        warmAnswer = tostring(text)
+
+        return realAnswer(text)
+    end
+
+    CN_TEST_NO_PROFESSIONS = true
+
+    press(panel.scanAll)
+
+    CN_TEST_DrainDeferred()
+
+    CN_TEST_NO_PROFESSIONS = false
+
+    CN.UI.Answer = realAnswer
+
+    local withNone = tonumber(tostring(warmAnswer):match("Read (%d+) collections"))
+
+    assert(withNone == 6,
+        "a character with no professions still had six collections read: "
+        .. tostring(warmAnswer))
+
     print("  Scan everything counts what it read")
 end)()
 
@@ -116089,6 +116679,472 @@ end)()
         "and not `/cn waiting`, which lists quests you walked past: " .. line)
 
     print("  the sentence itself names the command about deadlines")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CHARACTER WITH NO PROFESSIONS CAN FINISH SETUP.
+    --
+    -- 0.99.0 gave the professions step `measured = true, measuredAt = 1` --
+    -- the number of profession LINES -- alongside eight steps whose count is
+    -- the length of the client's own list. Professions count what this
+    -- CHARACTER has learned, so zero is a person rather than a refusal, and a
+    -- measured zero returns not-ready, and `Setup.Run` refuses to stamp
+    -- `completedAt` while any step is not ready. Setup became impossible to
+    -- complete for every character in its first hours, which is when it is
+    -- run.
+    --
+    -- Two assertions, because two things were wrong at once: the step's
+    -- verdict, and the fact that the module had already called `MarkScanned`
+    -- on the same run -- so `Setup.NeverScanned` called the step done in the
+    -- same second the report called it not ready.
+    ------------------------------------------------------------
+    local setupModule  = CN:GetModule("Setup")
+    local professions  = CN:GetModule("Professions")
+
+    assert(setupModule and professions, "both modules are loaded")
+
+    local step
+
+    for _, entry in ipairs(setupModule.steps) do
+        if entry.key == "professions" then
+            step = entry
+        end
+    end
+
+    assert(step, "the professions step is in the table")
+
+    CN_TEST_NO_PROFESSIONS = true
+
+    local record = CN.Account("setup")
+
+    record.completedAt = nil
+    record.steps       = {}
+
+    local ok, lines = setupModule.RunStep(step)
+
+    assert(ok == true,
+        "a character with no professions completed the step, got "
+        .. tostring(ok))
+
+    assert(lines == 0, "and read no lines: " .. tostring(lines))
+
+    assert(setupModule.StepDone("professions"),
+        "and the module and the step agree that it was read")
+
+    -- AND A CLIENT WITH NO PROFESSION API AT ALL IS STILL A REFUSAL.
+    local realProfessions = GetProfessions
+
+    GetProfessions = nil
+
+    local noApi = setupModule.RunStep(step)
+
+    GetProfessions        = realProfessions
+    CN_TEST_NO_PROFESSIONS = false
+
+    assert(noApi == nil,
+        "a client with no profession API is reported as not ready, got "
+        .. tostring(noApi))
+
+    -- AND THE WHOLE RUN COMPLETES, which is the thing the player sees. The
+    -- account stamp is the one value that silences the login reminder.
+    record.completedAt = nil
+    record.steps       = {}
+
+    CN_TEST_NO_PROFESSIONS = true
+
+    setupModule.Run()
+
+    for _ = 1, #setupModule.steps + 4 do
+        CN_TEST_DrainDeferred()
+    end
+
+    CN_TEST_NO_PROFESSIONS = false
+
+    assert(CN.Account("setup").completedAt,
+        "setup completes for a character with no professions")
+
+    print("  a character with no professions can finish setup")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "REFRESH WHAT IS STALE" COUNTS WHAT MOVED.
+    --
+    -- It counted every command that did not throw, and a cold client refuses
+    -- without throwing -- so the button answered "Read 12 stale sources" over
+    -- twelve sources that were still exactly as stale, and could never reach
+    -- "Nothing is stale". Same defect 0.99.0 removed from the "Scan
+    -- everything" button, in the same file, in the release whose comment on
+    -- that fix reads "the fix landed at one call site and not at its sibling
+    -- in the same file".
+    ------------------------------------------------------------
+    local record = CN.Account("setup")
+
+    record.steps = {}
+
+    CN_TEST_TOYS_COLD      = true
+    CN_TEST_MOUNTS_COLD    = true
+    CN_TEST_TITLES_COLD    = true
+    CN_TEST_WARDROBE_COLD  = true
+    CN_TEST_CRITERIA_COLD  = true
+    CN_TEST_RECIPES_COLD   = true
+    CN_TEST_NO_PROFESSIONS = true
+
+    local refreshed, tried = CN.UI.RefreshStaleSources()
+
+    CN_TEST_TOYS_COLD      = false
+    CN_TEST_MOUNTS_COLD    = false
+    CN_TEST_TITLES_COLD    = false
+    CN_TEST_WARDROBE_COLD  = false
+    CN_TEST_CRITERIA_COLD  = false
+    CN_TEST_RECIPES_COLD   = false
+    CN_TEST_NO_PROFESSIONS = false
+
+    assert(tried and tried > 0,
+        "the cold run had stale sources to try: " .. tostring(tried))
+
+    assert(refreshed < tried,
+        "and did not claim to have read every one of them: "
+        .. tostring(refreshed) .. " of " .. tostring(tried))
+
+    -- The four journals in the list above cannot have been read, whatever
+    -- else answered.
+    for _, key in ipairs({ "toys", "mounts", "titles", "appearances" }) do
+        assert(not record.steps[key],
+            "a refused scan stamps nothing: " .. key)
+    end
+
+    -- AND A WARM RUN DOES COUNT, so this is a guard rather than a wall.
+    record.steps = {}
+
+    local warm = CN.UI.RefreshStaleSources()
+
+    assert(warm > 0,
+        "a client that answers records what was read: " .. tostring(warm))
+
+    print("  refreshing stale sources counts what actually moved")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE AGE OF A PER-CHARACTER STORE IS A PER-CHARACTER AGE.
+    --
+    -- The Sources tab read the account-wide stamp for all twelve rows. Two of
+    -- them are read per character -- which is why `Setup.steps` marks them
+    -- `perCharacter`, and why 0.76.0 wrote `StepDoneHere` for the login
+    -- reminder. A fresh alt was shown its main's timestamps on the tab whose
+    -- header is "Where every number in this addon comes from", and "Refresh
+    -- what is stale" could not run either source because both looked fresh.
+    ------------------------------------------------------------
+    local setupModule = CN:GetModule("Setup")
+
+    -- Every step read, right now, by SOMEBODY.
+    local record = CN.Account("setup")
+
+    record.steps = {}
+
+    for _, step in ipairs(setupModule.steps) do
+        record.steps[step.key] = time()
+    end
+
+    -- And this character has never read either per-character store.
+    CN.Account("achievementScans")[CN.characterKey or CN.GetCharacterKey()] = nil
+    CN.Account("loremasterScans")[CN.characterKey or CN.GetCharacterKey()] = nil
+
+    local byLabel = {}
+
+    for _, source in ipairs(CN.UI.Sources("stored")) do
+        byLabel[source.label] = source
+    end
+
+    assert(byLabel["Achievements"] and byLabel["Zone achievements"],
+        "both per-character rows are on the tab")
+
+    assert(byLabel["Achievements"].at == nil,
+        "an alt that never scanned achievements is not shown the main's time")
+
+    assert(byLabel["Zone achievements"].at == nil,
+        "nor the main's Loremaster time")
+
+    -- AND AN ACCOUNT-WIDE ROW STILL READS THE ACCOUNT STAMP.
+    assert(type(byLabel["Mounts"].at) == "number",
+        "an account-wide source keeps its account-wide stamp")
+
+    -- AND ONCE THIS CHARACTER SCANS, THE ROW CARRIES ITS OWN TIME.
+    CN.Account("achievementScans")[CN.characterKey or CN.GetCharacterKey()] =
+        time() - 60
+
+    local after
+
+    for _, source in ipairs(CN.UI.Sources("stored")) do
+        if source.label == "Achievements" then
+            after = source
+        end
+    end
+
+    assert(type(after.at) == "number",
+        "and a character that has scanned is dated by its own scan")
+
+    print("  a per-character source is dated per character")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- `/cn setup again` PUTS THE PROMPT BACK.
+    --
+    -- `completedAt` was written once and read for the life of the install,
+    -- with nothing in the addon able to clear it -- so a setup that completed
+    -- against a warming-up client could never be redone, and `/cn setup
+    -- check` answered for the whole account for ever.
+    ------------------------------------------------------------
+    local setupModule = CN:GetModule("Setup")
+
+    CN.Account("setup").completedAt = time()
+
+    CN.HandleSlashCommand("setup again")
+
+    for _ = 1, #setupModule.steps + 4 do
+        CN_TEST_DrainDeferred()
+    end
+
+    -- The command re-runs setup, so what is asserted is that the stamps were
+    -- forgotten first: every step's record is from THIS run.
+    local steps = setupModule.Steps()
+
+    assert(next(steps) ~= nil, "and it scanned again rather than only clearing")
+
+    -- The per-character markers go with them, or an alt's reset silently
+    -- keeps its main's per-character verdict.
+    CN.Account("setup").completedAt = time()
+    CN.Account("achievementScans")[CN.characterKey or CN.GetCharacterKey()] =
+        time()
+
+    CN_TEST_CRITERIA_COLD = true
+
+    CN.HandleSlashCommand("setup again")
+
+    for _ = 1, #setupModule.steps + 4 do
+        CN_TEST_DrainDeferred()
+    end
+
+    CN_TEST_CRITERIA_COLD = false
+
+    assert(CN.Account("achievementScans")[CN.characterKey
+        or CN.GetCharacterKey()] == nil,
+        "a reset against a cold client forgets the per-character marker too")
+
+    print("  /cn setup again forgets what setup recorded")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN EMPTY ITEM CACHE NAMES EVERYTHING ANYWAY.
+    --
+    -- The client answers `nil` for any item it has not seen this session.
+    -- Eleven call sites take a name from it and the rule they rely on --
+    -- "unknown names are skipped rather than guessed" -- had never been
+    -- exercised. A regression guard rather than a fix: nothing was found
+    -- wrong, and the state that would have shown it was unreachable.
+    ------------------------------------------------------------
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    local checked = 0
+
+    for name, provider in pairs(CN.candidateProviders) do
+        local ok, rows = pcall(provider.fn)
+
+        assert(ok, "provider " .. name .. " survives an empty item cache: "
+            .. tostring(rows))
+
+        if type(rows) == "table" then
+            for _, objective in ipairs(rows) do
+                assert(type(objective.name) == "string"
+                    and objective.name ~= ""
+                    and not objective.name:find("nil", 1, true),
+                    "provider " .. name .. " named an objective from an empty "
+                    .. "item cache: " .. tostring(objective.name))
+
+                checked = checked + 1
+            end
+        end
+    end
+
+    CN.UI.Show()
+
+    for _, tab in ipairs(CN.UI.tabs) do
+        if tab.refresh and tab.panel then
+            local ok, err = pcall(tab.refresh, tab.panel)
+
+            assert(ok, "the " .. tab.name
+                .. " tab draws with an empty item cache: " .. tostring(err))
+        end
+    end
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    assert(checked > 0, "and there were objectives to check")
+
+    print("  " .. checked .. " objectives named with an empty item cache")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- WHERE A QUEST WAS HANDED IN IS RECORDED WHERE IT DIFFERS.
+    --
+    -- `turnInMapID/X/Y` has been a documented field in `Data/Quests.lua`
+    -- since the three-phase quest model, `Static.GetQuestTurnIn` reads it and
+    -- `Quests.WaypointFor` prefers it over the client's own moving waypoint
+    -- -- and nothing in the addon had ever written one. The backlog carries
+    -- it as item 7, "Turn-in NPC database", filed under *Later* on the
+    -- grounds that an independent table was needed. What was needed was the
+    -- `QUEST_TURNED_IN` handler, which already routed to `Harvest.Capture`
+    -- and lost the waypoint to a setter that only writes nil fields.
+    ------------------------------------------------------------
+    local turnInHarvest = CN:GetModule("Harvest")
+
+    assert(turnInHarvest, "the harvest module is loaded")
+
+    local store = CN.Account("questHarvest")
+
+    store[9001] = nil
+
+    -- Accepted at the giver.
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.20, 0.80 }
+
+    turnInHarvest.Capture(9001, "accepted")
+
+    assert(store[9001], "the quest was captured on acceptance")
+
+    assert(store[9001].turnInMapID == nil,
+        "and acceptance records no turn-in location")
+
+    -- Handed in somewhere else. The client points at the hand-in once the
+    -- quest is ready, which is the one moment this coordinate exists.
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.55, 0.31 }
+
+    turnInHarvest.Capture(9001, "turnedin")
+
+    CN_TEST_WAYPOINT_MOVED = nil
+
+    assert(store[9001].turnInMapID == 84,
+        "the turn-in map is recorded: " .. tostring(store[9001].turnInMapID))
+
+    assert(store[9001].turnInX == 0.55 and store[9001].turnInY == 0.31,
+        "with the point the client gave at hand-in: "
+        .. tostring(store[9001].turnInX) .. ", "
+        .. tostring(store[9001].turnInY))
+
+    -- AND THE PICK-UP LOCATION IS NOT OVERWRITTEN, which is the field every
+    -- map pin and travel cost in the addon is drawn from.
+    assert(store[9001].x == 0.20 and store[9001].y == 0.80,
+        "and where it was picked up is untouched")
+
+    -- AND A QUEST HANDED IN WHERE IT WAS TAKEN CARRIES NOTHING, because a row
+    -- saying "handed in where you got it" is the ordinary case and the store
+    -- is capped at two thousand rows.
+    store[9002] = nil
+
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.20, 0.80 }
+
+    turnInHarvest.Capture(9001, "turnedin")
+
+    assert(store[9001].turnInX == 0.55,
+        "a later identical turn-in does not overwrite the first")
+
+    -- AND A ROW THAT HAS NEVER BEEN ANYWHERE ELSE CARRIES NOTHING.
+    --
+    -- "Handed in where you got it" is the ordinary case; recording it would
+    -- put three numbers on nearly every row of a store capped at two
+    -- thousand, and say nothing the pick-up coordinates do not already say.
+    store[9001] = nil
+
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.20, 0.80 }
+
+    turnInHarvest.Capture(9001, "accepted")
+    turnInHarvest.Capture(9001, "turnedin")
+
+    assert(store[9001].turnInMapID == nil
+        and store[9001].turnInX == nil
+        and store[9001].turnInY == nil,
+        "a quest handed in where it was taken records no turn-in: "
+        .. tostring(store[9001].turnInMapID) .. " "
+        .. tostring(store[9001].turnInX))
+
+    -- Put the differing pair back for the export and resolver checks below.
+    store[9001] = nil
+
+    turnInHarvest.Capture(9001, "accepted")
+
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.55, 0.31 }
+
+    turnInHarvest.Capture(9001, "turnedin")
+
+    CN_TEST_WAYPOINT_MOVED = nil
+
+    -- AND THE EXPORT CARRIES IT, or the field is recorded for nobody: the
+    -- export is how a harvested row reaches curation and Navigator Data.
+    local text = turnInHarvest.BuildExport(true)
+
+    assert(text:find("turnInMapID = 84", 1, true),
+        "the export emits the turn-in map")
+
+    assert(text:find("turnInX   = 0.55", 1, true)
+        and text:find("turnInY   = 0.31", 1, true),
+        "and the point with it")
+
+    -- AND IT IS A FIELD THE DATA LAYER ACCEPTS, so a curated row built from
+    -- this export is not silently refused.
+    for _, field in ipairs({ "turnInMapID", "turnInX", "turnInY" }) do
+        assert(CN.Static.validFields[field],
+            "the data layer accepts " .. field)
+    end
+
+    -- AND THE WAYPOINT RESOLVER PREFERS IT, which is what the field is for.
+    local added = CN.Static.RegisterQuest(770001, {
+        name        = "Handed In Elsewhere",
+        mapID       = 84,
+        x           = 0.20,
+        y           = 0.80,
+        turnInMapID = 84,
+        turnInX     = 0.55,
+        turnInY     = 0.31,
+    }, "harness")
+
+    assert(added ~= false, "the curated row registers")
+
+    local map, x, y = CN.Static.GetQuestTurnIn(770001)
+
+    assert(map == 84 and x == 0.55 and y == 0.31,
+        "and the data layer reads the turn-in back")
+
+    CN.Static.UnregisterOrigin("harness")
+
+    -- AND THE RESOLVER FALLS BACK TO WHAT THIS ACCOUNT WATCHED, when nothing
+    -- curated exists and the client will not answer -- which is every quest
+    -- but two, since `Data/Quests.lua` holds one curated row and Navigator
+    -- Data ships two.
+    local quests = CN:GetModule("Quests")
+
+    local realReady = CN.Blizzard.IsQuestReadyForTurnIn
+    local realPoint = CN.Blizzard.GetQuestWaypoint
+
+    CN.Blizzard.IsQuestReadyForTurnIn = function(id) return id == 9001 end
+    CN.Blizzard.GetQuestWaypoint      = function() return nil, nil, nil end
+
+    local seenMap, px, py, source = quests.GetLocation(9001)
+
+    CN.Blizzard.IsQuestReadyForTurnIn = realReady
+    CN.Blizzard.GetQuestWaypoint      = realPoint
+
+    assert(seenMap == 84 and px == 0.55 and py == 0.31,
+        "a client that will not answer falls back to what was watched: "
+        .. tostring(seenMap) .. " " .. tostring(px) .. " " .. tostring(py))
+
+    assert(source == "harvested turn-in",
+        "and says the answer is an observation: " .. tostring(source))
+
+    print("  a quest handed in elsewhere records where")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

@@ -802,7 +802,21 @@ function GetSpecializationInfoByID(specID)
 
     return specID, names[specID]
 end
-function GetProfessions() return 1, 2, nil, 4, 5 end
+-- A CHARACTER WHO HAS LEARNED NONE. CN_TEST_NO_PROFESSIONS, 1.0.0.
+--
+-- The stub has answered with two professions since the first release, so the
+-- suite had never once run `/cn setup` on the state every character is in for
+-- its first hours -- which is where 0.99.0's `measuredAt = 1` on the
+-- professions step made setup impossible to complete. Nineteenth entry in this
+-- project's list of defects hidden by a stub simpler than the client, and the
+-- first where the stub was more generous rather than more forgiving.
+function GetProfessions()
+    if CN_TEST_NO_PROFESSIONS then
+        return nil, nil, nil, nil, nil
+    end
+
+    return 1, 2, nil, 4, 5
+end
 function GetProfessionInfo(i) return "Profession" .. i, nil, 75, 100, nil, nil, 170 + i end
 
 -- UiMapPoint and Vector2D are DIFFERENT types, and modelling them as the same
@@ -1776,8 +1790,23 @@ C_QuestLog = {
     ReadyForTurnIn         = function(id) return id == 9001 end,
     IsComplete             = function(id) return id == 9001 end,
     GetNextWaypoint        = function(id)
-        -- The real client answers for very few quests. Only 9001 here.
-        if id == 9001 then return 84, 0.20, 0.80 end
+        -- THE WAYPOINT MOVES TO THE HAND-IN ONCE THE QUEST IS READY.
+        -- CN_TEST_WAYPOINT_MOVED, 1.0.0.
+        --
+        -- This is the whole reason `turnInMapID` exists as a curated field,
+        -- and the stub answered with one fixed point for the life of a quest
+        -- -- so the only state in which a turn-in location is observable had
+        -- never existed in the suite, and the addon's failure to record one
+        -- was unobservable with it.
+        if id == 9001 then
+            if CN_TEST_WAYPOINT_MOVED then
+                return CN_TEST_WAYPOINT_MOVED[1], CN_TEST_WAYPOINT_MOVED[2],
+                       CN_TEST_WAYPOINT_MOVED[3]
+            end
+
+            return 84, 0.20, 0.80
+        end
+
         return nil
     end,
     GetNextWaypointForMap  = function(id, mapID) return nil end,
@@ -2831,6 +2860,19 @@ C_Item = {
             -- for twenty releases.
             [880001] = "Recipe: Flask of Assertion",
         }
+
+        -- THE CLIENT'S ITEM CACHE IS EMPTY UNTIL IT IS NOT.
+        -- CN_TEST_ITEM_CACHE_COLD, 1.0.0.
+        --
+        -- The real client answers `nil` for any item it has not seen this
+        -- session and fills the cache asynchronously; this table always
+        -- answered. Eleven call sites take a name from it, and the rule they
+        -- rely on -- "unknown names are skipped rather than guessed" -- had
+        -- never been exercised anywhere in the suite.
+        if CN_TEST_ITEM_CACHE_COLD then
+            return nil
+        end
+
         return names[itemID]
     end,
 }
@@ -41474,6 +41516,40 @@ end)()
         "and a press against a client that answers records what it read: "
         .. read)
 
+    -- AND A PROFESSION SCAN ON A CHARACTER WITH NONE IS A SCAN THAT WORKED.
+    -- 1.0.0.
+    --
+    -- Five of the six modules behind this button count the length of the
+    -- client's own list, so `> 0` is the right test for them.
+    -- `Professions.Scan` counts what this CHARACTER has learned, and a
+    -- character who has learned none reads zero on a scan that answered
+    -- perfectly -- so the count has to consult whether it ANSWERED, or a new
+    -- player who also owns no pets, mounts, toys or titles is told the game
+    -- would not answer about any of them.
+    local warmAnswer = nil
+
+    CN.UI.Answer = function(text)
+        warmAnswer = tostring(text)
+
+        return realAnswer(text)
+    end
+
+    CN_TEST_NO_PROFESSIONS = true
+
+    press(panel.scanAll)
+
+    CN_TEST_DrainDeferred()
+
+    CN_TEST_NO_PROFESSIONS = false
+
+    CN.UI.Answer = realAnswer
+
+    local withNone = tonumber(tostring(warmAnswer):match("Read (%d+) collections"))
+
+    assert(withNone == 6,
+        "a character with no professions still had six collections read: "
+        .. tostring(warmAnswer))
+
     print("  Scan everything counts what it read")
 end)()
 
@@ -41504,6 +41580,472 @@ end)()
         "and not `/cn waiting`, which lists quests you walked past: " .. line)
 
     print("  the sentence itself names the command about deadlines")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A CHARACTER WITH NO PROFESSIONS CAN FINISH SETUP.
+    --
+    -- 0.99.0 gave the professions step `measured = true, measuredAt = 1` --
+    -- the number of profession LINES -- alongside eight steps whose count is
+    -- the length of the client's own list. Professions count what this
+    -- CHARACTER has learned, so zero is a person rather than a refusal, and a
+    -- measured zero returns not-ready, and `Setup.Run` refuses to stamp
+    -- `completedAt` while any step is not ready. Setup became impossible to
+    -- complete for every character in its first hours, which is when it is
+    -- run.
+    --
+    -- Two assertions, because two things were wrong at once: the step's
+    -- verdict, and the fact that the module had already called `MarkScanned`
+    -- on the same run -- so `Setup.NeverScanned` called the step done in the
+    -- same second the report called it not ready.
+    ------------------------------------------------------------
+    local setupModule  = CN:GetModule("Setup")
+    local professions  = CN:GetModule("Professions")
+
+    assert(setupModule and professions, "both modules are loaded")
+
+    local step
+
+    for _, entry in ipairs(setupModule.steps) do
+        if entry.key == "professions" then
+            step = entry
+        end
+    end
+
+    assert(step, "the professions step is in the table")
+
+    CN_TEST_NO_PROFESSIONS = true
+
+    local record = CN.Account("setup")
+
+    record.completedAt = nil
+    record.steps       = {}
+
+    local ok, lines = setupModule.RunStep(step)
+
+    assert(ok == true,
+        "a character with no professions completed the step, got "
+        .. tostring(ok))
+
+    assert(lines == 0, "and read no lines: " .. tostring(lines))
+
+    assert(setupModule.StepDone("professions"),
+        "and the module and the step agree that it was read")
+
+    -- AND A CLIENT WITH NO PROFESSION API AT ALL IS STILL A REFUSAL.
+    local realProfessions = GetProfessions
+
+    GetProfessions = nil
+
+    local noApi = setupModule.RunStep(step)
+
+    GetProfessions        = realProfessions
+    CN_TEST_NO_PROFESSIONS = false
+
+    assert(noApi == nil,
+        "a client with no profession API is reported as not ready, got "
+        .. tostring(noApi))
+
+    -- AND THE WHOLE RUN COMPLETES, which is the thing the player sees. The
+    -- account stamp is the one value that silences the login reminder.
+    record.completedAt = nil
+    record.steps       = {}
+
+    CN_TEST_NO_PROFESSIONS = true
+
+    setupModule.Run()
+
+    for _ = 1, #setupModule.steps + 4 do
+        CN_TEST_DrainDeferred()
+    end
+
+    CN_TEST_NO_PROFESSIONS = false
+
+    assert(CN.Account("setup").completedAt,
+        "setup completes for a character with no professions")
+
+    print("  a character with no professions can finish setup")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "REFRESH WHAT IS STALE" COUNTS WHAT MOVED.
+    --
+    -- It counted every command that did not throw, and a cold client refuses
+    -- without throwing -- so the button answered "Read 12 stale sources" over
+    -- twelve sources that were still exactly as stale, and could never reach
+    -- "Nothing is stale". Same defect 0.99.0 removed from the "Scan
+    -- everything" button, in the same file, in the release whose comment on
+    -- that fix reads "the fix landed at one call site and not at its sibling
+    -- in the same file".
+    ------------------------------------------------------------
+    local record = CN.Account("setup")
+
+    record.steps = {}
+
+    CN_TEST_TOYS_COLD      = true
+    CN_TEST_MOUNTS_COLD    = true
+    CN_TEST_TITLES_COLD    = true
+    CN_TEST_WARDROBE_COLD  = true
+    CN_TEST_CRITERIA_COLD  = true
+    CN_TEST_RECIPES_COLD   = true
+    CN_TEST_NO_PROFESSIONS = true
+
+    local refreshed, tried = CN.UI.RefreshStaleSources()
+
+    CN_TEST_TOYS_COLD      = false
+    CN_TEST_MOUNTS_COLD    = false
+    CN_TEST_TITLES_COLD    = false
+    CN_TEST_WARDROBE_COLD  = false
+    CN_TEST_CRITERIA_COLD  = false
+    CN_TEST_RECIPES_COLD   = false
+    CN_TEST_NO_PROFESSIONS = false
+
+    assert(tried and tried > 0,
+        "the cold run had stale sources to try: " .. tostring(tried))
+
+    assert(refreshed < tried,
+        "and did not claim to have read every one of them: "
+        .. tostring(refreshed) .. " of " .. tostring(tried))
+
+    -- The four journals in the list above cannot have been read, whatever
+    -- else answered.
+    for _, key in ipairs({ "toys", "mounts", "titles", "appearances" }) do
+        assert(not record.steps[key],
+            "a refused scan stamps nothing: " .. key)
+    end
+
+    -- AND A WARM RUN DOES COUNT, so this is a guard rather than a wall.
+    record.steps = {}
+
+    local warm = CN.UI.RefreshStaleSources()
+
+    assert(warm > 0,
+        "a client that answers records what was read: " .. tostring(warm))
+
+    print("  refreshing stale sources counts what actually moved")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE AGE OF A PER-CHARACTER STORE IS A PER-CHARACTER AGE.
+    --
+    -- The Sources tab read the account-wide stamp for all twelve rows. Two of
+    -- them are read per character -- which is why `Setup.steps` marks them
+    -- `perCharacter`, and why 0.76.0 wrote `StepDoneHere` for the login
+    -- reminder. A fresh alt was shown its main's timestamps on the tab whose
+    -- header is "Where every number in this addon comes from", and "Refresh
+    -- what is stale" could not run either source because both looked fresh.
+    ------------------------------------------------------------
+    local setupModule = CN:GetModule("Setup")
+
+    -- Every step read, right now, by SOMEBODY.
+    local record = CN.Account("setup")
+
+    record.steps = {}
+
+    for _, step in ipairs(setupModule.steps) do
+        record.steps[step.key] = time()
+    end
+
+    -- And this character has never read either per-character store.
+    CN.Account("achievementScans")[CN.characterKey or CN.GetCharacterKey()] = nil
+    CN.Account("loremasterScans")[CN.characterKey or CN.GetCharacterKey()] = nil
+
+    local byLabel = {}
+
+    for _, source in ipairs(CN.UI.Sources("stored")) do
+        byLabel[source.label] = source
+    end
+
+    assert(byLabel["Achievements"] and byLabel["Zone achievements"],
+        "both per-character rows are on the tab")
+
+    assert(byLabel["Achievements"].at == nil,
+        "an alt that never scanned achievements is not shown the main's time")
+
+    assert(byLabel["Zone achievements"].at == nil,
+        "nor the main's Loremaster time")
+
+    -- AND AN ACCOUNT-WIDE ROW STILL READS THE ACCOUNT STAMP.
+    assert(type(byLabel["Mounts"].at) == "number",
+        "an account-wide source keeps its account-wide stamp")
+
+    -- AND ONCE THIS CHARACTER SCANS, THE ROW CARRIES ITS OWN TIME.
+    CN.Account("achievementScans")[CN.characterKey or CN.GetCharacterKey()] =
+        time() - 60
+
+    local after
+
+    for _, source in ipairs(CN.UI.Sources("stored")) do
+        if source.label == "Achievements" then
+            after = source
+        end
+    end
+
+    assert(type(after.at) == "number",
+        "and a character that has scanned is dated by its own scan")
+
+    print("  a per-character source is dated per character")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- `/cn setup again` PUTS THE PROMPT BACK.
+    --
+    -- `completedAt` was written once and read for the life of the install,
+    -- with nothing in the addon able to clear it -- so a setup that completed
+    -- against a warming-up client could never be redone, and `/cn setup
+    -- check` answered for the whole account for ever.
+    ------------------------------------------------------------
+    local setupModule = CN:GetModule("Setup")
+
+    CN.Account("setup").completedAt = time()
+
+    CN.HandleSlashCommand("setup again")
+
+    for _ = 1, #setupModule.steps + 4 do
+        CN_TEST_DrainDeferred()
+    end
+
+    -- The command re-runs setup, so what is asserted is that the stamps were
+    -- forgotten first: every step's record is from THIS run.
+    local steps = setupModule.Steps()
+
+    assert(next(steps) ~= nil, "and it scanned again rather than only clearing")
+
+    -- The per-character markers go with them, or an alt's reset silently
+    -- keeps its main's per-character verdict.
+    CN.Account("setup").completedAt = time()
+    CN.Account("achievementScans")[CN.characterKey or CN.GetCharacterKey()] =
+        time()
+
+    CN_TEST_CRITERIA_COLD = true
+
+    CN.HandleSlashCommand("setup again")
+
+    for _ = 1, #setupModule.steps + 4 do
+        CN_TEST_DrainDeferred()
+    end
+
+    CN_TEST_CRITERIA_COLD = false
+
+    assert(CN.Account("achievementScans")[CN.characterKey
+        or CN.GetCharacterKey()] == nil,
+        "a reset against a cold client forgets the per-character marker too")
+
+    print("  /cn setup again forgets what setup recorded")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN EMPTY ITEM CACHE NAMES EVERYTHING ANYWAY.
+    --
+    -- The client answers `nil` for any item it has not seen this session.
+    -- Eleven call sites take a name from it and the rule they rely on --
+    -- "unknown names are skipped rather than guessed" -- had never been
+    -- exercised. A regression guard rather than a fix: nothing was found
+    -- wrong, and the state that would have shown it was unreachable.
+    ------------------------------------------------------------
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    local checked = 0
+
+    for name, provider in pairs(CN.candidateProviders) do
+        local ok, rows = pcall(provider.fn)
+
+        assert(ok, "provider " .. name .. " survives an empty item cache: "
+            .. tostring(rows))
+
+        if type(rows) == "table" then
+            for _, objective in ipairs(rows) do
+                assert(type(objective.name) == "string"
+                    and objective.name ~= ""
+                    and not objective.name:find("nil", 1, true),
+                    "provider " .. name .. " named an objective from an empty "
+                    .. "item cache: " .. tostring(objective.name))
+
+                checked = checked + 1
+            end
+        end
+    end
+
+    CN.UI.Show()
+
+    for _, tab in ipairs(CN.UI.tabs) do
+        if tab.refresh and tab.panel then
+            local ok, err = pcall(tab.refresh, tab.panel)
+
+            assert(ok, "the " .. tab.name
+                .. " tab draws with an empty item cache: " .. tostring(err))
+        end
+    end
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    assert(checked > 0, "and there were objectives to check")
+
+    print("  " .. checked .. " objectives named with an empty item cache")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- WHERE A QUEST WAS HANDED IN IS RECORDED WHERE IT DIFFERS.
+    --
+    -- `turnInMapID/X/Y` has been a documented field in `Data/Quests.lua`
+    -- since the three-phase quest model, `Static.GetQuestTurnIn` reads it and
+    -- `Quests.WaypointFor` prefers it over the client's own moving waypoint
+    -- -- and nothing in the addon had ever written one. The backlog carries
+    -- it as item 7, "Turn-in NPC database", filed under *Later* on the
+    -- grounds that an independent table was needed. What was needed was the
+    -- `QUEST_TURNED_IN` handler, which already routed to `Harvest.Capture`
+    -- and lost the waypoint to a setter that only writes nil fields.
+    ------------------------------------------------------------
+    local turnInHarvest = CN:GetModule("Harvest")
+
+    assert(turnInHarvest, "the harvest module is loaded")
+
+    local store = CN.Account("questHarvest")
+
+    store[9001] = nil
+
+    -- Accepted at the giver.
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.20, 0.80 }
+
+    turnInHarvest.Capture(9001, "accepted")
+
+    assert(store[9001], "the quest was captured on acceptance")
+
+    assert(store[9001].turnInMapID == nil,
+        "and acceptance records no turn-in location")
+
+    -- Handed in somewhere else. The client points at the hand-in once the
+    -- quest is ready, which is the one moment this coordinate exists.
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.55, 0.31 }
+
+    turnInHarvest.Capture(9001, "turnedin")
+
+    CN_TEST_WAYPOINT_MOVED = nil
+
+    assert(store[9001].turnInMapID == 84,
+        "the turn-in map is recorded: " .. tostring(store[9001].turnInMapID))
+
+    assert(store[9001].turnInX == 0.55 and store[9001].turnInY == 0.31,
+        "with the point the client gave at hand-in: "
+        .. tostring(store[9001].turnInX) .. ", "
+        .. tostring(store[9001].turnInY))
+
+    -- AND THE PICK-UP LOCATION IS NOT OVERWRITTEN, which is the field every
+    -- map pin and travel cost in the addon is drawn from.
+    assert(store[9001].x == 0.20 and store[9001].y == 0.80,
+        "and where it was picked up is untouched")
+
+    -- AND A QUEST HANDED IN WHERE IT WAS TAKEN CARRIES NOTHING, because a row
+    -- saying "handed in where you got it" is the ordinary case and the store
+    -- is capped at two thousand rows.
+    store[9002] = nil
+
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.20, 0.80 }
+
+    turnInHarvest.Capture(9001, "turnedin")
+
+    assert(store[9001].turnInX == 0.55,
+        "a later identical turn-in does not overwrite the first")
+
+    -- AND A ROW THAT HAS NEVER BEEN ANYWHERE ELSE CARRIES NOTHING.
+    --
+    -- "Handed in where you got it" is the ordinary case; recording it would
+    -- put three numbers on nearly every row of a store capped at two
+    -- thousand, and say nothing the pick-up coordinates do not already say.
+    store[9001] = nil
+
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.20, 0.80 }
+
+    turnInHarvest.Capture(9001, "accepted")
+    turnInHarvest.Capture(9001, "turnedin")
+
+    assert(store[9001].turnInMapID == nil
+        and store[9001].turnInX == nil
+        and store[9001].turnInY == nil,
+        "a quest handed in where it was taken records no turn-in: "
+        .. tostring(store[9001].turnInMapID) .. " "
+        .. tostring(store[9001].turnInX))
+
+    -- Put the differing pair back for the export and resolver checks below.
+    store[9001] = nil
+
+    turnInHarvest.Capture(9001, "accepted")
+
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.55, 0.31 }
+
+    turnInHarvest.Capture(9001, "turnedin")
+
+    CN_TEST_WAYPOINT_MOVED = nil
+
+    -- AND THE EXPORT CARRIES IT, or the field is recorded for nobody: the
+    -- export is how a harvested row reaches curation and Navigator Data.
+    local text = turnInHarvest.BuildExport(true)
+
+    assert(text:find("turnInMapID = 84", 1, true),
+        "the export emits the turn-in map")
+
+    assert(text:find("turnInX   = 0.55", 1, true)
+        and text:find("turnInY   = 0.31", 1, true),
+        "and the point with it")
+
+    -- AND IT IS A FIELD THE DATA LAYER ACCEPTS, so a curated row built from
+    -- this export is not silently refused.
+    for _, field in ipairs({ "turnInMapID", "turnInX", "turnInY" }) do
+        assert(CN.Static.validFields[field],
+            "the data layer accepts " .. field)
+    end
+
+    -- AND THE WAYPOINT RESOLVER PREFERS IT, which is what the field is for.
+    local added = CN.Static.RegisterQuest(770001, {
+        name        = "Handed In Elsewhere",
+        mapID       = 84,
+        x           = 0.20,
+        y           = 0.80,
+        turnInMapID = 84,
+        turnInX     = 0.55,
+        turnInY     = 0.31,
+    }, "harness")
+
+    assert(added ~= false, "the curated row registers")
+
+    local map, x, y = CN.Static.GetQuestTurnIn(770001)
+
+    assert(map == 84 and x == 0.55 and y == 0.31,
+        "and the data layer reads the turn-in back")
+
+    CN.Static.UnregisterOrigin("harness")
+
+    -- AND THE RESOLVER FALLS BACK TO WHAT THIS ACCOUNT WATCHED, when nothing
+    -- curated exists and the client will not answer -- which is every quest
+    -- but two, since `Data/Quests.lua` holds one curated row and Navigator
+    -- Data ships two.
+    local quests = CN:GetModule("Quests")
+
+    local realReady = CN.Blizzard.IsQuestReadyForTurnIn
+    local realPoint = CN.Blizzard.GetQuestWaypoint
+
+    CN.Blizzard.IsQuestReadyForTurnIn = function(id) return id == 9001 end
+    CN.Blizzard.GetQuestWaypoint      = function() return nil, nil, nil end
+
+    local seenMap, px, py, source = quests.GetLocation(9001)
+
+    CN.Blizzard.IsQuestReadyForTurnIn = realReady
+    CN.Blizzard.GetQuestWaypoint      = realPoint
+
+    assert(seenMap == 84 and px == 0.55 and py == 0.31,
+        "a client that will not answer falls back to what was watched: "
+        .. tostring(seenMap) .. " " .. tostring(px) .. " " .. tostring(py))
+
+    assert(source == "harvested turn-in",
+        "and says the answer is an observation: " .. tostring(source))
+
+    print("  a quest handed in elsewhere records where")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

@@ -413,10 +413,16 @@ function Achievements.Scan()
 end
 
 -- Whether THIS character has ever read its own criteria progress.
+-- RETURNS THE STAMP, WHICH IS STILL AN ANSWER TO "HAS IT". 1.0.0.
+--
+-- The marker on disk has always been `time()`, and this threw it away to
+-- return a boolean -- so `Setup.StampFor` had a per-character "yes" and no
+-- per-character "when", and the Sources tab fell back to the account-wide
+-- time. Every caller tests truthiness, and a timestamp is truthy.
 function Achievements.HasScanned(characterKey)
     characterKey = characterKey or CN.characterKey or CN.GetCharacterKey()
 
-    return CN.Account("achievementScans")[characterKey] ~= nil
+    return CN.Account("achievementScans")[characterKey]
 end
 
 ------------------------------------------------------------

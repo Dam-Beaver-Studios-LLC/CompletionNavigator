@@ -20,11 +20,28 @@ local Blizzard = CN.Blizzard
 -- PROFESSIONS AND RECIPES
 ------------------------------------------------------------
 
+-- Returns `lines, answered`.
+--
+-- WHETHER THE CLIENT ANSWERED IS NOT THE SAME QUESTION AS HOW MANY IT NAMED.
+-- 1.0.0.
+--
+-- Every other scan in this addon can tell a refusal from an empty result by
+-- the count alone, because the count is the LENGTH OF THE CLIENT'S OWN LIST:
+-- the toy box holds every toy that exists, the mount journal every mount, the
+-- title list every title. Zero means the list did not stream.
+--
+-- Professions are the exception. `GetProfessions` names what THIS CHARACTER
+-- has learned, so zero is the ordinary state of a character who has learned
+-- none -- which is every character for its first hours -- and there is no
+-- count that separates that from a refusal. The separation has to be reported
+-- rather than inferred, and the only genuine refusal here is the API being
+-- absent, because `GetProfessions` reads skill lines that are present from
+-- `PLAYER_LOGIN` and does not stream the way a journal does.
 function Blizzard.GetProfessionSkillLines()
     local lines = {}
 
     if not GetProfessions then
-        return lines
+        return lines, false
     end
 
     -- Same nil-hole problem as above: index the five slots explicitly
@@ -48,7 +65,7 @@ function Blizzard.GetProfessionSkillLines()
         end
     end
 
-    return lines
+    return lines, true
 end
 
 -- Recipe enumeration only works while a trade skill window is open. This

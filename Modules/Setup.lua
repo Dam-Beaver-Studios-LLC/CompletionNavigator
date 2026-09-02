@@ -78,12 +78,27 @@ Setup.steps = {
     -- the step in front of it and none of them listed the remainder -- which
     -- is backlog rule 142, committed five more times in the same table.
     { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan",     unit = "titles", measured = true, measuredAt = 1, retry = "titlescan" },
-    -- Same shape: `Professions.Scan` returns `#lines`, and the client answers
-    -- with an empty list until the skill lines have streamed. A character
-    -- with no professions at all is real, so this one is not a hard failure
-    -- -- but it is not evidence of a completed read either, and the retry
-    -- costs the player one command.
-    { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines", measured = true, measuredAt = 1, retry = "profscan" },
+    -- NOT THE SAME SHAPE, AND MEASURING IT LIKE THE OTHERS BROKE SETUP FOR
+    -- EVERY NEW CHARACTER. 1.0.0.
+    --
+    -- 0.99.0 gave this step `measuredAt = 1` -- the number of profession
+    -- lines -- with a note saying "a character with no professions at all is
+    -- real, so this one is not a hard failure". It was a hard failure. A
+    -- measured zero returns not-ready, and `Setup.Run` refuses to stamp
+    -- `completedAt` while ANY step is not ready, so a character who had
+    -- learned no professions could never finish setup: the login reminder
+    -- fired for ever, `/cn setup check` answered "Not scanned yet" for ever,
+    -- and the report told the player to run `/cn profscan`, which changes
+    -- nothing. That is every character for its first hours, which is when
+    -- this command is run.
+    --
+    -- The rule the other eight steps rely on is that the count they return is
+    -- the length of the CLIENT'S list -- every toy that exists, every mount,
+    -- every title -- so zero can only be a refusal. Professions count what
+    -- this character has LEARNED, so zero is a person. The refusal is
+    -- reported instead of inferred: `Professions.Scan` returns
+    -- `#lines, answered`, and the second return is what is measured here.
+    { key = "professions", label = "Professions", module = "Professions", fn = "Scan",     unit = "profession lines", measured = true, retry = "profscan" },
     -- Same shape: `Exploration.Scan` now returns zero when the criteria API
     -- refused every row, which is the state it wrote zeroes over until
     -- 0.97.0.
@@ -171,7 +186,17 @@ function Setup.RunStep(step)
         measured = fourth
     end
 
-    if step.measured and measured == 0 then
+    -- A REFUSAL IS ZERO, `false` OR ABSENT. 1.0.0.
+    --
+    -- This tested `measured == 0` only, and `false == 0` and `nil == 0` are
+    -- both false in Lua -- so a step whose designated return is a BOOLEAN
+    -- "did the client answer", which `professions` became this release,
+    -- would have reported a refusal as a success. The same hole covered a
+    -- step whose designated return simply is not there: `measuredAt = 4` on a
+    -- scan that took an early exit returns three values, and the fourth reads
+    -- `nil`, which slipped straight through the one comparison this guard had.
+    if step.measured
+        and (measured == 0 or measured == false or measured == nil) then
         return nil, "the game was not ready yet"
     end
 
@@ -497,6 +522,64 @@ end
 
 Setup.StepDoneHere = StepDoneHere
 
+-- WHEN THIS CHARACTER LAST READ IT, OR NIL. 1.0.0.
+--
+-- `StepDoneHere` answers the yes/no half of this question and 0.76.0 wrote it
+-- for the login reminder. The Sources tab asks the other half -- "when was
+-- this last read" -- and reached straight into the account-wide `Steps()`
+-- table for every row, which is the exact defect 0.76.0 named, one function
+-- away and four releases later. A fresh alt was shown the MAIN'S achievement
+-- and Loremaster timestamps, so the tab whose header is "Where every number
+-- in this addon comes from" reported two sources as read today that this
+-- character had never read at all -- and `UI.RefreshStaleSources`, which
+-- skips anything read within a day, could not run them.
+--
+-- Both per-character markers store `time()`, so the stamp is the value
+-- already on disk rather than a new field.
+function Setup.StampFor(step)
+    if type(step) ~= "table" then
+        return nil
+    end
+
+    if step.perCharacter then
+        local module = CN:GetModule(step.module)
+
+        local answers = module and module[step.perCharacter]
+
+        if type(answers) == "function" then
+            local ok, at = pcall(answers)
+
+            if not ok or not at then
+                return nil
+            end
+
+            -- A marker that is merely truthy still says "this character has
+            -- read it"; the account stamp is then the closest honest time.
+            if type(at) == "number" then
+                return at
+            end
+        end
+    end
+
+    return Steps()[string.lower(tostring(step.key))]
+        or Steps()[string.lower(tostring(step.module))]
+end
+
+-- The step whose store a row on the Sources tab is drawn from, by module
+-- name. One table, so the tab and the reminder cannot drift apart again.
+function Setup.StepForModule(moduleName)
+    local wanted = string.lower(tostring(moduleName))
+
+    for _, step in ipairs(Setup.steps) do
+        if string.lower(step.module) == wanted
+            or string.lower(step.key) == wanted then
+            return step
+        end
+    end
+
+    return nil
+end
+
 function Setup.NeverScanned()
     local missing = {}
 
@@ -661,11 +744,46 @@ end)
 CN:RegisterCommand{
     name    = "setup",
     aliases = { "scanall" },
-    args    = "[check]",
+    args    = "[check|again]",
     order   = 5,
     help    = "Scan every subsystem once. Run this first.",
     handler = function(args)
-        if string.lower(CN.Trim(args or "")) == "check" then
+        local word = string.lower(CN.Trim(args or ""))
+
+        -- THE WAY BACK. 1.0.0.
+        --
+        -- `completedAt` is stamped once and read for the life of the install:
+        -- `Setup.HasRun` short-circuits on it, which silences the login
+        -- reminder and makes `/cn setup check` answer for the whole account.
+        -- Nothing in the addon could clear it. So a player whose setup
+        -- completed against a client that was still warming up -- the state
+        -- five releases of guards exist to catch, and which those guards
+        -- cannot help with once the stamp is down -- had no way to ask for
+        -- the prompt back, and no way to make `check` tell the truth again.
+        --
+        -- It forgets the stamps, not the data: every scan is idempotent and
+        -- rewrites its own store, so the worst this costs is the few seconds
+        -- the scans take.
+        if word == "again" or word == "reset" then
+            local record = CN.Account("setup")
+
+            record.completedAt = nil
+            record.steps       = {}
+
+            CN.Account("achievementScans")[CN.characterKey
+                or CN.GetCharacterKey()] = nil
+
+            CN.Account("loremasterScans")[CN.characterKey
+                or CN.GetCharacterKey()] = nil
+
+            Print("Forgot what setup had recorded. Running it again.")
+
+            Setup.Run()
+
+            return
+        end
+
+        if word == "check" then
             -- Report without scanning. "What can you not see?" is a
             -- different question from "go and look again", and answering the
             -- first by doing the second is why people stop asking.

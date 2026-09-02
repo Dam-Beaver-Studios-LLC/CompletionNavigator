@@ -7,6 +7,88 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.0.0]
+
+0.99.0 went looking for what a new player hits in their first hour and fixed
+five steps of `/cn setup` that reported a refusal as a success. This release
+audited that fix and found it had broken the same command a different way, for
+a different player â€” which is the shape this project has now found in every
+release for thirty in a row: **the worst defect in a release lives in the
+previous release's own changes.**
+
+**A character who had learned no professions could never finish setup.**
+0.99.0 gave the professions step the same "a zero means the client refused"
+rule as the eight steps beside it. That rule holds for those eight because
+their count is the length of the *client's* list â€” every toy that exists,
+every mount, every title â€” so zero can only be a refusal. Professions count
+what *this character has learned*, so zero is an ordinary person: every
+character, for its first hours, which is exactly when this command is run. A
+step that reports "not ready" blocks the whole run from being recorded, so the
+login reminder fired for ever, `/cn setup check` answered "Not scanned yet"
+for ever, and the report told the player to run `/cn profscan`, which changed
+nothing. The addon contradicted itself while it happened: the module marked
+itself scanned on the same run the report called it not ready. The refusal is
+now reported by the layer that knows rather than inferred from a count.
+
+**"Refresh what is stale" counted every scan that did not crash.** A cold
+client refuses without crashing â€” that is the whole point of the guards the
+last five releases added â€” so the button answered "Read 12 stale sources" over
+twelve sources that were exactly as stale as before, and could never reach
+"Nothing is stale", which is the other half of its own sentence. It counts
+what actually moved now, and has a third answer for the case where nothing
+did. This is the defect 0.99.0 removed from the "Scan everything" button, one
+screen away in the same file, in the release whose note on that fix reads *the
+fix landed at one call site and not at its sibling in the same file*.
+
+**A fresh alt was shown its main's timestamps.** Two of the twelve sources are
+read per character, and the Sources tab dated all twelve from the account-wide
+stamp â€” so the tab whose header is "Where every number in this addon comes
+from" reported two sources as read today that this character had never read,
+and the stale refresh could not run either of them because both looked fresh.
+
+### Added
+
+- **The addon records where a quest was handed in.** `turnInMapID` has been a
+  documented field since the three-phase quest model was designed â€” *a quest
+  is a pick up, a do, and a turn in* â€” with a reader, a schema and a curated
+  data pipeline behind it, and nothing in the addon had ever written one. The
+  backlog carries it as *Later* on the grounds that an independent table was
+  needed. What was needed was one line in the `QUEST_TURNED_IN` handler, which
+  already ran three lines from the capture that was discarding it. Recorded
+  only where the hand-in differs from the pick-up, exported for curation, and
+  used as the walking target for a quest that is ready to turn in when the
+  client will not answer â€” labelled as an observation, because that is what it
+  is.
+- **`/cn setup again`** forgets what setup recorded and runs it once more. The
+  "you are done" flag was written once and read for the life of the install
+  with nothing able to clear it, so a setup that completed against a warming-up
+  client could never be redone.
+
+### Changed
+
+- `/cn profscan` says which zero it means. "Found 0 professions" was true of a
+  character who has learned none and of a client with no profession API, and
+  the next move differs.
+- The "Scan everything" button counts a profession scan that answered for a
+  character with none, rather than reporting the whole press as a refusal.
+- Refreshing stale sources reads the source list once instead of three times.
+
+### How defects were found
+
+- **A count is only a refusal signal when it is the client's own list
+  length.** Nine steps were given one rule; one of them counts something else.
+  The suite now runs `/cn setup` on a character with no professions â€” a state
+  the test client had never been in, because its stub has answered with two
+  professions since the first release.
+- **The item cache is empty until it is not.** Eleven call sites take an item
+  name from the client and the rule they rely on â€” *unknown names are skipped
+  rather than guessed* â€” had never been exercised. Nothing was found wrong;
+  the state is now reachable.
+- **The waypoint moves to the hand-in once a quest is ready.** The stub
+  answered with one fixed point for the life of a quest, so the only state in
+  which a turn-in location is observable had never existed in the suite â€” and
+  the addon's failure to record one was invisible with it.
+
 ## [0.99.0]
 
 The last release before 1.0, so this one went looking for what a new player

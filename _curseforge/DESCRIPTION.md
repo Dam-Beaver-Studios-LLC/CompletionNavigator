@@ -368,6 +368,8 @@ Nothing is uploaded. The addon *cannot* upload; addons have no network access at
 
 **And you can ask which of its claims have never been checked.** `/cn provenance` lists every prerequisite the addon believes on evidence rather than on somebody having read it â€” learned from your own play, contributed by another player, or imported by hand â€” with how many characters or contributions stand behind each. `/cn why` has always named the source of an answer; this is the opposite question, and it is where checking one starts.
 
+**It also records where a quest was handed in.** A quest is a pick up, a do and a turn in, and the client's own waypoint moves with the work â€” so once a quest is ready to hand back, the addon walks you to where *this account* watched that quest be turned in, when the client will not say. It is labelled as an observation rather than as a checked fact, and it goes into `/cn contribute` with everything else.
+
 **And another addon can supply that data.** [Navigator Data](https://www.curseforge.com/wow/addons/navigator-data) is a companion that contributes hand-checked quest chains, turn-in spots and gating â€” no window, no commands, no settings; it hands over a table and stops. It is entirely optional, and everything here works without it.
 
 What matters is that installing it does not blur the line this addon draws. Rows from a supplier are counted separately from rows checked by this addon, `/cn providers` names who supplied what, and `/cn selftest` reports it. Two sources claiming the same quest is recorded and named rather than resolved quietly in favour of whoever loaded last. "Checked by hand" is a claim about *who* did the checking, and it survives having more than one answer.
@@ -432,6 +434,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn locale` | Which language the addon is using, and how much is translated |
 | `/cn dbsize` | How much the addon is storing, and where |
 | `/cn setup check` | What it still cannot see, without rescanning |
+| `/cn setup again` | Forget what setup recorded and read everything once more |
 | `/cn progress` | Quests completed: lifetime, today, this session |
 | `/cn loremaster` | Zone, continent and expansion completion |
 | `/cn available` | Quests offered here that you have not taken |

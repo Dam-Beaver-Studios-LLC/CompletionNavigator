@@ -178,6 +178,43 @@ function Harvest.Capture(questID, reason)
         set("y", math.floor(y * 10000 + 0.5) / 10000)
     end
 
+    -- WHERE IT WAS HANDED IN, AT THE ONE MOMENT THE CLIENT KNOWS. 1.0.0.
+    --
+    -- `turnInMapID/X/Y` has been a documented field in `Data/Quests.lua`
+    -- since the three-phase quest model, `Static.GetQuestTurnIn` reads it,
+    -- and `Quests.WaypointFor` prefers it over the client's own moving
+    -- waypoint -- and NOTHING IN THE ADDON HAS EVER WRITTEN ONE. The backlog
+    -- carries it as item 7, "Turn-in NPC database", filed under *Later*
+    -- because "an independent table would make the three-phase quest model
+    -- stable". The table did not need to be independent. It needed this line.
+    --
+    -- `QUEST_TURNED_IN` already routes here, three lines from the capture
+    -- that discarded it: `set` writes a field only while it is nil, so the
+    -- waypoint read at turn-in time -- which IS the turn-in NPC, because the
+    -- client points at the hand-in once the quest is ready -- lost every race
+    -- with the accept-time capture of the same quest and was thrown away.
+    --
+    -- Recorded only on the turn-in pass, and only when it differs from where
+    -- the quest was picked up: a row saying "handed in where you got it" is
+    -- the ordinary case and costs three numbers per quest on a store capped
+    -- at two thousand.
+    if reason == "turnedin" and mapID and x and y then
+        local turnX = math.floor(x * 10000 + 0.5) / 10000
+        local turnY = math.floor(y * 10000 + 0.5) / 10000
+
+        local elsewhere = record.mapID ~= mapID
+            or record.x ~= turnX
+            or record.y ~= turnY
+
+        if elsewhere and record.turnInMapID == nil then
+            record.turnInMapID = mapID
+            record.turnInX     = turnX
+            record.turnInY     = turnY
+
+            changed = true
+        end
+    end
+
     -- ZONE IS NOT STORED. It is `GetMapName(record.mapID)`, which the client
     -- answers for free and forever -- the same duplication migrations 4 and 5
     -- removed from items, achievements and pets. The coordinates genuinely
@@ -245,6 +282,32 @@ function Harvest.Capture(questID, reason)
     end
 
     return changed
+end
+
+-- Where this account watched a quest be handed in, or nil.
+--
+-- An OBSERVATION, NOT A CURATED FACT, and the distinction is why this is a
+-- separate accessor from `Static.GetQuestTurnIn` rather than a fallback
+-- folded into it. Curated rows are checked by a person; this is a coordinate
+-- the client gave at the moment the quest was turned in on this account. It
+-- is good enough to walk to and not good enough to ship, which is exactly the
+-- line `/cn provenance` draws.
+function Harvest.TurnInFor(questID)
+    questID = CN.ToID(questID)
+
+    if not questID then
+        return nil
+    end
+
+    local record = Store()[questID]
+
+    if not record or not record.turnInMapID
+        or not record.turnInX or not record.turnInY then
+
+        return nil
+    end
+
+    return record.turnInMapID, record.turnInX, record.turnInY
 end
 
 ------------------------------------------------------------
@@ -559,6 +622,20 @@ function Harvest.BuildExport(onlyLocated)
         if record.x and record.y then
             table.insert(lines, "        x         = " .. record.x .. ",")
             table.insert(lines, "        y         = " .. record.y .. ",")
+        end
+
+        -- AND WHERE IT WAS HANDED IN, WHEN THAT IS SOMEWHERE ELSE. 1.0.0.
+        --
+        -- Emitted as fact rather than as a comment, unlike `observedRequires`
+        -- below, because the two are different kinds of claim. A prerequisite
+        -- is an inference from the ORDER things happened in and can be a
+        -- coincidence; a turn-in location is a coordinate the client gave for
+        -- this quest at the moment it was handed in. There is nothing for a
+        -- curator to confirm by reading quest text.
+        if record.turnInMapID and record.turnInX and record.turnInY then
+            table.insert(lines, "        turnInMapID = " .. record.turnInMapID .. ",")
+            table.insert(lines, "        turnInX   = " .. record.turnInX .. ",")
+            table.insert(lines, "        turnInY   = " .. record.turnInY .. ",")
         end
 
         if record.requiresLevel then

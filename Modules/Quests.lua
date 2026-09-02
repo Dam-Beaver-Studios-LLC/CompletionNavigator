@@ -1680,6 +1680,34 @@ function Quests.GetLocation(questID)
         return override.mapID, override.x, override.y, override.source or "manual"
     end
 
+    -- THIS ACCOUNT'S OWN OBSERVATION, WHEN NOTHING ABOVE ANSWERED. 1.0.0.
+    --
+    -- The curated branch at the top of this function is the right answer and
+    -- there are two curated rows in existence, so for every other quest the
+    -- three-phase model still rests on the client -- which is fine until the
+    -- client refuses, which it does for a quest whose giver is on a map it is
+    -- not currently describing. `Harvest` began recording where a quest was
+    -- handed in in 1.0.0, so this account usually has the answer for anything
+    -- it has done before on another character.
+    --
+    -- Below the override deliberately: an override is the player saying where
+    -- something is, and nothing the addon watched outranks that. Above the
+    -- curated PICK-UP location, because a quest that is ready to hand in is
+    -- not asking where it was taken from.
+    if Blizzard.IsQuestReadyForTurnIn
+        and Blizzard.IsQuestReadyForTurnIn(questID) then
+
+        local harvest = CN:GetModule("Harvest")
+
+        if harvest and harvest.TurnInFor then
+            local seenMap, seenX, seenY = harvest.TurnInFor(questID)
+
+            if seenMap and seenX and seenY then
+                return seenMap, seenX, seenY, "harvested turn-in"
+            end
+        end
+    end
+
     local staticMap, staticX, staticY = CN.Static.GetQuestLocation(questID)
 
     if staticMap and staticX and staticY then
