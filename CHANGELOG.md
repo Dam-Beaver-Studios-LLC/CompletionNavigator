@@ -7,6 +7,48 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.4.0]
+
+The question 1.2.0 and 1.3.0 kept asking â€” *who sends the request?* â€” has now
+found four systems. This release found the last two, and one of them is the
+most time-critical thing the addon tracks.
+
+**Expiring mail was invisible.** `GetInboxNumItems()` answers zero until the
+client has been handed the inbox, and `CheckInbox()` is what asks the server
+for it. `/cn waiting` carried a sentence explaining this to the player â€” *"No
+mail, or the mailbox has not been opened this session â€” the client only hands
+the addon the inbox once you have looked at it"* â€” so the limitation was
+understood and apologised for rather than removed. An addon does not need the
+player to walk to a mailbox. The candidate provider had no such sentence and
+simply emitted nothing, which means mail whose attachments are about to be
+destroyed was silently absent for the whole session. The addon asks now, and
+"the answer has not come back yet" is its own line rather than being reported
+as "no mail".
+
+**And an item name the client had not cached was never asked for.** 1.1.0
+taught two providers to listen for `GET_ITEM_INFO_RECEIVED`, because a row
+named "Start: item 71715" never became a name. That was half of it: the event
+answers a request, and the branch this addon *prefers* does not make one.
+`C_Item.GetItemNameByID` reads the cache and returns nil; `GetItemInfo` is the
+call that queues an asynchronous load as a side effect, and it is the
+fallback. So on any modern client the addon took the path that never asks and
+then waited for an answer that could not come â€” a defect created by the fix
+for its own symptom, and invisible on a client old enough to take the other
+branch.
+
+### How defects were found
+
+- **Four systems now, from one question.** The lockout list (1.2.0), the
+  keystone (1.3.0), the inbox and the item cache. Each had a reader, a
+  display, and for three of them the event already subscribed.
+- **The test client answered an inbox it had never been asked for**, from the
+  first release. Twenty-second entry in this project's list of defects hidden
+  by a stub that skips a precondition the client enforces.
+- **`GetItemInfo` did not exist in the test client at all**, so the fallback
+  branch of a function eleven call sites depend on had never once been
+  executed â€” a branch that could only be reasoned about, in a file whose
+  header exists to make client behaviour testable.
+
 ## [1.3.0]
 
 1.2.0 found a system the addon was listening to and never asking. This release

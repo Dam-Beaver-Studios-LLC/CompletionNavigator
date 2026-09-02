@@ -1315,7 +1315,39 @@ if CN_BENCH then
     end
 end
 
+-- THE INBOX IS EMPTY UNTIL IT IS ASKED FOR.
+-- CN_TEST_INBOX_UNREQUESTED, 1.4.0.
+--
+-- `GetInboxNumItems()` answers zero until the client has been handed the
+-- inbox, and `CheckInbox()` is what asks the server for it. This stub answered
+-- from the fixture from the first release, so the state every player is in at
+-- login had never existed here -- and the addon's own `/cn waiting` carried a
+-- sentence apologising for the limitation instead of removing it.
+--
+-- Twenty-second entry in this project's list of defects hidden by a stub that
+-- skips a precondition the client enforces, and the fourth system in three
+-- releases where the missing piece was a REQUEST rather than a read.
+CN_TEST_INBOX_UNREQUESTED = false
+CN_TEST_INBOX_REQUESTS    = 0
+
+function CheckInbox()
+    CN_TEST_INBOX_REQUESTS = CN_TEST_INBOX_REQUESTS + 1
+
+    -- The server answering. In the client this is asynchronous and arrives as
+    -- MAIL_INBOX_UPDATE; fired here so the addon's own flag moves the way it
+    -- would in game rather than only when a count happens to be non-zero.
+    CN_TEST_INBOX_UNREQUESTED = false
+
+    if CN and CN.FireEvent then
+        CN.FireEvent("MAIL_INBOX_UPDATE")
+    end
+end
+
 function GetInboxNumItems()
+    if CN_TEST_INBOX_UNREQUESTED then
+        return 0
+    end
+
     return #CN_TEST_MAIL
 end
 
@@ -2905,33 +2937,38 @@ C_TransmogCollection.PlayerHasTransmogByItemInfo = function(itemID)
     return false
 end
 
+-- THE CLIENT'S ITEM NAMES, SHARED BY BOTH ACCESSORS. 1.4.0.
+--
+-- A global rather than an upvalue: this chunk is at Lua's 200-local ceiling,
+-- and the flat `GetItemInfo` fallback below has to read the same table while
+-- a fixture has removed `C_Item` to model an old client.
+CN_TEST_ITEM_NAMES = {
+    [500] = "Test Toy",
+    [501] = "Missing Toy",
+
+    -- THE QUEST STARTER IN THE BAG FIXTURE. 1.1.0.
+    --
+    -- It had no name in this table, so the row the Inventory provider
+    -- builds from it read "Start: item 60001" in every test that has
+    -- ever run -- and every one of them passed, because none asserted
+    -- what the row was CALLED. The check that a cold item cache still
+    -- names everything could not tell a cold cache from a warm one.
+    [60001] = "Sealed Test Orders",
+    [700] = "Flask of Testing",
+    [800] = "Reins of the Horde Wolf",
+    [801] = "Wild Critter Cage",
+    [900] = "Tabard of Testing",
+
+    -- TWO ID SPACES, TWO NUMBERS. 0.81.0. The vendor-recipe fixture
+    -- used to sell item 880001 and register recipe NAME 880001, so
+    -- the only row it could ever produce was the collision itself --
+    -- which is why the provider's id-space defect passed every test
+    -- for twenty releases.
+    [880001] = "Recipe: Flask of Assertion",
+}
+
 C_Item = {
     GetItemNameByID = function(itemID)
-        local names = {
-            [500] = "Test Toy",
-            [501] = "Missing Toy",
-
-            -- THE QUEST STARTER IN THE BAG FIXTURE. 1.1.0.
-            --
-            -- It had no name in this table, so the row the Inventory provider
-            -- builds from it read "Start: item 60001" in every test that has
-            -- ever run -- and every one of them passed, because none asserted
-            -- what the row was CALLED. The check that a cold item cache still
-            -- names everything could not tell a cold cache from a warm one.
-            [60001] = "Sealed Test Orders",
-            [700] = "Flask of Testing",
-            [800] = "Reins of the Horde Wolf",
-            [801] = "Wild Critter Cage",
-            [900] = "Tabard of Testing",
-
-            -- TWO ID SPACES, TWO NUMBERS. 0.81.0. The vendor-recipe fixture
-            -- used to sell item 880001 and register recipe NAME 880001, so
-            -- the only row it could ever produce was the collision itself --
-            -- which is why the provider's id-space defect passed every test
-            -- for twenty releases.
-            [880001] = "Recipe: Flask of Assertion",
-        }
-
         -- THE CLIENT'S ITEM CACHE IS EMPTY UNTIL IT IS NOT.
         -- CN_TEST_ITEM_CACHE_COLD, 1.0.0.
         --
@@ -2944,9 +2981,54 @@ C_Item = {
             return nil
         end
 
-        return names[itemID]
+        return CN_TEST_ITEM_NAMES[itemID]
+    end,
+
+    -- THE CALL THAT ASKS. CN_TEST_ITEM_LOADS, 1.4.0.
+    --
+    -- `GetItemNameByID` READS the cache; it does not queue a load. 1.1.0
+    -- taught two providers to listen for `GET_ITEM_INFO_RECEIVED` and nothing
+    -- in the addon sent the request that produces one, because the only call
+    -- that asks implicitly -- `GetItemInfo` -- is the fallback branch. This
+    -- stub had no `RequestLoadItemDataByID` at all, so the missing request
+    -- was unobservable: the suite could not tell a client that had been asked
+    -- from one that had not.
+    RequestLoadItemDataByID = function(itemID)
+        CN_TEST_ITEM_LOADS = (CN_TEST_ITEM_LOADS or 0) + 1
+
+        CN_TEST_LAST_ITEM_LOAD = itemID
     end,
 }
+
+-- THE FLAT FALLBACK, WHICH NOTHING HAD EVER RUN. 1.4.0.
+--
+-- `Blizzard.GetItemName` prefers `C_Item.GetItemNameByID` and falls back to
+-- the global `GetItemInfo`, and there was no `GetItemInfo` in this file at
+-- all -- so the fallback branch of a function eleven call sites depend on had
+-- never once been executed. It is in the addon's published API surface and in
+-- its `.luacheckrc`, and it was a branch that could only be reasoned about.
+--
+-- The client's own `GetItemInfo` queues an asynchronous load as a side effect
+-- when the item is not cached, which is why that branch does not need the
+-- explicit request the modern one does; modelled here so the distinction is
+-- real rather than asserted in a comment.
+function GetItemInfo(itemID)
+    -- Reads the shared name table rather than `C_Item`, because a fixture
+    -- that models an old client removes `C_Item` entirely -- which is the one
+    -- state this branch exists for.
+    local name = (not CN_TEST_ITEM_CACHE_COLD)
+        and CN_TEST_ITEM_NAMES[itemID] or nil
+
+    if not name then
+        CN_TEST_ITEM_LOADS = (CN_TEST_ITEM_LOADS or 0) + 1
+
+        CN_TEST_LAST_ITEM_LOAD = itemID
+
+        return nil
+    end
+
+    return name
+end
 
 -- The modern tooltip pipeline.
 Enum.TooltipDataType = { Item = 0, Unit = 2 }
@@ -42527,6 +42609,161 @@ end)()
         "and it is gathered, because up to forty arrive at once")
 
     print("  a quest title arriving is recorded, not announced")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE INBOX IS ASKED FOR, NOT WAITED FOR.
+    --
+    -- `GetInboxNumItems()` answers zero until the client has been handed the
+    -- inbox, and `CheckInbox()` asks the server for it. `/cn waiting` carried
+    -- a sentence apologising for the limitation -- "the client only hands the
+    -- addon the inbox once you have looked at it" -- so it was understood and
+    -- worked around in prose rather than removed. The candidate provider had
+    -- no such sentence and simply emitted nothing, which means the most
+    -- time-critical thing this addon tracks, mail whose attachments are about
+    -- to be destroyed, was silently absent for the whole session.
+    --
+    -- Fourth instance of the request-shaped defect in three releases, and the
+    -- second in `Modules/Waiting.lua` alone.
+    ------------------------------------------------------------
+    local waiting = CN:GetModule("Waiting")
+
+    assert(waiting, "the waiting module is loaded")
+
+    CN_TEST_INBOX_UNREQUESTED = true
+    CN_TEST_INBOX_REQUESTS    = 0
+
+    waiting.inboxAnswered = false
+
+    CN.Blizzard.ForgetMailRequest()
+
+    local mail, readable, answered = waiting.Mail()
+
+    assert(CN_TEST_INBOX_REQUESTS >= 1,
+        "reading the mailbox asks the server for it: "
+        .. CN_TEST_INBOX_REQUESTS)
+
+    assert(readable, "and the client can be read at all")
+
+    assert(answered, "and the answer arrived")
+
+    assert(#mail > 0,
+        "the inbox arrives once it has been asked for: " .. #mail)
+
+    -- AND ONCE PER SEGMENT, because `CheckInbox` is a server round trip and
+    -- every read of the mailbox goes through the function that sends it.
+    local sentSoFar = CN_TEST_INBOX_REQUESTS
+
+    for _ = 1, 30 do
+        waiting.Mail()
+    end
+
+    assert(CN_TEST_INBOX_REQUESTS == sentSoFar,
+        "thirty reads do not send thirty requests: "
+        .. CN_TEST_INBOX_REQUESTS)
+
+    -- AND A LOADING SCREEN ASKS AGAIN: mail arrives while you play and
+    -- expires on a clock, so an answer from before a loading screen is not an
+    -- answer after it.
+    CN_TEST_INBOX_REQUESTS = 0
+
+    CN.FireEvent("PLAYER_ENTERING_WORLD")
+
+    assert(CN_TEST_INBOX_REQUESTS >= 1,
+        "entering the world asks for the mailbox again: "
+        .. CN_TEST_INBOX_REQUESTS)
+
+    -- AND "NOT ANSWERED YET" IS NOT "NO MAIL".
+    --
+    -- Both read as zero from the client, and this reported both as "the
+    -- client answered, there is nothing there" -- a guard whose empty branch
+    -- is also its failure branch, which is backlog rule 169.
+    CN_TEST_INBOX_UNREQUESTED = true
+
+    waiting.inboxAnswered = false
+
+    local held = CheckInbox
+
+    CheckInbox = function() end
+
+    local none, canRead, gotAnswer = waiting.Mail()
+
+    CheckInbox = held
+
+    assert(canRead and #none == 0,
+        "an unanswered request reads as an empty inbox from the client")
+
+    assert(gotAnswer == false,
+        "and the addon says it has not been answered rather than that there "
+        .. "is no mail")
+
+    CN_TEST_INBOX_UNREQUESTED = false
+
+    waiting.inboxAnswered = true
+
+    print("  the inbox is asked for, once, and an unanswered ask is not "
+        .. "an empty mailbox")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- AN ITEM NAME THE CLIENT HAS NOT CACHED IS ASKED FOR.
+    --
+    -- 1.1.0 taught two providers to listen for `GET_ITEM_INFO_RECEIVED`,
+    -- because a row named "Start: item 71715" never became a name. That was
+    -- half of it: the event answers a request, and the branch this addon
+    -- PREFERS does not make one. `C_Item.GetItemNameByID` reads the cache;
+    -- `GetItemInfo` is the call that queues a load, and it is the fallback --
+    -- so on any modern client the addon took the path that never asks and
+    -- then waited for an answer that could not come.
+    --
+    -- The release that wrote backlog rule 168's ancestor committed the defect
+    -- the rule describes: it asked who handles the event and not who sends
+    -- the request.
+    ------------------------------------------------------------
+    CN_TEST_ITEM_LOADS     = 0
+    CN_TEST_LAST_ITEM_LOAD = nil
+
+    -- A name the client HAS, which must not send a request.
+    local known = CN.Blizzard.GetItemName(500)
+
+    assert(known == "Test Toy", "a cached name is answered from the cache: "
+        .. tostring(known))
+
+    assert(CN_TEST_ITEM_LOADS == 0,
+        "and asks the server for nothing: " .. CN_TEST_ITEM_LOADS)
+
+    -- A name the client does not have.
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    local missing = CN.Blizzard.GetItemName(60001)
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    assert(missing == nil, "an uncached name is nil, not a guess")
+
+    assert(CN_TEST_ITEM_LOADS == 1,
+        "and the client is asked to load it: " .. CN_TEST_ITEM_LOADS)
+
+    assert(CN_TEST_LAST_ITEM_LOAD == 60001,
+        "for the item that was wanted: " .. tostring(CN_TEST_LAST_ITEM_LOAD))
+
+    -- AND THE OLD PATH STILL WORKS, because a client without
+    -- `GetItemNameByID` gets its load from `GetItemInfo` as a side effect and
+    -- must not be made to ask twice.
+    local heldItem = C_Item
+
+    C_Item = nil
+
+    local viaFlat = CN.Blizzard.GetItemName(500)
+
+    C_Item = heldItem
+
+    assert(viaFlat ~= nil,
+        "a client with only the flat API still answers: " .. tostring(viaFlat))
+
+    print("  an item name the client has not cached is asked for")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

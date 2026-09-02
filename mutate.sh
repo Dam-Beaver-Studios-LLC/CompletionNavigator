@@ -5152,6 +5152,42 @@ mutate "Modules/Waiting.lua" \
     "    CN.Blizzard.ForgetKeystoneRequest()" \
     "a loading screen re-arms the keystone request and never sends it"
 
+mutate "Modules/Waiting.lua" \
+    "    Blizzard.RequestMail()
+
+    local ok, count = pcall(GetInboxNumItems)" \
+    "    local ok, count = pcall(GetInboxNumItems)" \
+    "the inbox is read without ever being asked for"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    if requestedMail and not force then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "every mail read is a server round trip"
+
+mutate "Modules/Waiting.lua" \
+    "        return items, true, Waiting.inboxAnswered" \
+    "        return items, true, true" \
+    "an inbox that has not answered yet reads as no mail"
+
+mutate "Modules/Waiting.lua" \
+    "    CN.Blizzard.ForgetMailRequest()
+    CN.Blizzard.RequestMail()" \
+    "    CN.Blizzard.ForgetMailRequest()" \
+    "a loading screen re-arms the mail request and never sends it"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "        if C_Item.RequestLoadItemDataByID then
+            pcall(C_Item.RequestLoadItemDataByID, itemID)
+        end" \
+    "        if false then
+            pcall(C_Item.RequestLoadItemDataByID, itemID)
+        end" \
+    "an item name the client has not cached is never asked for"
+
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
     "            .. CN.Accent(\"/cn waiting\") .. \" for what is on a timer.\")" \

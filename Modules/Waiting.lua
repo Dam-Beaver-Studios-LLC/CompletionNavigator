@@ -38,18 +38,43 @@ local Blizzard   = CN.Blizzard
 -- about mail that arrived this morning.
 Waiting.mailWarningDays = 3
 
+-- Whether the client has actually handed over the inbox this session.
+--
+-- ZERO MESSAGES AND AN UNANSWERED REQUEST LOOK IDENTICAL. 1.4.0.
+--
+-- `GetInboxNumItems()` returns zero in both cases, and `Waiting.Mail` reported
+-- both as "the client answered, there is no mail" -- which is backlog rule
+-- 169: a guard whose "nothing here" branch is also its failure branch. The
+-- request is sent now, so the distinction is knowable: `MAIL_INBOX_UPDATE` is
+-- the client saying the inbox is in hand.
+Waiting.inboxAnswered = false
+
+CN:RegisterEvent("MAIL_INBOX_UPDATE", function()
+    Waiting.inboxAnswered = true
+end)
+
+-- Returns `items, readable, answered`.
 function Waiting.Mail()
     local items = {}
 
     if not GetInboxNumItems or not GetInboxHeaderInfo then
-        return items, false
+        return items, false, false
     end
+
+    -- ASKED ON THE WAY PAST, like the keystone and the lockout list. Sent
+    -- once per loading screen; see `Blizzard.RequestMail`.
+    Blizzard.RequestMail()
 
     local ok, count = pcall(GetInboxNumItems)
 
     if not ok or not count or count == 0 then
-        return items, true
+        return items, true, Waiting.inboxAnswered
     end
+
+    -- A count the client answered with is the client having answered, even if
+    -- the event has not been seen: an inbox arriving before this addon loaded
+    -- is a real state and must not read as "still waiting" for ever.
+    Waiting.inboxAnswered = true
 
     for index = 1, count do
         local gotInfo, _, _, sender, subject, money, _, daysLeft, itemCount =
@@ -71,7 +96,7 @@ function Waiting.Mail()
         return (a.daysLeft or 0) < (b.daysLeft or 0)
     end)
 
-    return items, true
+    return items, true, true
 end
 
 function Waiting.ExpiringMail()
@@ -448,14 +473,24 @@ CN:RegisterCommand{
     handler = function()
         local said = false
 
-        local mail, readable = Waiting.Mail()
+        local mail, readable, answered = Waiting.Mail()
 
+        -- THREE ANSWERS, BECAUSE THERE ARE THREE STATES. 1.4.0.
+        --
+        -- This had two, and the middle sentence was an apology for a
+        -- limitation that turned out to be optional: "No mail, or the mailbox
+        -- has not been opened this session -- the client only hands the addon
+        -- the inbox once you have looked at it." The addon asks the server
+        -- itself now, so an empty inbox is an empty inbox and can be said
+        -- plainly -- and the case where the answer has not come back yet is
+        -- its own line, which is the state the old sentence was really about.
         if not readable then
             Print("|cff8a8f96Mail cannot be read in this client.|r")
+        elseif not answered then
+            Print("|cff8a8f96Asking the server for your mailbox"
+                .. CN.ELLIPSIS .. " try again in a moment.|r")
         elseif #mail == 0 then
-            Print("|cff8a8f96No mail, or the mailbox has not been opened this "
-                .. "session" .. CN.DASH .. "the client only hands the addon the inbox once "
-                .. "you have looked at it.|r")
+            Print("|cff8a8f96No mail.|r")
         else
             local rows = {}
 
@@ -530,6 +565,12 @@ CN:RegisterCommand{
 CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
     CN.Blizzard.ForgetKeystoneRequest()
     CN.Blizzard.RequestKeystoneInfo()
+
+    -- AND THE INBOX. 1.4.0. Mail arrives while you play and expires on a
+    -- clock, so a request that was answered before a loading screen is not an
+    -- answer after it.
+    CN.Blizzard.ForgetMailRequest()
+    CN.Blizzard.RequestMail()
 end)
 
 return Waiting

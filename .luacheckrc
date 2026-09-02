@@ -62,7 +62,7 @@ read_globals = {
 
     -- Bags, mail, keystones, heirlooms and challenge modes: five systems the
     -- addon began reading in 0.44.0.
-    "C_Container", "GetInboxNumItems", "GetInboxHeaderInfo",
+    "C_Container", "GetInboxNumItems", "GetInboxHeaderInfo", "CheckInbox",
     "C_MythicPlus", "C_ChallengeMode", "C_Heirloom",
     "C_ToyBox", "PlayerHasToy",
     "C_TransmogSets", "C_LFGList", "IsInGuild", "GetGuildInfo", "GetBuildInfo",

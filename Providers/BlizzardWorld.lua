@@ -1527,13 +1527,44 @@ function Blizzard.HasTransmogByItem(itemID)
     return nil
 end
 
+-- A NAME THE CLIENT HAS NOT CACHED IS ASKED FOR. 1.4.0.
+--
+-- 1.1.0 taught two providers to listen for `GET_ITEM_INFO_RECEIVED`, because
+-- a row named "Start: item 71715" never became a name. That was half of it:
+-- the event answers a request, and the branch this function PREFERS does not
+-- make one. `C_Item.GetItemNameByID` reads the cache and returns nil when the
+-- item is not in it; `GetItemInfo` is the call that queues an asynchronous
+-- load as a side effect, and it is the fallback, so on any modern client the
+-- addon took the path that never asks and then waited for an answer that
+-- would never come.
+--
+-- Backlog rule 168, committed by the release that wrote the rule's ancestor:
+-- 1.1.0 asked "who handles this event" and did not ask "who sends the
+-- request". `C_Item.RequestLoadItemDataByID` is the explicit ask; the
+-- `GetItemInfo` fallback below already asked implicitly, which is why the
+-- defect was invisible on a client old enough to take it.
+--
+-- No latch. The client de-duplicates a load already in flight, the call is
+-- local, and a per-item latch would be a table the size of every item the
+-- addon has ever asked about -- on a store the whole file set exists to keep
+-- off disk.
 function Blizzard.GetItemName(itemID)
     if not itemID then
         return nil
     end
 
     if C_Item and C_Item.GetItemNameByID then
-        return C_Item.GetItemNameByID(itemID)
+        local name = C_Item.GetItemNameByID(itemID)
+
+        if name then
+            return name
+        end
+
+        if C_Item.RequestLoadItemDataByID then
+            pcall(C_Item.RequestLoadItemDataByID, itemID)
+        end
+
+        return nil
     end
 
     if GetItemInfo then
@@ -1644,6 +1675,47 @@ end
 
 function Blizzard.ForgetKeystoneRequest()
     requestedKeystone = false
+end
+
+-- AND THE INBOX. 1.4.0.
+--
+-- `GetInboxNumItems()` answers zero until the client has been handed the
+-- inbox, and `CheckInbox()` is what asks the server for it -- which is why
+-- `MAIL_INBOX_UPDATE`, already declared by the `Waiting` provider, exists.
+--
+-- `/cn waiting` had a sentence explaining this to the player: "No mail, or
+-- the mailbox has not been opened this session -- the client only hands the
+-- addon the inbox once you have looked at it." The limitation was understood
+-- and worked around in prose rather than removed, and `CheckInbox` is the
+-- removal: an addon does not need the player to walk to a mailbox. The
+-- candidate provider had no such sentence and simply emitted nothing, so the
+-- most time-critical thing this addon tracks -- mail whose attachments are
+-- about to be destroyed -- was silently absent for the whole session.
+--
+-- Fourth instance of backlog rule 168 in three releases, and the second in
+-- `Modules/Waiting.lua` alone.
+--
+-- Server-throttled, so the latch matters more here than for the other two:
+-- `CheckInbox` asks the server for the whole inbox and calling it per read
+-- would be a round trip inside a ranking pass.
+local requestedMail = false
+
+function Blizzard.RequestMail(force)
+    if not CheckInbox then
+        return false
+    end
+
+    if requestedMail and not force then
+        return false
+    end
+
+    requestedMail = true
+
+    return (pcall(CheckInbox))
+end
+
+function Blizzard.ForgetMailRequest()
+    requestedMail = false
 end
 
 function Blizzard.GetSavedInstances()
