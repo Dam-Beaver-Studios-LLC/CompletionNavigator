@@ -119,6 +119,38 @@ end
 
 Loremaster.Records = Records
 
+-- THE COUNTS THE SCANS TAB NEEDS. 0.99.0.
+--
+-- Every other source on that tab has a `Summary`, and the tab -- whose header
+-- is "Where every number in this addon comes from" -- lists only the modules
+-- that do. This module and `Exploration` were the two without a row, which is
+-- how the source with the LONGEST staleness half-life ended up invisible on
+-- the screen built to show staleness.
+--
+-- Same shape as `Exploration.Summary`, deliberately: they answer the same
+-- question about the same kind of achievement, and two shapes for one
+-- question is how the tab grew special cases for currencies and professions.
+function Loremaster.Summary()
+    local counts = {
+        zones    = 0,
+        complete = 0,
+        criteria = 0,
+        done     = 0,
+    }
+
+    for _, record in pairs(Records()) do
+        counts.zones    = counts.zones + 1
+        counts.criteria = counts.criteria + (record.criteria or 0)
+        counts.done     = counts.done + (Loremaster.DoneFor(record) or 0)
+
+        if record.completed then
+            counts.complete = counts.complete + 1
+        end
+    end
+
+    return counts
+end
+
 -- The achievement's name, and its category's, from the client. See the note
 -- in `Scan`. The stored fallbacks keep an older database readable until its
 -- first rescan.

@@ -2386,6 +2386,39 @@ function UI.Sources(which)
                     .. ", " .. seen .. " with recipes read"
             end,
         },
+
+        -- THE TWO SOURCES THIS TAB DID NOT LIST. 0.99.0.
+        --
+        -- `Setup.steps` has twelve steps and this had ten rows. The tab's own
+        -- description -- and the store page's -- is "one row per source, with
+        -- its count, when it was last read, and a marker on anything older
+        -- than a day", and "Refresh what is stale" iterates exactly this
+        -- list.
+        --
+        -- Exploration is the worst possible omission: `Modules/Exploration.lua`
+        -- says outright that "only a full `/cn explorescan` rewrites it, and
+        -- nothing runs one on its own", so it is the source most certain to go
+        -- stale -- and it was the one the staleness screen could not see and
+        -- the refresh button could not run. "Nothing is stale. Every source
+        -- has been read today" was answered without ever asking it.
+        {
+            label   = "Exploration",
+            module  = "Exploration",
+            command = "explorescan",
+            shape   = function(counts)
+                return (counts.done or 0) .. " / " .. (counts.criteria or 0)
+                    .. CN.Aside(CN.Count(counts.zones or 0, "zone"))
+            end,
+        },
+        {
+            label   = "Zone achievements",
+            module  = "Loremaster",
+            command = "scanlore",
+            shape   = function(counts)
+                return (counts.done or 0) .. " / " .. (counts.criteria or 0)
+                    .. CN.Aside(CN.Count(counts.zones or 0, "zone"))
+            end,
+        },
     }
 
     for _, entry in ipairs(collections) do
@@ -3791,6 +3824,26 @@ UI.RegisterTab{
 
         panel.scanAll = AddButton(panel, "Scan everything", 140, function()
             RunScans(panel.scanAll, "Scan everything", function()
+                -- `pcall` IS NOT "IT WORKED". 0.99.0.
+                --
+                -- It is true whenever the scan did not THROW, and a cold
+                -- journal returns zero without throwing. So this stamped the
+                -- setup step that the module had just deliberately refused to
+                -- stamp -- and this is the button the Collections tab's own
+                -- empty text points a new player at ("Nothing scanned yet.
+                -- Press Scan everything."), pressed at the moment the
+                -- journals are coldest. Afterwards this tab and the Scans tab
+                -- both read "just now" over empty stores.
+                --
+                -- The stamp is gone rather than conditional: every one of
+                -- these six modules calls `CN.MarkScanned` itself on a real
+                -- read, and `MarkScanned` routes to `NoteSetupStep` with the
+                -- key the setup step is looked up by. The correct stamp
+                -- already happened; this one could only ever add a wrong one.
+                --
+                -- "Scan achievements", eleven lines below, has checked the
+                -- return since 0.87.0. The fix landed at one call site and
+                -- not at its sibling in the same file.
                 local scanned = 0
 
                 for _, moduleName in ipairs({ "Pets", "Mounts", "Toys",
@@ -3799,17 +3852,21 @@ UI.RegisterTab{
                     local module = CN:GetModule(moduleName)
 
                     if module and module.Scan then
-                        if pcall(module.Scan) then
-                            scanned = scanned + 1
+                        local ok, read = pcall(module.Scan)
 
-                            if CN.NoteSetupStep then
-                                CN.NoteSetupStep(moduleName)
-                            end
+                        if ok and (read or 0) > 0 then
+                            scanned = scanned + 1
                         end
                     end
                 end
 
-                UI.Answer("Read " .. scanned .. " collections.")
+                -- AND THE SENTENCE COUNTS WHAT WAS READ, not what was tried.
+                if scanned == 0 then
+                    UI.Answer("The game would not answer about any of them "
+                        .. "just now. Try again in a few seconds.")
+                else
+                    UI.Answer("Read " .. scanned .. " collections.")
+                end
             end)
         end, "Read your pets, mounts, toys, appearances, titles and "
             .. "professions from the game. Takes a few seconds and freezes "

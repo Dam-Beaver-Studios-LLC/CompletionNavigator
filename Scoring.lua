@@ -2664,7 +2664,22 @@ function CN.ExplainEmptyList()
         table.insert(lines, "Every provider answered and none of them had "
             .. "anything to offer, which usually means you are between "
             .. "things: try a different zone, or "
-            .. CN.Accent("/cn waiting") .. " for what is on a timer.")
+            -- `/cn clock`, WHICH IS THE COMMAND ABOUT TIMERS. 0.99.0.
+            --
+            -- This said `/cn waiting`, which resolves -- as an alias of
+            -- `/cn unpicked`, "quests you have walked past and never picked
+            -- up". The comment above that alias says why it was renamed:
+            -- "'Waiting' reads as 'waiting on a timer', which is what
+            -- `/cn now` and `/cn clock` do -- and this one is not about
+            -- deadlines at all." The rename happened and this caller was
+            -- left behind.
+            --
+            -- 0.96.0's lint checks that every command the addon names EXISTS.
+            -- This one does, so the lint passed while the sentence pointed at
+            -- the wrong list -- and on a fresh account that list answers
+            -- "Nothing remembered yet", which is the worst possible reply to
+            -- "I have nothing to suggest, try this".
+            .. CN.Accent("/cn clock") .. " for what is on a timer.")
     end
 
     return lines

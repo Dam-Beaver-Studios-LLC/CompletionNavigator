@@ -2444,7 +2444,20 @@ end
 C_TransmogCollection = {
     GetCategoryInfo           = function(id) return appearanceData[id] and appearanceData[id].name or nil end,
     GetCategoryCollectedCount = function(id) return appearanceData[id] and appearanceData[id].collected or 0 end,
-    GetCategoryTotal          = function(id) return appearanceData[id] and appearanceData[id].total or 0 end,
+    -- A WARDROBE THAT HAS NOT LOADED. 0.99.0.
+    --
+    -- `GetAppearanceCategories` keeps only categories whose total is above
+    -- zero, so a client that has not sent the collection yields an empty
+    -- list -- and that was recorded as a completed scan. The literal made the
+    -- state unreachable; it is the fifth collection API to need this lever
+    -- after toys, mounts, titles and the criteria API.
+    GetCategoryTotal          = function(id)
+        if CN_TEST_WARDROBE_COLD then
+            return 0
+        end
+
+        return appearanceData[id] and appearanceData[id].total or 0
+    end,
     GetAppearanceSources      = function(id) return appearanceSources[id] end,
 }
 
@@ -2730,6 +2743,7 @@ CN_TEST_MOUNTS_COLD = false
 CN_TEST_TITLES_COLD = false
 CN_TEST_ACHIEVEMENTS_COLD = false
 CN_TEST_CALENDAR_COLD     = false
+CN_TEST_WARDROBE_COLD     = false
 CN_TEST_CRITERIA_COLD     = false
 
 
@@ -19050,10 +19064,15 @@ end)()
 
     -- The stamps are keyed on the MODULE, which is what Sources reads, so
     -- stamp those too rather than assuming the label matches.
-    for _, key in ipairs({ "quests", "reputations", "mounts", "pets", "toys",
-                           "titles", "appearances", "achievements",
-                           "currencies", "professions" }) do
-        steps[key] = time()
+    --
+    -- READ FROM SETUP'S OWN LIST, NOT FROM A COPY OF IT. 0.99.0.
+    --
+    -- This was ten hardcoded keys, which is exactly the ten rows the tab had
+    -- -- so the two sources it was MISSING were missing from the test as
+    -- well, and the assertion below could not have noticed. A fixture that
+    -- lists what the code lists cannot find something the code forgot.
+    for _, step in ipairs(setupModule.steps or {}) do
+        steps[step.key] = time()
     end
 
     assert(CN.UI.RefreshStaleSources() == 0,
@@ -41173,6 +41192,318 @@ end)()
         "and not delivered twice")
 
     print("  a complaint with nowhere to go waits rather than evaporating")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE STORE PAGE'S NUMBERS ARE THE ADDON'S NUMBERS.
+    ------------------------------------------------------------
+    -- The page said "Eighteen checks" against twenty, "the two tabs that have
+    -- no list" against one, and `/cn textsize <100-150>` against a real
+    -- ceiling of 200 -- the accessibility control, on the page where somebody
+    -- decides whether this addon can be made readable at all, quoting a limit
+    -- `Modules/Hud.lua` records correcting in the addon itself in 0.88.0.
+    --
+    -- A page is the one artefact a player reads before installing, and every
+    -- number on it is a claim. These are the ones a machine can check.
+    local page = CN_TEST_ReadAddonFile("_curseforge/DESCRIPTION.md")
+
+    assert(page, "the store description ships in the tree and is readable")
+
+    -- 1. The self-test count.
+    local words = {
+        ["Ten"] = 10, ["Eleven"] = 11, ["Twelve"] = 12, ["Thirteen"] = 13,
+        ["Fourteen"] = 14, ["Fifteen"] = 15, ["Sixteen"] = 16,
+        ["Seventeen"] = 17, ["Eighteen"] = 18, ["Nineteen"] = 19,
+        ["Twenty"] = 20, ["Twenty-one"] = 21, ["Twenty-two"] = 22,
+        ["Twenty-three"] = 23, ["Twenty-four"] = 24, ["Twenty-five"] = 25,
+    }
+
+    local claimed = page:match("([%a%-]+) checks that run against your own client")
+
+    assert(claimed, "the page says how many self-tests there are")
+
+    assert(words[claimed] == #CN.selfTests,
+        "and the number is the number: the page says " .. tostring(claimed)
+        .. " (" .. tostring(words[claimed]) .. ") and the addon registers "
+        .. #CN.selfTests)
+
+    -- 2. The text-size ceiling, which is the accessibility control.
+    local low, high = page:match("/cn textsize <(%d+)%-(%d+)>")
+
+    assert(low and high, "the page documents the text size range")
+
+    local realLow, realHigh = 100, 100
+
+    while CN.SetTextScale((realHigh + 10) / 100) do
+        realHigh = realHigh + 10
+
+        if realHigh > 400 then
+            break
+        end
+    end
+
+    CN.SetTextScale(1.0)
+
+    assert(tonumber(low) == realLow and tonumber(high) == realHigh,
+        "and its bounds are the ones the command accepts: the page says "
+        .. low .. "-" .. high .. ", the addon takes " .. realLow .. "-"
+        .. realHigh)
+
+    -- 3. Every command the page names exists. 0.96.0 checks the addon's own
+    --    output; the page is the other half, and it names fifty of them.
+    local named, missing = 0, {}
+
+    for command in page:gmatch("/cn%s+([%a]+)") do
+        named = named + 1
+
+        if not CN.commands[string.lower(command)] then
+            missing[command] = true
+        end
+    end
+
+    assert(named > 20, "the page names commands to check: " .. named)
+
+    local names = {}
+
+    for command in pairs(missing) do
+        table.insert(names, "/cn " .. command)
+    end
+
+    table.sort(names)
+
+    assert(#names == 0,
+        "every command the store page names exists; these do not: "
+        .. table.concat(names, ", "))
+
+    print("  the store page's numbers are the addon's numbers")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE EMPTY-LIST EXPLANATION POINTS AT A COMMAND ABOUT DEADLINES.
+    ------------------------------------------------------------
+    -- It said "`/cn waiting` for what is on a timer". That resolves -- as an
+    -- alias of `/cn unpicked`, "quests you have walked past and never picked
+    -- up" -- so the addon's single explanation for "I have nothing to tell
+    -- you" sent the player to the wrong list, and on a fresh account that
+    -- list answers "Nothing remembered yet".
+    --
+    -- 0.96.0's lint checks that every command the addon names EXISTS. This
+    -- one did. Existence is not meaning, and this is the assertion that
+    -- covers the difference.
+    local lines = CN.ExplainEmptyList()
+
+    local text = table.concat(lines or {}, " ")
+
+    assert(text ~= "", "the addon explains an empty list")
+
+    if text:find("on a timer", 1, true) then
+        assert(text:find("/cn clock", 1, true),
+            "what is on a timer is `/cn clock`: " .. text)
+
+        assert(not text:find("/cn waiting", 1, true),
+            "and not `/cn waiting`, which lists quests you walked past")
+    end
+
+    print("  the empty-list explanation points at a command about deadlines")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD JOURNAL DOES NOT COMPLETE SETUP.
+    ------------------------------------------------------------
+    -- Five of the twelve steps carried no `measured` flag, so `RunStep`
+    -- returned success for a scan that read nothing, `notReady` stayed zero
+    -- and `Setup.Run` stamped `completedAt`. `Setup.HasRun` short-circuits on
+    -- that stamp BEFORE it consults `NeverScanned`, so the module-side guards
+    -- 0.92.0 and 0.95.0 added were defeated by the one thing they exist to
+    -- protect -- on the first-hour path, with no command that gets the prompt
+    -- back.
+    local setupSteps = CN:GetModule("Setup")
+
+    local function StepFor(key)
+        for _, entry in ipairs(setupSteps.steps) do
+            if entry.key == key then
+                return entry
+            end
+        end
+    end
+
+    local cold = {
+        toys        = function(on) CN_TEST_TOYS_COLD     = on end,
+        mounts      = function(on) CN_TEST_MOUNTS_COLD   = on end,
+        titles      = function(on) CN_TEST_TITLES_COLD   = on end,
+        appearances = function(on) CN_TEST_WARDROBE_COLD = on end,
+    }
+
+    for key, setCold in pairs(cold) do
+        local step = StepFor(key)
+
+        assert(step, "setup runs a " .. key .. " step")
+
+        assert(step.retry and CN.commands[step.retry],
+            key .. " names a real command to try again with: "
+            .. tostring(step.retry))
+
+        setCold(true)
+
+        local ok, why = setupSteps.RunStep(step)
+
+        setCold(false)
+
+        assert(ok == nil,
+            "a cold " .. key .. " read is reported as not ready, not as a "
+            .. "success: " .. tostring(ok) .. " " .. tostring(why))
+
+        local warm = setupSteps.RunStep(step)
+
+        assert(warm == true,
+            "and a client that answers completes the step: " .. tostring(warm))
+    end
+
+    print("  a cold journal does not complete setup")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "SCAN EVERYTHING" COUNTS WHAT IT READ.
+    ------------------------------------------------------------
+    -- The button treated `pcall` returning true as "the scan worked", so a
+    -- cold journal -- which returns zero without throwing -- was stamped as a
+    -- completed setup step, undoing the modules' own refusal. This is the
+    -- button the Collections tab's empty text points a new player at, pressed
+    -- at the moment the journals are coldest.
+    local panel = nil
+
+    for _, tab in ipairs(CN.UI.tabs or {}) do
+        if tab.name == "Collections" and tab.panel and tab.panel.scanAll then
+            panel = tab.panel
+            break
+        end
+    end
+
+    assert(panel, "the Collections tab has its Scan everything button")
+
+    local steps = CN:GetModule("Setup").Steps()
+
+    for _, key in ipairs({ "toys", "mounts", "titles", "appearances" }) do
+        steps[key] = nil
+    end
+
+    CN_TEST_TOYS_COLD     = true
+    CN_TEST_MOUNTS_COLD   = true
+    CN_TEST_TITLES_COLD   = true
+    CN_TEST_WARDROBE_COLD = true
+
+    -- THROUGH THE SCRIPT, because the offline button has no `Click`: the
+    -- client's method is what a player's mouse reaches, and the harness
+    -- models the handler rather than the input stack.
+    local press = panel.scanAll:GetScript("OnClick")
+
+    assert(type(press) == "function", "the button has a click handler")
+
+    local answered = nil
+
+    local realAnswer = CN.UI.Answer
+
+    CN.UI.Answer = function(text)
+        answered = tostring(text)
+
+        return realAnswer(text)
+    end
+
+    press(panel.scanAll)
+
+    -- The button defers its work by one frame so the client can repaint the
+    -- "Working..." caption first.
+    CN_TEST_DrainDeferred()
+
+    CN_TEST_TOYS_COLD     = false
+    CN_TEST_MOUNTS_COLD   = false
+    CN_TEST_TITLES_COLD   = false
+    CN_TEST_WARDROBE_COLD = false
+
+    local stamped = {}
+
+    for _, key in ipairs({ "toys", "mounts", "titles", "appearances" }) do
+        if steps[key] then
+            table.insert(stamped, key)
+        end
+    end
+
+    assert(#stamped == 0,
+        "a button press that read nothing stamps nothing; these were "
+        .. "recorded as scanned: " .. table.concat(stamped, ", "))
+
+    -- AND IT SAYS SO. The count in that sentence is the other half of the
+    -- same claim: "Read 6 collections" over six refusals is the addon
+    -- telling the player it did something it did not, on the tab it points
+    -- them at.
+    assert(answered and answered ~= "",
+        "the button answers in the window")
+
+    assert(not answered:find("Read 6", 1, true),
+        "and does not claim to have read six collections it could not read: "
+        .. answered)
+
+    -- Two of the six -- pets and professions -- are not cold in this
+    -- scenario, so "Read 2 collections" is the honest sentence and the
+    -- assertion is that the count is what was READ, not what was tried.
+    local claimed = tonumber(answered:match("Read (%d+) collections"))
+
+    assert(claimed and claimed < 6,
+        "the sentence counts what answered, not what was attempted: " .. answered)
+
+    -- AND A REAL PRESS DOES STAMP THEM, so this is a guard and not a wall.
+    press(panel.scanAll)
+
+    CN_TEST_DrainDeferred()
+
+    local read = 0
+
+    for _, key in ipairs({ "toys", "mounts", "titles", "appearances" }) do
+        if steps[key] then
+            read = read + 1
+        end
+    end
+
+    CN.UI.Answer = realAnswer
+
+    assert(read > 0,
+        "and a press against a client that answers records what it read: "
+        .. read)
+
+    print("  Scan everything counts what it read")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SENTENCE ITSELF NAMES THE COMMAND ABOUT DEADLINES.
+    ------------------------------------------------------------
+    -- The behavioural check beside this one only fires when the fixture
+    -- reaches that branch of the explanation, and a conditional assertion is
+    -- an assertion that can be skipped -- which is exactly how the mutant
+    -- covering this survived. The sentence is a fixed string in the source;
+    -- assert it there, where it cannot be routed around.
+    local source = CN_TEST_ReadAddonFile("Scoring.lua")
+
+    assert(source, "the scoring file is readable")
+
+    local line = source:match("([^\n]*for what is on a timer[^\n]*)")
+
+    assert(line, "the explanation still offers something on a timer")
+
+    assert(line:find("/cn clock", 1, true),
+        "and names the command about deadlines: " .. line)
+
+    -- Deliberately not "the file never mentions `/cn waiting`": the comment
+    -- explaining why it must not be offered here says the name out loud, and
+    -- a check that forbids its own explanation is a check somebody deletes.
+    assert(not line:find("/cn waiting", 1, true),
+        "and not `/cn waiting`, which lists quests you walked past: " .. line)
+
+    print("  the sentence itself names the command about deadlines")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

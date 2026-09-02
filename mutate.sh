@@ -4995,6 +4995,30 @@ mutate "Data/Quests.lua" \
         expansion = \"Classic\"," \
     "the addon's own curated row carries a field the registrar refuses"
 
+mutate "Modules/Setup.lua" \
+    "    { key = \"toys\",        label = \"Toys\",        module = \"Toys\",        fn = \"Scan\",     unit = \"toys\", measured = true, measuredAt = 1, retry = \"toyscan\" }," \
+    "    { key = \"toys\",        label = \"Toys\",        module = \"Toys\",        fn = \"Scan\",     unit = \"toys\" }," \
+    "a cold toy box completes setup and silences the reminder for ever"
+
+mutate "Modules/Appearances.lua" \
+    "    if #categories == 0 then
+        DebugPrint(\"Appearance sweep answered for nothing; not recording it.\")
+
+        return 0
+    end" \
+    "" \
+    "a wardrobe that had not loaded is recorded as a completed scan"
+
+mutate "UI.lua" \
+    "                        if ok and (read or 0) > 0 then" \
+    "                        if ok then" \
+    "Scan everything counts a scan that read nothing"
+
+mutate "Scoring.lua" \
+    "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
+    "            .. CN.Accent(\"/cn waiting\") .. \" for what is on a timer.\")" \
+    "the empty-list explanation points at the wrong command"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 

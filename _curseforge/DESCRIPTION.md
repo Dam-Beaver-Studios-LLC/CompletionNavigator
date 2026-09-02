@@ -122,6 +122,12 @@ Its angles are measured in yards rather than in map percentages, because a map n
 Account-wide unlocks are recognised as account-wide. Something another character already earned is not recommended to this one, and the reason line says which character did it.
 
 ```
+/cn warband
+```
+
+Your whole Warband, one line each: level, specialization, class and faction, with what each one has recorded â€” professions, recipes, titles, reputations. The specialization is stored as the game's own id and translated when you read it, so an alt levelled on a French client does not sit in the list in French.
+
+```
 /cn alts
 ```
 
@@ -259,7 +265,7 @@ The same rule covers your interface. A full pet or toy scan has to widen the jou
 /cn clock
 ```
 
-Weekly profession knowledge, which is the most permanently missable thing in the game â€” a week not collected does not come back. Mail about to expire **with something attached** â€” expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Weekly profession knowledge, which is the most permanently missable thing in the game. Heirlooms.
+Weekly profession knowledge, which is the most permanently missable thing in the game â€” a week not collected does not come back. Mail about to expire **with something attached** â€” expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Heirlooms.
 
 ## Sets, not just pieces
 
@@ -303,7 +309,11 @@ Dead, in a group, in an instance, or out in the world alone are four different s
 /cn situation
 ```
 
-Dead, and it says so before anything else. In a dungeon with four other people, outside work ranks down until you leave â€” down, never hidden, because hiding something is your decision and not a counter's.
+Dead, and it says so before anything else.
+
+**Inside an instance, it ranks by where things are.** Anything with a known location that is not in here with you is ranked down and says why â€” a world quest three zones away is not something you can go and do; it is something you can do after a loading screen. Anything that *is* in here, or that has no location at all â€” the mount off the last boss, a currency, a collection â€” is left exactly where it was. That holds whether you walked in with four other people or on your own, because the doorway is a fact about the doorway.
+
+Being in a **group** is a separate fact and gets a separate weighting: four people waiting at a boss is a reason not to suggest a solo detour, and it is not a reason to bury the thing everyone came in for. Down, never hidden, because hiding something is your decision and not a counter's.
 
 **And a quest your group shares outranks one only you are on.** Four of you standing in a zone, one of the six quests on the list is one all four are carrying: that one is worth four times the work, and every player already knows it â€” it is why people ask "anyone else need this?" out loud. The addon reads *your own client* about people already in your group. Nothing is sent, no protocol is agreed, nobody else has to be running this addon, and outside a group it says nothing at all.
 
@@ -334,7 +344,7 @@ Both of those are in the Settings tab now, along with everything else the addon 
 
 An optional one-line heads-up display â€” drag it anywhere, click it to navigate, right-click to put that one off for an hour, and close it with the **x** in its corner â€” a filter box in the window, keybindings for the things you do often, and a real entry in the game's own options list rather than only inside a window you have to know how to open.
 
-Every list can be sorted A to Z or reversed, and sorting reads the words rather than the colour in front of them â€” so a finished goal does not sort above an unfinished one because of how it is tinted. Rows that belong together stay together: a goal moves with its chain, a vault slot with its thresholds. The filter box greys itself out on the two tabs that have no list, instead of accepting text that could not go anywhere. Anything a button does is answered in the window, where the click happened; anything you type is answered in chat, where you typed it. And Escape closes every frame the addon puts on screen.
+Every list can be sorted A to Z or reversed, and sorting reads the words rather than the colour in front of them â€” so a finished goal does not sort above an unfinished one because of how it is tinted. Rows that belong together stay together: a goal moves with its chain, a vault slot with its thresholds. The filter box greys itself out on the one tab that has no list, instead of accepting text that could not go anywhere. Anything a button does is answered in the window, where the click happened; anything you type is answered in chat, where you typed it. And Escape closes the window, the welcome screen and the export box; the arrow, the heads-up line and the follow frame each carry their own **x**.
 
 A row that does something carries a marker, not just a slightly brighter grey â€” colour alone is not an explanation, and it is no explanation at all to the one player in twelve who cannot see the difference. A button that cannot act is drawn as unavailable rather than left looking live. A checkbox's words are part of what you can hover, not just the box. And a search that matches nothing says so, instead of falling back to the message about never having scanned.
 
@@ -358,13 +368,17 @@ Nothing is uploaded. The addon *cannot* upload; addons have no network access at
 
 **And you can ask which of its claims have never been checked.** `/cn provenance` lists every prerequisite the addon believes on evidence rather than on somebody having read it â€” learned from your own play, contributed by another player, or imported by hand â€” with how many characters or contributions stand behind each. `/cn why` has always named the source of an answer; this is the opposite question, and it is where checking one starts.
 
+**And another addon can supply that data.** [Navigator Data](https://www.curseforge.com/wow/addons/navigator-data) is a companion that contributes hand-checked quest chains, turn-in spots and gating â€” no window, no commands, no settings; it hands over a table and stops. It is entirely optional, and everything here works without it.
+
+What matters is that installing it does not blur the line this addon draws. Rows from a supplier are counted separately from rows checked by this addon, `/cn providers` names who supplied what, and `/cn selftest` reports it. Two sources claiming the same quest is recorded and named rather than resolved quietly in favour of whoever loaded last. "Checked by hand" is a claim about *who* did the checking, and it survives having more than one answer.
+
 ## Ask it whether it is working
 
 ```
 /cn selftest
 ```
 
-Eighteen checks that run against your own client and report what they actually found â€” whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+Twenty checks that run against your own client and report what they actually found â€” whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
 
 One of them is new and worth knowing about after a patch: **whether every client function this addon calls still exists**. An addon reads the game through a couple of hundred named functions, and every expansion renames or removes some. Each call is guarded, which is the right way to write it and also the reason a removed function makes no noise at all â€” the guard simply goes false and that feature stops working, silently, possibly for months. The list of names is generated from the source rather than written by hand, so it cannot fall out of step with what the addon actually calls, and the check will tell you exactly which ones your client no longer has.
 
@@ -377,6 +391,8 @@ German, Spanish, French, Italian, Korean, Portuguese, Russian and both Chinese s
 ## Show only what you care about
 
 Hide any objective type you are not working on â€” quests, pets, mounts, toys, appearances, reputations, professions, currencies, exploration, rares. Hidden types drop out of the recommendations **and** out of the route, so you are not walked to something you said you did not want. Collection totals still count everything.
+
+**And you can put one specific thing off for as long as you like.** `/cn defer` takes an hour, the rest of today, tomorrow, this week, until the weekly reset, or until you undo it â€” the reset being the one that matches how most of the game is actually scheduled. It comes back on its own when the time is up; `/cn unhide <id>` brings it back sooner, and `/cn hidden` lists everything you have put aside and when each returns. Deferring is not the same as ignoring: ignoring is permanent and deferring is a decision about *now*, which is the decision this addon is for.
 
 ---
 
@@ -402,7 +418,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn unpicked` | Quests you have seen and never picked up, by zone |
 | `/cn find <text>` | Find something without knowing which tab it is on |
 | `/cn provenance` | Which chain claims have never been checked by a person |
-| `/cn textsize <100-150>` | Larger text, without resizing the window |
+| `/cn textsize <100-200>` | Larger text, without resizing the window |
 | `/cn orders` | Crafting orders you placed, and anything ready to collect |
 | `/cn hud` | A small always-on line showing the next thing |
 | `/cn errors` | Anything that went wrong inside the addon this session |
@@ -424,6 +440,7 @@ Hide any objective type you are not working on â€” quests, pets, mounts, to
 | `/cn go` | Navigate to the top recommendation |
 | `/cn why <id>` | Why this is recommended, and what is blocking it |
 | `/cn types` | Choose which kinds of objective appear |
+| `/cn defer <how long>` | Put the current recommendation off â€” an hour, today, this week, until the reset |
 | `/cn goal <type> <id>` | Pin a goal and weight everything toward it |
 | `/cn vault` | Great Vault progress |
 | `/cn breakdown` | Collection totals by category |

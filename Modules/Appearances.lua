@@ -119,6 +119,25 @@ function Appearances.Scan()
         }
     end
 
+    -- A WARDROBE THAT HAS NOT LOADED IS NOT A CHARACTER WITH NO SLOTS.
+    -- 0.99.0.
+    --
+    -- `GetAppearanceCategories` walks `Enum.TransmogCollectionType` and keeps
+    -- only categories with a total above zero -- and `GetCategoryTotal`
+    -- answers zero while the collection is streaming, which this file's own
+    -- header describes two screens up as the state at login. So a cold read
+    -- produced an empty list, and this stamped it as a completed scan.
+    --
+    -- The last collection scan with no refusal guard: pets got one in 0.92.0,
+    -- toys, mounts and titles in 0.95.0. Appearances was the fifth, and the
+    -- one whose store the higher-of-the-two rule below already protects --
+    -- which is why the missing guard cost a stamp rather than the data.
+    if #categories == 0 then
+        DebugPrint("Appearance sweep answered for nothing; not recording it.")
+
+        return 0
+    end
+
     CN.MarkScanned("appearances")
 
     return #categories

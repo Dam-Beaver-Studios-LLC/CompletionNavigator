@@ -56,7 +56,28 @@ Setup.steps = {
     -- many rows the client answered about" -- and neither release asked which
     -- other steps return a refusal shaped like a success.
     { key = "currencies",  label = "Currencies",  module = "Currencies",  fn = "Scan",     unit = "currencies", measured = true, measuredAt = 1, retry = "currencyscan" },
-    { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan",     unit = "titles" },
+    -- THE FIVE COLLECTION STEPS THAT NEVER ASKED. 0.99.0.
+    --
+    -- `Toys.Scan`, `Titles.Scan`, `Mounts.Scan` and `Pets.Scan` all return
+    -- zero as an explicit refusal and deliberately skip `CN.MarkScanned` --
+    -- the guards 0.92.0 and 0.95.0 added, whose notes say "this one runs from
+    -- `CN:OnLogin`, which is precisely when the toy box is cold". This file
+    -- never asked, so it reported the row in the success colour, counted it,
+    -- and stamped `completedAt`.
+    --
+    -- `Setup.HasRun` short-circuits on `completedAt` BEFORE it consults
+    -- `NeverScanned`, so the module-side guards were defeated by the one
+    -- thing they exist to protect. And this is the first-hour path: the
+    -- Welcome screen's primary button runs it, the store page promises the
+    -- addon "keeps asking until you have", and there is no command that gets
+    -- the prompt back.
+    --
+    -- Fifth, sixth, seventh, eighth and ninth step to need the flag, after
+    -- loremaster (0.73.0), achievements (0.86.0), currencies (0.94.0),
+    -- reputations and exploration (0.97.0). Every one of those releases fixed
+    -- the step in front of it and none of them listed the remainder -- which
+    -- is backlog rule 142, committed five more times in the same table.
+    { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan",     unit = "titles", measured = true, measuredAt = 1, retry = "titlescan" },
     -- Same shape: `Professions.Scan` returns `#lines`, and the client answers
     -- with an empty list until the skill lines have streamed. A character
     -- with no professions at all is real, so this one is not a hard failure
@@ -79,10 +100,10 @@ Setup.steps = {
     { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true, retry = "scanlore", perCharacter = "HasScanned" },
     { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
     { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements", measured = true, measuredAt = 4, retry = "achievescan", perCharacter = "HasScanned" },
-    { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },
-    { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan",     unit = "mounts" },
-    { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan",     unit = "species" },
-    { key = "appearances", label = "Appearances", module = "Appearances", fn = "Scan",     unit = "slot categories" },
+    { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys", measured = true, measuredAt = 1, retry = "toyscan" },
+    { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan",     unit = "mounts", measured = true, measuredAt = 1, retry = "mountscan" },
+    { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan",     unit = "species", measured = true, measuredAt = 1, retry = "petscan" },
+    { key = "appearances", label = "Appearances", module = "Appearances", fn = "Scan",     unit = "slot categories", measured = true, measuredAt = 1, retry = "appearancescan" },
 }
 
 function Setup.RunStep(step)

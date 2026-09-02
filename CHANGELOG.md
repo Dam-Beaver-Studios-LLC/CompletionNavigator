@@ -7,6 +7,50 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [0.99.0]
+
+The last release before 1.0, so this one went looking for what a new player
+hits in their first hour â€” and found the worst defect of the year there.
+
+**`/cn setup` run on a cold client reported a scan that read nothing as a
+success, and then stopped asking for ever.** Five of the twelve steps â€” toys,
+mounts, pets, titles and appearances â€” never checked whether the game had
+answered. The modules themselves had been taught to refuse a cold read in
+0.92.0 and 0.95.0 and to record nothing; setup did not ask, printed the row in
+the success colour, and stamped the "you are done" flag. That flag is checked
+*before* the list of never-scanned sources, so the guards were defeated by the
+one thing they exist to protect. The Welcome screen's own button runs this,
+the store page promises the addon "keeps asking until you have", and there was
+no command that got the prompt back.
+
+**And the Collections tab's "Scan everything" button did the same thing from
+the other direction** â€” it treated "the scan did not throw" as "the scan
+worked", so it stamped the very steps the modules had just refused to stamp.
+Afterwards the Collections tab and the Scans tab both read "just now" over
+empty stores. It counts what was read now, and says so when the answer is
+nothing.
+
+### Fixed
+
+- **The one command the addon offers when it has nothing to suggest pointed at
+  the wrong list.** "Try `/cn waiting` for what is on a timer" â€” and
+  `/cn waiting` lists quests you have walked past and never picked up, which
+  on a fresh account answers "Nothing remembered yet". The command about
+  timers is `/cn clock`. The rename happened three releases ago and this
+  caller was left behind; the check added in 0.96.0 verifies that a named
+  command *exists*, and this one did.
+- **Two of the twelve sources were missing from the Scans tab** â€” exploration
+  and zone achievements. Exploration is the source most certain to go stale,
+  because nothing in the addon ever rescans it on its own, and it was the one
+  the staleness screen could not see and the "Refresh what is stale" button
+  could not run. That button answered "Nothing is stale" without ever asking.
+- Three numbers on the store page had drifted from the addon: it offered
+  `/cn textsize <100-150>` against a real ceiling of **200** â€” the
+  accessibility control, quoting a limit corrected inside the addon in 0.88.0
+  â€” said eighteen self-tests against twenty, and described two tabs without a
+  list where there is one. The offline suite now checks the page's numbers,
+  and every command it names, against the tree.
+
 ## [0.98.0]
 
 **The addon's own curated quest data was being refused at load, and nothing

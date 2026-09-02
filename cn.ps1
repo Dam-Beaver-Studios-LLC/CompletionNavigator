@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '0.98.0'
+$script:ToolkitVersion = '0.99.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "0.98.0"
+CN.version     = "0.99.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -10377,7 +10377,22 @@ function CN.ExplainEmptyList()
         table.insert(lines, "Every provider answered and none of them had "
             .. "anything to offer, which usually means you are between "
             .. "things: try a different zone, or "
-            .. CN.Accent("/cn waiting") .. " for what is on a timer.")
+            -- `/cn clock`, WHICH IS THE COMMAND ABOUT TIMERS. 0.99.0.
+            --
+            -- This said `/cn waiting`, which resolves -- as an alias of
+            -- `/cn unpicked`, "quests you have walked past and never picked
+            -- up". The comment above that alias says why it was renamed:
+            -- "'Waiting' reads as 'waiting on a timer', which is what
+            -- `/cn now` and `/cn clock` do -- and this one is not about
+            -- deadlines at all." The rename happened and this caller was
+            -- left behind.
+            --
+            -- 0.96.0's lint checks that every command the addon names EXISTS.
+            -- This one does, so the lint passed while the sentence pointed at
+            -- the wrong list -- and on a fresh account that list answers
+            -- "Nothing remembered yet", which is the worst possible reply to
+            -- "I have nothing to suggest, try this".
+            .. CN.Accent("/cn clock") .. " for what is on a timer.")
     end
 
     return lines
@@ -14810,6 +14825,39 @@ function UI.Sources(which)
                     .. ", " .. seen .. " with recipes read"
             end,
         },
+
+        -- THE TWO SOURCES THIS TAB DID NOT LIST. 0.99.0.
+        --
+        -- `Setup.steps` has twelve steps and this had ten rows. The tab's own
+        -- description -- and the store page's -- is "one row per source, with
+        -- its count, when it was last read, and a marker on anything older
+        -- than a day", and "Refresh what is stale" iterates exactly this
+        -- list.
+        --
+        -- Exploration is the worst possible omission: `Modules/Exploration.lua`
+        -- says outright that "only a full `/cn explorescan` rewrites it, and
+        -- nothing runs one on its own", so it is the source most certain to go
+        -- stale -- and it was the one the staleness screen could not see and
+        -- the refresh button could not run. "Nothing is stale. Every source
+        -- has been read today" was answered without ever asking it.
+        {
+            label   = "Exploration",
+            module  = "Exploration",
+            command = "explorescan",
+            shape   = function(counts)
+                return (counts.done or 0) .. " / " .. (counts.criteria or 0)
+                    .. CN.Aside(CN.Count(counts.zones or 0, "zone"))
+            end,
+        },
+        {
+            label   = "Zone achievements",
+            module  = "Loremaster",
+            command = "scanlore",
+            shape   = function(counts)
+                return (counts.done or 0) .. " / " .. (counts.criteria or 0)
+                    .. CN.Aside(CN.Count(counts.zones or 0, "zone"))
+            end,
+        },
     }
 
     for _, entry in ipairs(collections) do
@@ -16215,6 +16263,26 @@ UI.RegisterTab{
 
         panel.scanAll = AddButton(panel, "Scan everything", 140, function()
             RunScans(panel.scanAll, "Scan everything", function()
+                -- `pcall` IS NOT "IT WORKED". 0.99.0.
+                --
+                -- It is true whenever the scan did not THROW, and a cold
+                -- journal returns zero without throwing. So this stamped the
+                -- setup step that the module had just deliberately refused to
+                -- stamp -- and this is the button the Collections tab's own
+                -- empty text points a new player at ("Nothing scanned yet.
+                -- Press Scan everything."), pressed at the moment the
+                -- journals are coldest. Afterwards this tab and the Scans tab
+                -- both read "just now" over empty stores.
+                --
+                -- The stamp is gone rather than conditional: every one of
+                -- these six modules calls `CN.MarkScanned` itself on a real
+                -- read, and `MarkScanned` routes to `NoteSetupStep` with the
+                -- key the setup step is looked up by. The correct stamp
+                -- already happened; this one could only ever add a wrong one.
+                --
+                -- "Scan achievements", eleven lines below, has checked the
+                -- return since 0.87.0. The fix landed at one call site and
+                -- not at its sibling in the same file.
                 local scanned = 0
 
                 for _, moduleName in ipairs({ "Pets", "Mounts", "Toys",
@@ -16223,17 +16291,21 @@ UI.RegisterTab{
                     local module = CN:GetModule(moduleName)
 
                     if module and module.Scan then
-                        if pcall(module.Scan) then
-                            scanned = scanned + 1
+                        local ok, read = pcall(module.Scan)
 
-                            if CN.NoteSetupStep then
-                                CN.NoteSetupStep(moduleName)
-                            end
+                        if ok and (read or 0) > 0 then
+                            scanned = scanned + 1
                         end
                     end
                 end
 
-                UI.Answer("Read " .. scanned .. " collections.")
+                -- AND THE SENTENCE COUNTS WHAT WAS READ, not what was tried.
+                if scanned == 0 then
+                    UI.Answer("The game would not answer about any of them "
+                        .. "just now. Try again in a few seconds.")
+                else
+                    UI.Answer("Read " .. scanned .. " collections.")
+                end
             end)
         end, "Read your pets, mounts, toys, appearances, titles and "
             .. "professions from the game. Takes a few seconds and freezes "
@@ -29428,6 +29500,25 @@ function Appearances.Scan()
         }
     end
 
+    -- A WARDROBE THAT HAS NOT LOADED IS NOT A CHARACTER WITH NO SLOTS.
+    -- 0.99.0.
+    --
+    -- `GetAppearanceCategories` walks `Enum.TransmogCollectionType` and keeps
+    -- only categories with a total above zero -- and `GetCategoryTotal`
+    -- answers zero while the collection is streaming, which this file's own
+    -- header describes two screens up as the state at login. So a cold read
+    -- produced an empty list, and this stamped it as a completed scan.
+    --
+    -- The last collection scan with no refusal guard: pets got one in 0.92.0,
+    -- toys, mounts and titles in 0.95.0. Appearances was the fifth, and the
+    -- one whose store the higher-of-the-two rule below already protects --
+    -- which is why the missing guard cost a stamp rather than the data.
+    if #categories == 0 then
+        DebugPrint("Appearance sweep answered for nothing; not recording it.")
+
+        return 0
+    end
+
     CN.MarkScanned("appearances")
 
     return #categories
@@ -38511,7 +38602,28 @@ Setup.steps = {
     -- many rows the client answered about" -- and neither release asked which
     -- other steps return a refusal shaped like a success.
     { key = "currencies",  label = "Currencies",  module = "Currencies",  fn = "Scan",     unit = "currencies", measured = true, measuredAt = 1, retry = "currencyscan" },
-    { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan",     unit = "titles" },
+    -- THE FIVE COLLECTION STEPS THAT NEVER ASKED. 0.99.0.
+    --
+    -- `Toys.Scan`, `Titles.Scan`, `Mounts.Scan` and `Pets.Scan` all return
+    -- zero as an explicit refusal and deliberately skip `CN.MarkScanned` --
+    -- the guards 0.92.0 and 0.95.0 added, whose notes say "this one runs from
+    -- `CN:OnLogin`, which is precisely when the toy box is cold". This file
+    -- never asked, so it reported the row in the success colour, counted it,
+    -- and stamped `completedAt`.
+    --
+    -- `Setup.HasRun` short-circuits on `completedAt` BEFORE it consults
+    -- `NeverScanned`, so the module-side guards were defeated by the one
+    -- thing they exist to protect. And this is the first-hour path: the
+    -- Welcome screen's primary button runs it, the store page promises the
+    -- addon "keeps asking until you have", and there is no command that gets
+    -- the prompt back.
+    --
+    -- Fifth, sixth, seventh, eighth and ninth step to need the flag, after
+    -- loremaster (0.73.0), achievements (0.86.0), currencies (0.94.0),
+    -- reputations and exploration (0.97.0). Every one of those releases fixed
+    -- the step in front of it and none of them listed the remainder -- which
+    -- is backlog rule 142, committed five more times in the same table.
+    { key = "titles",      label = "Titles",      module = "Titles",      fn = "Scan",     unit = "titles", measured = true, measuredAt = 1, retry = "titlescan" },
     -- Same shape: `Professions.Scan` returns `#lines`, and the client answers
     -- with an empty list until the skill lines have streamed. A character
     -- with no professions at all is real, so this one is not a hard failure
@@ -38534,10 +38646,10 @@ Setup.steps = {
     { key = "loremaster",  label = "Loremaster",  module = "Loremaster",  fn = "Scan",     unit = "quest achievements", measured = true, retry = "scanlore", perCharacter = "HasScanned" },
     { key = "quests",      label = "Quests",      module = "Quests",      fn = "ScanKnown",unit = "quests checked" },
     { key = "achievements",label = "Achievements",module = "Achievements",fn = "Scan",     unit = "achievements", measured = true, measuredAt = 4, retry = "achievescan", perCharacter = "HasScanned" },
-    { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys" },
-    { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan",     unit = "mounts" },
-    { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan",     unit = "species" },
-    { key = "appearances", label = "Appearances", module = "Appearances", fn = "Scan",     unit = "slot categories" },
+    { key = "toys",        label = "Toys",        module = "Toys",        fn = "Scan",     unit = "toys", measured = true, measuredAt = 1, retry = "toyscan" },
+    { key = "mounts",      label = "Mounts",      module = "Mounts",      fn = "Scan",     unit = "mounts", measured = true, measuredAt = 1, retry = "mountscan" },
+    { key = "pets",        label = "Battle pets", module = "Pets",        fn = "Scan",     unit = "species", measured = true, measuredAt = 1, retry = "petscan" },
+    { key = "appearances", label = "Appearances", module = "Appearances", fn = "Scan",     unit = "slot categories", measured = true, measuredAt = 1, retry = "appearancescan" },
 }
 
 function Setup.RunStep(step)
@@ -41753,6 +41865,38 @@ local function Records()
 end
 
 Loremaster.Records = Records
+
+-- THE COUNTS THE SCANS TAB NEEDS. 0.99.0.
+--
+-- Every other source on that tab has a `Summary`, and the tab -- whose header
+-- is "Where every number in this addon comes from" -- lists only the modules
+-- that do. This module and `Exploration` were the two without a row, which is
+-- how the source with the LONGEST staleness half-life ended up invisible on
+-- the screen built to show staleness.
+--
+-- Same shape as `Exploration.Summary`, deliberately: they answer the same
+-- question about the same kind of achievement, and two shapes for one
+-- question is how the tab grew special cases for currencies and professions.
+function Loremaster.Summary()
+    local counts = {
+        zones    = 0,
+        complete = 0,
+        criteria = 0,
+        done     = 0,
+    }
+
+    for _, record in pairs(Records()) do
+        counts.zones    = counts.zones + 1
+        counts.criteria = counts.criteria + (record.criteria or 0)
+        counts.done     = counts.done + (Loremaster.DoneFor(record) or 0)
+
+        if record.completed then
+            counts.complete = counts.complete + 1
+        end
+    end
+
+    return counts
+end
 
 -- The achievement's name, and its category's, from the client. See the note
 -- in `Scan`. The stored fallbacks keep an older database readable until its
@@ -60747,7 +60891,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 0.98.0
+## Version: 0.99.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -61002,6 +61146,50 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [0.99.0]
+
+The last release before 1.0, so this one went looking for what a new player
+hits in their first hour — and found the worst defect of the year there.
+
+**`/cn setup` run on a cold client reported a scan that read nothing as a
+success, and then stopped asking for ever.** Five of the twelve steps — toys,
+mounts, pets, titles and appearances — never checked whether the game had
+answered. The modules themselves had been taught to refuse a cold read in
+0.92.0 and 0.95.0 and to record nothing; setup did not ask, printed the row in
+the success colour, and stamped the "you are done" flag. That flag is checked
+*before* the list of never-scanned sources, so the guards were defeated by the
+one thing they exist to protect. The Welcome screen's own button runs this,
+the store page promises the addon "keeps asking until you have", and there was
+no command that got the prompt back.
+
+**And the Collections tab's "Scan everything" button did the same thing from
+the other direction** — it treated "the scan did not throw" as "the scan
+worked", so it stamped the very steps the modules had just refused to stamp.
+Afterwards the Collections tab and the Scans tab both read "just now" over
+empty stores. It counts what was read now, and says so when the answer is
+nothing.
+
+### Fixed
+
+- **The one command the addon offers when it has nothing to suggest pointed at
+  the wrong list.** "Try `/cn waiting` for what is on a timer" — and
+  `/cn waiting` lists quests you have walked past and never picked up, which
+  on a fresh account answers "Nothing remembered yet". The command about
+  timers is `/cn clock`. The rename happened three releases ago and this
+  caller was left behind; the check added in 0.96.0 verifies that a named
+  command *exists*, and this one did.
+- **Two of the twelve sources were missing from the Scans tab** — exploration
+  and zone achievements. Exploration is the source most certain to go stale,
+  because nothing in the addon ever rescans it on its own, and it was the one
+  the staleness screen could not see and the "Refresh what is stale" button
+  could not run. That button answered "Nothing is stale" without ever asking.
+- Three numbers on the store page had drifted from the addon: it offered
+  `/cn textsize <100-150>` against a real ceiling of **200** — the
+  accessibility control, quoting a limit corrected inside the addon in 0.88.0
+  — said eighteen self-tests against twenty, and described two tabs without a
+  list where there is one. The offline suite now checks the page's numbers,
+  and every command it names, against the tree.
 
 ## [0.98.0]
 
@@ -68255,6 +68443,12 @@ Its angles are measured in yards rather than in map percentages, because a map n
 Account-wide unlocks are recognised as account-wide. Something another character already earned is not recommended to this one, and the reason line says which character did it.
 
 ```
+/cn warband
+```
+
+Your whole Warband, one line each: level, specialization, class and faction, with what each one has recorded — professions, recipes, titles, reputations. The specialization is stored as the game's own id and translated when you read it, so an alt levelled on a French client does not sit in the list in French.
+
+```
 /cn alts
 ```
 
@@ -68392,7 +68586,7 @@ The same rule covers your interface. A full pet or toy scan has to widen the jou
 /cn clock
 ```
 
-Weekly profession knowledge, which is the most permanently missable thing in the game — a week not collected does not come back. Mail about to expire **with something attached** — expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Weekly profession knowledge, which is the most permanently missable thing in the game. Heirlooms.
+Weekly profession knowledge, which is the most permanently missable thing in the game — a week not collected does not come back. Mail about to expire **with something attached** — expired mail is destroyed, not returned, and warning you about an empty message from a stranger is how an addon teaches you to ignore it. The keystone that is replaced at the reset whether you use it or not. Heirlooms.
 
 ## Sets, not just pieces
 
@@ -68436,7 +68630,11 @@ Dead, in a group, in an instance, or out in the world alone are four different s
 /cn situation
 ```
 
-Dead, and it says so before anything else. In a dungeon with four other people, outside work ranks down until you leave — down, never hidden, because hiding something is your decision and not a counter's.
+Dead, and it says so before anything else.
+
+**Inside an instance, it ranks by where things are.** Anything with a known location that is not in here with you is ranked down and says why — a world quest three zones away is not something you can go and do; it is something you can do after a loading screen. Anything that *is* in here, or that has no location at all — the mount off the last boss, a currency, a collection — is left exactly where it was. That holds whether you walked in with four other people or on your own, because the doorway is a fact about the doorway.
+
+Being in a **group** is a separate fact and gets a separate weighting: four people waiting at a boss is a reason not to suggest a solo detour, and it is not a reason to bury the thing everyone came in for. Down, never hidden, because hiding something is your decision and not a counter's.
 
 **And a quest your group shares outranks one only you are on.** Four of you standing in a zone, one of the six quests on the list is one all four are carrying: that one is worth four times the work, and every player already knows it — it is why people ask "anyone else need this?" out loud. The addon reads *your own client* about people already in your group. Nothing is sent, no protocol is agreed, nobody else has to be running this addon, and outside a group it says nothing at all.
 
@@ -68467,7 +68665,7 @@ Both of those are in the Settings tab now, along with everything else the addon 
 
 An optional one-line heads-up display — drag it anywhere, click it to navigate, right-click to put that one off for an hour, and close it with the **x** in its corner — a filter box in the window, keybindings for the things you do often, and a real entry in the game's own options list rather than only inside a window you have to know how to open.
 
-Every list can be sorted A to Z or reversed, and sorting reads the words rather than the colour in front of them — so a finished goal does not sort above an unfinished one because of how it is tinted. Rows that belong together stay together: a goal moves with its chain, a vault slot with its thresholds. The filter box greys itself out on the two tabs that have no list, instead of accepting text that could not go anywhere. Anything a button does is answered in the window, where the click happened; anything you type is answered in chat, where you typed it. And Escape closes every frame the addon puts on screen.
+Every list can be sorted A to Z or reversed, and sorting reads the words rather than the colour in front of them — so a finished goal does not sort above an unfinished one because of how it is tinted. Rows that belong together stay together: a goal moves with its chain, a vault slot with its thresholds. The filter box greys itself out on the one tab that has no list, instead of accepting text that could not go anywhere. Anything a button does is answered in the window, where the click happened; anything you type is answered in chat, where you typed it. And Escape closes the window, the welcome screen and the export box; the arrow, the heads-up line and the follow frame each carry their own **x**.
 
 A row that does something carries a marker, not just a slightly brighter grey — colour alone is not an explanation, and it is no explanation at all to the one player in twelve who cannot see the difference. A button that cannot act is drawn as unavailable rather than left looking live. A checkbox's words are part of what you can hover, not just the box. And a search that matches nothing says so, instead of falling back to the message about never having scanned.
 
@@ -68491,13 +68689,17 @@ Nothing is uploaded. The addon *cannot* upload; addons have no network access at
 
 **And you can ask which of its claims have never been checked.** `/cn provenance` lists every prerequisite the addon believes on evidence rather than on somebody having read it — learned from your own play, contributed by another player, or imported by hand — with how many characters or contributions stand behind each. `/cn why` has always named the source of an answer; this is the opposite question, and it is where checking one starts.
 
+**And another addon can supply that data.** [Navigator Data](https://www.curseforge.com/wow/addons/navigator-data) is a companion that contributes hand-checked quest chains, turn-in spots and gating — no window, no commands, no settings; it hands over a table and stops. It is entirely optional, and everything here works without it.
+
+What matters is that installing it does not blur the line this addon draws. Rows from a supplier are counted separately from rows checked by this addon, `/cn providers` names who supplied what, and `/cn selftest` reports it. Two sources claiming the same quest is recorded and named rather than resolved quietly in favour of whoever loaded last. "Checked by hand" is a claim about *who* did the checking, and it survives having more than one answer.
+
 ## Ask it whether it is working
 
 ```
 /cn selftest
 ```
 
-Eighteen checks that run against your own client and report what they actually found — whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+Twenty checks that run against your own client and report what they actually found — whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
 
 One of them is new and worth knowing about after a patch: **whether every client function this addon calls still exists**. An addon reads the game through a couple of hundred named functions, and every expansion renames or removes some. Each call is guarded, which is the right way to write it and also the reason a removed function makes no noise at all — the guard simply goes false and that feature stops working, silently, possibly for months. The list of names is generated from the source rather than written by hand, so it cannot fall out of step with what the addon actually calls, and the check will tell you exactly which ones your client no longer has.
 
@@ -68510,6 +68712,8 @@ German, Spanish, French, Italian, Korean, Portuguese, Russian and both Chinese s
 ## Show only what you care about
 
 Hide any objective type you are not working on — quests, pets, mounts, toys, appearances, reputations, professions, currencies, exploration, rares. Hidden types drop out of the recommendations **and** out of the route, so you are not walked to something you said you did not want. Collection totals still count everything.
+
+**And you can put one specific thing off for as long as you like.** `/cn defer` takes an hour, the rest of today, tomorrow, this week, until the weekly reset, or until you undo it — the reset being the one that matches how most of the game is actually scheduled. It comes back on its own when the time is up; `/cn unhide <id>` brings it back sooner, and `/cn hidden` lists everything you have put aside and when each returns. Deferring is not the same as ignoring: ignoring is permanent and deferring is a decision about *now*, which is the decision this addon is for.
 
 ---
 
@@ -68535,7 +68739,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn unpicked` | Quests you have seen and never picked up, by zone |
 | `/cn find <text>` | Find something without knowing which tab it is on |
 | `/cn provenance` | Which chain claims have never been checked by a person |
-| `/cn textsize <100-150>` | Larger text, without resizing the window |
+| `/cn textsize <100-200>` | Larger text, without resizing the window |
 | `/cn orders` | Crafting orders you placed, and anything ready to collect |
 | `/cn hud` | A small always-on line showing the next thing |
 | `/cn errors` | Anything that went wrong inside the addon this session |
@@ -68557,6 +68761,7 @@ Hide any objective type you are not working on — quests, pets, mounts, toys, a
 | `/cn go` | Navigate to the top recommendation |
 | `/cn why <id>` | Why this is recommended, and what is blocking it |
 | `/cn types` | Choose which kinds of objective appear |
+| `/cn defer <how long>` | Put the current recommendation off — an hour, today, this week, until the reset |
 | `/cn goal <type> <id>` | Pin a goal and weight everything toward it |
 | `/cn vault` | Great Vault progress |
 | `/cn breakdown` | Collection totals by category |
@@ -68632,7 +68837,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-0.98.0
+0.99.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -74126,6 +74331,30 @@ mutate "Data/Quests.lua" \
         expansion = \"Classic\"," \
     "the addon's own curated row carries a field the registrar refuses"
 
+mutate "Modules/Setup.lua" \
+    "    { key = \"toys\",        label = \"Toys\",        module = \"Toys\",        fn = \"Scan\",     unit = \"toys\", measured = true, measuredAt = 1, retry = \"toyscan\" }," \
+    "    { key = \"toys\",        label = \"Toys\",        module = \"Toys\",        fn = \"Scan\",     unit = \"toys\" }," \
+    "a cold toy box completes setup and silences the reminder for ever"
+
+mutate "Modules/Appearances.lua" \
+    "    if #categories == 0 then
+        DebugPrint(\"Appearance sweep answered for nothing; not recording it.\")
+
+        return 0
+    end" \
+    "" \
+    "a wardrobe that had not loaded is recorded as a completed scan"
+
+mutate "UI.lua" \
+    "                        if ok and (read or 0) > 0 then" \
+    "                        if ok then" \
+    "Scan everything counts a scan that read nothing"
+
+mutate "Scoring.lua" \
+    "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
+    "            .. CN.Accent(\"/cn waiting\") .. \" for what is on a timer.\")" \
+    "the empty-list explanation points at the wrong command"
+
 echo
 echo "$PASSED killed, $SURVIVED survived."
 
@@ -76800,7 +77029,20 @@ end
 C_TransmogCollection = {
     GetCategoryInfo           = function(id) return appearanceData[id] and appearanceData[id].name or nil end,
     GetCategoryCollectedCount = function(id) return appearanceData[id] and appearanceData[id].collected or 0 end,
-    GetCategoryTotal          = function(id) return appearanceData[id] and appearanceData[id].total or 0 end,
+    -- A WARDROBE THAT HAS NOT LOADED. 0.99.0.
+    --
+    -- `GetAppearanceCategories` keeps only categories whose total is above
+    -- zero, so a client that has not sent the collection yields an empty
+    -- list -- and that was recorded as a completed scan. The literal made the
+    -- state unreachable; it is the fifth collection API to need this lever
+    -- after toys, mounts, titles and the criteria API.
+    GetCategoryTotal          = function(id)
+        if CN_TEST_WARDROBE_COLD then
+            return 0
+        end
+
+        return appearanceData[id] and appearanceData[id].total or 0
+    end,
     GetAppearanceSources      = function(id) return appearanceSources[id] end,
 }
 
@@ -77086,6 +77328,7 @@ CN_TEST_MOUNTS_COLD = false
 CN_TEST_TITLES_COLD = false
 CN_TEST_ACHIEVEMENTS_COLD = false
 CN_TEST_CALENDAR_COLD     = false
+CN_TEST_WARDROBE_COLD     = false
 CN_TEST_CRITERIA_COLD     = false
 
 
@@ -93406,10 +93649,15 @@ end)()
 
     -- The stamps are keyed on the MODULE, which is what Sources reads, so
     -- stamp those too rather than assuming the label matches.
-    for _, key in ipairs({ "quests", "reputations", "mounts", "pets", "toys",
-                           "titles", "appearances", "achievements",
-                           "currencies", "professions" }) do
-        steps[key] = time()
+    --
+    -- READ FROM SETUP'S OWN LIST, NOT FROM A COPY OF IT. 0.99.0.
+    --
+    -- This was ten hardcoded keys, which is exactly the ten rows the tab had
+    -- -- so the two sources it was MISSING were missing from the test as
+    -- well, and the assertion below could not have noticed. A fixture that
+    -- lists what the code lists cannot find something the code forgot.
+    for _, step in ipairs(setupModule.steps or {}) do
+        steps[step.key] = time()
     end
 
     assert(CN.UI.RefreshStaleSources() == 0,
@@ -115529,6 +115777,318 @@ end)()
         "and not delivered twice")
 
     print("  a complaint with nowhere to go waits rather than evaporating")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE STORE PAGE'S NUMBERS ARE THE ADDON'S NUMBERS.
+    ------------------------------------------------------------
+    -- The page said "Eighteen checks" against twenty, "the two tabs that have
+    -- no list" against one, and `/cn textsize <100-150>` against a real
+    -- ceiling of 200 -- the accessibility control, on the page where somebody
+    -- decides whether this addon can be made readable at all, quoting a limit
+    -- `Modules/Hud.lua` records correcting in the addon itself in 0.88.0.
+    --
+    -- A page is the one artefact a player reads before installing, and every
+    -- number on it is a claim. These are the ones a machine can check.
+    local page = CN_TEST_ReadAddonFile("_curseforge/DESCRIPTION.md")
+
+    assert(page, "the store description ships in the tree and is readable")
+
+    -- 1. The self-test count.
+    local words = {
+        ["Ten"] = 10, ["Eleven"] = 11, ["Twelve"] = 12, ["Thirteen"] = 13,
+        ["Fourteen"] = 14, ["Fifteen"] = 15, ["Sixteen"] = 16,
+        ["Seventeen"] = 17, ["Eighteen"] = 18, ["Nineteen"] = 19,
+        ["Twenty"] = 20, ["Twenty-one"] = 21, ["Twenty-two"] = 22,
+        ["Twenty-three"] = 23, ["Twenty-four"] = 24, ["Twenty-five"] = 25,
+    }
+
+    local claimed = page:match("([%a%-]+) checks that run against your own client")
+
+    assert(claimed, "the page says how many self-tests there are")
+
+    assert(words[claimed] == #CN.selfTests,
+        "and the number is the number: the page says " .. tostring(claimed)
+        .. " (" .. tostring(words[claimed]) .. ") and the addon registers "
+        .. #CN.selfTests)
+
+    -- 2. The text-size ceiling, which is the accessibility control.
+    local low, high = page:match("/cn textsize <(%d+)%-(%d+)>")
+
+    assert(low and high, "the page documents the text size range")
+
+    local realLow, realHigh = 100, 100
+
+    while CN.SetTextScale((realHigh + 10) / 100) do
+        realHigh = realHigh + 10
+
+        if realHigh > 400 then
+            break
+        end
+    end
+
+    CN.SetTextScale(1.0)
+
+    assert(tonumber(low) == realLow and tonumber(high) == realHigh,
+        "and its bounds are the ones the command accepts: the page says "
+        .. low .. "-" .. high .. ", the addon takes " .. realLow .. "-"
+        .. realHigh)
+
+    -- 3. Every command the page names exists. 0.96.0 checks the addon's own
+    --    output; the page is the other half, and it names fifty of them.
+    local named, missing = 0, {}
+
+    for command in page:gmatch("/cn%s+([%a]+)") do
+        named = named + 1
+
+        if not CN.commands[string.lower(command)] then
+            missing[command] = true
+        end
+    end
+
+    assert(named > 20, "the page names commands to check: " .. named)
+
+    local names = {}
+
+    for command in pairs(missing) do
+        table.insert(names, "/cn " .. command)
+    end
+
+    table.sort(names)
+
+    assert(#names == 0,
+        "every command the store page names exists; these do not: "
+        .. table.concat(names, ", "))
+
+    print("  the store page's numbers are the addon's numbers")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE EMPTY-LIST EXPLANATION POINTS AT A COMMAND ABOUT DEADLINES.
+    ------------------------------------------------------------
+    -- It said "`/cn waiting` for what is on a timer". That resolves -- as an
+    -- alias of `/cn unpicked`, "quests you have walked past and never picked
+    -- up" -- so the addon's single explanation for "I have nothing to tell
+    -- you" sent the player to the wrong list, and on a fresh account that
+    -- list answers "Nothing remembered yet".
+    --
+    -- 0.96.0's lint checks that every command the addon names EXISTS. This
+    -- one did. Existence is not meaning, and this is the assertion that
+    -- covers the difference.
+    local lines = CN.ExplainEmptyList()
+
+    local text = table.concat(lines or {}, " ")
+
+    assert(text ~= "", "the addon explains an empty list")
+
+    if text:find("on a timer", 1, true) then
+        assert(text:find("/cn clock", 1, true),
+            "what is on a timer is `/cn clock`: " .. text)
+
+        assert(not text:find("/cn waiting", 1, true),
+            "and not `/cn waiting`, which lists quests you walked past")
+    end
+
+    print("  the empty-list explanation points at a command about deadlines")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A COLD JOURNAL DOES NOT COMPLETE SETUP.
+    ------------------------------------------------------------
+    -- Five of the twelve steps carried no `measured` flag, so `RunStep`
+    -- returned success for a scan that read nothing, `notReady` stayed zero
+    -- and `Setup.Run` stamped `completedAt`. `Setup.HasRun` short-circuits on
+    -- that stamp BEFORE it consults `NeverScanned`, so the module-side guards
+    -- 0.92.0 and 0.95.0 added were defeated by the one thing they exist to
+    -- protect -- on the first-hour path, with no command that gets the prompt
+    -- back.
+    local setupSteps = CN:GetModule("Setup")
+
+    local function StepFor(key)
+        for _, entry in ipairs(setupSteps.steps) do
+            if entry.key == key then
+                return entry
+            end
+        end
+    end
+
+    local cold = {
+        toys        = function(on) CN_TEST_TOYS_COLD     = on end,
+        mounts      = function(on) CN_TEST_MOUNTS_COLD   = on end,
+        titles      = function(on) CN_TEST_TITLES_COLD   = on end,
+        appearances = function(on) CN_TEST_WARDROBE_COLD = on end,
+    }
+
+    for key, setCold in pairs(cold) do
+        local step = StepFor(key)
+
+        assert(step, "setup runs a " .. key .. " step")
+
+        assert(step.retry and CN.commands[step.retry],
+            key .. " names a real command to try again with: "
+            .. tostring(step.retry))
+
+        setCold(true)
+
+        local ok, why = setupSteps.RunStep(step)
+
+        setCold(false)
+
+        assert(ok == nil,
+            "a cold " .. key .. " read is reported as not ready, not as a "
+            .. "success: " .. tostring(ok) .. " " .. tostring(why))
+
+        local warm = setupSteps.RunStep(step)
+
+        assert(warm == true,
+            "and a client that answers completes the step: " .. tostring(warm))
+    end
+
+    print("  a cold journal does not complete setup")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- "SCAN EVERYTHING" COUNTS WHAT IT READ.
+    ------------------------------------------------------------
+    -- The button treated `pcall` returning true as "the scan worked", so a
+    -- cold journal -- which returns zero without throwing -- was stamped as a
+    -- completed setup step, undoing the modules' own refusal. This is the
+    -- button the Collections tab's empty text points a new player at, pressed
+    -- at the moment the journals are coldest.
+    local panel = nil
+
+    for _, tab in ipairs(CN.UI.tabs or {}) do
+        if tab.name == "Collections" and tab.panel and tab.panel.scanAll then
+            panel = tab.panel
+            break
+        end
+    end
+
+    assert(panel, "the Collections tab has its Scan everything button")
+
+    local steps = CN:GetModule("Setup").Steps()
+
+    for _, key in ipairs({ "toys", "mounts", "titles", "appearances" }) do
+        steps[key] = nil
+    end
+
+    CN_TEST_TOYS_COLD     = true
+    CN_TEST_MOUNTS_COLD   = true
+    CN_TEST_TITLES_COLD   = true
+    CN_TEST_WARDROBE_COLD = true
+
+    -- THROUGH THE SCRIPT, because the offline button has no `Click`: the
+    -- client's method is what a player's mouse reaches, and the harness
+    -- models the handler rather than the input stack.
+    local press = panel.scanAll:GetScript("OnClick")
+
+    assert(type(press) == "function", "the button has a click handler")
+
+    local answered = nil
+
+    local realAnswer = CN.UI.Answer
+
+    CN.UI.Answer = function(text)
+        answered = tostring(text)
+
+        return realAnswer(text)
+    end
+
+    press(panel.scanAll)
+
+    -- The button defers its work by one frame so the client can repaint the
+    -- "Working..." caption first.
+    CN_TEST_DrainDeferred()
+
+    CN_TEST_TOYS_COLD     = false
+    CN_TEST_MOUNTS_COLD   = false
+    CN_TEST_TITLES_COLD   = false
+    CN_TEST_WARDROBE_COLD = false
+
+    local stamped = {}
+
+    for _, key in ipairs({ "toys", "mounts", "titles", "appearances" }) do
+        if steps[key] then
+            table.insert(stamped, key)
+        end
+    end
+
+    assert(#stamped == 0,
+        "a button press that read nothing stamps nothing; these were "
+        .. "recorded as scanned: " .. table.concat(stamped, ", "))
+
+    -- AND IT SAYS SO. The count in that sentence is the other half of the
+    -- same claim: "Read 6 collections" over six refusals is the addon
+    -- telling the player it did something it did not, on the tab it points
+    -- them at.
+    assert(answered and answered ~= "",
+        "the button answers in the window")
+
+    assert(not answered:find("Read 6", 1, true),
+        "and does not claim to have read six collections it could not read: "
+        .. answered)
+
+    -- Two of the six -- pets and professions -- are not cold in this
+    -- scenario, so "Read 2 collections" is the honest sentence and the
+    -- assertion is that the count is what was READ, not what was tried.
+    local claimed = tonumber(answered:match("Read (%d+) collections"))
+
+    assert(claimed and claimed < 6,
+        "the sentence counts what answered, not what was attempted: " .. answered)
+
+    -- AND A REAL PRESS DOES STAMP THEM, so this is a guard and not a wall.
+    press(panel.scanAll)
+
+    CN_TEST_DrainDeferred()
+
+    local read = 0
+
+    for _, key in ipairs({ "toys", "mounts", "titles", "appearances" }) do
+        if steps[key] then
+            read = read + 1
+        end
+    end
+
+    CN.UI.Answer = realAnswer
+
+    assert(read > 0,
+        "and a press against a client that answers records what it read: "
+        .. read)
+
+    print("  Scan everything counts what it read")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE SENTENCE ITSELF NAMES THE COMMAND ABOUT DEADLINES.
+    ------------------------------------------------------------
+    -- The behavioural check beside this one only fires when the fixture
+    -- reaches that branch of the explanation, and a conditional assertion is
+    -- an assertion that can be skipped -- which is exactly how the mutant
+    -- covering this survived. The sentence is a fixed string in the source;
+    -- assert it there, where it cannot be routed around.
+    local source = CN_TEST_ReadAddonFile("Scoring.lua")
+
+    assert(source, "the scoring file is readable")
+
+    local line = source:match("([^\n]*for what is on a timer[^\n]*)")
+
+    assert(line, "the explanation still offers something on a timer")
+
+    assert(line:find("/cn clock", 1, true),
+        "and names the command about deadlines: " .. line)
+
+    -- Deliberately not "the file never mentions `/cn waiting`": the comment
+    -- explaining why it must not be offered here says the name out loud, and
+    -- a check that forbids its own explanation is a check somebody deletes.
+    assert(not line:find("/cn waiting", 1, true),
+        "and not `/cn waiting`, which lists quests you walked past: " .. line)
+
+    print("  the sentence itself names the command about deadlines")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")
