@@ -845,6 +845,23 @@ end, {
         -- so this provider reads that system too, and the lint below this
         -- file is right to require it to say so.
         "ZONE_CHANGED_NEW_AREA",
+
+        -- AND THE CLIENT'S ITEM CACHE, WHICH IS A SYSTEM. 1.1.0.
+        --
+        -- `Blizzard.GetItemName` answers `nil` for any item the client has
+        -- not seen this session and fills in asynchronously, announcing each
+        -- arrival with this event. Both rows this provider emits are named
+        -- from it, with `or ("item " .. itemID)` behind them -- so a player
+        -- who opened `/cn next` in the first seconds after logging in read
+        -- "Start: item 71715", and nothing re-asked. The name arrived, the
+        -- provider was never told, and the row kept its number until a bag
+        -- update or a quest event happened along.
+        --
+        -- This file's own comment three lines up states the rule it broke:
+        -- "a provider must declare the events of every system it reads, not
+        -- of the system it is named after." The item cache had simply never
+        -- been thought of as a system. The lint now knows it is one.
+        "GET_ITEM_INFO_RECEIVED",
     },
     cooldown = 5,
 })

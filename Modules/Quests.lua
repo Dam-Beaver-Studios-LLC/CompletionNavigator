@@ -1659,15 +1659,25 @@ function Quests.GetLocation(questID)
     --
     -- Only when the quest is actually ready to hand in. Before that the
     -- client's waypoint is the better answer, because it moves with the work.
-    if CN.Static and CN.Static.GetQuestTurnIn
+    -- THE CHEAP QUESTION FIRST. 1.1.0.
+    --
+    -- This asked the client whether the quest was ready to hand in BEFORE
+    -- asking whether there was a curated turn-in to use -- a C call per
+    -- quest, on a function the zone router calls once per stop, for the
+    -- three curated rows in existence. `Static.GetQuestTurnIn` is a table
+    -- lookup and answers nil for everything else, so it decides the branch
+    -- for a two-hundred-stop route without leaving Lua.
+    local turnMap, turnX, turnY
+
+    if CN.Static and CN.Static.GetQuestTurnIn then
+        turnMap, turnX, turnY = CN.Static.GetQuestTurnIn(questID)
+    end
+
+    if turnMap and turnX and turnY
         and Blizzard.IsQuestReadyForTurnIn
         and Blizzard.IsQuestReadyForTurnIn(questID) then
 
-        local turnMap, turnX, turnY = CN.Static.GetQuestTurnIn(questID)
-
-        if turnMap and turnX and turnY then
-            return turnMap, turnX, turnY, "turn-in"
-        end
+        return turnMap, turnX, turnY, "turn-in"
     end
 
     if mapID and x and y then
@@ -1694,17 +1704,19 @@ function Quests.GetLocation(questID)
     -- something is, and nothing the addon watched outranks that. Above the
     -- curated PICK-UP location, because a quest that is ready to hand in is
     -- not asking where it was taken from.
-    if Blizzard.IsQuestReadyForTurnIn
-        and Blizzard.IsQuestReadyForTurnIn(questID) then
+    -- Same ordering rule as the curated branch above: the store lookup is
+    -- Lua and answers nil for a quest this account has never handed in, so
+    -- the client is asked only when there is an answer to use.
+    local harvest = CN:GetModule("Harvest")
 
-        local harvest = CN:GetModule("Harvest")
+    if harvest and harvest.TurnInFor then
+        local seenMap, seenX, seenY = harvest.TurnInFor(questID)
 
-        if harvest and harvest.TurnInFor then
-            local seenMap, seenX, seenY = harvest.TurnInFor(questID)
+        if seenMap and seenX and seenY
+            and Blizzard.IsQuestReadyForTurnIn
+            and Blizzard.IsQuestReadyForTurnIn(questID) then
 
-            if seenMap and seenX and seenY then
-                return seenMap, seenX, seenY, "harvested turn-in"
-            end
+            return seenMap, seenX, seenY, "harvested turn-in"
         end
     end
 

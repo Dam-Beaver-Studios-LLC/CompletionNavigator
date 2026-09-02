@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '1.0.0'
+$script:ToolkitVersion = '1.1.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "1.0.0"
+CN.version     = "1.1.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -9134,6 +9134,30 @@ end
 -- Tracked, so only genuinely new events are wired.
 CN.subscribedInvalidationEvents = CN.subscribedInvalidationEvents or {}
 
+-- EVENTS THAT ARRIVE IN BURSTS, AND HOW LONG TO GATHER THEM. 1.1.0.
+--
+-- `GET_ITEM_INFO_RECEIVED` fires once per item the client resolves, and the
+-- client resolves a bagful, a bank, a merchant's stock and every quest reward
+-- in the seconds after a login -- hundreds of fires, each of which would walk
+-- all twenty-odd providers to set a flag that was already set.
+--
+-- Delaying the mark costs nothing that can be seen: `InvalidateCandidates`
+-- only marks a provider stale, and `RefreshProviders` then applies each
+-- provider's own cooldown before rebuilding -- five seconds, for both
+-- providers that read the item cache. A mark that lands three quarters of a
+-- second late cannot delay a rebuild that was not going to happen for five.
+--
+-- `CN.Debounce` runs the FIRST call immediately and collapses the rest into
+-- one trailing run, so the first item to arrive still invalidates at once and
+-- the burst behind it costs one more pass, not four hundred.
+--
+-- Deliberately a short list. An event belongs here only when it fires many
+-- times for one change in the world; an event that fires once per change --
+-- which is nearly all of them -- must not be delayed at all.
+CN.burstInvalidationEvents = {
+    GET_ITEM_INFO_RECEIVED = 0.75,
+}
+
 function CN.SubscribeToInvalidationEvents()
     CN.subscribedToInvalidation = true
 
@@ -9167,9 +9191,19 @@ function CN.SubscribeToInvalidationEvents()
     for _, event in ipairs(subscribed) do
         CN.subscribedInvalidationEvents[event] = true
 
-        CN:RegisterEvent(event, function()
-            CN.InvalidateCandidates(event)
-        end)
+        local gather = CN.burstInvalidationEvents[event]
+
+        if gather then
+            CN:RegisterEvent(event, function()
+                CN.Debounce("invalidate:" .. event, gather, function()
+                    CN.InvalidateCandidates(event)
+                end)
+            end)
+        else
+            CN:RegisterEvent(event, function()
+                CN.InvalidateCandidates(event)
+            end)
+        end
     end
 
     return subscribed
@@ -25375,15 +25409,25 @@ function Quests.GetLocation(questID)
     --
     -- Only when the quest is actually ready to hand in. Before that the
     -- client's waypoint is the better answer, because it moves with the work.
-    if CN.Static and CN.Static.GetQuestTurnIn
+    -- THE CHEAP QUESTION FIRST. 1.1.0.
+    --
+    -- This asked the client whether the quest was ready to hand in BEFORE
+    -- asking whether there was a curated turn-in to use -- a C call per
+    -- quest, on a function the zone router calls once per stop, for the
+    -- three curated rows in existence. `Static.GetQuestTurnIn` is a table
+    -- lookup and answers nil for everything else, so it decides the branch
+    -- for a two-hundred-stop route without leaving Lua.
+    local turnMap, turnX, turnY
+
+    if CN.Static and CN.Static.GetQuestTurnIn then
+        turnMap, turnX, turnY = CN.Static.GetQuestTurnIn(questID)
+    end
+
+    if turnMap and turnX and turnY
         and Blizzard.IsQuestReadyForTurnIn
         and Blizzard.IsQuestReadyForTurnIn(questID) then
 
-        local turnMap, turnX, turnY = CN.Static.GetQuestTurnIn(questID)
-
-        if turnMap and turnX and turnY then
-            return turnMap, turnX, turnY, "turn-in"
-        end
+        return turnMap, turnX, turnY, "turn-in"
     end
 
     if mapID and x and y then
@@ -25410,17 +25454,19 @@ function Quests.GetLocation(questID)
     -- something is, and nothing the addon watched outranks that. Above the
     -- curated PICK-UP location, because a quest that is ready to hand in is
     -- not asking where it was taken from.
-    if Blizzard.IsQuestReadyForTurnIn
-        and Blizzard.IsQuestReadyForTurnIn(questID) then
+    -- Same ordering rule as the curated branch above: the store lookup is
+    -- Lua and answers nil for a quest this account has never handed in, so
+    -- the client is asked only when there is an answer to use.
+    local harvest = CN:GetModule("Harvest")
 
-        local harvest = CN:GetModule("Harvest")
+    if harvest and harvest.TurnInFor then
+        local seenMap, seenX, seenY = harvest.TurnInFor(questID)
 
-        if harvest and harvest.TurnInFor then
-            local seenMap, seenX, seenY = harvest.TurnInFor(questID)
+        if seenMap and seenX and seenY
+            and Blizzard.IsQuestReadyForTurnIn
+            and Blizzard.IsQuestReadyForTurnIn(questID) then
 
-            if seenMap and seenX and seenY then
-                return seenMap, seenX, seenY, "harvested turn-in"
-            end
+            return seenMap, seenX, seenY, "harvested turn-in"
         end
     end
 
@@ -31078,6 +31124,12 @@ function Harvest.Capture(questID, reason)
     end
 
     local store  = Store()
+
+    -- WHETHER THIS IS THE FIRST TIME THE ADDON HAS SEEN THIS QUEST AT ALL.
+    -- 1.1.0. Read before the record is created, because creating it is the
+    -- answer. See the turn-in block below for what it decides.
+    local firstSighting = store[questID] == nil
+
     local record = store[questID] or { questID = questID, firstSeen = time() }
 
     local changed = false
@@ -31127,6 +31179,27 @@ function Harvest.Capture(questID, reason)
     if reason == "turnedin" and mapID and x and y then
         local turnX = math.floor(x * 10000 + 0.5) / 10000
         local turnY = math.floor(y * 10000 + 0.5) / 10000
+
+        -- A QUEST THIS ADDON FIRST MEETS AT ITS HAND-IN HAS NO PICK-UP.
+        -- 1.1.0.
+        --
+        -- `set` had just written the hand-in point into `x` and `y`, because
+        -- nothing had ever written them -- so a quest completed by a player
+        -- who installed the addon halfway through it was recorded as being
+        -- OFFERED at the turn-in NPC. That row goes into `/cn export`, into
+        -- Navigator Data's staging, and from there into a curated file whose
+        -- header reads "every row in this file was checked by a person". The
+        -- curator has nothing to check it against: the coordinate is real,
+        -- the map is real, and the claim about it is wrong.
+        --
+        -- 1.0.0 gave the record a field that says exactly what this
+        -- coordinate is, and then let the first-sighting case go on writing
+        -- it under the other name. The pick-up is cleared rather than
+        -- guessed: a location the addon never saw is not a location it has.
+        if firstSighting then
+            record.x = nil
+            record.y = nil
+        end
 
         local elsewhere = record.mapID ~= mapID
             or record.x ~= turnX
@@ -31474,6 +31547,11 @@ function Harvest.Summary()
         total       = 0,
         named       = 0,
         located     = 0,
+
+        -- Counted separately because it is a different claim: the addon
+        -- knows where this quest ENDS and has never seen where it starts,
+        -- which is what a curator most needs told.
+        turnInOnly  = 0,
         withRequires = 0,
         withGuesses = 0,
     }
@@ -31482,7 +31560,17 @@ function Harvest.Summary()
         counts.total = counts.total + 1
 
         if record.name then counts.named = counts.named + 1 end
-        if record.x and record.y then counts.located = counts.located + 1 end
+
+        -- A TURN-IN IS A LOCATION. 1.1.0. See `Harvest.Located`: a quest the
+        -- addon first met at its hand-in has no pick-up and is not a row with
+        -- nothing in it.
+        if Harvest.Located(record) then
+            counts.located = counts.located + 1
+
+            if not (record.x and record.y) then
+                counts.turnInOnly = counts.turnInOnly + 1
+            end
+        end
         if record.requires then counts.withRequires = counts.withRequires + 1 end
         -- `record.observed`, not `record.maybeRequires`. The old field was
         -- deleted by database migration 3 and nothing has written it since,
@@ -31514,11 +31602,35 @@ end
 -- file failed to parse, and the addon did not load. The whole contribution
 -- workflow this function exists for was broken. Asserted now by LOADING the
 -- export rather than by looking at it.
+-- Whether the addon knows where this quest happens, in either sense.
+--
+-- ONE DEFINITION OF "LOCATED", BECAUSE THERE WERE THREE. 1.1.0.
+--
+-- `record.x and record.y` was written out three times -- the export filter,
+-- the summary counter and the contribution line -- and 1.0.0 added a second
+-- kind of location that none of them knew about. A quest the addon first met
+-- at its hand-in has a turn-in point and no pick-up, so all three called it
+-- unlocated: it was counted as nothing on `/cn harvest`, dropped by
+-- `/cn export`, and never reached curation -- which is the one row in the
+-- store whose coordinate the client can never re-supply.
+function Harvest.Located(record)
+    if type(record) ~= "table" then
+        return false
+    end
+
+    if record.x and record.y then
+        return true
+    end
+
+    return (record.turnInMapID and record.turnInX and record.turnInY) and true
+        or false
+end
+
 function Harvest.BuildExport(onlyLocated)
     local rows = {}
 
     for questID, record in pairs(Store()) do
-        if not onlyLocated or (record.x and record.y) then
+        if not onlyLocated or Harvest.Located(record) then
             table.insert(rows, record)
         end
     end
@@ -31548,6 +31660,17 @@ function Harvest.BuildExport(onlyLocated)
         if record.x and record.y then
             table.insert(lines, "        x         = " .. record.x .. ",")
             table.insert(lines, "        y         = " .. record.y .. ",")
+        elseif record.turnInMapID then
+            -- AND THE ROW SAYS WHAT IT DOES NOT KNOW. 1.1.0.
+            --
+            -- A row with a turn-in and no pick-up is not a row missing its
+            -- coordinates by accident; it is a quest this addon met halfway
+            -- through. Saying so in the file is the difference between a
+            -- curator adding the missing half and a curator assuming the
+            -- turn-in point is where the quest is offered -- which is what
+            -- this export claimed until this release.
+            table.insert(lines, "        -- picked up: NOT SEEN. The addon "
+                .. "met this quest at its hand-in.")
         end
 
         -- AND WHERE IT WAS HANDED IN, WHEN THAT IS SOMEWHERE ELSE. 1.0.0.
@@ -31717,7 +31840,11 @@ CN:RegisterCommand{
 
         Print("Harvested quests: " .. counts.total)
         Print("  with names: " .. counts.named)
-        Print("  with coordinates: " .. counts.located)
+        Print("  with coordinates: " .. counts.located
+            .. ((counts.turnInOnly > 0)
+                and CN.Aside(counts.turnInOnly
+                    .. " of them only where they were handed in")
+                or ""))
         Print("  with confirmed prerequisites: " .. counts.withRequires)
         Print("  with unconfirmed prerequisite guesses: " .. counts.withGuesses)
         Print("Use |cffffc74f/cn export|r to emit them as Data\\Quests.lua rows.")
@@ -38044,7 +38171,24 @@ CN.RegisterCandidateProvider("Vendors", function()
     CN.providerTruncation["Vendors"] = { considered = considered, dropped = dropped }
 
     return candidates
-end, { events = { "MERCHANT_SHOW", "TRADE_SKILL_LIST_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 5 })
+end, {
+    events = {
+        "MERCHANT_SHOW", "TRADE_SKILL_LIST_UPDATE", "ZONE_CHANGED_NEW_AREA",
+
+        -- AND THE CLIENT'S ITEM CACHE. 1.1.0.
+        --
+        -- Worse here than in `Modules/Inventory.lua`, which at least emits a
+        -- row with a number in it. This provider joins vendor items to
+        -- recipes BY NAME -- `RecipeFor` asks `Blizzard.GetItemName` and
+        -- gives up when the answer is nil -- so while the item cache is cold
+        -- it emits nothing at all, and its declared events are a merchant
+        -- window, a trade-skill window and a zone line. A player who logs in
+        -- and asks what to do next is told about no vendor-sold recipe until
+        -- they happen to open a shop.
+        "GET_ITEM_INFO_RECEIVED",
+    },
+    cooldown = 5,
+})
 
 ------------------------------------------------------------
 -- EVENTS
@@ -51903,6 +52047,23 @@ end, {
         -- so this provider reads that system too, and the lint below this
         -- file is right to require it to say so.
         "ZONE_CHANGED_NEW_AREA",
+
+        -- AND THE CLIENT'S ITEM CACHE, WHICH IS A SYSTEM. 1.1.0.
+        --
+        -- `Blizzard.GetItemName` answers `nil` for any item the client has
+        -- not seen this session and fills in asynchronously, announcing each
+        -- arrival with this event. Both rows this provider emits are named
+        -- from it, with `or ("item " .. itemID)` behind them -- so a player
+        -- who opened `/cn next` in the first seconds after logging in read
+        -- "Start: item 71715", and nothing re-asked. The name arrived, the
+        -- provider was never told, and the row kept its number until a bag
+        -- update or a quest event happened along.
+        --
+        -- This file's own comment three lines up states the rule it broke:
+        -- "a provider must declare the events of every system it reads, not
+        -- of the system it is named after." The item cache had simply never
+        -- been thought of as a system. The lint now knows it is one.
+        "GET_ITEM_INFO_RECEIVED",
     },
     cooldown = 5,
 })
@@ -61278,7 +61439,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 1.0.0
+## Version: 1.1.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -61533,6 +61694,72 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [1.1.0]
+
+Two defects, both in code 1.0.0 wrote, both of the same shape: **a new kind of
+answer arrived and the questions asked about it were the old ones.**
+
+**A quest this addon first meets at its hand-in was recorded as being offered
+there.** 1.0.0 gave the harvest record a field that says exactly what a
+turn-in coordinate is — and left the first-sighting case writing it under the
+other name, because the setter that fills a blank field ran first. A player
+who installs the addon halfway through a quest had that quest exported with
+the turn-in NPC's position as its quest giver, into `/cn export`, into
+Navigator Data's staging, and from there into a file whose header reads *every
+row in this file was checked by a person*. The coordinate is real, the map is
+real, and the claim about it is wrong, which is the one kind of defect a
+curation pipeline cannot catch. Such a row now records the hand-in, records no
+pick-up, and says so in the export — and it is still counted and exported,
+because a turn-in is a location and three separate places had been asking
+`x and y` since long before there was a second kind.
+
+**Nothing told the addon that an item name had arrived.** The client answers
+`nil` for any item it has not seen this session and fills its cache
+asynchronously. Two providers read that cache and neither declared its event,
+so `/cn next` in the first seconds after a login read "Start: item 71715" and
+nothing ever re-asked. The vendor-recipe provider was worse: it joins vendor
+stock to recipes *by name*, so it emitted nothing at all — a player who logged
+in and asked what to do next was told about no vendor-sold recipe until they
+happened to open a shop. `Modules/Inventory.lua` has carried the rule since
+0.86.0 — *a provider must declare the events of every system it reads, not of
+the system it is named after* — and the item cache had never been counted as a
+system.
+
+### Changed
+
+- **Events that arrive in bursts gather before they invalidate.**
+  `GET_ITEM_INFO_RECEIVED` fires once per item the client resolves, and it
+  resolves a bagful, a bank, a merchant's stock and every quest reward in the
+  seconds after a login. Each fire would have walked every provider to set a
+  flag that was already set; the first still lands immediately and the burst
+  behind it costs one more pass rather than several hundred. Nothing can be
+  seen to be slower, because marking a provider stale does not rebuild it —
+  the two providers that read the item cache have a five-second cooldown, and
+  a mark that lands three quarters of a second late cannot delay a rebuild
+  that was not going to happen for five.
+- **`Quests.GetLocation` asks the client a question only when there is an
+  answer to use.** It asked whether a quest was ready to hand in *before*
+  asking whether a turn-in location existed — a client call per quest, on a
+  function the zone router calls once per stop, for the three curated rows in
+  existence. The table lookup decides the branch now.
+- `/cn harvest` says how many of its located rows are located only by where
+  they were handed in. It is a different claim from the rest, and it is the
+  one a curator most needs told.
+
+### How defects were found
+
+- **The item cache is a system.** The provider-event lint had four systems in
+  it — the quest log, your bags, where you are standing, what you have
+  collected. Four is a list somebody wrote; the fifth is the one nobody
+  thought of, which is the whole reason the check is structural rather than a
+  review.
+- **A fixture item with no name passes every test that does not ask what the
+  row is called.** The bag fixture's quest starter had no entry in the test
+  client's item table, so it has rendered as "Start: item 60001" in every run
+  this project has ever made — including the check added last release that a
+  cold item cache still names everything, which could not tell a cold cache
+  from a warm one.
 
 ## [1.0.0]
 
@@ -69309,7 +69536,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-1.0.0
+1.1.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -74864,6 +75091,42 @@ mutate "UI.lua" \
     "        if true then" \
     "refreshing stale sources counts a scan the client refused"
 
+mutate "Modules/Harvest.lua" \
+    "        if firstSighting then
+            record.x = nil
+            record.y = nil
+        end" \
+    "        if false then
+            record.x = nil
+            record.y = nil
+        end" \
+    "a quest met at its hand-in is exported as being offered there"
+
+mutate "Modules/Harvest.lua" \
+    "    if record.x and record.y then
+        return true
+    end
+
+    return (record.turnInMapID and record.turnInX and record.turnInY) and true
+        or false" \
+    "    if record.x and record.y then
+        return true
+    end
+
+    return false" \
+    "a row located only by its hand-in is dropped from the export"
+
+mutate "Modules/Inventory.lua" \
+    "        \"GET_ITEM_INFO_RECEIVED\",
+    }," \
+    "    }," \
+    "the bag provider never hears that an item name arrived"
+
+mutate "Scoring.lua" \
+    "        local gather = CN.burstInvalidationEvents[event]" \
+    "        local gather = nil" \
+    "every item the client resolves walks every provider"
+
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
     "            .. CN.Accent(\"/cn waiting\") .. \" for what is on a timer.\")" \
@@ -75155,6 +75418,12 @@ for _, name in ipairs({
     -- against the client's own list before being added -- which is what
     -- adding a name to this table is supposed to mean.
     "UNIT_SPELLCAST_SUCCEEDED", "HEARTHSTONE_BOUND",
+
+    -- 1.1.0: the client fills its item cache asynchronously and announces
+    -- each arrival with this. Real, long-standing, and fired once per item --
+    -- which is why `CN.burstInvalidationEvents` gathers it rather than acting
+    -- on every fire.
+    "GET_ITEM_INFO_RECEIVED",
 }) do
     CN_KNOWN_EVENTS[name] = true
 end
@@ -77947,6 +78216,15 @@ C_Item = {
         local names = {
             [500] = "Test Toy",
             [501] = "Missing Toy",
+
+            -- THE QUEST STARTER IN THE BAG FIXTURE. 1.1.0.
+            --
+            -- It had no name in this table, so the row the Inventory provider
+            -- builds from it read "Start: item 60001" in every test that has
+            -- ever run -- and every one of them passed, because none asserted
+            -- what the row was CALLED. The check that a cold item cache still
+            -- names everything could not tell a cold cache from a warm one.
+            [60001] = "Sealed Test Orders",
             [700] = "Flask of Testing",
             [800] = "Reins of the Horde Wolf",
             [801] = "Wild Critter Cage",
@@ -91247,6 +91525,26 @@ end)()
                 "NEW_MOUNT_ADDED", "NEW_PET_ADDED", "NEW_TOY_ADDED",
                 "ACHIEVEMENT_EARNED",
             },
+        },
+        {
+            -- THE CLIENT'S ITEM CACHE IS A SYSTEM. 1.1.0.
+            --
+            -- It answers `nil` for any item it has not seen this session and
+            -- fills in asynchronously, announcing each arrival. Two providers
+            -- read it and neither declared it: `Inventory` named its rows
+            -- "Start: item 71715" and never renamed them, and `Vendors`
+            -- joins vendor stock to recipes BY NAME, so it emitted nothing at
+            -- all until a merchant window happened to open.
+            --
+            -- The rule this checks was written into `Modules/Inventory.lua`
+            -- in 0.86.0 -- "a provider must declare the events of every
+            -- system it reads, not of the system it is named after" -- and
+            -- the item cache had simply never been counted as a system. Four
+            -- systems is a list somebody wrote; the fifth is the one nobody
+            -- thought of, which is the whole reason this check is structural.
+            name    = "the client's item cache",
+            readers = { "Blizzard.GetItemName", "CN.Blizzard.GetItemName" },
+            events  = { "GET_ITEM_INFO_RECEIVED" },
         },
     }
 
@@ -117145,6 +117443,167 @@ end)()
         "and says the answer is an observation: " .. tostring(source))
 
     print("  a quest handed in elsewhere records where")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A QUEST THIS ADDON FIRST MEETS AT ITS HAND-IN HAS NO PICK-UP.
+    --
+    -- `set` writes a field only while it is nil, so the first capture of a
+    -- quest wrote the hand-in point into `x` and `y` -- and a player who
+    -- installs the addon halfway through a quest had that quest recorded as
+    -- being OFFERED at the turn-in NPC. The row goes into `/cn export`, into
+    -- Navigator Data's staging, and from there into a curated file whose
+    -- header reads "every row in this file was checked by a person". The
+    -- coordinate is real, the map is real, and the claim about it is wrong,
+    -- which is the one kind of defect the curation pipeline cannot catch.
+    ------------------------------------------------------------
+    local firstSeen = CN:GetModule("Harvest")
+
+    local store = CN.Account("questHarvest")
+
+    store[9001] = nil
+
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.55, 0.31 }
+
+    firstSeen.Capture(9001, "turnedin")
+
+    CN_TEST_WAYPOINT_MOVED = nil
+
+    local row = store[9001]
+
+    assert(row, "the quest was captured")
+
+    assert(row.turnInMapID == 84 and row.turnInX == 0.55
+        and row.turnInY == 0.31,
+        "the point is recorded as the hand-in: "
+        .. tostring(row.turnInMapID) .. " " .. tostring(row.turnInX))
+
+    assert(row.x == nil and row.y == nil,
+        "and NOT as where the quest is offered: "
+        .. tostring(row.x) .. ", " .. tostring(row.y))
+
+    assert(row.mapID == 84,
+        "the map is kept, because it is right either way")
+
+    -- AND IT IS STILL A LOCATED ROW, or the one coordinate the client can
+    -- never re-supply is dropped by the export that exists to carry it.
+    assert(firstSeen.Located(row),
+        "a turn-in with no pick-up is a location")
+
+    local counts = firstSeen.Summary()
+
+    assert(counts.turnInOnly > 0,
+        "and `/cn harvest` counts it separately: " .. tostring(counts.turnInOnly))
+
+    local text = firstSeen.BuildExport(true)
+
+    assert(text:find("%[9001%]"),
+        "the export carries a row located only by its hand-in")
+
+    assert(not text:find("x         = 0.55", 1, true),
+        "and does not call the hand-in point a pick-up")
+
+    assert(text:find("picked up: NOT SEEN", 1, true),
+        "and says which half it never saw")
+
+    store[9001] = nil
+
+    print("  a quest first met at its hand-in claims no pick-up")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ITEM CACHE FILLING IS A CHANGE THE PROVIDERS HEAR ABOUT.
+    --
+    -- The client answers `nil` for any item it has not seen this session and
+    -- fills in asynchronously. Two providers name their rows from it, with
+    -- `or ("item " .. itemID)` behind them, and neither declared the event --
+    -- so `/cn next` in the first seconds after a login read "Start: item
+    -- 71715" and nothing ever re-asked. `Vendors` was worse: it joins vendor
+    -- stock to recipes BY NAME and emitted nothing at all.
+    ------------------------------------------------------------
+    for _, name in ipairs({ "Inventory", "Vendors" }) do
+        local provider = CN.candidateProviders[name]
+
+        assert(provider and provider.events
+            and provider.events["GET_ITEM_INFO_RECEIVED"],
+            "the " .. name .. " provider declares the item cache's event")
+    end
+
+    -- SUBSCRIBED, or a declared event nobody registered is a comment.
+    assert(CN.subscribedInvalidationEvents["GET_ITEM_INFO_RECEIVED"],
+        "and the addon is listening for it")
+
+    assert(CN.eventTable["GET_ITEM_INFO_RECEIVED"],
+        "with a handler on the client's own event table")
+
+    -- AND THE ROW IS RENAMED WHEN THE NAME ARRIVES.
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    CN.InvalidateCandidates()
+
+    local cold
+
+    for _, objective in ipairs(CN.candidateProviders["Inventory"].fn()) do
+        if tostring(objective.name):find("item %d") then
+            cold = objective.name
+        end
+    end
+
+    assert(cold, "a cold item cache names a row by its id")
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    CN.FireEvent("GET_ITEM_INFO_RECEIVED", 60001)
+
+    CN_TEST_DrainDeferred()
+
+    local warm
+
+    for _, objective in ipairs(CN.candidateProviders["Inventory"].fn()) do
+        if objective.name == cold then
+            warm = objective.name
+        end
+    end
+
+    assert(warm == nil,
+        "and the row is not still called " .. tostring(cold)
+        .. " once the client has answered")
+
+    -- AND A BURST OF THEM COSTS ONE PASS, NOT FOUR HUNDRED.
+    --
+    -- The client resolves a bagful, a bank, a merchant's stock and every
+    -- quest reward in the seconds after a login, one event each. Every fire
+    -- walked all twenty-odd providers to set a flag that was already set.
+    assert(CN.burstInvalidationEvents["GET_ITEM_INFO_RECEIVED"],
+        "the event is declared as one that arrives in bursts")
+
+    local passes = 0
+
+    local realInvalidate = CN.InvalidateCandidates
+
+    CN.InvalidateCandidates = function(...)
+        passes = passes + 1
+
+        return realInvalidate(...)
+    end
+
+    -- Well inside the gathering window, so only the leading call runs.
+    for _ = 1, 200 do
+        CN.FireEvent("GET_ITEM_INFO_RECEIVED", 60001)
+    end
+
+    CN.InvalidateCandidates = realInvalidate
+
+    assert(passes <= 2,
+        "two hundred item arrivals cost at most two invalidation passes, "
+        .. "not two hundred: " .. passes)
+
+    -- AND THE GATHERED ONE STILL RUNS, or the debounce is a mute button.
+    CN_TEST_DrainDeferred()
+
+    print("  the item cache filling reaches the providers that read it")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

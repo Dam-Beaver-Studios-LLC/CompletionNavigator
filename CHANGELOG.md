@@ -7,6 +7,72 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.1.0]
+
+Two defects, both in code 1.0.0 wrote, both of the same shape: **a new kind of
+answer arrived and the questions asked about it were the old ones.**
+
+**A quest this addon first meets at its hand-in was recorded as being offered
+there.** 1.0.0 gave the harvest record a field that says exactly what a
+turn-in coordinate is â€” and left the first-sighting case writing it under the
+other name, because the setter that fills a blank field ran first. A player
+who installs the addon halfway through a quest had that quest exported with
+the turn-in NPC's position as its quest giver, into `/cn export`, into
+Navigator Data's staging, and from there into a file whose header reads *every
+row in this file was checked by a person*. The coordinate is real, the map is
+real, and the claim about it is wrong, which is the one kind of defect a
+curation pipeline cannot catch. Such a row now records the hand-in, records no
+pick-up, and says so in the export â€” and it is still counted and exported,
+because a turn-in is a location and three separate places had been asking
+`x and y` since long before there was a second kind.
+
+**Nothing told the addon that an item name had arrived.** The client answers
+`nil` for any item it has not seen this session and fills its cache
+asynchronously. Two providers read that cache and neither declared its event,
+so `/cn next` in the first seconds after a login read "Start: item 71715" and
+nothing ever re-asked. The vendor-recipe provider was worse: it joins vendor
+stock to recipes *by name*, so it emitted nothing at all â€” a player who logged
+in and asked what to do next was told about no vendor-sold recipe until they
+happened to open a shop. `Modules/Inventory.lua` has carried the rule since
+0.86.0 â€” *a provider must declare the events of every system it reads, not of
+the system it is named after* â€” and the item cache had never been counted as a
+system.
+
+### Changed
+
+- **Events that arrive in bursts gather before they invalidate.**
+  `GET_ITEM_INFO_RECEIVED` fires once per item the client resolves, and it
+  resolves a bagful, a bank, a merchant's stock and every quest reward in the
+  seconds after a login. Each fire would have walked every provider to set a
+  flag that was already set; the first still lands immediately and the burst
+  behind it costs one more pass rather than several hundred. Nothing can be
+  seen to be slower, because marking a provider stale does not rebuild it â€”
+  the two providers that read the item cache have a five-second cooldown, and
+  a mark that lands three quarters of a second late cannot delay a rebuild
+  that was not going to happen for five.
+- **`Quests.GetLocation` asks the client a question only when there is an
+  answer to use.** It asked whether a quest was ready to hand in *before*
+  asking whether a turn-in location existed â€” a client call per quest, on a
+  function the zone router calls once per stop, for the three curated rows in
+  existence. The table lookup decides the branch now.
+- `/cn harvest` says how many of its located rows are located only by where
+  they were handed in. It is a different claim from the rest, and it is the
+  one a curator most needs told.
+
+### How defects were found
+
+- **The item cache is a system.** The provider-event lint had four systems in
+  it â€” the quest log, your bags, where you are standing, what you have
+  collected. Four is a list somebody wrote; the fifth is the one nobody
+  thought of, which is the whole reason the check is structural rather than a
+  review.
+- **A fixture item with no name passes every test that does not ask what the
+  row is called.** The bag fixture's quest starter had no entry in the test
+  client's item table, so it has rendered as "Start: item 60001" in every run
+  this project has ever made â€” including the check added last release that a
+  cold item cache still names everything, which could not tell a cold cache
+  from a warm one.
+
 ## [1.0.0]
 
 0.99.0 went looking for what a new player hits in their first hour and fixed

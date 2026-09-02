@@ -56,6 +56,12 @@ for _, name in ipairs({
     -- against the client's own list before being added -- which is what
     -- adding a name to this table is supposed to mean.
     "UNIT_SPELLCAST_SUCCEEDED", "HEARTHSTONE_BOUND",
+
+    -- 1.1.0: the client fills its item cache asynchronously and announces
+    -- each arrival with this. Real, long-standing, and fired once per item --
+    -- which is why `CN.burstInvalidationEvents` gathers it rather than acting
+    -- on every fire.
+    "GET_ITEM_INFO_RECEIVED",
 }) do
     CN_KNOWN_EVENTS[name] = true
 end
@@ -2848,6 +2854,15 @@ C_Item = {
         local names = {
             [500] = "Test Toy",
             [501] = "Missing Toy",
+
+            -- THE QUEST STARTER IN THE BAG FIXTURE. 1.1.0.
+            --
+            -- It had no name in this table, so the row the Inventory provider
+            -- builds from it read "Start: item 60001" in every test that has
+            -- ever run -- and every one of them passed, because none asserted
+            -- what the row was CALLED. The check that a cold item cache still
+            -- names everything could not tell a cold cache from a warm one.
+            [60001] = "Sealed Test Orders",
             [700] = "Flask of Testing",
             [800] = "Reins of the Horde Wolf",
             [801] = "Wild Critter Cage",
@@ -16148,6 +16163,26 @@ end)()
                 "NEW_MOUNT_ADDED", "NEW_PET_ADDED", "NEW_TOY_ADDED",
                 "ACHIEVEMENT_EARNED",
             },
+        },
+        {
+            -- THE CLIENT'S ITEM CACHE IS A SYSTEM. 1.1.0.
+            --
+            -- It answers `nil` for any item it has not seen this session and
+            -- fills in asynchronously, announcing each arrival. Two providers
+            -- read it and neither declared it: `Inventory` named its rows
+            -- "Start: item 71715" and never renamed them, and `Vendors`
+            -- joins vendor stock to recipes BY NAME, so it emitted nothing at
+            -- all until a merchant window happened to open.
+            --
+            -- The rule this checks was written into `Modules/Inventory.lua`
+            -- in 0.86.0 -- "a provider must declare the events of every
+            -- system it reads, not of the system it is named after" -- and
+            -- the item cache had simply never been counted as a system. Four
+            -- systems is a list somebody wrote; the fifth is the one nobody
+            -- thought of, which is the whole reason this check is structural.
+            name    = "the client's item cache",
+            readers = { "Blizzard.GetItemName", "CN.Blizzard.GetItemName" },
+            events  = { "GET_ITEM_INFO_RECEIVED" },
         },
     }
 
@@ -42046,6 +42081,167 @@ end)()
         "and says the answer is an observation: " .. tostring(source))
 
     print("  a quest handed in elsewhere records where")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A QUEST THIS ADDON FIRST MEETS AT ITS HAND-IN HAS NO PICK-UP.
+    --
+    -- `set` writes a field only while it is nil, so the first capture of a
+    -- quest wrote the hand-in point into `x` and `y` -- and a player who
+    -- installs the addon halfway through a quest had that quest recorded as
+    -- being OFFERED at the turn-in NPC. The row goes into `/cn export`, into
+    -- Navigator Data's staging, and from there into a curated file whose
+    -- header reads "every row in this file was checked by a person". The
+    -- coordinate is real, the map is real, and the claim about it is wrong,
+    -- which is the one kind of defect the curation pipeline cannot catch.
+    ------------------------------------------------------------
+    local firstSeen = CN:GetModule("Harvest")
+
+    local store = CN.Account("questHarvest")
+
+    store[9001] = nil
+
+    CN_TEST_WAYPOINT_MOVED = { 84, 0.55, 0.31 }
+
+    firstSeen.Capture(9001, "turnedin")
+
+    CN_TEST_WAYPOINT_MOVED = nil
+
+    local row = store[9001]
+
+    assert(row, "the quest was captured")
+
+    assert(row.turnInMapID == 84 and row.turnInX == 0.55
+        and row.turnInY == 0.31,
+        "the point is recorded as the hand-in: "
+        .. tostring(row.turnInMapID) .. " " .. tostring(row.turnInX))
+
+    assert(row.x == nil and row.y == nil,
+        "and NOT as where the quest is offered: "
+        .. tostring(row.x) .. ", " .. tostring(row.y))
+
+    assert(row.mapID == 84,
+        "the map is kept, because it is right either way")
+
+    -- AND IT IS STILL A LOCATED ROW, or the one coordinate the client can
+    -- never re-supply is dropped by the export that exists to carry it.
+    assert(firstSeen.Located(row),
+        "a turn-in with no pick-up is a location")
+
+    local counts = firstSeen.Summary()
+
+    assert(counts.turnInOnly > 0,
+        "and `/cn harvest` counts it separately: " .. tostring(counts.turnInOnly))
+
+    local text = firstSeen.BuildExport(true)
+
+    assert(text:find("%[9001%]"),
+        "the export carries a row located only by its hand-in")
+
+    assert(not text:find("x         = 0.55", 1, true),
+        "and does not call the hand-in point a pick-up")
+
+    assert(text:find("picked up: NOT SEEN", 1, true),
+        "and says which half it never saw")
+
+    store[9001] = nil
+
+    print("  a quest first met at its hand-in claims no pick-up")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ITEM CACHE FILLING IS A CHANGE THE PROVIDERS HEAR ABOUT.
+    --
+    -- The client answers `nil` for any item it has not seen this session and
+    -- fills in asynchronously. Two providers name their rows from it, with
+    -- `or ("item " .. itemID)` behind them, and neither declared the event --
+    -- so `/cn next` in the first seconds after a login read "Start: item
+    -- 71715" and nothing ever re-asked. `Vendors` was worse: it joins vendor
+    -- stock to recipes BY NAME and emitted nothing at all.
+    ------------------------------------------------------------
+    for _, name in ipairs({ "Inventory", "Vendors" }) do
+        local provider = CN.candidateProviders[name]
+
+        assert(provider and provider.events
+            and provider.events["GET_ITEM_INFO_RECEIVED"],
+            "the " .. name .. " provider declares the item cache's event")
+    end
+
+    -- SUBSCRIBED, or a declared event nobody registered is a comment.
+    assert(CN.subscribedInvalidationEvents["GET_ITEM_INFO_RECEIVED"],
+        "and the addon is listening for it")
+
+    assert(CN.eventTable["GET_ITEM_INFO_RECEIVED"],
+        "with a handler on the client's own event table")
+
+    -- AND THE ROW IS RENAMED WHEN THE NAME ARRIVES.
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    CN.InvalidateCandidates()
+
+    local cold
+
+    for _, objective in ipairs(CN.candidateProviders["Inventory"].fn()) do
+        if tostring(objective.name):find("item %d") then
+            cold = objective.name
+        end
+    end
+
+    assert(cold, "a cold item cache names a row by its id")
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    CN.FireEvent("GET_ITEM_INFO_RECEIVED", 60001)
+
+    CN_TEST_DrainDeferred()
+
+    local warm
+
+    for _, objective in ipairs(CN.candidateProviders["Inventory"].fn()) do
+        if objective.name == cold then
+            warm = objective.name
+        end
+    end
+
+    assert(warm == nil,
+        "and the row is not still called " .. tostring(cold)
+        .. " once the client has answered")
+
+    -- AND A BURST OF THEM COSTS ONE PASS, NOT FOUR HUNDRED.
+    --
+    -- The client resolves a bagful, a bank, a merchant's stock and every
+    -- quest reward in the seconds after a login, one event each. Every fire
+    -- walked all twenty-odd providers to set a flag that was already set.
+    assert(CN.burstInvalidationEvents["GET_ITEM_INFO_RECEIVED"],
+        "the event is declared as one that arrives in bursts")
+
+    local passes = 0
+
+    local realInvalidate = CN.InvalidateCandidates
+
+    CN.InvalidateCandidates = function(...)
+        passes = passes + 1
+
+        return realInvalidate(...)
+    end
+
+    -- Well inside the gathering window, so only the leading call runs.
+    for _ = 1, 200 do
+        CN.FireEvent("GET_ITEM_INFO_RECEIVED", 60001)
+    end
+
+    CN.InvalidateCandidates = realInvalidate
+
+    assert(passes <= 2,
+        "two hundred item arrivals cost at most two invalidation passes, "
+        .. "not two hundred: " .. passes)
+
+    -- AND THE GATHERED ONE STILL RUNS, or the debounce is a mute button.
+    CN_TEST_DrainDeferred()
+
+    print("  the item cache filling reaches the providers that read it")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

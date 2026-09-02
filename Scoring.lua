@@ -1421,6 +1421,30 @@ end
 -- Tracked, so only genuinely new events are wired.
 CN.subscribedInvalidationEvents = CN.subscribedInvalidationEvents or {}
 
+-- EVENTS THAT ARRIVE IN BURSTS, AND HOW LONG TO GATHER THEM. 1.1.0.
+--
+-- `GET_ITEM_INFO_RECEIVED` fires once per item the client resolves, and the
+-- client resolves a bagful, a bank, a merchant's stock and every quest reward
+-- in the seconds after a login -- hundreds of fires, each of which would walk
+-- all twenty-odd providers to set a flag that was already set.
+--
+-- Delaying the mark costs nothing that can be seen: `InvalidateCandidates`
+-- only marks a provider stale, and `RefreshProviders` then applies each
+-- provider's own cooldown before rebuilding -- five seconds, for both
+-- providers that read the item cache. A mark that lands three quarters of a
+-- second late cannot delay a rebuild that was not going to happen for five.
+--
+-- `CN.Debounce` runs the FIRST call immediately and collapses the rest into
+-- one trailing run, so the first item to arrive still invalidates at once and
+-- the burst behind it costs one more pass, not four hundred.
+--
+-- Deliberately a short list. An event belongs here only when it fires many
+-- times for one change in the world; an event that fires once per change --
+-- which is nearly all of them -- must not be delayed at all.
+CN.burstInvalidationEvents = {
+    GET_ITEM_INFO_RECEIVED = 0.75,
+}
+
 function CN.SubscribeToInvalidationEvents()
     CN.subscribedToInvalidation = true
 
@@ -1454,9 +1478,19 @@ function CN.SubscribeToInvalidationEvents()
     for _, event in ipairs(subscribed) do
         CN.subscribedInvalidationEvents[event] = true
 
-        CN:RegisterEvent(event, function()
-            CN.InvalidateCandidates(event)
-        end)
+        local gather = CN.burstInvalidationEvents[event]
+
+        if gather then
+            CN:RegisterEvent(event, function()
+                CN.Debounce("invalidate:" .. event, gather, function()
+                    CN.InvalidateCandidates(event)
+                end)
+            end)
+        else
+            CN:RegisterEvent(event, function()
+                CN.InvalidateCandidates(event)
+            end)
+        end
     end
 
     return subscribed

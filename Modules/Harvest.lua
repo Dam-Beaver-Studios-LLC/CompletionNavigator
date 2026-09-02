@@ -152,6 +152,12 @@ function Harvest.Capture(questID, reason)
     end
 
     local store  = Store()
+
+    -- WHETHER THIS IS THE FIRST TIME THE ADDON HAS SEEN THIS QUEST AT ALL.
+    -- 1.1.0. Read before the record is created, because creating it is the
+    -- answer. See the turn-in block below for what it decides.
+    local firstSighting = store[questID] == nil
+
     local record = store[questID] or { questID = questID, firstSeen = time() }
 
     local changed = false
@@ -201,6 +207,27 @@ function Harvest.Capture(questID, reason)
     if reason == "turnedin" and mapID and x and y then
         local turnX = math.floor(x * 10000 + 0.5) / 10000
         local turnY = math.floor(y * 10000 + 0.5) / 10000
+
+        -- A QUEST THIS ADDON FIRST MEETS AT ITS HAND-IN HAS NO PICK-UP.
+        -- 1.1.0.
+        --
+        -- `set` had just written the hand-in point into `x` and `y`, because
+        -- nothing had ever written them -- so a quest completed by a player
+        -- who installed the addon halfway through it was recorded as being
+        -- OFFERED at the turn-in NPC. That row goes into `/cn export`, into
+        -- Navigator Data's staging, and from there into a curated file whose
+        -- header reads "every row in this file was checked by a person". The
+        -- curator has nothing to check it against: the coordinate is real,
+        -- the map is real, and the claim about it is wrong.
+        --
+        -- 1.0.0 gave the record a field that says exactly what this
+        -- coordinate is, and then let the first-sighting case go on writing
+        -- it under the other name. The pick-up is cleared rather than
+        -- guessed: a location the addon never saw is not a location it has.
+        if firstSighting then
+            record.x = nil
+            record.y = nil
+        end
 
         local elsewhere = record.mapID ~= mapID
             or record.x ~= turnX
@@ -548,6 +575,11 @@ function Harvest.Summary()
         total       = 0,
         named       = 0,
         located     = 0,
+
+        -- Counted separately because it is a different claim: the addon
+        -- knows where this quest ENDS and has never seen where it starts,
+        -- which is what a curator most needs told.
+        turnInOnly  = 0,
         withRequires = 0,
         withGuesses = 0,
     }
@@ -556,7 +588,17 @@ function Harvest.Summary()
         counts.total = counts.total + 1
 
         if record.name then counts.named = counts.named + 1 end
-        if record.x and record.y then counts.located = counts.located + 1 end
+
+        -- A TURN-IN IS A LOCATION. 1.1.0. See `Harvest.Located`: a quest the
+        -- addon first met at its hand-in has no pick-up and is not a row with
+        -- nothing in it.
+        if Harvest.Located(record) then
+            counts.located = counts.located + 1
+
+            if not (record.x and record.y) then
+                counts.turnInOnly = counts.turnInOnly + 1
+            end
+        end
         if record.requires then counts.withRequires = counts.withRequires + 1 end
         -- `record.observed`, not `record.maybeRequires`. The old field was
         -- deleted by database migration 3 and nothing has written it since,
@@ -588,11 +630,35 @@ end
 -- file failed to parse, and the addon did not load. The whole contribution
 -- workflow this function exists for was broken. Asserted now by LOADING the
 -- export rather than by looking at it.
+-- Whether the addon knows where this quest happens, in either sense.
+--
+-- ONE DEFINITION OF "LOCATED", BECAUSE THERE WERE THREE. 1.1.0.
+--
+-- `record.x and record.y` was written out three times -- the export filter,
+-- the summary counter and the contribution line -- and 1.0.0 added a second
+-- kind of location that none of them knew about. A quest the addon first met
+-- at its hand-in has a turn-in point and no pick-up, so all three called it
+-- unlocated: it was counted as nothing on `/cn harvest`, dropped by
+-- `/cn export`, and never reached curation -- which is the one row in the
+-- store whose coordinate the client can never re-supply.
+function Harvest.Located(record)
+    if type(record) ~= "table" then
+        return false
+    end
+
+    if record.x and record.y then
+        return true
+    end
+
+    return (record.turnInMapID and record.turnInX and record.turnInY) and true
+        or false
+end
+
 function Harvest.BuildExport(onlyLocated)
     local rows = {}
 
     for questID, record in pairs(Store()) do
-        if not onlyLocated or (record.x and record.y) then
+        if not onlyLocated or Harvest.Located(record) then
             table.insert(rows, record)
         end
     end
@@ -622,6 +688,17 @@ function Harvest.BuildExport(onlyLocated)
         if record.x and record.y then
             table.insert(lines, "        x         = " .. record.x .. ",")
             table.insert(lines, "        y         = " .. record.y .. ",")
+        elseif record.turnInMapID then
+            -- AND THE ROW SAYS WHAT IT DOES NOT KNOW. 1.1.0.
+            --
+            -- A row with a turn-in and no pick-up is not a row missing its
+            -- coordinates by accident; it is a quest this addon met halfway
+            -- through. Saying so in the file is the difference between a
+            -- curator adding the missing half and a curator assuming the
+            -- turn-in point is where the quest is offered -- which is what
+            -- this export claimed until this release.
+            table.insert(lines, "        -- picked up: NOT SEEN. The addon "
+                .. "met this quest at its hand-in.")
         end
 
         -- AND WHERE IT WAS HANDED IN, WHEN THAT IS SOMEWHERE ELSE. 1.0.0.
@@ -791,7 +868,11 @@ CN:RegisterCommand{
 
         Print("Harvested quests: " .. counts.total)
         Print("  with names: " .. counts.named)
-        Print("  with coordinates: " .. counts.located)
+        Print("  with coordinates: " .. counts.located
+            .. ((counts.turnInOnly > 0)
+                and CN.Aside(counts.turnInOnly
+                    .. " of them only where they were handed in")
+                or ""))
         Print("  with confirmed prerequisites: " .. counts.withRequires)
         Print("  with unconfirmed prerequisite guesses: " .. counts.withGuesses)
         Print("Use |cffffc74f/cn export|r to emit them as Data\\Quests.lua rows.")

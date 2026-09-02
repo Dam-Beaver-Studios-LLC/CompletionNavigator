@@ -5056,6 +5056,42 @@ mutate "UI.lua" \
     "        if true then" \
     "refreshing stale sources counts a scan the client refused"
 
+mutate "Modules/Harvest.lua" \
+    "        if firstSighting then
+            record.x = nil
+            record.y = nil
+        end" \
+    "        if false then
+            record.x = nil
+            record.y = nil
+        end" \
+    "a quest met at its hand-in is exported as being offered there"
+
+mutate "Modules/Harvest.lua" \
+    "    if record.x and record.y then
+        return true
+    end
+
+    return (record.turnInMapID and record.turnInX and record.turnInY) and true
+        or false" \
+    "    if record.x and record.y then
+        return true
+    end
+
+    return false" \
+    "a row located only by its hand-in is dropped from the export"
+
+mutate "Modules/Inventory.lua" \
+    "        \"GET_ITEM_INFO_RECEIVED\",
+    }," \
+    "    }," \
+    "the bag provider never hears that an item name arrived"
+
+mutate "Scoring.lua" \
+    "        local gather = CN.burstInvalidationEvents[event]" \
+    "        local gather = nil" \
+    "every item the client resolves walks every provider"
+
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
     "            .. CN.Accent(\"/cn waiting\") .. \" for what is on a timer.\")" \

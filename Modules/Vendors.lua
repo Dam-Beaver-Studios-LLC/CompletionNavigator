@@ -557,7 +557,24 @@ CN.RegisterCandidateProvider("Vendors", function()
     CN.providerTruncation["Vendors"] = { considered = considered, dropped = dropped }
 
     return candidates
-end, { events = { "MERCHANT_SHOW", "TRADE_SKILL_LIST_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 5 })
+end, {
+    events = {
+        "MERCHANT_SHOW", "TRADE_SKILL_LIST_UPDATE", "ZONE_CHANGED_NEW_AREA",
+
+        -- AND THE CLIENT'S ITEM CACHE. 1.1.0.
+        --
+        -- Worse here than in `Modules/Inventory.lua`, which at least emits a
+        -- row with a number in it. This provider joins vendor items to
+        -- recipes BY NAME -- `RecipeFor` asks `Blizzard.GetItemName` and
+        -- gives up when the answer is nil -- so while the item cache is cold
+        -- it emits nothing at all, and its declared events are a merchant
+        -- window, a trade-skill window and a zone line. A player who logs in
+        -- and asks what to do next is told about no vendor-sold recipe until
+        -- they happen to open a shop.
+        "GET_ITEM_INFO_RECEIVED",
+    },
+    cooldown = 5,
+})
 
 ------------------------------------------------------------
 -- EVENTS
