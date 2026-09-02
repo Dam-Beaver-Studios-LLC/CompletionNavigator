@@ -7,6 +7,77 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.2.0]
+
+1.1.0 added "the client's item cache" to the list of systems a provider must
+declare, and wrote down why: the weak part of an enumeration is the entry
+nobody thought of. Asking that question again found the answer sitting one
+file away, with its own event already registered â€” and a second system that
+had a handler for an answer to a question the addon never asked.
+
+**The addon was listening for the lockout list and never asking for it.**
+`GetNumSavedInstances` reads a table the client does not populate on its own:
+`RequestRaidInfo()` asks the server, and `UPDATE_INSTANCE_INFO` â€” which the
+instances provider has declared all along, under a comment reading *the client
+saying so* â€” is the answer arriving. Without the request the count is zero for
+the whole session unless the player happens to open the Raid Info frame, which
+sends it for them. So every lockout-shaped answer this addon gives was
+silently empty for somebody who logged in and asked what to do next:
+`/cn lockouts`, the part-finished-raid recommendation, the vault's dungeon row
+and the "Dungeons and raids" section of this addon's own store page. The
+request is sent on every loading screen and once per read, and the same
+pattern was already handled correctly two hundred lines away in the same file,
+for the calendar.
+
+**Quest titles arriving in the background were announced in chat, one line
+each.** `Blizzard.GetQuestTitle(id, true)` asks the server for a title the
+client has not cached, and the handler for the answer printed it. Every path
+that reaches that handler is a background one â€” the candidate provider walking
+this map's quest pins, the same provider walking up to twenty offers in three
+neighbouring zones, the map-pin sweep, `Chase`. There is no player-facing path
+into it at all. So crossing into a zone whose pins the client had not cached
+printed a line per quest, up to forty of them, announcing titles for rows
+nobody had looked at yet.
+
+**And the row that was waiting for one of those titles kept its number.** The
+provider renders "Quest 84732" while it waits, and nothing told it the answer
+had come: the title landed in the metadata store and the ranked list went on
+showing the number until an unrelated quest event happened along. Exactly the
+defect 1.1.0 fixed for the item cache, on its sibling system â€” one that
+already had the event, the handler and the store, and no line joining them to
+the screen.
+
+### Changed
+
+- `QUEST_DATA_LOAD_RESULT` joins `GET_ITEM_INFO_RECEIVED` as an event that
+  gathers before it invalidates. Up to forty answers arrive within a second or
+  two of each other as a zone's pins resolve.
+- The lockout request is sent at most once per loading screen, not once per
+  read: it is a server round trip, and every read of a lockout goes through
+  the function that sends it.
+
+### How defects were found
+
+- **The provider-event lint gained a sixth system**, the client's quest title
+  cache, and it named the offender on the first run. Rule 161 was written last
+  release about the item cache; asking the same question one release later
+  cost one entry in a table.
+- **The test client answered a lockout list it had never been asked for.** The
+  stub has done that since the first release, so the state every player is
+  actually in at login had never existed in the suite. Twentieth entry in this
+  project's list of defects hidden by a stub simpler than the client, and the
+  second in three releases where the missing piece was a *request* rather than
+  a read.
+- **A requested quest title never arrived in the test client either.**
+  `RequestLoadQuestByID` recorded the id and changed nothing, so the answer was
+  the same before and after â€” and the whole point of the call is that it is
+  not. Every test of that path was exercising the failure branch, including
+  the one that fires the success event.
+- **Capturing `CN.Print` intercepts nothing.** Every module binds
+  `local Print = CN.Print` in its header, so the first draft of the check that
+  no chat line is printed passed against the very line it was written for. It
+  captures at the chat frame now.
+
 ## [1.1.0]
 
 Two defects, both in code 1.0.0 wrote, both of the same shape: **a new kind of

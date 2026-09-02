@@ -1557,12 +1557,68 @@ end
 -- Returns an array of:
 --   { name, id, reset, difficultyID, difficulty, defeated, encounters,
 --     locked, extended, raid }
+-- THE LOCKOUT LIST HAS TO BE ASKED FOR. 1.2.0.
+--
+-- `GetNumSavedInstances` answers from a table the client does not populate on
+-- its own: `RequestRaidInfo()` asks the server for it, and
+-- `UPDATE_INSTANCE_INFO` is the answer arriving. Without the request the count
+-- is zero for the whole session unless the player happens to open the Raid
+-- Info frame, which calls it for them.
+--
+-- So every lockout-shaped answer this addon gives -- the "Dungeons and raids"
+-- section of its own store page, `/cn lockouts`, the part-finished-raid
+-- candidate, the Great Vault's dungeon row -- was silently empty for a player
+-- who logged in and asked what to do next. `Modules/Instances.lua` already
+-- declares `UPDATE_INSTANCE_INFO` on its provider, with a comment reading
+-- "UPDATE_INSTANCE_INFO is the client saying so": the addon was listening for
+-- an answer to a question it never asked.
+--
+-- This exact pattern is handled correctly two hundred lines up for the
+-- calendar -- `C_Calendar.OpenCalendar()` before reading day events, under a
+-- header saying "the calendar is asynchronous". One asynchronous system was
+-- given its request and its sibling was not, which is backlog rule 30.
+--
+-- Cheap and idempotent, but not free: it is a server round trip, so it is
+-- sent once per session and then only when the client says the data changed.
+local requestedRaidInfo = false
+
+function Blizzard.RequestSavedInstances(force)
+    if not RequestRaidInfo then
+        return false
+    end
+
+    if requestedRaidInfo and not force then
+        return false
+    end
+
+    requestedRaidInfo = true
+
+    return (pcall(RequestRaidInfo))
+end
+
+-- RE-ARMED BY A LOADING SCREEN.
+--
+-- Lockouts belong to a character and change when one is used, and the latch
+-- above is for the life of the Lua state -- which survives every zone change,
+-- every instance entered and every character switch that does not reload.
+-- `Modules/Instances.lua` sends the request on `PLAYER_ENTERING_WORLD`; this
+-- is what lets it, and it is deliberately not the request itself, because a
+-- provider file does not listen to the game.
+function Blizzard.ForgetSavedInstanceRequest()
+    requestedRaidInfo = false
+end
+
 function Blizzard.GetSavedInstances()
     local results = {}
 
     if not GetNumSavedInstances or not GetSavedInstanceInfo then
         return results
     end
+
+    -- ASKED ON THE WAY PAST, so no caller has to remember to. The first read
+    -- of the session comes back empty and the event that follows rebuilds
+    -- everything that depends on it; every read after that is answered.
+    Blizzard.RequestSavedInstances()
 
     local ok, count = pcall(GetNumSavedInstances)
 

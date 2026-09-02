@@ -49,7 +49,7 @@ read_globals = {
     -- Saved instances and the Adventure Guide (Encounter Journal). The EJ
     -- functions are globals rather than a namespaced table, which is why
     -- there are so many of them.
-    "GetNumSavedInstances", "GetSavedInstanceInfo", "C_TaxiMap",
+    "GetNumSavedInstances", "GetSavedInstanceInfo", "RequestRaidInfo", "C_TaxiMap",
 
     -- Memory reporting, sound and flash, group and death state, self-flying,
     -- crafting orders and the settings panel. All optional, all guarded at

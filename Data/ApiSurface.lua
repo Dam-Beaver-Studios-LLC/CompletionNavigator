@@ -210,6 +210,7 @@ CN.apiSurface = {
     "IsTitleKnown",
     "PlaySound",
     "PlayerHasToy",
+    "RequestRaidInfo",
     "Settings",
     "UIFrameFadeIn",
     "UIFrameFlash",

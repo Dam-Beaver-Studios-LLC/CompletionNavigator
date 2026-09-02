@@ -5092,6 +5092,44 @@ mutate "Scoring.lua" \
     "        local gather = nil" \
     "every item the client resolves walks every provider"
 
+mutate "Providers/BlizzardWorld.lua" \
+    "    Blizzard.RequestSavedInstances()" \
+    "    -- Blizzard.RequestSavedInstances()" \
+    "the lockout list is read without ever being asked for"
+
+mutate "Providers/BlizzardWorld.lua" \
+    "    if requestedRaidInfo and not force then
+        return false
+    end" \
+    "    if false then
+        return false
+    end" \
+    "every lockout read is a server round trip"
+
+mutate "Modules/Instances.lua" \
+    "    CN.Blizzard.ForgetSavedInstanceRequest()
+    CN.Blizzard.RequestSavedInstances()" \
+    "    CN.Blizzard.ForgetSavedInstanceRequest()" \
+    "a loading screen re-arms the lockout request and never sends it"
+
+mutate "Modules/Quests.lua" \
+    "    DebugPrint(\"Quest \" .. questID .. \" resolved: \" .. title)" \
+    "    Print(\"Quest \" .. questID .. \" resolved: \" .. title)" \
+    "a quest title fetched in the background is announced in chat"
+
+mutate "Modules/Quests.lua" \
+    "        \"QUEST_DATA_LOAD_RESULT\",
+    },
+    cooldown = 2," \
+    "    },
+    cooldown = 2," \
+    "the provider that asks for a quest title is not told it arrived"
+
+mutate "Scoring.lua" \
+    "    QUEST_DATA_LOAD_RESULT = 0.75," \
+    "" \
+    "forty quest titles arriving cost forty invalidation passes"
+
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
     "            .. CN.Accent(\"/cn waiting\") .. \" for what is on a timer.\")" \

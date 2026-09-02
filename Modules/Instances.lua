@@ -598,6 +598,37 @@ end, {
 })
 
 ------------------------------------------------------------
+-- ASKING FOR THE LOCKOUT LIST
+------------------------------------------------------------
+
+-- THE ADDON WAS LISTENING FOR AN ANSWER IT NEVER ASKED FOR. 1.2.0.
+--
+-- `GetNumSavedInstances` reads a table the client does not populate on its
+-- own: `RequestRaidInfo()` asks the server, and the `UPDATE_INSTANCE_INFO`
+-- declared eight lines above is the answer arriving. Without the request the
+-- count is zero for the whole session unless the player happens to open the
+-- Raid Info frame, which sends it for them -- so `/cn lockouts`, the
+-- part-finished-raid candidate, the vault's dungeon row and the "Dungeons and
+-- raids" section of this addon's store page were all silently empty for
+-- somebody who logged in and asked what to do next.
+--
+-- `Providers/BlizzardWorld.lua` handles this correctly for the calendar two
+-- hundred lines from `GetSavedInstances` -- `C_Calendar.OpenCalendar()`
+-- before reading day events, under a header saying the calendar is
+-- asynchronous. One asynchronous system got its request and its sibling did
+-- not.
+--
+-- ON EVERY LOADING SCREEN, not once at login. A lockout belongs to a
+-- character and changes when one is used; the once-per-session latch inside
+-- `RequestSavedInstances` exists so that reading a lockout does not send a
+-- server round trip every time, not so that the addon asks once and never
+-- again.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    CN.Blizzard.ForgetSavedInstanceRequest()
+    CN.Blizzard.RequestSavedInstances()
+end)
+
+------------------------------------------------------------
 -- COMMAND
 ------------------------------------------------------------
 

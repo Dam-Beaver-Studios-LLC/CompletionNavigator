@@ -1999,7 +1999,24 @@ CN.RegisterCandidateProvider("Quests", function()
     -- convention and `RunProvider` does not enforce it, so a provider that
     -- does not call this can push an unbounded list into the score-and-sort.
     return CN.CapCandidates and CN.CapCandidates(candidates) or candidates
-end, { events = { "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA" }, cooldown = 2 })
+end, {
+    events = {
+        "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED",
+        "QUEST_LOG_UPDATE", "ZONE_CHANGED_NEW_AREA",
+
+        -- AND THE TITLE THIS PROVIDER ASKED THE SERVER FOR. 1.2.0.
+        --
+        -- Two of the three loops above render `"Quest " .. questID` when the
+        -- client has no title cached, and call
+        -- `Blizzard.GetQuestTitle(id, true)` to ask for one -- so this
+        -- provider is the thing that starts the request and was not told
+        -- when it was answered. Crossing into a zone whose pins are not
+        -- cached produced a ranked list of quest numbers that stayed numbers
+        -- until something else invalidated.
+        "QUEST_DATA_LOAD_RESULT",
+    },
+    cooldown = 2,
+})
 
 ------------------------------------------------------------
 -- EVENTS
@@ -2019,12 +2036,46 @@ CN:RegisterEvent("QUEST_DATA_LOAD_RESULT", function(event, questID, success)
 
     local title = Blizzard.GetQuestTitle(questID, false)
 
-    if title then
-        Quests.SetMetadata(questID, title, "blizzard")
-        Print("Quest " .. questID .. " - " .. title)
-    else
+    if not title then
         DebugPrint("Quest " .. questID .. " loaded, but no title was returned.")
+        return
     end
+
+    Quests.SetMetadata(questID, title, "blizzard")
+
+    -- NOBODY ASKED FOR THIS SENTENCE. 1.2.0.
+    --
+    -- This printed a chat line per quest, and every path that reaches it is a
+    -- background one. `CN.pendingQuestLoads` is written in exactly one place
+    -- -- `Blizzard.GetQuestTitle(questID, true)` -- and its callers are the
+    -- candidate provider walking this map's quest pins, the same provider
+    -- walking up to twenty offers in three neighbouring zones, the map-pin
+    -- sweep and `Chase`. Not one of them is a player asking about a quest.
+    -- There is no `/cn lookup <id>` path into this: that command asks
+    -- external providers and never requests a title.
+    --
+    -- So crossing into a zone whose pins the client has not cached printed
+    -- a line for each of them -- forty at the cap -- announcing titles for
+    -- rows the player had not looked at yet. `Modules/Harvest.lua` states the
+    -- rule this broke: "nothing spams the chat frame at login".
+    DebugPrint("Quest " .. questID .. " resolved: " .. title)
+
+    -- AND THE ROW THAT WAS SHOWING A NUMBER IS REBUILT. 1.2.0.
+    --
+    -- The provider that asked for this title renders `"Quest " .. questID`
+    -- while waiting, and nothing told it the answer had come: the name landed
+    -- in the metadata store and the ranked list went on saying "Quest 84732"
+    -- until a quest event happened along. Exactly the defect 1.1.0 fixed for
+    -- the client's ITEM cache, on its sibling system -- one that had an event
+    -- registered, a handler and a store, and no line joining them to the
+    -- screen.
+    --
+    -- THE INVALIDATION IS NOT WRITTEN HERE. The provider below declares
+    -- `QUEST_DATA_LOAD_RESULT`, so `CN.SubscribeToInvalidationEvents` wires
+    -- it, and `CN.burstInvalidationEvents` gathers it -- because this arrives
+    -- once per quest, in bursts of up to forty as a zone's pins resolve. A
+    -- second invalidation written by hand here would be the same work twice
+    -- and a second place to keep right.
 end)
 
 CN:RegisterEvent("QUEST_ACCEPTED", function(event, questID)

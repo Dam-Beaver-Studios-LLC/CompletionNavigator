@@ -1490,7 +1490,35 @@ function CN_TEST_SetLockouts(rows)
     CN_TEST_SAVED_INSTANCES = built
 end
 
+-- THE LOCKOUT LIST IS EMPTY UNTIL IT IS ASKED FOR.
+-- CN_TEST_LOCKOUTS_UNREQUESTED, 1.2.0.
+--
+-- `GetNumSavedInstances` reads a table the client does not populate on its
+-- own: `RequestRaidInfo()` asks the server, `UPDATE_INSTANCE_INFO` is the
+-- answer arriving, and until then the count is zero. This stub answered
+-- immediately from the first release, so the state every player is actually
+-- in when they log in and type `/cn next` had never existed in the suite --
+-- and the addon's failure to send the request was invisible in it.
+--
+-- Twentieth entry in this project's list of defects hidden by a stub simpler
+-- than the client, and the second in three releases where the missing piece
+-- was a REQUEST rather than a read.
+CN_TEST_RAID_INFO_REQUESTS = 0
+
+function RequestRaidInfo()
+    CN_TEST_RAID_INFO_REQUESTS = CN_TEST_RAID_INFO_REQUESTS + 1
+
+    -- The server answering. In the client this is asynchronous and arrives as
+    -- UPDATE_INSTANCE_INFO; here it is immediate, which is the more demanding
+    -- shape for a caller to get right, because it cannot rely on ordering.
+    CN_TEST_LOCKOUTS_UNREQUESTED = false
+end
+
 function GetNumSavedInstances()
+    if CN_TEST_LOCKOUTS_UNREQUESTED then
+        return 0
+    end
+
     return #CN_TEST_SAVED_INSTANCES
 end
 
@@ -1705,6 +1733,24 @@ local offeredTitles = {
 
 local pendingLoad = {}
 
+-- A REQUESTED TITLE ARRIVES. CN_TEST_LOADABLE_TITLES, 1.2.0.
+--
+-- `RequestLoadQuestByID` recorded the id and nothing else, so
+-- `GetTitleForQuestID` answered nil before the request and nil after it --
+-- and the whole point of the call in the client is that the second answer is
+-- different. Every test of the load path was therefore testing the failure
+-- branch, including the one that fires `QUEST_DATA_LOAD_RESULT` with
+-- `success = true`.
+--
+-- These are the titles the server holds and the client has not cached. The
+-- request moves one into `offeredTitles`, which is where the stub's cache
+-- lives.
+-- A GLOBAL, not a local: this chunk is at Lua's 200-local ceiling and adding
+-- one more is a load error on 5.4 rather than a test failure.
+CN_TEST_LOADABLE_TITLES = {
+    [4242] = "The Quest The Client Had To Ask About",
+}
+
 CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
 
 -- MOVING THE PLAYER IS A FRAME BOUNDARY, so the fixture crosses one.
@@ -1790,7 +1836,17 @@ C_QuestLog = {
         end
         return offeredTitles[id]
     end,
-    RequestLoadQuestByID   = function(id) table.insert(pendingLoad, id) end,
+    RequestLoadQuestByID   = function(id)
+        table.insert(pendingLoad, id)
+
+        -- The server answering. In the client this is asynchronous and
+        -- arrives as QUEST_DATA_LOAD_RESULT; the title is in the cache by the
+        -- time that event's handler reads it, which is the shape modelled
+        -- here.
+        if CN_TEST_LOADABLE_TITLES[id] then
+            offeredTitles[id] = CN_TEST_LOADABLE_TITLES[id]
+        end
+    end,
     GetNumQuestLogEntries  = function() return #questLog end,
     GetInfo                = function(i) return questLog[i] end,
     ReadyForTurnIn         = function(id) return id == 9001 end,
@@ -16183,6 +16239,24 @@ end)()
             name    = "the client's item cache",
             readers = { "Blizzard.GetItemName", "CN.Blizzard.GetItemName" },
             events  = { "GET_ITEM_INFO_RECEIVED" },
+        },
+        {
+            -- AND THE QUEST TITLE CACHE, WHICH IS THE SAME SYSTEM. 1.2.0.
+            --
+            -- `Blizzard.GetQuestTitle(id, true)` returns nil and asks the
+            -- server; `QUEST_DATA_LOAD_RESULT` is the answer arriving. The
+            -- addon had the event registered, a handler for it and a store to
+            -- put the title in -- and no line joining any of that to the
+            -- screen, so a row rendered as "Quest 84732" until a quest event
+            -- happened along.
+            --
+            -- Added the release after the item cache, which is the point:
+            -- rule 161 says the weak part of an enumeration is the entry
+            -- nobody thought of, and the answer to "what else answers late"
+            -- was sitting one file away with its own event already wired.
+            name    = "the client's quest title cache",
+            readers = { "Blizzard.GetQuestTitle", "CN.Blizzard.GetQuestTitle" },
+            events  = { "QUEST_DATA_LOAD_RESULT" },
         },
     }
 
@@ -42242,6 +42316,151 @@ end)()
     CN_TEST_DrainDeferred()
 
     print("  the item cache filling reaches the providers that read it")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE LOCKOUT LIST IS ASKED FOR, NOT WAITED FOR.
+    --
+    -- `GetNumSavedInstances` reads a table the client does not populate on its
+    -- own: `RequestRaidInfo()` asks the server and `UPDATE_INSTANCE_INFO` is
+    -- the answer. Without the request the count is zero for the whole session
+    -- unless the player opens the Raid Info frame, which sends it for them --
+    -- so every lockout-shaped answer this addon gives was silently empty for
+    -- somebody who logged in and asked what to do next: `/cn lockouts`, the
+    -- part-finished-raid candidate, the vault's dungeon row, and the
+    -- "Dungeons and raids" section of the addon's own store page.
+    --
+    -- The addon was already LISTENING for the answer: the Instances provider
+    -- declares `UPDATE_INSTANCE_INFO` with a comment reading "the client
+    -- saying so". It had the handler and not the question. The same pattern
+    -- is handled correctly for the calendar two hundred lines away in the
+    -- same file -- `C_Calendar.OpenCalendar()` before reading day events --
+    -- which is backlog rule 30 on two asynchronous systems.
+    ------------------------------------------------------------
+    CN_TEST_LOCKOUTS_UNREQUESTED = true
+    CN_TEST_RAID_INFO_REQUESTS   = 0
+
+    -- A LOADING SCREEN, which is what re-arms it. The latch inside
+    -- `RequestSavedInstances` has been closed since this session's own login,
+    -- forty thousand lines ago.
+    CN.FireEvent("PLAYER_ENTERING_WORLD")
+
+    assert(CN_TEST_RAID_INFO_REQUESTS >= 1,
+        "entering the world asks the server for the lockout list: "
+        .. CN_TEST_RAID_INFO_REQUESTS)
+
+    assert(not CN_TEST_LOCKOUTS_UNREQUESTED,
+        "and the server answers once it has been asked")
+
+    -- AND A READ SENDS IT TOO, so no caller has to remember. This is the
+    -- path a cold `/cn next` takes before any loading screen handler has run.
+    CN.Blizzard.ForgetSavedInstanceRequest()
+
+    CN_TEST_LOCKOUTS_UNREQUESTED = true
+    CN_TEST_RAID_INFO_REQUESTS   = 0
+
+    local cold = CN.Blizzard.GetSavedInstances()
+
+    assert(CN_TEST_RAID_INFO_REQUESTS == 1,
+        "reading a lockout asks for the list: " .. CN_TEST_RAID_INFO_REQUESTS)
+
+    assert(#cold >= 0, "and the read answers")
+
+    -- AND ONCE PER SESSION, because it is a server round trip and every read
+    -- of a lockout goes through the function that sends it.
+    local sentSoFar = CN_TEST_RAID_INFO_REQUESTS
+
+    for _ = 1, 50 do
+        CN.Blizzard.GetSavedInstances()
+    end
+
+    assert(CN_TEST_RAID_INFO_REQUESTS == sentSoFar,
+        "fifty reads do not send fifty requests: "
+        .. CN_TEST_RAID_INFO_REQUESTS)
+
+    local rows = CN.Blizzard.GetSavedInstances()
+
+    assert(#rows > 0,
+        "the lockouts arrive after the request: " .. #rows)
+
+    -- AND THE PROVIDER IS TOLD WHEN THEY DO, or the request buys nothing: the
+    -- first read of the session comes back empty by construction.
+    local provider = CN.candidateProviders["Instances"]
+
+    assert(provider and provider.events
+        and provider.events["UPDATE_INSTANCE_INFO"],
+        "the instances provider declares the event that answers the request")
+
+    assert(CN.subscribedInvalidationEvents["UPDATE_INSTANCE_INFO"],
+        "and the addon is listening for it")
+
+    print("  the lockout list is asked for, once, and heard when it arrives")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A QUEST TITLE ARRIVING IS NOT AN ANNOUNCEMENT.
+    --
+    -- The handler printed a chat line per quest, and every path that reaches
+    -- it is a background one: `CN.pendingQuestLoads` is written in exactly one
+    -- place -- `Blizzard.GetQuestTitle(questID, true)` -- whose callers are
+    -- the candidate provider walking this map's quest pins, the same provider
+    -- walking up to twenty offers in three neighbouring zones, the map-pin
+    -- sweep and `Chase`. There is no player-facing path into it at all:
+    -- `/cn lookup` asks external providers and never requests a title.
+    --
+    -- So crossing into a zone whose pins the client has not cached printed a
+    -- line for each of them, announcing titles for rows the player had not
+    -- looked at. `Modules/Harvest.lua` states the rule: "nothing spams the
+    -- chat frame at login".
+    ------------------------------------------------------------
+    -- CAPTURED AT THE CHAT FRAME, NOT AT `CN.Print`. Every module binds
+    -- `local Print = CN.Print` in its header, so replacing the field at test
+    -- time intercepts nothing -- which is how the first draft of this check
+    -- passed against the very line it was written for.
+    local spoke = {}
+
+    local realAddMessage = DEFAULT_CHAT_FRAME.AddMessage
+
+    DEFAULT_CHAT_FRAME.AddMessage = function(chatFrame, message)
+        table.insert(spoke, tostring(message))
+    end
+
+    -- A background request, exactly as the provider makes it.
+    CN.Blizzard.GetQuestTitle(4242, true)
+
+    assert(CN.pendingQuestLoads[4242],
+        "the request is recorded as pending")
+
+    CN.FireEvent("QUEST_DATA_LOAD_RESULT", 4242, true)
+
+    DEFAULT_CHAT_FRAME.AddMessage = realAddMessage
+
+    assert(#spoke >= 0, "the chat frame was reachable")
+
+    for _, line in ipairs(spoke) do
+        assert(not line:find("4242", 1, true),
+            "a title arriving in the background says nothing in chat: " .. line)
+    end
+
+    -- AND THE TITLE IS STILL RECORDED, or the quiet is bought by doing less.
+    local quests = CN:GetModule("Quests")
+
+    assert(quests.GetName(4242),
+        "the title that arrived is stored")
+
+    -- AND THE PROVIDER THAT ASKED IS TOLD.
+    local provider = CN.candidateProviders["Quests"]
+
+    assert(provider and provider.events
+        and provider.events["QUEST_DATA_LOAD_RESULT"],
+        "the provider that requests titles declares the event that answers it")
+
+    assert(CN.burstInvalidationEvents["QUEST_DATA_LOAD_RESULT"],
+        "and it is gathered, because up to forty arrive at once")
+
+    print("  a quest title arriving is recorded, not announced")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

@@ -1443,6 +1443,15 @@ CN.subscribedInvalidationEvents = CN.subscribedInvalidationEvents or {}
 -- which is nearly all of them -- must not be delayed at all.
 CN.burstInvalidationEvents = {
     GET_ITEM_INFO_RECEIVED = 0.75,
+
+    -- THE SAME SHAPE ON THE QUEST TITLE CACHE. 1.2.0.
+    --
+    -- `Blizzard.GetQuestTitle(id, true)` asks the server for one title and
+    -- this is the answer. The candidate provider asks for every uncached
+    -- quest pin on this map and up to twenty offers in three neighbouring
+    -- zones, so crossing a zone line starts up to forty requests and forty
+    -- answers arrive within a second or two of each other.
+    QUEST_DATA_LOAD_RESULT = 0.75,
 }
 
 function CN.SubscribeToInvalidationEvents()
