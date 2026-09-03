@@ -7,6 +7,55 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.6.0]
+
+1.5.0 fixed a client request that repeated on every rebuild and wrote down why
+no benchmark could have caught it: every benchmark runs against a warm client,
+so the branches that talk to the server are never taken. This release built
+the measurement that was missing, and it found the same defect on the sibling
+system immediately.
+
+**A quest the server will not describe was asked about every two seconds, for
+ever.** `Blizzard.GetQuestTitle` records the request in `CN.pendingQuestLoads`
+and the handler for the answer clears it â€” and nothing ever read it before
+asking again. The candidate provider calls this for every uncached quest pin
+on the map and for up to twenty offers in three neighbouring zones, and it
+rebuilds every two seconds, so a quest id the client has no data for produced
+a request per pin per rebuild for the life of the session. The latch was
+already on disk, already named for exactly this, and was written to and never
+read.
+
+### Added
+
+- **A request budget in the suite.** Every request-shaped call the addon can
+  make is counted across three identical cold rebuilds, and asking for
+  anything a second time is a failure. It is a difference rather than an
+  absolute, because an absolute is a statement about the fixture and the
+  difference is a statement about the addon: a request repeated on the second
+  pass repeats for ever, whatever size the fixture is. A new request added
+  without a latch now fails on the release that adds it.
+
+### Changed
+
+- The two `PLAYER_ENTERING_WORLD` handlers in `Modules/Instances.lua` are one
+  handler. 1.5.0 added the second to clear the lockout answer, leaving two
+  halves of one thing in two places that happened to be registered in the
+  right order â€” clear the answer, then re-ask â€” with nothing saying so.
+  Moving either block would have credited the previous segment's reply to the
+  new one.
+
+### How defects were found
+
+- **The test client named every quest it was asked about.** Every offered
+  quest in the fixture had a title, so the provider's "ask the server and
+  render the id while waiting" branch had never been reached and the request
+  it sends had never been counted. There is now a pin the client refuses to
+  name and never answers about, which is an ordinary state in game.
+- **And the first version of that pin was invisible.** The fixture client
+  answers "completed" for every odd quest id below 70000, so an odd pin is
+  dropped by the availability filter and reaches nothing â€” it passed every
+  assertion by not existing.
+
 ## [1.5.0]
 
 Both of this release's defects were written by the two releases before it, and

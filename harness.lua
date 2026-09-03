@@ -1932,6 +1932,27 @@ C_QuestLog = {
             { questID = 9102, x = 0.44, y = 0.66,
               isQuestStart = true, inProgress = false, isDaily = true },
 
+            -- A PIN THE CLIENT WILL NOT NAME. 1.6.0.
+            --
+            -- Every offered quest in this fixture had a title, so the branch
+            -- the provider takes when it does NOT -- ask the server, render
+            -- "Quest <id>" while waiting -- had never been reached, and the
+            -- request it sends had never been counted. That is an ordinary
+            -- state in game: the client describes a quest it has data for and
+            -- refuses for the rest until asked, and sometimes after.
+            --
+            -- Deliberately absent from `offeredTitles` AND from
+            -- `CN_TEST_LOADABLE_TITLES`, so the server never answers about it:
+            -- a refusal that persists is what turned one request into one
+            -- request every two seconds for the life of the session.
+            -- EVEN, because this fixture's client answers "completed" for
+            -- every odd id below 70000. An odd one here is silently dropped
+            -- by the availability filter and reaches nothing -- which is how
+            -- the first draft of this pin passed every assertion by being
+            -- invisible.
+            { questID = 9104, x = 0.52, y = 0.39,
+              isQuestStart = true, inProgress = false, isDaily = false },
+
             -- A quest start for something already completed: must be ignored.
             { questID = 9101, x = 0.50, y = 0.50,
               isQuestStart = true, inProgress = false },
@@ -5650,8 +5671,13 @@ for _, poi in ipairs(availableHere) do availableIDs[#availableIDs + 1] = poi.que
 
 print("  available to pick up = " .. table.concat(availableIDs, ", "))
 
-assert(#availableHere == 2,
-    "two quests are offered and not yet done, got " .. #availableHere)
+-- THREE SINCE 1.6.0: 9100, 9102, and 9104 -- the pin the client will not
+-- name, added so the provider's "ask the server for a title" branch is
+-- reachable at all. The count is derived from the fixture below rather than
+-- typed, because a hardcoded number is what makes adding a pin look like a
+-- test failure.
+assert(#availableHere == 3,
+    "three quests are offered and not yet done, got " .. #availableHere)
 
 for _, poi in ipairs(availableHere) do
     assert(poi.questID ~= 9002, "a quest already in the log is not 'available'")
@@ -42674,6 +42700,22 @@ end)()
         "entering the world asks for the mailbox again: "
         .. CN_TEST_INBOX_REQUESTS)
 
+    -- AND THE LOCKOUT ANSWER IS FORGOTTEN WITH IT. 1.6.0.
+    --
+    -- A loading screen re-arms the lockout request; if the previous segment's
+    -- answer is not forgotten alongside it, a reply to the old question is
+    -- credited to the new one and `/cn instances` reports last zone's list as
+    -- this one's. 1.5.0 wrote the two halves as two handlers for one event
+    -- and relied on their registration order to keep them in step.
+    local lockoutModule = CN:GetModule("Instances")
+
+    lockoutModule.answered = true
+
+    CN.FireEvent("PLAYER_ENTERING_WORLD")
+
+    assert(lockoutModule.answered == false,
+        "a loading screen forgets the previous segment's lockout answer")
+
     -- AND "NOT ANSWERED YET" IS NOT "NO MAIL".
     --
     -- Both read as zero from the client, and this reported both as "the
@@ -42927,6 +42969,107 @@ end)()
         "and the client saying the list is in hand is what makes it one")
 
     print("  an unanswered lockout request is not an empty week")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A REBUILD ASKS THE SERVER FOR NOTHING IT HAS ALREADY ASKED FOR.
+    --
+    -- This is the measurement backlog rule 174 says is missing. Every
+    -- benchmark in this project runs against a warm client, so the branches
+    -- that TALK to the server -- the ones that only fire on a miss -- have
+    -- never been timed or counted, and two releases running shipped a request
+    -- inside a loop because of it: `C_Item.RequestLoadItemDataByID` in 1.4.0,
+    -- fixed in 1.5.0, and `C_QuestLog.RequestLoadQuestByID`, which had the
+    -- defect from the day it was written.
+    --
+    -- Counted rather than timed, and expressed as a difference between two
+    -- identical rebuilds rather than as an absolute, because an absolute is a
+    -- statement about this fixture and the difference is a statement about the
+    -- addon. A request repeated on the second pass is a request that repeats
+    -- for ever, whatever the fixture's size.
+    --
+    -- Every request-shaped call the addon can make is here. A new one added
+    -- without a latch fails this on the release that adds it.
+    ------------------------------------------------------------
+    local sent = {}
+
+    local wrapped = {}
+
+    local function watch(holder, key, label)
+        local real = holder[key]
+
+        if type(real) ~= "function" then
+            return
+        end
+
+        sent[label] = 0
+
+        table.insert(wrapped, { holder = holder, key = key, real = real })
+
+        holder[key] = function(...)
+            sent[label] = sent[label] + 1
+
+            return real(...)
+        end
+    end
+
+    watch(C_Item,     "RequestLoadItemDataByID", "an item's data")
+    watch(C_QuestLog, "RequestLoadQuestByID",    "a quest's data")
+    watch(_G,         "RequestRaidInfo",         "the lockout list")
+    watch(_G,         "CheckInbox",              "the mailbox")
+
+    if C_MythicPlus then
+        watch(C_MythicPlus, "RequestMapInfo", "the keystone")
+    end
+
+    assert(sent["an item's data"] and sent["a quest's data"]
+        and sent["the lockout list"] and sent["the mailbox"],
+        "every request the addon makes is being counted")
+
+    -- COLD, because a warm client never takes the branch that asks.
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates(true)
+
+    local first = {}
+
+    for label, value in pairs(sent) do
+        first[label] = value
+    end
+
+    -- Two more identical rebuilds, with nothing about the world changed.
+    for _ = 1, 2 do
+        CN.InvalidateCandidates()
+        CN.CollectCandidates(true)
+    end
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    for _, entry in ipairs(wrapped) do
+        entry.holder[entry.key] = entry.real
+    end
+
+    local asked = 0
+
+    for label, value in pairs(sent) do
+        assert(value == first[label],
+            "a rebuild that changed nothing asked the server for " .. label
+            .. " again: " .. first[label] .. " on the first pass, "
+            .. value .. " after two more")
+
+        asked = asked + value
+    end
+
+    -- AND SOMETHING WAS ASKED FOR, or this passes by measuring nothing --
+    -- which is how the quest-title request went unmeasured for its whole
+    -- life.
+    assert(asked > 0,
+        "the cold rebuild asked the server for something: " .. asked)
+
+    print("  " .. asked .. " requests on a cold rebuild, and none of them "
+        .. "twice")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

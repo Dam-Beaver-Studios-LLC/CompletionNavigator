@@ -69,12 +69,6 @@ CN:RegisterEvent("UPDATE_INSTANCE_INFO", function()
     Instances.answered = true
 end)
 
-CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
-    -- A loading screen re-arms the request, so it re-arms the answer with it
-    -- or the addon reports a stale segment's reply as this one's.
-    Instances.answered = false
-end)
-
 -- Returns `lockouts, answered`.
 function Instances.Lockouts()
     local raw = Blizzard.GetSavedInstances()
@@ -661,7 +655,19 @@ end, {
 -- `RequestSavedInstances` exists so that reading a lockout does not send a
 -- server round trip every time, not so that the addon asks once and never
 -- again.
+-- ONE HANDLER, BECAUSE THE ORDER IS LOAD-BEARING. 1.6.0.
+--
+-- 1.5.0 added a second `PLAYER_ENTERING_WORLD` handler at the top of this
+-- file to clear `Instances.answered`, leaving two handlers for one event
+-- doing two halves of one thing. They happened to be registered in the right
+-- order -- clear the answer, then re-ask -- and nothing said so, so moving
+-- either block would have silently discarded an answer that arrived between
+-- them. The three statements belong together and now are together.
 CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    -- The answer is forgotten BEFORE the request goes out, or a reply to the
+    -- previous segment's question is credited to this one.
+    Instances.answered = false
+
     CN.Blizzard.ForgetSavedInstanceRequest()
     CN.Blizzard.RequestSavedInstances()
 end)

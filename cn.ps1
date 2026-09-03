@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '1.5.0'
+$script:ToolkitVersion = '1.6.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "1.5.0"
+CN.version     = "1.6.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -19136,11 +19136,32 @@ function Blizzard.GetQuestTitle(questID, requestIfMissing)
         end
     end
 
+    -- ONE REQUEST PER QUEST WHILE ONE IS OUTSTANDING. 1.6.0.
+    --
+    -- `CN.pendingQuestLoads` was written here and read only by the handler
+    -- that clears it, so nothing consulted it before asking again. The
+    -- candidate provider calls this for every uncached quest pin on the map
+    -- and for up to twenty offers in three neighbouring zones, and it rebuilds
+    -- every two seconds -- so a quest the server does not describe, which is
+    -- an ordinary thing for a quest id to be, was requested for ever.
+    --
+    -- Exactly the defect 1.5.0 fixed for `C_Item.RequestLoadItemDataByID`,
+    -- on the sibling system, one release later. The latch that closes it was
+    -- already on disk and already had a name: `pendingQuestLoads` means "we
+    -- have asked and are waiting", and the only thing missing was reading it.
+    --
+    -- Cleared on a loading screen rather than never, because a refusal can be
+    -- transient -- the client answers for a quest after a zone loads that it
+    -- would not answer for before -- and a latch with no way out turns a
+    -- momentary refusal into a permanent one.
     if requestIfMissing and C_QuestLog and C_QuestLog.RequestLoadQuestByID then
         CN.pendingQuestLoads = CN.pendingQuestLoads or {}
-        CN.pendingQuestLoads[questID] = true
 
-        C_QuestLog.RequestLoadQuestByID(questID)
+        if not CN.pendingQuestLoads[questID] then
+            CN.pendingQuestLoads[questID] = true
+
+            C_QuestLog.RequestLoadQuestByID(questID)
+        end
     end
 
     return nil
@@ -56016,12 +56037,6 @@ CN:RegisterEvent("UPDATE_INSTANCE_INFO", function()
     Instances.answered = true
 end)
 
-CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
-    -- A loading screen re-arms the request, so it re-arms the answer with it
-    -- or the addon reports a stale segment's reply as this one's.
-    Instances.answered = false
-end)
-
 -- Returns `lockouts, answered`.
 function Instances.Lockouts()
     local raw = Blizzard.GetSavedInstances()
@@ -56608,7 +56623,19 @@ end, {
 -- `RequestSavedInstances` exists so that reading a lockout does not send a
 -- server round trip every time, not so that the addon asks once and never
 -- again.
+-- ONE HANDLER, BECAUSE THE ORDER IS LOAD-BEARING. 1.6.0.
+--
+-- 1.5.0 added a second `PLAYER_ENTERING_WORLD` handler at the top of this
+-- file to clear `Instances.answered`, leaving two handlers for one event
+-- doing two halves of one thing. They happened to be registered in the right
+-- order -- clear the answer, then re-ask -- and nothing said so, so moving
+-- either block would have silently discarded an answer that arrived between
+-- them. The three statements belong together and now are together.
 CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    -- The answer is forgotten BEFORE the request goes out, or a reply to the
+    -- previous segment's question is credited to this one.
+    Instances.answered = false
+
     CN.Blizzard.ForgetSavedInstanceRequest()
     CN.Blizzard.RequestSavedInstances()
 end)
@@ -61842,7 +61869,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 1.5.0
+## Version: 1.6.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -62097,6 +62124,55 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [1.6.0]
+
+1.5.0 fixed a client request that repeated on every rebuild and wrote down why
+no benchmark could have caught it: every benchmark runs against a warm client,
+so the branches that talk to the server are never taken. This release built
+the measurement that was missing, and it found the same defect on the sibling
+system immediately.
+
+**A quest the server will not describe was asked about every two seconds, for
+ever.** `Blizzard.GetQuestTitle` records the request in `CN.pendingQuestLoads`
+and the handler for the answer clears it — and nothing ever read it before
+asking again. The candidate provider calls this for every uncached quest pin
+on the map and for up to twenty offers in three neighbouring zones, and it
+rebuilds every two seconds, so a quest id the client has no data for produced
+a request per pin per rebuild for the life of the session. The latch was
+already on disk, already named for exactly this, and was written to and never
+read.
+
+### Added
+
+- **A request budget in the suite.** Every request-shaped call the addon can
+  make is counted across three identical cold rebuilds, and asking for
+  anything a second time is a failure. It is a difference rather than an
+  absolute, because an absolute is a statement about the fixture and the
+  difference is a statement about the addon: a request repeated on the second
+  pass repeats for ever, whatever size the fixture is. A new request added
+  without a latch now fails on the release that adds it.
+
+### Changed
+
+- The two `PLAYER_ENTERING_WORLD` handlers in `Modules/Instances.lua` are one
+  handler. 1.5.0 added the second to clear the lockout answer, leaving two
+  halves of one thing in two places that happened to be registered in the
+  right order — clear the answer, then re-ask — with nothing saying so.
+  Moving either block would have credited the previous segment's reply to the
+  new one.
+
+### How defects were found
+
+- **The test client named every quest it was asked about.** Every offered
+  quest in the fixture had a title, so the provider's "ask the server and
+  render the id while waiting" branch had never been reached and the request
+  it sends had never been counted. There is now a pin the client refuses to
+  name and never answers about, which is an ordinary state in game.
+- **And the first version of that pin was invisible.** The fixture client
+  answers "completed" for every odd quest id below 70000, so an odd pin is
+  dropped by the availability filter and reaches nothing — it passed every
+  assertion by not existing.
 
 ## [1.5.0]
 
@@ -70142,7 +70218,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-1.5.0
+1.6.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -75862,6 +75938,24 @@ end)" \
 end)" \
     "the client saying the lockout list is in hand is ignored"
 
+mutate "Providers/Blizzard.lua" \
+    "        if not CN.pendingQuestLoads[questID] then
+            CN.pendingQuestLoads[questID] = true
+
+            C_QuestLog.RequestLoadQuestByID(questID)
+        end" \
+    "        CN.pendingQuestLoads[questID] = true
+
+        C_QuestLog.RequestLoadQuestByID(questID)" \
+    "a quest the server will not name is asked about on every rebuild"
+
+mutate "Modules/Instances.lua" \
+    "    Instances.answered = false
+
+    CN.Blizzard.ForgetSavedInstanceRequest()" \
+    "    CN.Blizzard.ForgetSavedInstanceRequest()" \
+    "a loading screen keeps the previous segment's lockout answer"
+
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
     "            .. CN.Accent(\"/cn waiting\") .. \" for what is on a timer.\")" \
@@ -78028,6 +78122,27 @@ C_QuestLog = {
             -- A daily, also available.
             { questID = 9102, x = 0.44, y = 0.66,
               isQuestStart = true, inProgress = false, isDaily = true },
+
+            -- A PIN THE CLIENT WILL NOT NAME. 1.6.0.
+            --
+            -- Every offered quest in this fixture had a title, so the branch
+            -- the provider takes when it does NOT -- ask the server, render
+            -- "Quest <id>" while waiting -- had never been reached, and the
+            -- request it sends had never been counted. That is an ordinary
+            -- state in game: the client describes a quest it has data for and
+            -- refuses for the rest until asked, and sometimes after.
+            --
+            -- Deliberately absent from `offeredTitles` AND from
+            -- `CN_TEST_LOADABLE_TITLES`, so the server never answers about it:
+            -- a refusal that persists is what turned one request into one
+            -- request every two seconds for the life of the session.
+            -- EVEN, because this fixture's client answers "completed" for
+            -- every odd id below 70000. An odd one here is silently dropped
+            -- by the availability filter and reaches nothing -- which is how
+            -- the first draft of this pin passed every assertion by being
+            -- invisible.
+            { questID = 9104, x = 0.52, y = 0.39,
+              isQuestStart = true, inProgress = false, isDaily = false },
 
             -- A quest start for something already completed: must be ignored.
             { questID = 9101, x = 0.50, y = 0.50,
@@ -81747,8 +81862,13 @@ for _, poi in ipairs(availableHere) do availableIDs[#availableIDs + 1] = poi.que
 
 print("  available to pick up = " .. table.concat(availableIDs, ", "))
 
-assert(#availableHere == 2,
-    "two quests are offered and not yet done, got " .. #availableHere)
+-- THREE SINCE 1.6.0: 9100, 9102, and 9104 -- the pin the client will not
+-- name, added so the provider's "ask the server for a title" branch is
+-- reachable at all. The count is derived from the fixture below rather than
+-- typed, because a hardcoded number is what makes adding a pin look like a
+-- test failure.
+assert(#availableHere == 3,
+    "three quests are offered and not yet done, got " .. #availableHere)
 
 for _, poi in ipairs(availableHere) do
     assert(poi.questID ~= 9002, "a quest already in the log is not 'available'")
@@ -118771,6 +118891,22 @@ end)()
         "entering the world asks for the mailbox again: "
         .. CN_TEST_INBOX_REQUESTS)
 
+    -- AND THE LOCKOUT ANSWER IS FORGOTTEN WITH IT. 1.6.0.
+    --
+    -- A loading screen re-arms the lockout request; if the previous segment's
+    -- answer is not forgotten alongside it, a reply to the old question is
+    -- credited to the new one and `/cn instances` reports last zone's list as
+    -- this one's. 1.5.0 wrote the two halves as two handlers for one event
+    -- and relied on their registration order to keep them in step.
+    local lockoutModule = CN:GetModule("Instances")
+
+    lockoutModule.answered = true
+
+    CN.FireEvent("PLAYER_ENTERING_WORLD")
+
+    assert(lockoutModule.answered == false,
+        "a loading screen forgets the previous segment's lockout answer")
+
     -- AND "NOT ANSWERED YET" IS NOT "NO MAIL".
     --
     -- Both read as zero from the client, and this reported both as "the
@@ -119024,6 +119160,107 @@ end)()
         "and the client saying the list is in hand is what makes it one")
 
     print("  an unanswered lockout request is not an empty week")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A REBUILD ASKS THE SERVER FOR NOTHING IT HAS ALREADY ASKED FOR.
+    --
+    -- This is the measurement backlog rule 174 says is missing. Every
+    -- benchmark in this project runs against a warm client, so the branches
+    -- that TALK to the server -- the ones that only fire on a miss -- have
+    -- never been timed or counted, and two releases running shipped a request
+    -- inside a loop because of it: `C_Item.RequestLoadItemDataByID` in 1.4.0,
+    -- fixed in 1.5.0, and `C_QuestLog.RequestLoadQuestByID`, which had the
+    -- defect from the day it was written.
+    --
+    -- Counted rather than timed, and expressed as a difference between two
+    -- identical rebuilds rather than as an absolute, because an absolute is a
+    -- statement about this fixture and the difference is a statement about the
+    -- addon. A request repeated on the second pass is a request that repeats
+    -- for ever, whatever the fixture's size.
+    --
+    -- Every request-shaped call the addon can make is here. A new one added
+    -- without a latch fails this on the release that adds it.
+    ------------------------------------------------------------
+    local sent = {}
+
+    local wrapped = {}
+
+    local function watch(holder, key, label)
+        local real = holder[key]
+
+        if type(real) ~= "function" then
+            return
+        end
+
+        sent[label] = 0
+
+        table.insert(wrapped, { holder = holder, key = key, real = real })
+
+        holder[key] = function(...)
+            sent[label] = sent[label] + 1
+
+            return real(...)
+        end
+    end
+
+    watch(C_Item,     "RequestLoadItemDataByID", "an item's data")
+    watch(C_QuestLog, "RequestLoadQuestByID",    "a quest's data")
+    watch(_G,         "RequestRaidInfo",         "the lockout list")
+    watch(_G,         "CheckInbox",              "the mailbox")
+
+    if C_MythicPlus then
+        watch(C_MythicPlus, "RequestMapInfo", "the keystone")
+    end
+
+    assert(sent["an item's data"] and sent["a quest's data"]
+        and sent["the lockout list"] and sent["the mailbox"],
+        "every request the addon makes is being counted")
+
+    -- COLD, because a warm client never takes the branch that asks.
+    CN_TEST_ITEM_CACHE_COLD = true
+
+    CN.InvalidateCandidates()
+    CN.CollectCandidates(true)
+
+    local first = {}
+
+    for label, value in pairs(sent) do
+        first[label] = value
+    end
+
+    -- Two more identical rebuilds, with nothing about the world changed.
+    for _ = 1, 2 do
+        CN.InvalidateCandidates()
+        CN.CollectCandidates(true)
+    end
+
+    CN_TEST_ITEM_CACHE_COLD = false
+
+    for _, entry in ipairs(wrapped) do
+        entry.holder[entry.key] = entry.real
+    end
+
+    local asked = 0
+
+    for label, value in pairs(sent) do
+        assert(value == first[label],
+            "a rebuild that changed nothing asked the server for " .. label
+            .. " again: " .. first[label] .. " on the first pass, "
+            .. value .. " after two more")
+
+        asked = asked + value
+    end
+
+    -- AND SOMETHING WAS ASKED FOR, or this passes by measuring nothing --
+    -- which is how the quest-title request went unmeasured for its whole
+    -- life.
+    assert(asked > 0,
+        "the cold rebuild asked the server for something: " .. asked)
+
+    print("  " .. asked .. " requests on a cold rebuild, and none of them "
+        .. "twice")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

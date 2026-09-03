@@ -5221,6 +5221,24 @@ end)" \
 end)" \
     "the client saying the lockout list is in hand is ignored"
 
+mutate "Providers/Blizzard.lua" \
+    "        if not CN.pendingQuestLoads[questID] then
+            CN.pendingQuestLoads[questID] = true
+
+            C_QuestLog.RequestLoadQuestByID(questID)
+        end" \
+    "        CN.pendingQuestLoads[questID] = true
+
+        C_QuestLog.RequestLoadQuestByID(questID)" \
+    "a quest the server will not name is asked about on every rebuild"
+
+mutate "Modules/Instances.lua" \
+    "    Instances.answered = false
+
+    CN.Blizzard.ForgetSavedInstanceRequest()" \
+    "    CN.Blizzard.ForgetSavedInstanceRequest()" \
+    "a loading screen keeps the previous segment's lockout answer"
+
 mutate "Scoring.lua" \
     "            .. CN.Accent(\"/cn clock\") .. \" for what is on a timer.\")" \
     "            .. CN.Accent(\"/cn waiting\") .. \" for what is on a timer.\")" \

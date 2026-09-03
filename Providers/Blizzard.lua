@@ -69,11 +69,32 @@ function Blizzard.GetQuestTitle(questID, requestIfMissing)
         end
     end
 
+    -- ONE REQUEST PER QUEST WHILE ONE IS OUTSTANDING. 1.6.0.
+    --
+    -- `CN.pendingQuestLoads` was written here and read only by the handler
+    -- that clears it, so nothing consulted it before asking again. The
+    -- candidate provider calls this for every uncached quest pin on the map
+    -- and for up to twenty offers in three neighbouring zones, and it rebuilds
+    -- every two seconds -- so a quest the server does not describe, which is
+    -- an ordinary thing for a quest id to be, was requested for ever.
+    --
+    -- Exactly the defect 1.5.0 fixed for `C_Item.RequestLoadItemDataByID`,
+    -- on the sibling system, one release later. The latch that closes it was
+    -- already on disk and already had a name: `pendingQuestLoads` means "we
+    -- have asked and are waiting", and the only thing missing was reading it.
+    --
+    -- Cleared on a loading screen rather than never, because a refusal can be
+    -- transient -- the client answers for a quest after a zone loads that it
+    -- would not answer for before -- and a latch with no way out turns a
+    -- momentary refusal into a permanent one.
     if requestIfMissing and C_QuestLog and C_QuestLog.RequestLoadQuestByID then
         CN.pendingQuestLoads = CN.pendingQuestLoads or {}
-        CN.pendingQuestLoads[questID] = true
 
-        C_QuestLog.RequestLoadQuestByID(questID)
+        if not CN.pendingQuestLoads[questID] then
+            CN.pendingQuestLoads[questID] = true
+
+            C_QuestLog.RequestLoadQuestByID(questID)
+        end
     end
 
     return nil
