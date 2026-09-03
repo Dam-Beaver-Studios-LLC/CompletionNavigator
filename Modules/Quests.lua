@@ -14,6 +14,40 @@ local Blizzard   = CN.Blizzard
 
 CN.pendingQuestLoads = CN.pendingQuestLoads or {}
 
+-- QUESTS THE SERVER HAS ALREADY SAID NO ABOUT. 1.7.0.
+--
+-- 1.6.0 stopped the addon asking for a quest title while a request was in
+-- flight, and the handler below clears the pending flag on EVERY answer --
+-- including `success = false`, and including a success that carries no title.
+-- Both are ordinary answers from the client, and both put the id straight
+-- back into the "not asked" state, so the next rebuild asked again, two
+-- seconds later, for ever.
+--
+-- The latch 1.6.0 added therefore closed only the case where no answer ever
+-- arrives, which is the one the test fixture happened to model. The two the
+-- client actually produces were untouched, and the suite's own request budget
+-- passed because the stub answered nothing rather than answering "no".
+--
+-- A separate table rather than a third value in `pendingQuestLoads`, because
+-- that table is tested for truthiness in three places and a `false` in it
+-- reads as "not pending" at every one of them.
+CN.refusedQuestLoads = CN.refusedQuestLoads or {}
+
+-- AND THE WAY OUT THE 1.6.0 COMMENT PROMISED AND DID NOT BUILD.
+--
+-- That release's note reads "cleared on a loading screen rather than never,
+-- because a refusal can be transient... a latch with no way out turns a
+-- momentary refusal into a permanent one." Nothing cleared it. The comment
+-- described behaviour that did not exist, which is worse than the missing
+-- behaviour: the next reader checks the note instead of the code.
+--
+-- Both tables go, because both are statements about what the server has said
+-- during THIS segment, and a loading screen is where that stops being true.
+CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
+    CN.pendingQuestLoads = {}
+    CN.refusedQuestLoads = {}
+end)
+
 ------------------------------------------------------------
 -- COMPLETION STATE
 ------------------------------------------------------------
@@ -2029,14 +2063,27 @@ CN:RegisterEvent("QUEST_DATA_LOAD_RESULT", function(event, questID, success)
 
     CN.pendingQuestLoads[questID] = nil
 
+    -- AN ANSWER OF "NO" IS AN ANSWER. 1.7.0.
+    --
+    -- Clearing the pending flag and recording nothing else put this id back
+    -- into the state that starts a request, so the provider asked again on
+    -- its next rebuild -- every two seconds, for as long as the player stood
+    -- in a zone with a pin the server would not describe.
     if not success then
+        CN.refusedQuestLoads[questID] = true
+
         DebugPrint("Quest " .. tostring(questID) .. " metadata was unavailable from Blizzard.")
         return
     end
 
     local title = Blizzard.GetQuestTitle(questID, false)
 
+    -- AND A SUCCESS WITH NOTHING IN IT IS ALSO AN ANSWER. The client reports
+    -- the load as having worked and still has no title for the quest, which
+    -- this treated as "keep asking" for the same reason.
     if not title then
+        CN.refusedQuestLoads[questID] = true
+
         DebugPrint("Quest " .. questID .. " loaded, but no title was returned.")
         return
     end

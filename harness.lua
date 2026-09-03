@@ -1783,6 +1783,21 @@ CN_TEST_LOADABLE_TITLES = {
     [4242] = "The Quest The Client Had To Ask About",
 }
 
+-- Quest ids the server explicitly declines to describe. 1.7.0. See
+-- `RequestLoadQuestByID`: this is the refusal the real client gives, and it
+-- is the one that re-armed the addon's request every two seconds.
+-- Maps a quest id to the `success` value the server answers with.
+--
+-- BOTH REFUSALS, NOT ONE. 1.7.0. The client has two ways of declining to
+-- describe a quest -- `success = false`, and a success carrying no title --
+-- and the addon treated both as "keep asking". A fixture with only the first
+-- left the second unmodelled, and the mutation that removes its handling
+-- survived.
+CN_TEST_REFUSED_QUESTS = {
+    [9104] = false,   -- the server says no
+    [9106] = true,    -- the server says yes and has no title for it
+}
+
 CN_TEST_PLAYER_X, CN_TEST_PLAYER_Y = 0.42, 0.55
 
 -- MOVING THE PLAYER IS A FRAME BOUNDARY, so the fixture crosses one.
@@ -1877,6 +1892,34 @@ C_QuestLog = {
         -- here.
         if CN_TEST_LOADABLE_TITLES[id] then
             offeredTitles[id] = CN_TEST_LOADABLE_TITLES[id]
+        end
+
+        -- AND THE SERVER SAYING NO. CN_TEST_REFUSED_QUESTS, 1.7.0.
+        --
+        -- This stub answered by going quiet, which is the one refusal the
+        -- client almost never gives. The two it does give are
+        -- `QUEST_DATA_LOAD_RESULT` with `success = false`, and a success that
+        -- carries no title -- and both cleared the addon's in-flight latch
+        -- and put the id back into the state that starts a request. So the
+        -- request budget added in 1.6.0 passed against a fixture that
+        -- modelled the wrong refusal, over a defect the same release's latch
+        -- was written to prevent.
+        --
+        -- Fired immediately rather than deferred: an answer that arrives
+        -- inside the caller is the more demanding shape for a latch to get
+        -- right, because it cannot rely on the request having returned first.
+        -- `_G.CompletionNavigator`, NOT `CN`. This file's own note beside
+        -- `CN_TEST_MovePlayer` records the trap: a stub written above the
+        -- line where `CN` is declared references a global that is nil at call
+        -- time, guards it with `if CN and ...`, and therefore does nothing at
+        -- all -- silently, while looking careful. The first draft of this
+        -- block did exactly that, and the mutation it was written to kill
+        -- survived while every assertion passed.
+        local addon = _G.CompletionNavigator
+
+        if CN_TEST_REFUSED_QUESTS[id] ~= nil and addon and addon.FireEvent then
+            addon.FireEvent("QUEST_DATA_LOAD_RESULT", id,
+                CN_TEST_REFUSED_QUESTS[id])
         end
     end,
     GetNumQuestLogEntries  = function() return #questLog end,
@@ -28691,7 +28734,28 @@ print("\nEvery event a provider asks for is an event something dispatches:")
         assert(state and state.dirty ~= true,
             "a forced rebuild must leave " .. name .. " clean")
 
+        -- PAST THE GATHERING WINDOW. 1.7.0.
+        --
+        -- Two events -- `GET_ITEM_INFO_RECEIVED` and
+        -- `QUEST_DATA_LOAD_RESULT` -- arrive in bursts and have their
+        -- invalidation debounced, and `CN.Debounce` runs the FIRST call
+        -- immediately and collapses the rest. So this assertion holds only
+        -- when the window is not already open, and it became flaky the moment
+        -- the fixture started firing one of those events during an ordinary
+        -- rebuild. Advancing the clock is what the rest of this file does to
+        -- mean "time passed".
+        CN_TEST_CLOCK = CN_TEST_CLOCK + 5
+
         fire(event)
+
+        -- AND THE GATHERED ONES LAND ON THE TRAILING RUN. 1.7.0.
+        --
+        -- `GET_ITEM_INFO_RECEIVED` and `QUEST_DATA_LOAD_RESULT` arrive in
+        -- bursts and have their invalidation debounced, so the mark may be
+        -- one timer away rather than immediate. Draining is what the client
+        -- does by running the next frame; asserting before it would be
+        -- asserting that no event may ever be gathered.
+        CN_TEST_DrainDeferred()
 
         assert(CN.ProviderState(name).dirty == true,
             event .. " must invalidate " .. name .. ", the provider that "
@@ -43070,6 +43134,92 @@ end)()
 
     print("  " .. asked .. " requests on a cold rebuild, and none of them "
         .. "twice")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- A SERVER THAT SAYS NO IS NOT ASKED AGAIN, AND A LOADING SCREEN IS THE
+    -- WAY OUT.
+    --
+    -- 1.6.0 stopped the addon asking for a quest title while a request was in
+    -- flight. The handler for the answer clears that flag on EVERY reply --
+    -- including `success = false`, and including a success carrying no title
+    -- -- so both of the refusals the client actually gives put the id back
+    -- into the state that starts a request. The latch closed only the case
+    -- where no answer ever arrives, which is the one the fixture modelled.
+    --
+    -- And 1.6.0's own comment said the latch was "cleared on a loading screen
+    -- rather than never, because a refusal can be transient". Nothing cleared
+    -- it. The comment described behaviour that did not exist, which is worse
+    -- than the missing behaviour: the next reader checks the note instead of
+    -- the code.
+    ------------------------------------------------------------
+    local requests = 0
+
+    local realLoad = C_QuestLog.RequestLoadQuestByID
+
+    C_QuestLog.RequestLoadQuestByID = function(id)
+        requests = requests + 1
+
+        return realLoad(id)
+    end
+
+    CN.pendingQuestLoads = {}
+    CN.refusedQuestLoads = {}
+
+    -- 9104 is the fixture's refusing quest: the client answers
+    -- QUEST_DATA_LOAD_RESULT with success = false, which is what it does in
+    -- game for an id it has no data for.
+    for _ = 1, 20 do
+        CN.Blizzard.GetQuestTitle(9104, true)
+    end
+
+    assert(requests == 1,
+        "twenty asks about a quest the server refused sent one request: "
+        .. requests)
+
+    assert(CN.refusedQuestLoads[9104],
+        "and the refusal is what is remembered, not the request")
+
+    assert(CN.pendingQuestLoads[9104] == nil,
+        "with nothing left in flight")
+
+    -- AND THE OTHER REFUSAL, which is a success carrying no title. The client
+    -- reports the load as having worked and still has nothing to give, and
+    -- the addon treated that as "keep asking" for the same reason.
+    requests = 0
+
+    for _ = 1, 20 do
+        CN.Blizzard.GetQuestTitle(9106, true)
+    end
+
+    assert(requests == 1,
+        "twenty asks about a quest loaded with no title sent one request: "
+        .. requests)
+
+    assert(CN.refusedQuestLoads[9106],
+        "and that answer is remembered too")
+
+    -- AND A LOADING SCREEN ASKS AGAIN, because a refusal can be transient:
+    -- the client answers for a quest after a zone loads that it would not
+    -- answer for before, and a latch with no way out turns a momentary
+    -- refusal into a permanent one.
+    CN.FireEvent("PLAYER_ENTERING_WORLD")
+
+    assert(next(CN.refusedQuestLoads) == nil,
+        "a loading screen forgets what the server refused")
+
+    requests = 0
+
+    CN.Blizzard.GetQuestTitle(9104, true)
+
+    assert(requests == 1,
+        "and the quest is asked about once more: " .. requests)
+
+    C_QuestLog.RequestLoadQuestByID = realLoad
+
+    print("  a quest the server refused is asked about once, until a loading "
+        .. "screen")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

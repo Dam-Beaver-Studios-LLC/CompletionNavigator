@@ -89,8 +89,21 @@ function Blizzard.GetQuestTitle(questID, requestIfMissing)
     -- momentary refusal into a permanent one.
     if requestIfMissing and C_QuestLog and C_QuestLog.RequestLoadQuestByID then
         CN.pendingQuestLoads = CN.pendingQuestLoads or {}
+        CN.refusedQuestLoads = CN.refusedQuestLoads or {}
 
-        if not CN.pendingQuestLoads[questID] then
+        -- NOT WHILE ONE IS IN FLIGHT, AND NOT AFTER A NO. 1.7.0.
+        --
+        -- 1.6.0 added the first half and the handler for the answer clears
+        -- the pending flag on every reply -- so a client that answered "no",
+        -- or answered "yes" with no title, put the id back into the state
+        -- that starts a request. Both are ordinary replies, and both meant
+        -- the addon asked again two seconds later, for ever.
+        --
+        -- `Modules/Quests.lua` clears both tables on a loading screen, which
+        -- is the escape 1.6.0's comment described and did not build.
+        if not CN.pendingQuestLoads[questID]
+            and not CN.refusedQuestLoads[questID] then
+
             CN.pendingQuestLoads[questID] = true
 
             C_QuestLog.RequestLoadQuestByID(questID)

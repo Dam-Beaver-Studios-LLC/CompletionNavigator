@@ -7,6 +7,45 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.7.0]
+
+**1.6.0's latch closed the one case the test fixture modelled and neither of
+the two the client actually produces.** It stopped the addon asking for a
+quest title while a request was in flight â€” and the handler for the answer
+clears that flag on *every* reply, including `success = false` and including a
+success that carries no title. Both are ordinary answers from the client, and
+both put the quest straight back into the state that starts a request. The
+suite's own request budget, added in that release to catch exactly this,
+passed: the test client refused by going silent, which is the one refusal the
+real client almost never gives.
+
+**And 1.6.0's comment described an escape hatch that was never built.** It
+reads *cleared on a loading screen rather than never, because a refusal can be
+transientâ€¦ a latch with no way out turns a momentary refusal into a permanent
+one.* Nothing cleared it. That is worse than the missing behaviour: the next
+reader checks the note instead of the code. Both tables are cleared on a
+loading screen now, and a test asserts it.
+
+### How defects were found
+
+- **The test client refused in the wrong way.** It answered by never
+  answering. It now answers `success = false` for one quest and `success =
+  true` with no title for another, which are the two refusals the client
+  gives, and the mutation covering the second survived until the second was
+  modelled.
+- **A stub written above the line where `CN` is declared does nothing,
+  silently.** The first draft of the refusing-server stub read the addon table
+  through a global that is nil at call time and guarded it with `if CN and
+  â€¦` â€” so it looked careful and fired no events, and the mutation it was
+  written to kill survived while every assertion passed. This file already
+  documents that trap beside another stub; the note is now beside this one
+  too.
+- **An event that arrives in bursts lands on a trailing run.** The check that
+  every declared provider event marks its provider dirty asserted immediately,
+  which was true until a gathered event started firing during ordinary
+  rebuilds. It drains the timer first now, because asserting before that is
+  asserting that no event may ever be gathered.
+
 ## [1.6.0]
 
 1.5.0 fixed a client request that repeated on every rebuild and wrote down why

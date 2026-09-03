@@ -5222,15 +5222,37 @@ end)" \
     "the client saying the lockout list is in hand is ignored"
 
 mutate "Providers/Blizzard.lua" \
+    "        if not CN.pendingQuestLoads[questID]
+            and not CN.refusedQuestLoads[questID] then
+" \
     "        if not CN.pendingQuestLoads[questID] then
-            CN.pendingQuestLoads[questID] = true
+" \
+    "a quest the server refused is asked about again on every rebuild"
 
-            C_QuestLog.RequestLoadQuestByID(questID)
-        end" \
-    "        CN.pendingQuestLoads[questID] = true
+mutate "Modules/Quests.lua" \
+    "    if not success then
+        CN.refusedQuestLoads[questID] = true
+" \
+    "    if not success then
+" \
+    "a server saying no is not remembered"
 
-        C_QuestLog.RequestLoadQuestByID(questID)" \
-    "a quest the server will not name is asked about on every rebuild"
+mutate "Modules/Quests.lua" \
+    "    if not title then
+        CN.refusedQuestLoads[questID] = true
+" \
+    "    if not title then
+" \
+    "a load that answered with no title is not remembered"
+
+mutate "Modules/Quests.lua" \
+    "CN:RegisterEvent(\"PLAYER_ENTERING_WORLD\", function()
+    CN.pendingQuestLoads = {}
+    CN.refusedQuestLoads = {}
+end)" \
+    "CN:RegisterEvent(\"PLAYER_ENTERING_WORLD\", function()
+end)" \
+    "a transient refusal becomes permanent for the session"
 
 mutate "Modules/Instances.lua" \
     "    Instances.answered = false
