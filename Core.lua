@@ -18,7 +18,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "1.8.0"
+CN.version     = "1.9.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -475,6 +475,89 @@ function CN.RegisterSelfTest(definition)
     table.insert(CN.selfTests, definition)
 
     return true
+end
+
+-- THINGS THIS ADDON ASKS THE SERVER FOR.
+--
+-- FOUR COPIES OF ONE PATTERN, AND THE FIRST THING TO READ THEM GOT IT WRONG.
+-- 1.9.0.
+--
+-- Six releases found client systems this addon read and never asked for: the
+-- lockout list (1.2.0), the keystone (1.3.0), the inbox and the item cache
+-- (1.4.0), quest titles (1.6.0). Each fix grew the same four parts in a
+-- different file -- a send, a once-per-segment latch, a forget on a loading
+-- screen, and for two of them a flag saying the answer arrived.
+--
+-- 1.8.0 then added the first thing that reads across them, a self-test saying
+-- what is still outstanding, and it asked the wrong question: it reported
+-- anything not ANSWERED, rather than anything ASKED and not answered. On a
+-- client with no `RequestRaidInfo` or `CheckInbox` -- nothing was asked, and
+-- nothing can be -- it said "still waiting on the lockout list and your
+-- mailbox" for ever. A guard whose waiting state is also its cannot state,
+-- which is rule 169 wearing the other face.
+--
+-- So the cross-cutting half becomes a registry and the per-system half stays
+-- where it belongs. Each system says how to tell whether it has been asked
+-- and whether it has been answered; nothing else has to know there are four
+-- of them, and the fifth is a registration rather than a fifth place to get
+-- this right.
+CN.serverRequests = CN.serverRequests or {}
+
+-- definition = { label, asked = function() end, answered = function() end }
+--
+-- `asked` must be false when the client offers no way to ask. That is the
+-- distinction the defect above turned on, so it is what the field is named
+-- for rather than being left to each caller's judgement.
+function CN.RegisterServerRequest(definition)
+    local labelKind = type(type(definition) == "table" and definition.label)
+
+    if type(definition) ~= "table"
+        or (labelKind ~= "string" and labelKind ~= "function")
+        or type(definition.asked) ~= "function"
+        or type(definition.answered) ~= "function" then
+
+        return false
+    end
+
+    table.insert(CN.serverRequests, definition)
+
+    return true
+end
+
+-- Everything asked for and not yet answered, as labels a player can read.
+--
+-- Protected per entry: this is read by a self-test, and a self-test that
+-- throws is a self-test that reports nothing about the twenty checks after
+-- it.
+function CN.OutstandingServerRequests()
+    local outstanding = {}
+
+    for _, request in ipairs(CN.serverRequests) do
+        local askedOk, asked = pcall(request.asked)
+
+        if askedOk and asked then
+            local answeredOk, answered = pcall(request.answered)
+
+            if answeredOk and not answered then
+                -- A LABEL MAY BE A COUNT. Quest titles are "3 quest titles"
+                -- rather than a fixed noun, so the field takes either a
+                -- string or something that produces one.
+                local label = request.label
+
+                if type(label) == "function" then
+                    local labelOk, produced = pcall(label)
+
+                    label = labelOk and produced or nil
+                end
+
+                if type(label) == "string" and label ~= "" then
+                    table.insert(outstanding, label)
+                end
+            end
+        end
+    end
+
+    return outstanding
 end
 
 -- AN EVENT THAT FIRES MANY TIMES A SECOND, ANSWERED ONCE.

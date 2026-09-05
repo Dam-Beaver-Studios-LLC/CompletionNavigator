@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '1.8.0'
+$script:ToolkitVersion = '1.9.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "1.8.0"
+CN.version     = "1.9.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -578,6 +578,89 @@ function CN.RegisterSelfTest(definition)
     table.insert(CN.selfTests, definition)
 
     return true
+end
+
+-- THINGS THIS ADDON ASKS THE SERVER FOR.
+--
+-- FOUR COPIES OF ONE PATTERN, AND THE FIRST THING TO READ THEM GOT IT WRONG.
+-- 1.9.0.
+--
+-- Six releases found client systems this addon read and never asked for: the
+-- lockout list (1.2.0), the keystone (1.3.0), the inbox and the item cache
+-- (1.4.0), quest titles (1.6.0). Each fix grew the same four parts in a
+-- different file -- a send, a once-per-segment latch, a forget on a loading
+-- screen, and for two of them a flag saying the answer arrived.
+--
+-- 1.8.0 then added the first thing that reads across them, a self-test saying
+-- what is still outstanding, and it asked the wrong question: it reported
+-- anything not ANSWERED, rather than anything ASKED and not answered. On a
+-- client with no `RequestRaidInfo` or `CheckInbox` -- nothing was asked, and
+-- nothing can be -- it said "still waiting on the lockout list and your
+-- mailbox" for ever. A guard whose waiting state is also its cannot state,
+-- which is rule 169 wearing the other face.
+--
+-- So the cross-cutting half becomes a registry and the per-system half stays
+-- where it belongs. Each system says how to tell whether it has been asked
+-- and whether it has been answered; nothing else has to know there are four
+-- of them, and the fifth is a registration rather than a fifth place to get
+-- this right.
+CN.serverRequests = CN.serverRequests or {}
+
+-- definition = { label, asked = function() end, answered = function() end }
+--
+-- `asked` must be false when the client offers no way to ask. That is the
+-- distinction the defect above turned on, so it is what the field is named
+-- for rather than being left to each caller's judgement.
+function CN.RegisterServerRequest(definition)
+    local labelKind = type(type(definition) == "table" and definition.label)
+
+    if type(definition) ~= "table"
+        or (labelKind ~= "string" and labelKind ~= "function")
+        or type(definition.asked) ~= "function"
+        or type(definition.answered) ~= "function" then
+
+        return false
+    end
+
+    table.insert(CN.serverRequests, definition)
+
+    return true
+end
+
+-- Everything asked for and not yet answered, as labels a player can read.
+--
+-- Protected per entry: this is read by a self-test, and a self-test that
+-- throws is a self-test that reports nothing about the twenty checks after
+-- it.
+function CN.OutstandingServerRequests()
+    local outstanding = {}
+
+    for _, request in ipairs(CN.serverRequests) do
+        local askedOk, asked = pcall(request.asked)
+
+        if askedOk and asked then
+            local answeredOk, answered = pcall(request.answered)
+
+            if answeredOk and not answered then
+                -- A LABEL MAY BE A COUNT. Quest titles are "3 quest titles"
+                -- rather than a fixed noun, so the field takes either a
+                -- string or something that produces one.
+                local label = request.label
+
+                if type(label) == "function" then
+                    local labelOk, produced = pcall(label)
+
+                    label = labelOk and produced or nil
+                end
+
+                if type(label) == "string" and label ~= "" then
+                    table.insert(outstanding, label)
+                end
+            end
+        end
+    end
+
+    return outstanding
 end
 
 -- AN EVENT THAT FIRES MANY TIMES A SECOND, ANSWERED ONCE.
@@ -22138,6 +22221,16 @@ function Blizzard.ForgetSavedInstanceRequest()
     requestedRaidInfo = false
 end
 
+-- WHETHER THE QUESTION WAS EVER PUT. 1.9.0.
+--
+-- "Not answered" and "cannot be asked" are the same silence, and 1.8.0's
+-- self-test reported both as waiting -- so a client with no `RequestRaidInfo`
+-- was told the addon was still waiting for an answer it had never asked for
+-- and never could. The latch above already knows; it just had no reader.
+function Blizzard.AskedForSavedInstances()
+    return requestedRaidInfo
+end
+
 -- THE KEYSTONE HAS TO BE ASKED FOR TOO. 1.3.0.
 --
 -- `C_MythicPlus.GetOwnedKeystoneLevel()` reads a table the client fills only
@@ -22215,6 +22308,12 @@ end
 
 function Blizzard.ForgetMailRequest()
     requestedMail = false
+end
+
+-- See `Blizzard.AskedForSavedInstances`: the same distinction, on the system
+-- whose absence 1.8.0 also reported as waiting.
+function Blizzard.AskedForMail()
+    return requestedMail
 end
 
 function Blizzard.GetSavedInstances()
@@ -24033,6 +24132,26 @@ CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
     CN.pendingQuestLoads = {}
     CN.refusedQuestLoads = {}
 end)
+
+-- SEE `Modules/Instances.lua`. Unlike the other two this one is a count
+-- rather than a noun, which is why the registry takes a label that may be
+-- produced rather than only a fixed string.
+CN.RegisterServerRequest{
+    label = function()
+        local outstanding = 0
+
+        for _ in pairs(CN.pendingQuestLoads or {}) do
+            outstanding = outstanding + 1
+        end
+
+        return CN.Count(outstanding, "quest title")
+    end,
+
+    -- Asking IS the pending entry: nothing goes into that table without a
+    -- request having gone out beside it.
+    asked    = function() return next(CN.pendingQuestLoads or {}) ~= nil end,
+    answered = function() return next(CN.pendingQuestLoads or {}) == nil end,
+}
 
 ------------------------------------------------------------
 -- COMPLETION STATE
@@ -52580,6 +52699,21 @@ CN:RegisterEvent("MAIL_INBOX_UPDATE", function()
     Waiting.inboxAnswered = true
 end)
 
+-- See the note in `Modules/Instances.lua`: the registry is what stops the
+-- next reader of these four systems inventing its own list of them.
+--
+-- The keystone is deliberately not registered. 1.5.0 recorded that it has no
+-- event saying the answer arrived, so it can report "asked" and never
+-- "answered" -- which would make it permanently outstanding for every
+-- character that holds no keystone. A system with no answering signal has
+-- nothing to contribute here, and saying so is better than a line that is
+-- always wrong.
+CN.RegisterServerRequest{
+    label    = "your mailbox",
+    asked    = function() return CN.Blizzard.AskedForMail() end,
+    answered = function() return Waiting.inboxAnswered end,
+}
+
 -- Returns `items, readable, answered`.
 function Waiting.Mail()
     local items = {}
@@ -56097,6 +56231,19 @@ CN:RegisterEvent("UPDATE_INSTANCE_INFO", function()
     Instances.answered = true
 end)
 
+-- SAID ONCE, WHERE THE STATE LIVES. 1.9.0.
+--
+-- `CN.OutstandingServerRequests` collects these; before it existed, the
+-- self-test that reports them carried its own hardcoded knowledge of which
+-- three modules to ask and got the question wrong -- reading "not answered"
+-- rather than "asked and not answered", so a client that cannot send the
+-- request at all was reported as waiting for its reply for ever.
+CN.RegisterServerRequest{
+    label    = "the lockout list",
+    asked    = function() return CN.Blizzard.AskedForSavedInstances() end,
+    answered = function() return Instances.answered end,
+}
+
 -- Returns `lockouts, answered`.
 function Instances.Lockouts()
     local raw = Blizzard.GetSavedInstances()
@@ -59415,31 +59562,7 @@ CN.RegisterSelfTest{
 -- ordinary state as a problem teaches the player to ignore this command --
 -- which is the rule the two checks above already follow.
 function SelfTest.Outstanding()
-    local waitingOn = {}
-
-    local instances = CN:GetModule("Instances")
-
-    if instances and instances.answered == false then
-        table.insert(waitingOn, "the lockout list")
-    end
-
-    local waiting = CN:GetModule("Waiting")
-
-    if waiting and waiting.inboxAnswered == false then
-        table.insert(waitingOn, "your mailbox")
-    end
-
-    local titles = 0
-
-    for _ in pairs(CN.pendingQuestLoads or {}) do
-        titles = titles + 1
-    end
-
-    if titles > 0 then
-        table.insert(waitingOn, CN.Count(titles, "quest title"))
-    end
-
-    return waitingOn
+    return CN.OutstandingServerRequests()
 end
 
 CN.RegisterSelfTest{
@@ -61998,7 +62121,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 1.8.0
+## Version: 1.9.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -62253,6 +62376,47 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [1.9.0]
+
+**Four copies of one pattern, and the first thing to read across them asked
+the wrong question.**
+
+Six releases found client systems this addon read and never asked for — the
+lockout list, the keystone, the inbox, the item cache, quest titles. Each fix
+grew the same four parts in a different file: a send, a once-per-segment
+latch, a forget on a loading screen, and a flag saying the answer arrived.
+1.8.0 then added the first thing that reads across them, and it reported
+anything not *answered* rather than anything *asked and not answered*. On a
+client with no `RequestRaidInfo` and no `CheckInbox` — where nothing was asked
+and nothing can be — `/cn selftest` said the addon was still waiting for
+replies it had never asked for and never could, permanently.
+
+### Changed
+
+- **The cross-cutting half of that pattern is a registry.** Each system says
+  how to tell whether it has been asked and whether it has been answered;
+  nothing else has to know there are four of them. The self-test that reports
+  outstanding requests carried its own hardcoded list of three modules, which
+  meant a fifth system would have been a fifth edit there and a fifth chance
+  to get the question wrong. It is a registration now.
+
+  The per-system halves stay where they are. Each belongs in the file that
+  owns the state, and collapsing them would have moved four well-documented
+  latches into one place that knows about four unrelated things.
+
+- The keystone is still deliberately unregistered, for the reason 1.5.0 gave:
+  it has no event saying its answer arrived, so it would report *asked* and
+  never *answered* — permanently outstanding for every character that holds no
+  keystone. A system with no answering signal contributes nothing here, and
+  saying so beats a line that is always wrong.
+
+### How defects were found
+
+- **The suite swept for the shape rule 183 names**, a fixture selecting its
+  subject by a property it shares rather than by one it owns. Twenty-six
+  last-match-wins selectors in the harness; all but the one 1.8.0 already
+  fixed pick by an exact name.
 
 ## [1.8.0]
 
@@ -70427,7 +70591,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-1.8.0
+1.9.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -76180,32 +76344,33 @@ end)" \
 end)" \
     "a transient refusal becomes permanent for the session"
 
-mutate "Modules/SelfTest.lua" \
-    "    if instances and instances.answered == false then
-        table.insert(waitingOn, \"the lockout list\")
-    end" \
-    "    if false then
-        table.insert(waitingOn, \"the lockout list\")
-    end" \
-    "an outstanding lockout request is not reported"
+mutate "Core.lua" \
+    "        local askedOk, asked = pcall(request.asked)
 
-mutate "Modules/SelfTest.lua" \
-    "    if waiting and waiting.inboxAnswered == false then
-        table.insert(waitingOn, \"your mailbox\")
-    end" \
-    "    if false then
-        table.insert(waitingOn, \"your mailbox\")
-    end" \
-    "an outstanding mailbox request is not reported"
+        if askedOk and asked then" \
+    "        local askedOk, asked = pcall(request.asked)
 
-mutate "Modules/SelfTest.lua" \
-    "    if titles > 0 then
-        table.insert(waitingOn, CN.Count(titles, \"quest title\"))
-    end" \
-    "    if false then
-        table.insert(waitingOn, CN.Count(titles, \"quest title\"))
-    end" \
-    "outstanding quest titles are not reported"
+        if true then" \
+    "a request the client cannot send is reported as waiting for a reply"
+
+mutate "Core.lua" \
+    "            if answeredOk and not answered then" \
+    "            if answeredOk then" \
+    "a request that was answered is still reported as outstanding"
+
+mutate "Modules/Instances.lua" \
+    "CN.RegisterServerRequest{
+    label    = \"the lockout list\"," \
+    "local _unregistered = {
+    label    = \"the lockout list\"," \
+    "the lockout list is never registered as a server request"
+
+mutate "Modules/Waiting.lua" \
+    "CN.RegisterServerRequest{
+    label    = \"your mailbox\"," \
+    "local _unregistered = {
+    label    = \"your mailbox\"," \
+    "the mailbox is never registered as a server request"
 
 mutate "Modules/Instances.lua" \
     "    Instances.answered = false
@@ -119832,6 +119997,70 @@ end)()
 
     assert(tostring(reported.detail):find("lockout", 1, true),
         "and says what it is waiting on: " .. tostring(reported.detail))
+
+    -- AND A CLIENT THAT CANNOT BE ASKED IS NOT WAITING. 1.9.0.
+    --
+    -- 1.8.0 read "not answered" rather than "asked and not answered", so a
+    -- client with no `RequestRaidInfo` and no `CheckInbox` -- nothing was
+    -- asked, and nothing can be -- was told the addon was still waiting for
+    -- replies it had never asked for and never could. A guard whose waiting
+    -- state is also its cannot state, which is rule 169 wearing the other
+    -- face.
+    local heldRaid  = RequestRaidInfo
+    local heldInbox = CheckInbox
+
+    CN.Blizzard.ForgetSavedInstanceRequest()
+    CN.Blizzard.ForgetMailRequest()
+
+    RequestRaidInfo = nil
+    CheckInbox      = nil
+
+    instances.answered    = false
+    waiting.inboxAnswered = false
+
+    CN.pendingQuestLoads = {}
+
+    -- The addon tries, and the client offers nowhere to try.
+    CN.Blizzard.RequestSavedInstances()
+    CN.Blizzard.RequestMail()
+
+    local unaskable = selfTest.Outstanding()
+
+    RequestRaidInfo = heldRaid
+    CheckInbox      = heldInbox
+
+    assert(#unaskable == 0,
+        "a client that cannot be asked is not reported as waiting: "
+        .. table.concat(unaskable, ", "))
+
+    -- AND ONCE THE CLIENT CAN BE ASKED, IT IS WAITING AGAIN -- so the fix is
+    -- a distinction rather than a mute button.
+    CN.Blizzard.ForgetSavedInstanceRequest()
+
+    instances.answered = false
+
+    CN.Blizzard.RequestSavedInstances()
+
+    local askable = selfTest.Outstanding()
+
+    instances.answered = true
+
+    assert(#askable == 1 and askable[1] == "the lockout list",
+        "and a client that was asked and has not replied still is: "
+        .. table.concat(askable, ", "))
+
+    -- EVERY SYSTEM SAYS SO IN ONE PLACE. The self-test used to carry its own
+    -- list of which three modules to interrogate; a fourth would have been a
+    -- fourth edit here and a fourth chance to ask the wrong question.
+    assert(#CN.serverRequests >= 3,
+        "the systems register themselves: " .. #CN.serverRequests)
+
+    for _, request in ipairs(CN.serverRequests) do
+        assert(type(request.asked) == "function"
+            and type(request.answered) == "function",
+            "and each says both whether it was asked and whether it was "
+            .. "answered")
+    end
 
     print("  the addon says which answers it is still waiting for")
 end)()

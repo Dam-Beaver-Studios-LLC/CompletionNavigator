@@ -43384,6 +43384,70 @@ end)()
     assert(tostring(reported.detail):find("lockout", 1, true),
         "and says what it is waiting on: " .. tostring(reported.detail))
 
+    -- AND A CLIENT THAT CANNOT BE ASKED IS NOT WAITING. 1.9.0.
+    --
+    -- 1.8.0 read "not answered" rather than "asked and not answered", so a
+    -- client with no `RequestRaidInfo` and no `CheckInbox` -- nothing was
+    -- asked, and nothing can be -- was told the addon was still waiting for
+    -- replies it had never asked for and never could. A guard whose waiting
+    -- state is also its cannot state, which is rule 169 wearing the other
+    -- face.
+    local heldRaid  = RequestRaidInfo
+    local heldInbox = CheckInbox
+
+    CN.Blizzard.ForgetSavedInstanceRequest()
+    CN.Blizzard.ForgetMailRequest()
+
+    RequestRaidInfo = nil
+    CheckInbox      = nil
+
+    instances.answered    = false
+    waiting.inboxAnswered = false
+
+    CN.pendingQuestLoads = {}
+
+    -- The addon tries, and the client offers nowhere to try.
+    CN.Blizzard.RequestSavedInstances()
+    CN.Blizzard.RequestMail()
+
+    local unaskable = selfTest.Outstanding()
+
+    RequestRaidInfo = heldRaid
+    CheckInbox      = heldInbox
+
+    assert(#unaskable == 0,
+        "a client that cannot be asked is not reported as waiting: "
+        .. table.concat(unaskable, ", "))
+
+    -- AND ONCE THE CLIENT CAN BE ASKED, IT IS WAITING AGAIN -- so the fix is
+    -- a distinction rather than a mute button.
+    CN.Blizzard.ForgetSavedInstanceRequest()
+
+    instances.answered = false
+
+    CN.Blizzard.RequestSavedInstances()
+
+    local askable = selfTest.Outstanding()
+
+    instances.answered = true
+
+    assert(#askable == 1 and askable[1] == "the lockout list",
+        "and a client that was asked and has not replied still is: "
+        .. table.concat(askable, ", "))
+
+    -- EVERY SYSTEM SAYS SO IN ONE PLACE. The self-test used to carry its own
+    -- list of which three modules to interrogate; a fourth would have been a
+    -- fourth edit here and a fourth chance to ask the wrong question.
+    assert(#CN.serverRequests >= 3,
+        "the systems register themselves: " .. #CN.serverRequests)
+
+    for _, request in ipairs(CN.serverRequests) do
+        assert(type(request.asked) == "function"
+            and type(request.answered) == "function",
+            "and each says both whether it was asked and whether it was "
+            .. "answered")
+    end
+
     print("  the addon says which answers it is still waiting for")
 end)()
 

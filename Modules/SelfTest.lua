@@ -982,31 +982,7 @@ CN.RegisterSelfTest{
 -- ordinary state as a problem teaches the player to ignore this command --
 -- which is the rule the two checks above already follow.
 function SelfTest.Outstanding()
-    local waitingOn = {}
-
-    local instances = CN:GetModule("Instances")
-
-    if instances and instances.answered == false then
-        table.insert(waitingOn, "the lockout list")
-    end
-
-    local waiting = CN:GetModule("Waiting")
-
-    if waiting and waiting.inboxAnswered == false then
-        table.insert(waitingOn, "your mailbox")
-    end
-
-    local titles = 0
-
-    for _ in pairs(CN.pendingQuestLoads or {}) do
-        titles = titles + 1
-    end
-
-    if titles > 0 then
-        table.insert(waitingOn, CN.Count(titles, "quest title"))
-    end
-
-    return waitingOn
+    return CN.OutstandingServerRequests()
 end
 
 CN.RegisterSelfTest{

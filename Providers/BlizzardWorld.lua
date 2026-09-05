@@ -1662,6 +1662,16 @@ function Blizzard.ForgetSavedInstanceRequest()
     requestedRaidInfo = false
 end
 
+-- WHETHER THE QUESTION WAS EVER PUT. 1.9.0.
+--
+-- "Not answered" and "cannot be asked" are the same silence, and 1.8.0's
+-- self-test reported both as waiting -- so a client with no `RequestRaidInfo`
+-- was told the addon was still waiting for an answer it had never asked for
+-- and never could. The latch above already knows; it just had no reader.
+function Blizzard.AskedForSavedInstances()
+    return requestedRaidInfo
+end
+
 -- THE KEYSTONE HAS TO BE ASKED FOR TOO. 1.3.0.
 --
 -- `C_MythicPlus.GetOwnedKeystoneLevel()` reads a table the client fills only
@@ -1739,6 +1749,12 @@ end
 
 function Blizzard.ForgetMailRequest()
     requestedMail = false
+end
+
+-- See `Blizzard.AskedForSavedInstances`: the same distinction, on the system
+-- whose absence 1.8.0 also reported as waiting.
+function Blizzard.AskedForMail()
+    return requestedMail
 end
 
 function Blizzard.GetSavedInstances()

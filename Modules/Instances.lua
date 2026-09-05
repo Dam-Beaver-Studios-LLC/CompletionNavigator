@@ -69,6 +69,19 @@ CN:RegisterEvent("UPDATE_INSTANCE_INFO", function()
     Instances.answered = true
 end)
 
+-- SAID ONCE, WHERE THE STATE LIVES. 1.9.0.
+--
+-- `CN.OutstandingServerRequests` collects these; before it existed, the
+-- self-test that reports them carried its own hardcoded knowledge of which
+-- three modules to ask and got the question wrong -- reading "not answered"
+-- rather than "asked and not answered", so a client that cannot send the
+-- request at all was reported as waiting for its reply for ever.
+CN.RegisterServerRequest{
+    label    = "the lockout list",
+    asked    = function() return CN.Blizzard.AskedForSavedInstances() end,
+    answered = function() return Instances.answered end,
+}
+
 -- Returns `lockouts, answered`.
 function Instances.Lockouts()
     local raw = Blizzard.GetSavedInstances()

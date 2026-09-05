@@ -48,6 +48,26 @@ CN:RegisterEvent("PLAYER_ENTERING_WORLD", function()
     CN.refusedQuestLoads = {}
 end)
 
+-- SEE `Modules/Instances.lua`. Unlike the other two this one is a count
+-- rather than a noun, which is why the registry takes a label that may be
+-- produced rather than only a fixed string.
+CN.RegisterServerRequest{
+    label = function()
+        local outstanding = 0
+
+        for _ in pairs(CN.pendingQuestLoads or {}) do
+            outstanding = outstanding + 1
+        end
+
+        return CN.Count(outstanding, "quest title")
+    end,
+
+    -- Asking IS the pending entry: nothing goes into that table without a
+    -- request having gone out beside it.
+    asked    = function() return next(CN.pendingQuestLoads or {}) ~= nil end,
+    answered = function() return next(CN.pendingQuestLoads or {}) == nil end,
+}
+
 ------------------------------------------------------------
 -- COMPLETION STATE
 ------------------------------------------------------------

@@ -5254,32 +5254,33 @@ end)" \
 end)" \
     "a transient refusal becomes permanent for the session"
 
-mutate "Modules/SelfTest.lua" \
-    "    if instances and instances.answered == false then
-        table.insert(waitingOn, \"the lockout list\")
-    end" \
-    "    if false then
-        table.insert(waitingOn, \"the lockout list\")
-    end" \
-    "an outstanding lockout request is not reported"
+mutate "Core.lua" \
+    "        local askedOk, asked = pcall(request.asked)
 
-mutate "Modules/SelfTest.lua" \
-    "    if waiting and waiting.inboxAnswered == false then
-        table.insert(waitingOn, \"your mailbox\")
-    end" \
-    "    if false then
-        table.insert(waitingOn, \"your mailbox\")
-    end" \
-    "an outstanding mailbox request is not reported"
+        if askedOk and asked then" \
+    "        local askedOk, asked = pcall(request.asked)
 
-mutate "Modules/SelfTest.lua" \
-    "    if titles > 0 then
-        table.insert(waitingOn, CN.Count(titles, \"quest title\"))
-    end" \
-    "    if false then
-        table.insert(waitingOn, CN.Count(titles, \"quest title\"))
-    end" \
-    "outstanding quest titles are not reported"
+        if true then" \
+    "a request the client cannot send is reported as waiting for a reply"
+
+mutate "Core.lua" \
+    "            if answeredOk and not answered then" \
+    "            if answeredOk then" \
+    "a request that was answered is still reported as outstanding"
+
+mutate "Modules/Instances.lua" \
+    "CN.RegisterServerRequest{
+    label    = \"the lockout list\"," \
+    "local _unregistered = {
+    label    = \"the lockout list\"," \
+    "the lockout list is never registered as a server request"
+
+mutate "Modules/Waiting.lua" \
+    "CN.RegisterServerRequest{
+    label    = \"your mailbox\"," \
+    "local _unregistered = {
+    label    = \"your mailbox\"," \
+    "the mailbox is never registered as a server request"
 
 mutate "Modules/Instances.lua" \
     "    Instances.answered = false

@@ -7,6 +7,47 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.9.0]
+
+**Four copies of one pattern, and the first thing to read across them asked
+the wrong question.**
+
+Six releases found client systems this addon read and never asked for â€” the
+lockout list, the keystone, the inbox, the item cache, quest titles. Each fix
+grew the same four parts in a different file: a send, a once-per-segment
+latch, a forget on a loading screen, and a flag saying the answer arrived.
+1.8.0 then added the first thing that reads across them, and it reported
+anything not *answered* rather than anything *asked and not answered*. On a
+client with no `RequestRaidInfo` and no `CheckInbox` â€” where nothing was asked
+and nothing can be â€” `/cn selftest` said the addon was still waiting for
+replies it had never asked for and never could, permanently.
+
+### Changed
+
+- **The cross-cutting half of that pattern is a registry.** Each system says
+  how to tell whether it has been asked and whether it has been answered;
+  nothing else has to know there are four of them. The self-test that reports
+  outstanding requests carried its own hardcoded list of three modules, which
+  meant a fifth system would have been a fifth edit there and a fifth chance
+  to get the question wrong. It is a registration now.
+
+  The per-system halves stay where they are. Each belongs in the file that
+  owns the state, and collapsing them would have moved four well-documented
+  latches into one place that knows about four unrelated things.
+
+- The keystone is still deliberately unregistered, for the reason 1.5.0 gave:
+  it has no event saying its answer arrived, so it would report *asked* and
+  never *answered* â€” permanently outstanding for every character that holds no
+  keystone. A system with no answering signal contributes nothing here, and
+  saying so beats a line that is always wrong.
+
+### How defects were found
+
+- **The suite swept for the shape rule 183 names**, a fixture selecting its
+  subject by a property it shares rather than by one it owns. Twenty-six
+  last-match-wins selectors in the harness; all but the one 1.8.0 already
+  fixed pick by an exact name.
+
 ## [1.8.0]
 
 Six releases found systems this addon read from the client and never asked

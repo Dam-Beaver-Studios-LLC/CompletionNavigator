@@ -53,6 +53,21 @@ CN:RegisterEvent("MAIL_INBOX_UPDATE", function()
     Waiting.inboxAnswered = true
 end)
 
+-- See the note in `Modules/Instances.lua`: the registry is what stops the
+-- next reader of these four systems inventing its own list of them.
+--
+-- The keystone is deliberately not registered. 1.5.0 recorded that it has no
+-- event saying the answer arrived, so it can report "asked" and never
+-- "answered" -- which would make it permanently outstanding for every
+-- character that holds no keystone. A system with no answering signal has
+-- nothing to contribute here, and saying so is better than a line that is
+-- always wrong.
+CN.RegisterServerRequest{
+    label    = "your mailbox",
+    asked    = function() return CN.Blizzard.AskedForMail() end,
+    answered = function() return Waiting.inboxAnswered end,
+}
+
 -- Returns `items, readable, answered`.
 function Waiting.Mail()
     local items = {}
