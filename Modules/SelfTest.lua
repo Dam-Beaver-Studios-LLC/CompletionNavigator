@@ -956,4 +956,73 @@ CN.RegisterSelfTest{
     end,
 }
 
+------------------------------------------------------------
+-- WHAT THE ADDON HAS ASKED THE SERVER FOR AND NOT BEEN TOLD
+------------------------------------------------------------
+
+-- SIX RELEASES FOUND SYSTEMS THIS ADDON READ AND NEVER ASKED FOR, AND
+-- NOTHING SAYS WHICH ONES IT IS STILL WAITING ON. 1.8.0.
+--
+-- The lockout list (1.2.0), the keystone (1.3.0), the inbox and the item
+-- cache (1.4.0) and quest titles (1.6.0) are all asked for now, and each
+-- answer arrives whenever the server feels like it. A player who runs
+-- `/cn next` in the first seconds after a login and sees no raid lockout has
+-- no way to tell "you are saved to nothing" from "the answer has not landed",
+-- except by running the one command that happens to distinguish them.
+--
+-- Two of the four can say. `Instances.answered` and `Waiting.inboxAnswered`
+-- are set by the events that answer their requests, and quest titles are
+-- countable directly. The keystone is deliberately absent: 1.5.0 recorded
+-- that it has no event saying the answer arrived, so a "still asking" line
+-- for it would be permanently wrong for every character that holds none, and
+-- inventing the state is worse than not reporting it.
+--
+-- A SKIP rather than a FAIL when something is outstanding: waiting is the
+-- ordinary state of the first few seconds, and an addon that reports the
+-- ordinary state as a problem teaches the player to ignore this command --
+-- which is the rule the two checks above already follow.
+function SelfTest.Outstanding()
+    local waitingOn = {}
+
+    local instances = CN:GetModule("Instances")
+
+    if instances and instances.answered == false then
+        table.insert(waitingOn, "the lockout list")
+    end
+
+    local waiting = CN:GetModule("Waiting")
+
+    if waiting and waiting.inboxAnswered == false then
+        table.insert(waitingOn, "your mailbox")
+    end
+
+    local titles = 0
+
+    for _ in pairs(CN.pendingQuestLoads or {}) do
+        titles = titles + 1
+    end
+
+    if titles > 0 then
+        table.insert(waitingOn, CN.Count(titles, "quest title"))
+    end
+
+    return waitingOn
+end
+
+CN.RegisterSelfTest{
+    area  = "client",
+    order = 6,
+    name  = "everything the addon asked the server for has come back",
+    run   = function()
+        local waitingOn = SelfTest.Outstanding()
+
+        if #waitingOn == 0 then
+            return PASS, "nothing is outstanding"
+        end
+
+        return SKIP, "still waiting on " .. CN.Series(waitingOn)
+            .. CN.DASH .. "ordinary in the first seconds after a login"
+    end,
+}
+
 return SelfTest

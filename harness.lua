@@ -27144,10 +27144,16 @@ print("\nEvery client function this addon calls, checked against the client:")
     -- neither" is a case the suite tests on purpose -- so the count is not
     -- the assertion. What is asserted is that the checker agrees with
     -- reality in both directions.
+    -- BY NAME, NOT BY AREA. 1.8.0.
+    --
+    -- This took the last check in the "client" area, which was the API check
+    -- only while it was the only one there. Adding a second client check made
+    -- this assertion read a different check's status and fail -- a fixture
+    -- that identifies its subject by a property it does not own.
     local report
 
     for _, check in ipairs(CN:GetModule("SelfTest").Run().checks) do
-        if check.area == "client" then
+        if check.name:find("client function", 1, true) then
             report = check
         end
     end
@@ -43220,6 +43226,165 @@ end)()
 
     print("  a quest the server refused is asked about once, until a loading "
         .. "screen")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE PIN ADDED TO REACH A BRANCH REACHES IT.
+    --
+    -- 1.6.0 added a quest pin so the provider's "the client will not name
+    -- this, ask the server" branch could be exercised, gave it an odd id, and
+    -- this fixture's client answers "completed" for every odd id below 70000
+    -- -- so the availability filter dropped it and every assertion written
+    -- against it passed over a world that did not contain it.
+    --
+    -- The first draft of this check was worse than nothing: it asserted that
+    -- every pin lands in one of offeredNow / in-log / completed, which is true
+    -- by construction and can never fail. It would not have caught the defect
+    -- it was written for, because a dropped pin lands in "completed" -- that
+    -- is HOW it was dropped.
+    --
+    -- Backlog rule 178 asks for the narrow thing instead: something that says
+    -- the new entry arrived where it was aimed. A fixture entity added for a
+    -- reason is named here with that reason, and the assertion is about this
+    -- entity and this branch.
+    ------------------------------------------------------------
+    local questsHere = CN:GetModule("Quests")
+
+    local offeredNow = {}
+
+    for _, poi in ipairs(questsHere.AvailableOnMap(94)) do
+        offeredNow[poi.questID] = true
+    end
+
+    -- 9100: an ordinary offer, the pin every other test in this file leans on.
+    assert(offeredNow[9100],
+        "the ordinary offeredNow pin is offeredNow")
+
+    -- 9104: added in 1.6.0 for the unnamed-quest branch, and refused by the
+    -- server in 1.7.0 for the refusal branch. It has to be OFFERED to reach
+    -- either, which is exactly what its first version was not.
+    assert(offeredNow[9104],
+        "the pin that exists to be unnamed is offeredNow, so the branch that "
+        .. "asks the server for its title is reachable")
+
+    assert(not questsHere.GetName(9104),
+        "and the client does not name it, which is the branch's condition")
+
+    assert(CN_TEST_REFUSED_QUESTS[9104] ~= nil,
+        "and the server answers about it, so the refusal branch is reachable "
+        .. "too -- a pin nothing ever answers about exercises neither")
+
+    -- 9101: present in the fixture to be EXCLUDED, and a test that only ever
+    -- checks for presence cannot tell an exclusion that works from one that
+    -- silently stopped running.
+    assert(not offeredNow[9101],
+        "and the completed pin is still excluded")
+
+    print("  the fixture pins added for a branch reach that branch")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ADDON SAYS WHAT IT IS STILL WAITING ON.
+    --
+    -- Six releases found systems this addon read and never asked for, and
+    -- nothing said which of them it was still waiting for an answer to. A
+    -- player who runs `/cn next` in the first seconds after a login and sees
+    -- no raid lockout cannot tell "you are saved to nothing" from "the answer
+    -- has not landed" without running the one command that distinguishes them.
+    --
+    -- The keystone is deliberately absent: 1.5.0 recorded that it has no
+    -- event saying the answer arrived, so a "still asking" line for it would
+    -- be permanently wrong for every character that holds none.
+    ------------------------------------------------------------
+    local selfTest  = CN:GetModule("SelfTest")
+    local instances = CN:GetModule("Instances")
+    local waiting   = CN:GetModule("Waiting")
+
+    assert(selfTest and selfTest.Outstanding, "the check is published")
+
+    -- Everything answered.
+    instances.answered      = true
+    waiting.inboxAnswered   = true
+    CN.pendingQuestLoads    = {}
+
+    assert(#selfTest.Outstanding() == 0,
+        "with every answer in hand, nothing is outstanding")
+
+    -- Each of the three, one at a time, so a check that reports the wrong
+    -- one -- or reports the same one three times -- fails here.
+    local cases = {
+        {
+            set  = function() instances.answered = false end,
+            undo = function() instances.answered = true end,
+            says = "lockout",
+        },
+        {
+            set  = function() waiting.inboxAnswered = false end,
+            undo = function() waiting.inboxAnswered = true end,
+            says = "mailbox",
+        },
+        {
+            set  = function() CN.pendingQuestLoads = { [4242] = true } end,
+            undo = function() CN.pendingQuestLoads = {} end,
+            says = "quest title",
+        },
+    }
+
+    for _, case in ipairs(cases) do
+        case.set()
+
+        local outstanding = selfTest.Outstanding()
+
+        assert(#outstanding == 1,
+            "one unanswered request is reported once, got " .. #outstanding)
+
+        assert(tostring(outstanding[1]):find(case.says, 1, true),
+            "and names it: expected something about " .. case.says
+            .. ", got " .. tostring(outstanding[1]))
+
+        case.undo()
+    end
+
+    -- AND ALL THREE AT ONCE, because a check that reports the first and stops
+    -- is a check that hides the other two.
+    for _, case in ipairs(cases) do
+        case.set()
+    end
+
+    assert(#selfTest.Outstanding() == 3,
+        "three unanswered requests are all reported: "
+        .. #selfTest.Outstanding())
+
+    for _, case in ipairs(cases) do
+        case.undo()
+    end
+
+    -- AND IT REACHES THE PLAYER as a self-test row rather than only as a
+    -- function nothing calls.
+    instances.answered = false
+
+    local reported
+
+    for _, check in ipairs(selfTest.Run().checks) do
+        if check.name:find("asked the server", 1, true) then
+            reported = check
+        end
+    end
+
+    instances.answered = true
+
+    assert(reported, "the self-test lists the check")
+
+    assert(reported.status == "SKIP",
+        "waiting is reported as not-yet rather than as a failure: "
+        .. tostring(reported.status))
+
+    assert(tostring(reported.detail):find("lockout", 1, true),
+        "and says what it is waiting on: " .. tostring(reported.detail))
+
+    print("  the addon says which answers it is still waiting for")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

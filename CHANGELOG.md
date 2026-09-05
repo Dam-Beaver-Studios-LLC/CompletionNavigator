@@ -7,6 +7,47 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.8.0]
+
+Six releases found systems this addon read from the client and never asked
+for. All four are asked for now â€” and until this release nothing said which of
+them the addon was still waiting to hear back about.
+
+### Added
+
+- **`/cn selftest` reports what has been asked for and not answered.** A
+  player who runs `/cn next` in the first seconds after a login and sees no
+  raid lockout could not tell "you are saved to nothing" from "the answer has
+  not landed yet" without running the one command that happens to distinguish
+  them. Three of the four can say: the lockout list, the mailbox, and how many
+  quest titles are outstanding. It reports waiting as a not-yet rather than as
+  a failure, because waiting is the ordinary state of the first few seconds
+  and an addon that reports the ordinary state as a problem teaches the player
+  to ignore the command.
+
+  The keystone is deliberately absent, for the reason 1.5.0 recorded: it has
+  no event saying the answer arrived, so a "still asking" line would be
+  permanently wrong for every character that holds none.
+
+### How defects were found
+
+- **The fixture pins added for a branch are asserted to reach that branch.**
+  1.6.0 added a quest pin to exercise an untested branch, gave it an odd id,
+  and this fixture's client answers "completed" for every odd id below 70000 â€”
+  so it was dropped before reaching anything and the new assertions passed
+  over a world that did not contain it. Each pin added for a reason now
+  carries an assertion naming that reason.
+- **And the first version of that check was worse than nothing.** It asserted
+  that every pin lands in one of offered / in-log / completed â€” true by
+  construction, unable to fail, and unable to catch the defect it was written
+  for, because a dropped pin lands in "completed": that is *how* it was
+  dropped. Replaced with the narrow assertion the rule actually asks for.
+- **A fixture that identifies its subject by a property it does not own
+  breaks when a sibling appears.** The API self-test check was located by
+  taking the last check in the "client" area, which was correct only while it
+  was the only one there. Adding a second client check made that assertion
+  read a different check's status.
+
 ## [1.7.0]
 
 **1.6.0's latch closed the one case the test fixture modelled and neither of

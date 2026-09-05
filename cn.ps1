@@ -73,7 +73,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '1.7.0'
+$script:ToolkitVersion = '1.8.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +121,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "1.7.0"
+CN.version     = "1.8.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -59389,6 +59389,75 @@ CN.RegisterSelfTest{
     end,
 }
 
+------------------------------------------------------------
+-- WHAT THE ADDON HAS ASKED THE SERVER FOR AND NOT BEEN TOLD
+------------------------------------------------------------
+
+-- SIX RELEASES FOUND SYSTEMS THIS ADDON READ AND NEVER ASKED FOR, AND
+-- NOTHING SAYS WHICH ONES IT IS STILL WAITING ON. 1.8.0.
+--
+-- The lockout list (1.2.0), the keystone (1.3.0), the inbox and the item
+-- cache (1.4.0) and quest titles (1.6.0) are all asked for now, and each
+-- answer arrives whenever the server feels like it. A player who runs
+-- `/cn next` in the first seconds after a login and sees no raid lockout has
+-- no way to tell "you are saved to nothing" from "the answer has not landed",
+-- except by running the one command that happens to distinguish them.
+--
+-- Two of the four can say. `Instances.answered` and `Waiting.inboxAnswered`
+-- are set by the events that answer their requests, and quest titles are
+-- countable directly. The keystone is deliberately absent: 1.5.0 recorded
+-- that it has no event saying the answer arrived, so a "still asking" line
+-- for it would be permanently wrong for every character that holds none, and
+-- inventing the state is worse than not reporting it.
+--
+-- A SKIP rather than a FAIL when something is outstanding: waiting is the
+-- ordinary state of the first few seconds, and an addon that reports the
+-- ordinary state as a problem teaches the player to ignore this command --
+-- which is the rule the two checks above already follow.
+function SelfTest.Outstanding()
+    local waitingOn = {}
+
+    local instances = CN:GetModule("Instances")
+
+    if instances and instances.answered == false then
+        table.insert(waitingOn, "the lockout list")
+    end
+
+    local waiting = CN:GetModule("Waiting")
+
+    if waiting and waiting.inboxAnswered == false then
+        table.insert(waitingOn, "your mailbox")
+    end
+
+    local titles = 0
+
+    for _ in pairs(CN.pendingQuestLoads or {}) do
+        titles = titles + 1
+    end
+
+    if titles > 0 then
+        table.insert(waitingOn, CN.Count(titles, "quest title"))
+    end
+
+    return waitingOn
+end
+
+CN.RegisterSelfTest{
+    area  = "client",
+    order = 6,
+    name  = "everything the addon asked the server for has come back",
+    run   = function()
+        local waitingOn = SelfTest.Outstanding()
+
+        if #waitingOn == 0 then
+            return PASS, "nothing is outstanding"
+        end
+
+        return SKIP, "still waiting on " .. CN.Series(waitingOn)
+            .. CN.DASH .. "ordinary in the first seconds after a login"
+    end,
+}
+
 return SelfTest
 '@
 
@@ -61929,7 +61998,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 1.7.0
+## Version: 1.8.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -62184,6 +62253,47 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [1.8.0]
+
+Six releases found systems this addon read from the client and never asked
+for. All four are asked for now — and until this release nothing said which of
+them the addon was still waiting to hear back about.
+
+### Added
+
+- **`/cn selftest` reports what has been asked for and not answered.** A
+  player who runs `/cn next` in the first seconds after a login and sees no
+  raid lockout could not tell "you are saved to nothing" from "the answer has
+  not landed yet" without running the one command that happens to distinguish
+  them. Three of the four can say: the lockout list, the mailbox, and how many
+  quest titles are outstanding. It reports waiting as a not-yet rather than as
+  a failure, because waiting is the ordinary state of the first few seconds
+  and an addon that reports the ordinary state as a problem teaches the player
+  to ignore the command.
+
+  The keystone is deliberately absent, for the reason 1.5.0 recorded: it has
+  no event saying the answer arrived, so a "still asking" line would be
+  permanently wrong for every character that holds none.
+
+### How defects were found
+
+- **The fixture pins added for a branch are asserted to reach that branch.**
+  1.6.0 added a quest pin to exercise an untested branch, gave it an odd id,
+  and this fixture's client answers "completed" for every odd id below 70000 —
+  so it was dropped before reaching anything and the new assertions passed
+  over a world that did not contain it. Each pin added for a reason now
+  carries an assertion naming that reason.
+- **And the first version of that check was worse than nothing.** It asserted
+  that every pin lands in one of offered / in-log / completed — true by
+  construction, unable to fail, and unable to catch the defect it was written
+  for, because a dropped pin lands in "completed": that is *how* it was
+  dropped. Replaced with the narrow assertion the rule actually asks for.
+- **A fixture that identifies its subject by a property it does not own
+  breaks when a sibling appears.** The API self-test check was located by
+  taking the last check in the "client" area, which was correct only while it
+  was the only one there. Adding a second client check made that assertion
+  read a different check's status.
 
 ## [1.7.0]
 
@@ -70178,7 +70288,7 @@ What matters is that installing it does not blur the line this addon draws. Rows
 /cn selftest
 ```
 
-Twenty checks that run against your own client and report what they actually found — whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, how much you are storing, and whether the engine can answer "what next" at all.
+Twenty-one checks that run against your own client and report what they actually found — whether your position converts, whether the arrow's facing has been confirmed against your movement, whether the map reports quests you have not accepted yet, whether your lockouts and the Adventure Guide are readable, whether achievement criteria carry their counters, whether everything the addon asked the server for has come back, how much you are storing, and whether the engine can answer "what next" at all.
 
 One of them is new and worth knowing about after a patch: **whether every client function this addon calls still exists**. An addon reads the game through a couple of hundred named functions, and every expansion renames or removes some. Each call is guarded, which is the right way to write it and also the reason a removed function makes no noise at all — the guard simply goes false and that feature stops working, silently, possibly for months. The list of names is generated from the source rather than written by hand, so it cannot fall out of step with what the addon actually calls, and the check will tell you exactly which ones your client no longer has.
 
@@ -70317,7 +70427,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-1.7.0
+1.8.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -76069,6 +76179,33 @@ end)" \
     "CN:RegisterEvent(\"PLAYER_ENTERING_WORLD\", function()
 end)" \
     "a transient refusal becomes permanent for the session"
+
+mutate "Modules/SelfTest.lua" \
+    "    if instances and instances.answered == false then
+        table.insert(waitingOn, \"the lockout list\")
+    end" \
+    "    if false then
+        table.insert(waitingOn, \"the lockout list\")
+    end" \
+    "an outstanding lockout request is not reported"
+
+mutate "Modules/SelfTest.lua" \
+    "    if waiting and waiting.inboxAnswered == false then
+        table.insert(waitingOn, \"your mailbox\")
+    end" \
+    "    if false then
+        table.insert(waitingOn, \"your mailbox\")
+    end" \
+    "an outstanding mailbox request is not reported"
+
+mutate "Modules/SelfTest.lua" \
+    "    if titles > 0 then
+        table.insert(waitingOn, CN.Count(titles, \"quest title\"))
+    end" \
+    "    if false then
+        table.insert(waitingOn, CN.Count(titles, \"quest title\"))
+    end" \
+    "outstanding quest titles are not reported"
 
 mutate "Modules/Instances.lua" \
     "    Instances.answered = false
@@ -103456,10 +103593,16 @@ print("\nEvery client function this addon calls, checked against the client:")
     -- neither" is a case the suite tests on purpose -- so the count is not
     -- the assertion. What is asserted is that the checker agrees with
     -- reality in both directions.
+    -- BY NAME, NOT BY AREA. 1.8.0.
+    --
+    -- This took the last check in the "client" area, which was the API check
+    -- only while it was the only one there. Adding a second client check made
+    -- this assertion read a different check's status and fail -- a fixture
+    -- that identifies its subject by a property it does not own.
     local report
 
     for _, check in ipairs(CN:GetModule("SelfTest").Run().checks) do
-        if check.area == "client" then
+        if check.name:find("client function", 1, true) then
             report = check
         end
     end
@@ -119532,6 +119675,165 @@ end)()
 
     print("  a quest the server refused is asked about once, until a loading "
         .. "screen")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE PIN ADDED TO REACH A BRANCH REACHES IT.
+    --
+    -- 1.6.0 added a quest pin so the provider's "the client will not name
+    -- this, ask the server" branch could be exercised, gave it an odd id, and
+    -- this fixture's client answers "completed" for every odd id below 70000
+    -- -- so the availability filter dropped it and every assertion written
+    -- against it passed over a world that did not contain it.
+    --
+    -- The first draft of this check was worse than nothing: it asserted that
+    -- every pin lands in one of offeredNow / in-log / completed, which is true
+    -- by construction and can never fail. It would not have caught the defect
+    -- it was written for, because a dropped pin lands in "completed" -- that
+    -- is HOW it was dropped.
+    --
+    -- Backlog rule 178 asks for the narrow thing instead: something that says
+    -- the new entry arrived where it was aimed. A fixture entity added for a
+    -- reason is named here with that reason, and the assertion is about this
+    -- entity and this branch.
+    ------------------------------------------------------------
+    local questsHere = CN:GetModule("Quests")
+
+    local offeredNow = {}
+
+    for _, poi in ipairs(questsHere.AvailableOnMap(94)) do
+        offeredNow[poi.questID] = true
+    end
+
+    -- 9100: an ordinary offer, the pin every other test in this file leans on.
+    assert(offeredNow[9100],
+        "the ordinary offeredNow pin is offeredNow")
+
+    -- 9104: added in 1.6.0 for the unnamed-quest branch, and refused by the
+    -- server in 1.7.0 for the refusal branch. It has to be OFFERED to reach
+    -- either, which is exactly what its first version was not.
+    assert(offeredNow[9104],
+        "the pin that exists to be unnamed is offeredNow, so the branch that "
+        .. "asks the server for its title is reachable")
+
+    assert(not questsHere.GetName(9104),
+        "and the client does not name it, which is the branch's condition")
+
+    assert(CN_TEST_REFUSED_QUESTS[9104] ~= nil,
+        "and the server answers about it, so the refusal branch is reachable "
+        .. "too -- a pin nothing ever answers about exercises neither")
+
+    -- 9101: present in the fixture to be EXCLUDED, and a test that only ever
+    -- checks for presence cannot tell an exclusion that works from one that
+    -- silently stopped running.
+    assert(not offeredNow[9101],
+        "and the completed pin is still excluded")
+
+    print("  the fixture pins added for a branch reach that branch")
+end)()
+
+;(function()
+    ------------------------------------------------------------
+    -- THE ADDON SAYS WHAT IT IS STILL WAITING ON.
+    --
+    -- Six releases found systems this addon read and never asked for, and
+    -- nothing said which of them it was still waiting for an answer to. A
+    -- player who runs `/cn next` in the first seconds after a login and sees
+    -- no raid lockout cannot tell "you are saved to nothing" from "the answer
+    -- has not landed" without running the one command that distinguishes them.
+    --
+    -- The keystone is deliberately absent: 1.5.0 recorded that it has no
+    -- event saying the answer arrived, so a "still asking" line for it would
+    -- be permanently wrong for every character that holds none.
+    ------------------------------------------------------------
+    local selfTest  = CN:GetModule("SelfTest")
+    local instances = CN:GetModule("Instances")
+    local waiting   = CN:GetModule("Waiting")
+
+    assert(selfTest and selfTest.Outstanding, "the check is published")
+
+    -- Everything answered.
+    instances.answered      = true
+    waiting.inboxAnswered   = true
+    CN.pendingQuestLoads    = {}
+
+    assert(#selfTest.Outstanding() == 0,
+        "with every answer in hand, nothing is outstanding")
+
+    -- Each of the three, one at a time, so a check that reports the wrong
+    -- one -- or reports the same one three times -- fails here.
+    local cases = {
+        {
+            set  = function() instances.answered = false end,
+            undo = function() instances.answered = true end,
+            says = "lockout",
+        },
+        {
+            set  = function() waiting.inboxAnswered = false end,
+            undo = function() waiting.inboxAnswered = true end,
+            says = "mailbox",
+        },
+        {
+            set  = function() CN.pendingQuestLoads = { [4242] = true } end,
+            undo = function() CN.pendingQuestLoads = {} end,
+            says = "quest title",
+        },
+    }
+
+    for _, case in ipairs(cases) do
+        case.set()
+
+        local outstanding = selfTest.Outstanding()
+
+        assert(#outstanding == 1,
+            "one unanswered request is reported once, got " .. #outstanding)
+
+        assert(tostring(outstanding[1]):find(case.says, 1, true),
+            "and names it: expected something about " .. case.says
+            .. ", got " .. tostring(outstanding[1]))
+
+        case.undo()
+    end
+
+    -- AND ALL THREE AT ONCE, because a check that reports the first and stops
+    -- is a check that hides the other two.
+    for _, case in ipairs(cases) do
+        case.set()
+    end
+
+    assert(#selfTest.Outstanding() == 3,
+        "three unanswered requests are all reported: "
+        .. #selfTest.Outstanding())
+
+    for _, case in ipairs(cases) do
+        case.undo()
+    end
+
+    -- AND IT REACHES THE PLAYER as a self-test row rather than only as a
+    -- function nothing calls.
+    instances.answered = false
+
+    local reported
+
+    for _, check in ipairs(selfTest.Run().checks) do
+        if check.name:find("asked the server", 1, true) then
+            reported = check
+        end
+    end
+
+    instances.answered = true
+
+    assert(reported, "the self-test lists the check")
+
+    assert(reported.status == "SKIP",
+        "waiting is reported as not-yet rather than as a failure: "
+        .. tostring(reported.status))
+
+    assert(tostring(reported.detail):find("lockout", 1, true),
+        "and says what it is waiting on: " .. tostring(reported.detail))
+
+    print("  the addon says which answers it is still waiting for")
 end)()
 
 print("\nALL HARNESS CHECKS PASSED")

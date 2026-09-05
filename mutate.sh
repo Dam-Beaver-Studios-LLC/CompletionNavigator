@@ -5254,6 +5254,33 @@ end)" \
 end)" \
     "a transient refusal becomes permanent for the session"
 
+mutate "Modules/SelfTest.lua" \
+    "    if instances and instances.answered == false then
+        table.insert(waitingOn, \"the lockout list\")
+    end" \
+    "    if false then
+        table.insert(waitingOn, \"the lockout list\")
+    end" \
+    "an outstanding lockout request is not reported"
+
+mutate "Modules/SelfTest.lua" \
+    "    if waiting and waiting.inboxAnswered == false then
+        table.insert(waitingOn, \"your mailbox\")
+    end" \
+    "    if false then
+        table.insert(waitingOn, \"your mailbox\")
+    end" \
+    "an outstanding mailbox request is not reported"
+
+mutate "Modules/SelfTest.lua" \
+    "    if titles > 0 then
+        table.insert(waitingOn, CN.Count(titles, \"quest title\"))
+    end" \
+    "    if false then
+        table.insert(waitingOn, CN.Count(titles, \"quest title\"))
+    end" \
+    "outstanding quest titles are not reported"
+
 mutate "Modules/Instances.lua" \
     "    Instances.answered = false
 
