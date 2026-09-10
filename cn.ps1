@@ -54,7 +54,12 @@ param(
     # `ci -Watch` follows a run to completion instead of the author
     # re-running the command every thirty seconds, which is how an
     # unauthenticated API budget of sixty an hour gets spent in ten minutes.
-    [switch] $Watch
+    [switch] $Watch,
+
+    # Cut the tag without waiting for the checks on the pushed commit. 1.12.0.
+    # The wait is the default because the tag is the point of no return; this
+    # is for a release that has to go out now.
+    [switch] $NoWait
 )
 
 $ErrorActionPreference = 'Stop'
@@ -73,7 +78,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '1.11.0'
+$script:ToolkitVersion = '1.12.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -121,7 +126,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "1.11.0"
+CN.version     = "1.12.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -62469,7 +62474,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 1.11.0
+## Version: 1.12.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -62724,6 +62729,46 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [1.12.0]
+
+**Every check that has ever failed this project's build failed after the tag
+existed.**
+
+The release tagged first and pushed second, and the workflow ran on tags only
+— so the first time anything on a runner looked at a release was after the
+point of no return. The recovery from a failure there is `-Retag`: delete the
+tag locally, delete it on the remote, cut it again. That has been needed four
+times.
+
+Navigator Data's toolchain got this first, in its 0.20.0. Nineteen releases of
+finding checks that existed over there and not here, and this is the first
+time the missing half was on this side — which is the argument for comparing
+the two mechanically rather than by noticing.
+
+### Fixed
+
+- **The release pushes the commit, waits for the checks, and tags only then.**
+  The commit is the thing being tested and is cheap to supersede; the tag is
+  what the packager reads and what a store page is cut from. A failing run
+  says `NO TAG HAS BEEN CUT` and stops — the version files already carry the
+  version, so the second attempt has nothing to write. `-NoWait` cuts the tag
+  immediately for a release that has to go out now.
+
+- **The workflow runs its checks on every push and its packaging on a tag.**
+  Splitting the trigger is only half of it: without guarding the publishing
+  steps, every push to any branch would upload to CurseForge, and with no tag
+  at HEAD the packager publishes an ALPHA — 0.61.0's failure once per commit.
+  Both halves are asserted, in both directions, so guarding a check or
+  unguarding a publish fails the suite.
+
+- **A run that cannot be read is not a failed run.** An unauthenticated API
+  call is limited to sixty an hour and a private repository answers 404, and
+  neither is something the author can fix in the moment. The wait says so
+  plainly and lets the release proceed; the tag is recoverable, a release
+  blocked by a missing token is not. A remote that is not GitHub is skipped
+  outright, which is also the case the release rehearsal exercises — it pushes
+  to a local path, and that must never reach the network.
 
 ## [1.11.0]
 
@@ -71054,15 +71099,28 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-1.11.0
+1.12.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
 name: Package and release
 
-# Fires when you push a version tag, e.g.  git tag v0.8.0 && git push --tags
+# VERIFICATION RUNS ON THE COMMIT; PACKAGING RUNS ON THE TAG. 1.12.0.
+#
+# This ran on tags only, so every check in it ran for the first time AFTER
+# the tag existed -- and the tag is the point of no return. Recovering from a
+# check that fails there means deleting a tag locally and on the remote and
+# cutting it again, which is what `.\cn.ps1 release -Retag` exists for and
+# which has been needed four times.
+#
+# Navigator Data's toolchain got this first, in its 0.20.0, which is the
+# first time in nineteen releases that the missing half was on this side.
+# Same job, same steps, one file: the steps that need a tag say so, the rest
+# run on every push, and `.\cn.ps1 release` waits for them before it tags.
 on:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*'
 
@@ -71102,12 +71160,14 @@ jobs:
 
       # Belt and braces: force-fetch tags even if the checkout missed them.
       - name: Fetch tags
+        if: startsWith(github.ref, 'refs/tags/')
         run: git fetch --force --tags --prune --prune-tags
 
       # If no tag points at HEAD the packager silently publishes an alpha,
       # which then hides behind "Show alpha files" on CurseForge. Fail
       # instead, and print what git actually sees.
       - name: Verify a tag points at HEAD
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           echo "GITHUB_REF      = $GITHUB_REF"
           echo "GITHUB_REF_NAME = $GITHUB_REF_NAME"
@@ -71383,6 +71443,7 @@ jobs:
       # missing -- the build still goes green and no file appears. Fail here
       # instead, so a missing or misnamed secret is obvious.
       - name: Verify the CurseForge token is available
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
         run: |
@@ -71410,6 +71471,7 @@ jobs:
       # Not blocking: badly formatted release notes are a cosmetic problem and
       # the packager has its own fallback.
       - name: Release notes for this version
+        if: startsWith(github.ref, 'refs/tags/')
         continue-on-error: true
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -71439,6 +71501,7 @@ jobs:
       # rather than the primary one. X-Wago-ID in the .toc has to be filled in
       # before anything reaches it.
       - name: Package and upload
+        if: startsWith(github.ref, 'refs/tags/')
         uses: BigWigsMods/packager@master
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
@@ -123073,6 +123136,126 @@ if problems:
 print("    %d steps checked" % len(steps))
 CILINT
 
+echo "  CI: verification runs on the commit, packaging on the tag"
+# THE POINT OF NO RETURN. 1.12.0.
+#
+# The workflow ran on tags only, so every check in it ran for the first time
+# AFTER the tag existed. Every check that has ever failed this project's build
+# failed there, and the recovery is `-Retag`: delete the tag locally, delete
+# it on the remote, cut it again. That has been needed four times.
+#
+# Splitting the trigger is only half of it -- if the packaging steps were not
+# guarded, every push to any branch would upload to CurseForge, and with no
+# tag at HEAD the packager publishes an ALPHA. That is 0.61.0's failure on a
+# loop, once per commit. Both halves are checked, in both directions.
+python3 - "$WORK/.github/workflows/release.yml" <<'SPLIT'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+problems = []
+
+if "branches:" not in text.split("jobs:")[0]:
+    problems.append("the workflow does not run on a push, so its checks still "
+                    "run for the first time on the tag")
+
+steps = dict((n.strip(), b) for n, b in
+             re.findall(r"- name: (.+?)\n(.*?)(?=\n      - name: |\Z)", text, re.S))
+
+GUARD = "startsWith(github.ref, 'refs/tags/')"
+
+# Anything that publishes, or that only makes sense once a tag exists.
+tag_only = ["Fetch tags", "Verify a tag points at HEAD",
+            "Verify the CurseForge token is available",
+            "Release notes for this version", "Package and upload"]
+
+# The checks. Guarding any of these would undo the whole change.
+every_push = ["Lint", "Syntax check every Lua file", "Run the offline harness",
+              "Verify the .toc lists every Lua file", "Performance budgets",
+              "Mutation testing", "Coverage"]
+
+for name in tag_only:
+    if name not in steps:
+        problems.append("'%s' is not a step any more; this list is stale" % name)
+    elif GUARD not in steps[name]:
+        problems.append("'%s' would run on every push, and publishing on a "
+                        "push with no tag uploads an ALPHA" % name)
+
+for name in every_push:
+    if name not in steps:
+        problems.append("'%s' is not a step any more; this list is stale" % name)
+    elif "refs/tags/" in steps[name]:
+        problems.append("'%s' is guarded to tags, so it still runs for the "
+                        "first time after the point of no return" % name)
+
+if problems:
+    print("FAIL: the workflow's two halves are not split correctly")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    %d step(s) wait for a tag, %d run on every push"
+      % (len(tag_only), len(every_push)))
+SPLIT
+
+echo "  release: the commit is pushed before the tag is cut"
+# The commit is the thing being tested and is cheap to supersede. The tag is
+# what the packager reads and what a store page is cut from, and it waits for
+# the runner. This asserts the ORDER in the source, because the behaviour
+# needs a GitHub remote and the rehearsal above deliberately pushes to a
+# local path -- which is also the case that must never reach the network.
+python3 - /home/claude/cn/ps/cn.body.ps1 <<'ORDER'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+body = text.split("function Invoke-CNRelease")[1]
+
+def at(needle):
+    index = body.find(needle)
+    return index if index >= 0 else None
+
+push = at("Invoke-CNGit @('push')")
+wait = at("Wait-CNCommitVerified")
+tag  = at("Invoke-CNGit @('tag', \"v$new\")")
+tags = at("Invoke-CNGit @('push', '--tags')")
+
+problems = []
+
+if None in (push, wait, tag, tags):
+    problems.append("release must push, wait, tag and push tags; one is missing")
+else:
+    if not push < wait:
+        problems.append("the wait must come after the push, or there is "
+                        "nothing on the runner to wait for")
+    if not wait < tag:
+        problems.append("the tag must come after the wait; tagging first is "
+                        "the whole defect")
+    if not tag < tags:
+        problems.append("the tag must exist before it is pushed")
+
+waiter = text.split("function Wait-CNCommitVerified")[1].split("\nfunction ")[0]
+
+if "head_sha=" not in waiter:
+    problems.append("the wait must ask about the commit just pushed, not the "
+                    "newest run on the repository")
+
+if "github.com" not in waiter:
+    problems.append("the wait must skip a remote that is not GitHub; the "
+                    "release rehearsal pushes to a local path")
+
+if "NO TAG HAS BEEN CUT" not in waiter:
+    problems.append("a failing run must say the tag was not cut")
+
+if problems:
+    print("FAIL: the release order is wrong")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    push, wait, tag, push tags")
+ORDER
+
 echo "  lint: no unguarded native invocations"
 # Structural guarantee, not a behavioural one. Every native command must go
 # through Invoke-CNNative; a stray `2>&1` or a bare `git` call reintroduces
@@ -125600,6 +125783,94 @@ function Invoke-CNRestore {
     Write-Host "Restored $($archive.Name)" -ForegroundColor Green
 }
 
+# THE CHECKS RUN BEFORE THE POINT OF NO RETURN. 1.12.0.
+#
+# See the comment in `Invoke-CNRelease`. The commit is pushed first because it
+# is the thing being tested and is cheap to supersede; the tag is what the
+# packager reads and what a store page is cut from, and it waits for the
+# runner. `.\cn.ps1 release -NoWait` skips the wait.
+#
+# A run that cannot be READ is not a failed run. An unauthenticated API call
+# is limited to sixty an hour and a private repository answers 404, and
+# neither is something the author can fix in the moment -- so it says so
+# plainly and lets the release proceed. The tag is recoverable with `-Retag`;
+# a release blocked by a missing token is not.
+function Wait-CNCommitVerified {
+    param([string] $Sha, [int] $TimeoutSeconds = 3600)
+
+    $headers = @{
+        'User-Agent' = 'CompletionNavigator'
+        'Accept'     = 'application/vnd.github+json'
+    }
+
+    $token = Get-CNGitHubToken
+
+    if ($token) { $headers['Authorization'] = "Bearer $token" }
+
+    $repo = $script:Repo
+
+    # A REMOTE THAT IS NOT GITHUB HAS NO CHECKS TO WAIT FOR, and asking the
+    # API about it would ask about somebody else's repository under the same
+    # slug. The release rehearsal pushes to a local path, which is exactly
+    # this case and exactly the case that must not reach the network.
+    $origin = @((Invoke-CNGit @('remote', 'get-url', 'origin') -Quiet).Output)[0]
+
+    if (-not $origin -or [string] $origin -notmatch 'github\.com') {
+        Write-Host 'The remote is not GitHub, so there are no checks to wait for.' -ForegroundColor DarkGray
+
+        return $true
+    }
+
+    Write-Host ''
+    Write-Host "Waiting for the checks on $($Sha.Substring(0, 7)) before cutting the tag." -ForegroundColor Cyan
+    Write-Host '  This is the full suite on a runner. Ten to fifteen minutes is normal.' -ForegroundColor DarkGray
+
+    $waited = 0
+
+    while ($waited -lt $TimeoutSeconds) {
+        $runs = $null
+
+        try {
+            $runs = Invoke-RestMethod -Headers $headers `
+                -Uri "https://api.github.com/repos/$repo/actions/runs?head_sha=$Sha&per_page=10"
+        }
+        catch {
+            Write-Host "Could not read the checks ($($_.Exception.Message))." -ForegroundColor Yellow
+            Write-Host '  The tag is being cut without waiting.' -ForegroundColor Yellow
+            Write-Host "  https://github.com/$repo/actions" -ForegroundColor Cyan
+
+            return $true
+        }
+
+        $run = @($runs.workflow_runs)[0]
+
+        if ($run -and $run.status -eq 'completed') {
+            if ($run.conclusion -eq 'success') {
+                Write-Host "Checks passed on $($Sha.Substring(0, 7))." -ForegroundColor Green
+
+                return $true
+            }
+
+            Write-Host ''
+            Write-Host "The checks on this commit finished '$($run.conclusion)'. NO TAG HAS BEEN CUT." -ForegroundColor Red
+            Write-Host "  $($run.html_url)" -ForegroundColor Cyan
+            Write-Host ''
+            Write-Host '  Fix it, then run the release again. The version files already carry this' -ForegroundColor DarkGray
+            Write-Host '  version, so the second run has nothing to write.' -ForegroundColor DarkGray
+
+            return $false
+        }
+
+        Start-Sleep -Seconds 20
+
+        $waited += 20
+    }
+
+    Write-Host "The checks have not finished after $([int] ($TimeoutSeconds / 60)) minutes; the tag is being cut anyway." -ForegroundColor Yellow
+
+    return $true
+}
+
 function Get-CNGitHubToken {
     # A token turns 60 requests an hour into 5000. Read from the environment
     # first, then from a file the user can drop next to the toolkit.
@@ -127312,6 +127583,51 @@ function Invoke-CNRelease {
         # what was already committed. The tag is what matters.
         Invoke-CNGit @('commit', '-m', "Release $new") | Out-Null
 
+        # ------------------------------------------------------------------
+        # COMMIT, PUSH, WAIT, TAG. 1.12.0.
+        #
+        # This tagged FIRST and pushed afterwards, so the tag existed before
+        # anything on a runner had looked at the commit -- and the workflow
+        # ran on tags only, so the first look was after the point of no
+        # return. Every check that has ever failed this project's build
+        # failed there, and the recovery is `-Retag`: delete the tag locally,
+        # delete it on the remote, cut it again. That has been needed four
+        # times.
+        #
+        # The commit is the thing being tested and is cheap to supersede; the
+        # tag is what the packager reads and what a store page is cut from.
+        # Pushing the branch first gives the runner something to check while
+        # nothing irreversible has happened.
+        #
+        # Navigator Data's toolchain got this first, in its 0.20.0. Nineteen
+        # releases of finding checks that existed over there and not here,
+        # and this is the first time the missing half was on this side --
+        # which is the whole argument for comparing them mechanically rather
+        # than by noticing.
+        # ------------------------------------------------------------------
+        $remote = @((Invoke-CNGit @('remote') -Quiet).Output)
+
+        if (-not $remote) {
+            Write-Host 'No git remote configured, so nothing was pushed.' -ForegroundColor Yellow
+            Write-Host '  git remote add origin <url>' -ForegroundColor DarkGray
+            Write-Host '  git push -u origin main --tags' -ForegroundColor DarkGray
+            return
+        }
+
+        if (-not (Invoke-CNGit @('push')).Ok) {
+            Write-Host 'ERROR  git push failed. Nothing has been tagged.' -ForegroundColor Red
+            Write-Host '  Recover with:  git push ; then run the release again.' -ForegroundColor Yellow
+            return
+        }
+
+        if (-not $NoWait) {
+            $sha = @((Invoke-CNGit @('rev-parse', 'HEAD') -Quiet).Output)[0]
+
+            if ($sha -and -not (Wait-CNCommitVerified -Sha ([string] $sha).Trim())) {
+                return
+            }
+        }
+
         Invoke-CNGit @('tag', "v$new") | Out-Null
 
         if (-not @((Invoke-CNGit @('tag', '--list', "v$new") -Quiet).Output)) {
@@ -127331,21 +127647,6 @@ function Invoke-CNRelease {
         if ($atHead -notcontains "v$new") {
             Write-Host "ERROR  v$new does not point at HEAD; CurseForge would get an alpha." -ForegroundColor Red
             Write-Host "  tags at HEAD: $($atHead -join ', ')" -ForegroundColor DarkGray
-            return
-        }
-
-        $remote = @((Invoke-CNGit @('remote') -Quiet).Output)
-
-        if (-not $remote) {
-            Write-Host 'No git remote configured, so nothing was pushed.' -ForegroundColor Yellow
-            Write-Host '  git remote add origin <url>' -ForegroundColor DarkGray
-            Write-Host '  git push -u origin main --tags' -ForegroundColor DarkGray
-            return
-        }
-
-        if (-not (Invoke-CNGit @('push')).Ok) {
-            Write-Host 'ERROR  git push failed. The tag exists locally but was not pushed.' -ForegroundColor Red
-            Write-Host '  Recover with:  git push ; git push --tags' -ForegroundColor Yellow
             return
         }
 

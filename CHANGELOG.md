@@ -7,6 +7,46 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.12.0]
+
+**Every check that has ever failed this project's build failed after the tag
+existed.**
+
+The release tagged first and pushed second, and the workflow ran on tags only
+â€” so the first time anything on a runner looked at a release was after the
+point of no return. The recovery from a failure there is `-Retag`: delete the
+tag locally, delete it on the remote, cut it again. That has been needed four
+times.
+
+Navigator Data's toolchain got this first, in its 0.20.0. Nineteen releases of
+finding checks that existed over there and not here, and this is the first
+time the missing half was on this side â€” which is the argument for comparing
+the two mechanically rather than by noticing.
+
+### Fixed
+
+- **The release pushes the commit, waits for the checks, and tags only then.**
+  The commit is the thing being tested and is cheap to supersede; the tag is
+  what the packager reads and what a store page is cut from. A failing run
+  says `NO TAG HAS BEEN CUT` and stops â€” the version files already carry the
+  version, so the second attempt has nothing to write. `-NoWait` cuts the tag
+  immediately for a release that has to go out now.
+
+- **The workflow runs its checks on every push and its packaging on a tag.**
+  Splitting the trigger is only half of it: without guarding the publishing
+  steps, every push to any branch would upload to CurseForge, and with no tag
+  at HEAD the packager publishes an ALPHA â€” 0.61.0's failure once per commit.
+  Both halves are asserted, in both directions, so guarding a check or
+  unguarding a publish fails the suite.
+
+- **A run that cannot be read is not a failed run.** An unauthenticated API
+  call is limited to sixty an hour and a private repository answers 404, and
+  neither is something the author can fix in the moment. The wait says so
+  plainly and lets the release proceed; the tag is recoverable, a release
+  blocked by a missing token is not. A remote that is not GitHub is skipped
+  outright, which is also the case the release rehearsal exercises â€” it pushes
+  to a local path, and that must never reach the network.
+
 ## [1.11.0]
 
 **A caveat with no resolution makes every answer suspect and never says which

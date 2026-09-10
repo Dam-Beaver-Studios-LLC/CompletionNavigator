@@ -786,6 +786,126 @@ if problems:
 print("    %d steps checked" % len(steps))
 CILINT
 
+echo "  CI: verification runs on the commit, packaging on the tag"
+# THE POINT OF NO RETURN. 1.12.0.
+#
+# The workflow ran on tags only, so every check in it ran for the first time
+# AFTER the tag existed. Every check that has ever failed this project's build
+# failed there, and the recovery is `-Retag`: delete the tag locally, delete
+# it on the remote, cut it again. That has been needed four times.
+#
+# Splitting the trigger is only half of it -- if the packaging steps were not
+# guarded, every push to any branch would upload to CurseForge, and with no
+# tag at HEAD the packager publishes an ALPHA. That is 0.61.0's failure on a
+# loop, once per commit. Both halves are checked, in both directions.
+python3 - "$WORK/.github/workflows/release.yml" <<'SPLIT'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+problems = []
+
+if "branches:" not in text.split("jobs:")[0]:
+    problems.append("the workflow does not run on a push, so its checks still "
+                    "run for the first time on the tag")
+
+steps = dict((n.strip(), b) for n, b in
+             re.findall(r"- name: (.+?)\n(.*?)(?=\n      - name: |\Z)", text, re.S))
+
+GUARD = "startsWith(github.ref, 'refs/tags/')"
+
+# Anything that publishes, or that only makes sense once a tag exists.
+tag_only = ["Fetch tags", "Verify a tag points at HEAD",
+            "Verify the CurseForge token is available",
+            "Release notes for this version", "Package and upload"]
+
+# The checks. Guarding any of these would undo the whole change.
+every_push = ["Lint", "Syntax check every Lua file", "Run the offline harness",
+              "Verify the .toc lists every Lua file", "Performance budgets",
+              "Mutation testing", "Coverage"]
+
+for name in tag_only:
+    if name not in steps:
+        problems.append("'%s' is not a step any more; this list is stale" % name)
+    elif GUARD not in steps[name]:
+        problems.append("'%s' would run on every push, and publishing on a "
+                        "push with no tag uploads an ALPHA" % name)
+
+for name in every_push:
+    if name not in steps:
+        problems.append("'%s' is not a step any more; this list is stale" % name)
+    elif "refs/tags/" in steps[name]:
+        problems.append("'%s' is guarded to tags, so it still runs for the "
+                        "first time after the point of no return" % name)
+
+if problems:
+    print("FAIL: the workflow's two halves are not split correctly")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    %d step(s) wait for a tag, %d run on every push"
+      % (len(tag_only), len(every_push)))
+SPLIT
+
+echo "  release: the commit is pushed before the tag is cut"
+# The commit is the thing being tested and is cheap to supersede. The tag is
+# what the packager reads and what a store page is cut from, and it waits for
+# the runner. This asserts the ORDER in the source, because the behaviour
+# needs a GitHub remote and the rehearsal above deliberately pushes to a
+# local path -- which is also the case that must never reach the network.
+python3 - /home/claude/cn/ps/cn.body.ps1 <<'ORDER'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+body = text.split("function Invoke-CNRelease")[1]
+
+def at(needle):
+    index = body.find(needle)
+    return index if index >= 0 else None
+
+push = at("Invoke-CNGit @('push')")
+wait = at("Wait-CNCommitVerified")
+tag  = at("Invoke-CNGit @('tag', \"v$new\")")
+tags = at("Invoke-CNGit @('push', '--tags')")
+
+problems = []
+
+if None in (push, wait, tag, tags):
+    problems.append("release must push, wait, tag and push tags; one is missing")
+else:
+    if not push < wait:
+        problems.append("the wait must come after the push, or there is "
+                        "nothing on the runner to wait for")
+    if not wait < tag:
+        problems.append("the tag must come after the wait; tagging first is "
+                        "the whole defect")
+    if not tag < tags:
+        problems.append("the tag must exist before it is pushed")
+
+waiter = text.split("function Wait-CNCommitVerified")[1].split("\nfunction ")[0]
+
+if "head_sha=" not in waiter:
+    problems.append("the wait must ask about the commit just pushed, not the "
+                    "newest run on the repository")
+
+if "github.com" not in waiter:
+    problems.append("the wait must skip a remote that is not GitHub; the "
+                    "release rehearsal pushes to a local path")
+
+if "NO TAG HAS BEEN CUT" not in waiter:
+    problems.append("a failing run must say the tag was not cut")
+
+if problems:
+    print("FAIL: the release order is wrong")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    push, wait, tag, push tags")
+ORDER
+
 echo "  lint: no unguarded native invocations"
 # Structural guarantee, not a behavioural one. Every native command must go
 # through Invoke-CNNative; a stray `2>&1` or a bare `git` call reintroduces

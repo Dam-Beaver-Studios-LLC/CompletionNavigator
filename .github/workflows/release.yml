@@ -1,8 +1,21 @@
 name: Package and release
 
-# Fires when you push a version tag, e.g.  git tag v0.8.0 && git push --tags
+# VERIFICATION RUNS ON THE COMMIT; PACKAGING RUNS ON THE TAG. 1.12.0.
+#
+# This ran on tags only, so every check in it ran for the first time AFTER
+# the tag existed -- and the tag is the point of no return. Recovering from a
+# check that fails there means deleting a tag locally and on the remote and
+# cutting it again, which is what `.\cn.ps1 release -Retag` exists for and
+# which has been needed four times.
+#
+# Navigator Data's toolchain got this first, in its 0.20.0, which is the
+# first time in nineteen releases that the missing half was on this side.
+# Same job, same steps, one file: the steps that need a tag say so, the rest
+# run on every push, and `.\cn.ps1 release` waits for them before it tags.
 on:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*'
 
@@ -42,12 +55,14 @@ jobs:
 
       # Belt and braces: force-fetch tags even if the checkout missed them.
       - name: Fetch tags
+        if: startsWith(github.ref, 'refs/tags/')
         run: git fetch --force --tags --prune --prune-tags
 
       # If no tag points at HEAD the packager silently publishes an alpha,
       # which then hides behind "Show alpha files" on CurseForge. Fail
       # instead, and print what git actually sees.
       - name: Verify a tag points at HEAD
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           echo "GITHUB_REF      = $GITHUB_REF"
           echo "GITHUB_REF_NAME = $GITHUB_REF_NAME"
@@ -323,6 +338,7 @@ jobs:
       # missing -- the build still goes green and no file appears. Fail here
       # instead, so a missing or misnamed secret is obvious.
       - name: Verify the CurseForge token is available
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
         run: |
@@ -350,6 +366,7 @@ jobs:
       # Not blocking: badly formatted release notes are a cosmetic problem and
       # the packager has its own fallback.
       - name: Release notes for this version
+        if: startsWith(github.ref, 'refs/tags/')
         continue-on-error: true
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -379,6 +396,7 @@ jobs:
       # rather than the primary one. X-Wago-ID in the .toc has to be filled in
       # before anything reaches it.
       - name: Package and upload
+        if: startsWith(github.ref, 'refs/tags/')
         uses: BigWigsMods/packager@master
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
